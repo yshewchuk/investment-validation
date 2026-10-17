@@ -161,9 +161,9 @@ class SearchTrials:
         inputs = started["inputs"]
         execution = {**self.registration.document["magnitude_execution"], "fit_recipe": candidate["recipe"]}
         fits, pending = [], []
+        expected = self._fit_evidence(inputs, inner, plan, execution)
 
         def progress(state, fit):
-            expected = self._fit_evidence(inputs, inner, plan, execution)
             index = len(fits)
             if (index >= len(expected) or canonical_json(fit) != canonical_json(expected[index])
                     or (state == "started") == bool(pending)):

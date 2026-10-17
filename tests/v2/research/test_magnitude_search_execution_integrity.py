@@ -4,7 +4,9 @@ import copy
 
 import pytest
 
-from engine.v2.foundation import content_hash
+from engine.models.no_fit import no_fit_guard as legacy_guard
+from engine.v2.foundation import content_hash, to_document
+from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.native_registration import magnitude_fitted_execution_document
 from experiments import magnitude_search_trials as trials
@@ -150,6 +152,68 @@ def test_native_failure_still_requires_all_planned_candidates(native, monkeypatc
     frozen = native.recorder.freeze()
     assert frozen["prospective_candidate_id"] == "a-first"
     assert frozen["selections"][0]["scores"][0] == {"candidate_id": "z-last", "metrics": None}
+
+
+def test_native_metrics_refusal_retains_successful_execution_for_replay_and_freeze(native, monkeypatch):
+    native.recorder.execute("2024", "2023", "a-first", limits=LIMITS)
+    metrics = trials.magnitude_metrics
+    error = fail("EXPERIMENT_VARIANT_FAILED", "synthetic candidate scoring refusal")
+
+    def refuse(*args):
+        raise error
+
+    monkeypatch.setattr(trials, "magnitude_metrics", refuse)
+    with pytest.raises(OpsError) as caught:
+        native.recorder.execute("2024", "2023", "z-last", limits=LIMITS)
+    assert caught.value is error
+    key = content_hash(["plan", "2024", "2023", "z-last"])
+    receipt = native.recorder._read("execution:" + key)
+    assert receipt["status"] == "succeeded"
+    assert receipt["fit_attempt_count"] == receipt["completed_fit_count"] == 3
+    assert receipt["forecasts_id"] == content_hash(rows(2.0))
+    terminal = {"status": "refused", "problem": to_document(
+        fail("EXPERIMENT_VARIANT_FAILED", "search trial did not complete").problem)}
+    assert native.recorder._read("terminal:" + key) == terminal
+    before = native.conn.total_changes
+    monkeypatch.setattr(trials, "run_fitted_trial", lambda *a: pytest.fail("refused replay fitted"))
+    monkeypatch.setattr(native.recorder, "_inputs", lambda *a: pytest.fail("refused replay opened inputs"))
+    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("refused replay opened labels"))
+    with no_fit_guard(), legacy_guard():
+        assert native.recorder.execute("2024", "2023", "z-last", limits=LIMITS) == {
+            **receipt, "terminal": terminal, "evaluation_authority": "none"}
+    assert native.conn.total_changes == before
+    monkeypatch.setattr(trials, "magnitude_metrics", metrics)
+    with no_fit_guard(), legacy_guard():
+        frozen = native.recorder.freeze()
+        assert frozen["prospective_candidate_id"] == "a-first"
+        assert frozen["selections"][0]["scores"][0] == {"candidate_id": "z-last", "metrics": None}
+        before = native.conn.total_changes
+        assert native.recorder.freeze() == frozen
+    assert native.conn.total_changes == before
+    assert native.recorder._read("execution:" + key) == receipt
+
+
+def test_native_progress_reuses_precomputed_evidence_but_receipts_rebuild_it(native, monkeypatch):
+    evidence = native.recorder._fit_evidence
+    calls = []
+
+    def counted(*args):
+        calls.append(None)
+        return evidence(*args)
+
+    monkeypatch.setattr(native.recorder, "_fit_evidence", counted)
+    original = trials.run_fitted_trial
+
+    def fit(*args):
+        assert len(calls) == 1
+        result = original(*args)
+        assert len(calls) == 1
+        return result
+
+    monkeypatch.setattr(trials, "run_fitted_trial", fit)
+    result = native.recorder.execute("2024", "2023", "a-first", limits=LIMITS)
+    assert result["completed_fit_count"] == 3
+    assert len(calls) > 1
 
 
 @pytest.mark.parametrize("error", [MemoryError(), OSError(), RuntimeError("thread creation failed"), ArithmeticError()])

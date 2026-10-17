@@ -138,16 +138,20 @@ def injected(recipe, train, labels, test):
     assert [json.loads(line) for line in observed.read_text().splitlines()] == [[1, 0], [2, 1], [3, 2]]
 
 
-@pytest.mark.parametrize("kind", ["memory", "allocation", "io", "runtime", "wall", "cpu"])
+@pytest.mark.parametrize("kind", ["memory", "allocation", "io", "runtime", "ops", "setup", "wall", "cpu"])
 def test_resource_failures_leave_unfinished_claims_and_no_retry(case, monkeypatch, kind):
     bodies = {"memory": "raise MemoryError", "allocation": "bytearray(4 * 1024 ** 3)", "io": "raise OSError('private path')",
               "runtime": "raise RuntimeError('thread creation failed')",
+              "ops": "from engine.v2.ops.errors import fail; raise fail('RESOURCE_UNAVAILABLE', 'private child failure')",
+              "setup": "raise AssertionError('setup failure entered estimator')",
               "wall": "import time; time.sleep(10); return [2.0] * len(test)",
               "cpu": "\n    while True: pass"}
-    children = inject_child(monkeypatch, "def injected(recipe, train, labels, test):\n    " + bodies[kind] + "\n")
+    prelude = ("import resource\ndef unavailable(*args):\n    raise ValueError('hard limit forbids request')\n"
+               "resource.setrlimit = unavailable\n") if kind == "setup" else ""
+    children = inject_child(monkeypatch, prelude + "def injected(recipe, train, labels, test):\n    " + bodies[kind] + "\n")
     limits = {**LIMITS, **({"wall_seconds": 2} if kind == "wall" else
                          {"cpu_seconds": 2, "wall_seconds": 10} if kind == "cpu" else {})}
-    code, text = ("RESOURCE_UNAVAILABLE", "search execution infrastructure is unavailable") if kind in ("io", "runtime") else (
+    code, text = ("RESOURCE_UNAVAILABLE", "search execution infrastructure is unavailable") if kind in ("io", "runtime", "ops", "setup") else (
         "RESOURCE_LIMIT_EXCEEDED", "search execution exceeded its resource limits")
     with problem(code, text):
         case.recorder.execute(*trial_cases(case)[0], limits=limits)
@@ -159,11 +163,30 @@ def test_resource_failures_leave_unfinished_claims_and_no_retry(case, monkeypatc
     if kind == "wall":
         assert child.returncode == -signal.SIGKILL
     slots = [slot for slot, _ in trial_slots(case)]
+    if kind in ("ops", "setup"):
+        assert sum(slot.startswith("fit-started:") for slot in slots) == (0 if kind == "setup" else 1)
+    assert not any(slot.startswith("fit-completed:") for slot in slots)
     assert not any(slot.startswith(("terminal:", "execution:", "forecasts:")) for slot in slots)
     with problem("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt"):
         case.recorder.freeze()
     with problem("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
         case.recorder.execute(*trial_cases(case)[0], limits=limits)
+
+
+def test_oversized_native_input_preserves_unfinished_claim_and_blocks_freeze(case, monkeypatch):
+    monkeypatch.setattr(execution, "MAX_BYTES", 1)
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("oversized native input launched"))
+    args = trial_cases(case)[0]
+    with problem("RESOURCE_LIMIT_EXCEEDED", "search execution input exceeds its byte limit"):
+        case.recorder.execute(*args, limits=LIMITS)
+    slots = [slot for slot, _ in trial_slots(case)]
+    for prefix in ("start:", "execution-start:", "inputs:"):
+        assert sum(slot.startswith(prefix) for slot in slots) == 1
+    assert not any(slot.startswith(("fit-started:", "execution:", "forecasts:", "terminal:")) for slot in slots)
+    with problem("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt"):
+        case.recorder.freeze()
+    with problem("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
+        case.recorder.execute(*args, limits=LIMITS)
 
 
 @pytest.mark.parametrize("guard, error", [(no_fit_guard, RuntimeFitForbidden), (legacy_guard, LegacyRuntimeFitForbidden)])
@@ -232,7 +255,7 @@ def test_source_seal_explicitly_binds_fixed_child(case):
     assert "experiments/magnitude_fitted.py" in seal["recorder_sources"]
 
 
-def test_real_hgb_uses_declared_recipe_and_fresh_horizon_fits(base_source, tmp_path):
+def test_real_hgb_completes_each_horizon_and_scores_forecasts(base_source, tmp_path):
     import shutil
 
     from engine.v2.contracts import ArtifactRef

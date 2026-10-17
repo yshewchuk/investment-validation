@@ -36,6 +36,11 @@ def execution_limits(limits):
 
 def run_fitted_trial(inputs, inner, plan, execution, limits, progress):
     """Run only the installed fit child; commit every progress marker before its ACK."""
+    # CPython's Linux affinity API rejects CPU indices at or above INT_MAX.
+    if (not isinstance(limits, dict) or set(limits) != {"memory_bytes", "cpu_seconds", "wall_seconds", "cpu_id"}
+            or type(limits["cpu_id"]) is not int or not 0 <= limits["cpu_id"] < 2 ** 31 - 1):
+        raise fail("INVALID_EXPERIMENT_SPEC", "search execution requires resolved limits and a valid Linux CPU")
+    validate_execution_limits({name: value for name, value in limits.items() if name != "cpu_id"})
     forbid_fitting("run_fitted_trial")
     forbid_legacy_fitting("run_fitted_trial")
     payload = canonical_json({"inputs": {name: inputs[name] for name in ("features", "training")},

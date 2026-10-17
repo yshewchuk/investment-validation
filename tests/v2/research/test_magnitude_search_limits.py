@@ -6,6 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from engine.models.no_fit import RuntimeFitForbidden as LegacyRuntimeFitForbidden
+from engine.models.no_fit import no_fit_guard as legacy_guard
+from engine.v2.models.adapters import RuntimeFitForbidden
+from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.executor import THREAD_VARIABLES
 from experiments import magnitude_search_execution as execution
@@ -155,14 +159,58 @@ def test_cpu_choice_is_lowest_of_multiple_allowed_cpus(monkeypatch, available):
     assert execution.execution_limits(LIMITS) == {**LIMITS, "cpu_id": sorted(available)[0]}
 
 
-def test_fixed_worker_observes_requested_singleton_cpu_and_all_thread_limits(monkeypatch, tmp_path):
+@pytest.mark.parametrize("limits", [None, [], {}, LIMITS,
+    {**LIMITS, "cpu_id": 0, "extra": 1}, {"cpu_id": 0},
+    *({**LIMITS, "cpu_id": value} for value in (None, True, 1.0, "1", -1, 2 ** 31 - 1, sys.maxsize))])
+def test_public_fit_helper_refuses_malformed_resolved_limits_before_effects(monkeypatch, limits):
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("invalid limits launched child"))
+    monkeypatch.setattr(execution.tempfile, "TemporaryDirectory", lambda *a, **k: pytest.fail("invalid limits made scratch"))
+    with pytest.raises(OpsError) as caught:
+        execution.run_fitted_trial(None, None, None, None, limits, None)
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC",
+        "search execution requires resolved limits and a valid Linux CPU").problem
+
+
+@pytest.mark.parametrize("key", list(LIMITS))
+@pytest.mark.parametrize("value", [True, "60", 1.5, 0, sys.maxsize])
+def test_public_fit_helper_revalidates_each_resource_before_effects(monkeypatch, key, value):
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("invalid limits launched child"))
+    monkeypatch.setattr(execution.tempfile, "TemporaryDirectory", lambda *a, **k: pytest.fail("invalid limits made scratch"))
+    with pytest.raises(OpsError) as caught:
+        execution.run_fitted_trial(None, None, None, None, {**LIMITS, "cpu_id": 0, key: value}, None)
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC",
+        "search execution requires explicit positive integer resource limits").problem
+
+
+@pytest.mark.parametrize("cpu_id", [0, 2 ** 31 - 2])
+@pytest.mark.parametrize("value", [1, sys.maxsize - 1])
+def test_public_fit_helper_accepts_exact_resolved_endpoints_before_input_admission(monkeypatch, cpu_id, value):
+    class Inputs:
+        def __getitem__(self, name):
+            raise LookupError("input admission reached")
+
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("endpoint probe launched child"))
+    with pytest.raises(LookupError, match="input admission reached"):
+        execution.run_fitted_trial(Inputs(), None, None, None, {**dict.fromkeys(LIMITS, value), "cpu_id": cpu_id}, None)
+
+
+@pytest.mark.parametrize("guard, error", [(no_fit_guard, RuntimeFitForbidden), (legacy_guard, LegacyRuntimeFitForbidden)])
+def test_public_fit_helper_honors_both_no_fit_guards_before_inputs(monkeypatch, guard, error):
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("guarded helper launched child"))
+    with guard(), pytest.raises(error, match="run_fitted_trial"):
+        execution.run_fitted_trial(None, None, None, None, {**LIMITS, "cpu_id": 0}, None)
+
+
+@pytest.mark.parametrize("pin", ["lowest", "highest"])
+def test_fixed_worker_observes_requested_singleton_cpu_and_all_thread_limits(monkeypatch, tmp_path, pin):
     allowed = os.sched_getaffinity(0)
-    if len(allowed) < 2:
+    if pin == "highest" and len(allowed) < 2:
         pytest.skip("two allowed CPUs are needed to distinguish pinning from inherited affinity")
-    # Choose the other end of the set so a hardcoded lowest CPU cannot pass.
+    # The highest variant defeats hardcoded-lowest pinning; the lowest variant
+    # still checks real containment and thread limits on single-CPU hosts.
     resolved = execution.execution_limits(LIMITS)
     assert resolved["cpu_id"] == min(allowed)
-    limits = {**resolved, "cpu_id": max(allowed)}
+    limits = {**resolved, "cpu_id": max(allowed) if pin == "highest" else min(allowed)}
     for name in THREAD_VARIABLES:
         monkeypatch.setenv(name, "23")
     observation = tmp_path / "worker-containment.json"

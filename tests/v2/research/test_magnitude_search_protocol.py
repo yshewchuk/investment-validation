@@ -105,6 +105,25 @@ def test_parent_progress_failure_kills_and_reaps_child_before_removing_scratch(m
     assert not scratch.exists()
 
 
+def test_child_wall_lifetime_includes_parent_progress_acknowledgement_time(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(execution.time, "monotonic", lambda: now[0])
+    observed = wire_child(monkeypatch, "import sys; "
+        "print('{\"event\":\"started\",\"fit\":{}}', flush=True); sys.stdin.readline(); "
+        "print('{\"event\":\"succeeded\",\"forecasts\":[]}', flush=True)")
+
+    def commit(state, evidence):
+        assert (state, evidence) == ("started", {})
+        now[0] += LIMITS["wall_seconds"] + 1
+
+    with pytest.raises(OpsError) as caught:
+        run_wire(commit)
+    assert caught.value.problem == fail("RESOURCE_LIMIT_EXCEEDED", "search execution exceeded its resource limits").problem
+    child, scratch, _ = observed[0]
+    assert child.poll() is not None
+    assert not scratch.exists()
+
+
 @pytest.mark.parametrize("available", [None, set()])
 def test_affinity_unavailable_is_typed(monkeypatch, available):
     if available is None:
