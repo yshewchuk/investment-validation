@@ -56,7 +56,7 @@ caller translates fitting failures to `EXPERIMENT_VARIANT_FAILED`. The shared
 no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
 
 An automated nightly append cycle for the pool/residual/cutoff artifacts:
-release assembly is §2.1; the rest is design only — see #192.
+release assembly is §2.1, staging §2.2, and the three-phase tick sidecar is §2.2.1; see #192.
 
 ## 2. Primary contracts and public interfaces
 
@@ -247,14 +247,17 @@ content succeeds and different content refuses `ID_CONFLICT`.
 ### 2.2 `phase5_state_stage` job (nightly pool staging)
 
 An ops job kind (`engine/v2/ops/state_stage.py`; logic in `tools/phase5_state_stage_job.py`
-because the assembly helpers live in `checks/`; `delivery` class, write lease on
-`deployment_pointer`; `state_stage_plan` builds the plan, nothing submits it yet). It
+because the assembly helpers live in `checks/`; `projection` resource class (its pinned legacy read set exceeds `delivery`'s scratch), write lease on
+`deployment_pointer`; `state_stage_plan` builds the plan; the §2.2.1 sidecar or an operator submits it). It
 stages a candidate release; it never touches `DEPLOYED` (`models_promote` is separate).
 
 - Parameters: `release_root` (the store's parent; empty resolves the production root at
   plan time), `prior_release_id`, `release_id`, `cutoff` (extended ISO), `state_files` and
-  `input_bindings` (file name -> `training` output id, equal key sets; the job framework requires
-  the producing job to have succeeded).
+  `input_bindings` (a mapping from each state file name to its `training` output id; the job framework requires
+  the producing job to have succeeded), plus a required `legacy_manifest.json` binding (the pinned legacy
+  manifest, as `training` jobs bind it): the kind declares a `legacy_store` read, so the job's read set
+  carries the legacy tree the inventory reads the champion registry from. A plan without the manifest
+  is refused `INVALID_REQUEST`.
 - The bound files must cover exactly the advancing members `paired_residual_pool`,
   `board_analog_matcher`, `trailing_pnl_cutoff`. Paired and board objects carry `cutoff` as
   the last name segment; trailing objects are stamped with `cutoff`.
@@ -274,13 +277,37 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 | R1 verified input | Bound files are bounded regular files, re-classified by schema and member (self-consistency only: the loader hashes the bytes it read, no recorded hash is compared); assembly validates prior, cutoff, objects and inventory; an incomplete or extra member set refuses |
 | R2 cache | None; bound files, prior catalog and inventory are re-read each call |
 | R3 retry | One attempt (`RetryPolicy("none", 1)`); a failed job is not retried |
-| R4 transaction | New objects go to the shared content-addressed store; the staged manifest and catalog exist only under the new id; `stage_result.json` follows the light checks |
+| R4 transaction | New objects go to the shared content-addressed store; the staged manifest and catalog exist only under the new id; `deployment.mark_staging_succeeded` (the record `models_promote` requires) and then `stage_result.json` follow the light checks |
 | R5 partial failure | Orphan objects, a staged manifest, or a candidate catalog written before a light-check refusal may remain; no success output, no promotion, the deployed release is unchanged. Inventory drift refuses before any object is written |
 | R6 idempotency | Same inputs give the same catalog; the same `release_id` with different content refuses `ID_CONFLICT` |
 
+### 2.2.1 Pool-nightly refresh sidecar (`Service._reconcile_pool_nightly_refresh`, #192 slice 4)
+
+Called from `Service.tick()` beside the other sidecars (`engine/v2/ops/pool_refresh.py`); never a `GRAPH` node, and a
+failure never blocks required job dispatch. It advances only the three members `phase5_state_stage` stages
+(`paired_residual_pool`, `board_analog_matcher`, `trailing_pnl_cutoff`); driver pools and the chooser stay carried (§2.3). It trains at one cutoff per night: the session of the latest succeeded legacy `finality` or `features` job (the stages that keep the plan's `legacy_manifest.json` binding in snapshot mode, which the scheduled nightly uses; `score` does not). Alpha is
+the shadow fill alpha 0.5 (`engine.fills.MID`, as `native_score_batch._SHADOW_FILL_ALPHA`); strategies are the default of
+the `board_analog` mode (`strategies=()`: those present in the replay trades). Selection stays exact-key with no latest fallback: a
+row whose cutoff is not the session cutoff still needs a release carrying it, which this does not provide.
+
+Phases, each only after the previous succeeded: three `training` jobs (one per advancing member) bound to the session's
+scoring manifest; one `phase5_state_stage` job staging a candidate release from their outputs; one `models_promote` job
+guarded by `expected_previous_release_id` = the prior release. The scan for the latest scoring session covers a bounded window
+of the newest nightly jobs, so a score older than that window is not found.
+
+| Rule | Behaviour |
+|---|---|
+| R1 verified input | session and manifest id from the latest succeeded `finality`/`features` job (its `legacy_manifest.json` binding); prior release from the live pointer; a missing one submits nothing |
+| R7 serve lifetime | the scheduled serve (not the snapshot-import serve) also stays up while the latest session's pool cycle is pending: a candidate release for it is not yet deployed, or a phase job (including the promote) is still running, and no phase job has failed; a missing release root or a failed phase ends the wait, and the serve deadline still bounds it |
+| R2 cache | durable job and pointer state is re-read each tick; no memo (reads are cheap indexed selects) |
+| R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); an incumbent changed before staging starts a new cycle under new keys; once a candidate is staged, the staged id or the guarded promote refuses and the cycle stalls |
+| R4 transaction | phase N+1 is submitted only once every phase-N job has succeeded; a sidecar failure is caught and reported (deduped), never raised |
+| R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; before the pointer swap the prior release stays deployed, and a failure after the swap follows the §7.2 history rules |
+| R6 idempotency | phase keys and the candidate release id are stable per session, scoring manifest and prior release, so a rerun scored from a new manifest retrains; a deployed release already named so ends the cycle |
+
 ### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
 
-Once per calendar month, inside the nightly, the chooser analog pool advances and the objects that change only on a retrain (driver residual pools, and champion/gate models if retrained) are refreshed, covering the month just completed. The run rule is the Trigger paragraph below (user decision 2026-10-16, timing pending D9). One more `Service.tick()` reconcile (same shape as `_reconcile_computed_moves_refresh` and the planned `_reconcile_pool_nightly_refresh`, #192 slice 4; never a `GRAPH`/`_DAG_STAGES` node) submits it through `phase5_state_stage` (§2.2; no submitter yet). §2.2 accepts exactly the three advancing members and carries the rest; the monthly path also needs supplied driver pools and the chooser, a slice 1 change to `classify`/`prior_carry_set`. Options and open decisions D1-D9 live in #805 and the PR #822 description, not here.
+Once per calendar month, inside the nightly, the chooser analog pool advances and the objects that change only on a retrain (driver residual pools, and champion/gate models if retrained) are refreshed, covering the month just completed. The run rule is the Trigger paragraph below (user decision 2026-10-16, timing pending D9). One more `Service.tick()` reconcile (same shape as `_reconcile_computed_moves_refresh` and `_reconcile_pool_nightly_refresh` (§2.2.1); never a `GRAPH`/`_DAG_STAGES` node) submits it through `phase5_state_stage` (§2.2; no submitter yet). §2.2 accepts exactly the three advancing members and carries the rest; the monthly path also needs supplied driver pools and the chooser, a slice 1 change to `classify`/`prior_carry_set`. Options and open decisions D1-D9 live in #805 and the PR #822 description, not here.
 
 | Object | Nightly | Monthly |
 |---|---|---|
@@ -295,7 +322,7 @@ Once per calendar month, inside the nightly, the chooser analog pool advances an
 
 **Retrained set and causality.** Inputs are the base release, `M_end` and the pinned snapshot; a row filter on event and outcome data dates admits nothing after `M_end` (never `computed_at`) and the retrain reads only the pinned snapshot (inventory source: the stage job's champion-registry read, §2.2, for a pool-only release; the retrain job's staged release for a model-changing one). One boundary rule for every retrained artifact: the stored cutoff is exclusive, `M_end + 1 day`, and rows dated on or before `M_end` (strictly before the cutoff) are admitted, matching the pool builders' refusal of rows on or after their cutoff (`residual_artifact.py`); `sources.retrain_cutoff` records that exclusive date. Catalog `sources.retrain_cutoff` (one catalog-level ISO date not after `pool_cutoff`, new) names the cutoff of the retrained members; at the member level, retrained members carry it, nightly-advanced members the session cutoff, carried members their prior cutoff. This changes the §2.1 rule that every non-carried object carries the session cutoff exactly (`CUTOFF_MISMATCH`): retrained members instead carry `retrain_cutoff`, which slice 1 implements with the §2.1 text. The first retrain has no prior `retrain_cutoff` and skips this check. The monthly candidate is staged on the stage-time base, which the nightly may already have advanced to the same `pool_cutoff`, so its `pool_cutoff` need not advance: slice 1 changes the §2.1 rule to "`pool_cutoff` or `retrain_cutoff` strictly advances" (else `CUTOFF_NOT_ADVANCED`). A `retrain_cutoff` not past the prior `retrain_cutoff` refuses `VALIDATION_FAILED` with `details.code` `CUTOFF_NOT_ADVANCED`, as in §2.2. Whether production training excludes experiment holdouts is open (D7); until decided, none is applied.
 
-**Promotion.** A pool-only release follows the nightly path: stage, light checks, release-scope `phase5_acceptance` (sole writer of the staging-success record, §7.2), auto-promote with `expected_previous_release_id`. A model-changing candidate (champion or gate bindings differ from the base's, compared binding by binding; the semantic hash alone cannot say, since it includes `release_id`) also needs a non-regression check on month `C = M − 6` (`C_start` its first calendar day), the newest month outside the rolling experiment holdout for as-of `M` (`ExperimentHoldouts`). A check candidate and a check incumbent, each refit at `C_start − 1` with every pool and the trailing cutoff pinned to that date, score the same events of `C`, excluding "random" and "ambiguous" holdout events. The check measures rank and paired-difference consistency, not a magnitude cutoff. Its receipt binds the check candidate, release candidate and incumbent hashes; promotion requires a receipt naming the release hash being promoted plus the staging-success record. A failure before the pointer swap leaves the candidate staged (or, if staging itself failed, possibly a manifest or catalog without success, per §2.2), the incumbent deployed and a failure receipt. The existing promotion boundary still applies: `DEPLOYED` commits before the history append and the job output is written after `promote` returns, so a failure in either leaves the candidate live with the recorded failure, handled by the §7.2 history rules. Retrained model bindings enter through a new payload set: the retrain job stages the retrained models with `stage_release`, and the stage step uses that release as its inventory source; slice 5a extends the `carry_forward_release` inventory-equals-prior check to accept exactly the retrained champion/gate bindings.
+**Promotion.** A pool-only release follows the nightly path: stage, light checks (the stage worker then publishes the staging-success record, §2.2), auto-promote with `expected_previous_release_id`. A model-changing candidate (champion or gate bindings differ from the base's, compared binding by binding; the semantic hash alone cannot say, since it includes `release_id`) also needs a non-regression check on month `C = M − 6` (`C_start` its first calendar day), the newest month outside the rolling experiment holdout for as-of `M` (`ExperimentHoldouts`). A check candidate and a check incumbent, each refit at `C_start − 1` with every pool and the trailing cutoff pinned to that date, score the same events of `C`, excluding "random" and "ambiguous" holdout events. The check measures rank and paired-difference consistency, not a magnitude cutoff. Its receipt binds the check candidate, release candidate and incumbent hashes; promotion requires a receipt naming the release hash being promoted plus the staging-success record. A failure before the pointer swap leaves the candidate staged (or, if staging itself failed, possibly a manifest or catalog without success, per §2.2), the incumbent deployed and a failure receipt. The existing promotion boundary still applies: `DEPLOYED` commits before the history append and the job output is written after `promote` returns, so a failure in either leaves the candidate live with the recorded failure, handled by the §7.2 history rules. Retrained model bindings enter through a new payload set: the retrain job stages the retrained models with `stage_release`, and the stage step uses that release as its inventory source; slice 5a extends the `carry_forward_release` inventory-equals-prior check to accept exactly the retrained champion/gate bindings.
 
 **Rollback.** `rollback` undoes one promotion per call (§7.2), and nightly promotions follow the retrain's, so it cannot target the retrain after one night. Designed path: forward-promote a release re-derived from the pre-retrain models; a re-promote with changed model bindings passes the same acceptance and non-regression gate as any model-changing candidate.
 
@@ -558,12 +585,17 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   production_deployment_root`/`deployment.MissingReleaseRoot` from
   `promote_plan` — NOT `production_release_root` directly: `promote_plan`
   hands its resolved value straight to `deployment.promote`, which takes
-  the `deployment/` directory itself as `root`). Neither `nightly.py`,
+  the `deployment/` directory itself as `root`); `engine/v2/ops/pool_refresh.py`
+  (reads the `DEPLOYED` pointer through the bounded reader) and `supervisor.py`
+  (`deployment.production_release_root`) for the §2.2.1 sidecar, and `nightly_trigger.py`
+  (`deployment.production_release_root` for the scheduled-serve hold). Neither `nightly.py`,
   `worker.py` nor `stages.py` import this package's deployment surface
   directly.
 - `engine.v2.serving` — `engine/v2/serving/operations.py` reads the
   deployment pointer read-only (`current_pointer`, `resolve_release`) to
   serve `/models/release.json`; never promotes.
+- `tools/phase5_state_stage_job.py` — publishes the staging-success record
+  (`mark_staging_succeeded`) for a nightly pool candidate (§2.2).
 - `tools/phase5_prepare_release.py`, `tools/phase5_inventory.py` and
   `tools/phase5_serving_folds.py` — release preparation, inventory and fold metadata.
 - `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_execution.py`
@@ -630,7 +662,8 @@ pointer or history.
 This record is separate from the immutable model manifest. Staging alone never
 writes it. `checks/phase5_acceptance.py` publishes it only after all release
 subjects pass (`RELEASE_PASS` without a Phase 4 corpus, or `PASS` with one),
-then writes successful evidence. A publication refusal leaves no evidence for
+then writes successful evidence; the `phase5_state_stage` worker (§2.2)
+publishes it for a nightly pool candidate after its light checks. A publication refusal leaves no evidence for
 that attempt that claims acceptance succeeded. Preparation invalidates the
 candidate record before replacing its content. An invalid, failed, or stale
 record is never inferred from pointer/history entries or a manifest hash alone;

@@ -949,7 +949,9 @@ def _default_serve(root: Path, plan_ref: str, clock) -> str:
     no-op resubmission), then polled until every job is terminal via
     :func:`_drive_jobs_to_terminal` (shared with
     ``_ensure_shadow_snapshot``'s own drive-to-terminal step, Cutover PR-7b, so
-    there is exactly one polling loop in this module). ``serve`` is bounded by
+    there is exactly one polling loop in this module). The scheduled serve also
+    holds while the latest session's pool cycle is pending (``hold_for_pool``;
+    snapshot-import serve does not). ``serve`` is bounded by
     ``_serve_deadline``/``DEFAULT_SERVE_DEADLINE_ET`` (an absolute same-day ET
     cutoff, not a duration) and this returns ``"timed_out"`` if that deadline
     fires before every job is terminal, so a wedged job never blocks
@@ -975,24 +977,51 @@ def _default_serve(root: Path, plan_ref: str, clock) -> str:
             raise fail("INVALID_REQUEST", "the submitted plan produced no jobs")
         service = Service(conn, ops_root, registry(), DEFAULT_POLICY, clock=clock,
                           code_source=repo_root())
-        return _drive_jobs_to_terminal(service, conn, job_ids, _serve_deadline(clock))
+        return _drive_jobs_to_terminal(service, conn, job_ids, _serve_deadline(clock),
+                                       hold_for_pool=True)
     finally:
         conn.close()
 
 
+def _pool_pending(conn) -> bool:
+    """Is the latest session's pool cycle still pending?
+
+    Lazily imports the deployment and pool-refresh modules so this module keeps
+    its light import surface. A missing release root or any exception while
+    reading the cycle state means "not pending": the wait must never outlive
+    the serve deadline because of an unrelated read failure."""
+    from engine.v2.models import deployment
+    from engine.v2.ops import pool_refresh
+
+    try:
+        release_root = deployment.production_release_root()
+    except deployment.MissingReleaseRoot:
+        return False
+    try:
+        return bool(pool_refresh.pool_cycle_pending(conn, release_root))
+    except Exception:
+        return False
+
+
 def _drive_jobs_to_terminal(service, conn, job_ids,
-                            deadline_at) -> ServeOutcome:
+                            deadline_at, *, hold_for_pool=False) -> ServeOutcome:
     """Poll ``service`` until every job in ``job_ids`` is terminal or
-    ``deadline_at`` fires. Returns ``"timed_out"`` on ``serve``'s own
-    ``"deadline_exceeded"``, else ``"completed"`` when every job succeeded,
-    else ``"failed"``. Shared by ``_default_serve`` and
+    ``deadline_at`` fires. With ``hold_for_pool`` true, the scheduled serve also
+    stays up while the latest session's pool cycle is pending. Returns
+    ``"timed_out"`` on ``serve``'s own ``"deadline_exceeded"``, else
+    ``"completed"`` when every job succeeded, else ``"failed"``. Shared by
+    ``_default_serve`` and
     ``_ensure_shadow_snapshot`` (Cutover PR-7b) so there is exactly one
     polling loop in this module.
     """
     from engine.v2.ops.supervisor import serve
 
-    outcome = serve(service, until=lambda: _jobs_terminal(conn, job_ids),
-                    deadline_at=deadline_at)
+    def until() -> bool:
+        if not _jobs_terminal(conn, job_ids):
+            return False
+        return not (hold_for_pool and _pool_pending(conn))
+
+    outcome = serve(service, until=until, deadline_at=deadline_at)
     if outcome == "deadline_exceeded":
         return "timed_out"
     return "completed" if _jobs_succeeded(conn, job_ids) else "failed"
