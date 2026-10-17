@@ -13,6 +13,7 @@ import ast
 import hashlib
 import inspect
 import json
+import os
 import sqlite3
 import textwrap
 from pathlib import Path
@@ -748,6 +749,26 @@ def test_identity_is_none_for_a_non_mapping_spec():
     assert pool_refresh.pool_refresh_identity(conn) is None
 
 
+def test_identity_bounds_the_score_history_read_to_the_newest_rows():
+    conn = _db()
+    _add_score(conn, session="2026-06-01", manifest="newest")
+    for index in range(pool_refresh.MAX_SCORE_ROWS + 5):
+        _add_score(conn, session=f"2026-05-{index + 1:02d}", manifest=f"older-{index}")
+    statements = []
+    conn.set_trace_callback(statements.append)
+    assert pool_refresh.pool_refresh_identity(conn) == ("2026-06-01", "newest")
+    assert "LIMIT" in " ".join(statements).upper()
+
+
+def test_identity_is_unaffected_by_older_rows_beyond_the_limit():
+    conn = _db()
+    _add_score(conn, session="2026-06-01", manifest="newest")
+    for index in range(100):
+        _add_score(conn, session="2020-01-01", manifest=f"old-{index}",
+                   scope=f"sha256:{index:03d}", created_at="2026-12-31T00:00:00Z")
+    assert pool_refresh.pool_refresh_identity(conn) == ("2026-06-01", "newest")
+
+
 # --------------------------------------------------------------------------
 # 17. the pointer read is bounded to a bounded regular file
 # --------------------------------------------------------------------------
@@ -784,6 +805,60 @@ def test_bounded_pointer_rejects_a_directory(tmp_path):
 def test_bounded_pointer_rejects_an_oversize_regular_file(tmp_path):
     (tmp_path / "DEPLOYED").write_bytes(b"x" * (pool_refresh.MAX_POINTER_BYTES + 1))
     _assert_pointer_refused(tmp_path)
+
+
+def _deployment_dir(tmp_path):
+    deploy = tmp_path / "deployment"
+    deploy.mkdir()
+    return deploy
+
+
+def _assert_submission_pointer_refused(rec):
+    assert rec.submits == []
+
+
+def test_production_submission_refuses_an_oversize_pointer(monkeypatch, tmp_path):
+    rec = _wire(monkeypatch)
+    conn = _db()
+    _add_score(conn)
+    (tmp_path / "deployment").mkdir()
+    (tmp_path / "deployment" / "DEPLOYED").write_bytes(
+        b"x" * (pool_refresh.MAX_POINTER_BYTES + 1))
+    with pytest.raises(OpsError) as err:
+        _submit(conn, tmp_path)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert err.value.problem.message == "deployment pointer is not a bounded regular file"
+    _assert_submission_pointer_refused(rec)
+
+
+def test_production_submission_refuses_a_symlink_pointer(monkeypatch, tmp_path):
+    rec = _wire(monkeypatch)
+    conn = _db()
+    _add_score(conn)
+    deploy = _deployment_dir(tmp_path)
+    target = tmp_path / "target.json"
+    target.write_text("{}")
+    (deploy / "DEPLOYED").symlink_to(target)
+    with pytest.raises(OpsError) as err:
+        _submit(conn, tmp_path)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert err.value.problem.message == "deployment pointer is not a bounded regular file"
+    _assert_submission_pointer_refused(rec)
+
+
+def test_production_submission_refuses_a_fifo_pointer(monkeypatch, tmp_path):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("os.mkfifo is unsupported on this platform")
+    rec = _wire(monkeypatch)
+    conn = _db()
+    _add_score(conn)
+    deploy = _deployment_dir(tmp_path)
+    os.mkfifo(deploy / "DEPLOYED")
+    with pytest.raises(OpsError) as err:
+        _submit(conn, tmp_path)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert err.value.problem.message == "deployment pointer is not a bounded regular file"
+    _assert_submission_pointer_refused(rec)
 
 
 # --------------------------------------------------------------------------
@@ -872,3 +947,29 @@ def test_promote_request_pins_the_override_code_source(monkeypatch, tmp_path):
     assert override != repo_root
     assert recorded[0].job.implementation_ref == override
     assert recorded[0].job.implementation_ref != repo_root
+
+
+# --------------------------------------------------------------------------
+# 21. the real training submits pin the caller's code source, not the repo root
+# --------------------------------------------------------------------------
+
+
+def test_training_requests_pin_the_override_code_source(monkeypatch, tmp_path):
+    other_source = tmp_path / "code"
+    _seed_code_source(other_source)
+    monkeypatch.setattr(pool_refresh.deployment, "current_pointer",
+                        lambda root: SimpleNamespace(release_id=PRIOR))
+    recorded = []
+    monkeypatch.setattr(
+        pool_refresh, "submit",
+        lambda conn, registry, policy, request, *, clock: recorded.append(request) or "receipt")
+    conn = _db()
+    _add_score(conn)
+
+    assert _submit(conn, tmp_path, code_source=other_source) == ["receipt"] * 3
+    override = content_hash(worker_source_manifest(other_source))
+    repo_root = content_hash(worker_source_manifest(REPO_ROOT))
+    assert override != repo_root
+    assert len(recorded) == len(pool_refresh.TRAINING_PHASES)
+    assert all(request.job.implementation_ref == override for request in recorded)
+    assert all(request.job.implementation_ref != repo_root for request in recorded)

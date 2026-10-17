@@ -12,13 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import stat
 from collections.abc import Mapping
 from pathlib import Path
 
 from engine.v2.foundation import content_hash
 from engine.v2.models import deployment
+from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
 from engine.v2.ops import nightly, state_stage, training
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import worker_source_manifest
@@ -32,7 +31,12 @@ FILL_ALPHA = 0.5  # engine.fills.MID.alpha, the shadow fill alpha native_score_b
 
 #: Largest ``spec_json`` a score job may carry to still be considered (a bound on
 #: the per-tick read; anything larger is ignored rather than parsed).
-MAX_SPEC_BYTES = 1 << 20
+MAX_SPEC_BYTES = 256 * 1024
+
+#: Most succeeded score-job rows read in one tick. Score keys are
+#: ``nightly:<ISO session>:<scope>:score``, so descending key order lists the
+#: newest session first and a bounded read of the latest rows is enough.
+MAX_SCORE_ROWS = 32
 
 #: Largest ``DEPLOYED`` pointer file that may be read as a regular file.
 MAX_POINTER_BYTES = 64 * 1024
@@ -52,10 +56,13 @@ def pool_refresh_identity(conn):
     (session, created_at, scope_hash) over parseable keys with a usable
     ``created_at``; ``manifest_id`` is that job's ``legacy_manifest.json`` binding.
     Returns ``None`` when no score job exists or its binding is absent/not a string."""
+    # Bounded per-tick read: keys sort so the latest session is listed first; the
+    # Python max-selection below re-ranks only those newest rows by created_at.
     rows = conn.execute(
         "SELECT idempotency_key, spec_json, created_at FROM jobs "
-        "WHERE kind = ? AND state = 'succeeded' AND length(spec_json) <= ?",
-        (nightly._LEGACY_SCORE_KIND, MAX_SPEC_BYTES)).fetchall()
+        "WHERE kind = ? AND state = 'succeeded' AND length(spec_json) <= ? "
+        "ORDER BY idempotency_key DESC LIMIT ?",
+        (nightly._LEGACY_SCORE_KIND, MAX_SPEC_BYTES, MAX_SCORE_ROWS)).fetchall()
     candidates = []
     for row in rows:
         parsed = nightly._session_scope_from_score_key(row["idempotency_key"])
@@ -120,10 +127,10 @@ def _require_bounded_pointer(deployment_root):
     read so a planted pointer cannot steer or exhaust the per-tick read."""
     path = Path(deployment_root) / "DEPLOYED"
     try:
-        info = os.lstat(path)
+        read_bounded_state(path, MAX_POINTER_BYTES, no_follow=True)
     except FileNotFoundError:
         return
-    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_POINTER_BYTES:
+    except (BoundedStateReadError, OSError):
         raise fail("VALIDATION_FAILED", "deployment pointer is not a bounded regular file")
 
 
