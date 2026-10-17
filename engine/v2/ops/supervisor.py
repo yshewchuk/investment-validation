@@ -133,6 +133,10 @@ LEASE_SECONDS = 120
 #: (stopping, exited). Lease renewal still runs on every poll (D).
 HEARTBEAT_EVENT_SECONDS = 10.0
 
+#: A refused pool-nightly refresh pauses that sidecar for this long: the
+#: reconcile rebuilds the plan and re-hashes the source closure every tick.
+POOL_REFRESH_BACKOFF_SECONDS = 30.0
+
 #: A commit refused with one of these can never succeed under this fence:
 #: nothing more may be written under it, not even the attempt's own failure.
 _FENCE_LOST_CODES = frozenset({"LEASE_LOST", "CANCELLED"})
@@ -310,7 +314,8 @@ class Service:
         self._reconcile_computed_moves_refresh()
         self._reconcile_native_score_batch_shadow()
         self._reconcile_native_parity()
-        return bool(self.running or claim)
+        pool_submitted = self._reconcile_pool_nightly_refresh()
+        return bool(self.running or claim or pool_submitted)
 
     def record_nightly_completion(self, identity: SessionIdentity, generation: int,
                                   expected: Mapping[str, str],
@@ -401,6 +406,8 @@ class Service:
     #: (``fingerprints.worker_source_manifest``) -- unthrottled, that
     #: repeats every ~1s tick, all day (Opus re-gate finding).
     _COMPUTED_MOVES_MAX_ATTEMPTS = 5
+    #: (code, message) of the last reported _reconcile_pool_nightly_refresh problem (#192 slice 4); instance-assigned on first report.
+    _last_pool_refresh_problem = None
     #: Backoff (seconds) after attempt N fails -- 30s, 2m, 10m, 30m, 1h,
     #: then no more attempts for this identity. Picked to bound the worst
     #: case (an all-day session with nothing to submit) to a handful of
@@ -988,6 +995,45 @@ class Service:
             self._native_parity_memo = None
         else:
             self._native_parity_backoff(memo, now)
+
+    def _reconcile_pool_nightly_refresh(self):
+        """#192 slice 4: the ONLY place the pool-nightly refresh phases are
+        submitted (training, then ``phase5_state_stage``, then ``models_promote``);
+        called every tick(), never through build_legacy_job_requests. Contract:
+        ``engine/v2/models/ARCHITECTURE.md`` section 2.2.1. A refusal pauses
+        this sidecar for ``POOL_REFRESH_BACKOFF_SECONDS`` because the reconcile
+        rebuilds the plan and re-hashes the source closure; a clean pass clears
+        the pause. Every exception is caught and reported (deduped), never
+        crashing the tick."""
+        if time.monotonic() < getattr(self, "_pool_refresh_not_before", 0.0):
+            return False
+        from engine.v2.models import deployment
+        from engine.v2.ops.pool_refresh import submit_pool_nightly_refresh_if_ready
+        from engine.v2.ops.submission import NamespacePolicy
+
+        policy = NamespacePolicy({"operator": frozenset({"shadow"})})
+        try:
+            release_root = deployment.production_release_root()
+            receipts = submit_pool_nightly_refresh_if_ready(
+                self.conn, self.registry, policy, self.store, release_root,
+                code_source=self.code_source, clock=self.clock)
+        except deployment.MissingReleaseRoot:
+            return False
+        except Exception as exc:
+            self._pool_refresh_not_before = time.monotonic() + POOL_REFRESH_BACKOFF_SECONDS
+            problem = exc.problem if isinstance(exc, OpsError) else make_problem(
+                "VALIDATION_FAILED", "pool nightly refresh reconciliation failed")
+            problem_key = (problem.code, problem.message)
+            if problem_key == self._last_pool_refresh_problem:
+                return False
+            self._last_pool_refresh_problem = problem_key
+            print(json.dumps({"event": "pool_nightly_refresh_reconcile_failed",
+                              "problem": {field: to_document(problem)[field]
+                                          for field in ("code", "category", "retryable", "message")}}))
+            return False
+        self._last_pool_refresh_problem = None
+        self._pool_refresh_not_before = 0.0
+        return bool(receipts)
 
     def _clock_check(self):
         wall, mono = self.clock.now(), self.clock.monotonic()

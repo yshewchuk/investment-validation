@@ -179,7 +179,8 @@ def save_plan(conn, root, document, *, clock):
 
 #: Plan kinds enabled for submission, with the effect scope each must carry.
 _ENABLED_PLAN_KINDS = {"artifact_check": ["private_artifacts"], "experiment": ["staged"],
-                       "training": ["staged"], "promote": ["staged"], "rollback": ["staged"]}
+                       "training": ["staged"], "promote": ["staged"], "rollback": ["staged"],
+                       "phase5_state_stage": ["staged"]}
 
 #: The checkpoint contract each enabled kind's registered ``JobKind`` declares
 #: (``engine.v2.ops.stages.registry()``); a submission whose contract differs
@@ -188,7 +189,8 @@ _PLAN_CHECKPOINT_CONTRACTS = {"artifact_check": "receipt.v1.0",
                               "experiment": "experiment_receipt.v1.0",
                               "training": "training_job_result.v1.0",
                               "promote": "promote_pointer_state.v1.0",
-                              "rollback": "promote_pointer_state.v1.0"}
+                              "rollback": "promote_pointer_state.v1.0",
+                              "phase5_state_stage": "phase5_state_stage_result.v1.0"}
 
 #: Plan kinds whose registered job kind differs from the plan kind itself.
 _PLAN_JOB_KINDS = {"promote": "models_promote", "rollback": "models_rollback"}
@@ -199,11 +201,20 @@ def request_from_plan(plan, key):
         raise fail("INVALID_REQUEST", "plan has unsupported schema or blocked prerequisites")
     if plan["kind"] not in _ENABLED_PLAN_KINDS or plan["effects"] != _ENABLED_PLAN_KINDS[plan["kind"]]:
         raise fail("INVALID_REQUEST", "plan kind is not enabled for submission")
+    input_refs = tuple(plan["input_refs"])
+    dependency_job_ids: tuple[str, ...] = ()
+    retry_policy_ref = "bounded"
+    if plan["kind"] == "phase5_state_stage":
+        input_refs = tuple(ref for ref in plan["input_refs"] if "#" not in ref)
+        dependency_job_ids = tuple(sorted({ref.partition("#")[0]
+                                           for ref in plan["input_refs"] if "#" in ref}))
+        retry_policy_ref = "none"
     job = JobSpec(kind=_PLAN_JOB_KINDS.get(plan["kind"], plan["kind"]),
                   implementation_ref=plan["implementation_ref"],
                   spec_hash=plan.get("spec_hash"), environment_ref=plan["environment_ref"],
-                  parameters=plan["parameters"], input_refs=tuple(plan["input_refs"]),
+                  parameters=plan["parameters"], input_refs=input_refs,
+                  dependency_job_ids=dependency_job_ids,
                   output_namespace=plan["mode"], resource_class=plan["resource_class"],
-                  retry_policy_ref="bounded",
+                  retry_policy_ref=retry_policy_ref,
                   checkpoint_contract_ref=_PLAN_CHECKPOINT_CONTRACTS[plan["kind"]])
     return SubmitRequest(namespace=plan["mode"], idempotency_key=key, principal="operator", job=job)
