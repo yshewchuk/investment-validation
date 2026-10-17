@@ -321,7 +321,8 @@ def _pairs(score_doc, bundle_rows_by_ticker) -> set[tuple[str, str]]:
 
 
 def _release_id(preview_input: PreviewInput, snapshot_ref: SnapshotRef, score_doc,
-                bundle_rows_by_ticker, *, requested_as_of: str, resolved_as_of: str) -> str:
+                bundle_rows_by_ticker, *, requested_as_of: str, resolved_as_of: str,
+                row_sources: tuple[str, ...]) -> str:
     """Pure function of content: identical inputs give an identical id; a
     changed score or bundle changes it (§5.3 point 8's idempotency test)."""
     return content_hash({
@@ -334,6 +335,7 @@ def _release_id(preview_input: PreviewInput, snapshot_ref: SnapshotRef, score_do
         "snapshot_id": snapshot_ref.snapshot_id,
         "snapshot_manifest_hash": snapshot_ref.manifest_hash,
         "requested_as_of": requested_as_of, "resolved_as_of": resolved_as_of,
+        "row_sources": list(row_sources),
         "score_doc": score_doc,
         "bundle_rows_by_ticker": dict(bundle_rows_by_ticker),
         "projection_code_hash": _PROJECTION_CODE_HASH,
@@ -393,7 +395,7 @@ def build_candidate(
     preview_input: PreviewInput, score_doc, bundle_rows_by_ticker, *,
     repository: Repository, snapshot_ref: SnapshotRef, store, conn: sqlite3.Connection,
     requested_as_of: str, resolved_as_of: str, clock: Clock | None = None,
-    fault=None,
+    fault=None, row_sources: tuple[str, ...] = ("legacy_bundle",),
 ) -> PreviewRelease | Problem:
     """§5.3-§5.4: resolve, bridge, publish, and — only if ``findings.ok`` —
     index one release, transactionally and idempotently.
@@ -403,7 +405,13 @@ def build_candidate(
     transaction) so a test can raise mid-sequence and assert the rerun
     succeeds with no partial release — the O11-style fault hook this
     package's siblings already use.
+
+    ``row_sources`` must be exactly one element naming the source that
+    supplied the rows: ``"legacy_bundle"`` or ``"native_shadow"``; anything
+    else raises ``ValueError`` before any durable write.
     """
+    if len(row_sources) != 1 or row_sources[0] not in {"legacy_bundle", "native_shadow"}:
+        raise ValueError("invalid row_sources " + repr(row_sources))
     clock = clock or SystemClock()
     ensure_schema(conn, clock=clock)
     event_refs = resolve_event_refs(repository, snapshot_ref, _pairs(score_doc, bundle_rows_by_ticker))
@@ -413,7 +421,8 @@ def build_candidate(
         model_registry_artifact_refs=preview_input.model_registry_artifact_refs,
         request_provenance_refs=preview_input.score_job_input_refs)
     release_id = _release_id(preview_input, snapshot_ref, score_doc, bundle_rows_by_ticker,
-                             requested_as_of=requested_as_of, resolved_as_of=resolved_as_of)
+                             requested_as_of=requested_as_of, resolved_as_of=resolved_as_of,
+                             row_sources=row_sources)
     findings_ref = _publish_document(store, to_document(findings), "projection_findings.v1.0")
     if fault is not None:
         fault("findings_written")
@@ -445,6 +454,7 @@ def build_candidate(
         release_id=release_id, source_release_id=preview_input.source_release_id,
         projection_manifest_ref=manifest_ref.artifact_id, snapshot_ref=snapshot_ref.snapshot_id,
         score_batch_ref=preview_input.score_batch_ref, bundle_manifest_ref=preview_input.bundle_manifest_ref,
+        row_sources=row_sources,
         model_registry_artifact_refs=preview_input.model_registry_artifact_refs,
         model_evidence_ref=preview_input.model_evidence_ref,
         comparison_receipt_refs=(preview_input.score_comparison_receipt_ref,
@@ -557,8 +567,9 @@ def projection_binding(conn: sqlite3.Connection, release_id: str) -> dict | None
     names the exact rendered bytes this candidate was built from, not only
     the projection this index computed from them.
 
-    Returns ``None`` for an unknown or not-yet-committed release id — never
-    raises; an uncommitted candidate is a normal state, not a corruption.
+    Returns ``None`` for an unknown or not-yet-committed release id — an
+    uncommitted candidate is a normal state, not a corruption; raises
+    ``DocumentError`` for a stored release of an older schema.
     """
     row = conn.execute("SELECT document_json, findings_json FROM serving_release WHERE release_id = ?",
                        (release_id,)).fetchone()
@@ -591,8 +602,10 @@ def verify_projection_binding(conn: sqlite3.Connection, binding: dict) -> bool:
     pointer (guide §5.4: "refuse ... if the projection isn't fully committed
     in serving.sqlite or its manifest hash mismatches"). ``False`` for
     anything malformed, an uncommitted release, a tampered binding document,
-    or an index whose own row content moved — never raises; the caller
-    decides how to turn a ``False`` into a refusal."""
+    or an index whose own row content moved — raises DocumentError for a
+    stored release of an older schema (callers map it to
+    SERVING_INDEX_UNREADABLE); the caller decides how to turn a ``False``
+    into a refusal."""
     release_id = binding.get("projection_release_id") if isinstance(binding, dict) else None
     if not isinstance(release_id, str):
         return False

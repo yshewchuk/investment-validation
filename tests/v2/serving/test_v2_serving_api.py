@@ -352,6 +352,141 @@ def test_release_current_resolves_and_matches_explicit_lookup(live):
     assert json.loads(body)["release_id"] == release_a.release_id
 
 
+def _missing_row_sources_release(serving_root: Path, release_id: str) -> None:
+    """Point CURRENT at ``release_id`` and strip the required ``row_sources``
+    field from its stored release document to simulate an older-schema row --
+    an unrebuildable pre-v1.1 release."""
+    _set_current(serving_root, release_id)
+    conn = projections.connect(str(serving_root / "serving.sqlite"))
+    try:
+        conn.execute(
+            "UPDATE serving_release SET document_json = json_remove(document_json, '$.row_sources') "
+            "WHERE release_id = ?", (release_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_current_release_missing_row_sources_is_a_typed_503(live):
+    """``_missing_row_sources_release`` strips the required ``row_sources``
+    field from a stored release document to simulate an older-schema row (an
+    unrebuildable pre-v1.1 release). It reads as the same retryable
+    ``SERVING_INDEX_UNREADABLE`` 503 as any other unreadable index row --
+    never an unhandled 500."""
+    base, serving_root, release_a, _ = live
+    _missing_row_sources_release(serving_root, release_a.release_id)
+    code, body, _ = _get(base, "/api/v1/releases/current", token=TOKEN)
+    assert code == 503
+    assert json.loads(body)["code"] == "SERVING_INDEX_UNREADABLE"
+    assert json.loads(body)["retryable"] is True
+
+
+def test_release_by_id_missing_row_sources_is_a_typed_503(live):
+    """The explicit ``/api/v1/releases/{release_id}`` lookup hits the same
+    unreadable-index path as ``/api/v1/releases/current``: a stored release
+    document whose ``row_sources`` was stripped (an older-schema row) reads
+    as the retryable ``SERVING_INDEX_UNREADABLE`` 503 rather than an
+    unhandled 500."""
+    base, serving_root, release_a, _ = live
+    _missing_row_sources_release(serving_root, release_a.release_id)
+    code, body, _ = _get(base, "/api/v1/releases/" + release_a.release_id, token=TOKEN)
+    assert code == 503
+    assert json.loads(body)["code"] == "SERVING_INDEX_UNREADABLE"
+    assert json.loads(body)["retryable"] is True
+
+
+def test_stripped_release_events_and_event_scores_are_a_typed_503(live):
+    """Every connection-owning read over a stripped release document is the
+    same retryable ``SERVING_INDEX_UNREADABLE`` 503: ``/api/v1/events`` and
+    ``/api/v1/events/{event_id}/scores`` both validate the release through
+    ``get_release`` before reading rows, so an older-schema row refuses both.
+    The event id is taken from the listing before the strip."""
+    base, serving_root, release_a, _ = live
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release_a.release_id, "limit": "1"})
+    assert code == 200
+    event_id = json.loads(body)["items"][0]["event_ref"]["event_id"]
+
+    _missing_row_sources_release(serving_root, release_a.release_id)
+
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release_a.release_id})
+    assert code == 503
+    assert json.loads(body)["code"] == "SERVING_INDEX_UNREADABLE"
+    assert json.loads(body)["retryable"] is True
+
+    code, body, _ = _get(base, "/api/v1/events/" + event_id + "/scores", token=TOKEN,
+                         params={"release_id": release_a.release_id})
+    assert code == 503
+    assert json.loads(body)["code"] == "SERVING_INDEX_UNREADABLE"
+    assert json.loads(body)["retryable"] is True
+
+
+def _native_parity_report_document() -> dict:
+    """A minimal but valid ``native_parity_report.v1.3`` -- enough identity
+    and empty populations for the freshness check to read the current
+    release; every production report is built elsewhere."""
+    return {
+        "schema_version": "native_parity_report.v1.3",
+        "compared": [], "only_legacy": [], "only_native": [], "mismatches": [],
+        "as_of": "2024-01-01", "generated_at": "2024-01-01T00:00:00.000000Z",
+        "tolerance_policy_id": "score_record.exact.v1",
+    }
+
+
+def test_native_parity_with_stripped_current_release_is_a_typed_503(live, tmp_path):
+    """The native-parity summary derives its freshness by reading the current
+    release; a stripped current release makes that read raise ``DocumentError``,
+    which the route maps to the same retryable ``SERVING_INDEX_UNREADABLE`` 503
+    as the other index reads -- never an unhandled 500."""
+    _, serving_root, release_a, _ = live
+    _missing_row_sources_release(serving_root, release_a.release_id)
+    report_path = tmp_path / "native_parity_report.json"
+    report_path.write_text(json.dumps(_native_parity_report_document()))
+    app = create_app(serving_db=str(serving_root / "serving.sqlite"),
+                     store_root=str(serving_root / "objects"),
+                     serving_root=str(serving_root), token=TOKEN,
+                     resolver=lambda: release_a.release_id,
+                     native_parity_report_path=str(report_path))
+    server, thread, base = _start(app)
+    try:
+        code, body, _ = _get(base, "/api/v1/native_parity", token=TOKEN)
+        assert code == 503
+        assert json.loads(body)["code"] == "SERVING_INDEX_UNREADABLE"
+        assert json.loads(body)["retryable"] is True
+    finally:
+        _stop(server, thread)
+
+
+def test_native_parity_with_stripped_current_release_via_publication_resolver_is_a_typed_503(live, tmp_path):
+    """The same stripped-current-release refusal as
+    ``test_native_parity_with_stripped_current_release_is_a_typed_503``, but
+    resolved through the PRODUCTION pointer chain rather than an injected
+    ``resolver=lambda``: the fenced ops ``CURRENT`` -> its bound
+    ``projection_binding.json`` -> reverification against the live serving
+    index. Stripping ``row_sources`` makes that reverification raise
+    ``DocumentError``, which the freshness read maps to the same retryable
+    ``SERVING_INDEX_UNREADABLE`` 503 -- never an unhandled 500."""
+    _, serving_root, release_a, _ = live
+    _missing_row_sources_release(serving_root, release_a.release_id)
+    report_path = tmp_path / "native_parity_report.json"
+    report_path.write_text(json.dumps(_native_parity_report_document()))
+    app = create_app(serving_db=str(serving_root / "serving.sqlite"),
+                     store_root=str(serving_root / "objects"),
+                     serving_root=str(serving_root),
+                     publication_root=str(serving_root / "_publication"),
+                     token=TOKEN,
+                     native_parity_report_path=str(report_path))
+    server, thread, base = _start(app)
+    try:
+        code, body, _ = _get(base, "/api/v1/native_parity", token=TOKEN)
+        assert code == 503
+        assert json.loads(body)["code"] == "SERVING_INDEX_UNREADABLE"
+        assert json.loads(body)["retryable"] is True
+    finally:
+        _stop(server, thread)
+
+
 def test_release_current_is_no_store_with_etag_304_for_the_4s_poll(live):
     """The UI polls `/api/v1/releases/current` roughly every 4s (guide §7,
     `ui/src/hooks.ts` `usePinnedRelease`'s background poll) to detect a

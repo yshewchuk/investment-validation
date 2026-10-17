@@ -251,7 +251,7 @@ tests = [
     "tests/v2/ops/test_v2_ops_effects_backup.py",
     "tests/v2/foundation/test_v2_ops_foundation.py",
     "tests/test_v2_scoring_stage_observer.py",
-    "tests/test_v2_serving_bridge.py",
+    "tests/v2/serving/test_v2_serving_bridge.py",
 ]
 
 [modules.domain_features]
@@ -631,7 +631,7 @@ tests = [
     "tests/test_v2_ops_serving.py",
     "tests/test_v2_serving_analogs.py",
     "tests/v2/serving/test_v2_serving_api.py",
-    "tests/test_v2_serving_bridge.py",
+    "tests/v2/serving/test_v2_serving_bridge.py",
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_projections.py",
     "tests/v2/serving/test_v2_serving_publication_binding.py",
