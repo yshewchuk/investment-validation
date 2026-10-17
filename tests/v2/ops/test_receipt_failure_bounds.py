@@ -214,6 +214,7 @@ def test_plain_submit_replay_obeys_default_limit(over_default_problem):
         with pytest.raises(OpsError) as captured:
             submission.submit(case.conn, REGISTRY, POLICY, request(), clock=case.clock)
         assert captured.value.code == "RESOURCE_LIMIT_EXCEEDED"
+        assert captured.value.problem.message == "stored job failure exceeds its byte bound"
         assert case.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
         assert case.conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 1
         assert not case.conn.in_transaction

@@ -11,13 +11,13 @@ from engine.v2.ops.errors import OpsError, fail, make_problem
 
 def prepare_failure(problem: Problem, store: ArtifactStore) -> tuple[Problem, ArtifactRef | None]:
     """Publish the entire original envelope; no catalog write or completion happens here."""
-    payload = dumps(problem).encode("utf-8")
-    if len(payload) <= MAX_JOB_FAILURE_BYTES:
-        return problem, None
     if (not isinstance(problem.code, str) or problem.code not in FAILURE_CODES
             or problem.category != FAILURE_CODES[problem.code][0]
             or type(problem.retryable) is not bool or problem.schema_version != PROBLEM_V1):
         raise fail("INTEGRITY_FAILED", "failure diagnostic requires a valid Problem classification") from OpsError(problem)
+    payload = dumps(problem).encode("utf-8")
+    if len(payload) <= MAX_JOB_FAILURE_BYTES:
+        return problem, None
     try:
         ref = store.publish_bytes(payload, schema_ref=PROBLEM_V1)
     except OSError:

@@ -1259,7 +1259,7 @@ job.
 | R2-R6 | no cache or retry (rerun the stage); `features.json` is an atomic stage output, tables read-only; same tables give the same verdict |
 | Recorded in `features.json` | `comparison` (`numeric.v1`, `rtol`, `atol`), `verdict`, `pinned_*_sha256`, per table max absolute/relative diff and differing-column count, and on mismatch up to 5 columns (`reason`, `n_rows`, diffs); never cell values |
 
-`details` is private by design (§5.2): never in `failure_json`, always in `diagnostics/failure_details.json` via `diagnostic_ref`; the earlier "empty details" was this routing, not a lost value.
+Worker `details` follow the private staging path (§5.2), `diagnostics/failure_details.json`, and are published as `failure_diagnostic.v1.0` via `diagnostic_ref`; the earlier worker "empty details" was this routing, not a lost value. Coordinator Problems instead pass classification admission at every size: valid small envelopes retain inline details and exact canonical bytes in `failure_json`; oversized originals retain every field in a `problem.v1.0` artifact referenced by a bounded summary.
 
 ### `nightly_trigger.py`
 

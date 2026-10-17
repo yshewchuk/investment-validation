@@ -857,8 +857,10 @@ def test_recovered_failure_is_bounded_before_json_decode(tmp_path, monkeypatch, 
                                  (2 if encoding.startswith("UTF-16") else 1), column="failure_json",
                                  sql_fragment="end as failure_json from attempts")
         monkeypatch.setattr(collection.json, "loads", forbid_effect)
-        with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+        with pytest.raises(OpsError) as captured:
             collection._terminal(bounded, case.store, case.job, case.registration)
+        assert captured.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert captured.value.problem.message == "sweep attempt failure cannot be decoded"
         sql_size = len(text.encode(encoding))
         assert bounded.sizes == [sql_size if wide_text else None]
     finally:

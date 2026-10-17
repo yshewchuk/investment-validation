@@ -5,12 +5,13 @@ An interrupted publication may leave a complete content-addressed orphan; the
 catalog must never claim completion without its registered full diagnostic.
 """
 from dataclasses import replace
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from engine.v2.contracts import Problem
-from engine.v2.foundation import ArtifactError, ArtifactStore, artifact_reference
+from engine.v2.foundation import ArtifactError, ArtifactStore, artifact_reference, format_timestamp
 from engine.v2.ops import catalog, failure_diagnostics, lifecycle, recovery, scheduler, submission
 from engine.v2.ops.checkpoints import register_artifact, registered_artifact
 from engine.v2.ops.decision_validation import validate
@@ -152,21 +153,33 @@ def test_explicit_retryability_override_is_preserved(tmp_path, oversized):
 
 
 @pytest.mark.parametrize("changes", [
-    {"code": "NOT_REGISTERED"}, {"category": "internal"},
-    {"schema_version": "problem.v99.0"}, {"retryable": 1},
+    {"code": "NOT_REGISTERED"}, {"code": None}, {"code": []}, {"category": "internal"},
+    {"schema_version": "problem.v99.0"}, {"retryable": 0}, {"retryable": 1},
 ])
-def test_invalid_problem_classification_refuses_before_publication(changes):
+@pytest.mark.parametrize("oversized", [False, True], ids=["small", "large"])
+@pytest.mark.parametrize("entrypoint", ["prepare", "service"])
+def test_invalid_problem_classification_refuses_before_publication(case, monkeypatch, changes, oversized, entrypoint):
     original = replace(make_problem("VALIDATION_FAILED", "invalid envelope",
-                                    details={"padding": "x" * CAP}), **changes)
+                                    details={"padding": "x" * CAP} if oversized else {}), **changes)
 
     def forbidden(*args, **kwargs):
-        pytest.fail("an invalid failure envelope must not be published")
+        pytest.fail("an invalid failure classification must not be serialized or published")
 
+    monkeypatch.setattr(case.store, "publish_bytes", forbidden)
+    monkeypatch.setattr(failure_diagnostics, "dumps", forbidden)
+    before = catalog_rows(case.conn)
     with pytest.raises(OpsError) as captured:
-        failure_diagnostics.prepare_failure(original, SimpleNamespace(publish_bytes=forbidden))
+        if entrypoint == "prepare":
+            failure_diagnostics.prepare_failure(original, case.store)
+        else:
+            case.service._commit_failure(case.claim, {"exit_code": 4}, original)
     assert captured.value.code == "INTEGRITY_FAILED"
     assert captured.value.problem.retryable is False
     assert captured.value.problem.message == "failure diagnostic requires a valid Problem classification"
+    assert isinstance(captured.value.__cause__, OpsError)
+    assert captured.value.__cause__.problem is original
+    assert catalog_rows(case.conn) == before and not case.conn.in_transaction
+    assert object_bytes(case.store) == {}
 
 
 def test_service_keeps_real_coordinator_findings_and_previous_reference(case):
@@ -222,7 +235,8 @@ def test_large_retryable_failure_keeps_retry_policy_and_full_problem(case):
     case.service._commit_failure(case.claim, {"exit_code": 4}, original)
     receipt = get_job(case.conn, case.claim.job_id)
     assert receipt.state == "retry_wait" and receipt.failure.retryable
-    assert receipt.next_eligible_at is not None
+    # The fixture's first-attempt retry delay is one second, not retry_after_seconds=19.
+    assert receipt.next_eligible_at == format_timestamp(case.clock.now() + timedelta(seconds=1))
     ref = registered_artifact(case.conn, receipt.failure.diagnostic_ref)
     assert_summary(original, receipt.failure, ref)
     assert_original(case.store, original, ref)
@@ -295,6 +309,7 @@ def test_failure_artifact_must_match_the_failed_outcome(case, full_problem, mism
         lifecycle.commit_attempt(case.conn, case.claim.attempt_id, case.claim.fence, outcome,
                                  clock=case.clock, failure_artifact=ref)
     assert captured.value.code == "INTEGRITY_FAILED"
+    assert captured.value.problem.message == "failure diagnostic does not match its receipt"
     assert catalog_rows(case.conn) == before
     assert not case.conn.in_transaction
 
@@ -308,6 +323,7 @@ def test_fence_lost_after_publication_leaves_only_an_unregistered_complete_objec
                                  lifecycle.Outcome(False, "verified_dead", 4, summary),
                                  clock=case.clock, failure_artifact=ref)
     assert captured.value.code == "LEASE_LOST"
+    assert captured.value.problem.message == "the attempt no longer holds the job's fence"
     assert catalog_rows(case.conn) == before
     assert_original(case.store, full_problem, ref)
     assert case.conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
