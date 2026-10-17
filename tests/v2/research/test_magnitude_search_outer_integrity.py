@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
+from engine.v2.ops.errors import fail
 from engine.v2.ops.migrations import Migration, migrate
 from experiments import magnitude_search_outer as outer
 from experiments import magnitude_search_records as records
@@ -139,6 +140,28 @@ def test_invalid_limits_precede_missing_migrations(monkeypatch):
             conn, None, None, None, None, None, "2024", limits=limits), monkeypatch)
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_outer_source_admission_maps_input_changed_before_downstream_work(outer_case, monkeypatch, completed):
+    case = outer_case
+    if completed:
+        assert slot(case, "terminal") is None
+        result = run(case)
+        assert slot(case, "terminal") == result
+    source = Mock(side_effect=fail("INPUT_CHANGED", "declared implementation file is missing"))
+    monkeypatch.setattr(outer, "source_closure", source)
+    forbidden = Mock(side_effect=AssertionError("source refusal crossed the outer admission boundary"))
+    for name in ("_replay", "_inputs", "load_magnitude_targets", "execution_limits", "run_fitted_trial", "append_record"):
+        monkeypatch.setattr(outer, name, forbidden)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", forbidden)
+    before = case.conn.total_changes, list(case.conn.iterdump())
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+        run(case)
+    source.assert_called_once()
+    assert source.call_args.args[1] == ["experiments/magnitude_search_outer.py", "experiments/magnitude_search_worker.py"]
+    forbidden.assert_not_called()
+    assert (case.conn.total_changes, list(case.conn.iterdump())) == before
 
 
 @pytest.mark.parametrize("missing", ["selection", "execution", "terminal"])
