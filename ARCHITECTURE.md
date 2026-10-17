@@ -101,7 +101,8 @@ evidence. See the models and data component contracts.
   outside those two modules, is not enforced against by either rule.
   `experiments.magnitude_search_execution` separately owns its fixed bounded
   fit-only child with per-fit journal acknowledgements, outside the ops job/recovery
-  lifecycle and this v2-only enforcement.
+  lifecycle and this v2-only enforcement. Its child is pinned to the lowest allowed CPU, so
+  callers serialize trials per host or size `wall_seconds` for peak concurrency (#845).
   Known exception: `engine.v2.ops.state_stage` reaches
   `checks/phase5_release_assembly.py` through `tools/phase5_state_stage_job.py` (no direct
   import); the catalog layout already lives in `engine/v2/models`, and the exception ends
