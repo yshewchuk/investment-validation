@@ -406,14 +406,11 @@ def build_candidate(
     succeeds with no partial release — the O11-style fault hook this
     package's siblings already use.
 
-    ``row_sources`` must be non-empty, its first element must be
-    ``"legacy_bundle"``, every element must be one of ``"legacy_bundle"``/
-    ``"native_shadow"``, and it must carry no duplicates; anything else raises
-    ``ValueError`` before any durable write.
+    ``row_sources`` must be exactly one element naming the source that
+    supplied the rows: ``"legacy_bundle"`` or ``"native_shadow"``; anything
+    else raises ``ValueError`` before any durable write.
     """
-    if (not row_sources or row_sources[0] != "legacy_bundle"
-            or any(src not in {"legacy_bundle", "native_shadow"} for src in row_sources)
-            or len(set(row_sources)) != len(row_sources)):
+    if len(row_sources) != 1 or row_sources[0] not in {"legacy_bundle", "native_shadow"}:
         raise ValueError("invalid row_sources " + repr(row_sources))
     clock = clock or SystemClock()
     ensure_schema(conn, clock=clock)
@@ -570,8 +567,9 @@ def projection_binding(conn: sqlite3.Connection, release_id: str) -> dict | None
     names the exact rendered bytes this candidate was built from, not only
     the projection this index computed from them.
 
-    Returns ``None`` for an unknown or not-yet-committed release id — never
-    raises; an uncommitted candidate is a normal state, not a corruption.
+    Returns ``None`` for an unknown or not-yet-committed release id — an
+    uncommitted candidate is a normal state, not a corruption; raises
+    ``DocumentError`` for a stored release of an older schema.
     """
     row = conn.execute("SELECT document_json, findings_json FROM serving_release WHERE release_id = ?",
                        (release_id,)).fetchone()

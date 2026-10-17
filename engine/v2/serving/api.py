@@ -839,9 +839,12 @@ def open_index_untranslated(serving_db):
 
 def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> str:
     """Classify report freshness; an ApiError/OSError resolver means unknown current."""
-    return native_parity_projection.native_parity_freshness(
-        serving_db, resolve_current, as_of, open_index_untranslated, projections.get_release,
-        (ApiError, OSError))
+    try:
+        return native_parity_projection.native_parity_freshness(
+            serving_db, resolve_current, as_of, open_index_untranslated, projections.get_release,
+            (ApiError, OSError))
+    except DocumentError:
+        raise _index_unreadable() from None
 
 
 def _native_parity_encoded_response(document) -> Response:

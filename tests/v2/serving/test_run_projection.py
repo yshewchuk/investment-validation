@@ -50,7 +50,9 @@ def _flat_inputs(tmp_path: Path) -> dict:
     tmp_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / "phase2").mkdir()
     conn, store, snap = _events_snapshot(
-        tmp_path / "phase2", [_event_row("e1", "AAA", datetime(2024, 1, 5))])
+        tmp_path / "phase2",
+        [_event_row("e1", "AAA", datetime(2024, 1, 5)),
+         _event_row("e2", "BBB", datetime(2024, 1, 5))])
     conn.close()
 
     row = _row()
@@ -162,7 +164,7 @@ def test_build_candidate_row_sources_change_release_id_and_get_release_keeps_eac
     shadow = projections.build_candidate(
         preview, score_doc, bundle, repository=repo, snapshot_ref=snap,
         store=serving_store, conn=serving_conn, requested_as_of="2024-01-04",
-        resolved_as_of="2024-01-04", row_sources=("legacy_bundle", "native_shadow"))
+        resolved_as_of="2024-01-04", row_sources=("native_shadow",))
 
     assert isinstance(legacy, PreviewRelease)
     assert isinstance(shadow, PreviewRelease)
@@ -171,8 +173,7 @@ def test_build_candidate_row_sources_change_release_id_and_get_release_keeps_eac
     legacy_read = projections.get_release(serving_conn, legacy.release_id)
     shadow_read = projections.get_release(serving_conn, shadow.release_id)
     assert legacy_read == legacy and legacy_read.row_sources == ("legacy_bundle",)
-    assert shadow_read == shadow and shadow_read.row_sources == (
-        "legacy_bundle", "native_shadow")
+    assert shadow_read == shadow and shadow_read.row_sources == ("native_shadow",)
 
 
 # 3. invalid row_sources -> ValueError
@@ -184,7 +185,8 @@ def test_build_candidate_refuses_invalid_row_sources(tmp_path):
     row = _row()
     preview = _preview_input()
 
-    for bad in ((), ("native_shadow",), ("legacy_bundle", "bogus"),
+    for bad in ((), ("legacy_bundle", "native_shadow"),
+                ("native_shadow", "legacy_bundle"), ("bogus",),
                 ("legacy_bundle", "legacy_bundle")):
         with pytest.raises(ValueError, match="invalid row_sources"):
             projections.build_candidate(
@@ -219,7 +221,32 @@ def test_native_plan_without_native_inputs_raises_and_writes_no_release(tmp_path
             serving_conn.close()
 
 
-# 5. run_projection records the plan's row_sources on the stored release
+# 4b. a plan that is a JSON list, or not JSON at all, is INVALID_REQUEST
+def test_run_projection_refuses_list_or_non_json_plan(tmp_path):
+    inputs = _flat_inputs(tmp_path / "inputs")
+
+    for name, payload in (("list", "[]"), ("bad", "{not json")):
+        plan_path = tmp_path / f"plan_{name}.json"
+        plan_path.write_text(payload)
+        serving_root = tmp_path / f"serving_{name}"
+
+        with pytest.raises(OpsError) as error:
+            run_projection(**_args(inputs, serving_root, nightly_plan=plan_path))
+        assert error.value.code == "INVALID_REQUEST"
+
+        index_path = serving_root / "serving.sqlite"
+        assert not index_path.exists() or index_path.stat().st_size == 0
+        if index_path.exists():
+            serving_conn = projections.connect(str(index_path))
+            try:
+                assert serving_conn.execute(
+                    "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
+            finally:
+                serving_conn.close()
+
+
+# 5. run_projection records the plan's row_sources on the stored release, and
+#    the stored release's rows come from the native source
 def test_run_projection_native_plan_records_native_shadow(tmp_path, monkeypatch):
     import tools.v2_dashboard_project as tool
 
@@ -231,9 +258,22 @@ def test_run_projection_native_plan_records_native_shadow(tmp_path, monkeypatch)
 
     monkeypatch.setattr(tool, "_load_native_inputs", lambda path: {})
 
+    # The native source returns an extra ticker's rows, distinguishable from
+    # the legacy bundle's AAA-only rows, and its score row it must also declare
+    # so the bridge joins it.
+    native_score_row = _row(ticker="BBB")
+    native_display_row = _compact(native_score_row)
+
     calls = []
-    monkeypatch.setattr(
-        tool, "shadow_serving_row_source", _spy_row_source(calls))
+
+    def native_row_source(plan, score_doc, bundle_rows_by_ticker, pairs):
+        calls.append(plan)
+        score_doc["rows"] = [*score_doc["rows"], native_score_row]
+        score_doc["expected_population"] = sorted(
+            {*score_doc["expected_population"], "BBB|STR-THRU|2024-01-05"})
+        return {**bundle_rows_by_ticker, "BBB": [native_display_row]}
+
+    monkeypatch.setattr(tool, "shadow_serving_row_source", native_row_source)
 
     _, bundle_doc = run_projection(**_args(inputs, tmp_path / "serving_bundle"))
     assert calls == []
@@ -246,9 +286,12 @@ def test_run_projection_native_plan_records_native_shadow(tmp_path, monkeypatch)
     conn = projections.connect(str(tmp_path / "serving_native" / "serving.sqlite"))
     try:
         release = projections.get_release(conn, native_doc["release_id"])
+        page = projections.list_events(conn, native_doc["release_id"], limit=10)
     finally:
         conn.close()
-    assert release.row_sources == ("legacy_bundle", "native_shadow")
+    assert release.row_sources == ("native_shadow",)
+    listed = {item.event_ref.event_id for item in page.items}
+    assert listed == {"e1", "e2"}
 
 
 # 6. legacy plan -> only the legacy_bundle row source, shadow source unused

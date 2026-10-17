@@ -740,7 +740,7 @@ for a screenshot if a validated release exists.
    comparison receipts, then do one saved real-release disk round trip.
 4. Record the actual accepted Phase 2 interfaces and unresolved mapping gaps.
 
-Exit: `/usr/bin/python3 -m pytest -q tests/test_v2_serving_bridge.py`
+Exit: `/usr/bin/python3 -m pytest -q tests/v2/serving/test_v2_serving_bridge.py`
 
 ### P3-2 — Read API
 

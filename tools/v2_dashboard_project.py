@@ -208,7 +208,7 @@ def _row_sources_for_plan(plan: dict | None) -> tuple[str, ...]:
     if plan is None:
         return ("legacy_bundle",)
     if native_shadow_serving_mode(plan) == "native":
-        return ("legacy_bundle", "native_shadow")
+        return ("native_shadow",)
     return ("legacy_bundle",)
 
 

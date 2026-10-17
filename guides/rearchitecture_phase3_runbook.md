@@ -20,7 +20,7 @@ package remains the completion authority for this runbook.
 This draft does not claim the launch is complete. No assembled final acceptance
 has been run. The bare Phase 3 gate is expected to be red without evidence: see
 `checks/phase3_acceptance.json` for the L01-L14 matrix it checks and
-`tests/test_checks_phase3_gate.py::test_real_repo_bare_gate_is_red_with_missing_evidence`
+`tests/v2/serving/test_checks_phase3_gate.py::test_real_repo_bare_gate_is_red_with_missing_evidence`
 for the standing proof.
 
 ## Current P3A verification sequence (pending real rebuild)
