@@ -1,5 +1,7 @@
 """Exact-attempt collection, immutable native reconciliation and smoke isolation."""
 import csv
+import errno
+import inspect
 import json
 import sqlite3
 from dataclasses import asdict, replace
@@ -10,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from engine.v2.contracts import ArtifactRef
+from engine.v2.data.errors import fail as data_fail
 from engine.v2.foundation import (
     ArtifactError,
     SystemClock,
@@ -597,9 +600,9 @@ def test_terminal_artifact_read_keeps_registered_size_and_no_follow_guards(termi
         target = tmp_path / "untrusted-target"
         target.write_bytes(payload)
         path.symlink_to(target)
-    with pytest.raises(ArtifactError) as error:
+    with pytest.raises(OpsError) as error:
         collection._terminal(terminal.conn, terminal.store, terminal.job, terminal.registration)
-    assert error.value.code == ("INTEGRITY_FAILED" if damage == "oversized-backing-file" else "UNSAFE_PATH")
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 @pytest.mark.parametrize("encoding,wide_text", [("UTF-8", False), ("UTF-16le", False), ("UTF-16le", True)])
@@ -711,16 +714,27 @@ def test_collection_preserves_delegated_typed_submission_refusal(monkeypatch, co
     assert error.value is original and error.value.problem is original.problem
 
 
-@pytest.mark.parametrize("exception", [ValueError, TypeError, KeyError, RecursionError, sqlite3.IntegrityError])
-def test_collect_boundary_types_structural_verification_errors(monkeypatch, exception):
+@pytest.mark.parametrize("exception", [ValueError, TypeError, KeyError, RecursionError, SyntaxError, RuntimeError])
+def test_collect_preserves_unexpected_delegate_programming_errors(monkeypatch, exception):
+    original = exception("unexpected implementation defect")
     def damaged(*args, **kwargs):
-        raise exception("private malformed evidence detail")
+        raise original
+    monkeypatch.setattr(collection, "submit_sweep", damaged)
+    with pytest.raises(exception) as error:
+        collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
+                                 code_root=REPO, as_of_month=MONTH, no_ledger=True)
+    assert error.value is original
+
+
+def test_collect_types_raw_catalog_integrity_constraints(monkeypatch):
+    def damaged(*args, **kwargs):
+        raise sqlite3.IntegrityError("private catalog detail")
     monkeypatch.setattr(collection, "submit_sweep", damaged)
     with pytest.raises(OpsError) as error:
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=REPO, as_of_month=MONTH, no_ledger=True)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
-    assert "private malformed" not in canonical_json(to_document(error.value.problem))
+    assert "private" not in canonical_json(to_document(error.value.problem))
 
 
 @pytest.mark.parametrize("spelling", ["relative", "symlinked-parent"])
@@ -765,9 +779,9 @@ def test_bind_reservation_race_preserves_the_committed_winner(source, monkeypatc
     winning_ref = source.store.publish_bytes(canonical_json(other).encode(), schema_ref=other["schema_version"])
     verify = native_registration.verify_native_registration
     committed = None
-    def race_after_verification(conn, store, registration):
+    def race_after_verification(conn, store, registration, **kwargs):
         nonlocal committed
-        verify(conn, store, registration)
+        verify(conn, store, registration, **kwargs)
         committed = json.loads(conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?",
                                            (anchor.run_id,)).fetchone()[0])
         committed["concurrent_evidence"] = {"preserved": True}
@@ -903,8 +917,9 @@ def test_job_failure_is_bounded_before_decode_on_all_receipt_paths(tmp_path, mon
                 read()
             assert error.value.code == "INTEGRITY_FAILED" and error.value.problem.retryable is False
         elif case == "malformed":
-            with pytest.raises(json.JSONDecodeError):
+            with pytest.raises(OpsError) as error:
                 read()
+            assert error.value.code == "INTEGRITY_FAILED"
         else:
             if case == "utf16-valid":
                 sql_size = job.conn.execute("SELECT length(CAST(failure_json AS BLOB)) FROM jobs").fetchone()[0]
@@ -977,3 +992,175 @@ def test_cli_serializes_exact_raw_failure_code_without_private_details(tmp_path,
     output = capsys.readouterr()
     assert json.loads(output.out) == {"refused": code} and output.err == ""
     assert "private" not in output.out and not (tmp_path / "catalog.sqlite").exists()
+
+
+@pytest.mark.parametrize("payload", [b"{broken", b"[]", b"{}", b'{"schema_version":null}', b"[" * 2000 + b"]" * 2000])
+def test_terminal_decoding_translates_actual_malformed_evidence(terminal, payload):
+    set_terminal_result(terminal, payload=payload)
+    with pytest.raises(OpsError) as error:
+        collection._terminal(terminal.conn, terminal.store, terminal.job, terminal.registration)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("payload", ["{broken", "[]", "null", '{"nested":' + "[" * 2000 + "]" * 2000 + "}"])
+def test_malformed_native_evidence_refuses_before_collection_effects(source, tmp_path, payload):
+    call_sweep(source)
+    source.conn.execute("UPDATE experiment_runs SET evidence_json=?", (payload,))
+    before = scientific_rows(source)
+    ledger = tmp_path / "LEDGER.csv"
+    with pytest.raises(OpsError) as error:
+        _collect(source, ledger_path=ledger)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not ledger.exists()
+    assert scientific_rows(source) == before
+    assert source.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_submit_evidence_cap_is_opt_in_and_forwarded_before_staging(source, monkeypatch):
+    call_sweep(source)
+    anchor = _registrations(source)[0]
+    evidence = json.loads(source.conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?",
+                                            (anchor.run_id,)).fetchone()[0])
+    evidence["unrelated_padding"] = "漢" * 5000
+    payload = canonical_json(evidence)
+    source.conn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?", (payload, anchor.run_id))
+    # Existing callers do not acquire the collector's new size policy by default.
+    jobs = call_sweep(source, sweep.submit_sweep)
+    assert len(jobs) == 2
+    before = scientific_rows(source)
+    monkeypatch.setattr(source.store, "publish_bytes", forbid_effect)
+    with pytest.raises(OpsError) as error:
+        call_sweep(source, sweep.submit_sweep, max_evidence_bytes=len(payload.encode()) - 1)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert scientific_rows(source) == before
+
+
+@pytest.mark.parametrize("field,payload,code", [
+    ("failure_json", "{broken", "INTEGRITY_FAILED"),
+    ("failure_json", "[" * 2000 + "]" * 2000, "INTEGRITY_FAILED"),
+    ("queue_reason_json", "{broken", "EXPERIMENT_IDENTITY_CONFLICT"),
+])
+def test_observer_types_persisted_receipt_corruption_at_job_read(tmp_path, monkeypatch, field, payload, code):
+    job = submitted_job(tmp_path)
+    try:
+        job.conn.execute(f"UPDATE jobs SET {field}=?", (payload,))
+        pending = {"index": {"complete": False, "variants": [{"job_id": job.job_id}]}, "index_ref": None}
+        monkeypatch.setattr(cli, "collect_sweep", lambda *args, **kwargs: pending)
+        monkeypatch.setattr(cli, "sleep", forbid_effect)
+        with pytest.raises(OpsError) as error:
+            cli.run_sweep(job.conn, None, None, {}, code_root=REPO, no_ledger=True)
+        assert error.value.code == code and error.value.problem.retryable is False
+    finally:
+        job.conn.close()
+
+
+def _cli_args(tmp_path, *, action="collect", roster=None):
+    return [action, "--roster", str(roster or tmp_path / "roster.json"),
+            "--catalog", str(tmp_path / "catalog.sqlite"), "--store-root", str(tmp_path / "objects"),
+            "--code-root", str(REPO), "--as-of-month", MONTH, "--no-ledger"]
+
+
+@pytest.mark.parametrize("path_case", ["missing", "directory", "symlink"])
+def test_cli_invalid_roster_paths_refuse_before_catalog(tmp_path, monkeypatch, capsys, path_case):
+    path = tmp_path / "input"
+    if path_case == "directory":
+        path.mkdir()
+    elif path_case == "symlink":
+        target = tmp_path / "target.json"
+        target.write_text("{}")
+        path.symlink_to(target)
+    monkeypatch.setattr(cli, "connect", forbid_effect)
+    assert cli.main(_cli_args(tmp_path, roster=path)) == 2
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {"refused": "INVALID_EXPERIMENT_SPEC"} and output.err == ""
+
+
+@pytest.mark.parametrize("number,code", [(errno.EACCES, "INVALID_EXPERIMENT_SPEC"),
+    (errno.EPERM, "INVALID_EXPERIMENT_SPEC"), (errno.ENOTDIR, "INVALID_EXPERIMENT_SPEC"),
+    (errno.EIO, "RESOURCE_UNAVAILABLE"), (errno.EMFILE, "RESOURCE_UNAVAILABLE"),
+    (errno.ENOMEM, "RESOURCE_UNAVAILABLE")])
+def test_cli_roster_io_distinguishes_bad_paths_from_resource_failures(tmp_path, monkeypatch, capsys, number, code):
+    def read(path):
+        raise OSError(number, "private path detail")
+    monkeypatch.setattr(cli, "read_native_staged_input", read)
+    monkeypatch.setattr(cli, "connect", forbid_effect)
+    assert cli.main(_cli_args(tmp_path)) == 2
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {"refused": code} and output.err == ""
+
+
+def test_cli_recursive_roster_is_invalid_input_before_catalog(tmp_path, monkeypatch, capsys):
+    def recurse(payload):
+        raise RecursionError("private decoder detail")
+    monkeypatch.setattr(cli, "read_native_staged_input", lambda path: b"{}")
+    monkeypatch.setattr(cli, "json", SimpleNamespace(loads=recurse, dumps=json.dumps))
+    monkeypatch.setattr(cli, "connect", forbid_effect)
+    assert cli.main(_cli_args(tmp_path)) == 2
+    assert json.loads(capsys.readouterr().out) == {"refused": "INVALID_EXPERIMENT_SPEC"}
+
+
+@pytest.mark.parametrize("error", [ArtifactError("UNSAFE_PATH", "private artifact path"),
+                                    data_fail("INPUT_CHANGED", "private input detail")])
+def test_cli_preserves_exact_typed_artifact_and_data_codes(tmp_path, monkeypatch, capsys, error):
+    conn = SimpleNamespace(closed=False)
+    conn.close = lambda: setattr(conn, "closed", True)
+    monkeypatch.setattr(cli, "read_native_staged_input", lambda path: b"{}")
+    monkeypatch.setattr(cli, "connect", lambda *args, **kwargs: conn)
+    monkeypatch.setattr(cli, "Repository", lambda *args: object())
+    def refused(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(cli, "collect_sweep", refused)
+    assert cli.main(_cli_args(tmp_path)) == 2
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {"refused": error.code} and output.err == "" and conn.closed
+
+
+def test_cli_does_not_rebrand_an_unexpected_action_bug_as_bad_input(tmp_path, monkeypatch):
+    conn = SimpleNamespace(closed=False)
+    conn.close = lambda: setattr(conn, "closed", True)
+    monkeypatch.setattr(cli, "read_native_staged_input", lambda path: b"{}")
+    monkeypatch.setattr(cli, "connect", lambda *args, **kwargs: conn)
+    monkeypatch.setattr(cli, "Repository", lambda *args: object())
+    original = ValueError("implementation defect")
+    def broken(*args, **kwargs):
+        raise original
+    monkeypatch.setattr(cli, "collect_sweep", broken)
+    with pytest.raises(ValueError) as caught:
+        cli.main(_cli_args(tmp_path))
+    assert caught.value is original and conn.closed
+
+
+def test_library_and_cli_observer_defaults_are_one_hour(tmp_path, monkeypatch, capsys):
+    assert inspect.signature(cli.run_sweep).parameters["timeout_seconds"].default == 3600
+    conn = SimpleNamespace(close=lambda: None)
+    monkeypatch.setattr(cli, "read_native_staged_input", lambda path: b"{}")
+    monkeypatch.setattr(cli, "connect", lambda *args, **kwargs: conn)
+    monkeypatch.setattr(cli, "Repository", lambda *args: object())
+    def run(*args, **kwargs):
+        assert kwargs["timeout_seconds"] == 3600
+        return {"index": {"complete": False}, "index_ref": None}
+    monkeypatch.setattr(cli, "run_sweep", run)
+    assert cli.main(_cli_args(tmp_path, action="run")) == 2
+    assert json.loads(capsys.readouterr().out)["index"]["complete"] is False
+
+
+@pytest.mark.parametrize("payload", [b"[]", b"null", b"[" * 2000 + b"]" * 2000])
+def test_cli_nonobject_roster_is_invalid_before_catalog(tmp_path, monkeypatch, capsys, payload):
+    monkeypatch.setattr(cli, "read_native_staged_input", lambda path: payload)
+    monkeypatch.setattr(cli, "connect", forbid_effect)
+    assert cli.main(_cli_args(tmp_path)) == 2
+    assert json.loads(capsys.readouterr().out) == {"refused": "INVALID_EXPERIMENT_SPEC"}
+
+
+@pytest.mark.parametrize("reader", ["get-job", "submit-replay"])
+def test_job_failure_invalid_encoding_is_typed_before_receipt_decoding(tmp_path, reader):
+    job = submitted_job(tmp_path)
+    try:
+        job.conn.execute("UPDATE jobs SET failure_json=CAST(x'ff' AS TEXT)")
+        with pytest.raises(OpsError) as error:
+            if reader == "get-job":
+                submission.get_job(job.conn, job.job_id)
+            else:
+                submission.submit_graph(job.conn, REGISTRY, POLICY, [job.request], clock=job.clock)
+        assert error.value.code == "INTEGRITY_FAILED" and error.value.problem.retryable is False
+    finally:
+        job.conn.close()

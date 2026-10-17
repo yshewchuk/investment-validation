@@ -11,6 +11,7 @@ from engine.v2 import foundation
 from engine.v2.contracts import ArtifactRef
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.native_registration import native_evidence_json, read_native_evidence
 from experiments.lib import LedgerError, ledger_append
 from experiments.native_registration import verify_native_registration
 
@@ -21,8 +22,10 @@ STAGES = {"FEATURE_LOOKAHEAD": "refused", "HOLDOUT_ACCESS_DENIED": "refused",
           "EXPERIMENT_VARIANT_FAILED": "failed"}
 
 
-def _publish(store, document, schema=SCHEMA):
-    return store.publish_bytes(foundation.canonical_json(document).encode(), schema_ref=schema)
+def _publish(store, document, schema=SCHEMA, *, max_evidence_bytes=None):
+    payload = (foundation.canonical_json(document) if max_evidence_bytes is None else
+               native_evidence_json(document, max_bytes=max_evidence_bytes))
+    return store.publish_bytes(payload.encode(), schema_ref=schema)
 
 
 def publish_native_refusal(store, *, problem, request, registration=None):
@@ -60,10 +63,16 @@ def _slot(no_ledger, ledger_path):
     return "native_outcome", foundation.content_hash(str(path)), path
 
 
-def _evidence(conn, registration):
-    row = conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?",
-                       (registration.run_id,)).fetchone()
-    evidence = json.loads(row[0])
+def _evidence(conn, registration, max_evidence_bytes=None):
+    if max_evidence_bytes is None:
+        row = conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?",
+                           (registration.run_id,)).fetchone()
+        evidence = json.loads(row[0])
+    else:
+        saved = read_native_evidence(conn, registration.run_id, max_bytes=max_evidence_bytes)
+        if saved is None:
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration evidence is missing")
+        evidence = saved[1]
     if any(key + "_receipt" in evidence and key not in evidence for key in ("native_smoke", "native_outcome")):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion is missing its outcome intent")
     return evidence
@@ -82,24 +91,25 @@ def _report_path(store, registration, key, report=None, report_ref=None):
     return path
 
 
-def _reserve(conn, registration, key, ref, expected=None):
+def _reserve(conn, registration, key, ref, expected=None, *, max_evidence_bytes=None):
     """Only catalog reads/writes inside this transaction; preserve other evidence."""
     with transaction(conn):
-        evidence = _evidence(conn, registration)
+        evidence = _evidence(conn, registration, max_evidence_bytes)
         if (evidence.get("variant_id") != registration.variant_id
                 or (expected is not None and evidence.get(expected[0]) != expected[1])):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration changed during publication")
         if key not in evidence:
             evidence[key] = foundation.to_document(ref)
             conn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",
-                         (foundation.canonical_json(evidence), registration.run_id))
+                         ((foundation.canonical_json(evidence) if max_evidence_bytes is None else
+                           native_evidence_json(evidence, max_bytes=max_evidence_bytes)), registration.run_id))
         return evidence[key]
 
 
-def _verified(store, document, schema):
+def _verified(store, document, schema, *, max_evidence_bytes=None):
     """Verify bytes and their exact native publication reference without writing."""
     ref = foundation.from_document(ArtifactRef, document)
-    if ref.schema_ref != schema:
+    if ref.schema_ref != schema or (max_evidence_bytes is not None and ref.byte_size > max_evidence_bytes):
         raise ValueError("unexpected native artifact schema")
     payload = store.read_verified(ref)
     expected = foundation.to_document(foundation.artifact_reference(payload, schema))
@@ -108,16 +118,22 @@ def _verified(store, document, schema):
     return ref, payload
 
 
-def _read(store, document, schema=SCHEMA):
-    ref, payload = _verified(store, document, schema)
-    value = json.loads(payload)
-    if foundation.canonical_json(value).encode() != payload:
-        raise ValueError("native evidence is not canonical JSON")
+def _read(store, document, schema=SCHEMA, *, max_evidence_bytes=None):
+    ref, payload = _verified(store, document, schema, max_evidence_bytes=max_evidence_bytes)
+    try:
+        value = json.loads(payload)
+        if foundation.canonical_json(value).encode() != payload:
+            raise ValueError("native evidence is not canonical JSON")
+    except RecursionError:
+        if max_evidence_bytes is None:
+            raise
+        raise ValueError("native evidence nesting exceeds decoder capacity") from None
     return ref, value
 
 
-def _reconcile(conn, store, registration, key, destination, ledger_path, ref_document, export_path=None):
-    ref, outcome = _read(store, ref_document)
+def _reconcile(conn, store, registration, key, destination, ledger_path, ref_document, export_path=None,
+               *, max_evidence_bytes=None):
+    ref, outcome = _read(store, ref_document, max_evidence_bytes=max_evidence_bytes)
     if (not isinstance(outcome, dict) or set(outcome) != OUTCOME_FIELDS
             or outcome["schema_version"] != SCHEMA or outcome["variant_id"] != registration.variant_id
             or outcome["run_id"] != registration.run_id or outcome["ledger_destination"] != destination
@@ -143,9 +159,10 @@ def _reconcile(conn, store, registration, key, destination, ledger_path, ref_doc
                "recording_mode": "smoke" if key == "native_smoke" else "recorded",
                "report_ref": report_ref, "ledger_destination": destination,
                "ledger_row_hash": None if key == "native_smoke" else foundation.content_hash(row)}
-    evidence = _evidence(conn, registration)
+    evidence = _evidence(conn, registration, max_evidence_bytes)
     if key + "_receipt" in evidence:
-        _, saved_receipt = _read(store, evidence[key + "_receipt"], receipt["schema_version"])
+        _, saved_receipt = _read(store, evidence[key + "_receipt"], receipt["schema_version"],
+                                 max_evidence_bytes=max_evidence_bytes)
         if foundation.canonical_json(saved_receipt) != foundation.canonical_json(receipt):
             raise _conflict(store, registration)
     if export_path is not None and report_ref is None:
@@ -154,8 +171,9 @@ def _reconcile(conn, store, registration, key, destination, ledger_path, ref_doc
         _report_path(store, registration, key, report, report_ref)
     if key != "native_smoke":
         ledger_append([row], path=ledger_path, unique_by=("id", "spec_hash"))
-    completion = _publish(store, receipt, receipt["schema_version"])
-    existing = _reserve(conn, registration, key + "_receipt", completion, (key, foundation.to_document(ref)))
+    completion = _publish(store, receipt, receipt["schema_version"], max_evidence_bytes=max_evidence_bytes)
+    existing = _reserve(conn, registration, key + "_receipt", completion, (key, foundation.to_document(ref)),
+                        max_evidence_bytes=max_evidence_bytes)
     if existing != foundation.to_document(completion):
         raise _conflict(store, registration)
     store.read_verified(completion)
@@ -181,9 +199,9 @@ def _typed(operation):
     return call
 
 
-def _verify_outcome_registration(conn, store, registration):
+def _verify_outcome_registration(conn, store, registration, max_evidence_bytes=None):
     """Only executable schemas, including the sealed fixed magnitude policy, may publish."""
-    verify_native_registration(conn, store, registration)
+    verify_native_registration(conn, store, registration, max_evidence_bytes=max_evidence_bytes)
     if registration.document["schema_version"] not in (
             "native_experiment_registration.v1.0", "native_experiment_registration.v1.1",
             "native_experiment_registration.v1.3", "native_experiment_registration.v1.4",
@@ -192,24 +210,24 @@ def _verify_outcome_registration(conn, store, registration):
 
 
 @_typed
-def replay_native_outcome(conn, store, registration, *, no_ledger=False, ledger_path=None):
+def replay_native_outcome(conn, store, registration, *, no_ledger=False, ledger_path=None, max_evidence_bytes=None):
     """Verify and finish a saved intent, or return None without evaluating."""
     key, destination, ledger_path = _slot(no_ledger, ledger_path)
-    _verify_outcome_registration(conn, store, registration)
-    evidence = _evidence(conn, registration)
+    _verify_outcome_registration(conn, store, registration, max_evidence_bytes)
+    evidence = _evidence(conn, registration, max_evidence_bytes)
     return None if key not in evidence else _reconcile(
-        conn, store, registration, key, destination, ledger_path, evidence[key])
+        conn, store, registration, key, destination, ledger_path, evidence[key], max_evidence_bytes=max_evidence_bytes)
 
 
 @_typed
 def publish_native_outcome(conn, store, registration, *, report=None, problem=None,
-                           attempted=False, no_ledger=False, ledger_path=None):
+                           attempted=False, no_ledger=False, ledger_path=None, max_evidence_bytes=None):
     """Globally bind one scientific result before replay-keyed recording."""
     key, destination, ledger_path = _slot(no_ledger, ledger_path)
     if (type(attempted) is not bool or (problem is None and (not attempted or not isinstance(report, str)
             or not report.strip())) or (problem is not None and (report is not None or problem.code not in STAGES))):
         raise fail("INVALID_EXPERIMENT_SPEC", "native outcome requires one success or supported typed refusal")
-    _verify_outcome_registration(conn, store, registration)
+    _verify_outcome_registration(conn, store, registration, max_evidence_bytes)
     stage = "ran" if problem is None else STAGES[problem.code]
     row = {"id": registration.document["execution_plan"]["experiment_id"],
            "spec_hash": registration.variant_id, "date": datetime.now(timezone.utc).date().isoformat(),
@@ -221,31 +239,34 @@ def publish_native_outcome(conn, store, registration, *, report=None, problem=No
                 "failure_details": dict(problem.details) if problem else {},
                 "report_ref": foundation.to_document(report_ref) if report_ref else None,
                 "ledger_row": row, "ledger_destination": destination}
-    evidence = _evidence(conn, registration)
+    evidence = _evidence(conn, registration, max_evidence_bytes)
     if key in evidence:
         existing = evidence[key]
     else:
         if report:
             _report_path(store, registration, key, report.encode(), document["report_ref"])
             store.publish_bytes(report.encode(), schema_ref=report_ref.schema_ref)
-        existing = _reserve(conn, registration, key, _publish(store, document))
-    _, saved = _read(store, existing)
+        existing = _reserve(conn, registration, key, _publish(store, document, max_evidence_bytes=max_evidence_bytes),
+                            max_evidence_bytes=max_evidence_bytes)
+    _, saved = _read(store, existing, max_evidence_bytes=max_evidence_bytes)
     saved["ledger_row"]["date"] = row["date"]  # Compare result identity; reconciliation retains the first date.
     if foundation.canonical_json(saved) != foundation.canonical_json(document):
         raise _conflict(store, registration)
-    return _reconcile(conn, store, registration, key, destination, ledger_path, existing)
+    return _reconcile(conn, store, registration, key, destination, ledger_path, existing,
+                      max_evidence_bytes=max_evidence_bytes)
 
 
 @_typed
-def export_native_report(conn, store, registration, *, no_ledger=False, ledger_path=None):
+def export_native_report(conn, store, registration, *, no_ledger=False, ledger_path=None, max_evidence_bytes=None):
     """Materialize a verified completed report at its fixed store-local address."""
     key, destination, ledger_path = _slot(no_ledger, ledger_path)
-    _verify_outcome_registration(conn, store, registration)
-    evidence = _evidence(conn, registration)
+    _verify_outcome_registration(conn, store, registration, max_evidence_bytes)
+    evidence = _evidence(conn, registration, max_evidence_bytes)
     if key not in evidence:
         raise fail("INVALID_EXPERIMENT_SPEC", "native outcome has no completed report")
     path = _report_path(store, registration, key)
-    result = _reconcile(conn, store, registration, key, destination, ledger_path, evidence[key], export_path=path)
+    result = _reconcile(conn, store, registration, key, destination, ledger_path, evidence[key], export_path=path,
+                        max_evidence_bytes=max_evidence_bytes)
     ref = foundation.from_document(ArtifactRef, result["receipt"]["report_ref"])
     foundation.ensure_directory(path.parent)
     data = store.read_verified(ref)

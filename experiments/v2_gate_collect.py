@@ -1,5 +1,6 @@
 """Collect a sealed native gate sweep, optionally waiting for its supervisor."""
 import argparse
+import errno
 import json
 import math
 import sqlite3
@@ -27,7 +28,7 @@ def run_sweep(conn, store, repository, document, *, code_root, timeout_seconds=3
     job_ids = [arm["job_id"] for arm in result["index"]["variants"]]
     deadline = monotonic() + timeout_seconds
     try:
-        while not all(get_job(conn, job_id).state in TERMINAL for job_id in job_ids):
+        while not all(_job(conn, job_id).state in TERMINAL for job_id in job_ids):
             remaining = deadline - monotonic()
             if remaining <= 0:
                 break
@@ -37,6 +38,28 @@ def run_sweep(conn, store, repository, document, *, code_root, timeout_seconds=3
     except (OSError, sqlite3.Error):
         raise fail("RESOURCE_UNAVAILABLE", "sweep observation was interrupted") from None
     return collect_sweep(conn, store, repository, document, code_root=code_root, **kwargs)
+
+
+def _job(conn, job_id):
+    try:
+        return get_job(conn, job_id)
+    except (ArtifactError, ValueError, TypeError, KeyError, RecursionError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored sweep job receipt cannot be decoded") from None
+
+
+def _roster(path):
+    try:
+        document = json.loads(read_native_staged_input(Path(path)))
+        if not isinstance(document, dict):
+            raise ValueError
+        return document
+    except OSError as error:
+        if error.errno not in {errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.EPERM,
+                               errno.ELOOP, errno.EINVAL, errno.ENAMETOOLONG}:
+            raise
+        raise fail("INVALID_EXPERIMENT_SPEC", "sweep roster requires a readable regular path") from None
+    except (ValueError, TypeError, RecursionError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "sweep roster requires bounded JSON") from None
 
 
 def main(argv=None):
@@ -56,7 +79,7 @@ def main(argv=None):
             raise fail("HOLDOUT_ACCESS_DENIED", "gate sweep collection has no final-read authority")
         if args.no_ledger == (args.ledger is not None):
             raise fail("INVALID_EXPERIMENT_SPEC", "choose --no-ledger or --ledger")
-        document = json.loads(read_native_staged_input(Path(args.roster)))
+        document = _roster(args.roster)
         conn = connect(args.catalog, must_exist=True)
         store = ArtifactStore(args.store_root)
         action = run_sweep if args.action == "run" else collect_sweep
@@ -66,10 +89,9 @@ def main(argv=None):
             **({"timeout_seconds": args.timeout_seconds} if args.action == "run" else {}))
         print(json.dumps(result, sort_keys=True))
         return 0 if result["index"]["complete"] else 2
-    except (OpsError, DataError, ArtifactError, ValueError, TypeError, KeyError, RecursionError,
-            OSError, sqlite3.Error) as error:
+    except (OpsError, DataError, ArtifactError, OSError, sqlite3.Error) as error:
         print(json.dumps({"refused": error.code if isinstance(error, (OpsError, DataError, ArtifactError)) else
-                          "RESOURCE_UNAVAILABLE" if isinstance(error, (OSError, sqlite3.Error)) else "INVALID_EXPERIMENT_SPEC"}))
+                          "RESOURCE_UNAVAILABLE"}))
         return 2
     finally:
         if conn is not None:

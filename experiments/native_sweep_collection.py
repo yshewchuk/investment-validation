@@ -19,6 +19,11 @@ from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from engine.v2.ops.fingerprints import source_closure
+from engine.v2.ops.native_registration import (
+    MAX_NATIVE_EVIDENCE_BYTES,
+    native_evidence_json,
+    read_native_evidence,
+)
 from engine.v2.ops.submission import MAX_JOB_FAILURE_BYTES, get_job
 from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
@@ -55,13 +60,28 @@ def _typed(action):
     def call(*args, **kwargs):
         try:
             return action(*args, **kwargs)
-        except (ArtifactError, ValueError, TypeError, KeyError, RecursionError, SyntaxError):
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep collection evidence cannot be verified") from None
         except sqlite3.IntegrityError:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep collection catalog constraint failed") from None
         except (OSError, sqlite3.Error):
             raise fail("RESOURCE_UNAVAILABLE", "sweep collection publication was interrupted") from None
     return call
+
+
+def _evidence_boundary(action):
+    @wraps(action)
+    def call(*args, **kwargs):
+        try:
+            return action(*args, **kwargs)
+        except (ArtifactError, ValueError, TypeError, KeyError, RecursionError):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep stored evidence cannot be verified") from None
+    return call
+
+
+def _stored_evidence(conn, run_id):
+    saved = read_native_evidence(conn, run_id)
+    if saved is None:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep registration evidence is missing")
+    return saved[1]
 
 
 def _mode(no_ledger, ledger_path):
@@ -82,35 +102,35 @@ def _mode(no_ledger, ledger_path):
 
 
 def _publish(store, document):
-    return store.publish_bytes(canonical_json(document).encode(), schema_ref=document["schema_version"])
+    return store.publish_bytes(native_evidence_json(document).encode(), schema_ref=document["schema_version"])
 
 
+@_evidence_boundary
 def _bind(conn, store, anchor, key, document):
     """Compare immutable intent/index bytes; preserve all other arm evidence."""
-    payload = canonical_json(document).encode()
+    payload = native_evidence_json(document).encode()
     expected = artifact_reference(payload, document["schema_version"])
     with transaction(conn):
-        row = conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?", (anchor.run_id,)).fetchone()
-        evidence = json.loads(row[0])
+        evidence = _stored_evidence(conn, anchor.run_id)
         existing = evidence.get(key)
     if existing is not None:
         ref = from_document(ArtifactRef, existing)
         if ref != expected or store.read_verified(ref) != payload:
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep collection identity already has different evidence")
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep collection roster/source/mode/ledger intent or terminal index differs; restore original context or seal a new experiment")
         return to_document(ref)
     ref = _publish(store, document)
-    native.verify_native_registration(conn, store, anchor)
+    native.verify_native_registration(conn, store, anchor, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
     with transaction(conn):
-        row = conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?", (anchor.run_id,)).fetchone()
-        evidence = json.loads(row[0])
+        evidence = _stored_evidence(conn, anchor.run_id)
         if evidence.get("variant_id") != anchor.variant_id or (key in evidence and evidence[key] != to_document(ref)):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep collection identity changed during publication")
         evidence[key] = to_document(ref)
         conn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",
-                     (canonical_json(evidence), anchor.run_id))
+                     (native_evidence_json(evidence), anchor.run_id))
     return to_document(ref)
 
 
+@_evidence_boundary
 def _terminal(conn, store, job, registration):
     """Never use JobReceipt.output_refs: it unions outputs from old attempts."""
     encoding = conn.execute("PRAGMA encoding").fetchone()[0]
@@ -138,7 +158,7 @@ def _terminal(conn, store, job, registration):
     if job.state == "succeeded" and outputs:
         if len(outputs) != 1 or outputs[0]["name"] != "native_gate_result":
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep terminal attempt has unexpected outputs")
-        ref = registered_artifact(conn, outputs[0]["artifact_id"])
+        ref = registered_artifact(conn, outputs[0]["artifact_id"], max_metadata_bytes=MAX_NATIVE_EVIDENCE_BYTES)
         if ref.byte_size > MAX_GATE_RESULT_BYTES:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep result exceeds its byte bound")
         payload = store.read_verified(ref)
@@ -176,7 +196,7 @@ def collect_sweep(conn, store, repository, document, *, code_root, as_of_month,
         raise fail("INVALID_EXPERIMENT_SPEC", "sweep collection requires an idle catalog connection")
     implementation = _implementation(code_root)
     jobs = submit_sweep(conn, store, repository, document, code_root=code_root,
-                       as_of_month=as_of_month, scope=scope, event_ids=event_ids)
+                       as_of_month=as_of_month, scope=scope, event_ids=event_ids, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
     sealed = native.decode_native_gate_sweep(native.read_native_gate_sweep(
         conn, document["variants"][0]["experiment_id"]))
     registrations = [native.NativeRegistration(item["run_id"], canonical_json(item["binding"]).encode())
@@ -188,7 +208,10 @@ def collect_sweep(conn, store, repository, document, *, code_root, as_of_month,
     _bind(conn, store, registrations[0], key + "_intent", intent)
     arms, all_terminal = [], True
     for job, registration, spec_document in zip(jobs, registrations, sealed["request"]["variants"], strict=True):
-        job = get_job(conn, job.job_id)
+        try:
+            job = get_job(conn, job.job_id)
+        except (ArtifactError, ValueError, TypeError, KeyError, RecursionError):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored sweep job receipt cannot be decoded") from None
         arm = {"variant_id": registration.variant_id, "arm_id": spec_document["primary_arm_id"],
                "job_id": job.job_id, "attempted_variants": int(job.attempt_count > 0),
                "state": job.state, "attempt_id": None, "problem": None, "worker_problem": None, "report_ref": None,
@@ -211,12 +234,13 @@ def collect_sweep(conn, store, repository, document, *, code_root, as_of_month,
                     report.encode(), schema_ref="native_experiment_report.v1.0"))
         elif result is not None or problem.code in outcomes.STAGES:
             saved = outcomes.publish_native_outcome(conn, store, registration, report=report, problem=problem,
-                attempted=bool(arm["attempted_variants"]), ledger_path=ledger_path)
+                attempted=bool(arm["attempted_variants"]), ledger_path=ledger_path, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
             arm["report_ref"] = saved["outcome"]["report_ref"]
             arm["outcome_ref"] = saved["receipt"]["outcome_ref"]
             arm["completion_ref"] = saved["receipt_ref"]
             if report is not None:
-                outcomes.export_native_report(conn, store, registration, ledger_path=ledger_path)
+                outcomes.export_native_report(conn, store, registration, ledger_path=ledger_path,
+                                              max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
         arms.append(arm)
     index = {"schema_version": "native_gate_sweep_index.v1.0", "run_id": content_hash(intent),
              "roster_id": intent["roster_id"], "recording_mode": mode,

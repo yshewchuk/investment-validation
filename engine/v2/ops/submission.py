@@ -364,12 +364,16 @@ def get_job(conn: sqlite3.Connection, job_id: str) -> JobReceipt:
     if row is None:
         raise fail("INVALID_REQUEST", "unknown job", details={"reason": "not_found"})
     failure = None
-    if row["has_failure"]:
-        if row["failure_json"] is None:
-            raise fail("INTEGRITY_FAILED", "stored job failure requires bounded text")
-        failure = row["failure_json"].decode(encoding)
-        if len(failure.encode("utf-8")) > MAX_JOB_FAILURE_BYTES:
-            raise fail("INTEGRITY_FAILED", "stored job failure exceeds its UTF-8 byte bound")
+    try:
+        if row["has_failure"]:
+            if row["failure_json"] is None:
+                raise fail("INTEGRITY_FAILED", "stored job failure requires bounded text")
+            failure = row["failure_json"].decode(encoding)
+            if len(failure.encode("utf-8")) > MAX_JOB_FAILURE_BYTES:
+                raise fail("INTEGRITY_FAILED", "stored job failure exceeds its UTF-8 byte bound")
+        failure = load_json(Problem, failure)
+    except (ValueError, TypeError, KeyError, RecursionError):
+        raise fail("INTEGRITY_FAILED", "stored job failure cannot be decoded") from None
     resources = None
     if row["active_attempt_id"] is not None:
         attempt = conn.execute("SELECT resources_json FROM attempts WHERE attempt_id = ?",
@@ -399,5 +403,5 @@ def get_job(conn: sqlite3.Connection, job_id: str) -> JobReceipt:
         output_refs=tuple(row[0] for row in output_rows),
         latest_progress=None if progress is None else load_json(ProgressEvent,
                                                                 progress["body_json"]),
-        failure=load_json(Problem, failure),
+        failure=failure,
     )
