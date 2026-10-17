@@ -150,12 +150,16 @@ def _read_input(path: Path, *, score: bool = False) -> bytes:
     :class:`LegacyBundleError`, and ``read_score_bytes`` additionally refuses
     a missing file or a symlink (the score is read through it); the tool
     reports every such refusal as a typed ``INVALID_REQUEST`` so a bad
-    delivered input stays one failure kind.
+    delivered input stays one failure kind. Open/read failures — a missing
+    file, a permission denial, a directory in place of a file — are likewise
+    refused as ``INVALID_REQUEST``.
     """
     try:
         return read_score_bytes(path) if score else read_capped_bytes(path)
     except LegacyBundleError as exc:
         raise fail("INVALID_REQUEST", f"{path.name} is unreadable ({exc.code})") from None
+    except OSError:
+        raise fail("INVALID_REQUEST", f"{path.name} is unreadable") from None
 
 
 def _load_flat_bundle(bundle_dir: Path) -> dict[str, list[dict]]:

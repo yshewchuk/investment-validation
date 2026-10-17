@@ -298,6 +298,20 @@ def test_read_capped_refuses_over_cap_and_returns_at_cap(tmp_path):
     _assert_no_release_row(serving_root)
 
 
+# 11a. a missing preview input -> INVALID_REQUEST ("<name> is unreadable"),
+#      no release row
+def test_run_projection_refuses_missing_preview_input(tmp_path):
+    inputs = _flat_inputs(tmp_path / "inputs")
+    missing = tmp_path / "missing_preview_input.json"
+    serving_root = tmp_path / "serving_missing_preview"
+
+    with pytest.raises(OpsError) as error:
+        run_projection(**_args(inputs, serving_root, preview_input=missing))
+    assert error.value.code == "INVALID_REQUEST"
+    assert error.value.problem.message == f"{missing.name} is unreadable"
+    _assert_no_release_row(serving_root)
+
+
 # 11b. read_capped_bytes refuses a negative cap before opening the file
 def test_read_capped_refuses_negative_cap(tmp_path):
     path = tmp_path / "any.bin"
