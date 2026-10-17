@@ -1,4 +1,5 @@
 """Coordinator-only collection of sealed gate jobs and immutable run indexes."""
+import errno
 import json
 import os
 import sqlite3
@@ -53,13 +54,20 @@ def _implementation(code_root):
     if not stat.S_ISDIR(metadata.st_mode):
         raise fail("INVALID_EXPERIMENT_SPEC", "sweep code root must name an existing directory")
     try:
+        if _COLLECTOR_SOURCE_ERROR is not None:
+            raise ValueError
         current = source_closure(_COLLECTOR_ROOT, _COLLECTOR_ENTRIES)
+        if current != _COLLECTOR_SOURCES:
+            raise ValueError
         caller = source_closure(root, _COLLECTOR_ENTRIES)
-        if (_COLLECTOR_SOURCE_ERROR is not None or current != _COLLECTOR_SOURCES
-                or any(caller.get(entry) != current[entry] for entry in _COLLECTOR_ENTRIES)):
+        if any(caller.get(entry) != current[entry] for entry in _COLLECTOR_ENTRIES):
             raise ValueError
         return current
-    except (OpsError, ArtifactError, OSError, SyntaxError, ValueError, TypeError, RecursionError):
+    except OSError as error:
+        if error.errno in {errno.EIO, errno.EMFILE, errno.ENFILE}:
+            raise fail("RESOURCE_UNAVAILABLE", "collector source verification was interrupted") from None
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "installed collector source cannot be verified") from None
+    except (OpsError, ArtifactError, SyntaxError, ValueError, TypeError, RecursionError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "installed collector source cannot be verified") from None
 
 

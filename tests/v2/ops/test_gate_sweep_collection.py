@@ -18,6 +18,7 @@ from engine.v2.data.errors import fail as data_fail
 from engine.v2.foundation import (
     ArtifactError,
     SystemClock,
+    artifact_reference,
     canonical_json,
     content_hash,
     from_document,
@@ -664,6 +665,17 @@ def test_recovered_failure_exactly_at_byte_cap_retains_its_problem(terminal, mon
     assert result is None and collected == worker_problem == problem
 
 
+def test_recovered_failure_requires_text_storage_even_for_valid_problem_json(terminal):
+    payload = canonical_json(to_document(fail("CANCELLED", "synthetic cancellation").problem))
+    terminal.job.state, terminal.job.fence = "cancelled", 3
+    terminal.conn.execute("UPDATE attempts SET state='cancelled', failure_json=CAST(? AS BLOB)", (payload,))
+    terminal.conn.execute("DELETE FROM attempt_outputs")
+    assert terminal.conn.execute("SELECT typeof(failure_json) FROM attempts").fetchone()[0] == "blob"
+    with pytest.raises(OpsError) as error:
+        collection._terminal(terminal.conn, terminal.store, terminal.job, terminal.registration)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+
+
 @pytest.mark.parametrize("characters,accepted", [(600 * 1024, True), (1024 * 1024 + 1, False)])
 def test_utf16_failure_uses_encoded_sql_allowance_and_utf8_contract(tmp_path, monkeypatch, characters, accepted):
     case = terminal_case(tmp_path, encoding="UTF-16le")
@@ -708,6 +720,16 @@ def test_invalid_collection_mode_or_destination_refuses_before_submission(tmp_pa
         collection.collect_sweep(None, None, None, {}, code_root=REPO, as_of_month=MONTH, **arguments)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC" and error.value.problem.retryable is False
     assert not target.exists()
+
+
+def test_empty_ledger_path_refuses_as_invalid_text_before_filesystem_inspection(monkeypatch):
+    with monkeypatch.context() as guard:
+        for method in ("is_symlink", "is_dir", "resolve", "stat", "lstat"):
+            guard.setattr(Path, method, forbid_effect)
+        guard.setattr(collection, "submit_sweep", forbid_effect)
+        with pytest.raises(OpsError, match="sweep ledger destination must be a valid path") as error:
+            collection.collect_sweep(None, None, None, {}, code_root=REPO, as_of_month=MONTH, ledger_path="")
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC" and error.value.problem.retryable is False
 
 
 def test_active_transaction_refuses_before_submission_without_ending_caller_transaction(monkeypatch):
@@ -833,6 +855,42 @@ def test_bind_types_only_malformed_stored_reference(terminal, monkeypatch, refer
                          {"schema_version": "native_gate_collection.v1.0"})
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
     assert not terminal.conn.in_transaction
+
+
+@pytest.mark.parametrize("kind", ["intent", "index"])
+def test_bind_rejects_oversized_reference_before_any_object_read(terminal, monkeypatch, kind):
+    schema = "native_gate_collection.v1.0" if kind == "intent" else "native_gate_sweep_index.v1.0"
+    document = {"schema_version": schema}
+    expected = artifact_reference(canonical_json(document).encode(), schema)
+    saved = to_document(replace(expected, byte_size=10 ** 12))
+    monkeypatch.setattr(collection, "_stored_evidence", lambda *_: {kind: saved})
+    monkeypatch.setattr(terminal.store, "read_verified", forbid_effect)
+    monkeypatch.setattr(terminal.store, "publish_bytes", forbid_effect)
+    with pytest.raises(OpsError) as error:
+        collection._bind(terminal.conn, terminal.store, terminal.registration, kind, document)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert not terminal.conn.in_transaction
+
+
+@pytest.mark.parametrize("schema", ["native_gate_collection.v1.0", "native_experiment_report.v1.0",
+                                    "native_gate_sweep_index.v1.0"])
+@pytest.mark.parametrize("code", ["INTEGRITY_FAILED", "UNSAFE_PATH"])
+def test_collect_preserves_delegated_artifact_publication_error_identity(source, monkeypatch, schema, code):
+    call_sweep(source)
+    _complete(source, call_sweep(source, sweep.submit_sweep))
+    original = ArtifactError(code, "private artifact publication detail")
+    publish, calls = source.store.publish_bytes, []
+    def refused(data, *, schema_ref):
+        if schema_ref == schema:
+            calls.append(schema_ref)
+            raise original
+        return publish(data, schema_ref=schema_ref)
+    monkeypatch.setattr(source.store, "publish_bytes", refused)
+    with pytest.raises(ArtifactError) as error:
+        _collect(source, no_ledger=True)
+    assert error.value is original and error.value.code == code
+    assert calls == [schema]
+    assert not any("native_sweep_smoke_index" in evidence for evidence in _evidence(source))
 
 
 def test_collect_types_raw_catalog_integrity_constraints(monkeypatch):
@@ -1083,11 +1141,100 @@ def test_other_code_root_coordinator_bytes_cannot_describe_installed_collector(t
 
 def test_unavailable_import_time_collector_snapshot_refuses_before_submission(monkeypatch):
     monkeypatch.setattr(collection, "_COLLECTOR_SOURCE_ERROR", "synthetic snapshot capture failure")
+    monkeypatch.setattr(collection, "source_closure", forbid_effect)
     monkeypatch.setattr(collection, "submit_sweep", forbid_effect)
     with pytest.raises(OpsError) as error:
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=REPO, as_of_month=MONTH, no_ledger=True)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("mode", ["rb", "r"])
+@pytest.mark.parametrize("number,retryable", [
+    (errno.EIO, True), (errno.EMFILE, True), (errno.ENFILE, True),
+    (errno.EACCES, False), (errno.EPERM, False), (errno.ENOENT, False),
+    (errno.ENOTDIR, False), (errno.EISDIR, False), (errno.EINVAL, False), (None, False),
+])
+def test_collector_source_reads_distinguish_resources_from_unverifiable_code(monkeypatch, mode, number, retryable):
+    original, reads = Path.open, []
+    target = collection._COLLECTOR_ROOT / "experiments/v2_gate_collect.py"
+    def interrupted(path, *args, **kwargs):
+        opened_mode = args[0] if args else kwargs.get("mode", "r")
+        if path == target and opened_mode == mode:
+            reads.append((path, opened_mode))
+            raise OSError(number, "private source read detail")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", interrupted)
+    monkeypatch.setattr(collection, "submit_sweep", forbid_effect)
+    with pytest.raises(OpsError) as error:
+        collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
+                                 code_root=REPO, as_of_month=MONTH, no_ledger=True)
+    assert reads == [(target, mode)]
+    assert error.value.code == ("RESOURCE_UNAVAILABLE" if retryable else "EXPERIMENT_IDENTITY_CONFLICT")
+    assert error.value.problem.retryable is retryable
+    assert "private" not in canonical_json(to_document(error.value.problem))
+
+
+def test_source_read_interruption_can_retry_without_replacing_import_snapshot(monkeypatch):
+    original, snapshot = Path.open, collection._COLLECTOR_SOURCES
+    interruptions = []
+    def interrupted(path, *args, **kwargs):
+        if path == collection._COLLECTOR_ROOT / "experiments/v2_gate_collect.py" and not interruptions:
+            interruptions.append(path)
+            raise OSError(errno.EIO, "private temporary source read detail")
+        return original(path, *args, **kwargs)
+    admitted = RuntimeError("verified sources reached submission")
+    def submitted(*args, **kwargs):
+        raise admitted
+    monkeypatch.setattr(Path, "open", interrupted)
+    monkeypatch.setattr(collection, "submit_sweep", submitted)
+    with pytest.raises(OpsError) as error:
+        collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
+                                 code_root=REPO, as_of_month=MONTH, no_ledger=True)
+    assert error.value.code == "RESOURCE_UNAVAILABLE" and error.value.problem.retryable is True
+    with pytest.raises(RuntimeError) as retried:
+        collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
+                                 code_root=REPO, as_of_month=MONTH, no_ledger=True)
+    assert retried.value is admitted
+    assert collection._COLLECTOR_SOURCES is snapshot and collection._COLLECTOR_SOURCE_ERROR is None
+
+
+@pytest.mark.parametrize("number,code", [(errno.EIO, "RESOURCE_UNAVAILABLE"),
+                                       (errno.EACCES, "EXPERIMENT_IDENTITY_CONFLICT")])
+def test_caller_source_read_errors_keep_the_same_policy_after_installed_verification(tmp_path, monkeypatch, number, code):
+    target = tmp_path / "experiments/v2_gate_collect.py"
+    target.parent.mkdir()
+    target.write_bytes((REPO / "experiments/v2_gate_collect.py").read_bytes())
+    original, reads = Path.open, []
+    def interrupted(path, *args, **kwargs):
+        if path == target:
+            reads.append(path)
+            raise OSError(number, "private caller source read detail")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", interrupted)
+    monkeypatch.setattr(collection, "submit_sweep", forbid_effect)
+    with pytest.raises(OpsError) as error:
+        collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
+                                 code_root=tmp_path, as_of_month=MONTH, no_ledger=True)
+    assert reads == [target] and error.value.code == code
+    assert error.value.problem.retryable is (number == errno.EIO)
+    assert "private" not in canonical_json(to_document(error.value.problem))
+
+
+def test_changed_installed_source_refuses_before_caller_closure(monkeypatch):
+    changed = {**collection._COLLECTOR_SOURCES, collection._COLLECTOR_ENTRIES[0]: "sha256:" + "0" * 64}
+    calls = []
+    def closure(*args):
+        calls.append(args)
+        assert len(calls) == 1, "known installed-source drift must refuse before caller reads"
+        return changed
+    monkeypatch.setattr(collection, "source_closure", closure)
+    monkeypatch.setattr(collection, "submit_sweep", forbid_effect)
+    with pytest.raises(OpsError) as error:
+        collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
+                                 code_root=REPO, as_of_month=MONTH, no_ledger=True)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert calls == [(collection._COLLECTOR_ROOT, collection._COLLECTOR_ENTRIES)]
 
 
 @pytest.mark.parametrize("kind", ["missing", "file", "file-parent", "invalid-type", "nul"])
