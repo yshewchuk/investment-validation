@@ -46,7 +46,6 @@ packages (system rearchitecture §4.1/§4.2) and neither may import the other.
 """
 from __future__ import annotations
 
-import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +53,7 @@ from pathlib import Path
 from engine import paths
 from engine.models import registry as legacy_registry
 
+from .frozen_state_io import hash_bounded_file, read_hashed
 from .releases import (
     ArtifactInventoryMember,
     ModelArtifactInventory,
@@ -83,7 +83,7 @@ __all__ = [
 KNOWN_CLOCK_IDS = ("legacy.entry_close.v1",)
 
 #: Matches ``engine.v2.registry.strategies.default_registry()``'s
-#: ``deployment_id`` exactly (checked by ``tests/test_v2_models_inventory.py``
+#: ``deployment_id`` exactly (checked by ``tests/v2/models/test_inventory.py``
 #: against a parsed copy of that module's source, so the two cannot drift
 #: silently).
 DEPLOYMENT_ID = "legacy-phase4-deployment.v1"
@@ -94,6 +94,11 @@ RELEASE_ID = "legacy-model-registry-current"
 #: ``data/models/tier4/``. Matches ``engine.data.features.tier4.FEATURE_MODELS``
 #: (checked, not duplicated, by the module's own test).
 FEATURE_ROLES = ("size", "implied_t1", "runup_move", "iv_crush")
+
+#: Refuse to read (and hash) any single artifact file larger than this.
+MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+#: Refuse to read the registry manifest if it exceeds this.
+MAX_REGISTRY_BYTES = 16 * 1024 * 1024
 
 _TIER4_DIR = paths.DATA / "models" / "tier4"
 _FOLD_NAME = re.compile(r"^(?P<model_id>.+)_(?P<yyyymm>\d{6})_(?P<snapshot>[0-9a-f]+)\.joblib$")
@@ -106,14 +111,13 @@ def _relative(path: Path) -> str:
         return str(path)
 
 
-def _hash_bytes(data: bytes) -> str:
-    return "sha256:" + hashlib.sha256(data).hexdigest()
-
-
 def _hash_file(path: Path) -> str | None:
-    if not path.is_file():
-        return None
-    return _hash_bytes(path.read_bytes())
+    return hash_bounded_file(path, MAX_ARTIFACT_BYTES, "file exceeds size cap")
+
+
+def _hash_registry() -> str | None:
+    return hash_bounded_file(legacy_registry.REGISTRY_PATH, MAX_REGISTRY_BYTES,
+                             "registry exceeds size cap")
 
 
 def _required_kinds(role: str) -> tuple[str, ...]:
@@ -153,12 +157,13 @@ def _champion_members(entry: "legacy_registry.RegistryEntry") -> _MemberBuild:
     path = entry.path
     issues: list[ReleaseIssue] = []
     members: list[ArtifactInventoryMember] = []
-    file_hash = _hash_file(path)
-    if file_hash is None:
+    found = read_hashed(path, MAX_ARTIFACT_BYTES, "file exceeds size cap")
+    if found is None:
         issues.append(ReleaseIssue(
             path=f"$.artifacts[{entry.id}]", code="MISSING_ARTIFACT_FILE", detail=_relative(path),
         ))
         return _MemberBuild((), tuple(issues))
+    file_hash, stream = found
     if entry.artifact_sha256 and file_hash[len("sha256:"):] != entry.artifact_sha256:
         issues.append(ReleaseIssue(
             path=f"$.artifacts[{entry.id}]", code="ARTIFACT_HASH_DRIFT",
@@ -169,7 +174,7 @@ def _champion_members(entry: "legacy_registry.RegistryEntry") -> _MemberBuild:
         artifact_ref=_relative(path), content_hash=file_hash,
     ))
     try:
-        artifact = legacy_registry.load_artifact(path)
+        artifact = legacy_registry.load_artifact(stream)
     except Exception as exc:  # a corrupt or wrong-type pickle is INCOMPATIBLE, not absent
         issues.append(ReleaseIssue(
             path=f"$.artifacts[{entry.id}]", code="ARTIFACT_UNREADABLE", detail=type(exc).__name__,
@@ -191,7 +196,7 @@ def _champion_members(entry: "legacy_registry.RegistryEntry") -> _MemberBuild:
             artifact_ref=_relative(path), content_hash=file_hash,
         ))
     if entry.role == "gate" and entry.threshold is not None:
-        manifest_hash = _hash_file(legacy_registry.REGISTRY_PATH)
+        manifest_hash = _hash_registry()
         if manifest_hash is not None:
             members.append(ArtifactInventoryMember(
                 member_id=f"{entry.id}:threshold", kind="threshold",
@@ -231,9 +236,12 @@ def current_release_inventory(
     feature list against the real pickle, and returns what it found as
     :class:`~.releases.ReleaseIssue` tuples using the same shape, on top of
     (never instead of) the deterministic checks ``release_issues`` still runs
-    on the object this returns.
+    on the object this returns. A symlink, non-regular or oversize file
+    raises ``ValueError`` instead of returning an issue.
     """
-    reg = reg if reg is not None else legacy_registry.load_registry()
+    if reg is None:
+        manifest_hash = _hash_registry()
+    reg = legacy_registry.load_registry() if reg is None else reg
     artifacts: list[ModelArtifactInventory] = []
     bindings: list[ReleaseBinding] = []
     requirements: list[ReleaseRequirement] = []
@@ -265,7 +273,7 @@ def current_release_inventory(
             role=entry.role, strategy_id=entry.strategy, clock_id=KNOWN_CLOCK_IDS[0],
         ))
 
-    manifest_hash = _hash_file(legacy_registry.REGISTRY_PATH)
+    manifest_hash = _hash_registry()
     evidence = paths.FEATURES / "model_evidence.json"
     release = ModelReleaseInventory(
         release_id=RELEASE_ID,

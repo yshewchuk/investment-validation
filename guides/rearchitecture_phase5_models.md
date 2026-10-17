@@ -200,7 +200,7 @@ Run it yourself:
     INVESTING_PLAN_ROOT=/root/investing-plan python3 tools/phase5_inventory.py \
         --out reports/phase5_model_inventory.json
 
-Tests: `tests/test_v2_models_inventory.py` (14 cases: negative controls for a
+Tests: `tests/v2/models/test_inventory.py` (14 cases: negative controls for a
 missing residual/transform member, an incompatible feature order and an
 unknown clock, all refusing through the existing `release_issues` codes;
 real-file hash-drift and missing-file detection on synthetic fixtures; Tier-4
