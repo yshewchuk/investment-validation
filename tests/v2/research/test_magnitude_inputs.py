@@ -6,11 +6,16 @@ import pandas as pd
 import pytest
 
 from engine.v2.data.errors import DataError, fail
-from engine.v2.foundation import content_hash, market_calendar
+from engine.v2.foundation import content_hash
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.research import magnitude_inputs
-from tests.v2.research.test_event_history import _commit, _event, _poison
-from tests.v2.research.test_prediction_inputs import _move
+from tests.v2.research.magnitude_trial_support import (
+    calendar_sessions,
+    history_event,
+    outcome_move,
+    poison_outcomes,
+)
+from tests.v2.research.test_event_history import commit_event_history
 
 MONTH = "2025-01"
 CUTOFF = "2024-07-01"
@@ -26,23 +31,17 @@ def test_approved_magnitude_recipe_is_explicit_and_fixed():
     }
 
 
-def _calendar(start="2024-06-03", end="2024-06-14"):
-    projected = market_calendar.build_calendar_sessions((start,), event_through=end)
-    days = tuple(d for d in projected.days if d <= end)
-    return market_calendar.CalendarSessions(days, days[-1])
-
-
 @pytest.mark.parametrize("session,horizon,expected", [
     ("AMC", 5, "2024-06-05"), ("AMC", 3, "2024-06-07"), ("AMC", 1, "2024-06-11"),
     ("BMO", 5, "2024-06-04"), ("BMO", 3, "2024-06-06"), ("BMO", 1, "2024-06-10"),
 ])
 def test_forecast_ceiling_counts_full_sessions_before_the_preprint_close(session, horizon, expected):
-    result = magnitude_inputs.forecast_cutoff("2024-06-12", session, horizon, _calendar())
+    result = magnitude_inputs.forecast_cutoff("2024-06-12", session, horizon, calendar_sessions())
     assert result["source_session_ceiling"] == expected
     assert result["pre_announcement_close"] == ("2024-06-12" if session == "AMC" else "2024-06-11")
     assert result["horizon_sessions"] == horizon
     assert result["cutoff_id"] == content_hash({k: v for k, v in result.items() if k != "cutoff_id"})
-    assert result == magnitude_inputs.forecast_cutoff(date(2024, 6, 12), session, horizon, _calendar())
+    assert result == magnitude_inputs.forecast_cutoff(date(2024, 6, 12), session, horizon, calendar_sessions())
 
 
 @pytest.mark.parametrize("start,end,event,session,expected", [
@@ -52,7 +51,7 @@ def test_forecast_ceiling_counts_full_sessions_before_the_preprint_close(session
     ("2025-01-06", "2025-01-13", "2025-01-10", "AMC", "2025-01-08"),
 ])
 def test_weekends_holidays_and_one_off_closure_use_native_session_calendar(start, end, event, session, expected):
-    result = magnitude_inputs.forecast_cutoff(event, session, 1, _calendar(start, end))
+    result = magnitude_inputs.forecast_cutoff(event, session, 1, calendar_sessions(start, end))
     assert result["source_session_ceiling"] == expected
 
 
@@ -63,14 +62,14 @@ def test_weekends_holidays_and_one_off_closure_use_native_session_calendar(start
     {"event_date": "2024-06-01"}, {"event_date": "2024-06-17"}, {"calendar": None},
 ])
 def test_invalid_forecast_request_is_typed(changes):
-    args = dict(event_date="2024-06-12", session="AMC", horizon=1, calendar=_calendar())
+    args = dict(event_date="2024-06-12", session="AMC", horizon=1, calendar=calendar_sessions())
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         magnitude_inputs.forecast_cutoff(**{**args, **changes})
 
 
 @pytest.mark.parametrize("kind", ["gap", "projected", "short", "duplicate", "weekend", "observed_missing"])
 def test_bad_or_incomplete_forecast_calendar_refuses(kind):
-    calendar = _calendar()
+    calendar = calendar_sessions()
     if kind == "gap":
         calendar = replace(calendar, days=tuple(d for d in calendar.days if d != "2024-06-11"))
     elif kind == "projected":
@@ -89,7 +88,7 @@ def test_bad_or_incomplete_forecast_calendar_refuses(kind):
 
 @pytest.mark.parametrize("session,missing_anchor", [("AMC", "2024-06-12"), ("BMO", "2024-06-11")])
 def test_missing_actual_preannouncement_close_is_not_silently_shifted(session, missing_anchor):
-    calendar = _calendar()
+    calendar = calendar_sessions()
     calendar = replace(calendar, days=tuple(d for d in calendar.days if d != missing_anchor))
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         magnitude_inputs.forecast_cutoff("2024-06-12", session, 1, calendar)
@@ -101,20 +100,20 @@ def _load(repository, snapshot, **kwargs):
 
 
 def test_real_reader_excludes_union_aliases_and_future_objects_before_magnitude_reads(tmp_path, monkeypatch):
-    eligible = [_event(day) for day in ("2024-01-04", "2024-02-05", "2024-03-05")]
-    random = _event("2024-04-05", protected=True)
-    rolling = _event("2024-12-03")
-    future = _event("2024-07-02")
-    same_day = _event(CUTOFF)
-    alias = _event("2024-05-06")
+    eligible = [history_event(day) for day in ("2024-01-04", "2024-02-05", "2024-03-05")]
+    random = history_event("2024-04-05", protected=True)
+    rolling = history_event("2024-12-03")
+    future = history_event("2024-07-02")
+    same_day = history_event(CUTOFF)
+    alias = history_event("2024-05-06")
     sibling = {**alias, "event_id": "ambiguous-sibling", "session": "BMO"}
     protected = [random, rolling, future, same_day, alias]
     events = [*eligible, *protected, sibling]
-    moves = [_move(event, value) for event, value in zip(eligible, [-2.5, 0.0, 125.0])]
-    moves += [_move(event, None) for event in protected]
-    conn, repository, snapshot = _commit(tmp_path, events, moves)
+    moves = [outcome_move(event, value) for event, value in zip(eligible, [-2.5, 0.0, 125.0])]
+    moves += [outcome_move(event, None) for event in protected]
+    conn, repository, snapshot = commit_event_history(tmp_path, events, moves)
     try:
-        _poison(monkeypatch, repository, snapshot, [e["event_date"].date().isoformat() for e in protected])
+        poison_outcomes(monkeypatch, repository, snapshot, [e["event_date"].date().isoformat() for e in protected])
         before = conn.total_changes
         result = _load(repository, snapshot)
         assert result.event_id.tolist() == [e["event_id"] for e in eligible]
@@ -152,13 +151,13 @@ def test_real_reader_excludes_union_aliases_and_future_objects_before_magnitude_
 ])
 def test_explicit_inadmissible_id_refuses_before_any_outcome(tmp_path, monkeypatch, kind, code):
     day = {"rolling": "2024-12-03", "future": "2024-07-02", "same_day": CUTOFF}.get(kind, "2024-05-06")
-    target = _event(day, protected=kind == "random")
+    target = history_event(day, protected=kind == "random")
     events = [target]
     if kind == "alias":
         events.append({**target, "event_id": "alias", "session": "BMO"})
-    conn, repository, snapshot = _commit(tmp_path, events, [_move(target)])
+    conn, repository, snapshot = commit_event_history(tmp_path, events, [outcome_move(target)])
     try:
-        _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+        poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         key = "unknown" if kind == "unknown" else target["event_id"]
         with pytest.raises(DataError, match=code):
             _load(repository, snapshot, event_ids=[key])
@@ -169,12 +168,12 @@ def test_explicit_inadmissible_id_refuses_before_any_outcome(tmp_path, monkeypat
 
 @pytest.mark.parametrize("missing", [False, True])
 def test_all_objects_preflight_before_first_safe_target_or_mixed_sibling_opens(tmp_path, monkeypatch, missing):
-    first, later, protected = _event("2024-01-04"), _event("2024-03-05"), _event("2024-04-05", protected=True)
-    moves = [_move(first), _move(protected)] + ([] if missing else [_move(later)])
-    conn, repository, snapshot = _commit(tmp_path, [first, later, protected], moves,
+    first, later, protected = history_event("2024-01-04"), history_event("2024-03-05"), history_event("2024-04-05", protected=True)
+    moves = [outcome_move(first), outcome_move(protected)] + ([] if missing else [outcome_move(later)])
+    conn, repository, snapshot = commit_event_history(tmp_path, [first, later, protected], moves,
                                         mixed_days=("2024-03-05", "2024-04-05"))
     try:
-        _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+        poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
             _load(repository, snapshot)
         assert all(name == "earnings_events" for name, _ in repository.scans)
@@ -189,8 +188,8 @@ def test_all_objects_preflight_before_first_safe_target_or_mixed_sibling_opens(t
     (2.0, {"available_as_of_date": CUTOFF}), (2.0, {"available_as_of_date": "2024-07-02"}),
 ])
 def test_invalid_or_not_strictly_available_label_refuses_whole_read(tmp_path, value, changes):
-    target = _event("2024-05-06")
-    conn, repository, snapshot = _commit(tmp_path, [target], [_move(target, value, **changes)])
+    target = history_event("2024-05-06")
+    conn, repository, snapshot = commit_event_history(tmp_path, [target], [outcome_move(target, value, **changes)])
     try:
         with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
             _load(repository, snapshot)
@@ -199,8 +198,8 @@ def test_invalid_or_not_strictly_available_label_refuses_whole_read(tmp_path, va
 
 
 def test_availability_boundary_is_strict_and_precedes_numeric_validation(tmp_path, monkeypatch):
-    target = _event("2024-05-06")
-    conn, repository, snapshot = _commit(tmp_path, [target], [_move(target, None, available_as_of_date=CUTOFF)])
+    target = history_event("2024-05-06")
+    conn, repository, snapshot = commit_event_history(tmp_path, [target], [outcome_move(target, None, available_as_of_date=CUTOFF)])
     def forbidden(*args):
         pytest.fail("unavailable numeric label must not be parsed")
     monkeypatch.setattr(magnitude_inputs, "_parse_target", forbidden)
@@ -213,14 +212,14 @@ def test_availability_boundary_is_strict_and_precedes_numeric_validation(tmp_pat
 
 @pytest.mark.parametrize("value", [True, "2.0", float("inf"), -float("inf")])
 def test_non_numeric_and_boolean_values_are_not_coerced(value):
-    event = pd.Series(_event("2024-05-06"))
+    event = pd.Series(history_event("2024-05-06"))
     with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
-        magnitude_inputs._label_before([_move(event, value)], event, date(2024, 7, 1))
+        magnitude_inputs._label_before([outcome_move(event, value)], event, date(2024, 7, 1))
 
 
 def test_last_day_before_label_cutoff_is_admitted_and_recipe_is_not_shared_mutable_state(tmp_path):
-    target = _event("2024-05-06")
-    conn, repository, snapshot = _commit(tmp_path, [target], [_move(target, -3.0, available_as_of_date="2024-06-30")])
+    target = history_event("2024-05-06")
+    conn, repository, snapshot = commit_event_history(tmp_path, [target], [outcome_move(target, -3.0, available_as_of_date="2024-06-30")])
     try:
         result = _load(repository, snapshot)
         assert result.absolute_move_pct.tolist() == [3.0]
@@ -237,10 +236,10 @@ def test_last_day_before_label_cutoff_is_admitted_and_recipe_is_not_shared_mutab
     ({"labels_before": "2024-01-01"}, "POPULATION_COLLAPSED"),
 ])
 def test_invalid_context_refuses_before_outcomes(tmp_path, monkeypatch, changes, code):
-    target = _event("2024-05-06")
-    conn, repository, snapshot = _commit(tmp_path, [target], [_move(target)])
+    target = history_event("2024-05-06")
+    conn, repository, snapshot = commit_event_history(tmp_path, [target], [outcome_move(target)])
     try:
-        _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+        poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         with pytest.raises(DataError, match=code):
             _load(repository, snapshot, **changes)
     finally:
@@ -248,8 +247,8 @@ def test_invalid_context_refuses_before_outcomes(tmp_path, monkeypatch, changes,
 
 
 def test_wrong_snapshot_and_late_repository_failure_never_return_partial_or_retry(tmp_path, monkeypatch):
-    first, second = _event("2024-01-04"), _event("2024-03-05")
-    conn, repository, snapshot = _commit(tmp_path, [first, second], [_move(first), _move(second)])
+    first, second = history_event("2024-01-04"), history_event("2024-03-05")
+    conn, repository, snapshot = commit_event_history(tmp_path, [first, second], [outcome_move(first), outcome_move(second)])
     try:
         with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
             _load(repository, replace(snapshot, calendar_version="wrong-calendar"))

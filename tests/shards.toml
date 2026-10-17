@@ -7,9 +7,21 @@
 # Shards are ORDERED and the first shard whose pattern matches a file owns it.
 # The last shard is the remainder: it owns every test file no earlier pattern
 # claims, so a new test file or package can never silently fall out of CI.
-# Measured 2026-10-11 (CPU seconds over 3475 total, ~3.8x parallel on a 4-core
-# runner): ops ~1224, research ~902, checks ~474, rest ~876. Rebalance by
-# moving a pattern; keep every shard under ~10 minutes of wall time.
+# Measured 2026-10-11, before ops-sweep/integration existed (CPU seconds over 3475 total,
+# ~3.8x parallel on a 4-core runner): ops ~1224, research ~902, checks ~474,
+# rest ~876. Rebalance by moving a pattern; keep every shard under ~15 minutes
+# of pytest wall time on CI.
+# Runner speed varies ~2x, so the subprocess-driven ops files and the
+# bounded-retention test (ops-sweep) and the integration tests (integration)
+# each get their own shard.
+
+[[shard]]
+name = "ops-sweep"
+patterns = [
+  "tests/v2/ops/test_gate_sweep.py",
+  "tests/v2/ops/test_native_gate_worker.py",
+  "tests/v2/ops/test_computed_moves_bounded_retention.py",
+]
 
 [[shard]]
 name = "ops"
@@ -17,7 +29,11 @@ patterns = ["tests/v2/ops/*", "tests/test_v2_ops_*.py"]
 
 [[shard]]
 name = "research"
-patterns = ["tests/v2/research/*", "tests/v2/integration/*", "tests/test_v2_research_*.py"]
+patterns = ["tests/v2/research/*", "tests/test_v2_research_*.py"]
+
+[[shard]]
+name = "integration"
+patterns = ["tests/v2/integration/*"]
 
 [[shard]]
 name = "checks"

@@ -133,7 +133,8 @@ def _build_fold(recipe, prepared, fold, *, fit, plan_only, alpha, partial) -> st
 
 def run_training_job(recipe: TrainingRecipe, dataset: pd.DataFrame, out_dir, *,
                      fit=fit_recipe_estimator, plan_only: bool = False, cutoffs=(),
-                     alpha: float | None = None, extra_filters=()) -> store.TrainingJobResult:
+                     alpha: float | None = None, extra_filters=(),
+                     input_identity: dict | None = None) -> store.TrainingJobResult:
     """Run (or resume) every fold of ``recipe`` over ``dataset`` into ``out_dir``.
 
     ``plan_only`` writes both receipts per fold and fits nothing — the cheap
@@ -141,7 +142,8 @@ def run_training_job(recipe: TrainingRecipe, dataset: pd.DataFrame, out_dir, *,
     ``request_cutoff`` calibration recipes; ``alpha`` is their per-request
     fill alpha (a ``fill_alpha`` isclose filter, as legacy). The payoff and
     recalibration recipes are fitted through P5-4's frozen-artifact builders. ``fit(recipe, X, y)`` is
-    injectable for tests; the default is the native estimator.
+    injectable for tests; the default is the native estimator. ``input_identity``
+    optionally binds explicit source pins in addition to the value fingerprint.
     """
     forbid_fitting("engine.v2.models.training.job.run_training_job")
     prepared, dataset_fp, folds = _prepare(recipe, dataset, plan_only=plan_only, cutoffs=cutoffs,
@@ -150,6 +152,8 @@ def run_training_job(recipe: TrainingRecipe, dataset: pd.DataFrame, out_dir, *,
                 "recipe_key": recipe.key.label(), "recipe_fingerprint": recipe_fingerprint(recipe),
                 "dataset_fingerprint": dataset_fp, "plan_only": bool(plan_only),
                 "alpha": alpha, "folds": [f.fold_id for f in folds]}
+    if input_identity is not None:
+        identity["input_identity"] = input_identity
     out_dir = store.open_job(out_dir, identity)
     folds_dir = out_dir / "folds"
 

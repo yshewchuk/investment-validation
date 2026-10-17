@@ -151,7 +151,7 @@ matching score row (an `EXISTS` against `serving_score_summary`) and narrow
 each returned event's attached `scores` to those same matching rows.
 
 api (P3-2): `create_app(*, serving_db, store_root, serving_root, token,
-resolver=None, ops_root=None, native_parity_report_path=None) -> FastAPI` wires §6's six routes over `projections`' route-specific
+resolver=None, publication_root=None, ops_root=None, native_parity_report_path=None) -> FastAPI` wires §6's six routes over `projections`' route-specific
 read helpers only — no route or app-startup path imports or initiates
 scoring, a provider, `engine.v2.ops` or legacy `engine.*`. The relocated API
 test `tests/v2/serving/test_v2_serving_api.py` proves this with a real
@@ -218,7 +218,9 @@ given) follows it one more hop: that release's bound `projection_binding.
 json` names the projection `release_id`. Both files are read directly (the
 same symlink/one-clean-segment safety `operations.py`'s own
 `_resolve_current_id` applies, reimplemented since serving may not import
-ops), then the named release is reverified against the LIVE `serving.sqlite`
+ops; reads are final-component no-follow, regular-file only, at most 1 MiB and UTF-8,
+else the file reads as absent; `/releases/current` also returns the binding's optional
+string `scope`, `null` when absent: see ARCHITECTURE.md "Serving root"), then the named release is reverified against the LIVE `serving.sqlite`
 index (`projections.verify_projection_binding`) before being trusted — never
 a silent fallback to "latest". A release published with no bound projection
 at all (the plain P3-0 compatibility preview) resolves to the ordinary
@@ -308,7 +310,7 @@ the mock disagree, §6 wins":**
   src/api/client.ts` sends) succeeds on every route, not just proves the
   logic exists.
 
-<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, get_event, event_query_hash, projection_binding, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, api, create_app, ApiError, legacy_bundle, load_legacy_bundle, load_score_document, LegacyBundleError, score_projection, legacy_score_projection -->
+<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, get_event, event_query_hash, projection_binding, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, api, create_app, ApiError, open_index_untranslated, legacy_bundle, load_legacy_bundle, load_score_document, LegacyBundleError, score_projection, legacy_score_projection -->
 
 ## Consumers
 
@@ -355,19 +357,23 @@ binds the render bundle. No scoring, no provider calls, no legacy import —
 it composes `engine.v2.ops.bootstrap.open_catalog` and this package in the
 one place (`tools/`) allowed to import both.
 
-`python3 -m engine.v2.serving.api --host 127.0.0.1 --port 8766 --serving-db
-serving/serving.sqlite --store-root serving/objects --serving-root serving
---publication-root <ops_root>/releases/<scope> --ops-root <ops_root>` starts the read API under
-uvicorn, "current" resolved through that fenced ops publisher's own pointer
-(§5.4/P3-1c; omit `--publication-root` for no configured pointer). The
+`python3 -m engine.v2.serving.api --host 127.0.0.1 --port 8766 --serving-root
+<serving_root> --ops-root <ops_root>` starts the read API under uvicorn, "current"
+resolved through the pointer root `<serving_root>/publisher`; `serving.sqlite`,
+`objects/` and `publisher/` under `--serving-root` are the defaults, and
+`--serving-db`/`--store-root`/`--publication-root` override them (an explicit
+`--publication-root <ops_root>/releases/<scope>` selects that fenced ops
+publisher's own pointer instead) (§5.4/P3-1c). The
 explicit `--ops-root` also enables read-only discovery of the newest
 succeeded shadow `native_parity` job when `--native-parity-report-path` is
 omitted; the explicit report path takes precedence. Omit `--ops-root` to
 retain `no_report` when no report path is supplied. The token comes from the `V2_DASHBOARD_TOKEN` environment variable — the
 launcher refuses to start without one, and refuses a non-loopback `--host`
-without `--allow-non-loopback`, exactly the two refusals `engine/v2/
+without `--allow-non-loopback`, the two refusals `engine/v2/
 dashboard/preview.py`'s launcher already makes for the compatibility
-surface.
+surface; it also refuses any explicitly given path flag whose value is empty
+(`--serving-root`, `--serving-db`, `--store-root`, `--publication-root`, `--ops-root`,
+`--native-parity-report-path`).
 
 ## Testing
 

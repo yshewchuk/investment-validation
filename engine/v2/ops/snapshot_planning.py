@@ -32,6 +32,7 @@ rather than re-resolving "latest" — see its module docstring.
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 from engine.v2.contracts import SnapshotRef
@@ -58,8 +59,8 @@ from engine.v2.ops.snapshots import resolve_snapshot_head
 from engine.v2.registry.strategies import STRATEGY_IDS
 
 __all__ = ["GENERATED_HORIZON_DAYS", "REQUEST_SCHEMA_REF", "direct_scope_for",
-           "generated_population", "pin_snapshot_inputs", "scratch_estimate",
-           "snapshot_event_tickers"]
+           "generated_population", "pin_snapshot_inputs", "require_valid_population_keys",
+           "scratch_estimate", "snapshot_event_tickers"]
 
 REQUEST_SCHEMA_REF = "legacy_materialization_request.v1.0"
 #: Mirrors ``engine.dashboard.nightly.HORIZON_DAYS`` (as ``nightly_trigger._LEGACY_HORIZON_DAYS`` does);
@@ -67,15 +68,29 @@ REQUEST_SCHEMA_REF = "legacy_materialization_request.v1.0"
 GENERATED_HORIZON_DAYS = 35
 
 
+def require_valid_population_keys(keys) -> None:
+    """Refuse any key that is not ``ticker|strategy|YYYY-MM-DD`` (canonical ISO date)."""
+    for key in keys:
+        parts = str(key).split("|")
+        try:
+            valid = (len(parts) == 3 and all(parts)
+                     and date.fromisoformat(parts[2]).isoformat() == parts[2])
+        except ValueError:
+            valid = False
+        if not valid:
+            raise fail("INVALID_REQUEST",
+                       "expected population holds a key that is not "
+                       "ticker|strategy|event_date; fix or remove it")
+
+
 def direct_scope_for(expected_population) -> dict:
+    expected_population = tuple(expected_population)
+    require_valid_population_keys(expected_population)
     tickers, years = set(), set()
     for key in expected_population:
-        parts = str(key).split("|")
-        if len(parts) != 3 or not parts[0] or not parts[2][:4].isdigit():
-            raise fail("INVALID_REQUEST", "planned population key is not ticker|strategy|event_date",
-                       details={"key": str(key)})
-        tickers.add(parts[0])
-        years.add(int(parts[2][:4]))
+        ticker, _, event_date = str(key).split("|")
+        tickers.add(ticker)
+        years.add(int(event_date[:4]))
     return {"tickers": sorted(tickers), "years": sorted(years)}
 
 

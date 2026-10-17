@@ -11,12 +11,17 @@ from engine.v2.foundation import content_hash
 from engine.v2.research import magnitude_inputs
 from experiments import magnitude_inputs as admitted_inputs
 from experiments import native_registration as native
-from tests.v2.research.test_event_history import _commit, _event, _poison
-from tests.v2.research.test_magnitude_features import _commit as _calendar_commit
-from tests.v2.research.test_magnitude_inputs import _calendar
-from tests.v2.research.test_magnitude_registration import PlanRepository
-from tests.v2.research.test_native_registration import _catalog, _objects, _spec
-from tests.v2.research.test_prediction_inputs import _move
+from tests.v2.research.magnitude_trial_support import (
+    PlanRepository,
+    calendar_sessions,
+    catalog_rows,
+    commit_history_inputs,
+    history_event,
+    outcome_move,
+    poison_outcomes,
+)
+from tests.v2.research.test_event_history import commit_event_history
+from tests.v2.research.test_native_registration import artifact_object_bytes, native_spec
 
 MONTH, BOUNDARY = "2025-01", "2024-06-01"
 RECIPE = {"schema_version": "earnings_magnitude.v1", "units": "percentage_points",
@@ -54,26 +59,26 @@ def _objects_for(repository, snapshot, events):
 
 def test_training_qualifies_before_numeric_parse_and_binds_every_opened_object(tmp_path, monkeypatch):
     """Equality is late; zero is data; omissions never become zero-filled targets."""
-    events = [_event(day) for day in ("2024-01-04", "2024-02-05", "2024-03-05",
+    events = [history_event(day) for day in ("2024-01-04", "2024-02-05", "2024-03-05",
                                     "2024-04-05", "2024-05-06", "2024-05-20")]
-    random, rolling, future = _event("2024-03-06", protected=True), _event("2024-12-03"), _event("2024-07-02")
-    moves = [_move(events[0], -3.5, available_as_of_date="2024-05-31"), _move(events[1], 0.0),
-        _move(events[2], None, skipped=True, available_as_of_date=None),
-        _move(events[3], None, available_as_of_date=None),
-        _move(events[4], None, available_as_of_date=BOUNDARY),
-        _move(events[5], None, available_as_of_date="2024-06-02")]
-    conn, repository, snapshot = _commit(tmp_path, [*events, random, rolling, future],
-        [*moves, *[_move(event, None) for event in (random, rolling, future)]])
+    random, rolling, future = history_event("2024-03-06", protected=True), history_event("2024-12-03"), history_event("2024-07-02")
+    moves = [outcome_move(events[0], -3.5, available_as_of_date="2024-05-31"), outcome_move(events[1], 0.0),
+        outcome_move(events[2], None, skipped=True, available_as_of_date=None),
+        outcome_move(events[3], None, available_as_of_date=None),
+        outcome_move(events[4], None, available_as_of_date=BOUNDARY),
+        outcome_move(events[5], None, available_as_of_date="2024-06-02")]
+    conn, repository, snapshot = commit_event_history(tmp_path, [*events, random, rolling, future],
+        [*moves, *[outcome_move(event, None) for event in (random, rolling, future)]])
     try:
         expected_objects = _objects_for(repository, snapshot, events)
-        _poison(monkeypatch, repository, snapshot, ["2024-03-06", "2024-12-03", "2024-07-02"])
+        poison_outcomes(monkeypatch, repository, snapshot, ["2024-03-06", "2024-12-03", "2024-07-02"])
         parse, calls = magnitude_inputs._parse_target, []
         def parse_only_qualified(rows, day):
             assert day.isoformat() in ("2024-01-04", "2024-02-05")
             calls.append(day.isoformat())
             return parse(rows, day)
         monkeypatch.setattr(magnitude_inputs, "_parse_target", parse_only_qualified)
-        before = _catalog(conn), _objects(repository._store)
+        before = catalog_rows(conn), artifact_object_bytes(repository._store)
         result = _qualify(repository, snapshot, list(reversed(events)))
         assert result.event_id.tolist() == [event["event_id"] for event in events[:2]]
         assert result.realized_move_pct.tolist() == [-3.5, 0.0]
@@ -98,7 +103,7 @@ def test_training_qualifies_before_numeric_parse_and_binds_every_opened_object(t
         assert result.attrs == again.attrs
         result.attrs["read_inputs"].clear()
         assert _qualify(repository, snapshot, events).attrs["read_inputs"] == expected_objects
-        assert (_catalog(conn), _objects(repository._store)) == before
+        assert (catalog_rows(conn), artifact_object_bytes(repository._store)) == before
         assert all(query.snapshot_id == snapshot.snapshot_id for _, query in repository.scans)
     finally:
         conn.close()
@@ -109,11 +114,11 @@ def test_training_qualifies_before_numeric_parse_and_binds_every_opened_object(t
     ("empty", "HOLDOUT_ACCESS_DENIED"), ("same_day", "CONTRACT_MISMATCH"), ("future", "CONTRACT_MISMATCH")])
 def test_explicit_training_refusals_precede_all_outcome_access(tmp_path, monkeypatch, kind, code):
     day = {"rolling": "2024-12-03", "same_day": BOUNDARY, "future": "2024-07-02"}.get(kind, "2024-05-06")
-    event = _event(day, protected=kind == "random")
+    event = history_event(day, protected=kind == "random")
     events = [event, {**event, "event_id": "alias", "session": "BMO"}] if kind == "alias" else [event]
-    conn, repository, snapshot = _commit(tmp_path, events, [_move(event)])
+    conn, repository, snapshot = commit_event_history(tmp_path, events, [outcome_move(event)])
     try:
-        _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+        poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         ids = [] if kind == "empty" else ["unknown" if kind == "unknown" else event["event_id"]]
         with _refuses(code):
             _qualify(repository, snapshot, [], event_ids=ids)
@@ -141,8 +146,8 @@ def test_implicit_candidates_are_not_a_training_or_preflight_population(operatio
     (1.0, {"available_as_of_date": "20240508"}), (1.0, {"available_as_of_date": "2024-05-06"}),
     (1.0, {"available_as_of_date": "2024-05-05"})])
 def test_eligible_corruption_refuses_instead_of_selective_dropping(tmp_path, value, changes):
-    event = _event("2024-05-06")
-    conn, repository, snapshot = _commit(tmp_path, [event], [_move(event, value, **changes)])
+    event = history_event("2024-05-06")
+    conn, repository, snapshot = commit_event_history(tmp_path, [event], [outcome_move(event, value, **changes)])
     try:
         with _refuses("EXPERIMENT_VARIANT_FAILED"):
             _qualify(repository, snapshot, [event])
@@ -167,8 +172,8 @@ def test_decoded_training_guard_refuses_values_native_table_types_cannot_publish
     ("unavailable", {"available_as_of_date": None}),
     ("not_available_before_fit", {"available_as_of_date": BOUNDARY})])
 def test_empty_qualification_refuses_with_complete_read_evidence(tmp_path, reason, changes):
-    event = _event("2024-05-06")
-    conn, repository, snapshot = _commit(tmp_path, [event], [_move(event, None, **changes)])
+    event = history_event("2024-05-06")
+    conn, repository, snapshot = commit_event_history(tmp_path, [event], [outcome_move(event, None, **changes)])
     try:
         with _refuses("POPULATION_COLLAPSED") as caught:
             _qualify(repository, snapshot, [event])
@@ -184,12 +189,12 @@ def test_empty_qualification_refuses_with_complete_read_evidence(tmp_path, reaso
 
 @pytest.mark.parametrize("missing", [False, True])
 def test_training_preflights_later_mixed_or_missing_fragment_before_safe_first_read(tmp_path, monkeypatch, missing):
-    first, later, protected = _event("2024-01-04"), _event("2024-03-05"), _event("2024-03-06", protected=True)
-    moves = [_move(first), _move(protected)] + ([] if missing else [_move(later)])
-    conn, repository, snapshot = _commit(tmp_path, [first, later, protected], moves,
+    first, later, protected = history_event("2024-01-04"), history_event("2024-03-05"), history_event("2024-03-06", protected=True)
+    moves = [outcome_move(first), outcome_move(protected)] + ([] if missing else [outcome_move(later)])
+    conn, repository, snapshot = commit_event_history(tmp_path, [first, later, protected], moves,
                                         mixed_days=("2024-03-05", "2024-03-06"))
     try:
-        _poison(monkeypatch, repository, snapshot, (), all_outcomes=True)
+        poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
         with _refuses("HOLDOUT_ACCESS_DENIED"):
             _qualify(repository, snapshot, [first, later])
         assert all(name == "earnings_events" for name, _ in repository.scans)
@@ -198,8 +203,8 @@ def test_training_preflights_later_mixed_or_missing_fragment_before_safe_first_r
 
 
 def test_late_repository_failure_is_not_retried_or_returned_as_partial_training(tmp_path, monkeypatch):
-    events = [_event("2024-01-04"), _event("2024-02-05")]
-    conn, repository, snapshot = _commit(tmp_path, events, [_move(event) for event in events])
+    events = [history_event("2024-01-04"), history_event("2024-02-05")]
+    conn, repository, snapshot = commit_event_history(tmp_path, events, [outcome_move(event) for event in events])
     original, calls = repository.scan, []
     def fail_late(query, *, table_name):
         if table_name == "computed_moves":
@@ -208,24 +213,24 @@ def test_late_repository_failure_is_not_retried_or_returned_as_partial_training(
                 raise fail("OBJECT_CORRUPT", "synthetic late failure")
         yield from original(query, table_name=table_name)
     try:
-        before = _catalog(conn), _objects(repository._store)
+        before = catalog_rows(conn), artifact_object_bytes(repository._store)
         monkeypatch.setattr(repository, "scan", fail_late)
         with _refuses("OBJECT_CORRUPT"):
             _qualify(repository, snapshot, events)
         assert calls == ["2024-01-04", "2024-02-05"]
-        assert (_catalog(conn), _objects(repository._store)) == before
+        assert (catalog_rows(conn), artifact_object_bytes(repository._store)) == before
     finally:
         conn.close()
 
 
 def _registered(tmp_path, events, *, years, mixed_days):
     """Real native registration followed by the production read-only input boundary."""
-    conn, original, snapshot = _calendar_commit(tmp_path, events, [_move(event, None) for event in events],
-        days=_calendar("2023-12-01", "2025-01-10").days, mixed_days=mixed_days)
+    conn, original, snapshot = commit_history_inputs(tmp_path, events, [outcome_move(event, None) for event in events],
+        days=calendar_sessions("2023-12-01", "2025-01-10").days, mixed_days=mixed_days)
     repository, root = PlanRepository(conn, original._store), tmp_path / "code"
     root.mkdir()
     (root / "run.py").write_text("raise AssertionError('not an execution test')\n")
-    spec = _spec(price_source="computed_moves", economic_params={}, seed=0, folds=list(years), runner="run.py")
+    spec = native_spec(price_source="computed_moves", economic_params={}, seed=0, folds=list(years), runner="run.py")
     request = dict(code_root=root, as_of_month="2026-01", magnitude_training_start="2023-12-10",
                    magnitude_labels_before="2025-02-01")
     registered = native.register_native(conn, original._store, repository, spec, **request)
@@ -235,32 +240,32 @@ def _registered(tmp_path, events, *, years, mixed_days):
 
 def test_registered_union_preflight_reaches_late_fold_before_opening_early_safe_objects(tmp_path, monkeypatch):
     """A second-fold mixed object blocks the whole run before any first-fold label."""
-    train, early, later = (_event(day) for day in ("2023-12-12", "2024-06-12", "2025-01-07"))
-    protected = _event("2025-01-08", protected=True)
+    train, early, later = (history_event(day) for day in ("2023-12-12", "2024-06-12", "2025-01-07"))
+    protected = history_event("2025-01-08", protected=True)
     source = _registered(tmp_path, [train, early, later, protected], years=("2024", "2025"),
                          mixed_days=("2025-01-07", "2025-01-08"))
     try:
-        _poison(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
-        before = _catalog(source.conn), _objects(source.store)
+        poison_outcomes(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         with _refuses("HOLDOUT_ACCESS_DENIED"):
             admitted_inputs.admit_magnitude_inputs(source.conn, source.store, source.repository,
                                                    source.spec, **source.request)
         assert all(name != "computed_moves" for name, _ in source.repository.scans)
-        assert (_catalog(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     finally:
         source.conn.close()
 
 
 def test_registered_preflight_omits_unused_window_events_and_returns_exact_detached_identity(tmp_path, monkeypatch):
     """An unused late-December mixed fragment is not part of actual fold membership."""
-    train, unused, test = (_event(day) for day in ("2023-12-12", "2024-12-30", "2025-01-07"))
-    protected = _event("2024-12-31", protected=True)
+    train, unused, test = (history_event(day) for day in ("2023-12-12", "2024-12-30", "2025-01-07"))
+    protected = history_event("2024-12-31", protected=True)
     source = _registered(tmp_path, [train, unused, test, protected], years=("2025",),
                          mixed_days=("2024-12-30", "2024-12-31"))
     try:
         objects = _objects_for(source.repository, source.snapshot, [train, test])
-        _poison(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
-        before = _catalog(source.conn), _objects(source.store)
+        poison_outcomes(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         registration, preflight = admitted_inputs.admit_magnitude_inputs(
             source.conn, source.store, source.repository, source.spec, **source.request)
         assert registration == source.registered
@@ -276,6 +281,6 @@ def test_registered_preflight_omits_unused_window_events_and_returns_exact_detac
         assert admitted_inputs.admit_magnitude_inputs(source.conn, source.store, source.repository,
             source.spec, **source.request)[1] == {**identity, "preflight_id": content_hash(identity)}
         assert all(name != "computed_moves" for name, _ in source.repository.scans)
-        assert (_catalog(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     finally:
         source.conn.close()

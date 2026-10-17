@@ -1,84 +1,67 @@
 """Native magnitude preregistration over real synthetic metadata, never outcomes."""
-import json
 import inspect
-from contextlib import contextmanager
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from engine.v2.contracts import FinalHoldoutDeclaration
-from engine.v2.data.errors import DataError, fail as data_fail
-from engine.v2.data.repository import Repository
+from engine.v2.data.errors import DataError
+from engine.v2.data.errors import fail as data_fail
 from engine.v2.foundation import artifact_reference, canonical_json, content_hash, to_document
 from engine.v2.foundation.final_holdout import request_from_document
-from engine.v2.ops.errors import OpsError, fail as ops_fail
+from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import fail as ops_fail
 from engine.v2.ops.experiments import resolve_experiment_plan
 from engine.v2.research.magnitude_folds import magnitude_window
 from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
 from tests.data_scan_support import commit_tables
 from tests.ops_support import FakeClock
-from tests.v2.research.test_event_history import _event
-from tests.v2.research.test_magnitude_folds import _fixture, _metadata_only, _plan
-from tests.v2.research.test_native_registration import _catalog, _objects, _spec
-from tests.v2.research.test_prediction_inputs import TrackingRepository
-
-
-class PlanRepository(TrackingRepository):
-    """Allow the registrar's one head pin while retaining real tracked scans."""
-    def __init__(self, conn, store):
-        super().__init__(conn, store)
-        self.pins = []
-
-    def resolve_pinned(self, scope):
-        self.pins.append(scope)
-        return Repository.resolve_pinned(self, scope)
+from tests.v2.research import magnitude_trial_support as support
+from tests.v2.research.magnitude_trial_support import (
+    PlanRepository,
+    catalog_rows,
+    history_event,
+)
+from tests.v2.research.test_magnitude_folds import (
+    forbid_fold_outcomes,
+    magnitude_fold_fixture,
+    plan_test_magnitude_folds,
+)
+from tests.v2.research.test_native_registration import artifact_object_bytes, native_spec
 
 
 @pytest.fixture
 def source(tmp_path, monkeypatch, request):
     """Commit protected, ambiguous and out-of-window siblings with poisoned labels."""
-    train, test = _event("2023-12-12"), {**_event("2024-01-03"), "session": "BMO"}
-    before, future = _event("2023-11-01"), _event("2025-01-02")
-    random, rolling = _event("2023-12-13", protected=True), _event("2025-12-03")
-    alias = _event("2024-01-05")
+    train, test = history_event("2023-12-12"), {**history_event("2024-01-03"), "session": "BMO"}
+    before, future = history_event("2023-11-01"), history_event("2025-01-02")
+    random, rolling = history_event("2023-12-13", protected=True), history_event("2025-12-03")
+    alias = history_event("2024-01-05")
     events = [train, test, before, future, random, rolling, alias,
               {**alias, "event_id": "ambiguous-sibling", "session": "BMO"}]
     events.extend(getattr(request, "param", ()))
-    conn, original, snapshot = _fixture(tmp_path, events)
+    conn, original, snapshot = magnitude_fold_fixture(tmp_path, events)
     repository = PlanRepository(conn, original._store)
-    _metadata_only(monkeypatch, repository, snapshot)
+    forbid_fold_outcomes(monkeypatch, repository, snapshot)
     root = tmp_path / "code"
     root.mkdir()
     (root / "run.py").write_text("raise AssertionError('registration must not execute a runner')\n")
     value = SimpleNamespace(conn=conn, store=original._store, repository=repository,
         snapshot=snapshot, code_root=root, events=events,
-        spec=_spec(price_source="computed_moves", economic_params={}, seed=0, runner="run.py"))
+        spec=native_spec(price_source="computed_moves", economic_params={}, seed=0, runner="run.py"))
     yield value
     conn.close()
 
 
-def _call(source, *, admit=False, spec=None, **changes):
+def call_magnitude_registration(source, *, admit=False, spec=None, **changes):
     """Use the actual native registration and read-only admission entrypoints."""
     method = native.require_native_registration if admit else native.register_native
     return method(source.conn, source.store, source.repository, spec or source.spec,
         **{"code_root": source.code_root, "as_of_month": "2026-01",
            "magnitude_training_start": "2023-12-10", **changes})
-
-
-def _forbid(*args, **kwargs):
-    """Fail if a pre-admission refusal touches metadata or an effect boundary."""
-    raise AssertionError("forbidden access")
-
-
-@contextmanager
-def _refuses(error_type, code):
-    """Assert the exact documented nonretryable envelope, never exception text."""
-    with pytest.raises(error_type) as caught:
-        yield
-    assert caught.value.code == code
-    assert caught.value.problem.retryable is False
 
 
 @pytest.mark.parametrize("factory,code,other", [
@@ -95,15 +78,15 @@ def test_refusal_oracle_rejects_wrong_code_or_retryability(factory, code, other,
     if wrong_field == "retryability":
         error = type(error)(replace(error.problem, retryable=True))
     with pytest.raises(AssertionError):
-        with _refuses(type(error), code):
+        with support.refuses(type(error), code):
             raise error
 
 
 def test_full_plan_is_sealed_and_idempotently_admitted(source, monkeypatch):
     """Bind the independently planned metadata and only its selected population."""
-    expected_plan = _plan(source.repository, source.snapshot)
+    expected_plan = plan_test_magnitude_folds(source.repository, source.snapshot)
     source.repository.scans.clear()
-    registered = _call(source)
+    registered = call_magnitude_registration(source)
     document = registered.document
     assert document == {"schema_version": "native_experiment_registration.v1.2",
         "spec_hash": source.spec.spec_hash, "execution_plan": resolve_experiment_plan(source.spec).as_document(),
@@ -139,17 +122,17 @@ def test_full_plan_is_sealed_and_idempotently_admitted(source, monkeypatch):
         assert plan[field] == expected
     assert source.repository.pins == ["shadow"]
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
-    before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.store, "publish_bytes", _forbid)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    monkeypatch.setattr(source.store, "publish_bytes", support.forbid_access)
     source.conn.execute("PRAGMA query_only=ON")
-    assert _call(source, event_ids=list(reversed(document["event_ids"]))) == registered
-    assert _call(source, admit=True) == registered
-    assert _call(source, admit=True, expected=registered) == registered
+    assert call_magnitude_registration(source, event_ids=list(reversed(document["event_ids"]))) == registered
+    assert call_magnitude_registration(source, admit=True) == registered
+    assert call_magnitude_registration(source, admit=True, expected=registered) == registered
     assert native.read_native_registration(source.conn, source.store, source.spec) == registered
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and artifact_object_bytes(source.store) == objects
     document["magnitude_request"]["evaluation_years"].clear()
     assert registered.document["magnitude_request"]["evaluation_years"] == ["2024"]
-    with _refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
+    with support.refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
         native.prepare_final_holdout_request(source.conn, source.store, registered)
 
 
@@ -160,10 +143,10 @@ def test_absent_outcomes_table_is_not_a_registration_dependency(source):
         {name: source.repository.fragment_records(source.snapshot, name) for name in tables},
         {name: source.repository.table_contract(source.snapshot, name) for name in tables},
         scope="metadata-only", receipt_id="metadata-only", attempt_id="metadata-only", store=source.store)
-    registered = _call(source, scope="metadata-only")
+    registered = call_magnitude_registration(source, scope="metadata-only")
     assert registered.document["snapshot"] == to_document(snapshot)
     assert "computed_moves" not in registered.document["snapshot"]["table_versions"]
-    assert _call(source, admit=True, scope="metadata-only") == registered
+    assert call_magnitude_registration(source, admit=True, scope="metadata-only") == registered
 
 
 @pytest.mark.parametrize("changes", [
@@ -177,19 +160,19 @@ def test_bad_declarations_refuse_before_any_repository_access(source, monkeypatc
     """Window and source validation precede pins, scans and registration effects."""
     changes = dict(changes)
     if changes.pop("valid_final_read", False):
-        changes["final_read"] = _declaration()
+        changes["final_read"] = final_holdout_declaration()
     spec = replace(source.spec, **changes.pop("spec_changes", {}))
-    before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "resolve_pinned", _forbid)
-    with _refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
-        _call(source, spec=spec, admit=admit, **changes)
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    monkeypatch.setattr(source.repository, "resolve_pinned", support.forbid_access)
+    with support.refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
+        call_magnitude_registration(source, spec=spec, admit=admit, **changes)
+    assert catalog_rows(source.conn) == before and artifact_object_bytes(source.store) == objects
 
 
 @pytest.mark.parametrize("change", ["start", "years", "month", "scope", "snapshot", "source", "environment", "omitted", "expected"])
 def test_identity_drift_refuses_before_metadata_scan(source, monkeypatch, change):
     """Stored identity is automatically checked even when expected is omitted."""
-    registered = _call(source)
+    registered = call_magnitude_registration(source)
     kwargs = {}
     if change == "start":
         kwargs["magnitude_training_start"] = "2023-12-11"
@@ -217,27 +200,27 @@ def test_identity_drift_refuses_before_metadata_scan(source, monkeypatch, change
         kwargs["magnitude_training_start"] = None
     else:
         kwargs["expected"] = replace(registered, binding_json=b"{}")
-    before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
-        _call(source, admit=True, **kwargs)
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        call_magnitude_registration(source, admit=True, **kwargs)
+    assert catalog_rows(source.conn) == before and artifact_object_bytes(source.store) == objects
 
 
 def test_missing_reservation_refuses_before_metadata_scan(source, monkeypatch):
     """Admission never substitutes fresh registration for a missing reservation."""
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
-        _call(source, admit=True)
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "INVALID_EXPERIMENT_SPEC"):
+        call_magnitude_registration(source, admit=True)
 
 
 @pytest.mark.parametrize("declared", [False, True])
 def test_adding_magnitude_mode_to_an_old_registration_refuses_before_scan(source, monkeypatch, declared):
     """An old immutable reservation cannot acquire a new research plan implicitly."""
-    _call(source, magnitude_training_start=None, final_read=_declaration() if declared else None)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
-        _call(source, admit=True)
+    call_magnitude_registration(source, magnitude_training_start=None, final_read=final_holdout_declaration() if declared else None)
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        call_magnitude_registration(source, admit=True)
 
 
 def test_late_calendar_failure_never_publishes_or_retries(source, monkeypatch):
@@ -250,11 +233,11 @@ def test_late_calendar_failure_never_publishes_or_retries(source, monkeypatch):
             raise fail("OBJECT_CORRUPT", "synthetic calendar failure")
         yield from original(query, table_name=table_name)
     monkeypatch.setattr(source.repository, "scan", scan)
-    before, objects = _catalog(source.conn), _objects(source.store)
-    with _refuses(DataError, "OBJECT_CORRUPT"):
-        _call(source)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    with support.refuses(DataError, "OBJECT_CORRUPT"):
+        call_magnitude_registration(source)
     assert calls.count("daily_market") == 1 and "earnings_events" in calls
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and artifact_object_bytes(source.store) == objects
 
 
 @pytest.mark.parametrize("index,code", [(2, "CONTRACT_MISMATCH"), (4, "HOLDOUT_ACCESS_DENIED"),
@@ -266,13 +249,13 @@ def test_protected_or_outside_explicit_population_refuses_before_calendar(source
         assert table_name == "earnings_events"
         yield from original(query, table_name=table_name)
     monkeypatch.setattr(source.repository, "scan", scan)
-    before, objects = _catalog(source.conn), _objects(source.store)
-    with _refuses(DataError, code):
-        _call(source, event_ids=[source.events[index]["event_id"]])
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    with support.refuses(DataError, code):
+        call_magnitude_registration(source, event_ids=[source.events[index]["event_id"]])
+    assert catalog_rows(source.conn) == before and artifact_object_bytes(source.store) == objects
 
 
-def _rewrite(source, registered, document):
+def rewrite_magnitude_registration(source, registered, document):
     """Rebind synthetic catalog evidence so malformed content reaches the payload guard."""
     encoded = canonical_json(document).encode()
     ref = source.store.publish_bytes(encoded, schema_ref=document["schema_version"])
@@ -293,7 +276,7 @@ def _rewrite(source, registered, document):
     "fold-wrong-year", "fold-duplicate", "fold-boundary-type", "horizons", "horizons-bool"])
 def test_rehashed_malformed_or_cross_context_plans_refuse_without_reads(source, monkeypatch, kind):
     """Valid outer hashes cannot bless malformed nested metadata or a final-read hybrid."""
-    registered = _call(source)
+    registered = call_magnitude_registration(source)
     doc = registered.document
     plan = doc["magnitude_plan"]
     if kind.startswith("v1."):
@@ -353,31 +336,31 @@ def test_rehashed_malformed_or_cross_context_plans_refuse_without_reads(source, 
     elif kind in ("events-none", "empty"):
         plan["events"] = None if kind == "events-none" else []
     plan["plan_id"] = "changed" if kind == "plan-hash" else content_hash({k: v for k, v in plan.items() if k != "plan_id"})
-    forged = _rewrite(source, registered, doc)
-    before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    forged = rewrite_magnitude_registration(source, registered, doc)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
-        _call(source, admit=True)
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        call_magnitude_registration(source, admit=True)
+    assert catalog_rows(source.conn) == before and artifact_object_bytes(source.store) == objects
 
 
 def test_stored_integrity_does_not_replace_fresh_semantic_admission(source):
     """A self-consistent stored digest still cannot override freshly planned fold bounds."""
-    registered = _call(source)
+    registered = call_magnitude_registration(source)
     doc = registered.document
     doc["magnitude_plan"]["folds"][0]["training_labels_before"] = "2024-01-01"
     plan = doc["magnitude_plan"]
     plan["plan_id"] = content_hash({k: v for k, v in plan.items() if k != "plan_id"})
-    forged = _rewrite(source, registered, doc)
+    forged = rewrite_magnitude_registration(source, registered, doc)
     native.verify_native_registration(source.conn, source.store, forged)
     source.repository.scans.clear()
-    before, objects = _catalog(source.conn), _objects(source.store)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
-        _call(source, admit=True)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        call_magnitude_registration(source, admit=True)
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and artifact_object_bytes(source.store) == objects
 
 
 _DESCRIPTORS = ("target_recipe", "fold_policy", "population_input", "calendar_input", "availability")
@@ -414,7 +397,7 @@ _NESTED_MALFORMED = [
 @pytest.mark.parametrize("path,value", _NESTED_MALFORMED)
 def test_rehashed_nested_wire_schema_refuses_before_metadata_scan(source, monkeypatch, path, value):
     """Rehash and synchronize declarations so nested schema checks, not stale digests, refuse."""
-    registered = _call(source)
+    registered = call_magnitude_registration(source)
     doc = registered.document
     plan = doc["magnitude_plan"]
     target = plan
@@ -440,17 +423,17 @@ def test_rehashed_nested_wire_schema_refuses_before_metadata_scan(source, monkey
             clock.update(event_date=event["event_date"], session=event["session"])
             clock["cutoff_id"] = content_hash({key: item for key, item in clock.items() if key != "cutoff_id"})
     plan["plan_id"] = content_hash({key: item for key, item in plan.items() if key != "plan_id"})
-    forged = _rewrite(source, registered, doc)
-    before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    forged = rewrite_magnitude_registration(source, registered, doc)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
-        _call(source, admit=True)
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        call_magnitude_registration(source, admit=True)
+    assert catalog_rows(source.conn) == before and artifact_object_bytes(source.store) == objects
 
 
-def _declaration():
+def final_holdout_declaration():
     """Synthetic final-request metadata only; none of these referenced objects are read."""
     return FinalHoldoutDeclaration(
         evaluation_recipe_ref=artifact_reference(b"recipe", "final_holdout_recipe.v1.0"),
@@ -461,8 +444,8 @@ def _declaration():
 @pytest.mark.parametrize("declared", [False, True])
 def test_older_registration_bytes_remain_exact(source, declared):
     """The optional extension adds no fields or byte changes to either old schema."""
-    declaration = _declaration()
-    registered = _call(source, magnitude_training_start=None, final_read=declaration if declared else None)
+    declaration = final_holdout_declaration()
+    registered = call_magnitude_registration(source, magnitude_training_start=None, final_read=declaration if declared else None)
     context = {"holdout_as_of_month": "2026-01", "random_membership_version": "canonical-event-sha256.v1",
                "rolling_membership_version": "calendar-months.v1"}
     expected = {"schema_version": "native_experiment_registration.v1.0", "spec_hash": source.spec.spec_hash,
@@ -473,7 +456,7 @@ def test_older_registration_bytes_remain_exact(source, declared):
     if declared:
         expected.update(schema_version="native_experiment_registration.v1.1", final_read=to_document(declaration))
     assert registered.binding_json == canonical_json(expected).encode()
-    assert _call(source, admit=True, magnitude_training_start=None,
+    assert call_magnitude_registration(source, admit=True, magnitude_training_start=None,
                  final_read=declaration if declared else None) == registered
 
 
@@ -489,28 +472,28 @@ def test_public_window_is_detached_and_rejects_invalid_requests(invalid_years, i
     result = magnitude_window(years, "2023-12-10")
     years.append("2025")
     assert result == {"training_start": "2023-12-10", "evaluation_years": ["2024"]}
-    with _refuses(DataError, "CONTRACT_MISMATCH"):
+    with support.refuses(DataError, "CONTRACT_MISMATCH"):
         magnitude_window(invalid_years, invalid_start)
 
 
 def test_multiple_spec_years_define_the_complete_registered_fold_list(source):
     """No second evaluation-year declaration can disagree with the execution plan."""
     spec = replace(source.spec, folds=("2024", "2025"))
-    expected = _plan(source.repository, source.snapshot, evaluation_years=["2024", "2025"])
-    registered = _call(source, spec=spec)
+    expected = plan_test_magnitude_folds(source.repository, source.snapshot, evaluation_years=["2024", "2025"])
+    registered = call_magnitude_registration(source, spec=spec)
     assert registered.document["magnitude_plan"] == expected
     assert [fold["year"] for fold in expected["folds"]] == ["2024", "2025"]
-    assert _call(source, spec=spec, admit=True) == registered
+    assert call_magnitude_registration(source, spec=spec, admit=True) == registered
 
 
-@pytest.mark.parametrize("source", [[_event(day, ticker="AAA") for day in
+@pytest.mark.parametrize("source", [[history_event(day, ticker="AAA") for day in
     ("2023-12-12", "2023-12-14", "2024-01-03", "2024-01-04")]], indirect=True)
 @pytest.mark.parametrize("kind", ["events", "event-tie", "train", "train-tie", "test", "test-tie"])
 def test_rehashed_membership_permutations_refuse_before_scans(source, monkeypatch, kind):
     """Preserve members and hashes, then reject noncanonical date or same-day ID order."""
-    registered = _call(source)
+    registered = call_magnitude_registration(source)
     native.verify_native_registration(source.conn, source.store, registered)
-    assert _call(source, admit=True) == registered
+    assert call_magnitude_registration(source, admit=True) == registered
     doc = registered.document
     plan = doc["magnitude_plan"]
     events, fold = plan["events"], plan["folds"][0]
@@ -531,14 +514,14 @@ def test_rehashed_membership_permutations_refuse_before_scans(source, monkeypatc
     else:
         changed.reverse()
     plan["plan_id"] = content_hash({key: value for key, value in plan.items() if key != "plan_id"})
-    forged = _rewrite(source, registered, doc)
-    before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    forged = rewrite_magnitude_registration(source, registered, doc)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
-        _call(source, admit=True)
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        call_magnitude_registration(source, admit=True)
+    assert catalog_rows(source.conn) == before and artifact_object_bytes(source.store) == objects
 
 
 def _rehash_clocks_and_plan(doc):
@@ -553,21 +536,21 @@ def _rehash_clocks_and_plan(doc):
 def _assert_forged_refusal(source, registered, doc, monkeypatch, *, spec=None):
     """Exercise public stored verification first, before fresh admission can mask a guard."""
     _rehash_clocks_and_plan(doc)
-    forged = _rewrite(source, registered, doc)
-    before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+    forged = rewrite_magnitude_registration(source, registered, doc)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         native.verify_native_registration(source.conn, source.store, forged)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
-        _call(source, admit=True, spec=spec)
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        call_magnitude_registration(source, admit=True, spec=spec)
+    assert catalog_rows(source.conn) == before and artifact_object_bytes(source.store) == objects
 
 
 @pytest.mark.parametrize("link", ["events", "years", "snapshot", "holdout_as_of_month",
     "random_membership_version", "rolling_membership_version"])
 def test_outer_links_refuse_with_an_otherwise_unchanged_valid_plan(source, monkeypatch, link):
     """Alter only the enclosing link so nested plan-shape checks cannot mask it."""
-    registered = _call(source)
+    registered = call_magnitude_registration(source)
     doc = registered.document
     if link == "events":
         doc["event_ids"] = doc["event_ids"][1:]
@@ -591,7 +574,7 @@ def test_outer_links_refuse_with_an_otherwise_unchanged_valid_plan(source, monke
 def test_year_order_refuses_after_repairing_fold_and_outer_declarations(source, monkeypatch, kind):
     """Corresponding folds and all year declarations agree except for the ordering rule."""
     spec = replace(source.spec, folds=("2024", "2025"))
-    registered = _call(source, spec=spec)
+    registered = call_magnitude_registration(source, spec=spec)
     doc = registered.document
     plan = doc["magnitude_plan"]
     if kind == "reversed":
@@ -611,7 +594,7 @@ def test_year_order_refuses_after_repairing_fold_and_outer_declarations(source, 
     "clock-anchor-null", "clock-anchor-compact", "empty-train"])
 def test_independent_event_clock_and_training_guards(source, monkeypatch, kind):
     """Repair unrelated identities/cardinalities instead of relying on secondary refusals."""
-    registered = _call(source)
+    registered = call_magnitude_registration(source)
     doc = registered.document
     plan = doc["magnitude_plan"]
     event = plan["events"][0]
@@ -648,22 +631,22 @@ def test_independent_event_clock_and_training_guards(source, monkeypatch, kind):
 @pytest.mark.parametrize("admit", [False, True])
 def test_no_caller_supplied_plan_parameter(source, monkeypatch, admit):
     """A valid prebuilt plan cannot bypass the public metadata reconstruction boundary."""
-    registered = _call(source)
+    registered = call_magnitude_registration(source)
     method = native.require_native_registration if admit else native.register_native
     parameters = inspect.signature(method).parameters
     assert "magnitude_plan" not in parameters
     assert all(parameter.kind != inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-    before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.repository, "resolve_pinned", _forbid)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    monkeypatch.setattr(source.repository, "resolve_pinned", support.forbid_access)
     with pytest.raises(TypeError):
-        _call(source, admit=admit, magnitude_plan=registered.document["magnitude_plan"])
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+        call_magnitude_registration(source, admit=admit, magnitude_plan=registered.document["magnitude_plan"])
+    assert catalog_rows(source.conn) == before and artifact_object_bytes(source.store) == objects
 
 
 def test_prediction_cli_rejects_magnitude_clock_for_default_target(monkeypatch, capsys):
     """Magnitude clocks cannot silently change the default target before store access."""
     from experiments import v2_prediction as cli
-    monkeypatch.setattr(cli.foundation, "ArtifactStore", _forbid)
+    monkeypatch.setattr(cli.foundation, "ArtifactStore", support.forbid_access)
     with pytest.raises(SystemExit) as caught:
         cli.main(["register", "--spec", "unused", "--catalog", "unused", "--store-root", "unused",
                   "--as-of-month", "2026-01", "--magnitude-training-start", "2023-12-10"])
@@ -680,23 +663,23 @@ def test_registration_effects_are_only_its_binding_and_reservation(source, monke
     for module, name in ((experiment_folds, "fit_walk_forward_fold"), (prediction_report, "fit_walk_forward_fold"),
             (panel_math, "history_features"), (event_history, "history_features"),
             (event_history, "load_event_history"), (magnitude_features, "load_event_history")):
-        monkeypatch.setattr(module, name, _forbid)
-    before, objects = _catalog(source.conn), _objects(source.store)
-    registered = _call(source)
-    after, published = _catalog(source.conn), _objects(source.store)
+        monkeypatch.setattr(module, name, support.forbid_access)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    registered = call_magnitude_registration(source)
+    after, published = catalog_rows(source.conn), artifact_object_bytes(source.store)
     changed = {table for table in before.keys() | after.keys() if before.get(table) != after.get(table)}
     assert changed == {"hypotheses", "experiment_runs"}
     assert all(len(after[table]) == len(before[table]) + 1 for table in changed)
     assert all(published[path] == data for path, data in objects.items())
     assert [published[path] for path in published.keys() - objects.keys()] == [registered.binding_json]
-    assert _call(source, admit=True) == registered
-    assert _catalog(source.conn) == after and _objects(source.store) == published
+    assert call_magnitude_registration(source, admit=True) == registered
+    assert catalog_rows(source.conn) == after and artifact_object_bytes(source.store) == published
 
 
 def test_cross_year_event_permutation_is_not_masked_by_fold_membership(source, monkeypatch):
     """Swap evaluation years while every fold's internal member order remains intact."""
     spec = replace(source.spec, folds=("2024", "2025"))
-    registered = _call(source, spec=spec)
+    registered = call_magnitude_registration(source, spec=spec)
     doc = registered.document
     plan = doc["magnitude_plan"]
     assert [event["event_date"][:4] for event in plan["events"]] == ["2023", "2024", "2025"]
@@ -707,39 +690,39 @@ def test_cross_year_event_permutation_is_not_masked_by_fold_membership(source, m
     _assert_forged_refusal(source, registered, doc, monkeypatch, spec=spec)
 
 
-@pytest.mark.parametrize("source", [[_event("2023-12-14")]], indirect=True)
+@pytest.mark.parametrize("source", [[history_event("2023-12-14")]], indirect=True)
 @pytest.mark.parametrize("change", ["start", "years", "month", "events"])
 def test_changed_register_request_cannot_overwrite_its_reservation(source, monkeypatch, change):
     """Otherwise-valid altered requests refuse before publication on the register path."""
-    _call(source)
+    call_magnitude_registration(source)
     source.repository.scans.clear()
     changes = {"start": {"magnitude_training_start": "2023-12-11"},
         "years": {"spec": replace(source.spec, folds=("2024", "2025"))},
         "month": {"as_of_month": "2026-02"},
         "events": {"event_ids": [event["event_id"] for event in source.events[:2]]}}[change]
-    before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.store, "publish_bytes", _forbid)
-    with _refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
-        _call(source, **changes)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    monkeypatch.setattr(source.store, "publish_bytes", support.forbid_access)
+    with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        call_magnitude_registration(source, **changes)
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and artifact_object_bytes(source.store) == objects
 
 
 @pytest.mark.parametrize("years,start", [(("2024", "2026"), "2023-12-10"), (("2024",), "2023-12-30")])
 def test_empty_evaluation_or_training_fold_never_publishes(source, monkeypatch, years, start):
     """Propagate the planner's exact nonretryable refusal without reserving a partial run."""
-    before, objects = _catalog(source.conn), _objects(source.store)
-    monkeypatch.setattr(source.store, "publish_bytes", _forbid)
-    with _refuses(DataError, "POPULATION_COLLAPSED"):
-        _call(source, spec=replace(source.spec, folds=years), magnitude_training_start=start)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
+    monkeypatch.setattr(source.store, "publish_bytes", support.forbid_access)
+    with support.refuses(DataError, "POPULATION_COLLAPSED"):
+        call_magnitude_registration(source, spec=replace(source.spec, folds=years), magnitude_training_start=start)
     assert {name for name, _ in source.repository.scans} == {"earnings_events", "daily_market"}
-    assert _catalog(source.conn) == before and _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before and artifact_object_bytes(source.store) == objects
 
 
 @pytest.mark.parametrize("kind", ["horizon-value", "calendar-digest", "schedule-availability"])
 def test_clock_values_and_schedule_status_have_independent_refusal_oracles(source, monkeypatch, kind):
     """Keep calendar agreement, wire types and other descriptors valid for each guard."""
-    registered = _call(source)
+    registered = call_magnitude_registration(source)
     doc = registered.document
     plan = doc["magnitude_plan"]
     if kind == "horizon-value":
@@ -763,10 +746,10 @@ def test_clock_values_and_schedule_status_have_independent_refusal_oracles(sourc
 @pytest.mark.parametrize("no_ledger", [False, True])
 def test_magnitude_outcome_paths_refuse_before_result_access(source, monkeypatch, tmp_path, operation, no_ledger):
     """A valid preregistration permits read/admission, but only private conflict evidence."""
-    registered = _call(source)
+    registered = call_magnitude_registration(source)
     assert native.read_native_registration(source.conn, source.store, source.spec) == registered
-    assert _call(source, admit=True) == registered
-    before, objects = _catalog(source.conn), _objects(source.store)
+    assert call_magnitude_registration(source, admit=True) == registered
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     ledger = tmp_path / "unused" / "ledger.csv"
     refusal = canonical_json({"schema_version": "native_experiment_refusal.v1.0",
         "failure_code": "EXPERIMENT_IDENTITY_CONFLICT", "request": {"run_id": registered.run_id},
@@ -777,9 +760,9 @@ def test_magnitude_outcome_paths_refuse_before_result_access(source, monkeypatch
         assert payload == refusal and schema_ref == ref.schema_ref
         return publish(payload, schema_ref=schema_ref)
     monkeypatch.setattr(source.store, "publish_bytes", private_only)
-    monkeypatch.setattr(source.repository, "scan", _forbid)
+    monkeypatch.setattr(source.repository, "scan", support.forbid_access)
     for name in ("_evidence", "_reconcile", "_report_path", "ledger_append"):
-        monkeypatch.setattr(outcomes, name, _forbid)
+        monkeypatch.setattr(outcomes, name, support.forbid_access)
     method = {"publish": outcomes.publish_native_outcome, "refusal": outcomes.publish_native_outcome,
               "replay": outcomes.replay_native_outcome, "export": outcomes.export_native_report}[operation]
     options = ({"report": "Synthetic result must not publish", "attempted": True} if operation == "publish"
@@ -790,8 +773,8 @@ def test_magnitude_outcome_paths_refuse_before_result_access(source, monkeypatch
     assert caught.value.problem.retryable is False
     assert caught.value.problem.details == {"refusal_ref": to_document(ref)}
     assert source.store.read_verified(ref) == refusal
-    assert _catalog(source.conn) == before
-    assert _objects(source.store) == {**objects, ref.storage_key: refusal}
+    assert catalog_rows(source.conn) == before
+    assert artifact_object_bytes(source.store) == {**objects, ref.storage_key: refusal}
     assert not ledger.parent.exists() and not (source.store.root / "native_reports").exists()
 
 
@@ -799,7 +782,7 @@ def test_magnitude_outcome_paths_refuse_before_result_access(source, monkeypatch
 @pytest.mark.parametrize("no_ledger", [False, True])
 def test_older_registration_schemas_keep_complete_outcome_cycle(source, tmp_path, declared, no_ledger):
     """The outcome schema fence preserves both existing schemas and recording modes."""
-    registered = _call(source, magnitude_training_start=None, final_read=_declaration() if declared else None)
+    registered = call_magnitude_registration(source, magnitude_training_start=None, final_read=final_holdout_declaration() if declared else None)
     assert registered.document["schema_version"] == "native_experiment_registration.v1." + str(int(declared))
     options = {"no_ledger": no_ledger, "ledger_path": tmp_path / "ledger.csv"}
     result = outcomes.publish_native_outcome(source.conn, source.store, registered,
@@ -810,11 +793,11 @@ def test_older_registration_schemas_keep_complete_outcome_cycle(source, tmp_path
     assert options["ledger_path"].exists() is not no_ledger
 
 
-@pytest.mark.parametrize("source", [[_event("2024-01-04")]], indirect=True)
+@pytest.mark.parametrize("source", [[history_event("2024-01-04")]], indirect=True)
 @pytest.mark.parametrize("kind", ["one-anchor", "one-calendar", "missing-evaluation"])
 def test_cross_clock_and_fold_consistency_guards_are_independent(source, monkeypatch, kind):
     """Valid dates/digests and nonempty subsequences cannot mask agreement or coverage."""
-    registered = _call(source)
+    registered = call_magnitude_registration(source)
     doc = registered.document
     plan = doc["magnitude_plan"]
     if kind == "one-anchor":
@@ -830,11 +813,11 @@ def test_cross_clock_and_fold_consistency_guards_are_independent(source, monkeyp
 
 def test_v12_reference_is_invalid_final_request_metadata_before_catalog_access(source, monkeypatch):
     """Only pure request decoding: no authority call, terminal prompt or authorization."""
-    registered = _call(source, magnitude_training_start=None, final_read=_declaration())
+    registered = call_magnitude_registration(source, magnitude_training_start=None, final_read=final_holdout_declaration())
     request = native.prepare_final_holdout_request(source.conn, source.store, registered)
     ref = artifact_reference(registered.binding_json, "native_experiment_registration.v1.2")
     forged = replace(request, registration_ref=ref, variant_id=ref.content_hash)
-    monkeypatch.setattr(source.store, "read_verified", _forbid)
+    monkeypatch.setattr(source.store, "read_verified", support.forbid_access)
     with pytest.raises(ValueError, match="^invalid final-read artifact reference$"):
         request_from_document(to_document(forged))
     assert source.conn.execute("SELECT COUNT(*) FROM final_holdout_authorizations").fetchone()[0] == 0

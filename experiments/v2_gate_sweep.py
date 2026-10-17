@@ -61,12 +61,12 @@ def _prepare(conn, repository, document, *, code_root, as_of_month, scope, event
     if event_ids is not None and (not isinstance(event_ids, (list, tuple))
             or any(not isinstance(key, str) or not key for key in event_ids)):
         raise fail("INVALID_EXPERIMENT_SPEC", "sweep event IDs must be explicit strings")
-    code_root = Path(code_root)
     request = {"variants": [asdict(spec) for spec in specs], "primary_comparison": document["primary_comparison"],
                "scope": scope, "as_of_month": as_of_month,
                "event_ids": None if event_ids is None else sorted(set(event_ids))}
     row = None
     try:
+        code_root = Path(code_root)
         require_current(conn, OWNER, MIGRATIONS)
         row = native.read_native_gate_sweep(conn, specs[0].experiment_id)
         if required and row is None:

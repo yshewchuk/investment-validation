@@ -45,7 +45,6 @@ import dataclasses
 import hashlib
 import json
 import os
-import stat
 from pathlib import Path
 
 from engine.v2.foundation import (
@@ -59,6 +58,7 @@ from engine.v2.foundation import (
 )
 
 from . import contracts, releases
+from .frozen_state_io import BoundedStateReadError, read_bounded_state
 
 # Module imports plus aliases keep this file within the layer fan-out budget (checks/layer_map.py).
 ArtifactMember = contracts.ArtifactMember
@@ -357,28 +357,11 @@ MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 def _read_bounded_regular(path: Path, limit: int) -> bytes:
     """Read at most ``limit`` bytes from a regular file, refusing symlinks and oversize input."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        return read_bounded_state(path, limit, no_follow=True)
     except FileNotFoundError:
         raise
-    except OSError as exc:
-        raise ValueError("staged manifest is not a bounded regular file") from exc
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ValueError("staged manifest is not a bounded regular file")
-        chunks: list[bytes] = []
-        total = 0
-        while total <= limit:
-            chunk = os.read(fd, min(limit + 1 - total, 1024 * 1024))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-        data = b"".join(chunks)
-    finally:
-        os.close(fd)
-    if len(data) > limit:
-        raise ValueError("staged manifest is not a bounded regular file")
-    return data
+    except (BoundedStateReadError, OSError):
+        raise ValueError("staged manifest is not a bounded regular file") from None
 
 
 def _read_manifest(root: Path, release_id: str) -> StagedManifest | None:

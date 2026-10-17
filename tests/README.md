@@ -113,6 +113,12 @@ those files alone on a quieter box. `TEST_POLICY` caps every profile at
 256 MiB, so a memory `RESOURCE WAIT` means MemAvailable was below about
 0.75 GiB for a whole minute.
 
+Timeout stderr lookup and post-signal growth polling use the Service's artifact
+root, even when the catalog is elsewhere. The tail still reads only the latest
+4096 bytes and redacts paths, source lines and messages; unreadable diagnostics
+remain best-effort failures. Rootless test doubles retain the colocated-catalog
+convention. Regression coverage lives in `tests/v2/ops/test_timeout_diagnostic_root.py`.
+
 ### Sharing the box: `bounded_run` test slots and the heavy reservation
 
 Every `tools/bounded_run.py` run (so every `oc_check.py` and `land.py` test
@@ -181,7 +187,7 @@ and an empty result skips the shard). `tests/v2/integration/test_ci_shards.py` c
 that every test file is in exactly one shard and that no pattern is dead or shadowed.
 The required check `test` is an aggregator job that fails unless the plan job and
 every shard job succeeded. To rebalance, move a pattern between shards; keep each
-shard under about 10 minutes of wall time.
+shard under about 15 minutes of pytest wall time on CI.
 
 ### PR test selection
 

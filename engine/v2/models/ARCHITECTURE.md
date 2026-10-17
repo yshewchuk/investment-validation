@@ -121,6 +121,54 @@ size check. Existing callers omitting the ceiling retain their read contract.
 | Object at/below the ceiling | Existing byte-hash, canonical-hash and typed validation apply |
 | Cache, retry, transaction, partial write | Existing per-loader content-hash cache; no retries or writes; failure returns no partial state |
 
+### Snapshot-pinned D14 monthly datasets
+
+`training.build_d14_dataset` builds only the `implied_t1` and `runup_move`
+monthly inputs from explicit catalog/store/snapshot/receipt identifiers.
+It verifies provenance before calling `d14_dataset.calculate_frame`.
+That public helper checks snapshot identity for direct callers but does not
+certify calendar provenance or attach `training_inputs`. Its bounded-read,
+decision and daily-state helpers are declared in the training README.
+Bounded native Repository scans pin earnings,
+daily state and the stored `feature_panel` history block to one SnapshotRef.
+History is left-joined by ticker/event date; earnings defines decision membership.
+Stored history values and missingness are retained from the historical producer,
+without reconstruction through `scan_panel_row`.
+This is root §5's named compatibility-history exception for these two recipes,
+not a claim of native historical production or source availability/finality.
+Only daily features at the D14 entry and labels at the session-aware exit are
+calculated. The original calendar is read from one explicit committed import
+receipt, verified against the snapshot and object hash, with native projection
+math. The consumed calendar bytes are hash-verified and capped at 16 MiB.
+No mutable calendar file, head resolution or legacy reader is used.
+
+The opt-in `python -m tools.phase5_d14_inputs` CLI has no nightly or ops caller.
+It requires explicit catalog, artifact root, snapshot and import-receipt
+identifiers, delegating to that same public API. The fixed
+2017–2026 event window is the current monthly recipe population, with daily
+history from 2016. Snapshot coverage does not widen that recipe contract.
+The existing preparation, fold planning and label/membership receipts remain
+unchanged. `run_training_job(input_identity=...)` additionally binds the pinned
+source identity in `job.json`: `schema_version`, `snapshot_id`, `receipt_id`,
+`calendar_hash` and `table_versions`. Changed sources refuse resume even if values
+match. Champion jobs, scheduling, source-finality admission, historical panel
+reconstruction, held-out residual pools and serving publication are separate.
+No eligible decisions refuse before history/daily reads, preventing a zero-fold
+success. An absent panel history row stays missing; missing quotes retain legacy as-of
+and positional-lag behavior. Nonpositive prices produce missing move labels.
+
+| Condition | Outcome |
+| --- | --- |
+| Input exceeds table, ticker or calendar-byte bound | `RESULT_LIMIT_EXCEEDED` |
+| Snapshot identity or committed receipt association differs | `IDENTITY_CONFLICT` |
+| Committed receipt has no pinned reference inputs | `SNAPSHOT_NOT_READY` |
+| Explicit snapshot identifier is absent from the catalog | `SNAPSHOT_NOT_FOUND` |
+| Null session or fewer than 14 prior calendar sessions | Event excluded, matching legacy membership |
+| Catalog, required table/calendar, non-null session outside AMC/BMO, role, integer history or decision population invalid | `CONTRACT_MISMATCH` |
+| Calendar object bytes differ from their registered hash/size | `OBJECT_CORRUPT` |
+| CLI output is inside configured data root or input store | argparse exit 2 before reads/writes |
+| CLI receives a typed data/training refusal | stderr refusal detail and exit 2; no traceback |
+
 ### 2.1 Pool release assembly
 
 `checks/phase5_release_assembly.py`, beside the catalog in `checks/phase5_release.py`:
@@ -131,10 +179,21 @@ size check. Existing callers omitting the ceiling retain their read contract.
   `trailing_pnl_cutoff`, `board_analog_matcher`) and `chooser_analog_pool` each
   get the full set of supplied objects (`outputs` holds one or more
   `PoolOutput` per pool member; `chooser` is one or more; object names are
-  unique within a member, and every object carries `cutoff`), replacing that
+  unique within a member, and every non-carried object carries `cutoff`), replacing that
   row's objects wholesale; every other member row is copied unchanged;
   `sources.pool_cutoff` advances to `cutoff` and `sources.carried_from` names
-  the prior release id.
+  the prior release id. A `PoolOutput` may be `carried=True` (default
+  `False`): an object that does not change between monthly refreshes (driver
+  residual pools, which do not grow with new events and change only on a
+  retrain; the chooser row until the planned monthly advance, §2.3, which does not exist yet) is re-supplied unchanged. It carries a
+  caller-supplied `cutoff` (an extended ISO date not after `cutoff`; catalog rows
+  record none, `prior_carry_set` supplies the prior `pool_cutoff`) and must equal an object of the
+  same member in the prior row (name, `content_hash`, `payload_bytes`). Every
+  non-carried object must carry `cutoff` exactly. `prior_carry_set(release_root,
+  prior_release_id) -> (pool_cutoff, tuple[PoolOutput])` returns every prior
+  pool/chooser object as `carried=True`, recorded at the prior `sources.pool_cutoff`
+  (`PRIOR_MISMATCH` on a missing prior or structurally malformed rows, object keys or `pool_cutoff`;
+  wrong-typed object fields are not checked here and refuse later as `POOL_SET_MISMATCH`, or `CHOOSER_MISMATCH` for the chooser).
 - `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
   — verifies the prior staged release, untouched rows and supplied objects on disk,
   re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),
@@ -147,10 +206,10 @@ publish `OSError` to `PUBLICATION_FAILED`).
 | Condition | Code |
 |---|---|
 | Prior release id empty, not a string or unsafe (`/`, `\`, NUL, leading `.`); prior catalog malformed, wrong id, or `deployment_id` differs from its staged release; a pool/chooser row missing, duplicated or not `STAGED`; no extended-ISO `sources.pool_cutoff`; prior manifest, model payload or untouched STAGED row object missing, corrupt, oversize or not a regular file | `PRIOR_MISMATCH` |
-| Outputs do not cover exactly the six pool members; duplicate object name in a member; malformed field or hash | `POOL_SET_MISMATCH` |
-| Chooser empty, not `PoolOutput`, wrong member id, malformed name, hash or `payload_bytes`, or duplicate name | `CHOOSER_MISMATCH` |
-| An object's `cutoff` differs from `cutoff`, or `cutoff` is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` |
-| `cutoff` is not strictly after the prior's | `CUTOFF_NOT_ADVANCED` |
+| Outputs do not cover exactly the six pool members; a carried object absent from the prior row of its member; duplicate object name in a member; malformed field or hash | `POOL_SET_MISMATCH` |
+| A carried chooser object absent from the prior chooser row; chooser empty, not `PoolOutput`, wrong member id, malformed name, hash or `payload_bytes`, or duplicate name | `CHOOSER_MISMATCH` |
+| A non-carried object's `cutoff` differs from `cutoff`; a carried object's cutoff is not an extended date or is after `cutoff`; `cutoff` is not an extended `YYYY-MM-DD` date | `CUTOFF_MISMATCH` |
+| `cutoff` is not strictly after the prior's (checked before any per-object `CUTOFF_MISMATCH`) | `CUTOFF_NOT_ADVANCED` |
 | Supplied object missing, unreadable, not a regular file, `payload_bytes` above `MAX_OBJECT_BYTES`, longer than its claim, or bytes do not hash to the claim | `OBJECT_UNVERIFIED` |
 | Candidate id empty, unsafe or equal to the prior's; inventory `release_id` differs from it; candidate catalog or staged manifest exists with different or corrupt content | `ID_CONFLICT` |
 | Inventory missing, malformed, member hashes differ from the prior payloads, incomplete, incompatible with the prior bindings, or its `deployment_id` differs from the prior's | `INVENTORY_MISMATCH` |
@@ -173,6 +232,76 @@ content succeeds and different content refuses `ID_CONFLICT`.
 | R4 transaction | Candidate artifacts are written only under the new candidate id (objects are content-addressed); the only other write is the `deployment/.carry_forward.lock` coordination file |
 | R5 partial failure | Orphaned objects or a staged manifest without a catalog may remain and a retry completes it; no catalog, nothing promoted |
 | R6 idempotency | Identical inputs give identical catalog bytes (no clock in the catalog); same id with different content refuses `ID_CONFLICT` |
+
+### 2.2 `phase5_state_stage` job (nightly pool staging)
+
+An ops job kind (`engine/v2/ops/state_stage.py`; logic in `tools/phase5_state_stage_job.py`
+because the assembly helpers live in `checks/`; `delivery` class, write lease on
+`deployment_pointer`; `state_stage_plan` builds the plan, nothing submits it yet). It
+stages a candidate release; it never touches `DEPLOYED` (`models_promote` is separate).
+
+- Parameters: `release_root` (the store's parent; empty resolves the production root at
+  plan time), `prior_release_id`, `release_id`, `cutoff` (extended ISO), `state_files` and
+  `input_bindings` (file name -> `training` output id, equal key sets; the job framework requires
+  the producing job to have succeeded).
+- The bound files must cover exactly the advancing members `paired_residual_pool`,
+  `board_analog_matcher`, `trailing_pnl_cutoff`. Paired and board objects carry `cutoff` as
+  the last name segment; trailing objects are stamped with `cutoff`.
+- Every other prior pool/chooser object, and every prior object of an advancing member not
+  re-supplied, is carried (`prior_carry_set`), so older causal keys stay selectable and
+  driver pools and the chooser keep their hash until a retrain (the planned monthly refresh, §2.3, is not built) re-supplies them.
+- Output: a re-verified candidate release (never `DEPLOYED`) and `stage_result.json`. The
+  inventory comes from the legacy champion registry under the new id; drift refuses before any write.
+- Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a
+  `ReleaseAssemblyRefusal`, `members`, `member`, `issues`, `months`; plan-time `INVALID_REQUEST`
+  carries `problems`). A trailing object's month may not start after `cutoff`. An unreadable prior
+  refuses "prior release could not be read"; an inventory artifact or registry that is a symlink,
+  not a regular file, or over its size cap refuses "release inventory could not be built". One attempt only.
+
+| Rule | Behaviour |
+|---|---|
+| R1 verified input | Bound files are bounded regular files, re-classified by schema and member (self-consistency only: the loader hashes the bytes it read, no recorded hash is compared); assembly validates prior, cutoff, objects and inventory; an incomplete or extra member set refuses |
+| R2 cache | None; bound files, prior catalog and inventory are re-read each call |
+| R3 retry | One attempt (`RetryPolicy("none", 1)`); a failed job is not retried |
+| R4 transaction | New objects go to the shared content-addressed store; the staged manifest and catalog exist only under the new id; `stage_result.json` follows the light checks |
+| R5 partial failure | Orphan objects, a staged manifest, or a candidate catalog written before a light-check refusal may remain; no success output, no promotion, the deployed release is unchanged. Inventory drift refuses before any object is written |
+| R6 idempotency | Same inputs give the same catalog; the same `release_id` with different content refuses `ID_CONFLICT` |
+
+### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
+
+Once per calendar month, inside the nightly, the chooser analog pool advances and the objects that change only on a retrain (driver residual pools, and champion/gate models if retrained) are refreshed, covering the month just completed. The run rule is the Trigger paragraph below (user decision 2026-10-16, timing pending D9). One more `Service.tick()` reconcile (same shape as `_reconcile_computed_moves_refresh` and the planned `_reconcile_pool_nightly_refresh`, #192 slice 4; never a `GRAPH`/`_DAG_STAGES` node) submits it through `phase5_state_stage` (§2.2; no submitter yet). §2.2 accepts exactly the three advancing members and carries the rest; the monthly path also needs supplied driver pools and the chooser, a slice 1 change to `classify`/`prior_carry_set`. Options and open decisions D1-D9 live in #805 and the PR #822 description, not here.
+
+| Object | Nightly | Monthly |
+|---|---|---|
+| Board analog, paired residual pools, trailing cutoff | Advance to the settled-event cutoff | Unchanged |
+| Three driver residual pools | Carried | Regenerated; content changes only if models retrain (cutoff-independent) |
+| Chooser analog pool and row | Carried | Advances to the exclusive cutoff `M_end + 1 day`: keyed `(pool_id, cutoff)`, rows closed before the cutoff |
+| Champion and gate models | Carried | Retrained if the models decision (D1) says so |
+
+**Trigger.** Completed months are the calendar months before the session's month whose `M_end + 1 day` is strictly after the base release's `retrain_cutoff` (exclusive, so each month is due exactly once); when the base has no `retrain_cutoff`, only the latest completed month is considered. Each with no durable record (retrain or `superseded`) is due; the target `M` is the latest due, with cutoff `M_end` its last calendar day (a data date fixed by `M`). `M` runs on the first nightly where the settled-event cutoff (the nightly's exclusive pool cutoff) has reached `M_end + 1 day`, so every `M_end` event is settled (pending D9: the user's wording was "first run after month end"), the session's required graph and nightly pool refresh succeeded, and no heavy job runs. Older due months get a durable `superseded:{M1}` marker naming `M`, once (earlier due months, a bounded set).
+
+**Idempotency.** Job key `retrain:{M}`; a key in any state is never resubmitted and a failed key is terminal for `M` (operator recovery, open gap #154). State is derived from durable job and release state each tick. Stage key `retrain-stage:{M}:{n}` (n = attempt, 1 or 2); candidate release id `retrain-{M}-{n}`, recomputable after a crash. The stage job reads `prior_release_id` at stage time (a slice 1 change; today fixed at submit), carries the nightly-advanced members from that base and records it as `sources.carried_from`; the promote guard checks that recorded id. Later steps `retrain-accept|check|promote:{candidate_release_id}`; the reconcile submits the next step in order only when no key exists for it, and a failed key is never resubmitted. The one exception is not a resubmission: when the promote job fails `ConcurrentPromote` (branch key `details.exception_class`), the reconcile starts a new candidate `retrain-{M}-2` with new step keys; that failed promote key stays failed. A `ConcurrentPromote` on attempt 2 is terminal for `M` (no third candidate). Every other failure is terminal for `M`.
+
+**Retrained set and causality.** Inputs are the base release, `M_end` and the pinned snapshot; a row filter on event and outcome data dates admits nothing after `M_end` (never `computed_at`) and the retrain reads only the pinned snapshot (inventory source: the stage job's champion-registry read, §2.2, for a pool-only release; the retrain job's staged release for a model-changing one). One boundary rule for every retrained artifact: the stored cutoff is exclusive, `M_end + 1 day`, and rows dated on or before `M_end` (strictly before the cutoff) are admitted, matching the pool builders' refusal of rows on or after their cutoff (`residual_artifact.py`); `sources.retrain_cutoff` records that exclusive date. Catalog `sources.retrain_cutoff` (one catalog-level ISO date not after `pool_cutoff`, new) names the cutoff of the retrained members; at the member level, retrained members carry it, nightly-advanced members the session cutoff, carried members their prior cutoff. This changes the §2.1 rule that every non-carried object carries the session cutoff exactly (`CUTOFF_MISMATCH`): retrained members instead carry `retrain_cutoff`, which slice 1 implements with the §2.1 text. The first retrain has no prior `retrain_cutoff` and skips this check. The monthly candidate is staged on the stage-time base, which the nightly may already have advanced to the same `pool_cutoff`, so its `pool_cutoff` need not advance: slice 1 changes the §2.1 rule to "`pool_cutoff` or `retrain_cutoff` strictly advances" (else `CUTOFF_NOT_ADVANCED`). A `retrain_cutoff` not past the prior `retrain_cutoff` refuses `VALIDATION_FAILED` with `details.code` `CUTOFF_NOT_ADVANCED`, as in §2.2. Whether production training excludes experiment holdouts is open (D7); until decided, none is applied.
+
+**Promotion.** A pool-only release follows the nightly path: stage, light checks, release-scope `phase5_acceptance` (sole writer of the staging-success record, §7.2), auto-promote with `expected_previous_release_id`. A model-changing candidate (champion or gate bindings differ from the base's, compared binding by binding; the semantic hash alone cannot say, since it includes `release_id`) also needs a non-regression check on month `C = M − 6` (`C_start` its first calendar day), the newest month outside the rolling experiment holdout for as-of `M` (`ExperimentHoldouts`). A check candidate and a check incumbent, each refit at `C_start − 1` with every pool and the trailing cutoff pinned to that date, score the same events of `C`, excluding "random" and "ambiguous" holdout events. The check measures rank and paired-difference consistency, not a magnitude cutoff. Its receipt binds the check candidate, release candidate and incumbent hashes; promotion requires a receipt naming the release hash being promoted plus the staging-success record. A failure before the pointer swap leaves the candidate staged (or, if staging itself failed, possibly a manifest or catalog without success, per §2.2), the incumbent deployed and a failure receipt. The existing promotion boundary still applies: `DEPLOYED` commits before the history append and the job output is written after `promote` returns, so a failure in either leaves the candidate live with the recorded failure, handled by the §7.2 history rules. Retrained model bindings enter through a new payload set: the retrain job stages the retrained models with `stage_release`, and the stage step uses that release as its inventory source; slice 5a extends the `carry_forward_release` inventory-equals-prior check to accept exactly the retrained champion/gate bindings.
+
+**Rollback.** `rollback` undoes one promotion per call (§7.2), and nightly promotions follow the retrain's, so it cannot target the retrain after one night. Designed path: forward-promote a release re-derived from the pre-retrain models; a re-promote with changed model bindings passes the same acceptance and non-regression gate as any model-changing candidate.
+
+**Resource.** A heavy job under the existing exclusive heavy profile (`engine/v2/contracts/operations.py`, `tools/bounded_run.py --heavy`). `bounded_run` blocks and has no job deadline, so the reconcile needs a non-blocking probe (candidate: `engine/v2/ops/scheduler.py` `_claim_row`/`HEAVY_SLOT_HELD`) and the jobs an enforced deadline (`deadline_at` exists, unenforced); both are slice deliverables sized from a measured peak-memory and wall-time receipt. A retrain still running at the next session delays that session's heavy steps, including scoring.
+
+**Parity.** Parity reports do not record the release id today (`native_parity_report.py` stamps `as_of` and `generated_at`); slice 7 records it and marks the first session under a new release `release_changed`; tolerances are unchanged.
+
+| R | Retrain job | Stage | Accept / check / promote |
+|---|---|---|---|
+| R1 verified input | Base release, `M_end` and training inputs verified before compute; a cutoff past the settled-event cutoff refuses `VALIDATION_FAILED` | Output hashes, `retrain_cutoff`, member ids and base payload hashes re-verified; drift refuses (`VALIDATION_FAILED`, `details.code` `PRIOR_MISMATCH`) before any write | Receipt and staging-success hash match the candidate; base equals the guard |
+| R2 cache | None; durable state each tick | None | Pointer read per swap |
+| R3 retry | Failed is terminal; the next due month supersedes | At most two keys per `M`; the second only after `ConcurrentPromote` | A failed key is terminal for that candidate; no alternate target |
+| R4 transaction | Outputs private to the attempt and hashed after a clean exit; a model-changing retrain also `stage_release`s its models (shared content-addressed objects plus manifest) | New candidate id; `DEPLOYED` untouched | Existing atomic pointer swap |
+| R5 partial failure | Orphans and, for a model-changing retrain, a staged retrained release may remain, never promoted | Orphans stay unused | Refusal leaves pointer and history unchanged |
+| R6 idempotency | One `retrain:{M}` key per month; step keys are per candidate (at most two candidates) | Same inputs give the same catalog; a reused id with other content refuses | Re-promoting the live id is a no-op |
+
+Split list (code, in order; estimates in #822): 1 catalog `retrain_cutoff`, stage input contract, stage-time base and the §2.1 chooser line; 2 due-month decision and keys; 3 pool/chooser regeneration job with deadline; 4 monthly sidecar with admission probe; 5a champion/gate retrain kind and check fits; 5b acceptance wiring and non-regression check; 6 promotion and forward rollback; 7 parity release-id recording and marker.
 
 ## 3. Inputs
 
@@ -346,7 +475,7 @@ still uses `Tier4ServingFoldAdapter` through the existing inference executors.
 
 - **`current_release_inventory` (`inventory.py`)**: the champion registry
   (`engine.models.registry`) and the real files under `data/models/*` —
-  content hashes, never values.
+  content hashes, never values; a symlink, non-regular or oversize file raises `ValueError`.
 - **`deployment.stage_release`**: a caller-built `ModelRelease` +
   `ModelReleaseInventory` (already validated against each other by every
   training/preparation tool) plus a `{content_hash: bytes}` payload map for

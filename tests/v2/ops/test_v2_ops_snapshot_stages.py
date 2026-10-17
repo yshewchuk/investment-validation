@@ -1136,6 +1136,10 @@ def test_planning_refusals(case):
         "tickers": ["AAA", "BBB"], "years": [2020, 2021]}
     with pytest.raises(OpsError):
         direct_scope_for(["AAA|2020-01-15"])
+    for bad_key in ("AAA|S1|20261014", "AAA|S1|2026-W42-3"):
+        with pytest.raises(OpsError) as bad:
+            direct_scope_for([bad_key])
+        assert bad.value.code == "INVALID_REQUEST"
     with pytest.raises(OpsError):
         pin_snapshot_inputs(case.conn, case.store, "shadow", tickers=(), year_start=2020,
                             year_end=2021, expected_population=(), clock=case.clock,

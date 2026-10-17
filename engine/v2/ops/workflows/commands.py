@@ -23,6 +23,7 @@ from engine.v2.ops.nightly import (
     refuse_unfittable_memory_plan,
 )
 from engine.v2.ops.plans import nightly_plan, request_from_plan, save_plan
+from engine.v2.ops.snapshot_planning import require_valid_population_keys
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit, submit_graph
 
@@ -128,6 +129,7 @@ def _read_expected_population(args):
     if keys is not None:
         if not all(isinstance(v, str) for v in keys):
             raise fail("INVALID_REQUEST", "expected population must be a JSON list of strings")
+        require_valid_population_keys(keys)
         return tuple(keys)
     if not args.expected_population:
         return ()
@@ -141,6 +143,7 @@ def _read_expected_population(args):
                    "oversize, or not valid JSON") from None
     if not isinstance(payload, list) or not all(isinstance(v, str) for v in payload):
         raise fail("INVALID_REQUEST", "expected population must be a JSON list of strings")
+    require_valid_population_keys(payload)
     return tuple(payload)
 
 
@@ -308,6 +311,7 @@ def _submit_nightly(plan, conn, store, policy, clock, host_policy):
     # plan gets a subset effect scope even when the watchlist equals
     # the context (nightly.effect_scope_for).
     full_universe = context_tickers if plan.get("full_run") else None
+    require_valid_population_keys(plan.get("expected_population", ()))
     requests = build_legacy_job_requests(
         plan, tickers=tuple(plan.get("tickers", ())),
         context_tickers=context_tickers,

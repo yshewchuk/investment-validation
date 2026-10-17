@@ -13,7 +13,9 @@ every other path, including undeclared paths under `data/`, uses ordinary
 No package-wide runner/schema exists; invoke each CLI directly, e.g. `python3 checks/repo_hygiene.py`.
 Some checks also expose callable report functions.
 `phase5_release_assembly` (`derive_catalog`, `carry_forward_release`) assembles a carried-forward
-release catalog; its contract and refusal codes are `engine/v2/models/ARCHITECTURE.md` §2.1.
+release catalog (plus `prior_carry_set`, which lists a prior release's objects as carried);
+its contract and refusal codes are `engine/v2/models/ARCHITECTURE.md` §2.1. The ops job
+`phase5_state_stage` reaches it through `tools/phase5_state_stage_job.py` (§2.2).
 
 `phase5_release.write_object` returns hash/path in the existing flat deployment layout after exact bounded no-follow byte verification.
 New objects are durable before return; create-only publication never overwrites or repairs incumbents.

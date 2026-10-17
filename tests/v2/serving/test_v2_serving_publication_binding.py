@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -24,8 +23,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from engine.v2.contracts import Problem, PreviewRelease  # noqa: E402
-from engine.v2.data.repository import Repository  # noqa: E402
+from engine.v2.contracts import Problem  # noqa: E402
 from engine.v2.foundation import ArtifactStore, content_hash, to_document  # noqa: E402
 from engine.v2.ops.effects_graph import publication_effect  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
@@ -46,16 +44,12 @@ from tests.v2.ops.test_v2_ops_effects_graph import _publish_raw as _ops_publish_
 from tests.v2.ops.test_v2_ops_effects_graph import _seed_decisions  # noqa: E402
 from tests.v2.ops.test_v2_ops_effects_graph import _submit_and_claim  # noqa: E402
 from tests.v2.ops.test_v2_ops_effects_graph import _succeed_parent  # noqa: E402
+from tests.v2.serving.release_support import build_releases  # noqa: E402
 from tests.v2.serving.test_v2_serving_api import _FORBIDDEN_MODULE_SUBSTRINGS, _get, _start, _stop  # noqa: E402
 from tests.test_v2_serving_projections import (  # noqa: E402
-    _bundle,
-    _compact,
-    _event_row,
-    _events_snapshot,
     _preview_input,
     _row,
     _score_doc,
-    _serving,
 )
 
 TOKEN = "test-token-binding-7a1f"
@@ -64,26 +58,6 @@ TOKEN = "test-token-binding-7a1f"
 # synthetic serving candidates: two distinct releases from one shared
 # Phase-2 snapshot (AAA/2024-01-05, BBB/2024-01-05)
 # --------------------------------------------------------------------------
-
-
-def _releases(tmp_path):
-    (tmp_path / "phase2").mkdir()
-    conn, store, snap = _events_snapshot(tmp_path / "phase2", [
-        _event_row("e1", "AAA", datetime(2024, 1, 5)),
-        _event_row("e2", "BBB", datetime(2024, 1, 5))])
-    repo = Repository(conn, store)
-    serving_conn, serving_store = _serving(tmp_path)
-    row_a, row_b = _row(ticker="AAA"), _row(ticker="BBB")
-    release_a = projections.build_candidate(
-        _preview_input(), _score_doc(rows=[row_a]), _bundle(_compact(row_a)),
-        repository=repo, snapshot_ref=snap, store=serving_store, conn=serving_conn,
-        requested_as_of="2024-01-04", resolved_as_of="2024-01-04")
-    release_b = projections.build_candidate(
-        _preview_input(), _score_doc(rows=[row_b]), _bundle(_compact(row_b)),
-        repository=repo, snapshot_ref=snap, store=serving_store, conn=serving_conn,
-        requested_as_of="2024-01-05", resolved_as_of="2024-01-05")
-    assert isinstance(release_a, PreviewRelease) and isinstance(release_b, PreviewRelease)
-    return repo, snap, serving_conn, serving_store, release_a, release_b
 
 
 def _app(tmp_path, ops_target):
@@ -148,7 +122,7 @@ def _stage_and_publish(conn, store, claim, release_id, occurrence, files, *, exp
 
 
 def test_candidate_publish_api_current_names_that_projection_and_detail_reads_work(tmp_path):
-    repo, snap, serving_conn, serving_store, release_a, release_b = _releases(tmp_path)
+    repo, snap, serving_conn, serving_store, release_a, release_b = build_releases(tmp_path)
     conn, clock, supervisor = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "opsstore")
     target = tmp_path / "opsrelease"
@@ -198,7 +172,7 @@ def test_findings_failure_never_reaches_publication_and_current_stays_unchanged(
     means there is no release_id to bind at all, so the publish step this
     task adds is simply never invoked. This proves the previously-published
     pointer is untouched by that refusal."""
-    repo, snap, serving_conn, serving_store, release_a, release_b = _releases(tmp_path)
+    repo, snap, serving_conn, serving_store, release_a, release_b = build_releases(tmp_path)
     conn, clock, supervisor = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "opsstore")
     target = tmp_path / "opsrelease"
@@ -235,7 +209,7 @@ def test_findings_failure_never_reaches_publication_and_current_stays_unchanged(
 
 
 def test_tampered_binding_document_is_a_typed_refusal_from_the_resolver(tmp_path):
-    repo, snap, serving_conn, serving_store, release_a, release_b = _releases(tmp_path)
+    repo, snap, serving_conn, serving_store, release_a, release_b = build_releases(tmp_path)
     conn, clock, supervisor = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "opsstore")
     target = tmp_path / "opsrelease"
@@ -265,7 +239,7 @@ def test_a_changed_index_is_a_typed_refusal_from_the_resolver(tmp_path):
     the serving index row it was bound to (never through ``build_candidate``
     -- simulating disk corruption or a hand-edit), fails the SAME check:
     ``serving_index_identity`` no longer matches the live row."""
-    repo, snap, serving_conn, serving_store, release_a, release_b = _releases(tmp_path)
+    repo, snap, serving_conn, serving_store, release_a, release_b = build_releases(tmp_path)
     conn, clock, supervisor = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "opsstore")
     target = tmp_path / "opsrelease"
@@ -299,7 +273,7 @@ def test_a_changed_index_is_a_typed_refusal_from_the_resolver(tmp_path):
 
 
 def test_crash_before_publish_serves_previous_release_then_rerun_publishes_cleanly(tmp_path):
-    repo, snap, serving_conn, serving_store, release_a, release_b = _releases(tmp_path)
+    repo, snap, serving_conn, serving_store, release_a, release_b = build_releases(tmp_path)
     conn, clock, supervisor = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "opsstore")
     target = tmp_path / "opsrelease"
@@ -312,7 +286,7 @@ def test_crash_before_publish_serves_previous_release_then_rerun_publishes_clean
                            expected_current=None, target=target, scope=scope, clock=clock)
 
         # release_b's candidate is already fully committed in serving.sqlite
-        # (build_candidate succeeded in `_releases` above) -- but the
+        # (build_candidate succeeded in `build_releases` above) -- but the
         # operator "crashes" here, before ever building/staging its binding
         # or publishing it. The API must keep serving release_a untouched.
         server, thread, base = _start(_app(tmp_path, target))
@@ -353,7 +327,7 @@ def test_crash_before_publish_serves_previous_release_then_rerun_publishes_clean
 
 
 def test_second_generation_publish_then_rollback_api_current_follows_each_step(tmp_path):
-    repo, snap, serving_conn, serving_store, release_a, release_b = _releases(tmp_path)
+    repo, snap, serving_conn, serving_store, release_a, release_b = build_releases(tmp_path)
     conn, clock, supervisor = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "opsstore")
     target = tmp_path / "opsrelease"
@@ -415,7 +389,7 @@ def test_gate_receipts_bound_to_generation_1_cannot_publish_generation_2s_candid
     files, including release_a's projection_binding.json) do not validate
     for generation 2's DIFFERENT release id/files (release_b's), so
     ``stage_release`` reports it ineligible and ``publish_local`` refuses."""
-    repo, snap, serving_conn, serving_store, release_a, release_b = _releases(tmp_path)
+    repo, snap, serving_conn, serving_store, release_a, release_b = build_releases(tmp_path)
     conn, clock, supervisor = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "opsstore")
     target = tmp_path / "opsrelease"
@@ -449,7 +423,7 @@ def test_gate_receipts_bound_to_generation_1_cannot_publish_generation_2s_candid
 
 
 def test_publication_effect_binds_the_operator_supplied_projection_and_publishes(tmp_path):
-    repo, snap, serving_conn, serving_store, release_a, release_b = _releases(tmp_path)
+    repo, snap, serving_conn, serving_store, release_a, release_b = build_releases(tmp_path)
     conn, clock, supervisor, store, root = _ops_open(tmp_path)
     try:
         scope, session = "shadow", "2026-09-14"
@@ -555,7 +529,7 @@ print(json.dumps({{"after_create": after_create, "after_request": after_request}
 def test_api_process_never_imports_ops_even_resolving_a_real_bound_pointer(tmp_path):
     import subprocess
 
-    repo, snap, serving_conn, serving_store, release_a, release_b = _releases(tmp_path)
+    repo, snap, serving_conn, serving_store, release_a, release_b = build_releases(tmp_path)
     conn, clock, supervisor = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "opsstore")
     target = tmp_path / "opsrelease"

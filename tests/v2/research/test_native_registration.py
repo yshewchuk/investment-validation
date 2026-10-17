@@ -39,10 +39,15 @@ from tests.data_scan_support import (
     publish_and_inspect,
 )
 from tests.ops_support import FakeClock
-from tests.v2.research.test_prediction_inputs import MONTH, TrackingRepository, _commit, _event
+from tests.v2.research.magnitude_trial_support import TrackingRepository, catalog_rows
+from tests.v2.research.test_prediction_inputs import (
+    MONTH,
+    commit_prediction_inputs,
+    prediction_event,
+)
 
 
-def _spec(**changes):
+def native_spec(**changes):
     """Resolve a minimal synthetic single-arm specification with explicit overrides."""
     return experiment_spec_from_document({
         "experiment_id": "synthetic-native", "hypothesis": "synthetic preregistration",
@@ -81,9 +86,9 @@ class Source:
 
 def _source(tmp_path, *, include_targets=True):
     """Commit real synthetic Parquet and a source-only runner with a local import."""
-    events = [_event("2024-05-01"), _event("2024-05-02"),
-              _event("2024-05-03", random=True), _event("2024-12-03")]
-    conn, _, snapshot = _commit(tmp_path, events, include_targets=include_targets)
+    events = [prediction_event("2024-05-01"), prediction_event("2024-05-02"),
+              prediction_event("2024-05-03", random=True), prediction_event("2024-12-03")]
+    conn, _, snapshot = commit_prediction_inputs(tmp_path, events, include_targets=include_targets)
     store = ArtifactStore(tmp_path / "store")
     root = tmp_path / "code"
     package = root / "experiment"
@@ -105,39 +110,31 @@ def source(tmp_path):
     value.conn.close()
 
 
-def _call(source, *, admit=False, spec=None, **kwargs):
+def call_native_registration(source, *, admit=False, spec=None, **kwargs):
     """Invoke either public entrypoint with the same explicit source context."""
     method = native.require_native_registration if admit else native.register_native
-    return method(source.conn, source.store, source.repository, spec or _spec(),
+    return method(source.conn, source.store, source.repository, spec or native_spec(),
                   **{"code_root": source.code_root, "as_of_month": MONTH, **kwargs})
 
 
-def _catalog(conn):
-    """Snapshot every catalog row so refusals cannot silently change other tables."""
-    tables = [row[0] for row in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
-    return {table: sorted(tuple(row) for row in conn.execute(f'SELECT * FROM "{table}"'))
-            for table in tables}
-
-
-def _objects(store):
+def artifact_object_bytes(store):
     """Capture durable object bytes without including transient staging files."""
     return {str(path.relative_to(store.root)): path.read_bytes()
             for path in (store.root / "objects").rglob("*") if path.is_file()}
 
 
-def _evidence(source, run_id):
+def native_registration_evidence(source, run_id):
     """Read the native reference from the existing experiment-run evidence slot."""
     return json.loads(source.conn.execute(
         "SELECT evidence_json FROM experiment_runs WHERE run_id=?", (run_id,)).fetchone()[0])
 
 
-def _ref(source, registration):
+def native_registration_ref(source, registration):
     """Decode the registered reference through the shared typed contract."""
-    return from_document(ArtifactRef, _evidence(source, registration.run_id)["native_registration"])
+    return from_document(ArtifactRef, native_registration_evidence(source, registration.run_id)["native_registration"])
 
 
-def _new_snapshot(source, scope="alternate"):
+def new_native_snapshot(source, scope="alternate"):
     """Commit another exact snapshot with identical events and no target table."""
     contract = contract_for("earnings_events")
     records = [publish_and_inspect(source.store, contract, contract_ref_for(contract),
@@ -147,28 +144,28 @@ def _new_snapshot(source, scope="alternate"):
                          receipt_id=scope, attempt_id=scope, store=source.store)
 
 
-def _advance_head(source, snapshot):
+def advance_snapshot_head(source, snapshot):
     """Advance only the current scope head, leaving all pinned snapshots intact."""
     source.conn.execute("UPDATE data_snapshot_heads SET snapshot_id=?, generation=generation+1 "
                         "WHERE scope='shadow'", (snapshot.snapshot_id,))
 
 
-def _forbid(*_args, **_kwargs):
+def forbid_native_effects(*_args, **_kwargs):
     """Fail immediately if a read-only path attempts a forbidden effect."""
     raise AssertionError("unexpected write or outcome execution")
 
 
 def test_register_binds_complete_plan_and_only_eligible_metadata(source):
     """Bind the complete declared identity while excluding both holdout populations."""
-    before = _catalog(source.conn)
-    result = _call(source)
+    before = catalog_rows(source.conn)
+    result = call_native_registration(source)
     document = result.document
     assert result.run_id.startswith("native_")
     assert result.binding_json == canonical_json(document).encode("utf-8")
     assert result.variant_id == content_hash(document)
     assert document["schema_version"] == "native_experiment_registration.v1.0"
-    assert document["execution_plan"] == resolve_experiment_plan(_spec()).as_document()
-    assert document["spec_hash"] == _spec().spec_hash
+    assert document["execution_plan"] == resolve_experiment_plan(native_spec()).as_document()
+    assert document["spec_hash"] == native_spec().spec_hash
     assert document["snapshot"] == to_document(source.snapshot)
     assert document["scope"] == "shadow"
     assert document["event_ids"] == sorted(event["event_id"] for event in source.events[:2])
@@ -187,27 +184,27 @@ def test_register_binds_complete_plan_and_only_eligible_metadata(source):
     run = source.conn.execute("SELECT * FROM experiment_runs").fetchone()
     hypothesis = source.conn.execute("SELECT * FROM hypotheses").fetchone()
     assert run["run_id"] == hypothesis["run_id"] == result.run_id
-    assert run["spec_hash"] == hypothesis["spec_hash"] == _spec().spec_hash
+    assert run["spec_hash"] == hypothesis["spec_hash"] == native_spec().spec_hash
     assert run["input_hash"] == hypothesis["input_hash"] == result.variant_id
     assert run["mode"] == "primary"
-    assert hypothesis["payload_hash"] == content_hash({"spec": _spec().spec_hash,
+    assert hypothesis["payload_hash"] == content_hash({"spec": native_spec().spec_hash,
                                                         "input": result.variant_id})
-    evidence = _evidence(source, result.run_id)
+    evidence = native_registration_evidence(source, result.run_id)
     assert evidence["variant_id"] == result.variant_id
     assert evidence["planned_variants"] == 1
     assert "variants_tried" not in evidence
-    ref = _ref(source, result)
+    ref = native_registration_ref(source, result)
     assert ref.schema_ref == document["schema_version"]
     assert source.store.read_verified(ref) == result.binding_json
     assert source.store.verify(ref).stat().st_mode & 0o222 == 0
-    after = _catalog(source.conn)
+    after = catalog_rows(source.conn)
     assert {key: value for key, value in after.items() if key not in {"hypotheses", "experiment_runs"}} == {
         key: value for key, value in before.items() if key not in {"hypotheses", "experiment_runs"}}
 
 
 def test_result_is_frozen_and_document_copies_cannot_change_identity(source):
     """Neither dataclass assignment nor nested document edits may alter admitted bytes."""
-    result = _call(source)
+    result = call_native_registration(source)
     original = result.binding_json
     changed = result.document
     changed["execution_plan"]["economic_params"]["fill"] = 0
@@ -218,19 +215,19 @@ def test_result_is_frozen_and_document_copies_cannot_change_identity(source):
         result.run_id = "changed"
     with pytest.raises(FrozenInstanceError):
         result.binding_json = b"{}"
-    assert _call(source, admit=True) == result
+    assert call_native_registration(source, admit=True) == result
 
 
 def test_repeated_registration_and_admission_are_read_only(source, monkeypatch):
     """Canonical population order permits identical retries with all writes disabled."""
-    result = _call(source, event_ids=list(reversed([e["event_id"] for e in source.events[:2]])))
-    before, objects, changes = _catalog(source.conn), _objects(source.store), source.conn.total_changes
-    monkeypatch.setattr(source.store, "publish_bytes", _forbid)
+    result = call_native_registration(source, event_ids=list(reversed([e["event_id"] for e in source.events[:2]])))
+    before, objects, changes = catalog_rows(source.conn), artifact_object_bytes(source.store), source.conn.total_changes
+    monkeypatch.setattr(source.store, "publish_bytes", forbid_native_effects)
     source.conn.execute("PRAGMA query_only=ON")
-    assert _call(source) == result
-    assert _call(source, admit=True) == result
-    assert _catalog(source.conn) == before
-    assert _objects(source.store) == objects
+    assert call_native_registration(source) == result
+    assert call_native_registration(source, admit=True) == result
+    assert catalog_rows(source.conn) == before
+    assert artifact_object_bytes(source.store) == objects
     assert source.conn.total_changes == changes
     assert source.repository.pins == ["shadow"] * 3
 
@@ -257,9 +254,9 @@ def test_registration_and_admission_never_read_old_files_or_fit(source, monkeypa
         for owner, original in zip((builtins, io, os), originals):
             patch.setattr(owner, "open", guarded(original))
         from sklearn.linear_model import LogisticRegression
-        patch.setattr(LogisticRegression, "fit", _forbid)
-        result = _call(source)
-        assert _call(source, admit=True) == result
+        patch.setattr(LogisticRegression, "fit", forbid_native_effects)
+        result = call_native_registration(source)
+        assert call_native_registration(source, admit=True) == result
     assert {path: path.read_bytes() for path in forbidden} == bytes_before
     assert list(source.code_root.rglob("REPORT.md")) == [forbidden[1]]
 
@@ -269,8 +266,8 @@ def test_target_table_is_not_a_preregistration_prerequisite(tmp_path):
     source = _source(tmp_path, include_targets=False)
     try:
         assert "computed_moves" not in source.snapshot.table_versions
-        registered = _call(source)
-        assert _call(source, admit=True) == registered
+        registered = call_native_registration(source)
+        assert call_native_registration(source, admit=True) == registered
         assert {name for name, _ in source.repository.scans} == {"earnings_events"}
     finally:
         source.conn.close()
@@ -280,24 +277,24 @@ def test_target_table_is_not_a_preregistration_prerequisite(tmp_path):
     {"primary_arm_id": "another-arm", "arms": ["another-arm"]}])
 def test_distinct_experiment_or_primary_arm_has_a_distinct_registration(source, changes):
     """The stable key separates experiment IDs and primary-arm identities."""
-    first = _call(source)
-    second = _call(source, spec=_spec(**changes))
+    first = call_native_registration(source)
+    second = call_native_registration(source, spec=native_spec(**changes))
     assert first.run_id != second.run_id
     assert first.variant_id != second.variant_id
     assert source.conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 2
-    assert _call(source, admit=True) == first
-    assert _call(source, admit=True, spec=_spec(**changes)) == second
+    assert call_native_registration(source, admit=True) == first
+    assert call_native_registration(source, admit=True, spec=native_spec(**changes)) == second
 
 
 def test_missing_registration_is_read_only_refusal(source, monkeypatch):
     """Admission cannot turn an absent registration into an implicit reservation."""
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     source.conn.execute("PRAGMA query_only=ON")
-    monkeypatch.setattr(source.store, "publish_bytes", _forbid)
+    monkeypatch.setattr(source.store, "publish_bytes", forbid_native_effects)
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
-        _call(source, admit=True)
-    assert _catalog(source.conn) == before
-    assert _objects(source.store) == objects
+        call_native_registration(source, admit=True)
+    assert catalog_rows(source.conn) == before
+    assert artifact_object_bytes(source.store) == objects
 
 
 @pytest.mark.parametrize("changes", [
@@ -310,34 +307,34 @@ def test_invalid_spec_refuses_before_head_or_files(source, changes):
     """Invalid plans and external inputs cannot reach snapshot pinning or scans."""
     if changes.get("runner") == "<absolute-runner>":
         changes = {"runner": str(source.code_root / "run.py")}
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
-        _call(source, spec=_spec(**changes))
+        call_native_registration(source, spec=native_spec(**changes))
     assert source.repository.pins == source.repository.scans == []
-    assert _catalog(source.conn) == before
-    assert _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before
+    assert artifact_object_bytes(source.store) == objects
 
 
 def test_missing_python_source_has_no_registration_effect(source):
     """Missing runner bytes refuse before reading canonical metadata or publishing."""
     (source.code_root / "experiment/run.py").unlink()
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
-        _call(source)
+        call_native_registration(source)
     assert source.repository.pins == source.repository.scans == []
-    assert _catalog(source.conn) == before
-    assert _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before
+    assert artifact_object_bytes(source.store) == objects
 
 
 def test_missing_scope_head_refuses_without_fallback_or_scan(source):
     """An unresolved scope must never fall back to another committed head."""
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(OpsError, match="SNAPSHOT_UNRESOLVED"):
-        _call(source, scope="never-committed")
+        call_native_registration(source, scope="never-committed")
     assert source.repository.pins == ["never-committed"]
     assert source.repository.scans == []
-    assert _catalog(source.conn) == before
-    assert _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before
+    assert artifact_object_bytes(source.store) == objects
 
 
 @pytest.mark.parametrize("kind", ["random", "rolling", "unknown", "empty", "invalid-month"])
@@ -350,14 +347,14 @@ def test_holdout_refuses_before_any_target_access_or_write(source, kind, admit):
     }[kind]}
     if kind == "invalid-month":
         kwargs["as_of_month"] = "2025-13"
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
-        _call(source, admit=admit, **kwargs)
+        call_native_registration(source, admit=admit, **kwargs)
     assert all(table == "earnings_events" for table, _ in source.repository.scans)
     if kind == "invalid-month":
         assert source.repository.scans == []
-    assert _catalog(source.conn) == before
-    assert _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before
+    assert artifact_object_bytes(source.store) == objects
 
 
 @pytest.mark.parametrize("dimension", [
@@ -367,18 +364,18 @@ def test_holdout_refuses_before_any_target_access_or_write(source, kind, admit):
 ])
 def test_every_binding_dimension_conflicts_without_changing_registered_evidence(source, monkeypatch, dimension):
     """Every identity-bearing dimension is immutable under the same registration key."""
-    original = _call(source)
-    spec, kwargs = _spec(), {}
+    original = call_native_registration(source)
+    spec, kwargs = native_spec(), {}
     changes = {"hypothesis": {"hypothesis": "changed hypothesis"}, "seed": {"seed": 8},
                "folds": {"folds": ["2023", "2024"]},
                "economics": {"economic_params": {"fill": 0.7}},
                "exit": {"economic_params": {"fill": 0.5, "exit": {"kind": "fixed_day", "trading_days": 2}}},
                "price_source": {"price_source": "another-canonical-source"}}
     if dimension in changes:
-        spec = _spec(**changes[dimension])
+        spec = native_spec(**changes[dimension])
     elif dimension == "runner":
         (source.code_root / "experiment/other.py").write_text("# Another runner.\n")
-        spec = _spec(runner="experiment/other.py")
+        spec = native_spec(runner="experiment/other.py")
     elif dimension in {"runner-bytes", "imported-helper"}:
         leaf = "run.py" if dimension == "runner-bytes" else "helper.py"
         path = source.code_root / "experiment" / leaf
@@ -388,7 +385,7 @@ def test_every_binding_dimension_conflicts_without_changing_registered_evidence(
         environment["libraries"]["numpy"] = "different-version"
         monkeypatch.setattr(native, "environment_identity", lambda _threads: environment)
     elif dimension == "snapshot":
-        _advance_head(source, _new_snapshot(source))
+        advance_snapshot_head(source, new_native_snapshot(source))
     elif dimension == "scope":
         source.conn.execute("INSERT INTO data_snapshot_heads SELECT 'other', snapshot_id, 1, "
                             "updated_at, update_receipt_ref FROM data_snapshot_heads WHERE scope='shadow'")
@@ -400,19 +397,19 @@ def test_every_binding_dimension_conflicts_without_changing_registered_evidence(
     else:
         monkeypatch.setattr(ExperimentHoldouts, "random_version" if dimension == "random-version"
                             else "rolling_version", "changed-membership.v2")
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     for admit in (False, True):
         with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT") as caught:
-            _call(source, admit=admit, spec=spec, **kwargs)
+            call_native_registration(source, admit=admit, spec=spec, **kwargs)
         assert not caught.value.problem.retryable
-        assert _catalog(source.conn) == before
-        assert _objects(source.store) == objects
-        assert source.store.read_verified(_ref(source, original)) == original.binding_json
+        assert catalog_rows(source.conn) == before
+        assert artifact_object_bytes(source.store) == objects
+        assert source.store.read_verified(native_registration_ref(source, original)) == original.binding_json
 
 
 def test_current_head_is_pinned_once_even_if_head_moves_during_metadata_read(source, monkeypatch):
     """A concurrent head move cannot retarget an already pinned metadata scan."""
-    newer = _new_snapshot(source)
+    newer = new_native_snapshot(source)
     original_scan = source.repository.scan
     moved = False
 
@@ -420,16 +417,16 @@ def test_current_head_is_pinned_once_even_if_head_moves_during_metadata_read(sou
         nonlocal moved
         if not moved:
             moved = True
-            _advance_head(source, newer)
+            advance_snapshot_head(source, newer)
         yield from original_scan(query, table_name=table_name)
 
     monkeypatch.setattr(source.repository, "scan", move_then_scan)
-    result = _call(source)
+    result = call_native_registration(source)
     assert source.repository.pins == ["shadow"]
     assert result.document["snapshot"] == to_document(source.snapshot)
     assert all(query.snapshot_id == source.snapshot.snapshot_id for _, query in source.repository.scans)
     with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
-        _call(source, admit=True)
+        call_native_registration(source, admit=True)
 
 
 @pytest.mark.parametrize("kind", [
@@ -441,8 +438,8 @@ def test_current_head_is_pinned_once_even_if_head_moves_during_metadata_read(sou
 ])
 def test_tampered_catalog_reference_or_artifact_is_never_admitted_or_repaired(source, kind):
     """Corrupt evidence refuses non-retryably and remains untouched for inspection."""
-    result = _call(source)
-    evidence, ref = _evidence(source, result.run_id), _ref(source, result)
+    result = call_native_registration(source)
+    evidence, ref = native_registration_evidence(source, result.run_id), native_registration_ref(source, result)
     if kind.startswith("run-"):
         field, value = {"run-spec": ("spec_hash", content_hash("other")),
                         "run-input": ("input_hash", content_hash("other")),
@@ -484,24 +481,24 @@ def test_tampered_catalog_reference_or_artifact_is_never_admitted_or_repaired(so
                             "ref-unknown": ("unknown_field", "unexpected")}[kind]
             evidence["native_registration"][field] = value
         source.conn.execute("UPDATE experiment_runs SET evidence_json=?", (json.dumps(evidence),))
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     for admit in (True, False):
         with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT") as caught:
-            _call(source, admit=admit)
+            call_native_registration(source, admit=admit)
         assert not caught.value.problem.retryable
-        assert _catalog(source.conn) == before
-        assert _objects(source.store) == objects
+        assert catalog_rows(source.conn) == before
+        assert artifact_object_bytes(source.store) == objects
 
 
 def test_existing_nonnative_primary_reservation_cannot_be_adopted(source):
     """A legacy primary reservation cannot silently become native preregistration."""
-    register_hypothesis(source.conn, _spec(), content_hash("other-input"), mode="primary")
-    before = _catalog(source.conn)
+    register_hypothesis(source.conn, native_spec(), content_hash("other-input"), mode="primary")
+    before = catalog_rows(source.conn)
     with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
-        _call(source)
-    assert _catalog(source.conn) == before
+        call_native_registration(source)
+    assert catalog_rows(source.conn) == before
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
-        _call(source, admit=True)
+        call_native_registration(source, admit=True)
 
 
 @pytest.mark.parametrize("point", ["copied", "linked"])
@@ -515,14 +512,14 @@ def test_publication_failure_leaves_no_partial_registration_or_implicit_retry(so
             raise OSError("synthetic publication failure")
 
     source.store = ArtifactStore(source.store.root, fault=fault)
-    before = _catalog(source.conn)
+    before = catalog_rows(source.conn)
     with pytest.raises(OSError, match="synthetic publication failure"):
-        _call(source)
+        call_native_registration(source)
     assert calls.count(point) == 1
-    assert _catalog(source.conn) == before
+    assert catalog_rows(source.conn) == before
     assert not source.conn.in_transaction
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
-        _call(source, admit=True)
+        call_native_registration(source, admit=True)
 
 
 def test_commit_failure_rolls_back_both_rows_and_leaves_only_complete_orphan(source):
@@ -536,20 +533,20 @@ def test_commit_failure_rolls_back_both_rows_and_leaves_only_complete_orphan(sou
                 raise sqlite3.OperationalError("synthetic commit failure")
             return source.conn.execute(statement, *args)
 
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(sqlite3.OperationalError, match="synthetic commit failure"):
-        native.register_native(FailCommit(), source.store, source.repository, _spec(),
+        native.register_native(FailCommit(), source.store, source.repository, native_spec(),
                                code_root=source.code_root, as_of_month=MONTH)
-    assert _catalog(source.conn) == before
+    assert catalog_rows(source.conn) == before
     assert not source.conn.in_transaction
-    orphans = {key: value for key, value in _objects(source.store).items() if key not in objects}
+    orphans = {key: value for key, value in artifact_object_bytes(source.store).items() if key not in objects}
     assert len(orphans) == 1
-    assert json.loads(next(iter(orphans.values())))["spec_hash"] == _spec().spec_hash
+    assert json.loads(next(iter(orphans.values())))["spec_hash"] == native_spec().spec_hash
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
-        _call(source, admit=True)
-    result = _call(source)
+        call_native_registration(source, admit=True)
+    result = call_native_registration(source)
     assert result.binding_json == next(iter(orphans.values()))
-    assert _call(source, admit=True) == result
+    assert call_native_registration(source, admit=True) == result
 
 
 def test_concurrent_conflicting_registrations_admit_exactly_one_whole_binding(source):
@@ -567,7 +564,7 @@ def test_concurrent_conflicting_registrations_admit_exactly_one_whole_binding(so
         store = RacingStore(source.store.root)
         try:
             result = native.register_native(conn, store, MetadataRepository(conn, store),
-                                            _spec(seed=seed), code_root=source.code_root,
+                                            native_spec(seed=seed), code_root=source.code_root,
                                             as_of_month=MONTH)
             return seed, result
         except OpsError as exc:
@@ -586,18 +583,18 @@ def test_concurrent_conflicting_registrations_admit_exactly_one_whole_binding(so
     assert not losers[0][1].problem.retryable
     assert source.conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 1
     assert source.conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 1
-    assert _call(source, admit=True, spec=_spec(seed=seed)) == result
-    assert source.store.read_verified(_ref(source, result)) == result.binding_json
+    assert call_native_registration(source, admit=True, spec=native_spec(seed=seed)) == result
+    assert source.store.read_verified(native_registration_ref(source, result)) == result.binding_json
     with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
-        _call(source, admit=True, spec=_spec(seed=losers[0][0]))
+        call_native_registration(source, admit=True, spec=native_spec(seed=losers[0][0]))
 
 
 @pytest.mark.parametrize("seam", ["population", "publication"])
 def test_mutating_callers_economics_cannot_rewrite_captured_spec(source, monkeypatch, seam):
     """Caller-owned nested economics cannot drift while scans or publication execute."""
     economics = {"fill": 0.5, "exit": {"kind": "fixed_day", "trading_days": 2}}
-    pristine = _spec(economic_params=json.loads(json.dumps(economics)))
-    supplied = _spec(economic_params=economics)
+    pristine = native_spec(economic_params=json.loads(json.dumps(economics)))
+    supplied = native_spec(economic_params=economics)
 
     def mutate():
         supplied.economic_params["fill"] = 0.9
@@ -619,15 +616,15 @@ def test_mutating_callers_economics_cannot_rewrite_captured_spec(source, monkeyp
             return original(data, schema_ref=schema_ref)
 
         monkeypatch.setattr(source.store, "publish_bytes", publish)
-    result = _call(source, spec=supplied)
+    result = call_native_registration(source, spec=supplied)
     assert supplied.spec_hash != pristine.spec_hash
     assert result.document["spec_hash"] == pristine.spec_hash
     assert result.document["execution_plan"] == resolve_experiment_plan(pristine).as_document()
     assert source.conn.execute("SELECT spec_hash FROM experiment_runs").fetchone()[0] == pristine.spec_hash
     assert source.conn.execute("SELECT spec_hash FROM hypotheses").fetchone()[0] == pristine.spec_hash
-    assert _call(source, admit=True, spec=pristine) == result
+    assert call_native_registration(source, admit=True, spec=pristine) == result
     with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
-        _call(source, admit=True, spec=supplied)
+        call_native_registration(source, admit=True, spec=supplied)
 
 
 @pytest.mark.parametrize("leaf", ["run.py", "helper.py"])
@@ -638,12 +635,12 @@ def test_symlinked_source_closure_is_refused_before_metadata_or_registration(sou
     path = source.code_root / "experiment" / leaf
     path.unlink()
     path.symlink_to(target)
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
-        _call(source)
+        call_native_registration(source)
     assert source.repository.pins == source.repository.scans == []
-    assert _catalog(source.conn) == before
-    assert _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before
+    assert artifact_object_bytes(source.store) == objects
 
 
 @pytest.mark.parametrize("change", [{"input_files": None}, {"input_files": []},
@@ -652,7 +649,7 @@ def test_symlinked_source_closure_is_refused_before_metadata_or_registration(sou
 def test_malformed_direct_spec_is_typed_and_has_no_reads(source, change):
     """Direct dataclass callers receive the same typed validation as parsed specs."""
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
-        _call(source, spec=replace(_spec(), **change))
+        call_native_registration(source, spec=replace(native_spec(), **change))
     assert source.repository.pins == source.repository.scans == []
     assert source.conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
 
@@ -662,12 +659,12 @@ def test_malformed_direct_spec_is_typed_and_has_no_reads(source, change):
 @pytest.mark.parametrize("admit", [False, True])
 def test_invalid_scope_shape_refuses_before_any_pin_scan_or_write(source, scope, admit):
     """Malformed scopes cannot escape as SQLite binding errors or trigger fallback."""
-    before, objects = _catalog(source.conn), _objects(source.store)
+    before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(OpsError, match="SNAPSHOT_UNRESOLVED"):
-        _call(source, admit=admit, scope=scope)
+        call_native_registration(source, admit=admit, scope=scope)
     assert source.repository.pins == source.repository.scans == []
-    assert _catalog(source.conn) == before
-    assert _objects(source.store) == objects
+    assert catalog_rows(source.conn) == before
+    assert artifact_object_bytes(source.store) == objects
 
 
 def test_native_ops_imports_are_explicitly_public_and_have_a_documented_consumer():

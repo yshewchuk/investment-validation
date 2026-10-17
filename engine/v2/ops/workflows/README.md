@@ -25,15 +25,15 @@ peer above it.
 `commands` exposes module-private services used across modules by name
 (`_plan_command`, `_submit_command`, `_submit_nightly`, `_ticker_list`,
 `_read_input_manifest_ref`, `_check_nightly_manifest`, `_snapshot_inputs`,
-`_primary_runner_bindings`); there is no re-export. Its public helpers are the
+`_primary_runner_bindings`); the only re-export is `require_valid_population_keys`, imported from `snapshot_planning`. Its public helpers are the
 bounded, no-follow regular-file readers `read_bounded_json(path, max_bytes)` and
-`read_bounded_bytes(path, max_bytes)` and the public constants
+`read_bounded_bytes(path, max_bytes)`, `require_valid_population_keys(keys)` (defined in `snapshot_planning`, the one `ticker|strategy|YYYY-MM-DD` key check; called by `direct_scope_for`, `_read_expected_population`, `_submit_nightly` and `nightly_trigger`, `INVALID_REQUEST`) and the public constants
 `MAX_EXPECTED_POPULATION_BYTES` and `MAX_INPUT_MANIFEST_BYTES`, used by
 `ops plan --expected-population`, the `--input-manifest` read
 (`read_bounded_bytes`) and by `nightly_trigger` (with
 `MAX_EXPECTED_POPULATION_BYTES`).
 
-<!-- public-interface: _plan_command, _submit_command, read_bounded_json, read_bounded_bytes, MAX_EXPECTED_POPULATION_BYTES, MAX_INPUT_MANIFEST_BYTES -->
+<!-- public-interface: _plan_command, _submit_command, read_bounded_json, read_bounded_bytes, MAX_EXPECTED_POPULATION_BYTES, require_valid_population_keys, MAX_INPUT_MANIFEST_BYTES -->
 
 ## Consumers
 

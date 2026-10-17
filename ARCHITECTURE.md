@@ -99,6 +99,9 @@ evidence. See the models and data component contracts.
   owners (`engine.v2.ops.executor`, `engine.v2.ops.legacy_adapter`). A
   legacy module importing `checks/` or `tests/`, or shelling out from
   outside those two modules, is not enforced against by either rule.
+  Known exception: `engine.v2.ops.state_stage` reaches `checks/phase5_release*`
+  through `tools/phase5_state_stage_job.py` (no direct import); it ends when the release
+  catalog and assembly helpers move into `engine/v2/models` (#807).
 - **Operator CLIs and experiments.** These operator and research entrypoints
   may call into the legacy and v2 engines. They are not uniformly leaf-only:
   `engine.v2.ops.training` imports the `phase5_training_job` module while
@@ -574,15 +577,16 @@ Only a tracked path absent from the worktree reads as empty.
   `GRAPH`/`_DAG_STAGES` node — that nightly appends newly-settled events
   into the board-analog and paired residual pools, advances the trailing
   cutoff, re-verifies the chooser-analog pool and the three driver residual
-  pools (which do not themselves grow with new events — see the models doc
-  finding), and produces a new, gated, auto-promoted release that carries
-  every model binding over unchanged.
-  Retraining the champion/gate/chooser models themselves, monthly, is
-  cutover PR-13b; a native producer for the Tier-4 forecasts table native
-  currently only imports from a legacy snapshot is cutover PR-13c. Forward
-  inference instead uses the design in `engine/v2/scoring/ARCHITECTURE.md`;
-  it needs no stored forward row. See `engine/v2/ops/ARCHITECTURE.md`'s "Native nightly
-  pool/residual refresh", `engine/v2/models/ARCHITECTURE.md` §§1, 2, 8, and
+  pools (which do not themselves grow with new events — see
+  `engine/v2/models/ARCHITECTURE.md` §2.1, §2.3), and produces a new, gated,
+  auto-promoted release that carries every model binding over unchanged.
+  Retraining the champion/gate/chooser models themselves, monthly inside the
+  nightly, is cutover PR-13b (not implemented; contract: `engine/v2/models/
+  ARCHITECTURE.md` §2.3); a native producer for the
+  Tier-4 forecasts table native currently only imports from a legacy snapshot
+  is cutover PR-13c. Forward inference instead uses the design in
+  `engine/v2/scoring/ARCHITECTURE.md`; it needs no stored forward row. See
+  `engine/v2/models/ARCHITECTURE.md` §§1, 2, 8, and
   issue #192 for the full design.
 - **Captured native comparison export (tools, read-only inputs).**
   `tools/captured_native_comparison.py` exports one explicitly selected,
@@ -727,6 +731,11 @@ change their arithmetic or imply that source receipt production is available.
   calculated answer in (a forbidden-field map) or that arrives with a
   prebuilt geometry or pricing object. Legacy records are expected values
   for a comparator only — never a native input.
+  This contract adds a migration exception: `training.build_d14_dataset` for monthly
+  `implied_t1`/`runup_move`: it retains imported `feature_panel` history
+  with explicit snapshot/receipt/calendar/table-version lineage.
+  This is compatibility history, not native historical production or proof of
+  EOD availability/finality. Native scoring/capture's answer-free rule is unchanged.
 - **Missing input → typed refusal, never a silent default.** A missing or
   unusable input produces an explicit withheld/refused status (see
   `Problem`/`FAILURE_CODES` in `engine/v2/contracts/operations.py`, and

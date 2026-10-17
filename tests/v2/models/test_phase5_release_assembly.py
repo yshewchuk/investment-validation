@@ -1,6 +1,7 @@
 """Pool release assembly: derive/stage a carried-forward candidate catalog (#192 slice 2)."""
 from __future__ import annotations
 
+import builtins
 import copy
 import dataclasses
 import fcntl
@@ -1852,8 +1853,9 @@ def test_shared_readers_accept_exact_cap_and_refuse_one_below(tmp_path, monkeypa
     monkeypatch.setattr(deployment, "MAX_MANIFEST_BYTES", msize)
     assert deployment.resolve_release(store, "prior1").release_id == "prior1"
     monkeypatch.setattr(deployment, "MAX_MANIFEST_BYTES", msize - 1)
-    with pytest.raises(deployment.StagingRefused):
+    with pytest.raises(deployment.StagingRefused) as error:
         deployment.resolve_release(store, "prior1")
+    assert {issue.code for issue in error.value.issues} == {"MANIFEST_UNREADABLE"}
 
 
 def test_inventory_members_malformed_is_inventory_mismatch(tmp_path):
@@ -1964,33 +1966,64 @@ def test_catalog_reader_never_reads_past_its_cap(tmp_path, monkeypatch):
     assert sum(got for _, got in log) <= cap + 1
 
 
-def test_manifest_reader_stops_at_its_budget_on_a_chunk_boundary(tmp_path, monkeypatch):
+def test_manifest_reader_refuses_oversize_manifests_at_the_budget(tmp_path, monkeypatch):
     _stage_prior(tmp_path)
     store = phase5_release.deployment_root(tmp_path)
     manifest = phase5_release.staged_manifest_path(store, "prior1")
     limit = 1024 * 1024
     monkeypatch.setattr(deployment, "MAX_MANIFEST_BYTES", limit)
     base = manifest.read_bytes()
+
+    reads = []
+    real_open = builtins.open
+
+    class _ManifestReadSpy:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def read(self, *args, **kwargs):
+            data = self._handle.read(*args, **kwargs)
+            reads.append(len(data))
+            return data
+
+        def readinto(self, *args, **kwargs):
+            count = self._handle.readinto(*args, **kwargs)
+            reads.append(count)
+            return count
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._handle.__exit__(*exc)
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+    def spy(file, *args, **kwargs):
+        stream = real_open(file, *args, **kwargs)
+        if str(file) == str(manifest):
+            return _ManifestReadSpy(stream)
+        return stream
+
+    monkeypatch.setattr(builtins, "open", spy)
+
     manifest.write_bytes(base + b" " * (limit - len(base)))
     assert deployment.resolve_release(store, "prior1").release_id == "prior1"
+    assert reads and sum(reads) == limit
+    reads.clear()
     manifest.write_bytes(base + b" " * (limit + 1 - len(base)))
     with pytest.raises(deployment.StagingRefused) as error:
         deployment.resolve_release(store, "prior1")
     assert {issue.code for issue in error.value.issues} == {"MANIFEST_UNREADABLE"}
+    assert sum(reads) <= limit + 1
+    reads.clear()
     manifest.write_bytes(base + b" " * (5 * limit))
-    requested, got = [], []
-    real_read = os.read
-
-    def watch(fd, size):
-        data = real_read(fd, size)
-        requested.append(size)
-        got.append(len(data))
-        return data
-
-    monkeypatch.setattr(os, "read", watch)
-    with pytest.raises(deployment.StagingRefused):
+    with pytest.raises(deployment.StagingRefused) as error:
         deployment.resolve_release(store, "prior1")
-    assert max(requested) <= 1024 * 1024 and sum(got) <= limit + 1
+    assert {issue.code for issue in error.value.issues} == {"MANIFEST_UNREADABLE"}
+    assert sum(reads) <= limit + 1
 
 
 @pytest.mark.parametrize("exc", [TypeError, AttributeError, KeyError])
@@ -2084,3 +2117,198 @@ def test_supplied_object_read_stops_at_its_claim(tmp_path, monkeypatch):
     assert error.value.code == "OBJECT_UNVERIFIED"
     assert log and all(0 <= size <= target.payload_bytes + 1 for size, _ in log)
     assert sum(got for _, got in log) <= target.payload_bytes + 1
+
+
+def _carry_args(tmp_path, carried_members=(), chooser_carried=False):
+    """derive args where ``carried_members`` (and optionally the chooser) are the prior objects, carried."""
+    _inventory, body = _stage_prior(tmp_path)
+    cutoff_prior, carried = assembly.prior_carry_set(tmp_path, "prior1")
+    assert cutoff_prior == "2026-09-01"
+    args = _valid_derive_args(tmp_path)
+    by_key = {item.member_id: item for item in carried}
+    args["outputs"] = [by_key[o.member_id] if o.member_id in carried_members else o
+                       for o in args["outputs"]]
+    if chooser_carried:
+        args["chooser"] = by_key[assembly.CHOOSER_MEMBER_ID]
+    return body, args
+
+
+def test_prior_carry_set_returns_every_prior_object_as_carried(tmp_path):
+    _stage_prior(tmp_path)
+    cutoff, carried = assembly.prior_carry_set(tmp_path, "prior1")
+    assert cutoff == "2026-09-01"
+    members = {item.member_id for item in carried}
+    assert members == {*assembly.POOL_MEMBER_IDS, assembly.CHOOSER_MEMBER_ID}
+    assert all(item.carried and item.cutoff == "2026-09-01" and item.name == "prior.bin"
+               for item in carried)
+
+
+@pytest.mark.parametrize("release_id", ["missing", "", "../x", ".hidden"])
+def test_prior_carry_set_refuses_unknown_or_unsafe_prior(tmp_path, release_id):
+    _stage_prior(tmp_path)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.prior_carry_set(tmp_path, release_id)
+    assert err.value.code == "PRIOR_MISMATCH"
+
+
+def test_carried_objects_keep_their_prior_rows(tmp_path):
+    body, args = _carry_args(
+        tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:3], chooser_carried=True)
+    candidate = assembly.derive_catalog(body, **args)
+    prior_rows = {row["member_id"]: row for row in body["members"]}
+    rows = {row["member_id"]: row for row in candidate["members"]}
+    for member_id in (*assembly.POOL_MEMBER_IDS[:3], assembly.CHOOSER_MEMBER_ID):
+        assert rows[member_id]["objects"] == prior_rows[member_id]["objects"]
+    for member_id in assembly.POOL_MEMBER_IDS[3:]:
+        assert rows[member_id]["objects"] != prior_rows[member_id]["objects"]
+    assert candidate["sources"]["pool_cutoff"] == "2026-10-01"
+
+
+def test_carried_object_not_in_prior_row_refuses_pool_set_mismatch(tmp_path):
+    body, args = _carry_args(tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:1])
+    args["outputs"][0] = dataclasses.replace(args["outputs"][0], content_hash=args["outputs"][-1].content_hash)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "POOL_SET_MISMATCH"
+
+
+def test_carried_chooser_not_in_prior_row_refuses_chooser_mismatch(tmp_path):
+    body, args = _carry_args(tmp_path, chooser_carried=True)
+    args["chooser"] = dataclasses.replace(args["chooser"], name="other.bin")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "CHOOSER_MISMATCH"
+
+
+@pytest.mark.parametrize("cutoff", ["2026-10-02", "2026-9-1", "bad"])
+def test_carried_cutoff_after_session_or_malformed_refuses(tmp_path, cutoff):
+    body, args = _carry_args(tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:1])
+    args["outputs"][0] = dataclasses.replace(args["outputs"][0], cutoff=cutoff)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "CUTOFF_MISMATCH"
+
+
+def test_non_carried_object_with_old_cutoff_still_refuses(tmp_path):
+    body, args = _carry_args(tmp_path)
+    args["outputs"][0] = dataclasses.replace(args["outputs"][0], cutoff="2026-09-01")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "CUTOFF_MISMATCH"
+
+
+def test_carried_flag_must_be_a_bool(tmp_path):
+    body, args = _carry_args(tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:1])
+    args["outputs"][0] = dataclasses.replace(args["outputs"][0], carried="yes")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "POOL_SET_MISMATCH"
+    assert "carried flag" in str(err.value)
+
+
+def test_carried_object_with_wrong_payload_bytes_refuses(tmp_path):
+    body, args = _carry_args(tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:1])
+    args["outputs"][0] = dataclasses.replace(
+        args["outputs"][0], payload_bytes=args["outputs"][0].payload_bytes + 1)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "POOL_SET_MISMATCH"
+
+
+def test_carried_object_cutoff_equal_to_session_cutoff_is_accepted(tmp_path):
+    body, args = _carry_args(tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:1])
+    args["outputs"][0] = dataclasses.replace(args["outputs"][0], cutoff=args["cutoff"])
+    candidate = assembly.derive_catalog(body, **args)
+    assert candidate["sources"]["pool_cutoff"] == args["cutoff"]
+
+
+def _rewrite_prior(tmp_path, mutate):
+    _inventory, body = _stage_prior(tmp_path)
+    mutate(body)
+    body = phase5_release.manifest_body(
+        body["release_id"], body["deployment_id"], body["members"], body["sources"])
+    phase5_release.write_catalog(phase5_release.catalog_path(tmp_path, "prior1"), body)
+
+
+def _drop_pool_cutoff(body):
+    body["sources"] = {}
+
+
+def _bad_pool_cutoff(body):
+    body["sources"]["pool_cutoff"] = "2026-9-1"
+
+
+def _drop_object_bytes(body):
+    del body["members"][0]["objects"][0]["bytes"]
+
+
+def _drop_members(body):
+    body["members"] = []
+
+
+@pytest.mark.parametrize(
+    "mutate", [_drop_pool_cutoff, _bad_pool_cutoff, _drop_object_bytes, _drop_members])
+def test_prior_carry_set_refuses_malformed_prior_catalog(tmp_path, mutate):
+    _rewrite_prior(tmp_path, mutate)
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.prior_carry_set(tmp_path, "prior1")
+    assert err.value.code == "PRIOR_MISMATCH"
+
+
+def test_carried_pool_object_with_a_changed_name_refuses(tmp_path):
+    body, args = _carry_args(tmp_path, carried_members=assembly.POOL_MEMBER_IDS[:1])
+    args["outputs"][0] = dataclasses.replace(args["outputs"][0], name="renamed.bin")
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "POOL_SET_MISMATCH"
+
+
+def test_earlier_session_cutoff_with_carried_objects_is_not_advanced(tmp_path):
+    _stage_prior(tmp_path)
+    _cutoff, carried = assembly.prior_carry_set(tmp_path, "prior1")
+    args = _valid_derive_args(tmp_path, cutoff="2026-08-01")
+    by_key = {item.member_id: item for item in carried}
+    args["outputs"] = [by_key[o.member_id] if o.member_id == assembly.POOL_MEMBER_IDS[0] else o
+                       for o in args["outputs"]]
+    body = json.loads(phase5_release.catalog_path(tmp_path, "prior1").read_bytes())
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, **args)
+    assert err.value.code == "CUTOFF_NOT_ADVANCED"
+
+
+def _add_second_object(body):
+    row = next(r for r in body["members"] if r["member_id"] == assembly.POOL_MEMBER_IDS[0])
+    row["objects"].append({**row["objects"][0], "name": "second.bin"})
+
+
+def test_carried_object_matches_any_object_of_a_multi_object_prior_row(tmp_path):
+    _rewrite_prior(tmp_path, _add_second_object)
+    _cutoff, carried = assembly.prior_carry_set(tmp_path, "prior1")
+    member = assembly.POOL_MEMBER_IDS[0]
+    second = next(item for item in carried if item.member_id == member and item.name == "second.bin")
+    args = _valid_derive_args(tmp_path)
+    args["outputs"] = [second if o.member_id == member else o for o in args["outputs"]]
+    body = json.loads(phase5_release.catalog_path(tmp_path, "prior1").read_bytes())
+    candidate = assembly.derive_catalog(body, **args)
+    row = next(r for r in candidate["members"] if r["member_id"] == member)
+    assert [o["name"] for o in row["objects"]] == ["second.bin"]
+
+
+def test_release_caps_are_pinned():
+    assert deployment.MAX_MANIFEST_BYTES == 64 * 1024 * 1024
+    assert assembly.MAX_CATALOG_BYTES == 64 * 1024 * 1024
+    assert assembly.MAX_OBJECT_BYTES == 512 * 1024 * 1024
+    assert assembly.LOCK_WAIT_S == 30.0
+
+
+def test_symlinked_staged_manifest_is_refused(tmp_path):
+    _stage_prior(tmp_path)
+    store = phase5_release.deployment_root(tmp_path)
+    manifest = phase5_release.staged_manifest_path(store, "prior1")
+    real = tmp_path / "real_manifest.json"
+    real.write_bytes(manifest.read_bytes())
+    manifest.unlink()
+    manifest.symlink_to(real)
+    with pytest.raises(deployment.StagingRefused) as error:
+        deployment.resolve_release(store, "prior1")
+    assert {issue.code for issue in error.value.issues} == {"MANIFEST_UNREADABLE"}

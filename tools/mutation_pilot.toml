@@ -474,7 +474,7 @@ tests = [
     "tests/test_v2_models_admissible_table.py",
     "tests/test_v2_models_deployment.py",
     "tests/test_v2_models_inference.py",
-    "tests/test_v2_models_inventory.py",
+    "tests/v2/models/test_inventory.py",
     "tests/test_v2_models_lineage.py",
     "tests/v2/models/test_v2_models_no_fit.py",
     "tests/test_v2_models_no_fit_native.py",
@@ -509,7 +509,7 @@ mutate = [
 ]
 tests = [
     "tests/test_v2_models_board_analog.py",
-    "tests/test_v2_models_inventory.py",
+    "tests/v2/models/test_inventory.py",
 ]
 
 [modules.chooser]
@@ -632,6 +632,7 @@ tests = [
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_projections.py",
     "tests/v2/serving/test_v2_serving_publication_binding.py",
+    "tests/v2/serving/test_serving_root_current.py",
     # A glob, not a new literal line: tests/v2/integration/test_mutation_ci.py expands the
     # pattern list against `git ls-files`, so a literal for a file not yet
     # committed would fail as "matches no tracked file". This keeps every
@@ -657,6 +658,9 @@ mutate = [
 ]
 tests = [
     "tests/v2/research/test_magnitude_search_plan.py",
+    "tests/v2/research/test_magnitude_search_trials.py",
+    "tests/v2/research/test_magnitude_search_records.py",
+    "tests/v2/research/test_magnitude_search_trial_integrity.py",
     "tests/v2/ops/test_gate_sweep.py",
     "tests/v2/models/training/test_magnitude_estimators.py",
     "tests/v2/research/test_magnitude_fitted_model.py",
@@ -837,6 +841,9 @@ why = "Catalog-bound native registration verification and immutable user-only fi
 mutate = ["engine/v2/ops/native_registration.py", "engine/v2/ops/final_holdout.py"]
 tests = [
     "tests/v2/research/test_magnitude_search_plan.py",
+    "tests/v2/research/test_magnitude_search_trials.py",
+    "tests/v2/research/test_magnitude_search_records.py",
+    "tests/v2/research/test_magnitude_search_trial_integrity.py",
     "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/research/test_final_holdout_requests.py",
@@ -1016,6 +1023,7 @@ mutate = [
     "engine/v2/ops/incremental_data.py",
     "engine/v2/ops/provider_response.py",
     "engine/v2/ops/training.py",
+    "engine/v2/ops/state_stage.py",
     "engine/v2/ops/unit_receipts.py",
     "engine/v2/ops/computed_moves_store.py",
     "engine/v2/ops/pinned_partition_reader.py",
@@ -1023,6 +1031,7 @@ mutate = [
 ]
 tests = [
     "tests/v2/ops/test_gate_sweep.py",
+    "tests/v2/ops/test_fingerprints_import_cache.py",
     "tests/v2/ops/test_runup_model_inputs.py",
     "tests/v2/ops/test_runup_worker_activation.py",
     "tests/v2/ops/test_native_driver_declarations.py",
@@ -1077,6 +1086,7 @@ tests = [
     "tests/v2/ops/test_v2_ops_nightly_decision_clock.py",
     "tests/v2/ops/test_v2_ops_nightly_trigger.py",
     "tests/v2/ops/test_v2_ops_render_parity.py",
+    "tests/v2/ops/test_state_stage.py",
     "tests/v2/ops/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_runtime.py",
     "tests/v2/ops/test_v2_ops_scope_separation.py",
@@ -1115,6 +1125,9 @@ mutate = [
 ]
 tests = [
     "tests/v2/research/test_magnitude_search_plan.py",
+    "tests/v2/research/test_magnitude_search_trials.py",
+    "tests/v2/research/test_magnitude_search_records.py",
+    "tests/v2/research/test_magnitude_search_trial_integrity.py",
     "tests/v2/ops/test_gate_sweep.py",
     "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/v2/research/test_gate_variant.py",

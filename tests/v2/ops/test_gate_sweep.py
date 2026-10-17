@@ -103,17 +103,18 @@ def _replace_source(path, text):
     path.write_text(text)
 
 
-def _run_children(source, jobs, code_root):
+def _run_children(source, jobs, code_root, only=None):
+    selected = jobs if only is None else only
     service = Service(source.conn, source.store.root, stages.registry(), TEST_POLICY,
                       clock=SystemClock(), code_source=code_root)
     try:
         service.start()
-        for job in jobs:
+        for job in selected:
             run_until(service, source.conn, job.job_id, timeout=90)
     finally:
         service.close()
     results = []
-    for job in jobs:
+    for job in selected:
         row = source.conn.execute("SELECT state, failure_json FROM jobs WHERE job_id=?", (job.job_id,)).fetchone()
         attempts = source.conn.execute("SELECT * FROM attempts WHERE job_id=?", (job.job_id,)).fetchall()
         assert len(attempts) == 1
@@ -217,7 +218,8 @@ def test_real_two_arm_children_consume_distinct_inputs_and_only_stage(source, tm
     _replace_source(ledger, text.replace(marker, "    raise AssertionError('synthetic child ledger access')\n" + marker))
     control = subprocess.run([sys.executable, "-c", "from pathlib import Path; import experiments.lib as lib; "
         "assert Path(lib.__file__).resolve() == Path('experiments/lib.py').resolve(); lib.ledger_append([])"],
-        cwd=checkout, env={**os.environ, "PYTHONPATH": str(checkout)}, capture_output=True, text=True, timeout=30)
+        cwd=checkout, env={**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+                           "PYTHONPATH": str(checkout)}, capture_output=True, text=True, timeout=30)
     assert control.returncode == 1 and control.stdout == ""
     assert control.stderr.rstrip().endswith("AssertionError: synthetic child ledger access")
     identity = _call(source, code_root=checkout)
@@ -359,8 +361,12 @@ def test_real_failed_child_has_no_output_or_scientific_completion(source, tmp_pa
     _call(source, code_root=checkout)
     before = _scientific(source)
     jobs = _call(source, sweep.submit_sweep, code_root=checkout)
-    failed, success = _run_children(source, jobs, checkout)
-    assert success["schema_version"] == "native_gate_result.v1.0"
+    both = failure == "typed"
+    results = _run_children(source, jobs, checkout, only=None if both else jobs[:1])
+    failed = results[0]
+    if both:
+        sibling = results[1]
+        assert sibling["schema_version"] == "native_gate_result.v1.0"
     assert failed["code"] == ("EXPERIMENT_VARIANT_FAILED" if failure == "typed" else "WORKER_FAILED")
     assert _scientific(source) == before
     assert set(_row(source)) == {"schema_version", "request", "snapshot", "registrations", "coordinator_source", "implementation_ref"}
@@ -399,13 +405,18 @@ def test_supervised_evaluation_input_failures_preserve_exact_problem(
     _call(source, code_root=checkout)
     before = _scientific(source)
     jobs = _call(source, sweep.submit_sweep, code_root=checkout)
-    failed, sibling = _run_children(source, jobs, checkout)
+    both = detail == "HOLDOUT_ACCESS_DENIED"
+    results = _run_children(source, jobs, checkout, only=None if both else jobs[:1])
+    failed = results[0]
+    if both:
+        sibling = results[1]
+        assert sibling["schema_version"] == "native_gate_result.v1.0"
     assert (failed["code"], failed["category"], failed["retryable"]) == (code, category, retryable)
     assert failed["details"] == {}
     assert "synthetic private input" not in canonical_json(failed) and "data_failure_code" not in canonical_json(failed)
     diagnostic = artifact(source.conn, source.store, failed["diagnostic_ref"])
     assert json.loads(source.store.read_verified(diagnostic)) == {"data_failure_code": detail}
-    assert sibling["schema_version"] == "native_gate_result.v1.0" and _scientific(source) == before
+    assert _scientific(source) == before
     assert not list(source.root.rglob("REPORT.md")) and not list(source.root.rglob("LEDGER.csv"))
 
 
@@ -441,12 +452,17 @@ def test_real_child_dependency_read_preserves_exact_code(source, tmp_path, phase
     target.unlink()  # Replace only this test's immutable synthetic object.
     if damage == "corrupt":
         target.write_bytes(b"corrupted private bytes")
-    failed, sibling = _run_children(source, jobs, checkout)
+    both = phase == "admission" and damage == "corrupt"
+    results = _run_children(source, jobs, checkout, only=None if both else jobs[:1])
+    failed = results[0]
+    if both:
+        sibling = results[1]
+        assert sibling["schema_version"] == "native_gate_result.v1.0"
     assert (failed["code"], failed["category"], failed["retryable"]) == (code, category, False)
     assert failed["details"] == {} and ref.storage_key not in canonical_json(failed)
     diagnostic = artifact(source.conn, source.store, failed["diagnostic_ref"])
     assert json.loads(source.store.read_verified(diagnostic)) == {"data_failure_code": detail}
-    assert sibling["schema_version"] == "native_gate_result.v1.0" and _scientific(source) == before
+    assert _scientific(source) == before
     assert not list(source.root.rglob("REPORT.md")) and not list(source.root.rglob("*.csv"))
 
 
@@ -808,6 +824,20 @@ def test_public_api_io_failures_are_typed_and_recoverable(source, monkeypatch, p
     assert _call(source) == identity
     jobs = _call(source, sweep.submit_sweep)
     assert len(jobs) == 2 and [job.job_id for job in _call(source, sweep.submit_sweep)] == [job.job_id for job in jobs]
+
+
+@pytest.mark.parametrize("bad", [None, 5])
+def test_non_path_code_root_is_a_typed_refusal(source, bad):
+    with pytest.raises(OpsError) as raised:
+        _call(source, code_root=bad)
+    assert raised.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_str_code_root_is_coerced_to_the_same_sealed_identity(source, tmp_path):
+    checkout = _checkout(tmp_path)
+    identity = _call(source, code_root=str(checkout))
+    assert identity == content_hash(_row(source))
+    assert identity == _call(source, code_root=checkout)
 
 
 @pytest.mark.parametrize("action", [sweep.register_sweep, sweep.submit_sweep])

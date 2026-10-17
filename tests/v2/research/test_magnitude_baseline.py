@@ -16,21 +16,30 @@ from experiments import magnitude_report as magnitude
 from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
 from experiments import v2_prediction as cli
-from tests.v2.research.test_event_history import _event, _poison
-from tests.v2.research.test_magnitude_features import _commit
-from tests.v2.research.test_magnitude_inputs import _calendar
-from tests.v2.research.test_magnitude_registration import PlanRepository, _forbid
-from tests.v2.research.test_native_outcomes import _clock, _document, _rows
-from tests.v2.research.test_native_registration import _catalog, _objects
-from tests.v2.research.test_prediction_inputs import _move
-from tests.v2.research.test_prediction_report import _spec as _prior_spec
+from tests.v2.research.magnitude_trial_support import (
+    PlanRepository,
+    calendar_sessions,
+    catalog_rows,
+    commit_history_inputs,
+    forbid_access,
+    history_event,
+    outcome_move,
+    poison_outcomes,
+    prediction_spec,
+)
+from tests.v2.research.test_native_outcomes import (
+    read_ledger_rows,
+    read_outcome_document,
+    set_outcome_clock,
+)
+from tests.v2.research.test_native_registration import artifact_object_bytes
 
 MONTH, START, CUTOFF = "2026-01", "2023-12-01", "2025-02-01"
 ROOT = Path(__file__).resolve().parents[3]
 
 
 def _spec(**changes):
-    return _prior_spec(**{"experiment_id": "synthetic-magnitude", "primary_arm_id": "mean",
+    return prediction_spec(**{"experiment_id": "synthetic-magnitude", "primary_arm_id": "mean",
         "arms": ("mean",), "folds": ("2024", "2025"), **changes})
 
 
@@ -38,24 +47,24 @@ def _dataset():
     dates = ("2023-12-04", "2023-12-05", "2023-12-06", "2023-12-07",
              "2023-12-08", "2023-12-11", "2023-12-12", "2024-01-03",
              "2024-06-12", "2024-09-04", "2025-01-07")
-    events = [_event(day) for day in dates]
+    events = [history_event(day) for day in dates]
     events[7]["session"] = "BMO"
     values = [-2., 0., 4., 12., None, None, None, -1., 7., -10., 4.]
-    moves = [_move(event, value) for event, value in zip(events, values)]
+    moves = [outcome_move(event, value) for event, value in zip(events, values)]
     moves[3]["available_as_of_date"] = "2023-12-22"  # Exactly the first fit boundary.
     moves[4].update(skipped=True, available_as_of_date=None)
     moves[5]["available_as_of_date"] = None
     moves[6]["available_as_of_date"] = CUTOFF  # Unparseable but ineligible for both fits.
-    excluded = [_event("2024-06-13", protected=True), _event("2025-12-03"),
-                _event("2023-10-02")]
-    return events + excluded, moves + [_move(event, None) for event in excluded]
+    excluded = [history_event("2024-06-13", protected=True), history_event("2025-12-03"),
+                history_event("2023-10-02")]
+    return events + excluded, moves + [outcome_move(event, None) for event in excluded]
 
 
 def _source(tmp_path, *, register=True, spec=None, events=None, moves=None, mixed_days=()):
     if events is None:
         events, moves = _dataset()
-    conn, original, snapshot = _commit(tmp_path, events, moves, mixed_days=mixed_days,
-        days=_calendar("2023-11-01", "2025-12-05").days)
+    conn, original, snapshot = commit_history_inputs(tmp_path, events, moves, mixed_days=mixed_days,
+        days=calendar_sessions("2023-11-01", "2025-12-05").days)
     source = SimpleNamespace(conn=conn, store=original._store, snapshot=snapshot,
         repository=PlanRepository(conn, original._store), spec=spec or _spec(),
         events=events, root=tmp_path, spec_path=tmp_path / "spec.json")
@@ -75,7 +84,7 @@ def source(tmp_path):
     value.conn.close()
 
 
-def _evidence(source):
+def baseline_evidence(source):
     row = source.conn.execute("SELECT evidence_json FROM experiment_runs").fetchone()
     return json.loads(row[0]) if row else {}
 
@@ -94,7 +103,7 @@ def _invoke(source, capsys, action, *extra, status=0):
     return json.loads(captured.out)
 
 
-def _result_from_report(path):
+def result_from_report(path):
     return json.loads(Path(path).read_text().split("```json\n", 1)[1].split("\n```", 1)[0])
 
 
@@ -106,14 +115,14 @@ def _metadata_only(monkeypatch):
         yield from original(repository, query, table_name=table_name)
 
     monkeypatch.setattr(Repository, "scan", scan)
-    monkeypatch.setattr(magnitude, "prediction_result", _forbid)
-    monkeypatch.setattr(magnitude, "render_prediction_report", _forbid)
+    monkeypatch.setattr(magnitude, "prediction_result", forbid_access)
+    monkeypatch.setattr(magnitude, "render_prediction_report", forbid_access)
 
 
 def test_fold_means_event_pooled_losses_and_all_horizons_are_real_and_read_only(source, monkeypatch):
-    _poison(monkeypatch, source.repository, source.snapshot,
+    poison_outcomes(monkeypatch, source.repository, source.snapshot,
             [event["event_date"].date().isoformat() for event in source.events[-3:]])
-    before = _catalog(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     binding = source.registration.binding_json
     result = magnitude.prediction_result(source.repository, source.registration)
     assert result == magnitude.prediction_result(source.repository, source.registration)
@@ -153,7 +162,7 @@ def test_fold_means_event_pooled_losses_and_all_horizons_are_real_and_read_only(
     assert result["per_horizon"] == [{"horizon_sessions": horizon, **result["metrics"]}
                                      for horizon in (5, 3, 1)]
     assert result["result_id"] == content_hash({k: v for k, v in result.items() if k != "result_id"})
-    assert (_catalog(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     assert source.registration.binding_json == binding
     assert all(query.snapshot_id == source.snapshot.snapshot_id for _, query in source.repository.scans)
 
@@ -261,13 +270,13 @@ def test_bad_later_evaluation_or_empty_training_never_returns_partial_result(tmp
             "nonfinite": {"realized_move_pct": float("nan")}}[kind])
     source = _source(tmp_path, events=events, moves=moves)
     try:
-        before = _catalog(source.conn), _objects(source.store)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         with pytest.raises((DataError, OpsError)) as caught:
             magnitude.prediction_result(source.repository, source.registration)
         assert caught.value.code == ("POPULATION_COLLAPSED" if kind == "empty-training"
                                      else "EXPERIMENT_VARIANT_FAILED")
         assert not caught.value.problem.retryable
-        assert (_catalog(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
         assert not list(tmp_path.rglob("REPORT.md"))
     finally:
         source.conn.close()
@@ -275,11 +284,11 @@ def test_bad_later_evaluation_or_empty_training_never_returns_partial_result(tmp
 
 def test_later_mixed_object_blocks_entire_run_before_first_training_label(tmp_path, monkeypatch):
     events, moves = _dataset()
-    protected = _event("2025-01-08", protected=True)
-    source = _source(tmp_path, events=events + [protected], moves=moves + [_move(protected, None)],
+    protected = history_event("2025-01-08", protected=True)
+    source = _source(tmp_path, events=events + [protected], moves=moves + [outcome_move(protected, None)],
                      mixed_days=("2025-01-07", "2025-01-08"))
     try:
-        _poison(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
+        poison_outcomes(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
         with pytest.raises(DataError) as caught:
             magnitude.prediction_result(source.repository, source.registration)
         assert caught.value.code == "HOLDOUT_ACCESS_DENIED" and not caught.value.problem.retryable
@@ -290,7 +299,7 @@ def test_later_mixed_object_blocks_entire_run_before_first_training_label(tmp_pa
 
 def test_rendered_report_has_reviewable_clock_provenance_losses_and_limits(source):
     result = magnitude.prediction_result(source.repository, source.registration)
-    before = _catalog(source.conn), _objects(source.store)
+    before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     for no_ledger in (False, True):
         report = magnitude.render_prediction_report(source.registration, result,
                                                      spec=source.spec, no_ledger=no_ledger)
@@ -302,7 +311,7 @@ def test_rendered_report_has_reviewable_clock_provenance_losses_and_limits(sourc
             assert text in report
         assert ("no-ledger smoke; not recorded" if no_ledger else "recorded evaluation") in report
         assert json.loads(report.split("```json\n", 1)[1].split("\n```", 1)[0]) == result
-    assert (_catalog(source.conn), _objects(source.store)) == before
+    assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 
 
 @pytest.mark.parametrize("field", ["variant_id", "run_id", "provenance"])
@@ -375,11 +384,11 @@ def test_cli_metadata_registration_then_durable_smoke_never_touches_ledger(tmp_p
         with monkeypatch.context() as patch:
             _metadata_only(patch)
             registration = _invoke(source, capsys, "register")
-        evidence = _evidence(source)
+        evidence = baseline_evidence(source)
         assert registration["registered"] == evidence["variant_id"]
         assert evidence["planned_variants"] == 1
         assert not {"native_smoke", "native_outcome", "attempted_variants"} & evidence.keys()
-        binding = _document(source, evidence["native_registration"])
+        binding = read_outcome_document(source, evidence["native_registration"])
         assert binding["schema_version"] == "native_experiment_registration.v1.3"
         assert binding["source_closure"] == native.source_closure(ROOT, [source.spec.runner])
         assert {"experiments/v2_prediction.py", "experiments/magnitude_report.py"} <= set(binding["source_closure"])
@@ -394,15 +403,15 @@ def test_cli_metadata_registration_then_durable_smoke_never_touches_ledger(tmp_p
         with monkeypatch.context() as patch:
             for method in ("resolve", "open", "stat", "lstat", "mkdir", "touch"):
                 patch.setattr(Path, method, protect(getattr(Path, method)))
-            patch.setattr(outcomes, "ledger_append", _forbid)
+            patch.setattr(outcomes, "ledger_append", forbid_access)
             output = _invoke(source, capsys, "run", "--no-ledger", "--ledger", poison)
-        result = _result_from_report(output["report"])
+        result = result_from_report(output["report"])
         assert output["recording_mode"] == "smoke"
         assert result["target"]["target"] == "absolute_earnings_close_to_close_return"
         assert result["metrics"]["count"] == 4
         assert result["metrics"]["rmse"] == pytest.approx(math.sqrt((90 + (8 / 7) ** 2) / 4))
-        evidence = _evidence(source)
-        outcome, completion = (_document(source, evidence[key]) for key in ("native_smoke", "native_smoke_receipt"))
+        evidence = baseline_evidence(source)
+        outcome, completion = (read_outcome_document(source, evidence[key]) for key in ("native_smoke", "native_smoke_receipt"))
         assert "native_outcome" not in evidence
         assert outcome["failure_code"] is None and outcome["attempted_variants"] == 1
         assert outcome["ledger_destination"] is None
@@ -412,11 +421,11 @@ def test_cli_metadata_registration_then_durable_smoke_never_touches_ledger(tmp_p
         assert completion["recording_mode"] == "smoke"
         assert completion["ledger_row_hash"] is None
         assert not poison.parent.exists() and not list(tmp_path.rglob("*.csv"))
-        before = _catalog(source.conn), _objects(source.store)
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         with monkeypatch.context() as patch:
             _metadata_only(patch)
             assert _invoke(source, capsys, "run", "--no-ledger") == output
-        assert (_catalog(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     finally:
         source.conn.close()
 
@@ -427,24 +436,24 @@ def test_cli_recorded_lifecycle_replays_original_date_with_exactly_one_ledger_ro
         _invoke(source, capsys, "register")
         smoke = _invoke(source, capsys, "run", "--no-ledger")
         ledger = tmp_path / "recorded" / "ledger.csv"
-        _clock(monkeypatch, "2026-01-02")
+        set_outcome_clock(monkeypatch, "2026-01-02")
         first = _invoke(source, capsys, "run", "--ledger", ledger)
         assert first["recording_mode"] == "recorded" and first["report"] != smoke["report"]
-        assert _result_from_report(first["report"]) == _result_from_report(smoke["report"])
-        evidence = _evidence(source)
-        outcome = _document(source, evidence["native_outcome"])
-        completion = _document(source, evidence["native_outcome_receipt"])
+        assert result_from_report(first["report"]) == result_from_report(smoke["report"])
+        evidence = baseline_evidence(source)
+        outcome = read_outcome_document(source, evidence["native_outcome"])
+        completion = read_outcome_document(source, evidence["native_outcome_receipt"])
         assert outcome["failure_code"] is None and outcome["attempted_variants"] == 1
         assert completion["recording_mode"] == "recorded"
         assert completion["ledger_row_hash"] == content_hash(outcome["ledger_row"])
-        assert _rows(ledger) == [outcome["ledger_row"]]
-        assert _rows(ledger)[0]["date"] == "2026-01-02"
-        assert _rows(ledger)[0]["stage"] == "ran" and _rows(ledger)[0]["promoted"] == "False"
-        before = _catalog(source.conn), _objects(source.store), ledger.read_bytes()
-        _clock(monkeypatch, "2026-02-10")
+        assert read_ledger_rows(ledger) == [outcome["ledger_row"]]
+        assert read_ledger_rows(ledger)[0]["date"] == "2026-01-02"
+        assert read_ledger_rows(ledger)[0]["stage"] == "ran" and read_ledger_rows(ledger)[0]["promoted"] == "False"
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()
+        set_outcome_clock(monkeypatch, "2026-02-10")
         _metadata_only(monkeypatch)
         assert _invoke(source, capsys, "run", "--ledger", ledger) == first
-        assert (_catalog(source.conn), _objects(source.store), ledger.read_bytes()) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()) == before
     finally:
         source.conn.close()
 
@@ -454,7 +463,7 @@ def test_cli_interrupted_append_resumes_saved_result_without_fitting(tmp_path, m
     try:
         _invoke(source, capsys, "register")
         ledger = tmp_path / "ledger.csv"
-        _clock(monkeypatch, "2026-01-02")
+        set_outcome_clock(monkeypatch, "2026-01-02")
 
         def interrupted(*args, **kwargs):
             raise OSError("synthetic interrupted append")
@@ -463,16 +472,16 @@ def test_cli_interrupted_append_resumes_saved_result_without_fitting(tmp_path, m
             patch.setattr(outcomes, "ledger_append", interrupted)
             failed = _invoke(source, capsys, "run", "--ledger", ledger, status=2)
         assert failed["refused"] == "RESOURCE_UNAVAILABLE"
-        evidence = _evidence(source)
+        evidence = baseline_evidence(source)
         assert "native_outcome" in evidence and "native_outcome_receipt" not in evidence
-        outcome = _document(source, evidence["native_outcome"])
+        outcome = read_outcome_document(source, evidence["native_outcome"])
         assert not ledger.exists() and not list(tmp_path.rglob("REPORT.md"))
-        _clock(monkeypatch, "2026-02-10")
+        set_outcome_clock(monkeypatch, "2026-02-10")
         _metadata_only(monkeypatch)
         completed = _invoke(source, capsys, "run", "--ledger", ledger)
         assert completed["recording_mode"] == "recorded"
-        assert _rows(ledger) == [outcome["ledger_row"]]
-        assert _document(source, _evidence(source)["native_outcome"]) == outcome
+        assert read_ledger_rows(ledger) == [outcome["ledger_row"]]
+        assert read_outcome_document(source, baseline_evidence(source)["native_outcome"]) == outcome
     finally:
         source.conn.close()
 
@@ -487,9 +496,9 @@ def test_cli_interrupted_append_resumes_saved_result_without_fitting(tmp_path, m
 ])
 @pytest.mark.parametrize("action", ["register", "run"])
 def test_cli_invalid_mode_combinations_refuse_before_store_or_spec_access(monkeypatch, capsys, action, extra):
-    monkeypatch.setattr(cli.foundation, "ArtifactStore", _forbid)
-    monkeypatch.setattr(cli, "connect", _forbid)
-    monkeypatch.setattr(Path, "read_text", _forbid)
+    monkeypatch.setattr(cli.foundation, "ArtifactStore", forbid_access)
+    monkeypatch.setattr(cli, "connect", forbid_access)
+    monkeypatch.setattr(Path, "read_text", forbid_access)
     with pytest.raises(SystemExit) as caught:
         cli.main([action, "--spec", "unused", "--catalog", "unused", "--store-root", "unused",
                   "--as-of-month", MONTH, "--no-ledger", *extra])
@@ -526,7 +535,7 @@ def test_registration_version_and_closed_contract_refuse_before_any_label_read(s
         plan = document["magnitude_plan"]
         plan["plan_id"] = content_hash({k: v for k, v in plan.items() if k != "plan_id"})
     invalid = native.NativeRegistration(source.registration.run_id, canonical_json(document).encode())
-    monkeypatch.setattr(source.repository, "scan", _forbid)
+    monkeypatch.setattr(source.repository, "scan", forbid_access)
     with pytest.raises(OpsError) as caught:
         magnitude.prediction_result(source.repository, invalid)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not caught.value.problem.retryable
@@ -546,27 +555,27 @@ def test_cli_failed_attempt_is_durable_without_partial_report_or_refit(tmp_path,
         _invoke(source, capsys, "register")
         ledger = tmp_path / "recorded" / "ledger.csv"
         args = ["--ledger", ledger, *(["--no-ledger"] if smoke else [])]
-        monkeypatch.setattr(magnitude, "render_prediction_report", _forbid)
+        monkeypatch.setattr(magnitude, "render_prediction_report", forbid_access)
         response = _invoke(source, capsys, "run", *args, status=2)
         assert response["refused"] == "EXPERIMENT_VARIANT_FAILED"
-        assert _document(source, response["refusal_ref"])["failure_code"] == "EXPERIMENT_VARIANT_FAILED"
+        assert read_outcome_document(source, response["refusal_ref"])["failure_code"] == "EXPERIMENT_VARIANT_FAILED"
         key = "native_smoke" if smoke else "native_outcome"
-        evidence = _evidence(source)
-        outcome = _document(source, evidence[key])
+        evidence = baseline_evidence(source)
+        outcome = read_outcome_document(source, evidence[key])
         assert outcome["failure_code"] == "EXPERIMENT_VARIANT_FAILED"
         assert outcome["attempted_variants"] == 1 and outcome["report_ref"] is None
         assert outcome["ledger_row"]["stage"] == "failed"
-        assert _document(source, evidence[key + "_receipt"])["report_ref"] is None
+        assert read_outcome_document(source, evidence[key + "_receipt"])["report_ref"] is None
         assert not list(tmp_path.rglob("REPORT.md"))
         if smoke:
             assert not ledger.parent.exists()
         else:
-            assert _rows(ledger) == [outcome["ledger_row"]]
-        before = _catalog(source.conn), _objects(source.store)
+            assert read_ledger_rows(ledger) == [outcome["ledger_row"]]
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         _metadata_only(monkeypatch)
         replay = _invoke(source, capsys, "run", *args, status=2)
         assert replay["refused"] == "EXPERIMENT_VARIANT_FAILED"
         assert replay["receipt_ref"] == evidence[key + "_receipt"]
-        assert (_catalog(source.conn), _objects(source.store)) == before
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     finally:
         source.conn.close()

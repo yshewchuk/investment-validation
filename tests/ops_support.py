@@ -18,7 +18,14 @@ from engine.v2.ops.profiles import DEFAULT_POLICY, MIB
 from engine.v2.ops.recovery import begin_epoch, read_boot_id
 from engine.v2.ops.scheduler import Supervisor
 from engine.v2.ops.submission import get_job
-from tools.v2_ops_fixtures import Parameters, POLICY, REGISTRY, enqueue_claim, request, sample  # noqa: F401
+from tools.v2_ops_fixtures import (  # noqa: F401
+    POLICY,
+    REGISTRY,
+    Parameters,
+    enqueue_claim,
+    request,
+    sample,
+)
 
 GIB = 1 << 30
 
@@ -322,27 +329,33 @@ def _sanitize_worker_stderr_tail(text: str) -> str:
     return "\n".join(out) if kept else "<diagnostic text redacted>"
 
 
-def _worker_stderr_tail(conn, attempts) -> str:
+def _attempt_stderr_path(conn, attempt_id, *, root=None):
+    """Use the service's artifact root; rootless test doubles retain the
+    colocated-catalog convention. Resolving diagnostics never creates staging."""
+    if root is None:
+        root = next((Path(row["file"]).parent
+                     for row in conn.execute("PRAGMA database_list").fetchall()
+                     if row["file"]), None)
+    if root is None:
+        return None
+    return Path(root) / "attempts" / str(attempt_id) / "staging" / "diagnostics" / "worker.stderr"
+
+
+def _worker_stderr_tail(conn, attempts, *, root=None) -> str:
     """Bounded tail (latest 4096 bytes, replacement-decoded) of the latest
     attempt's ``worker.stderr``, sanitized to safe traceback structure only
     (:func:`_sanitize_worker_stderr_tail`), the path never printed;
-    ``unavailable (...)`` for an absent attempt, database path, file or read
-    error. Never raises."""
+    ``unavailable (...)`` for an absent attempt, file or read error, or a
+    missing catalog path when no service root was supplied. Never raises."""
     try:
         if attempts is None or not len(attempts) or attempts[-1] is None:
             return "unavailable (no attempt recorded)"
         attempt_id = getattr(attempts[-1], "attempt_id", None)
         if attempt_id is None:
             return "unavailable (no attempt id on the latest attempt receipt)"
-        database_file = None
-        for row in conn.execute("PRAGMA database_list").fetchall():
-            if row["file"]:
-                database_file = row["file"]
-                break
-        if not database_file:
+        path = _attempt_stderr_path(conn, attempt_id, root=root)
+        if path is None:
             return "unavailable (no catalog database path)"
-        path = (Path(database_file).parent / "attempts" / str(attempt_id) /
-                "staging" / "diagnostics" / "worker.stderr")
         with open(path, "rb") as fh:
             fh.seek(0, 2)
             size = fh.tell()
@@ -353,7 +366,7 @@ def _worker_stderr_tail(conn, attempts) -> str:
         return f"unavailable (worker stderr read failed: {type(exc).__name__})"
 
 
-def _worker_stderr_path(conn, job_id):
+def _worker_stderr_path(conn, job_id, *, root=None):
     """Path of the latest attempt's ``diagnostics/worker.stderr`` for this
     job, or ``None`` when it cannot be resolved. Best effort; the path is
     never rendered."""
@@ -364,13 +377,9 @@ def _worker_stderr_path(conn, job_id):
         attempt_id = getattr(attempts[-1], "attempt_id", None)
         if attempt_id is None:
             return None
-        for row in conn.execute("PRAGMA database_list").fetchall():
-            if row["file"]:
-                return (Path(row["file"]).parent / "attempts" / str(attempt_id) /
-                        "staging" / "diagnostics" / "worker.stderr")
+        return _attempt_stderr_path(conn, attempt_id, root=root)
     except Exception:
         return None
-    return None
 
 
 def _file_size(path):
@@ -437,7 +446,7 @@ def _signal_tracked_process(pid, stored_start_ticks, read_stat):
             pass
 
 
-def _tracked_process_diagnostics(conn, job_id) -> str:
+def _tracked_process_diagnostics(conn, job_id, *, root=None) -> str:
     """Per tracked process identity of this job -- the distinct
     ``(pid, start_ticks, attempts.host_boot_id)`` tuples -- the delta of
     ``utime + stime`` between two complete ``/proc/<pid>/stat`` samples one
@@ -532,7 +541,7 @@ def _tracked_process_diagnostics(conn, job_id) -> str:
             delta = final["ticks"] - earlier["ticks"]
             if final["state"] in ("S", "D") and delta <= 1:
                 selected.append(identity)
-        stderr_path = _worker_stderr_path(conn, job_id)
+        stderr_path = _worker_stderr_path(conn, job_id, root=root)
         stderr_baseline = _file_size(stderr_path) if stderr_path is not None else None
         signalled = set()
         not_signalled = {}
@@ -572,7 +581,7 @@ def _tracked_process_diagnostics(conn, job_id) -> str:
         return f"unavailable (tracked process diagnostics failed: {type(exc).__name__})"
 
 
-def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
+def _run_until_deadline_message(conn, job_id, state, states, timeout, *, root=None) -> str:
     """Deadline diagnostics from the existing ops read helpers (``get_job``,
     ``attempt_receipts``, ``diagnostics.process_family_liveness``) plus the
     module-local :func:`_read_progress_rows` reading of ``progress_events``,
@@ -700,10 +709,10 @@ def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
         # stuck worker (SIGABRT) and waits briefly for faulthandler to append
         # to worker.stderr, so the stderr tail below captures that fresh
         # output.
-        process_details = field(lambda: _tracked_process_diagnostics(conn, job_id),
+        process_details = field(lambda: _tracked_process_diagnostics(conn, job_id, root=root),
                                 missing="unavailable (tracked process diagnostics unavailable)",
                                 label="tracked process diagnostics")
-        stderr_tail = field(lambda: _worker_stderr_tail(conn, attempts),
+        stderr_tail = field(lambda: _worker_stderr_tail(conn, attempts, root=root),
                             missing="unavailable (worker stderr unavailable)",
                             label="worker stderr tail")
         return head + "; ".join([
@@ -767,4 +776,5 @@ def run_until(service, conn, job_id, *, timeout, states=TERMINAL_STATES, poll=0.
     state = job_state(conn, job_id)
     if state in states:
         return state
-    raise RunUntilTimeout(_run_until_deadline_message(conn, job_id, state, states, effective))
+    raise RunUntilTimeout(_run_until_deadline_message(
+        conn, job_id, state, states, effective, root=getattr(service, "root", None)))

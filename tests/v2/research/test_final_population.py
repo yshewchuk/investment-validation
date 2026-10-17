@@ -10,7 +10,11 @@ from engine.v2.foundation import artifact_reference
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.research._final_population import FinalPopulation, load_final_population
 from engine.v2.research.experiment_population import load_population
-from tests.v2.research.test_prediction_inputs import MONTH, _commit, _event
+from tests.v2.research.test_prediction_inputs import (
+    MONTH,
+    commit_prediction_inputs,
+    prediction_event,
+)
 
 
 def _ref(label, schema):
@@ -36,17 +40,17 @@ def _request(snapshot, **overrides):
 
 def _events():
     return {
-        "eligible": _event("2024-05-02", prefix="E"),
-        "random": _event("2024-05-03", random=True, prefix="R"),
-        "rolling": _event("2024-12-03", prefix="L"),
-        "both": _event("2024-12-04", random=True, prefix="B"),
-        "ambiguous": {**_event("2024-12-05", prefix="A"), "date_conflict": True},
+        "eligible": prediction_event("2024-05-02", prefix="E"),
+        "random": prediction_event("2024-05-03", random=True, prefix="R"),
+        "rolling": prediction_event("2024-12-03", prefix="L"),
+        "both": prediction_event("2024-12-04", random=True, prefix="B"),
+        "ambiguous": {**prediction_event("2024-12-05", prefix="A"), "date_conflict": True},
     }
 
 
 def test_sets_are_separate_and_agree_with_shared_population_labels(tmp_path):
     events = _events()
-    conn, repository, snapshot = _commit(tmp_path, list(events.values()), include_targets=False)
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, list(events.values()), include_targets=False)
     try:
         before = conn.total_changes
         result = load_final_population(repository, _request(snapshot))
@@ -74,7 +78,7 @@ def test_sets_are_separate_and_agree_with_shared_population_labels(tmp_path):
 @pytest.mark.parametrize("kind", ["not-a-request", "version", "future-month", "malformed-month"])
 def test_invalid_request_refuses_before_any_scan(tmp_path, kind):
     events = _events()
-    conn, repository, snapshot = _commit(tmp_path, list(events.values()), include_targets=False)
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, list(events.values()), include_targets=False)
     try:
         request = _request(snapshot)
         request = {"not-a-request": {"snapshot_id": snapshot.snapshot_id},
@@ -90,7 +94,7 @@ def test_invalid_request_refuses_before_any_scan(tmp_path, kind):
 
 
 def test_unresolved_snapshot_is_typed_without_scan(tmp_path):
-    conn, repository, snapshot = _commit(tmp_path, list(_events().values()), include_targets=False)
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, list(_events().values()), include_targets=False)
     try:
         with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
             load_final_population(repository, _request(snapshot, snapshot_id="missing-snapshot"))
@@ -101,7 +105,7 @@ def test_unresolved_snapshot_is_typed_without_scan(tmp_path):
 
 def test_population_with_no_held_out_events_is_not_a_success(tmp_path):
     events = _events()
-    conn, repository, snapshot = _commit(
+    conn, repository, snapshot = commit_prediction_inputs(
         tmp_path, [events["eligible"], events["ambiguous"]], include_targets=False)
     try:
         with pytest.raises(DataError, match="POPULATION_COLLAPSED"):
@@ -112,7 +116,7 @@ def test_population_with_no_held_out_events_is_not_a_success(tmp_path):
 
 def test_one_empty_set_is_still_a_population(tmp_path):
     events = _events()
-    conn, repository, snapshot = _commit(
+    conn, repository, snapshot = commit_prediction_inputs(
         tmp_path, [events["eligible"], events["rolling"]], include_targets=False)
     try:
         result = load_final_population(repository, _request(snapshot))
@@ -125,7 +129,7 @@ def test_one_empty_set_is_still_a_population(tmp_path):
 
 def test_missing_events_table_refuses_typed_without_partial_population(tmp_path):
     events = _events()
-    conn, repository, snapshot = _commit(tmp_path, list(events.values()), include_targets=True)
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, list(events.values()), include_targets=True)
     try:
         stripped = replace(snapshot, table_versions={
             name: version for name, version in snapshot.table_versions.items() if name != "earnings_events"})
@@ -137,7 +141,7 @@ def test_missing_events_table_refuses_typed_without_partial_population(tmp_path)
 
 
 def test_resolved_snapshot_with_different_identity_refuses_without_scan(tmp_path):
-    conn, repository, snapshot = _commit(tmp_path, list(_events().values()), include_targets=False)
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, list(_events().values()), include_targets=False)
     try:
         other = replace(snapshot, snapshot_id="different-snapshot")
         repository.resolve = lambda _snapshot_id: other
@@ -150,7 +154,7 @@ def test_resolved_snapshot_with_different_identity_refuses_without_scan(tmp_path
 
 
 def test_events_table_without_fragments_is_an_empty_collapsed_population(tmp_path):
-    conn, repository, snapshot = _commit(tmp_path, list(_events().values()), include_targets=False)
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, list(_events().values()), include_targets=False)
     try:
         repository.fragment_records = lambda _snapshot, _table: []
         with pytest.raises(DataError, match="POPULATION_COLLAPSED") as refusal:
@@ -161,7 +165,7 @@ def test_events_table_without_fragments_is_an_empty_collapsed_population(tmp_pat
 
 
 def test_integrity_refusal_from_resolve_propagates_unchanged(tmp_path):
-    conn, repository, snapshot = _commit(tmp_path, list(_events().values()), include_targets=False)
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, list(_events().values()), include_targets=False)
     try:
         def corrupt(_snapshot_id):
             raise errors.fail("MANIFEST_CORRUPT", "synthetic integrity failure")

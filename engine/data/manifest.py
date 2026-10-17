@@ -45,9 +45,10 @@ def write_text_atomic(path: Path, text: str) -> None:
     directory, so ``os.replace`` stays atomic on one filesystem) and is
     swapped in with ``os.replace``. A failed write removes the temp file and
     leaves the previous content untouched. The unique name keeps two writers
-    from clobbering each other's temp file. This is the shared atomic text
-    writer used by the SNAPSHOT, MANIFEST, flag-report, nightly-report and
-    ``--json`` writers.
+    from clobbering each other's temp file. The temp file is fsynced before
+    the swap. This is the shared atomic text writer used by the SNAPSHOT,
+    MANIFEST, flag-report, dashboard nightly report and the ``rebuild``
+    and ``tier4`` ``--json`` writers.
     """
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".",
                                     suffix=".tmp")
@@ -55,6 +56,8 @@ def write_text_atomic(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
         # mkstemp creates the temp file 0600, while the plain ``write_text`` this
         # replaced gave 0644 under the default umask. Restore 0644 before the
         # swap so the published SNAPSHOT/MANIFEST keep their expected mode.

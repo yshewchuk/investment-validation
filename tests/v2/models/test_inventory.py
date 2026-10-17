@@ -8,6 +8,8 @@ present in every worktree unlike ``data/models/*.joblib``.
 """
 from __future__ import annotations
 
+import hashlib
+import io
 from dataclasses import replace
 
 import joblib
@@ -205,3 +207,90 @@ def test_non_model_state_reports_presence_against_a_root(tmp_path):
     assert entries["payoff_line:STR-THRU"].backing_file is None
     assert entries["paired_residual_pool"].status == "missing_source"
     assert entries["recalibration_map"].status == "missing_source"
+
+
+# --------------------------------------------------------------------------
+# bounded reads: oversized files are refused, never slurped
+# --------------------------------------------------------------------------
+
+
+def test_a_symlink_to_an_artifact_is_refused_without_reading_it(tmp_path):
+    from engine.v2.models import inventory
+
+    target = tmp_path / "real.joblib"
+    target.write_bytes(b"payload")
+    link = tmp_path / "alias.joblib"
+    link.symlink_to(target)
+    with pytest.raises(ValueError) as error:
+        inventory._hash_file(link)
+    assert str(error.value) == "not a regular file"
+
+
+def test_a_symlinked_registry_is_refused_without_reading_it(tmp_path, monkeypatch):
+    from engine.v2.models import inventory
+
+    target = tmp_path / "registry.json"
+    target.write_text("{}")
+    link = tmp_path / "alias.json"
+    link.symlink_to(target)
+    monkeypatch.setattr(legacy_registry, "REGISTRY_PATH", link)
+    monkeypatch.setattr(
+        legacy_registry, "load_registry",
+        lambda *args, **kwargs: pytest.fail("the symlinked registry was read"),
+    )
+    with pytest.raises(ValueError) as error:
+        inventory.current_release_inventory()
+    assert str(error.value) == "not a regular file"
+
+
+def test_a_file_one_byte_over_the_artifact_cap_is_refused(tmp_path, monkeypatch):
+    from engine.v2.models import inventory
+
+    path = tmp_path / "big.joblib"
+    path.write_bytes(b"x" * 16)
+    monkeypatch.setattr(inventory, "MAX_ARTIFACT_BYTES", 15)
+    with pytest.raises(ValueError) as error:
+        inventory._hash_file(path)
+    assert str(error.value) == "file exceeds size cap"
+
+
+def test_a_file_of_exactly_the_artifact_cap_is_hashed(tmp_path, monkeypatch):
+    from engine.v2.models import inventory
+
+    path = tmp_path / "exact.joblib"
+    path.write_bytes(b"x" * 16)
+    monkeypatch.setattr(inventory, "MAX_ARTIFACT_BYTES", 16)
+    assert inventory._hash_file(path) == "sha256:" + hashlib.sha256(b"x" * 16).hexdigest()
+
+
+def test_an_oversize_registry_is_refused_before_it_is_read(monkeypatch):
+    from engine.v2.models import inventory
+
+    monkeypatch.setattr(inventory, "MAX_REGISTRY_BYTES", 0)
+    monkeypatch.setattr(
+        legacy_registry, "load_registry",
+        lambda *args, **kwargs: pytest.fail("the oversize registry was read"),
+    )
+    with pytest.raises(ValueError) as error:
+        inventory.current_release_inventory()
+    assert str(error.value) == "registry exceeds size cap"
+
+
+def test_inventory_caps_are_pinned():
+    from engine.v2.models import inventory
+
+    assert inventory.MAX_ARTIFACT_BYTES == 512 * 1024 * 1024
+    assert inventory.MAX_REGISTRY_BYTES == 16 * 1024 * 1024
+
+
+def test_artifact_is_unpickled_from_the_bounded_bytes(tmp_path, monkeypatch):
+    original = legacy_registry.load_artifact
+    recorded = []
+
+    def recorder(arg):
+        recorded.append(type(arg))
+        return original(arg)
+
+    monkeypatch.setattr(legacy_registry, "load_artifact", recorder)
+    _one_entry_release(tmp_path, id_="size_x", role="size")
+    assert recorded and all(kind is io.BytesIO for kind in recorded)
