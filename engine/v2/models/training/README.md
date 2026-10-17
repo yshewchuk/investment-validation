@@ -66,8 +66,9 @@ P5-3 (current dataset/training recipes):
 - `run_training_job` — the only entry that fits a recipe; resumable per fold,
   guarded by the shared no-fit switch.
 
-`d14_dataset.build_d14_dataset` builds the two monthly D14 datasets from an
-explicit Repository, SnapshotRef and pinned calendar. Earnings and daily-state
+`build_d14_dataset` builds the two monthly D14 datasets from explicit catalog,
+artifact root, snapshot and receipt identifiers. It verifies receipt association
+and calendar bytes before calculating any frame. Earnings and daily-state
 calculations use native readers/math; the historical panel producer remains a
 dependency through its snapshot-pinned history columns. It does not substitute
 the live panel-row population. The CLI,
@@ -89,7 +90,7 @@ are not saved, so they cannot be re-bucketed). The real-data dataset
 builders for these and for the calibration recipes live in
 `tools/phase5_datasets.py` (legacy readers stay outside `engine/v2`).
 
-<!-- public-interface: fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool -->
+<!-- public-interface: build_d14_dataset, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool -->
 
 ## Consumers
 

@@ -11,16 +11,17 @@ from pandas.testing import assert_frame_equal
 
 from engine.v2.data import errors
 from engine.v2.data.reference_catalog import insert_reference_inputs
-from engine.v2.models.training import d14_dataset
+from engine.v2.foundation import ArtifactStore
+from engine.v2.models.training import build_d14_dataset, d14_dataset, d14_inputs
 from tests.data_scan_support import commit_tables
-from tests.v2.models.training.test_d14_dataset import _forbidden, _legacy
-from tests.v2.models.training.test_d14_dataset import pinned as pinned
+from tests.v2.models.training.d14_support import forbidden, legacy_frame
+from tests.v2.models.training.d14_support import pinned as pinned
 from tools import phase5_d14_inputs
 
 
 @pytest.mark.parametrize("pinned", ("boundary",), indirect=True)
 def test_fixed_monthly_population_matches_legacy_across_year_boundary(pinned, monkeypatch):
-    expected = _legacy(pinned, "implied_t1", monkeypatch)
+    expected = legacy_frame(pinned, "implied_t1", monkeypatch)
     actual = phase5_d14_inputs.build_dataset("implied_t1", **pinned["inputs"])
     assert_frame_equal(actual[expected.columns], expected, check_exact=True)
     assert set(actual.year) == {2024, 2025}
@@ -30,10 +31,29 @@ def test_fixed_monthly_population_matches_legacy_across_year_boundary(pinned, mo
 @pytest.mark.parametrize("pinned", ("blank_session",), indirect=True)
 def test_blank_session_refuses_like_legacy_instead_of_changing_population(pinned, monkeypatch):
     with pytest.raises(ValueError, match="session"):
-        _legacy(pinned, "implied_t1", monkeypatch)
+        legacy_frame(pinned, "implied_t1", monkeypatch)
     with pytest.raises(errors.DataError) as err:
         phase5_d14_inputs.build_dataset("implied_t1", **pinned["inputs"])
     assert err.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("pinned", ("warmup",), indirect=True)
+def test_calendar_warmup_boundary_matches_legacy(pinned, monkeypatch):
+    expected = legacy_frame(pinned, "implied_t1", monkeypatch)
+    actual = build_d14_dataset("implied_t1", **pinned["inputs"])
+    assert_frame_equal(actual[expected.columns], expected, check_exact=True)
+    assert pinned["days"][13] not in set(actual.event_date)
+    row = actual[actual.event_date == pinned["days"][14]].iloc[0]
+    assert row.entry_date == pinned["days"][0]
+
+
+@pytest.mark.parametrize("pinned", ("early_daily",), indirect=True)
+def test_first_recipe_year_retains_prior_year_daily_history(pinned, monkeypatch):
+    expected = legacy_frame(pinned, "implied_t1", monkeypatch)
+    actual = build_d14_dataset("implied_t1", **pinned["inputs"])
+    assert_frame_equal(actual[expected.columns], expected, check_exact=True)
+    assert len(actual) == 1 and actual.iloc[0].entry_date.year == 2016
+    assert actual.iloc[0].spot > 0
 
 
 @pytest.mark.parametrize("days", ([], ["2024-01-02", "2024-01-01"],
@@ -47,7 +67,7 @@ def test_calendar_shape_has_stable_refusal(days):
 
 def test_unknown_role_refuses_before_inputs():
     with pytest.raises(errors.DataError) as err:
-        d14_dataset.build_d14_dataset(None, None, calendar=None, role="unsupported")
+        d14_dataset._calculate_frame(None, None, calendar=None, role="unsupported")
     assert err.value.code == "CONTRACT_MISMATCH"
 
 
@@ -56,13 +76,14 @@ def test_missing_input_table_refuses_before_reads(pinned, monkeypatch):
     snapshot = dataclasses.replace(snapshot, table_versions={
         key: value for key, value in snapshot.table_versions.items() if key != "feature_panel"})
     monkeypatch.setattr(repo, "resolve", lambda _: snapshot)
-    monkeypatch.setattr(repo, "scan", _forbidden)
+    monkeypatch.setattr(repo, "scan", forbidden)
     with pytest.raises(errors.DataError) as err:
-        d14_dataset.build_d14_dataset(repo, snapshot, calendar=None, role="implied_t1")
+        d14_dataset._calculate_frame(repo, snapshot, calendar=None, role="implied_t1")
     assert err.value.code == "CONTRACT_MISMATCH"
 
 
-def test_table_default_bound_and_scan_overflow_are_enforced(pinned, monkeypatch):
+@pytest.mark.parametrize("count", (1, 2))
+def test_table_default_bound_and_scan_overflow_are_enforced(pinned, monkeypatch, count):
     repo, snapshot = pinned["repository"], pinned["snapshot"]
     monkeypatch.setattr(repo, "scan_population_bound", lambda *args, **kw: 500001)
     queries = []
@@ -70,20 +91,34 @@ def test_table_default_bound_and_scan_overflow_are_enforced(pinned, monkeypatch)
     assert list(d14_dataset._rows(repo, snapshot, "earnings_events", ("event_id",),
                                  start="2017-01-01", end="2027-01-01")) == []
     assert queries[0].max_result_rows == 500000
-    monkeypatch.setattr(repo, "scan", lambda *args, **kw: iter([pa.table({"event_id": ["a", "b"]})]))
-    with pytest.raises(errors.DataError) as err:
-        list(d14_dataset._rows(repo, snapshot, "earnings_events", ("event_id",),
-                               start="2017-01-01", end="2027-01-01", cap=1))
-    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
+    monkeypatch.setattr(repo, "scan", lambda *args, **kw: iter([pa.table({"event_id": ["a", "b"][:count]})]))
+    rows = d14_dataset._rows(repo, snapshot, "earnings_events", ("event_id",),
+                            start="2017-01-01", end="2027-01-01", cap=1)
+    if count == 1:
+        assert list(rows) == [{"event_id": "a"}]
+    else:
+        with pytest.raises(errors.DataError) as err:
+            list(rows)
+        assert err.value.code == "RESULT_LIMIT_EXCEEDED"
 
 
-def test_ticker_row_bound_refuses_before_daily_calculation(monkeypatch):
+@pytest.mark.parametrize("count", (10000, 10001))
+def test_ticker_row_bound_is_inclusive(monkeypatch, count):
     monkeypatch.setattr(d14_dataset, "_rows", lambda *args, **kw: iter(
-        [{"ticker": "A", "date": "2024-01-01"}] * 10001))
-    monkeypatch.setattr(d14_dataset.panel_math, "daily_state_lookup", _forbidden)
-    with pytest.raises(errors.DataError) as err:
-        d14_dataset._daily_features(pd.DataFrame({"ticker": ["A"]}), None, None)
-    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
+        [{"ticker": "A", "date": "2024-01-01"}] * count))
+    calls = []
+    monkeypatch.setattr(d14_dataset.panel_math, "daily_state_lookup",
+                        lambda rows, day: calls.append(len(rows)) or {})
+    frame = pd.DataFrame({"ticker": ["A"], "entry_date": ["2024-01-01"],
+                          "last_pre_print": ["2024-02-01"]})
+    if count == 10000:
+        assert len(d14_dataset._daily_features(frame, None, None)) == 1
+        assert calls == [10000, 10000]
+    else:
+        with pytest.raises(errors.DataError) as err:
+            d14_dataset._daily_features(frame, None, None)
+        assert err.value.code == "RESULT_LIMIT_EXCEEDED"
+        assert calls == []
 
 
 @pytest.mark.parametrize("exit_spot", (0.0, -1.0))
@@ -156,39 +191,55 @@ def test_catalog_errors_are_typed(pinned, tmp_path, case):
     assert err.value.code == "CONTRACT_MISMATCH"
 
 
-def test_calendar_is_bounded_before_read(pinned, monkeypatch):
-    ref = dataclasses.replace(pinned["calendar_ref"], byte_size=phase5_d14_inputs.MAX_CALENDAR_BYTES + 1)
-    monkeypatch.setattr(pinned["store"], "read_verified", _forbidden)
-    with pytest.raises(errors.DataError) as err:
-        phase5_d14_inputs._calendar(pinned["store"], ref)
-    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
+@pytest.mark.parametrize("past_limit", (False, True))
+def test_calendar_byte_bound_is_inclusive(pinned, monkeypatch, past_limit):
+    monkeypatch.setattr(d14_inputs, "MAX_CALENDAR_BYTES", pinned["calendar_ref"].byte_size - past_limit)
+    if past_limit:
+        monkeypatch.setattr(ArtifactStore, "read_verified", forbidden)
+        with pytest.raises(errors.DataError) as err:
+            build_d14_dataset("implied_t1", **pinned["inputs"])
+        assert err.value.code == "RESULT_LIMIT_EXCEEDED"
+    else:
+        assert not build_d14_dataset("implied_t1", **pinned["inputs"]).empty
 
 
 def test_calendar_consumes_exact_verified_bytes(pinned, monkeypatch):
-    store = pinned["store"]
-    original = store.read_verified
+    original = ArtifactStore.read_verified
 
-    def read(ref):
-        data = original(ref)
+    def read(store, ref):
+        data = original(store, ref)
         replacement = store.root / "replacement"
         replacement.write_bytes(b"changed after verification")
         replacement.replace(store.root / ref.storage_key)
         return data
 
-    monkeypatch.setattr(store, "read_verified", read)
-    actual = phase5_d14_inputs._calendar(store, pinned["calendar_ref"])
-    assert list(actual.days[:len(pinned["days"])]) == list(pinned["days"])
+    expected = build_d14_dataset("implied_t1", **pinned["inputs"])
+    monkeypatch.setattr(ArtifactStore, "read_verified", read)
+    actual = build_d14_dataset("implied_t1", **pinned["inputs"])
+    assert_frame_equal(actual, expected, check_exact=True)
     with pytest.raises(errors.DataError) as err:
-        phase5_d14_inputs._calendar(store, pinned["calendar_ref"])
+        build_d14_dataset("implied_t1", **pinned["inputs"])
     assert err.value.code == "OBJECT_CORRUPT"
 
 
-@pytest.mark.parametrize("data", (b"", b"Price,Close\nTicker,^GSPC\nDate,\n",
-                                  b"Price,Close\nTicker,^GSPC\nDate,\nbad-date,100\n"))
-def test_malformed_calendar_date_refuses(pinned, data):
-    obj = pinned["store"].publish_bytes(data, schema_ref="parquet_fragment.v1")
-    ref = dataclasses.replace(pinned["calendar_ref"], object_id=obj.artifact_id,
-                              content_hash=obj.content_hash, byte_size=obj.byte_size)
+@pytest.mark.parametrize("pinned", tuple({"calendar_bytes": data} for data in (
+    b"", b"Price,Close\nTicker,^GSPC\nDate,\n", b"Price,Close\nTicker,^GSPC\nDate,\nbad-date,100\n",
+    b"Price,Close\nTicker,^GSPC\nDate,\n2024-01-02,100\n,100\n")), indirect=True)
+def test_malformed_calendar_date_refuses(pinned):
     with pytest.raises(errors.DataError) as err:
-        phase5_d14_inputs._calendar(pinned["store"], ref)
+        build_d14_dataset("implied_t1", **pinned["inputs"])
     assert err.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("native", (False, True))
+def test_cli_checks_both_no_fit_guards_before_reading(pinned, monkeypatch, tmp_path, native):
+    from engine.models import no_fit as legacy_guard
+    from engine.v2.models import no_fit as native_guard
+
+    guard = native_guard if native else legacy_guard
+    monkeypatch.setattr(phase5_d14_inputs, "build_dataset", forbidden)
+    args = ["--role", "implied_t1", "--out", str(tmp_path / "out")]
+    for name, value in pinned["inputs"].items():
+        args += ["--" + name.replace("_", "-"), str(value)]
+    with guard.no_fit_guard(), pytest.raises(guard.RuntimeFitForbidden):
+        phase5_d14_inputs.main(args)

@@ -57,8 +57,10 @@ no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
 
 ### Snapshot-pinned D14 monthly datasets
 
-`training.d14_dataset.build_d14_dataset` calculates only the `implied_t1` and
-`runup_move` monthly inputs. Bounded native Repository scans pin earnings,
+`training.build_d14_dataset` builds only the `implied_t1` and `runup_move`
+monthly inputs from explicit catalog/store/snapshot/receipt identifiers.
+It verifies provenance before calling its internal frame calculator.
+Bounded native Repository scans pin earnings,
 daily state and the stored `feature_panel` history block to one SnapshotRef.
 History retains the original panel population and missing values from its
 historical producer; it is not reconstructed with `scan_panel_row`.
@@ -69,8 +71,7 @@ math. The consumed calendar bytes are hash-verified and capped at 16 MiB.
 No mutable calendar file, head resolution or legacy reader is used.
 
 `python -m tools.phase5_d14_inputs` requires explicit catalog, artifact root,
-snapshot and import-receipt identifiers. The API's supplied calendar must be
-receipt-verified by its caller; the CLI enforces that binding. The fixed
+snapshot and import-receipt identifiers, delegating to that same public API. The fixed
 2017–2026 event window is the current monthly recipe population, with daily
 history from 2016. Snapshot coverage does not widen that recipe contract.
 The existing preparation, fold planning and label/membership receipts remain
@@ -87,7 +88,8 @@ and positional-lag behavior. Nonpositive prices produce missing move labels.
 | Input exceeds table, ticker or calendar-byte bound | `RESULT_LIMIT_EXCEEDED` |
 | Snapshot identity or committed receipt association differs | `IDENTITY_CONFLICT` |
 | Committed receipt has no pinned reference inputs | `SNAPSHOT_NOT_READY` |
-| Catalog, required table/calendar, session, role or decision population invalid | `CONTRACT_MISMATCH` |
+| Null session or fewer than 14 prior calendar sessions | Event excluded, matching legacy membership |
+| Catalog, required table/calendar, non-null session outside AMC/BMO, role or decision population invalid | `CONTRACT_MISMATCH` |
 | Calendar object bytes differ from their registered hash/size | `OBJECT_CORRUPT` |
 | CLI output is inside configured data root or input store | argparse exit 2 before reads/writes |
 

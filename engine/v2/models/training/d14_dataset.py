@@ -115,7 +115,7 @@ def _daily_features(frame, repository, snapshot):
     return frame
 
 
-def build_d14_dataset(repository, snapshot, *, calendar, role):
+def _calculate_frame(repository, snapshot, *, calendar, role):
     """Build either monthly frame; never read a mutable head or legacy file.
 
     The supplied calendar must come from the pinned original calendar object.
