@@ -27,16 +27,15 @@ as the existing `_reconcile_computed_moves_refresh` and the planned
 `_reconcile_pool_nightly_refresh` (#192 slice 4; never a `GRAPH`/`_DAG_STAGES`
 node). It publishes through the planned `phase5_state_stage` job (#806, #192
 slice 3; today only `run_state_job` in `tools/phase5_training_job.py` exists):
-the retrained objects
-arrive as non-carried `PoolOutput`s, everything else is carried or advanced as
-on any night. There is no second release-assembly path.
+the retrained objects arrive as non-carried `PoolOutput`s, everything else is
+carried or advanced as on any night. No second release-assembly path.
 
 ## 2. Trigger rule and idempotency
 
 **Due set.** For a refresh session dated `s`, the *completed* months are all
 calendar months before `s`'s month. Evaluate every completed month with no
-durable record (retrain or `superseded`; the first run, with no records, marks every month before the latest completed one `superseded`); the **target** is the latest due one,
-`M`. Its **retrain cutoff** is the last calendar day of `M` (`M_end`), a data
+durable record (retrain or `superseded`); the **target** is the latest due one,
+`M`. On a first run with no records, every due month before `M` is superseded. Its **retrain cutoff** is the last calendar day of `M` (`M_end`), a data
 date, fixed by `M` alone and independent of the night the job runs.
 
 **Due.** Month `M` is due when all hold: (a) no retrain record exists for `M`
@@ -53,8 +52,10 @@ state each tick, with no in-memory phase cache. A crash between "retrain
 succeeded" and "stage submitted" is recovered by the next tick: the stage key
 is `retrain-stage:{M}:{incumbent_release_id}` and the reconcile submits it when
 the retrain job succeeded and either no stage key exists for `M`, or the only
-one failed `ConcurrentPromote` (§4). Stage attempts are bounded at two per `M`;
-any other stage failure is terminal for `M`, like `retrain:{M}`.
+one is followed by a promote job (`models_promote`, key
+`retrain-promote:{M}:{incumbent_release_id}`, submitted by this reconcile after
+acceptance) that failed `ConcurrentPromote` (§4). Stage attempts are bounded at
+two per `M`; any other stage or promote failure is terminal for `M`.
 
 **Retry.** A hard failure is terminal for `retrain:{M}`. No automatic
 replacement key. Recovery is operator-driven; the missing replacement-key path is the open gap
@@ -93,10 +94,10 @@ admits no row dated after `M_end` and reads no live registry.
 
 **Causality (data dates, never `computed_at`).** Every retrained object records
 `retrain_cutoff = M_end`. A training row is admitted only if its event and
-outcome data dates are on or before `M_end`. The release then scores events
-dated after `M_end`; the nightly keeps advancing the board pool and trailing
-cutoff beyond `M_end` while the retrained members stay at `M_end` until the next
-retrain.
+outcome data dates are on or before `M_end` (inclusive). Pool cutoffs keep their
+exclusive convention (`residual_artifact.py`); the catalog records `M_end` and
+each artifact applies its own boundary. The nightly keeps advancing the board
+pool and trailing cutoff beyond `M_end`; retrained members stay at `M_end`.
 
 **Per-member cutoffs (contract change).** `derive_catalog` today requires every
 non-carried object to carry the session cutoff, and `sources.pool_cutoff` is a
@@ -146,20 +147,22 @@ needs the full staging gate before it can be promoted:
    paired differences with the incumbent's, not a magnitude cutoff**; the
    measures and the pass rule are written into the slice that builds them and
    are labelled there as design judgement.
-3. Promote with `expected_previous_release_id` = the incumbent. A concurrent
-   nightly promotion refuses `ConcurrentPromote`; the next tick re-stages on the
-   new incumbent (the retrained objects stay valid, §3) and submits the second
-   and last stage attempt (§2) under a key naming the new incumbent.
+3. The `retrain-promote` job promotes with `expected_previous_release_id` = the
+   incumbent. A concurrent nightly promotion refuses `ConcurrentPromote`; the
+   reconcile sees that failed job and re-stages on the new incumbent (retrained
+   objects stay valid, §3) as the second and last attempt (§2). Steps 1-2 rerun
+   for the new candidate: a receipt naming the first candidate's hash never
+   authorises the second.
 
-Failure at 1-3 leaves the candidate staged and unpromoted, the incumbent
-deployed, and a failure receipt (the job result naming the step and refusal code, e.g. `StaleReleaseHash`); no automatic next-tick action, operator recovery as in §2.
+Any other failure at 1-3 leaves the candidate staged and unpromoted, the
+incumbent deployed, and a failure receipt (job result naming step and refusal
+code, e.g. `StaleReleaseHash`); no automatic action, operator recovery as in §2.
 
-**Rollback.** `deployment.rollback` undoes exactly one promotion, and nightly
-promotions follow the retrain promotion, so it cannot target the retrain itself
-after the first night (D3). The designed path is a forward promotion of a
-release re-derived from the pre-retrain models (explicit
-`promote(release_id, expected_previous_release_id=…)`); the next nightly
-re-advances the board pool from it.
+**Rollback.** `deployment.rollback` undoes one promotion per call (models doc
+§7.2 undo stack, so N chained rollbacks undo N chained promotions). Nightly
+promotions follow the retrain promotion, so one rollback would undo only the
+latest nightly (D3). Designed path: forward-promote a release re-derived from
+the pre-retrain models; the next nightly re-advances the board pool from it.
 
 ## 5. Failure semantics (R1-R6)
 
@@ -197,11 +200,10 @@ waits for admission rather than being denied. Consequences, stated once:
   have finished, never from agent sessions or CI.
 - If the next session starts while it still runs, that session's heavy steps
   (including required-graph heavy steps) wait for admission until the retrain
-  ends; non-heavy steps proceed. Accepted because a monthly cadence makes overlap
-  rare.
-- Neither a wall-clock deadline nor a non-blocking admission probe exists today
-  (`bounded_run` only blocks). Slice 4 decides whether the retrain is enqueued
-  through `ops/scheduler.py`'s admission decision or probed directly. The job
+  ends; non-heavy steps proceed (overlap is rare at a monthly cadence).
+- `bounded_run` only blocks and has no deadline. The non-blocking probe
+  candidate is `ops/scheduler.py`'s claim-or-queue decision (`_claim_row`,
+  `HEAVY_SLOT_HELD`); slice 4 decides whether to call it. The job
   envelope already has `deadline_at` (`contracts/jobs.py`) but nothing enforces
   it; enforcement (terminal failure) is a deliverable of each job's
   slice (3 for pools, 5a for models), sized from the receipt below; the probe
@@ -212,11 +214,11 @@ job spec come from that measurement, not from this document.
 
 ## 7. Parity and qualification
 
-- Parity reports already pair native with legacy per session and record the
-  release id used. A retrain (or any model-changing promotion) is a release id
+- Parity reports pair native with legacy per session but do not record the
+  release id today (`native_parity_report.py` stamps only `as_of` and
+  `generated_at`); recording it is in slice 7's scope. A retrain is a release id
   change; the report marks the first session scored under a new release
-  `release_changed` and does not change its comparison rules (the bar-B
-  per-field tolerances apply as before).
+  `release_changed`; the bar-B per-field tolerances apply as before.
 - The retrain is submitted only after the session's required graph (which holds
   the score job) and the pool refresh finished (§2 condition c), so promotion
   follows that session's scoring and no session scores half under old and half
@@ -245,30 +247,27 @@ job spec come from that measurement, not from this document.
 - **D3 Rollback.** (a) *Forward-promote a release re-derived from the
   pre-retrain models* (§4; keeps the undo-stack invariant, costs one night of
   re-advance). (b) *Allow `rollback` to target a named release*: simpler to use,
-  breaks the documented "rollback undoes exactly one promotion" invariant.
-  Recommendation: (a).
-- **D4 Qualification across a retrain.** (a) *Count continues*, retrain
-  sessions reported separately; (b) *count resets* at a model-changing release.
-  (a) keeps momentum toward the cutover date; (b) makes the qualified release
-  the one that goes live. Recommendation: (b) only for model-changing retrains
-  (so with D1(a) nothing resets).
+  breaks the models-doc undo-stack invariant. Recommendation: (a).
+- **D4 Qualification across a retrain.** (a) *Count continues*, retrain sessions
+  reported separately (keeps momentum); (b) *count resets* at a model-changing
+  release (qualified release = live release). Recommendation: (b), model-changing
+  retrains only (so with D1(a) nothing resets).
 - **D6 Retrain vs next session's scoring.** A running retrain delays heavy
   scoring unboundedly until a deadline exists. (a) *Deadline only* (slices 3/5a
   fail the job at a limit sized from the receipt); (b) *start only in a window*
   with enough hours before the next session's heavy steps; (c) *let scoring
-  preempt*. (a) is simplest, (b) avoids the delay, (c) needs executor work.
-  Recommendation: (a)+(b).
-- **D7 Experiment holdouts in production training.** (a) *Not applied* (§3):
-  the deployed model sees all data to `M_end`; (b) *exclude* random and rolling
-  holdouts from retrain rows so the holdouts stay clean for later experiments,
-  at the cost of a model that ignores the newest six months. Recommendation: (a).
+  preempt* (needs executor work). Recommended: (a)+(b).
+- **D7 Experiment holdouts in production training.** (a) *Not applied* (§3): the
+  model sees all data to `M_end`, so later experiments cannot treat M−5…M as
+  clean holdout for this model; (b) *exclude* random and rolling holdouts from
+  retrain rows (keeps them clean; ignores the newest six months).
+  Recommendation: (a).
 - **D5 Missed months.** Designed as latest-only with a `superseded` marker (§2);
-  the alternative is to retrain each missed month in order. Recommendation:
-  latest-only; ordering adds cost and no information.
+  the alternative retrains each missed month in order. Recommended: latest-only.
 
 ## 9. Split list (code slices, one PR each, in order)
 
-Sizes are non-test code / test / doc lines, estimated.
+Sizes: non-test code / test / doc lines, estimated.
 
 1. **Catalog `retrain_cutoff`.** `sources.retrain_cutoff` and per-member cutoff
    checks in `derive_catalog`/`carry_forward_release`; `CUTOFF_NOT_ADVANCED` for
@@ -292,9 +291,8 @@ Sizes are non-test code / test / doc lines, estimated.
 7. **Parity marker** (§7). `release_changed` on the first session of a new
    release; qualification handling per D4. 60-90 / 70-100 / 15-25.
 
-Each slice adds focused synthetic tests for its R1-R6 promises; none touches the
-local model release store, runs the nightly, or runs a heavy job.
+Each slice adds synthetic tests for its R1-R6 promises; none touches the local
+release store, runs the nightly or runs a heavy job.
 
 Library check: no standard tool covers a content-addressed release catalog or
-this job-keyed reconcile; the design reuses the existing training, staging,
-promotion and executor surfaces.
+this job-keyed reconcile; existing training, staging and promotion surfaces are reused.
