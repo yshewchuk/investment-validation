@@ -166,6 +166,11 @@ def test_real_run_records_independent_arms_and_exact_replay(source, tmp_path, mo
     assert index["planned_variants"] == index["attempted_variants"] == 2
     assert index["recording_mode"] == "recorded"
     assert index["roster_id"] == content_hash(sealed_sweep(source))
+    ledger_intent = content_hash(str(ledger.resolve()))
+    intent = {"schema_version": "native_gate_collection.v1.0", "roster_id": content_hash(sealed_sweep(source)),
+              "recording_mode": "recorded", "ledger_destination": ledger_intent,
+              "collector_source": collection._implementation(REPO)}
+    assert index["run_id"] == content_hash(intent)
     assert index["primary_comparison"] == ["candidate", "control"]
     assert [arm["arm_id"] for arm in index["variants"]] == ["candidate", "control"]
     assert len({arm["attempt_id"] for arm in index["variants"]}) == 2
@@ -272,6 +277,13 @@ def test_pending_collection_binds_mode_and_does_not_freeze_index(source, tmp_pat
         assert result["index"]["attempted_variants"] == 0
         assert [arm["state"] for arm in result["index"]["variants"]] == ["queued", "queued"]
     assert smoke["index"]["run_id"] != recorded["index"]["run_id"]
+    for result, mode, ledger in ((smoke, "smoke", None),
+                                 (recorded, "recorded", tmp_path / "LEDGER.csv")):
+        intent = {"schema_version": "native_gate_collection.v1.0",
+                  "roster_id": content_hash(sealed_sweep(source)), "recording_mode": mode,
+                  "ledger_destination": None if ledger is None else content_hash(str(ledger.resolve())),
+                  "collector_source": collection._implementation(REPO)}
+        assert result["index"]["run_id"] == content_hash(intent)
     assert len({arm["job_id"] for result in (smoke, recorded) for arm in result["index"]["variants"]}) == 2
     assert not list(source.root.rglob("*.csv"))
     assert all(not any(key.endswith("_index") for key in evidence) for evidence in _evidence(source))
@@ -1485,6 +1497,17 @@ def test_terminal_types_malformed_metadata_and_recovered_failures(terminal, fiel
         terminal.job.state = "failed"
         terminal.conn.execute("UPDATE attempts SET state='failed', failure_json=?", (payload,))
         terminal.conn.execute("DELETE FROM attempt_outputs")
+    with pytest.raises(OpsError) as error:
+        collection._terminal(terminal.conn, terminal.store, terminal.job, terminal.registration)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+
+
+def test_terminal_decodes_attempt_failure_even_when_job_refusal_is_authoritative(terminal):
+    terminal.job.state, terminal.job.attempt_count, terminal.job.fence = "failed", 2, 3
+    terminal.job.failure = fail("RESOURCE_UNAVAILABLE", "authoritative refusal").problem
+    terminal.conn.execute(
+        "INSERT INTO attempts VALUES ('attempt-2', 'job-1', 2, 3, 'failed', 'ended-later', '{broken')")
+    terminal.conn.execute("DELETE FROM attempt_outputs")
     with pytest.raises(OpsError) as error:
         collection._terminal(terminal.conn, terminal.store, terminal.job, terminal.registration)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False

@@ -152,6 +152,14 @@ def _bind(conn, store, anchor, key, document):
     return to_document(ref)
 
 
+def _check_policy(problem):
+    if problem.code == "WORKER_FAILED" and problem.code not in FAILURE_CODES:
+        return
+    if (problem.code not in FAILURE_CODES
+            or (problem.category, problem.retryable) != FAILURE_CODES[problem.code]):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep child refusal differs from its registered policy")
+
+
 def _terminal(conn, store, job, registration):
     """Never use JobReceipt.output_refs: it unions outputs from old attempts."""
     encoding = conn.execute("PRAGMA encoding").fetchone()[0]
@@ -172,10 +180,13 @@ def _terminal(conn, store, job, registration):
         try:
             if payload is None or len(payload.decode(encoding).encode("utf-8")) > MAX_FAILURE_BYTES:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep attempt failure must be bounded text")
-            if problem is None:
-                problem = from_document(Problem, json.loads(payload.decode(encoding)))
+            stored = from_document(Problem, json.loads(payload.decode(encoding)))
         except (ValueError, RecursionError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep attempt failure cannot be decoded") from None
+        problem = job.failure if job.failure is not None else stored
+        _check_policy(stored)
+    if job.failure is not None:
+        _check_policy(job.failure)
     if problem is None and job.state == "cancelled":
         problem = fail("CANCELLED", "sweep child was cancelled").problem
     worker_problem = problem
@@ -186,6 +197,8 @@ def _terminal(conn, store, job, registration):
             ref = registered_artifact(conn, outputs[0]["artifact_id"], max_metadata_bytes=MAX_NATIVE_EVIDENCE_BYTES)
         except (ValueError, RecursionError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep result reference cannot be decoded") from None
+        if ref.artifact_id != outputs[0]["artifact_id"]:
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep result reference identity differs from its output")
         if ref.byte_size > MAX_GATE_RESULT_BYTES:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep result exceeds its byte bound")
         payload = _verified_bytes(store, ref)
@@ -203,7 +216,11 @@ def _terminal(conn, store, job, registration):
     elif outputs:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "failed sweep attempt has successful output")
     if result is None:
-        if problem is None or problem.code == "WORKER_FAILED":
+        if problem is None:
+            problem = fail("EXPERIMENT_VARIANT_FAILED", "sweep child produced no scientific result").problem
+        elif problem.code == "WORKER_FAILED":
+            if problem.code in FAILURE_CODES and (problem.category, problem.retryable) != FAILURE_CODES[problem.code]:
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep child refusal differs from its registered policy")
             problem = fail("EXPERIMENT_VARIANT_FAILED", "sweep child produced no scientific result").problem
         elif (problem.code not in FAILURE_CODES
               or (problem.category, problem.retryable) != FAILURE_CODES[problem.code]):

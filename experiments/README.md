@@ -93,4 +93,4 @@ Immutable roster/source/mode/destination conflicts refuse R6 with recovery conte
 Restore the original installed sources and ledger address to replay, or seal a new
 experiment identity; existing intent and failed `(id, spec_hash)` CSV rows never change to success.
 Never replace an existing collection intent. If import-time source capture failed, start a fresh process after restoring source access; the failed process has no trustworthy baseline.
-The inherited shared `source_closure` currently refuses `.py` files over 8 MiB with `INPUT_CHANGED`; collector source admission maps this to `EXPERIMENT_IDENTITY_CONFLICT`. This implementation limit conflicts with the owner-approved uncapped trusted-code contract and awaits a separate correction decision. Catalog, artifact, result, failure and report comparison bounds remain enforced.
+The inherited shared `source_closure` currently refuses `.py` files over 8 MiB with `INPUT_CHANGED`; collector source admission maps this to `EXPERIMENT_IDENTITY_CONFLICT`. Catalog, artifact, result, failure and report comparison bounds remain enforced.
