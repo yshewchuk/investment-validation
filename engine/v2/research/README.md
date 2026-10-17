@@ -248,3 +248,6 @@ chains, snapshot pinning, and the refusal paths.
 `tests/test_v2_research_reconcile_trades.py` covers the canonical-event prune:
 non-canonical rows tombstoned, everything else byte-identical, the pinned
 snapshot recorded, and an explicit `--snapshot-id` honoured.
+
+`experiments/magnitude_search_outer.py` consumes `read_stored`, target preflight,
+training qualification, complete target reads and `magnitude_recipe` for selected outer folds.

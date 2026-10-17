@@ -860,3 +860,6 @@ flowchart LR
     Commit -->|ok| NewVersion["new trades\ndataset version"]
     Commit -->|"head moved"| Conflict["SNAPSHOT_CONFLICT"]
 ```
+
+`experiments/magnitude_search_outer.py` consumes `read_stored`, target preflight,
+training qualification, complete target reads and `magnitude_recipe` for selected outer folds.

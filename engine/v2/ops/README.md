@@ -498,3 +498,6 @@ check is never green). The green-path command is:
 python3 checks/v2_coverage_ratchet.py --profile phase1 --measure --output /tmp/coverage.json
 python3 checks/rearchitecture_phase1_gate.py --coverage /tmp/coverage.json
 ```
+
+`experiments/magnitude_search_outer.py` consumes `migrations.require_current`,
+`fingerprints.source_closure` and `errors.OpsError`/`fail` for selected outer evaluation.

@@ -98,3 +98,27 @@ Restore the original installed sources and ledger address to replay, or seal a n
 experiment identity; existing intent and failed `(id, spec_hash)` CSV rows never change to success.
 Never replace an existing collection intent. If import-time source capture failed, start a fresh process after restoring source access; the failed process has no trustworthy baseline.
 The inherited shared `source_closure` currently refuses `.py` files over 8 MiB with `INPUT_CHANGED`; collector source admission maps this to `EXPERIMENT_IDENTITY_CONFLICT`. Catalog, artifact, result, failure and report comparison bounds remain enforced.
+
+## Selected outer folds
+
+After explicitly completing native inner trials and calling `SearchTrials.freeze`,
+call `magnitude_search_outer.execute_outer_fold(conn, store, repository,
+registration, request, plan_ref, outer_year, limits=...)`. Limits use the existing
+explicit `memory_bytes`, `cpu_seconds`, `wall_seconds` contract. This library API
+refits only that year's frozen inner winner on qualified prior labels. Submitted
+forecasts alone cannot authorize it. All planned native inner completions,
+including permitted candidate failures, are verified before outer execution.
+
+Each result preserves the selected recipe, input/source evidence, actual fit count,
+complete forecast/target pairs, event/forecast counts and pooled/per-horizon
+RMSE/MAE. Forecasts are durably fixed before that fold's evaluation targets open.
+Repeating a completed call verifies the original evidence without fitting or
+opening native payloads. Any incomplete outer attempt must remain unresolved;
+there is no retry, replacement candidate or recovery API in this slice.
+
+`collect_outer_results(conn, store, repository, registration, request, plan_ref)`
+requires all outer folds complete and returns their verified results plus pooled
+and per-horizon event-error metrics. It never launches missing work or chooses a
+winner using outer results: `prospective_candidate_id` is the latest fold's inner
+selection. Both APIs are library-only; no CLI, real-data execution, holdout/final
+access, ledger publication or release authority is implied.
