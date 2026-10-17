@@ -109,6 +109,8 @@ def _receive(child, wall_seconds, progress):
             code = child.wait(timeout=max(0, remaining))
         except subprocess.TimeoutExpired:
             raise fail("RESOURCE_LIMIT_EXCEEDED", "search execution exceeded its resource limits") from None
+        if time.monotonic() >= deadline:
+            raise fail("RESOURCE_LIMIT_EXCEEDED", "search execution exceeded its resource limits")
     if code == -signal.SIGXCPU:
         raise fail("RESOURCE_LIMIT_EXCEEDED", "search execution exceeded its resource limits")
     if code or buffer or result is None:

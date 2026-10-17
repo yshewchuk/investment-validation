@@ -135,7 +135,8 @@ def test_fixed_worker_independently_admits_exact_input_cap(monkeypatch, extra):
 def test_all_resource_keys_accept_exact_representable_endpoints(monkeypatch, value):
     monkeypatch.setattr(execution.os, "sched_getaffinity", lambda pid: {7})
     limits = dict.fromkeys(LIMITS, value)
-    assert execution.execution_limits(limits) == {**limits, "cpu_id": 7}
+    expected = {**limits, "cpu_id": 7}
+    assert execution.execution_limits(limits) == expected
 
 
 @pytest.mark.parametrize("key", list(LIMITS))
@@ -156,7 +157,9 @@ def test_cpu_choice_is_lowest_of_multiple_allowed_cpus(monkeypatch, available):
         return available
 
     monkeypatch.setattr(execution.os, "sched_getaffinity", affinity)
-    assert execution.execution_limits(LIMITS) == {**LIMITS, "cpu_id": sorted(available)[0]}
+    limits = dict(LIMITS)
+    expected = {**limits, "cpu_id": sorted(available)[0]}
+    assert execution.execution_limits(limits) == expected
 
 
 @pytest.mark.parametrize("limits", [None, [], {}, LIMITS,
@@ -207,6 +210,7 @@ def observe_worker_containment(monkeypatch, tmp_path, cpu_id):
     resolved = execution.execution_limits(LIMITS)
     assert resolved["cpu_id"] == min(allowed)
     limits = {**resolved, "cpu_id": cpu_id}
+    expected = dict(limits)
     for name in THREAD_VARIABLES:
         monkeypatch.setenv(name, "23")
     observation = tmp_path / "worker-containment.json"
@@ -227,7 +231,7 @@ worker.emit = emit
     assert run(limits=limits) == SUCCESS
     assert os.sched_getaffinity(0) == allowed
     assert_cleaned(observed, len(json_bytes(request())))
-    return json.loads(observation.read_text()), limits
+    return json.loads(observation.read_text()), expected
 
 
 @pytest.mark.parametrize("pin", ["lowest", "highest"])

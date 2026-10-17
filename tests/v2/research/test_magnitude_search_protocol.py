@@ -120,6 +120,47 @@ def test_post_eof_wait_timeout_is_typed_and_kills_and_reaps_child(monkeypatch):
     assert not scratch.exists()
 
 
+@pytest.mark.parametrize("remaining, wait_advance", [(1, 0), (0, 0), (-1, 0), (1, 2)],
+                         ids=["before", "at", "after-deadline", "expires-during-wait"])
+def test_exited_child_still_requires_unexpired_deadline(monkeypatch, remaining, wait_advance):
+    now = [100.0]
+    monkeypatch.setattr(execution.time, "monotonic", lambda: now[0])
+    popen, original_read = subprocess.Popen, execution.os.read
+    original_wait = popen.wait
+    result = {"event": "succeeded", "forecasts": []}
+    observed = wire_child(monkeypatch, f"print({json.dumps(result)!r}, flush=True)")
+    wait_timeouts = []
+
+    def read(fd, count):
+        chunk = original_read(fd, count)
+        if observed and fd == observed[0][0].stdout.fileno() and not chunk:
+            # Establish the already-exited branch before advancing the clock.
+            assert original_wait(observed[0][0], timeout=5) == 0
+            now[0] += LIMITS["wall_seconds"] - remaining
+        return chunk
+
+    def wait(child, timeout=None):
+        code = original_wait(child, timeout=timeout)
+        if timeout is not None:
+            wait_timeouts.append(timeout)
+            now[0] += wait_advance
+        return code
+
+    monkeypatch.setattr(execution.os, "read", read)
+    monkeypatch.setattr(popen, "wait", wait)
+    if remaining > wait_advance:
+        assert run_wire() == result
+    else:
+        with pytest.raises(OpsError) as caught:
+            run_wire()
+        assert caught.value.problem == fail(
+            "RESOURCE_LIMIT_EXCEEDED", "search execution exceeded its resource limits").problem
+    assert wait_timeouts == [max(0, remaining)]
+    child, scratch, _ = observed[0]
+    assert child.returncode == 0
+    assert not scratch.exists()
+
+
 def test_input_cap_precedes_launch(monkeypatch):
     monkeypatch.setattr(execution, "MAX_BYTES", 1)
     monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("launched oversized input"))
