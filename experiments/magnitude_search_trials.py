@@ -160,10 +160,14 @@ class SearchTrials:
                 fits.append(pending.pop())
 
         result = run_fitted_trial(inputs, inner, plan, execution, resolved, progress)
-        succeeded = result.get("event") == "succeeded"
-        if ((succeeded and (pending or len(fits) != len(plan["horizons"]) or set(result) != {"event", "forecasts"}))
+        succeeded = isinstance(result, dict) and result.get("event") == "succeeded"
+        if (not isinstance(result, dict) or result.get("event") not in ("succeeded", "failed")
+                or (succeeded and (pending or len(fits) != len(plan["horizons"]) or set(result) != {"event", "forecasts"}))
                 or (not succeeded and (len(pending) != 1 or set(result) != {"event"}))):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit completion differs from admitted attempts")
+        # run_fitted_trial has returned only after checking exit and reaping the child.
+        self._append("execution-result:" + key, {"attempt": attempt, "inputs_id": content_hash(inputs),
+                     "result": result}, replay=False)
         evidence = {"attempt": attempt, "fit_attempt_count": len(fits) + len(pending),
                     "completed_fit_count": len(fits), "fits": fits, "status": result["event"],
                     "forecasts_id": content_hash(result["forecasts"]) if succeeded else None}
@@ -171,6 +175,85 @@ class SearchTrials:
         self._record(outer_year, inner_year, candidate_id, native=True, **({"forecasts": result["forecasts"]} if succeeded
             else {"failure": fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed").problem}))
         return self._executed(plan, outer_year, inner_year, candidate_id, attempt)
+
+    def reconcile(self, outer_year, inner_year, candidate_id, *, limits):
+        """Finish publication from a durable child result; never retry any fitting."""
+        plan = self._admit()
+        key, _, _ = self._trial(plan, outer_year, inner_year, candidate_id)
+        validate_execution_limits(limits)
+        attempt = {"limits": dict(limits), "candidate_id": candidate_id, "trial_id": key}
+        result, evidence = self._result_evidence(plan, outer_year, inner_year, candidate_id, attempt)
+        completed = self._read("execution:" + key)
+        if completed is not None and canonical_json(completed) != canonical_json(evidence):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
+        if self._read("terminal:" + key) is not None:
+            return self._executed(plan, outer_year, inner_year, candidate_id, attempt)
+        self._append("execution:" + key, evidence)
+        self._record(outer_year, inner_year, candidate_id, native=True, reconcile=True,
+            **({"forecasts": result["forecasts"]} if result["event"] == "succeeded" else
+               {"failure": fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed").problem}))
+        return self._executed(plan, outer_year, inner_year, candidate_id, attempt)
+
+    def _result_evidence(self, plan, outer_year, inner_year, candidate_id, attempt):
+        """Independently verify durable result, admission, and exact progress prefix."""
+        key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
+        try:
+            started = {"trial_id": key, "outer_year": outer_year, "inner_year": inner_year,
+                       "candidate": candidate, "execution": attempt}
+            if (canonical_json(self._read("start:" + key)) != canonical_json(started)
+                    or canonical_json(self._read("execution-start:" + key)) != canonical_json(attempt)):
+                raise ValueError
+            admitted = self._read("inputs:" + key)
+            cohort_key = content_hash([plan["plan_id"], outer_year, inner_year])
+            inputs = self._read("cohort:" + cohort_key)
+            if admitted != {"cohort": cohort_key, "inputs_id": content_hash(inputs)} or inputs is None:
+                raise ValueError
+            durable = self._read("execution-result:" + key)
+            if (not isinstance(durable, dict) or set(durable) != {"attempt", "inputs_id", "result"}
+                    or canonical_json(durable["attempt"]) != canonical_json(attempt)
+                    or durable["inputs_id"] != admitted["inputs_id"]):
+                raise ValueError
+            result = durable["result"]
+            if not isinstance(result, dict) or result.get("event") not in ("succeeded", "failed"):
+                raise ValueError
+            succeeded = result["event"] == "succeeded"
+            if set(result) != ({"event", "forecasts"} if succeeded else {"event"}):
+                raise ValueError
+            forecasts = None
+            if succeeded:
+                try:
+                    forecasts = self._forecasts(result["forecasts"], inner, plan["horizons"])
+                except OpsError:
+                    raise ValueError from None
+                if canonical_json(forecasts) != canonical_json(result["forecasts"]):
+                    raise ValueError
+            submitted = self._read("forecasts:" + key)
+            if submitted is not None and canonical_json(submitted) != canonical_json(forecasts):
+                raise ValueError
+            if succeeded and submitted is not None:
+                validation = self._read("validation:" + cohort_key)
+                if validation is not None:
+                    self._validation(inner, admitted, inputs, validation)
+            execution = {**self.registration.document["magnitude_execution"], "fit_recipe": candidate["recipe"]}
+            expected = self._fit_evidence(inputs, inner, plan, execution)
+            started_fits, completed_fits = [], []
+            for fit in expected:
+                suffix = ":" + key + ":" + str(fit["horizon_sessions"])
+                started_fits.append(self._read("fit-started" + suffix))
+                completed_fits.append(self._read("fit-completed" + suffix))
+            count = sum(item is not None for item in started_fits)
+            completed = count if succeeded else count - 1
+            if not 1 <= count <= len(expected) or (succeeded and count != len(expected)):
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
+            for index, fit in enumerate(expected):
+                if (canonical_json(started_fits[index]) != canonical_json(fit if index < count else None)
+                        or canonical_json(completed_fits[index]) != canonical_json(fit if index < completed else None)):
+                    raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
+        except (ValueError, TypeError, KeyError, OverflowError):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search durable execution result differs") from None
+        return result, {"attempt": attempt, "fit_attempt_count": count, "completed_fit_count": completed,
+                        "fits": expected[:completed], "status": result["event"],
+                        "forecasts_id": content_hash(forecasts) if succeeded else None}
 
     @staticmethod
     def _fit_evidence(inputs, inner, plan, execution):
@@ -181,36 +264,21 @@ class SearchTrials:
         return self._execution_receipt(plan, outer_year, inner_year, candidate_id, terminal, attempt)
 
     def _execution_receipt(self, plan, outer_year, inner_year, candidate_id, terminal, attempt):
-        key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
-        admitted = self._read("inputs:" + key)
-        inputs = self._read("cohort:" + admitted["cohort"])
-        execution = {**self.registration.document["magnitude_execution"], "fit_recipe": candidate["recipe"]}
-        expected = self._fit_evidence(inputs, inner, plan, execution)
+        key, _, _ = self._trial(plan, outer_year, inner_year, candidate_id)
         record = self._read("execution:" + key)
         if (not isinstance(record, dict) or not isinstance(attempt, dict)
                 or set(attempt) != {"limits", "candidate_id", "trial_id"}
-                or attempt["candidate_id"] != candidate_id or attempt["trial_id"] != key):
+                or attempt["candidate_id"] != candidate_id or attempt["trial_id"] != key
+                or canonical_json(record.get("attempt")) != canonical_json(attempt)):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
         try:
             validate_execution_limits(attempt["limits"])
         except OpsError:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs") from None
-        succeeded = terminal["status"] in ("succeeded", "refused")
-        count = record.get("fit_attempt_count")
-        if (type(count) is not int or not 1 <= count <= len(expected)
-                or type(record.get("completed_fit_count")) is not int or (succeeded and count != len(expected))):
+        _, receipt = self._result_evidence(plan, outer_year, inner_year, candidate_id, attempt)
+        if (canonical_json(record) != canonical_json(receipt)
+                or (receipt["status"] == "succeeded") != (terminal["status"] in ("succeeded", "refused"))):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
-        completed = count if succeeded else count - 1
-        receipt = {"attempt": attempt, "fit_attempt_count": count, "completed_fit_count": completed,
-                   "fits": expected[:completed], "status": "succeeded" if succeeded else "failed",
-                   "forecasts_id": content_hash(self._read("forecasts:" + key)) if succeeded else None}
-        if self._read("execution-start:" + key) != attempt or canonical_json(record) != canonical_json(receipt):
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
-        for index, fit in enumerate(expected):
-            suffix = ":" + key + ":" + str(fit["horizon_sessions"])
-            if (canonical_json(self._read("fit-started" + suffix)) != canonical_json(fit if index < count else None)
-                    or canonical_json(self._read("fit-completed" + suffix)) != canonical_json(fit if index < completed else None)):
-                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
         return {**receipt, "terminal": terminal, "evaluation_authority": "none"}
 
     @staticmethod
@@ -224,8 +292,8 @@ class SearchTrials:
         """Submit forecasts/failure, or replay a completed trial; never recover native work."""
         return self._record(outer_year, inner_year, candidate_id, forecasts=forecasts, failure=failure)
 
-    def _record(self, outer_year, inner_year, candidate_id, *, forecasts=None, failure=None, native=False):
-        """Commit forecasts before validation labels; only execute may finish native work."""
+    def _record(self, outer_year, inner_year, candidate_id, *, forecasts=None, failure=None, native=False, reconcile=False):
+        """Commit forecasts before labels; native reconciliation can finish publication."""
         plan = self._admit()
         key, inner, _ = self._trial(plan, outer_year, inner_year, candidate_id)
         if self._read("start:" + key) is None:
@@ -258,15 +326,17 @@ class SearchTrials:
         admitted = self._read("inputs:" + key)
         if admitted is None:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial has no admitted native inputs")
-        self._append("forecasts:" + key, submitted, replay=False, absent=("terminal:" + key,))
-        if content_hash(self._inputs(inner)) != admitted["inputs_id"]:
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start")
-        binding = self.registration.document
-        labels = load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),
-            as_of_month=binding["holdouts"]["holdout_as_of_month"], labels_before=inner["evaluation_labels_before"],
-            event_ids=inner["evaluation_event_ids"])
-        validation = {"inputs_id": admitted["inputs_id"], "evaluation_inputs": dict(labels.attrs),
-                      "targets": labels[["event_id", "absolute_move_pct"]].to_dict("records")}
+        self._append("forecasts:" + key, submitted, replay=reconcile, absent=("terminal:" + key,))
+        validation = self._read("validation:" + admitted["cohort"]) if reconcile else None
+        if validation is None:
+            if content_hash(self._inputs(inner)) != admitted["inputs_id"]:
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start")
+            binding = self.registration.document
+            labels = load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),
+                as_of_month=binding["holdouts"]["holdout_as_of_month"], labels_before=inner["evaluation_labels_before"],
+                event_ids=inner["evaluation_event_ids"])
+            validation = {"inputs_id": admitted["inputs_id"], "evaluation_inputs": dict(labels.attrs),
+                          "targets": labels[["event_id", "absolute_move_pct"]].to_dict("records")}
         try:
             self._validation(inner, admitted, self._read("cohort:" + admitted["cohort"]), validation)
         except (ValueError, TypeError, KeyError, OverflowError):
@@ -279,7 +349,8 @@ class SearchTrials:
                         "validation_id": content_hash(validation), "evaluation_inputs": validation["evaluation_inputs"],
                         "predictions": scored, "metrics": magnitude_metrics(scored)}
         except OpsError as error:
-            self._refused(key, error)
+            if _candidate_failure(_problem(error.problem)):
+                self._refused(key, error)
             raise
         return self._append("terminal:" + key, terminal)
 
