@@ -542,10 +542,10 @@ Only a tracked path absent from the worktree reads as empty.
   `engine/v2/models/ARCHITECTURE.md` §2.1, §2.3), and produces a new, gated,
   auto-promoted release that carries every model binding over unchanged.
   Retraining the champion/gate/chooser models themselves, monthly inside the
-  nightly, is cutover PR-13b (not implemented; contract: `engine/v2/models/
-  ARCHITECTURE.md` §2.3); a native producer for the
-  Tier-4 forecasts table native currently only imports from a legacy snapshot
-  is cutover PR-13c. Forward inference instead uses the design in
+  nightly, is cutover PR-13b (not implemented; see
+  `engine/v2/models/ARCHITECTURE.md` §2.3). The current Tier-4 forecasts
+  producer imports only from a legacy snapshot. A native producer is cutover
+  PR-13c. Forward inference instead uses the design in
   `engine/v2/scoring/ARCHITECTURE.md`; it needs no stored forward row. See
   `engine/v2/models/ARCHITECTURE.md` §§1, 2, 8, and
   issue #192 for the full design.
