@@ -1,10 +1,9 @@
 # Monthly retrain + pool refresh inside the nightly (cutover PR-13b)
 
 Design only. Refs #805, #192. Companion to the nightly pool refresh (#192
-slices 3-4, `engine/v2/models/ARCHITECTURE.md` §2.1 and root
-`ARCHITECTURE.md`'s "Native nightly pool/residual refresh"). Where this file
-conflicts with a component `ARCHITECTURE.md`, that doc wins; the slices below
-move the agreed contract into those docs in the same PR as the code.
+slices 3-4, models `ARCHITECTURE.md` §2.1, root "Native nightly pool/residual
+refresh"). A component `ARCHITECTURE.md` wins on conflict; each slice moves its
+agreed contract into those docs with its code.
 
 User decision 2026-10-16: objects that change only on a retrain are refreshed
 **monthly, inside the nightly, on the first nightly run after a calendar
@@ -19,15 +18,19 @@ settlement lag); the user should confirm.
 |---|---|---|
 | Board analog pool, paired residual pool, trailing cutoff | Advanced every night to the settled-event cutoff | Unchanged (still nightly) |
 | Three driver residual pools, chooser analog pool | Carried (same hash, recorded at the prior `pool_cutoff`) | Regenerated at the month-end cutoff |
-| Champion and gate models | Carried (bindings unchanged) | Retrained (see D1) |
+| Champion and gate models | Carried (bindings unchanged) | Retrained if D1(b) |
 | Chooser row | Carried | Regenerated with the chooser pool |
 
 The monthly refresh is one more reconcile in `Service.tick()`, the same shape
 as the existing `_reconcile_computed_moves_refresh` and the planned
 `_reconcile_pool_nightly_refresh` (#192 slice 4; never a `GRAPH`/`_DAG_STAGES`
 node). It publishes through the `phase5_state_stage` job (worker exists, #806;
-nothing submits it yet, #192 slice 4): the retrained objects arrive as non-carried `PoolOutput`s, everything else is
-carried or advanced as on any night. No second release-assembly path.
+nothing submits it yet, #192 slice 4). Today it accepts exactly the three
+advancing members and carries every other object from the prior release
+(`tools/phase5_state_stage_job.py`; models doc §2.2). The monthly path needs it
+to also accept supplied driver pools and the chooser, with the advancing members
+carried from the incumbent; slice 1 changes `classify`/`prior_carry_set` and §2.2.
+No second release-assembly path.
 
 ## 2. Trigger rule and idempotency
 
@@ -41,8 +44,8 @@ by `M` alone and independent of the night the job runs.
 **Due.** Month `M` is due when all hold: (a) no retrain record exists for `M`
 in any state; (b) the nightly's settled-event cutoff is on or after `M_end`
 (events settle with a lag, so the first night of the new month is often not yet
-due and the rule simply waits); (c) the nightly pool refresh for the session
-has succeeded (the retrain starts from a verified, promoted incumbent); (d) no
+due and the rule simply waits); (c) the session's required graph and nightly
+pool refresh have succeeded (the retrain starts from a verified, promoted incumbent); (d) no
 other heavy job is running (§6).
 
 **Exactly once.** The job key is `retrain:{M}`, durable like every ops job key.
@@ -51,7 +54,8 @@ never resubmitted; the reconcile derives "done" from durable job and release
 state each tick, with no in-memory phase cache. A crash between "retrain
 succeeded" and "stage submitted" is recovered by the next tick: the stage key
 is `retrain-stage:{M}:{incumbent_release_id}` and the reconcile submits it when
-the retrain job succeeded and either no stage key exists for `M`, or the only
+the retrain job succeeded and either no stage key exists for `M` under any
+incumbent, or the only
 one is followed by a promote job that failed `ConcurrentPromote` (§4). Later
 steps are keyed `retrain-accept:{M}:{candidate_release_id}`,
 `retrain-check:{M}:{candidate_release_id}` and
@@ -70,9 +74,8 @@ subsumed by the next. If `M1 < M2` are both due, only `M2` is retrained;
 `M1` gets a durable `superseded:{M1}` marker naming `M2`, written once, so it is
 not re-evaluated. A failed `M1` followed by a due `M2` recovers by itself.
 
-**Month boundary and holidays.** Month completion is the calendar month, not the
-last trading day: `M_end` may be a weekend; the settled-event cutoff must reach
-it, which holiday and weekend lag handle without a calendar special case.
+Month completion is the calendar month, not the last trading day; the
+settled-event cutoff must reach `M_end`, which needs no calendar special case.
 
 ## 3. What is retrained and regenerated
 
@@ -151,7 +154,7 @@ needs the full staging gate before it can be promoted:
    objects stay valid, §3) as the second and last attempt (§2). Steps 1-2 rerun
    for the new candidate: a receipt naming the first candidate's hash never
    authorises the second. While a model-changing candidate is in steps 1-3 the
-   nightly stages but holds its own promote (D8), which makes a collision rare.
+   nightly stages but holds its promote if D8(a) is chosen (rare collisions).
 
 Any other failure at 1-3 leaves the candidate staged and unpromoted, the
 incumbent deployed, and a failure receipt (job result naming step and refusal
@@ -207,8 +210,7 @@ waits for admission rather than being denied. Consequences, stated once:
   nothing enforces it; enforcement (terminal failure) is a deliverable of slice
   3 (pools) and 5a (models), sized from the receipt below.
 
-Slice 3 records measured peak memory and wall time as a receipt; budgets in the
-job spec come from that measurement, not from this document.
+Slice 3 records peak memory and wall time as a receipt; job budgets come from it.
 
 ## 7. Parity and qualification
 
@@ -273,7 +275,8 @@ Sizes: non-test code / test / doc lines, estimated.
 
 1. **Catalog `retrain_cutoff`.** `sources.retrain_cutoff` and per-member cutoff
    checks in `derive_catalog`/`carry_forward_release`; `CUTOFF_NOT_ADVANCED` for
-   retrain members. 70-100 / 80-110 / 25-35. Depends on #806 and #192 slice 2.
+   retrain members; stage input contract (`classify`, `prior_carry_set`, models
+   doc §2.2). 90-130 / 100-140 / 30-40. Depends on #806 and #192 slice 2.
 2. **Due-month decision.** A pure function over session date, settled-event
    cutoff and durable job state returning `NOT_DUE | DUE(M) | SUPERSEDE(M…)`;
    the `retrain:{M}` and `superseded:{M}` key shapes. 80-110 / 100-140 / 20-30.
@@ -293,7 +296,6 @@ Sizes: non-test code / test / doc lines, estimated.
 7. **Parity marker** (§7). `release_changed` on the first session of a new
    release; qualification handling per D4. 60-90 / 70-100 / 15-25.
 
-Each slice adds synthetic tests for its R1-R6 promises; none touches the local
-release store, runs the nightly or runs a heavy job.
-
-Library check: no standard tool covers a content-addressed release catalog or this job-keyed reconcile.
+Each slice adds synthetic R1-R6 tests; none touches the release store or runs the
+nightly or a heavy job. Library check: no standard tool covers a
+content-addressed release catalog or this job-keyed reconcile.
