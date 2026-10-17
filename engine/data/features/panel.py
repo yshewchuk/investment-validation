@@ -594,6 +594,38 @@ def add_runup_features(
 # block 4 — ORATS state at the last pre-event close, from Tier 2
 # --------------------------------------------------------------------------
 
+#: Tickers per daily_market batch. Peak RSS of the panel's daily_market reads is
+#: one year-partition plus one batch of tickers' rows, not the whole table.
+_DAILY_BATCH_TICKERS = 800
+
+
+def _iter_daily_batches(columns, tickers, batch_size=None):
+    """Yield one coerced daily_market frame per batch of ``tickers``.
+
+    Each batch streams the table one year-partition at a time (``store.iter_table``),
+    keeps only the batch's tickers, frees the partition, concatenates, then coerces
+    exactly as ``store.read_table`` does (``store.coerce(out, "daily_market", only=list(columns))``).
+    ``tickers`` is an iterable of ticker strings; iterate ``sorted(set(tickers))`` in slices of
+    ``batch_size or _DAILY_BATCH_TICKERS`` (read the module global at call time). A batch with no rows yields
+    ``store.empty_frame("daily_market")[list(columns)]`` (same as read_table's empty case).
+    """
+    size = batch_size or _DAILY_BATCH_TICKERS
+    ordered = sorted(set(tickers))
+    for start in range(0, len(ordered), size):
+        batch = ordered[start : start + size]
+        frames = []
+        for _year, frame in store.iter_table("daily_market", columns=columns):
+            matched = frame[frame["ticker"].isin(batch)]
+            if len(matched):
+                frames.append(matched)
+            del frame
+        if not frames:
+            yield store.empty_frame("daily_market")[list(columns)]
+            continue
+        out = pd.concat(frames, ignore_index=True)
+        frames.clear()
+        yield store.coerce(out, "daily_market", only=list(columns))
+
 
 def add_orats_features(
     df: pd.DataFrame,
@@ -621,8 +653,8 @@ def add_orats_features(
     if daily is None:
         needed = ["ticker", "date", "mcap_usd", "mcap_log", "src_iv", *ORATS_FEATURES.keys()]
         _log("reading tier-2 daily_market …")
-        daily = store.read_table("daily_market", columns=needed)
-    _log(f"daily_market: {len(daily):,} rows")
+    else:
+        _log(f"daily_market: {len(daily):,} rows")
 
     out = df.copy()
     n = len(out)
@@ -650,106 +682,121 @@ def add_orats_features(
     ):
         positions.setdefault(ticker, []).append((i, event_date, as_of_date))
 
-    daily = daily.sort_values(["ticker", "date"])
-    known_tickers = set(daily["ticker"].unique())
-    started = time.time()
+    def _apply(daily, seen):
+        daily = daily.sort_values(["ticker", "date"])
+        seen.update(daily["ticker"].unique())
+        started = time.time()
+        no_prior = 0
+        for gi, (ticker, group) in enumerate(daily.groupby("ticker", sort=True)):
+            if ticker not in positions:
+                continue
+            if gi % 500 == 0:
+                _log(f"orats {gi} tickers, {time.time()-started:.0f}s")
+            # The IV block resolves over rows that came from ORATS summaries. Rows
+            # contributed only by cores (a market-cap observation on a date
+            # summaries has no row for) carry no IV, and must not become the
+            # as-of answer for an IV feature.
+            iv_rows = (
+                group[group["src_iv"].notna()] if "src_iv" in group.columns else group
+            )
+            if iv_rows.empty:
+                iv_rows = group.iloc[0:0]
+            dates = iv_rows["date"].to_numpy()
+            columns = {c: iv_rows[c].to_numpy(dtype=float) for c in ORATS_FEATURES}
+            exern = columns["exern_iv30"]
+
+            # Market cap gets its own as-of index, over the rows that actually have
+            # one. The IV block comes from ORATS summaries and the cap from ORATS
+            # cores, and the two series do not share every date: tying the cap to
+            # the summaries observation would return a stale figure whenever
+            # summaries has a gap, or none at all where it has no row. "Most recent
+            # cap available before the print" is both the legacy behaviour and the
+            # right one.
+            has_mcap = np.isfinite(group["mcap_usd"].to_numpy(dtype=float))
+            mcap_dates = group["date"].to_numpy()[has_mcap]
+            mcap_log_vals = group["mcap_log"].to_numpy(dtype=float)[has_mcap]
+            mcap_usd_vals = group["mcap_usd"].to_numpy(dtype=float)[has_mcap]
+
+            rows = positions[ticker]
+            events = np.array([r[1] for r in rows], dtype="datetime64[ns]")
+            as_ofs = None if as_of_column == "date" else np.array(
+                [r[2] for r in rows], dtype="datetime64[ns]"
+            )
+            iv_idx = _anchor_index(dates, events, as_ofs) if len(dates) else np.full(len(rows), -1)
+            mcap_idx = (
+                _anchor_index(mcap_dates, events, as_ofs)
+                if len(mcap_dates)
+                else np.full(len(rows), -1)
+            )
+
+            for pos, (i, event_date, _as_of) in enumerate(rows):
+                j = int(iv_idx[pos])
+                if j < 0:
+                    no_prior += 1
+                else:
+                    orats_asof[i] = dates[j]
+                    for src_col, panel_col in ORATS_FEATURES.items():
+                        targets[panel_col][i] = columns[src_col][j]
+                    # z-score of ex-earnings IV against its own trailing 252
+                    # sessions, strictly before j — a within-name standardization,
+                    # so it cannot leak cross-sectional information from the future.
+                    #
+                    # LEAK FIXED 2026-09-02. This block used to sit OUTSIDE the
+                    # `else`, so it also ran for events with no prior daily row.
+                    # There `j == -1`, which makes `exern[j]` the LAST row of the
+                    # ticker's series — routinely years AFTER the print — and
+                    # `exern[max(0, -253):-1]` the entire history rather than a
+                    # trailing window. That is a straight future leak, and it
+                    # populated 507 of the 116,432 non-null values (0.44%), spread
+                    # over 1989-2025: every event that precedes its own ticker's
+                    # ORATS coverage.
+                    #
+                    # `checks/phase0_migration.py::verify_z252_delta` — the
+                    # reference implementation this builder is supposed to
+                    # reproduce — has carried `if j < 0: continue` all along, which
+                    # is what says this was an oversight rather than a definition.
+                    #
+                    # No model has ever consumed the column (verified against every
+                    # registry entry, champion and retired), so nothing downstream
+                    # moves. `engine.features.QUARANTINED_FEATURES` now keeps it out
+                    # of the model-input surface so nothing can start.
+                    #
+                    # TODO(2026-Q4): delete `or_exern_z252` outright — this block,
+                    # its `targets` entry, and its name in PANEL_COLUMNS — together
+                    # with the KnownDelta and verify_z252_delta in
+                    # checks/phase0_migration.py that exist only to reconcile it.
+                    # Needs a Tier-3 rebuild, so it wants its own change, not a
+                    # ride-along. Until then every panel built before 2026-09-02
+                    # still carries the leaked values on those 507 rows.
+                    window = exern[max(0, j - 252) : j]
+                    window = window[np.isfinite(window)]
+                    if len(window) >= 60 and np.isfinite(exern[j]):
+                        std = window.std()
+                        if std > 0:
+                            targets["or_exern_z252"][i] = (exern[j] - window.mean()) / std
+                if len(mcap_dates):
+                    jm = int(mcap_idx[pos])
+                    if jm >= 0:
+                        targets["mcap_log"][i] = mcap_log_vals[jm]
+                        targets["mcap_usd"][i] = mcap_usd_vals[jm]
+                        mcap_asof[i] = mcap_dates[jm]
+        return no_prior
+
+    known_tickers: set = set()
     no_prior = 0
+    if daily is None:
+        total_rows = 0
+        for chunk in _iter_daily_batches(needed, positions.keys()):
+            total_rows += len(chunk)
+            no_prior += _apply(chunk, known_tickers)
+            del chunk
+        _log(f"daily_market: {total_rows:,} rows")
+    else:
+        _log(f"daily_market: {len(daily):,} rows")
+        no_prior = _apply(daily, known_tickers)
     missing_ticker = sum(
         len(rows) for ticker, rows in positions.items() if ticker not in known_tickers
     )
-    for gi, (ticker, group) in enumerate(daily.groupby("ticker", sort=True)):
-        if ticker not in positions:
-            continue
-        if gi % 500 == 0:
-            _log(f"orats {gi} tickers, {time.time()-started:.0f}s")
-        # The IV block resolves over rows that came from ORATS summaries. Rows
-        # contributed only by cores (a market-cap observation on a date
-        # summaries has no row for) carry no IV, and must not become the
-        # as-of answer for an IV feature.
-        iv_rows = (
-            group[group["src_iv"].notna()] if "src_iv" in group.columns else group
-        )
-        if iv_rows.empty:
-            iv_rows = group.iloc[0:0]
-        dates = iv_rows["date"].to_numpy()
-        columns = {c: iv_rows[c].to_numpy(dtype=float) for c in ORATS_FEATURES}
-        exern = columns["exern_iv30"]
-
-        # Market cap gets its own as-of index, over the rows that actually have
-        # one. The IV block comes from ORATS summaries and the cap from ORATS
-        # cores, and the two series do not share every date: tying the cap to
-        # the summaries observation would return a stale figure whenever
-        # summaries has a gap, or none at all where it has no row. "Most recent
-        # cap available before the print" is both the legacy behaviour and the
-        # right one.
-        has_mcap = np.isfinite(group["mcap_usd"].to_numpy(dtype=float))
-        mcap_dates = group["date"].to_numpy()[has_mcap]
-        mcap_log_vals = group["mcap_log"].to_numpy(dtype=float)[has_mcap]
-        mcap_usd_vals = group["mcap_usd"].to_numpy(dtype=float)[has_mcap]
-
-        rows = positions[ticker]
-        events = np.array([r[1] for r in rows], dtype="datetime64[ns]")
-        as_ofs = None if as_of_column == "date" else np.array(
-            [r[2] for r in rows], dtype="datetime64[ns]"
-        )
-        iv_idx = _anchor_index(dates, events, as_ofs) if len(dates) else np.full(len(rows), -1)
-        mcap_idx = (
-            _anchor_index(mcap_dates, events, as_ofs)
-            if len(mcap_dates)
-            else np.full(len(rows), -1)
-        )
-
-        for pos, (i, event_date, _as_of) in enumerate(rows):
-            j = int(iv_idx[pos])
-            if j < 0:
-                no_prior += 1
-            else:
-                orats_asof[i] = dates[j]
-                for src_col, panel_col in ORATS_FEATURES.items():
-                    targets[panel_col][i] = columns[src_col][j]
-                # z-score of ex-earnings IV against its own trailing 252
-                # sessions, strictly before j — a within-name standardization,
-                # so it cannot leak cross-sectional information from the future.
-                #
-                # LEAK FIXED 2026-09-02. This block used to sit OUTSIDE the
-                # `else`, so it also ran for events with no prior daily row.
-                # There `j == -1`, which makes `exern[j]` the LAST row of the
-                # ticker's series — routinely years AFTER the print — and
-                # `exern[max(0, -253):-1]` the entire history rather than a
-                # trailing window. That is a straight future leak, and it
-                # populated 507 of the 116,432 non-null values (0.44%), spread
-                # over 1989-2025: every event that precedes its own ticker's
-                # ORATS coverage.
-                #
-                # `checks/phase0_migration.py::verify_z252_delta` — the
-                # reference implementation this builder is supposed to
-                # reproduce — has carried `if j < 0: continue` all along, which
-                # is what says this was an oversight rather than a definition.
-                #
-                # No model has ever consumed the column (verified against every
-                # registry entry, champion and retired), so nothing downstream
-                # moves. `engine.features.QUARANTINED_FEATURES` now keeps it out
-                # of the model-input surface so nothing can start.
-                #
-                # TODO(2026-Q4): delete `or_exern_z252` outright — this block,
-                # its `targets` entry, and its name in PANEL_COLUMNS — together
-                # with the KnownDelta and verify_z252_delta in
-                # checks/phase0_migration.py that exist only to reconcile it.
-                # Needs a Tier-3 rebuild, so it wants its own change, not a
-                # ride-along. Until then every panel built before 2026-09-02
-                # still carries the leaked values on those 507 rows.
-                window = exern[max(0, j - 252) : j]
-                window = window[np.isfinite(window)]
-                if len(window) >= 60 and np.isfinite(exern[j]):
-                    std = window.std()
-                    if std > 0:
-                        targets["or_exern_z252"][i] = (exern[j] - window.mean()) / std
-            if len(mcap_dates):
-                jm = int(mcap_idx[pos])
-                if jm >= 0:
-                    targets["mcap_log"][i] = mcap_log_vals[jm]
-                    targets["mcap_usd"][i] = mcap_usd_vals[jm]
-                    mcap_asof[i] = mcap_dates[jm]
 
     for name, values in targets.items():
         out[name] = values
@@ -801,7 +848,6 @@ def add_pre_print_vol(
     if daily is None:
         needed = ["ticker", "date", *PRE_PRINT_FEATURES.keys()]
         _log("reading tier-2 daily_market for pre-print vol …")
-        daily = store.read_table("daily_market", columns=needed)
     if events is None:
         events = store.read_table(
             "earnings_events", columns=["ticker", "event_date", "session"])
@@ -811,40 +857,54 @@ def add_pre_print_vol(
         for t, d, sn in zip(events["ticker"], events["event_date"], events["session"])
         if sn is not None and not pd.isna(sn)
     }
-    daily = daily.sort_values(["ticker", "date"]).reset_index(drop=True)
-    sizes = daily.groupby("ticker", sort=True).size()
-    starts = sizes.cumsum().shift(1).fillna(0).astype(int)
-    spans = {t: (int(a), int(a) + int(n))
-             for t, a, n in zip(sizes.index, starts.values, sizes.values)}
-    dates = daily["date"].to_numpy()
 
     out = df.copy()
     n_rows = len(out)
-    idx = np.full(n_rows, -1)
+    values = {column: np.full(n_rows, np.nan) for column in PRE_PRINT_FEATURES.values()}
+    found = np.zeros(n_rows, dtype=bool)
     # `as_of_column` exists for the same reason the other blocks have one: a
     # decision taken earlier than the last pre-print close must not anchor on
     # the event date, which would reach FORWARD of the decision. For a forward
     # event the searchsorted below then lands on the newest close available,
     # which is the right estimate of a pre-print quote that does not exist yet.
     when_col = as_of_column if as_of_column in out.columns else "date"
-    for i, (ticker, when) in enumerate(zip(out["ticker"].to_numpy(),
-                                           pd.to_datetime(out[when_col]).to_numpy())):
-        span = spans.get(str(ticker))
-        if span is None:
-            continue
-        lo, hi = span
-        session = sessions.get((str(ticker), pd.Timestamp(when).normalize()), AMC)
-        # AMC prints after the close, so that close is still pre-print; BMO
-        # prints before it, so the last clean quote is the session before.
-        side = "right" if session == AMC else "left"
-        j = np.searchsorted(dates[lo:hi], when, side=side) - 1
-        if j >= 0:
-            idx[i] = lo + j
+    whens = pd.to_datetime(out[when_col]).to_numpy()
+    event_tickers = out["ticker"].to_numpy()
 
-    found = idx >= 0
-    for source, column in PRE_PRINT_FEATURES.items():
-        values = daily[source].to_numpy(dtype=float)
-        out[column] = np.where(found, values[np.where(found, idx, 0)], np.nan)
+    def _anchor(daily):
+        daily = daily.sort_values(["ticker", "date"]).reset_index(drop=True)
+        sizes = daily.groupby("ticker", sort=True).size()
+        starts = sizes.cumsum().shift(1).fillna(0).astype(int)
+        spans = {t: (int(a), int(a) + int(n))
+                 for t, a, n in zip(sizes.index, starts.values, sizes.values)}
+        dates = daily["date"].to_numpy()
+        cols = {source: daily[source].to_numpy(dtype=float) for source in PRE_PRINT_FEATURES}
+        for i, (ticker, when) in enumerate(zip(event_tickers, whens)):
+            span = spans.get(str(ticker))
+            if span is None:
+                continue
+            lo, hi = span
+            session = sessions.get((str(ticker), pd.Timestamp(when).normalize()), AMC)
+            # AMC prints after the close, so that close is still pre-print; BMO
+            # prints before it, so the last clean quote is the session before.
+            side = "right" if session == AMC else "left"
+            j = np.searchsorted(dates[lo:hi], when, side=side) - 1
+            if j >= 0:
+                found[i] = True
+                for source, column in PRE_PRINT_FEATURES.items():
+                    values[column][i] = cols[source][lo + j]
+
+    if daily is None:
+        for chunk in _iter_daily_batches(
+            needed, sorted({str(t) for t in out["ticker"]})
+        ):
+            _anchor(chunk)
+            del chunk
+    else:
+        _anchor(daily)
+
+    for column in PRE_PRINT_FEATURES.values():
+        out[column] = values[column]
     _log(f"pre-print vol: {int(found.sum()):,}/{n_rows:,} events anchored")
     return out
 
