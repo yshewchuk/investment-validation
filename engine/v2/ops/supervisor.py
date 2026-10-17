@@ -133,6 +133,10 @@ LEASE_SECONDS = 120
 #: (stopping, exited). Lease renewal still runs on every poll (D).
 HEARTBEAT_EVENT_SECONDS = 10.0
 
+#: A refused pool-nightly refresh pauses that sidecar for this long: the
+#: reconcile rebuilds the plan and re-hashes the source closure every tick.
+POOL_REFRESH_BACKOFF_SECONDS = 30.0
+
 #: A commit refused with one of these can never succeed under this fence:
 #: nothing more may be written under it, not even the attempt's own failure.
 _FENCE_LOST_CODES = frozenset({"LEASE_LOST", "CANCELLED"})
@@ -996,9 +1000,13 @@ class Service:
         """#192 slice 4: the ONLY place the pool-nightly refresh phases are
         submitted (training, then ``phase5_state_stage``, then ``models_promote``);
         called every tick(), never through build_legacy_job_requests. Contract:
-        ``engine/v2/models/ARCHITECTURE.md`` section 2.2.1. All reads are cheap
-        indexed selects plus one pointer read, so there is no backoff memo; every
-        exception is caught and reported (deduped), never crashing the tick."""
+        ``engine/v2/models/ARCHITECTURE.md`` section 2.2.1. A refusal pauses
+        this sidecar for ``POOL_REFRESH_BACKOFF_SECONDS`` because the reconcile
+        rebuilds the plan and re-hashes the source closure; a clean pass clears
+        the pause. Every exception is caught and reported (deduped), never
+        crashing the tick."""
+        if time.monotonic() < getattr(self, "_pool_refresh_not_before", 0.0):
+            return False
         from engine.v2.models import deployment
         from engine.v2.ops.pool_refresh import submit_pool_nightly_refresh_if_ready
         from engine.v2.ops.submission import NamespacePolicy
@@ -1012,6 +1020,7 @@ class Service:
         except deployment.MissingReleaseRoot:
             return False
         except Exception as exc:
+            self._pool_refresh_not_before = time.monotonic() + POOL_REFRESH_BACKOFF_SECONDS
             problem = exc.problem if isinstance(exc, OpsError) else make_problem(
                 "VALIDATION_FAILED", "pool nightly refresh reconciliation failed")
             problem_key = (problem.code, problem.message)
@@ -1023,6 +1032,7 @@ class Service:
                                           for field in ("code", "category", "retryable", "message")}}))
             return False
         self._last_pool_refresh_problem = None
+        self._pool_refresh_not_before = 0.0
         return bool(receipts)
 
     def _clock_check(self):

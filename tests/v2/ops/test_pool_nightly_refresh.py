@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -672,6 +673,7 @@ def test_reconcile_swallows_missing_root_and_reports_once(monkeypatch, capsys):
 
     monkeypatch.setattr(pool_refresh, "submit_pool_nightly_refresh_if_ready", _boom)
     Service._reconcile_pool_nightly_refresh(service)
+    service._pool_refresh_not_before = 0.0
     Service._reconcile_pool_nightly_refresh(service)
     assert service._last_pool_refresh_problem == ("INPUT_CHANGED", "planted pool refresh failure")
     out = capsys.readouterr().out
@@ -686,8 +688,72 @@ def test_reconcile_swallows_missing_root_and_reports_once(monkeypatch, capsys):
 
     monkeypatch.setattr(pool_refresh, "submit_pool_nightly_refresh_if_ready",
                         lambda *args, **kwargs: [])
+    service._pool_refresh_not_before = 0.0
     Service._reconcile_pool_nightly_refresh(service)
     assert service._last_pool_refresh_problem is None
+
+
+def test_reconcile_pauses_after_a_refusal(monkeypatch):
+    service = SimpleNamespace(conn=None, registry=None, store=None, code_source=None,
+                              clock=None, _last_pool_refresh_problem=None)
+    monkeypatch.setattr(deployment, "production_release_root", lambda: "/somewhere")
+    calls = []
+
+    def _boom(*args, **kwargs):
+        calls.append(1)
+        raise fail("INPUT_CHANGED", "planted pool refresh failure")
+
+    monkeypatch.setattr(pool_refresh, "submit_pool_nightly_refresh_if_ready", _boom)
+
+    assert Service._reconcile_pool_nightly_refresh(service) is False
+    assert service._pool_refresh_not_before > time.monotonic()
+    assert len(calls) == 1
+
+    assert Service._reconcile_pool_nightly_refresh(service) is False
+    assert len(calls) == 1
+
+
+def test_reconcile_runs_again_after_the_pause_expires(monkeypatch):
+    service = SimpleNamespace(conn=None, registry=None, store=None, code_source=None,
+                              clock=None, _last_pool_refresh_problem=None)
+    monkeypatch.setattr(deployment, "production_release_root", lambda: "/somewhere")
+    calls = []
+
+    def _boom(*args, **kwargs):
+        calls.append(1)
+        raise fail("INPUT_CHANGED", "planted pool refresh failure")
+
+    monkeypatch.setattr(pool_refresh, "submit_pool_nightly_refresh_if_ready", _boom)
+    Service._reconcile_pool_nightly_refresh(service)
+    assert len(calls) == 1
+
+    service._pool_refresh_not_before = 0.0
+    Service._reconcile_pool_nightly_refresh(service)
+    assert len(calls) == 2
+
+
+def test_reconcile_clean_pass_clears_the_pause(monkeypatch):
+    service = SimpleNamespace(conn=None, registry=None, store=None, code_source=None,
+                              clock=None, _last_pool_refresh_problem=None,
+                              _pool_refresh_not_before=-1.0)
+    monkeypatch.setattr(deployment, "production_release_root", lambda: "/somewhere")
+    monkeypatch.setattr(pool_refresh, "submit_pool_nightly_refresh_if_ready",
+                        lambda *args, **kwargs: [])
+
+    assert Service._reconcile_pool_nightly_refresh(service) is False
+    assert service._pool_refresh_not_before == 0.0
+
+
+def test_reconcile_missing_root_does_not_pause(monkeypatch):
+    service = SimpleNamespace(conn=None, registry=None, store=None, code_source=None,
+                              clock=None, _last_pool_refresh_problem=None)
+
+    def _missing():
+        raise deployment.MissingReleaseRoot()
+
+    monkeypatch.setattr(deployment, "production_release_root", _missing)
+    assert Service._reconcile_pool_nightly_refresh(service) is False
+    assert getattr(service, "_pool_refresh_not_before", 0.0) == 0.0
 
 
 def test_tick_calls_reconcile_pool_nightly_refresh(monkeypatch):

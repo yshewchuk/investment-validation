@@ -999,8 +999,6 @@ def submit_computed_moves_refresh_if_ready(conn, registry, policy, store, *, cat
 #: Cutover PR-7a: the legacy "score" stage's own job kind
 #: (``_legacy_action("score")``).
 _LEGACY_SCORE_KIND = "legacy_score"
-#: public name for pool_refresh (#835 tracks sharing the selector)
-LEGACY_SCORE_KIND = _LEGACY_SCORE_KIND
 
 
 def _scope_from_native_score_batch_key(idempotency_key):
@@ -1211,10 +1209,6 @@ def _session_scope_from_score_key(idempotency_key):
     if not sep3 or stage != "score" or not scope_hash:
         return None
     return session, scope_hash
-
-
-#: public name for pool_refresh (#835 tracks sharing the selector)
-session_scope_from_score_key = _session_scope_from_score_key
 
 
 def _native_score_batch_identity(conn):
