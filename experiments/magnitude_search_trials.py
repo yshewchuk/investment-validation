@@ -260,11 +260,11 @@ class SearchTrials:
             count = sum(item is not None for item in started_fits)
             completed = count if succeeded else count - 1
             if not 1 <= count <= len(expected) or (succeeded and count != len(expected)):
-                raise ValueError
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
             for index, fit in enumerate(expected):
                 if (canonical_json(started_fits[index]) != canonical_json(fit if index < count else None)
                         or canonical_json(completed_fits[index]) != canonical_json(fit if index < completed else None)):
-                    raise ValueError
+                    raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
         except (ValueError, TypeError, KeyError, OverflowError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search durable execution result differs") from None
         return result, {"attempt": attempt, "fit_attempt_count": count, "completed_fit_count": completed,
@@ -295,38 +295,20 @@ class SearchTrials:
         return self._execution_receipt(plan, outer_year, inner_year, candidate_id, terminal, attempt)
 
     def _execution_receipt(self, plan, outer_year, inner_year, candidate_id, terminal, attempt):
-        key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
-        admitted = self._read("inputs:" + key)
-        inputs = self._read("cohort:" + admitted["cohort"])
-        execution = {**self.registration.document["magnitude_execution"], "fit_recipe": candidate["recipe"]}
-        expected = self._fit_evidence(inputs, inner, plan, execution)
+        key, _, _ = self._trial(plan, outer_year, inner_year, candidate_id)
         record = self._read("execution:" + key)
         if (not isinstance(record, dict) or not isinstance(attempt, dict)
                 or set(attempt) != {"limits", "candidate_id", "trial_id"}
-                or attempt["candidate_id"] != candidate_id or attempt["trial_id"] != key):
+                or attempt["candidate_id"] != candidate_id or attempt["trial_id"] != key
+                or canonical_json(record.get("attempt")) != canonical_json(attempt)):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
         try:
             validate_execution_limits(attempt["limits"])
         except OpsError:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs") from None
-        succeeded = terminal["status"] in ("succeeded", "refused")
-        count = record.get("fit_attempt_count")
-        if (type(count) is not int or not 1 <= count <= len(expected)
-                or type(record.get("completed_fit_count")) is not int or (succeeded and count != len(expected))):
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
-        completed = count if succeeded else count - 1
-        receipt = {"attempt": attempt, "fit_attempt_count": count, "completed_fit_count": completed,
-                   "fits": expected[:completed], "status": "succeeded" if succeeded else "failed",
-                   "forecasts_id": content_hash(self._read("forecasts:" + key)) if succeeded else None}
-        if self._read("execution-start:" + key) != attempt or canonical_json(record) != canonical_json(receipt):
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
-        for index, fit in enumerate(expected):
-            suffix = ":" + key + ":" + str(fit["horizon_sessions"])
-            if (canonical_json(self._read("fit-started" + suffix)) != canonical_json(fit if index < count else None)
-                    or canonical_json(self._read("fit-completed" + suffix)) != canonical_json(fit if index < completed else None)):
-                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
-        _, durable = self._result_evidence(plan, outer_year, inner_year, candidate_id, attempt)
-        if canonical_json(durable) != canonical_json(receipt):
+        _, receipt = self._result_evidence(plan, outer_year, inner_year, candidate_id, attempt)
+        if (canonical_json(record) != canonical_json(receipt)
+                or (receipt["status"] == "succeeded") != (terminal["status"] in ("succeeded", "refused"))):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
         return {**receipt, "terminal": terminal, "evaluation_authority": "none"}
 

@@ -22,6 +22,18 @@ KEY = content_hash(["plan", *ARGS])
 COHORT = content_hash(["plan", "2024", "2023"])
 
 
+def expected_fits():
+    """Independent fixture matrices; never derive expected entries from a receipt."""
+    columns = ["n_prior", "mean_prior_move", "mean_prior_abs_move", "ema2_prior_move",
+               "ema2_prior_abs_move", "ema4_prior_move", "ema4_prior_abs_move", "ema8_prior_move",
+               "ema8_prior_abs_move", "ema12_prior_move", "ema12_prior_abs_move"]
+    return [{"horizon_sessions": horizon, "training_event_ids": ["train"], "evaluation_event_ids": ["event"],
+             "training_matrix_id": content_hash({"columns": columns, "row_keys": [["train", "history", horizon]],
+                 "values": [[0.0] * 11], "absolute_move_pct": [2.0]}),
+             "prediction_matrix_id": content_hash({"columns": columns, "row_keys": [["event", "history", horizon]],
+                 "values": [[0.0] * 11]})} for horizon in (5, 3, 1)]
+
+
 def interrupt(monkeypatch, recorder, stage, after):
     append = recorder._append
     error = fail("RESOURCE_UNAVAILABLE", "synthetic publication interruption")
@@ -78,7 +90,7 @@ def test_publication_faults_reconcile_only_durable_results(native, monkeypatch, 
     if stage == "execution-result" and not after:
         with no_fit_guard(), legacy_guard(), pytest.raises(OpsError) as caught:
             recorder.reconcile(*ARGS, limits=LIMITS)
-        assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search durable execution result differs").problem
         assert durable_evidence(native) == before
         assert recorder._read("terminal:" + KEY) is None
         return
@@ -93,6 +105,7 @@ def test_publication_faults_reconcile_only_durable_results(native, monkeypatch, 
         result = recorder.reconcile(*ARGS, limits=LIMITS)
     assert result["status"] == result["terminal"]["status"] == "succeeded"
     assert result["fit_attempt_count"] == result["completed_fit_count"] == 3
+    assert result["fits"] == expected_fits()
     assert result["terminal"]["metrics"] == {"count": 3, "rmse": 2.0, "mae": 2.0}
     assert result["evaluation_authority"] == "none"
     assert recorder._read("execution-result:" + KEY) == durable
@@ -120,11 +133,11 @@ def test_candidate_failure_reconciliation_retains_exact_attempt_prefix(native, m
     assert result["status"] == result["terminal"]["status"] == "failed"
     assert result["fit_attempt_count"] == completed + 1
     assert result["completed_fit_count"] == completed
-    assert len(result["fits"]) == completed
+    assert result["fits"] == expected_fits()[:completed]
     assert native.recorder._read("forecasts:" + KEY) is None
     with pytest.raises(OpsError) as caught:
         native.recorder.freeze()
-    assert caught.value.problem.code == "EXPERIMENT_VARIANT_FAILED"
+    assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt").problem
     assert native.recorder._read("selection") is None
 
 
@@ -135,7 +148,7 @@ def test_interrupted_fit_or_admission_cannot_be_reconciled(native, monkeypatch, 
     no_launch(monkeypatch)
     with no_fit_guard(), legacy_guard(), pytest.raises(OpsError) as caught:
         native.recorder.reconcile(*ARGS, limits=LIMITS)
-    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search durable execution result differs").problem
     assert durable_evidence(native) == before
     assert native.recorder._read("execution-result:" + KEY) is None
 
@@ -211,7 +224,9 @@ def test_valid_hash_mutations_cannot_authorize_reconciliation(native, monkeypatc
     no_launch(monkeypatch)
     with no_fit_guard(), legacy_guard(), pytest.raises(OpsError) as caught:
         native.recorder.reconcile(*ARGS, limits=LIMITS)
-    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    message = ("search execution accounting differs" if slot in ("execution", "fit-started", "fit-completed") else
+               "search trial evidence chain differs" if slot == "terminal" else "search durable execution result differs")
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", message).problem
     assert durable_evidence(native) == before
 
 
@@ -231,8 +246,14 @@ def test_reconciliation_rechecks_seal_trial_and_limit_identity(native, monkeypat
         args = ("2025", *ARGS[1:])
     with no_fit_guard(), legacy_guard(), pytest.raises(OpsError) as caught:
         native.recorder.reconcile(*args, limits=limits)
-    assert caught.value.problem.code == ("INVALID_EXPERIMENT_SPEC" if change in
-        ("invalid_limits", "candidate", "fold") else "EXPERIMENT_IDENTITY_CONFLICT")
+    code, message = {
+        "source": ("EXPERIMENT_IDENTITY_CONFLICT", "search recording requires its exact sealed plan"),
+        "limits": ("EXPERIMENT_IDENTITY_CONFLICT", "search durable execution result differs"),
+        "invalid_limits": ("INVALID_EXPERIMENT_SPEC", "search execution requires explicit positive integer resource limits"),
+        "candidate": ("INVALID_EXPERIMENT_SPEC", "trial is outside the sealed search plan"),
+        "fold": ("INVALID_EXPERIMENT_SPEC", "trial is outside the sealed search plan"),
+    }[change]
+    assert caught.value.problem == fail(code, message).problem
     assert durable_evidence(native) == before
 
 
@@ -284,13 +305,19 @@ def test_real_fixed_child_is_reaped_before_result_becomes_recoverable(native, mo
     monkeypatch.setattr(execution.subprocess, "Popen", launch)
     monkeypatch.setattr(trials, "run_fitted_trial", execution.run_fitted_trial)
     monkeypatch.setattr(native.recorder, "_append", publish)
-    with pytest.raises(OpsError, match="cut after reaped child result"):
+    with pytest.raises(OpsError) as caught:
         native.recorder.execute(*ARGS, limits=LIMITS)
+    assert caught.value.problem == fail("RESOURCE_UNAVAILABLE", "cut after reaped child result").problem
     monkeypatch.setattr(native.recorder, "_append", append)
     no_launch(monkeypatch)
     with no_fit_guard(), legacy_guard():
         result = native.recorder.reconcile(*ARGS, limits=LIMITS)
     assert result["completed_fit_count"] == 3
+    assert result["fits"] == expected_fits()
+    assert native.recorder._read("execution-result:" + KEY)["result"] == {"event": "succeeded", "forecasts": rows(2.0)}
+    assert native.recorder._read("forecasts:" + KEY) == rows(2.0)
+    assert result["forecasts_id"] == content_hash(rows(2.0))
+    assert result["terminal"]["predictions"] == [{**row, "absolute_move_pct": 4.0} for row in rows(2.0)]
     assert result["terminal"]["metrics"] == {"count": 3, "rmse": 2.0, "mae": 2.0}
     assert len(children) == 1
 
@@ -300,8 +327,9 @@ def test_reconciliation_checks_current_inputs_before_first_validation_read(nativ
     no_launch(monkeypatch)
     monkeypatch.setattr(native.recorder, "_inputs", lambda *a: {"changed": True})
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("changed inputs opened labels"))
-    with pytest.raises(OpsError, match="trial native inputs changed after start"):
+    with pytest.raises(OpsError) as caught:
         native.recorder.reconcile(*ARGS, limits=LIMITS)
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start").problem
     assert native.recorder._read("validation:" + COHORT) is None
     assert native.recorder._read("terminal:" + KEY) is None
 
@@ -310,8 +338,9 @@ def test_reconciled_failures_still_require_all_candidates_and_match_selection(na
     native.recorder.execute("2024", "2023", "z-last", limits=LIMITS)
     failed_child(monkeypatch, completed=1)
     interrupt(monkeypatch, native.recorder, "execution-result", after=True)
-    with pytest.raises(OpsError, match="search selection requires every terminal attempt"):
+    with pytest.raises(OpsError) as caught:
         native.recorder.freeze()
+    assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt").problem
     no_launch(monkeypatch)
     with no_fit_guard(), legacy_guard():
         native.recorder.reconcile(*ARGS, limits=LIMITS)
@@ -343,15 +372,16 @@ def test_failed_scoring_publication_reconciles_to_original_refusal(native, monke
     monkeypatch.setattr(native.recorder, "_append", refuse)
     with pytest.raises(OpsError) as caught:
         native.recorder.execute(*ARGS, limits=LIMITS)
-    assert caught.value.problem.code == "EXPERIMENT_VARIANT_FAILED"
-    assert caught.value.__cause__.problem.code == "RESOURCE_UNAVAILABLE"
+    assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "synthetic candidate scoring refusal").problem
+    assert caught.value.__cause__.problem == fail("RESOURCE_UNAVAILABLE", "synthetic refusal write failure").problem
     monkeypatch.setattr(native.recorder, "_append", append)
     no_launch(monkeypatch)
     with no_fit_guard(), legacy_guard(), pytest.raises(OpsError) as caught:
         native.recorder.reconcile(*ARGS, limits=LIMITS)
-    assert caught.value.problem.code == "EXPERIMENT_VARIANT_FAILED"
+    assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "synthetic candidate scoring refusal").problem
     result = native.recorder.reconcile(*ARGS, limits=LIMITS)
     assert result["status"] == "succeeded" and result["terminal"]["status"] == "refused"
+    assert result["fits"] == expected_fits()
     assert native.recorder._read("forecasts:" + KEY) == rows(1e308)
 
 
@@ -406,6 +436,7 @@ def test_new_recorder_reconciles_catalog_durable_result_after_reopen(native, mon
             recovered = recorder.reconcile(*ARGS, limits=LIMITS)
             assert native.recorder.reconcile(*ARGS, limits=LIMITS) == recovered
         assert recovered["completed_fit_count"] == 3
+        assert recovered["fits"] == expected_fits()
         assert recovered["terminal"]["status"] == "succeeded"
     finally:
         peer.close()
