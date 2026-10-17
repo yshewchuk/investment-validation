@@ -136,17 +136,85 @@ def test_summary_none_counters_unavailable_tables():
 
 
 def test_summary_tie_break_sorted_by_name():
-    """Equal rows_decoded ranks name-first via dict insertion order."""
-    c = _counters([{
-        "b": {"rows_decoded": 10, "bytes_read": 100},
-        "a": {"rows_decoded": 10, "bytes_read": 100},
-    }])
-    summary = ReadTracker(c).summary()
-    assert list(summary["tables"]) == ["b", "a"]
-    ranked = sorted(
-        summary["tables"].items(),
-        key=lambda item: (-item[1]["rows_decoded"], item[0]))
-    assert [name for name, _ in ranked] == ["a", "b"]
+    """Equal rows_decoded ties sort by name (a before b)."""
+    c = _counters([
+        {},
+        {
+            "b": {"rows_decoded": 10, "bytes_read": 100},
+            "a": {"rows_decoded": 10, "bytes_read": 100},
+        },
+    ])
+    t = ReadTracker(c)
+    assert list(t.delta()) == ["a", "b"]
+
+
+def test_delta_includes_byte_only_change():
+    c = _counters([
+        {"t": {"rows_decoded": 10, "bytes_read": 100}},
+        {"t": {"rows_decoded": 10, "bytes_read": 256}},
+    ])
+    t = ReadTracker(c)
+    assert t.delta() == {"t": {"rows_decoded": 0, "bytes_read": 156}}
+
+
+def test_summary_wall_seconds_isolated_on_monotonic_raise(monkeypatch):
+    calls = {"n": 0}
+    real = time.monotonic
+
+    def boom():
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("wall clock failed")
+        return real()
+
+    monkeypatch.setattr(nightly_read_summary.time, "monotonic", boom)
+    summary = ReadTracker(_counters([{}, {}])).summary()
+    assert summary["wall_seconds"] is None
+    assert "wall_seconds" in summary["unavailable"]
+    assert summary["tables"] is not None
+
+
+def test_summary_cpu_seconds_isolated_on_process_time_raise(monkeypatch):
+    calls = {"n": 0}
+    real = time.process_time
+
+    def boom():
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("cpu clock failed")
+        return real()
+
+    monkeypatch.setattr(nightly_read_summary.time, "process_time", boom)
+    summary = ReadTracker(_counters([{}, {}])).summary()
+    assert summary["cpu_seconds"] is None
+    assert "cpu_seconds" in summary["unavailable"]
+    assert summary["tables"] is not None
+
+
+def test_summary_peak_rss_isolated_on_getrusage_raise(monkeypatch):
+    def boom(who):
+        raise OSError("getrusage failed")
+
+    monkeypatch.setattr(resource, "getrusage", boom)
+    summary = ReadTracker(_counters([{}, {}])).summary()
+    assert summary["peak_rss_bytes"] is None
+    assert "peak_rss_bytes" in summary["unavailable"]
+    assert summary["tables"] is not None
+
+
+def test_summary_process_read_bytes_isolated_on_open_raise(monkeypatch):
+    real_open = builtins.open
+
+    def fake_open(path, *args, **kwargs):
+        if path == "/proc/self/io":
+            raise OSError("proc io unreadable")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    summary = ReadTracker(_counters([{}, {}])).summary()
+    assert summary["process_read_bytes"] is None
+    assert "process_read_bytes" in summary["unavailable"]
+    assert summary["tables"] is not None
 
 
 def test_process_read_bytes_parses_rchar(monkeypatch):
@@ -295,6 +363,11 @@ def test_producer_records_step_reads_and_summary(tmp_path, monkeypatch):
     assert reads["tables"]["option_chains"]["rows_decoded"] >= 10 * len(events)
     assert isinstance(reads["wall_seconds"], float)
     assert reads["wall_seconds"] > 0 or reads["wall_seconds"] == 0
+    assert set(reads) == {"wall_seconds", "cpu_seconds", "peak_rss_bytes",
+                          "process_read_bytes", "tables", "slowest_steps",
+                          "unavailable"}
+    assert len(reads["slowest_steps"]) == min(10, len(compose_ends))
+    assert {s["step"] for s in reads["slowest_steps"]} <= {c[1] for c in compose_ends}
     assert events and refusals["refusals"] == []
     assert len(events) == 20
     assert sorted({e["key"]["ticker"] for e in events}) == ["AAA", "BBB"]
@@ -337,6 +410,9 @@ def test_producer_summary_recorded_on_compose_exception(tmp_path, monkeypatch):
     assert len(summary_ends) == 1
     assert isinstance(summary_ends[0][3], dict)
     assert "tables" in summary_ends[0][3]
+    assert set(summary_ends[0][3]) == {"wall_seconds", "cpu_seconds",
+                                       "peak_rss_bytes", "process_read_bytes",
+                                       "tables", "slowest_steps", "unavailable"}
 
 
 def test_producer_empty_enumeration_still_emits_summary(tmp_path, monkeypatch):
@@ -360,6 +436,11 @@ def test_producer_empty_enumeration_still_emits_summary(tmp_path, monkeypatch):
     assert len(summary_ends) == 1
     assert isinstance(summary_ends[0][3], dict)
     assert "tables" in summary_ends[0][3]
+    reads = summary_ends[0][3]
+    assert set(reads) == {"wall_seconds", "cpu_seconds", "peak_rss_bytes",
+                          "process_read_bytes", "tables", "slowest_steps",
+                          "unavailable"}
+    assert reads["slowest_steps"] == []
 
 
 def _empty_rig(tmp_path, monkeypatch):
@@ -405,3 +486,14 @@ def test_producer_unaffected_by_read_counters_failure(tmp_path, monkeypatch):
     assert len(degraded[0]) == 20
     assert sorted({e["key"]["ticker"] for e in degraded[0]}) == ["AAA", "BBB"]
     assert degraded[1]["refusals"] == []
+
+    class Blank:
+        def add(self, *args, **kwargs):
+            return None
+
+        def snapshot(self):
+            return {}
+
+    monkeypatch.setattr(repository, "read_counters", Blank(), raising=False)
+    reference = _build(repository, snapshot)
+    assert degraded == reference
