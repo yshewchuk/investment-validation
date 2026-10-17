@@ -101,6 +101,22 @@ def _session_scope_from_stage_key(idempotency_key):
     return session, scope_hash
 
 
+def _manifest_id_from_spec(document):
+    """``document``'s ``legacy_manifest.json`` binding, or ``None`` when either
+    nested level is absent or is not a mapping (a non-mapping ``parameters`` or
+    ``input_bindings`` is refused rather than probed with ``.get``)."""
+    parameters = document.get("parameters") or {}
+    if not isinstance(parameters, Mapping):
+        return None
+    bindings = parameters.get("input_bindings") or {}
+    if not isinstance(bindings, Mapping):
+        return None
+    manifest_id = bindings.get("legacy_manifest.json")
+    if not isinstance(manifest_id, str) or not manifest_id:
+        return None
+    return manifest_id
+
+
 def pool_refresh_identity(conn):
     """``(session, manifest_id)`` from the latest succeeded legacy ``finality``
     or ``features`` job, or ``None``. Max by (session, created_at, scope_hash)
@@ -136,9 +152,8 @@ def pool_refresh_identity(conn):
         return None
     if not isinstance(document, Mapping):
         return None
-    parameters = document.get("parameters") or {}
-    manifest_id = (parameters.get("input_bindings") or {}).get("legacy_manifest.json")
-    if not isinstance(manifest_id, str) or not manifest_id:
+    manifest_id = _manifest_id_from_spec(document)
+    if manifest_id is None:
         return None
     return session, manifest_id
 
@@ -201,15 +216,22 @@ _TERMINAL_STATES = _STALLED_STATES | {"succeeded"}
 
 #: Bounded lookup for a promote attempt whose key embeds a ``prior`` that is no
 #: longer readable from the pointer (the pointer already names the candidate).
+#: An explicit binary key range rather than ``LIKE`` (case-insensitive in
+#: SQLite, so it cannot use the (namespace, idempotency_key) index as a range):
+#: exactly the keys prefixed ``nightly:<session>:pool:promote:<tag>:`` are
+#: covered, since ``:`` is followed by ``;`` in ASCII.
 PROMOTE_LOOKUP_SQL = (
-    "SELECT state FROM jobs WHERE namespace = 'shadow' AND idempotency_key LIKE ? "
+    "SELECT state FROM jobs WHERE namespace = 'shadow' "
+    "AND idempotency_key >= ? AND idempotency_key < ? "
     "ORDER BY idempotency_key DESC LIMIT 8"
 )
 
 
 def _promote_states_with_unknown_prior(conn, session, tag):
     rows = conn.execute(
-        PROMOTE_LOOKUP_SQL, (f"nightly:{session}:pool:promote:{tag}:%",)).fetchall()
+        PROMOTE_LOOKUP_SQL,
+        (f"nightly:{session}:pool:promote:{tag}:",
+         f"nightly:{session}:pool:promote:{tag};")).fetchall()
     return [row["state"] for row in rows]
 
 

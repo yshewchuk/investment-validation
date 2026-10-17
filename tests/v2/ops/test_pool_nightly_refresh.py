@@ -848,6 +848,7 @@ def test_real_training_planners_build_the_three_phase_plans(monkeypatch, tmp_pat
     paired, board, trailing = plans["state"], plans["board_analog"], plans["trailing_cutoff"]
     assert paired["state"] == "paired_residual_pool" and paired["cutoffs"] == (SESSION,)
     assert board["alpha"] == pool_refresh.FILL_ALPHA and board["cutoffs"] == (SESSION,)
+    assert board["strategies"] == ()
     assert trailing["cutoffs"] == (SESSION,)
     for parameters in plans.values():
         assert parameters["input_bindings"] == {"legacy_manifest.json": MANIFEST}
@@ -923,6 +924,18 @@ def test_identity_is_none_for_a_non_mapping_spec():
     conn = _db()
     _add_score_spec(conn, key="nightly:2026-01-05:sha256:z:finality",
                     created_at="2026-01-05T00:00:00Z", spec_json="[]")
+    assert pool_refresh.pool_refresh_identity(conn) is None
+
+
+@pytest.mark.parametrize("spec", [
+    {"parameters": []},
+    {"parameters": {"input_bindings": [1]}},
+    {"parameters": "x"},
+])
+def test_identity_is_none_for_a_non_mapping_nested_layer(spec):
+    conn = _db()
+    _add_score_spec(conn, key="nightly:2026-01-05:sha256:z:finality",
+                    created_at="2026-01-05T00:00:00Z", spec_json=json.dumps(spec))
     assert pool_refresh.pool_refresh_identity(conn) is None
 
 
@@ -1300,3 +1313,32 @@ def test_running_promote_is_pending_and_not_resubmitted(monkeypatch, tmp_path):
     assert _submit(conn, tmp_path) == []
     assert rec.submits == []
     assert pool_refresh.pool_cycle_pending(conn, tmp_path) is True
+
+
+# --------------------------------------------------------------------------
+# 25. the promote lookup is a binary key range, not a LIKE prefix
+# --------------------------------------------------------------------------
+
+
+def _add_promote(conn, *, session=SESSION, tag=TAG, prior=PRIOR, state="failed"):
+    key = f"nightly:{session}:pool:promote:{tag}:{prior}"
+    conn.execute("INSERT INTO jobs (job_id, kind, state, idempotency_key, spec_json, created_at) "
+                 "VALUES (?, 'training', ?, ?, NULL, NULL)",
+                 (job_id_for("shadow", key), state, key))
+    return key
+
+
+def test_promote_lookup_excludes_other_sessions_and_tags():
+    conn = _db()
+    _add_promote(conn, prior=PRIOR, state="failed")
+    _add_promote(conn, session="2026-01-03", state="running")
+    _add_promote(conn, session=f"{SESSION}x", state="running")
+    _add_promote(conn, tag="othertag", state="running")
+    _add_promote(conn, tag=TAG[:-1] + ("0" if TAG[-1] != "0" else "1"), state="running")
+    assert pool_refresh._promote_states_with_unknown_prior(conn, SESSION, TAG) == ["failed"]
+
+
+def test_promote_lookup_returns_a_prior_with_uppercase_and_odd_chars():
+    conn = _db()
+    _add_promote(conn, prior="Prior_ABC-1!?", state="running")
+    assert pool_refresh._promote_states_with_unknown_prior(conn, SESSION, TAG) == ["running"]

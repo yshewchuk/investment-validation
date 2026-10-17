@@ -577,8 +577,7 @@ Only a tracked path absent from the worktree reads as empty.
   pools and the trailing cutoff at the session cutoff, stages a candidate
   release and promotes it behind an expected-incumbent guard; driver pools
   and the chooser stay carried. Contract: `engine/v2/models/ARCHITECTURE.md`
-  §2.2.1. Monthly retraining of the champion/gate/chooser models is cutover
-  PR-13b (contract: §2.3); a native Tier-4 forecasts producer is PR-13c.
+  §2.2.1; monthly retraining contract: §2.3.
   Forward inference uses `engine/v2/scoring/ARCHITECTURE.md`.
 - **Captured native comparison export (tools, read-only inputs).**
   `tools/captured_native_comparison.py` exports one explicitly selected,
