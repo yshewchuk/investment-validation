@@ -235,9 +235,9 @@ Use existing foundation hashing and strict decoding. Operational timestamps
 live in envelopes, outside deterministic score/projection identity.
 
 ```text
-PreviewRelease (preview_release.v1.0):
+PreviewRelease (preview_release.v1.1):
   release_id, source_release_id, projection_manifest_ref
-  snapshot_ref, score_batch_ref, bundle_manifest_ref
+  snapshot_ref, score_batch_ref, bundle_manifest_ref, row_sources
   model_registry_artifact_refs, model_evidence_ref?
   comparison_receipt_refs, source_code_hash, projection_code_hash
   requested_as_of, resolved_as_of, clock_ids
@@ -740,7 +740,7 @@ for a screenshot if a validated release exists.
    comparison receipts, then do one saved real-release disk round trip.
 4. Record the actual accepted Phase 2 interfaces and unresolved mapping gaps.
 
-Exit: `/usr/bin/python3 -m pytest -q tests/test_v2_serving_bridge.py`
+Exit: `/usr/bin/python3 -m pytest -q tests/v2/serving/test_v2_serving_bridge.py`
 
 ### P3-2 — Read API
 
