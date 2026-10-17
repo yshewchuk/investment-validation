@@ -86,7 +86,7 @@ defines the prospective frozen winner; no winner exists until recorded execution
 Every planned candidate must be attempted and failures recorded before selection.
 This command neither reads outcomes nor runs the search.
 
-The library-only `experiments.magnitude_search_trials.SearchTrials` boundary
+The public `experiments.magnitude_search_trials.SearchTrials` boundary
 records every candidate/inner-fold attempt and freezes selections from submitted
 forecasts. Explicitly seal one plan per anchor, start each attempt once, and record
 complete three-horizon real forecasts or an explicit `EXPERIMENT_VARIANT_FAILED` fit failure. Numeric predictions and
@@ -99,12 +99,25 @@ infrastructure/resource/shared-identity failures also block selection. Exact rep
 terminal submission or freeze is idempotent; another start is a forbidden retry.
 Journal writes above 16 MiB refuse nonretryable `RESOURCE_LIMIT_EXCEEDED` before publishing that record.
 The submitted forecasts do not prove that an estimator ran. Frozen selections grant
-no outer-evaluation, deployment or final-read authority. The library-only `SearchTrials.execute` runs one planned candidate/inner fold with explicit
+no outer-evaluation, deployment or final-read authority. The public `SearchTrials.execute` runs one planned candidate/inner fold with explicit
 positive integer `memory_bytes`, `cpu_seconds` and `wall_seconds` limits. A fixed Linux
 child reuses the native fresh-fit pipeline for each horizon; immutable fit-admission
 and completion receipts bind matrices, candidate and complete forecasts. A fit admission
 does not prove physical invocation after an interruption. Resource/shared failures remain
 unfinished and cannot be retried or converted to candidate exclusion. Completed native
 replay verifies the whole chain without fitting or reopening labels. Limits apply to
-the fit child, not parent native admission or shared-host capacity. No CLI is added;
-interrupted-attempt reconciliation, outer evaluation and reporting remain unimplemented.
+the fit child, not parent native admission or shared-host capacity.
+
+`SearchTrials.reconcile` can finish publication only from a durable post-exit native
+child result, verifying original admission and fit evidence without fitting again.
+`magnitude_search_outer` refits each frozen inner winner on its outer training fold
+and collects all completed outer results, preserving the latest inner winner.
+Unfinished outer attempts cannot be recovered or retried.
+
+The serial `v2_magnitude_search_run seal|run|collect` CLI composes these APIs;
+see [the driver contract](../README.md#serial-magnitude-search-driver) for commands,
+source-bound sealing, explicit limits, zero-retry behavior and bounded JSON output.
+It reuses standard argparse/SQLite/tempfile plus existing journal and canonical
+serialization APIs, without another scheduler, report store or parser dependency.
+No real-data run, measured data availability, holdout/final access, ledger result
+or release is established by this development implementation.

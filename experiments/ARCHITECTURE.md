@@ -221,7 +221,7 @@ both flag states publish/verify the same plan and never write a ledger.
 
 ## Recorded magnitude-search selection
 
-`magnitude_search_trials.SearchTrials` is library-only, with no CLI or production caller. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies are contracts, foundation, ops migrations/catalog/fingerprints/errors, and research stored-history/target reads. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. `magnitude_history_inputs.history_binding` and `magnitude_search_plan.read_search_plan` own native/plan admission; public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
+`magnitude_search_trials.SearchTrials` exposes the journal API composed by the serial CLI. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies are contracts, foundation, ops migrations/catalog/fingerprints/errors, and research stored-history/target reads. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. `magnitude_history_inputs.history_binding` and `magnitude_search_plan.read_search_plan` own native/plan admission; public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
 
 | Condition | Outcome |
 |---|---|
@@ -541,7 +541,7 @@ immutable completion prevents a second terminal CSV row; prior reports stay unch
 
 ## Bounded inner-trial execution
 
-`SearchTrials.execute(outer_year, inner_year, candidate_id, limits=...)` is a library-only
+`SearchTrials.execute(outer_year, inner_year, candidate_id, limits=...)` is a public
 native caller of the existing recorder and `magnitude_fitted.fitted_forecasts`.
 It consumes one declared candidate and inner fold; it does not run outer evaluation,
 reclaim starts, change the selection policy, write a ledger or grant final-read authority.
@@ -625,7 +625,7 @@ There is no retry, fallback source, projected calendar or partial-success mode.
 
 ## Selected-candidate outer evaluation
 
-`magnitude_search_outer.execute_outer_fold` is library-only. It requires an existing
+`magnitude_search_outer.execute_outer_fold` is a selected-fold runner. It requires an existing
 frozen selection and completed native execution/terminal evidence for every inner
 trial before public `freeze`/`execute` replay. Missing or submitted-only evidence
 never launches inner work; permitted candidate failures retain sealed exclusions.
@@ -671,3 +671,24 @@ existing search plan/journal/trial/child/evidence APIs, contracts, foundation, o
 migrations/fingerprinting/errors and legacy/v2 no-fit guards. The evidence helper
 consumes native history admission and research stored-history/target APIs; no new
 scheduler, parser, estimator implementation or third-party dependency is needed.
+
+## Serial search orchestration
+
+`v2_magnitude_search_run` composes public plan, journal, trial and outer APIs.
+Separate `seal`, `run` and read-only `collect` commands retain explicit ownership;
+run never migrates or seals implicitly. A distinct driver seal binds plan/ref and
+full driver source closure; atomic absence guards prevent blessing started library
+journals. Run and CLI collection require that exact binding, without changing the
+scientific report hash. The complete roster is checked for unfinished claims and
+premature selections before new work. Durable inner results reconcile first;
+completed outer results replay next, before any fresh serial fitting.
+Scientific scoring refusals continue only after public reconciliation verifies
+the durable refused terminal; shared/resource failures stop. Freeze precedes all
+selected outer evaluation, with zero fit retries and unchanged winner policy.
+
+The CLI reuses the bounded staged-input reader, strict duplicate-key decoder,
+typed spec/reference admission and shared canonical JSON stream. A disposable
+temporary file enforces a complete 64 MiB UTF-8 output budget before stdout;
+oversized reports refuse without truncation. Collection preserves the existing
+outer report identity and uses a read-only SQLite connection. No persisted report
+framework, scheduler, ledger, final-read or release authority is introduced.

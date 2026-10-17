@@ -1,0 +1,439 @@
+"""Synthetic CLI admission, read-only collection and all-or-nothing JSON output."""
+# ruff: noqa: F811
+import io
+import json
+import os
+import sqlite3
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+
+from engine.v2.contracts import ArtifactRef
+from engine.v2.data.errors import DataError
+from engine.v2.foundation import ArtifactError, canonical_json, to_document
+from engine.v2.ops.errors import OpsError, fail
+from experiments import magnitude_search_records as records
+from experiments import v2_magnitude_search_run as cli
+from tests.v2.research.test_magnitude_search_driver_binding import (
+    driver_case,  # noqa: F401
+    snapshot,
+)
+
+LIMITS = {"memory_bytes": 1024, "cpu_seconds": 2, "wall_seconds": 3}
+RESOURCE_FLAGS = tuple("--" + name.replace("_", "-") for name in LIMITS)
+ACTION_NAMES = {"seal": "seal_search_run", "run": "run_search", "collect": "collect_outer_results"}
+METADATA_LIMIT = 16 * 1024 * 1024
+
+
+@pytest.fixture
+def source(tmp_path, monkeypatch):
+    store = tmp_path / "store"
+    store.mkdir()
+    catalog = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(catalog) as connection:
+        connection.execute("CREATE TABLE sentinel (value INTEGER)")
+        connection.execute("INSERT INTO sentinel VALUES (7)")
+    reference = ArtifactRef(artifact_id="plan", content_hash="sha256:" + "1" * 64,
+                            schema_ref="search_plan.v1", byte_size=2, storage_key="objects/plan")
+    documents = {
+        "spec": {"hypothesis": "synthetic", "primary_arm_id": "primary", "economic_params": {},
+                 "price_source": "computed_moves", "runner": "experiments/v2_prediction.py"},
+        "request": {"synthetic": True},
+        "plan-ref": to_document(reference),
+    }
+    paths = {}
+    for name, document in documents.items():
+        paths[name] = tmp_path / (name + ".json")
+        paths[name].write_text(json.dumps(document), encoding="utf-8")
+    state = SimpleNamespace(root=tmp_path, paths=paths, catalog=catalog, store=store,
+                            reference=reference, documents=documents, calls=[], connections=[],
+                            registration=object(), repository=object(),
+                            result={"z": [2, 1], "a": "synthetic é"})
+
+    def registration(connection, artifact_store, spec):
+        assert artifact_store.root == store
+        assert spec.hypothesis == "synthetic"
+        state.connections.append(connection)
+        return state.registration
+
+    def repository(connection, artifact_store):
+        assert connection is state.connections[-1]
+        assert artifact_store.root == store
+        return state.repository
+
+    monkeypatch.setattr(cli, "read_native_registration", registration)
+    monkeypatch.setattr(cli, "Repository", repository)
+    monkeypatch.setattr(cli, "_admit_driver", lambda *args, **kwargs: None)
+    for action, name in ACTION_NAMES.items():
+        def invoke(*args, _action=action, **kwargs):
+            state.calls.append((_action, args, kwargs))
+            return state.result
+        monkeypatch.setattr(cli, name, invoke)
+    return state
+
+
+def _args(source, action="collect", *, limits=True):
+    arguments = [action]
+    for name, path in source.paths.items():
+        arguments.extend(["--" + name, str(path)])
+    arguments.extend(["--catalog", str(source.catalog), "--store-root", str(source.store)])
+    if action == "run" and limits:
+        for name, value in LIMITS.items():
+            arguments.extend(["--" + name.replace("_", "-"), str(value)])
+    return arguments
+
+
+def _invoke(source, capsys, action="collect", *, status=0, extra=()):
+    assert cli.main([*_args(source, action), *extra]) == status
+    captured = capsys.readouterr()
+    document = json.loads(captured.out)
+    assert captured.out == canonical_json(document) + "\n"
+    return document, captured.err
+
+
+def _raising(error):
+    def raise_error(*args, **kwargs):
+        raise error
+    return raise_error
+
+
+@pytest.mark.parametrize("action", ACTION_NAMES)
+@pytest.mark.parametrize("no_ledger", [False, True])
+def test_actions_use_public_adapters_and_emit_one_canonical_document(source, capsys, action, no_ledger):
+    result, stderr = _invoke(source, capsys, action, extra=("--no-ledger",) if no_ledger else ())
+    assert result == source.result
+    assert not stderr
+    assert len(source.calls) == 1
+    name, arguments, keywords = source.calls[0]
+    assert name == action
+    assert arguments[0] is source.connections[0]
+    assert source.registration in arguments
+    assert source.documents["request"] in arguments
+    assert source.reference in arguments
+    if action != "seal":
+        assert source.repository in arguments
+    if action == "run":
+        assert keywords["limits"] == LIMITS
+    else:
+        assert "limits" not in keywords
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        source.connections[0].execute("SELECT 1")
+    assert not list(source.root.rglob("*.csv"))
+
+
+@pytest.mark.parametrize("action", ACTION_NAMES)
+@pytest.mark.parametrize("flag", ["--spec", "--request", "--plan-ref", "--catalog", "--store-root"])
+def test_every_action_requires_explicit_metadata_and_storage(source, capsys, action, flag):
+    arguments = _args(source, action)
+    index = arguments.index(flag)
+    del arguments[index:index + 2]
+    with pytest.raises(SystemExit) as caught:
+        cli.main(arguments)
+    assert caught.value.code == 2
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert flag in captured.err
+    assert not source.calls
+
+
+@pytest.mark.parametrize("flag", RESOURCE_FLAGS)
+def test_run_requires_each_resource_flag(source, capsys, flag):
+    arguments = _args(source, "run")
+    index = arguments.index(flag)
+    del arguments[index:index + 2]
+    with pytest.raises(SystemExit) as caught:
+        cli.main(arguments)
+    assert caught.value.code == 2
+    assert not capsys.readouterr().out
+    assert not source.calls
+
+
+@pytest.mark.parametrize("flag", RESOURCE_FLAGS)
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "true"])
+def test_run_resource_flags_require_positive_integers(source, capsys, flag, value):
+    arguments = _args(source, "run")
+    arguments[arguments.index(flag) + 1] = value
+    with pytest.raises(SystemExit) as caught:
+        cli.main(arguments)
+    assert caught.value.code == 2
+    assert not capsys.readouterr().out
+    assert not source.calls
+
+
+@pytest.mark.parametrize("action", ["seal", "collect"])
+@pytest.mark.parametrize("flag", RESOURCE_FLAGS)
+def test_nonexecuting_actions_reject_resource_flags(source, capsys, action, flag):
+    with pytest.raises(SystemExit) as caught:
+        cli.main([*_args(source, action), flag, "1"])
+    assert caught.value.code == 2
+    assert not capsys.readouterr().out
+    assert not source.calls
+
+
+def test_unknown_action_and_execution_options_are_rejected(source, capsys):
+    for arguments in (["prepare", *_args(source)[1:]], [*_args(source), "--jobs", "2"]):
+        with pytest.raises(SystemExit) as caught:
+            cli.main(arguments)
+        assert caught.value.code == 2
+        assert not capsys.readouterr().out
+    assert not source.calls
+
+
+@pytest.mark.parametrize("payload", [b'{"a":1,"a":2}', b'{"x":{"a":1,"a":2}}',
+                                     b"[]", b"null", b'"text"', b"1", b"{", b"\xff",
+                                     b'{"x":NaN}', b'{"x":Infinity}', b'{"x":-Infinity}'])
+def test_metadata_decoder_rejects_duplicates_nonobjects_and_invalid_json(tmp_path, payload):
+    path = tmp_path / "metadata.json"
+    path.write_bytes(payload)
+    with pytest.raises(OpsError) as caught:
+        cli._read_document(path)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert str(path) not in str(caught.value)
+
+
+@pytest.mark.parametrize("kind", ["oversize", "symlink", "fifo", "directory"])
+def test_metadata_reader_requires_bounded_regular_nonsymlink_leaf(tmp_path, kind):
+    path = tmp_path / "metadata.json"
+    if kind == "oversize":
+        with path.open("wb") as stream:
+            stream.truncate(METADATA_LIMIT + 1)
+    elif kind == "symlink":
+        target = tmp_path / "target.json"
+        target.write_text("{}", encoding="utf-8")
+        path.symlink_to(target)
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        path.mkdir()
+    with pytest.raises(OpsError) as caught:
+        cli._read_document(path)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_metadata_byte_bound_is_inclusive_and_counts_utf8(tmp_path):
+    path = tmp_path / "metadata.json"
+    payload = '{"value":"é"}'.encode("utf-8")
+    path.write_bytes(payload + b" " * (METADATA_LIMIT - len(payload)))
+    assert path.stat().st_size == METADATA_LIMIT
+    assert cli._read_document(path) == {"value": "é"}
+    with path.open("ab") as stream:
+        stream.write(b" ")
+    with pytest.raises(OpsError) as caught:
+        cli._read_document(path)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+@pytest.mark.parametrize("name", ["spec", "request", "plan-ref"])
+def test_cli_rejects_duplicate_keys_in_every_metadata_input_before_dispatch(source, capsys, name):
+    source.paths[name].write_text('{"duplicate":1,"duplicate":2}', encoding="utf-8")
+    result, stderr = _invoke(source, capsys, status=2)
+    assert result["refused"]["code"] == "INVALID_EXPERIMENT_SPEC"
+    assert not stderr
+    assert not source.calls
+
+
+@pytest.mark.parametrize("missing", ["catalog", "store", "metadata"])
+@pytest.mark.parametrize("action", ACTION_NAMES)
+def test_missing_inputs_are_not_created_and_private_paths_are_redacted(source, capsys, missing, action):
+    absent = source.root / "private-operator-path" / missing
+    if missing == "metadata":
+        source.paths["request"] = absent
+    else:
+        setattr(source, missing, absent)
+    result, stderr = _invoke(source, capsys, action, status=2)
+    assert result["refused"]["code"] == "RESOURCE_UNAVAILABLE"
+    assert "private-operator-path" not in canonical_json(result) + stderr
+    assert not absent.exists()
+    assert not absent.parent.exists()
+    assert not source.calls
+
+
+def test_collect_uses_actual_read_only_sqlite_connection(source, monkeypatch, capsys):
+    before = source.catalog.read_bytes()
+
+    def collect(connection, *args, **kwargs):
+        assert connection.row_factory is sqlite3.Row
+        assert connection.execute("SELECT value FROM sentinel").fetchone()[0] == 7
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute("INSERT INTO sentinel VALUES (8)")
+        return source.result
+
+    monkeypatch.setattr(cli, "connect", _raising(AssertionError("collect opened writable catalog")))
+    monkeypatch.setattr(cli, "collect_outer_results", collect)
+    assert _invoke(source, capsys)[0] == source.result
+    assert source.catalog.read_bytes() == before
+    assert not list(source.store.rglob("*"))
+
+
+@pytest.mark.parametrize("binding", ["missing", "different"])
+def test_collect_requires_its_exact_driver_seal_before_reading_results(
+        driver_case, monkeypatch, capsys, binding):
+    case = driver_case
+    case.recorder.seal(clock=case.clock)
+    if binding == "different":
+        _, sealed = cli._binding(case.conn, case.store, case.registration, case.request, case.plan_ref)
+        records.append_record(case.conn, case.store, "run", "driver-seal", {**sealed, "plan_id": "other"})
+    documents = {"spec": {"hypothesis": "synthetic", "primary_arm_id": "primary",
+                           "economic_params": {}, "price_source": "computed_moves"},
+                 "request": case.request, "plan-ref": to_document(case.plan_ref)}
+    paths = {}
+    for name, document in documents.items():
+        paths[name] = case.catalog.parent / (name + ".json")
+        paths[name].write_text(json.dumps(document), encoding="utf-8")
+    source = SimpleNamespace(paths=paths, catalog=case.catalog, store=case.store.root)
+    monkeypatch.setattr(cli, "read_native_registration", lambda *args: case.registration)
+    monkeypatch.setattr(cli, "Repository", lambda *args: None)
+    monkeypatch.setattr(cli, "collect_outer_results", _raising(AssertionError("unadmitted collection")))
+    before = snapshot(case)
+    result, stderr = _invoke(source, capsys, status=2)
+    assert result["refused"]["code"] == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert not stderr
+    assert snapshot(case) == before
+
+
+@pytest.mark.parametrize("exception", [OpsError, DataError])
+def test_typed_refusal_preserves_the_complete_problem(source, monkeypatch, capsys, exception):
+    problem = replace(fail("RESOURCE_UNAVAILABLE", "safe shared refusal", stage="admission",
+                           details={"field": "feature_snapshot"}, retry_after_seconds=11,
+                           dependency_refs=("sha256:dependency",)).problem,
+                      trace_id="trace-id", diagnostic_ref="diagnostic-id")
+    monkeypatch.setattr(cli, "collect_outer_results", _raising(exception(problem)))
+    result, stderr = _invoke(source, capsys, status=2)
+    assert result == {"refused": to_document(problem)}
+    assert not stderr
+
+
+@pytest.mark.parametrize("error", [OSError("private-disk-path"),
+                                   sqlite3.OperationalError("private-table-name"),
+                                   ArtifactError("UNSAFE_PATH", "private-artifact-path")])
+def test_untyped_infrastructure_failures_are_safely_redacted(source, monkeypatch, capsys, error):
+    monkeypatch.setattr(cli, "collect_outer_results", _raising(error))
+    result, stderr = _invoke(source, capsys, status=2)
+    assert result["refused"]["code"] == "RESOURCE_UNAVAILABLE"
+    assert "private" not in canonical_json(result) + stderr
+
+
+@pytest.mark.parametrize("exception", [TypeError, ValueError])
+def test_unexpected_programming_errors_are_not_silenced(source, monkeypatch, capsys, exception):
+    monkeypatch.setattr(cli, "collect_outer_results", _raising(exception("unexpected bug")))
+    with pytest.raises(exception, match="unexpected bug"):
+        cli.main(_args(source))
+    assert not capsys.readouterr().out
+
+
+def test_incidental_python_stdout_moves_to_stderr(source, monkeypatch, capsys):
+    def collect(*args, **kwargs):
+        print("synthetic progress")
+        return source.result
+
+    monkeypatch.setattr(cli, "collect_outer_results", collect)
+    result, stderr = _invoke(source, capsys)
+    assert result == source.result
+    assert stderr == "synthetic progress\n"
+
+
+@pytest.mark.parametrize("scratch", [False, True])
+def test_render_budget_counts_utf8_and_final_newline_inclusively(monkeypatch, scratch):
+    document = {"value": "é🧪"}
+    expected = canonical_json(document) + "\n"
+    budget = len(expected.encode("utf-8"))
+    assert budget > len(expected)
+    monkeypatch.setattr(cli, "MAX_REPORT_BYTES", budget)
+    with cli._render(document, scratch=scratch) as stream:
+        assert stream.read() == expected
+    monkeypatch.setattr(cli, "MAX_REPORT_BYTES", budget - 1)
+    with pytest.raises(OpsError) as caught:
+        cli._render(document, scratch=scratch)
+    assert caught.value.code == "RESOURCE_LIMIT_EXCEEDED"
+
+
+def test_report_overflow_emits_one_refusal_and_no_partial_success(source, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "MAX_REPORT_BYTES", 1024)
+    source.result = {"first_success_field": "partial must stay private", "padding": "é" * 1024}
+    result, stderr = _invoke(source, capsys, status=2)
+    assert result["refused"]["code"] == "RESOURCE_LIMIT_EXCEEDED"
+    assert "first_success_field" not in canonical_json(result) + stderr
+    assert "partial must stay private" not in canonical_json(result) + stderr
+
+
+def test_tempfile_allocation_failure_still_emits_redacted_refusal(source, monkeypatch, capsys):
+    monkeypatch.setattr(cli.tempfile, "TemporaryFile", _raising(OSError("private-scratch-path")))
+    result, stderr = _invoke(source, capsys, status=2)
+    assert result["refused"]["code"] == "RESOURCE_UNAVAILABLE"
+    assert "private-scratch-path" not in canonical_json(result) + stderr
+
+
+def test_tempfile_write_failure_discards_partial_report_and_closes_scratch(source, monkeypatch, capsys):
+    class FailingScratch(io.StringIO):
+        def write(self, text):
+            if self.tell():
+                raise OSError("private-full-disk-path")
+            return super().write(text)
+
+    stream = FailingScratch()
+    monkeypatch.setattr(cli.tempfile, "TemporaryFile", lambda *args, **kwargs: stream)
+    result, stderr = _invoke(source, capsys, status=2)
+    assert result["refused"]["code"] == "RESOURCE_UNAVAILABLE"
+    assert "private-full-disk-path" not in canonical_json(result) + stderr
+    assert stream.closed
+
+
+def test_broken_stdout_does_not_attempt_a_second_json_document(source, monkeypatch):
+    class BrokenOutput:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, text):
+            self.writes.append(text)
+            raise BrokenPipeError("closed consumer")
+
+    output = BrokenOutput()
+    with monkeypatch.context() as patch:
+        patch.setattr(cli.sys, "stdout", output)
+        with pytest.raises(BrokenPipeError, match="closed consumer"):
+            cli.main(_args(source))
+    assert output.writes == [canonical_json(source.result) + "\n"]
+
+
+@pytest.mark.parametrize("encoding", ["latin-1", "utf-16"])
+def test_binary_stdout_receives_exact_utf8_without_text_encoding_or_writes(source, monkeypatch, encoding):
+    class HostileTextOutput:
+        def __init__(self):
+            self.buffer = io.BytesIO()
+            self.encoding = encoding
+
+        def write(self, text):
+            raise AssertionError("stdout text encoding must not alter canonical UTF-8")
+
+    # Exercise several copy chunks, including multibyte characters at chunk boundaries.
+    source.result = {"value": "é🧪" * 40000}
+    output = HostileTextOutput()
+    with monkeypatch.context() as patch:
+        patch.setattr(cli.sys, "stdout", output)
+        assert cli.main(_args(source)) == 0
+    assert output.buffer.getvalue() == (canonical_json(source.result) + "\n").encode("utf-8")
+
+
+def test_broken_binary_stdout_does_not_fall_back_or_emit_second_document(source, monkeypatch):
+    class BrokenBuffer:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, data):
+            self.writes.append(data)
+            raise BrokenPipeError("closed binary consumer")
+
+    class BinaryOutput:
+        def __init__(self):
+            self.buffer = BrokenBuffer()
+
+        def write(self, text):
+            raise AssertionError("broken binary stdout must not fall back to text")
+
+    output = BinaryOutput()
+    with monkeypatch.context() as patch:
+        patch.setattr(cli.sys, "stdout", output)
+        with pytest.raises(BrokenPipeError, match="closed binary consumer"):
+            cli.main(_args(source))
+    assert output.buffer.writes == [(canonical_json(source.result) + "\n").encode("utf-8")]
