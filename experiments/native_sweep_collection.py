@@ -16,10 +16,10 @@ from engine.v2.foundation import (
 )
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import registered_artifact
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from engine.v2.ops.fingerprints import source_closure
-from engine.v2.ops.submission import get_job
+from engine.v2.ops.submission import MAX_JOB_FAILURE_BYTES, get_job
 from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
 from experiments.gate_report import render_gate_report
@@ -27,7 +27,27 @@ from experiments.v2_gate_sweep import submit_sweep
 
 TERMINAL = frozenset({"succeeded", "failed", "cancelled", "blocked"})
 MAX_GATE_RESULT_BYTES = 16 * 1024 * 1024
-MAX_FAILURE_BYTES = 1024 * 1024
+MAX_FAILURE_BYTES = MAX_JOB_FAILURE_BYTES
+_COLLECTOR_ROOT = Path(__file__).resolve().parents[1]
+_COLLECTOR_ENTRIES = ("experiments/native_sweep_collection.py", "experiments/v2_gate_collect.py")
+try:
+    _COLLECTOR_SOURCES = source_closure(_COLLECTOR_ROOT, _COLLECTOR_ENTRIES)
+    _COLLECTOR_SOURCE_ERROR = None
+except (OpsError, ArtifactError, OSError, SyntaxError, ValueError, RecursionError) as _error:
+    _COLLECTOR_SOURCES, _COLLECTOR_SOURCE_ERROR = None, type(_error).__name__
+
+
+def _implementation(code_root):
+    """Verify an import-time on-disk snapshot, not a Python bytecode attestation."""
+    try:
+        current = source_closure(_COLLECTOR_ROOT, _COLLECTOR_ENTRIES)
+        caller = source_closure(Path(code_root), _COLLECTOR_ENTRIES)
+        if (_COLLECTOR_SOURCE_ERROR is not None or current != _COLLECTOR_SOURCES
+                or any(caller.get(entry) != current[entry] for entry in _COLLECTOR_ENTRIES)):
+            raise ValueError
+        return current
+    except (OpsError, ArtifactError, OSError, SyntaxError, ValueError, TypeError, RecursionError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "installed collector source cannot be verified") from None
 
 
 def _typed(action):
@@ -37,6 +57,8 @@ def _typed(action):
             return action(*args, **kwargs)
         except (ArtifactError, ValueError, TypeError, KeyError, RecursionError, SyntaxError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep collection evidence cannot be verified") from None
+        except sqlite3.IntegrityError:
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep collection catalog constraint failed") from None
         except (OSError, sqlite3.Error):
             raise fail("RESOURCE_UNAVAILABLE", "sweep collection publication was interrupted") from None
     return call
@@ -152,6 +174,7 @@ def collect_sweep(conn, store, repository, document, *, code_root, as_of_month,
     mode, ledger_path = _mode(no_ledger, ledger_path)
     if conn.in_transaction:
         raise fail("INVALID_EXPERIMENT_SPEC", "sweep collection requires an idle catalog connection")
+    implementation = _implementation(code_root)
     jobs = submit_sweep(conn, store, repository, document, code_root=code_root,
                        as_of_month=as_of_month, scope=scope, event_ids=event_ids)
     sealed = native.decode_native_gate_sweep(native.read_native_gate_sweep(
@@ -160,8 +183,7 @@ def collect_sweep(conn, store, repository, document, *, code_root, as_of_month,
                      for item in sealed["registrations"]]
     intent = {"schema_version": "native_gate_collection.v1.0", "roster_id": content_hash(sealed),
               "recording_mode": mode, "ledger_destination": None if no_ledger else content_hash(str(ledger_path)),
-              "collector_source": source_closure(Path(code_root), ["experiments/native_sweep_collection.py",
-                                                                 "experiments/v2_gate_collect.py"])}
+              "collector_source": implementation}
     key = "native_sweep_" + mode
     _bind(conn, store, registrations[0], key + "_intent", intent)
     arms, all_terminal = [], True

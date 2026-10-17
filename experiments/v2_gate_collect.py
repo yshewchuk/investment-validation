@@ -26,11 +26,16 @@ def run_sweep(conn, store, repository, document, *, code_root, timeout_seconds=3
         return result
     job_ids = [arm["job_id"] for arm in result["index"]["variants"]]
     deadline = monotonic() + timeout_seconds
-    while not all(get_job(conn, job_id).state in TERMINAL for job_id in job_ids):
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            break
-        sleep(min(1, remaining))
+    try:
+        while not all(get_job(conn, job_id).state in TERMINAL for job_id in job_ids):
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            sleep(min(1, remaining))
+    except sqlite3.IntegrityError:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep observation catalog constraint failed") from None
+    except (OSError, sqlite3.Error):
+        raise fail("RESOURCE_UNAVAILABLE", "sweep observation was interrupted") from None
     return collect_sweep(conn, store, repository, document, code_root=code_root, **kwargs)
 
 

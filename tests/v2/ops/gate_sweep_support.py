@@ -9,8 +9,12 @@ import pytest
 from engine.v2.foundation import ArtifactStore, SystemClock, canonical_json
 from engine.v2.ops.checkpoints import register_artifact
 from engine.v2.ops.fingerprints import snapshot_code, worker_source_manifest
+from engine.v2.ops.migrations import migrate
+from engine.v2.ops.schema import MIGRATIONS, OWNER
+from engine.v2.ops.submission import submit
 from experiments import v2_gate_sweep as sweep
 from experiments.native_registration import NativeRegistration
+from tests.ops_support import POLICY, REGISTRY, request
 from tests.v2.research.test_gate_report import MONTH, REPO, build_gate_spec
 
 
@@ -82,3 +86,20 @@ def set_terminal_result(case, *, payload=None, schema="native_gate_result.v1.0")
     case.conn.execute("DELETE FROM attempt_outputs")
     case.conn.execute("INSERT INTO attempt_outputs VALUES ('attempt-1', 'native_gate_result', ?)",
                       (case.ref.artifact_id,))
+
+
+def submitted_job(tmp_path, *, encoding="UTF-8", strict=True):
+    """A real submitted ops job, optionally with a damaged legacy jobs table."""
+    conn = sqlite3.connect(tmp_path / "job.sqlite", isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA encoding='{encoding}'")
+    clock = SystemClock()
+    migrate(conn, OWNER, MIGRATIONS, clock=clock)
+    if not strict:
+        # Current STRICT TEXT rejects BLOBs; model a malformed older catalog.
+        ddl = conn.execute("SELECT sql FROM sqlite_master WHERE name='jobs'").fetchone()[0]
+        conn.execute("DROP TABLE jobs")
+        conn.execute(ddl.removesuffix("STRICT"))
+    document = request()
+    receipt = submit(conn, REGISTRY, POLICY, document, clock=clock)
+    return SimpleNamespace(conn=conn, clock=clock, request=document, job_id=receipt.job_id)

@@ -37,6 +37,7 @@ are internal to ops; production packages consume versioned artifacts instead
 of importing the supervisor.
 
 Native experiment registration also exposes these existing submodule APIs:
+`submission.get_job` returns a job receipt, bounding only `failure_json` before transfer/decoding by `submission.MAX_JOB_FAILURE_BYTES` (1 MiB UTF-8, matching executor result pipes); UTF-16 SQL transfer allows 2 MiB before the UTF-8 recheck. Oversized/wrong-type failure text refuses `INTEGRITY_FAILED`, never truncates. Normal receipt fields/lifecycle and existing malformed-JSON errors are unchanged; submission replay shares this reader.
 `catalog.transaction`, `errors.OpsError`, `errors.fail`,
 `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`,
 `experiments.register_hypothesis_in_transaction`, `experiments.NATIVE_GATE_WORKER`, `experiments.NATIVE_GATE_ENTRYPOINT`, `experiments.NATIVE_GATE_RUNNERS`,
@@ -135,7 +136,7 @@ either required table. Their current consumer is
 
 `nightly_session` (session/generation identity and compare-and-swap state, #564 slice 1) is internal to this package and used by completion persistence in `supervisor.Service`; tests include `tests/v2/ops/test_nightly_session.py` and `tests/v2/ops/test_nightly_completion.py`. `nightly_completion` (run-scoped reports, #564 slice 7; exports `Disposition`, `SCHEMA`, `build_completion_report`, `record_completion`) is internal and consumed through `supervisor.Service`; `tests/v2/ops/test_nightly_completion.py` covers its report contract and persistence. `nightly_receipts` (step receipts and effect reconciliation, #564 slice 2; exports `Effect`, `Reconciliation`, `StepReceipt`, `begin_step`, `complete_step`, `reconcile_step`) is imported by the production modules `nightly_chain`, `nightly_history`, and `nightly_repair`; `nightly_trigger` does not call it yet. `tests/v2/ops/test_nightly_receipts.py` covers its contract. `nightly_readiness` (legacy run-report readiness for a session, #564 slice 3; exports `LegacyReadiness`, `check_legacy_report`) is internal and uncalled by `nightly_trigger`; `tests/v2/ops/test_nightly_readiness.py` covers its contract. `nightly_chain` (snapshot import/refresh/moves/capture step chain over step receipts, #564 slice 4; exports `ChainResult`, `ChainStep`, `run_snapshot_chain`) is imported by production module `nightly_history`; `nightly_trigger` does not call it directly. `tests/v2/ops/test_nightly_chain.py` covers its contract.
 
-<!-- public-interface: Migration, migrate, magnitude_fitted_execution_document, validate_magnitude_fitted_execution, registered_artifact, register_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, verified_registration_bytes, magnitude_execution_document, validate_magnitude_execution, magnitude_history_request, magnitude_history_execution_document, validate_magnitude_history_execution, environment_identity, source_closure, worker_source_manifest, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document, READ_ONCE, reclaim, THREAD_VARIABLES, NativeGateParameters, NATIVE_GATE_WORKER, NATIVE_GATE_ENTRYPOINT, NATIVE_GATE_RUNNERS, main, submit_graph, NamespacePolicy, registry, require_current, OWNER, MIGRATIONS -->
+<!-- public-interface: Migration, migrate, magnitude_fitted_execution_document, validate_magnitude_fitted_execution, registered_artifact, register_artifact, verify_eod_availability, transaction, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, verified_registration_bytes, magnitude_execution_document, validate_magnitude_execution, magnitude_history_request, magnitude_history_execution_document, validate_magnitude_history_execution, environment_identity, source_closure, worker_source_manifest, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document, READ_ONCE, reclaim, THREAD_VARIABLES, NativeGateParameters, NATIVE_GATE_WORKER, NATIVE_GATE_ENTRYPOINT, NATIVE_GATE_RUNNERS, main, submit_graph, NamespacePolicy, registry, require_current, OWNER, MIGRATIONS, MAX_JOB_FAILURE_BYTES, get_job -->
 
 ## Consumers
 
@@ -158,7 +159,7 @@ to submit an immutable common-snapshot roster atomically. Child artifacts are
 unrecorded evaluation evidence; operations success is not scientific sweep completion.
 `experiments/native_sweep_collection.py` consumes `catalog.transaction`,
 `checkpoints.registered_artifact`, `experiments.experiment_spec_from_document`,
-`fingerprints.source_closure`, `submission.get_job` and `errors.fail` for collection.
+`fingerprints.source_closure`, `submission.get_job`/`MAX_JOB_FAILURE_BYTES` and `errors.OpsError`/`fail` for collection.
 `experiments/v2_gate_collect.py` consumes `catalog.connect`, `submission.get_job` and `errors.OpsError`/`fail` for an observer-only CLI.
 
 No other production package imports ops. The CLI starts the coordinator, and
