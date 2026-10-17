@@ -706,6 +706,7 @@ def test_atomic_graph_conflict_in_second_child_rolls_back_first(source, monkeypa
     with pytest.raises(OpsError) as caught:
         _call(source, sweep.submit_sweep)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.message == "sweep submission differs from its first request"
     rows = source.conn.execute("SELECT spec_json FROM jobs").fetchall()
     assert len(rows) == 1 and json.loads(rows[0][0])["priority"] == 7
 

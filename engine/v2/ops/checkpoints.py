@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from engine.v2.contracts import ArtifactRef, CheckpointReceipt
 from engine.v2.foundation import ArtifactStore, content_hash, format_timestamp
+from engine.v2.ops import catalog
 from engine.v2.ops.catalog import (
     decode_bounded_text,
     dumps,
@@ -21,14 +22,8 @@ def cache_identity(*, kind, inputs, implementation, parameters, environment, sch
 
 
 def register_artifact(conn, ref, attempt_id, clock):
-    old = conn.execute("SELECT ref_json FROM artifacts WHERE artifact_id = ?",
-                       (ref.artifact_id,)).fetchone()
-    if old:
-        if old[0] != dumps(ref):
-            raise fail("INTEGRITY_FAILED", "artifact identity conflict")
-        return
-    conn.execute("INSERT INTO artifacts VALUES (?, ?, ?, ?)",
-                 (ref.artifact_id, dumps(ref), attempt_id, format_timestamp(clock.now())))
+    """Keep the checkpoint registration API on the shared catalog primitive."""
+    return catalog.register_artifact(conn, ref, attempt_id, clock)
 
 
 def registered_artifact(conn, artifact_id, *, max_metadata_bytes=None):

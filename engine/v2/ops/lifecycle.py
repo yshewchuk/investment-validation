@@ -38,7 +38,7 @@ from engine.v2.contracts import (
     ResolvedResources,
 )
 from engine.v2.foundation import Clock, format_timestamp
-from engine.v2.ops.catalog import dumps, dumps_failure, load_json, transaction
+from engine.v2.ops.catalog import dumps, dumps_failure, load_json, register_artifact, transaction
 from engine.v2.ops.errors import fail, make_problem
 from engine.v2.ops.submission import RetryPolicy
 
@@ -266,8 +266,6 @@ def commit_attempt(conn: sqlite3.Connection, attempt_id: str, fence: int, outcom
     with transaction(conn):
         job, _ = verify_fence(conn, attempt_id, fence, now)
         if failure_artifact is not None:
-            # checkpoints imports verify_fence; defer this import to avoid a module cycle.
-            from engine.v2.ops.checkpoints import register_artifact
             register_artifact(conn, failure_artifact, attempt_id, clock)
         if effects is not None and outcome.succeeded:
             effects(conn)

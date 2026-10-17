@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from engine.v2.contracts import Problem
-from engine.v2.foundation import canonical_json, from_document, to_document
+from engine.v2.foundation import canonical_json, format_timestamp, from_document, to_document
 from engine.v2.ops.errors import OpsError, fail
 
 __all__ = [
@@ -38,6 +38,7 @@ __all__ = [
     "dumps_failure",
     "integrity_errors",
     "load_json",
+    "register_artifact",
     "sql_text_budget",
     "transaction",
 ]
@@ -126,6 +127,18 @@ def dumps_failure(problem: Problem) -> str:
 def load_json(cls: type, text: str | None) -> Any:
     """Strictly decode a JSON column back into its contract type."""
     return None if text is None else from_document(cls, json.loads(text))
+
+
+def register_artifact(conn, ref, attempt_id, clock):
+    """Register canonical metadata in the caller's transaction; no publication or fence check."""
+    old = conn.execute("SELECT ref_json FROM artifacts WHERE artifact_id = ?",
+                       (ref.artifact_id,)).fetchone()
+    if old:
+        if old[0] != dumps(ref):
+            raise fail("INTEGRITY_FAILED", "artifact identity conflict")
+        return
+    conn.execute("INSERT INTO artifacts VALUES (?, ?, ?, ?)",
+                 (ref.artifact_id, dumps(ref), attempt_id, format_timestamp(clock.now())))
 
 
 def sql_text_budget(conn: sqlite3.Connection, max_utf8_bytes: int) -> tuple[str, int]:

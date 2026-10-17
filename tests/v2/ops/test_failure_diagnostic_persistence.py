@@ -485,6 +485,61 @@ def test_registration_conflict_rolls_back_failure_completion(case, full_problem)
     assert_original(case.store, full_problem, ref)
 
 
+@pytest.mark.parametrize("registrar", [catalog.register_artifact, register_artifact], ids=["catalog", "checkpoints"])
+def test_shared_registration_preserves_bytes_provenance_and_noop_clock(case, registrar):
+    ref = case.store.publish_bytes(b"diagnostic", schema_ref="problem.v1.0")
+    expected = (ref.artifact_id, catalog.dumps(ref), case.claim.attempt_id, format_timestamp(case.clock.now()))
+    with catalog.transaction(case.conn):
+        assert registrar(case.conn, ref, case.claim.attempt_id, case.clock) is None
+    assert tuple(case.conn.execute("SELECT * FROM artifacts").fetchone()) == expected
+    before = catalog_rows(case.conn)
+
+    def forbidden_clock():
+        pytest.fail("existing registration must not read the clock")
+
+    clock = SimpleNamespace(now=forbidden_clock)
+    with catalog.transaction(case.conn):
+        assert registrar(case.conn, ref, None, clock) is None
+    assert catalog_rows(case.conn) == before
+    with pytest.raises(OpsError) as captured, catalog.transaction(case.conn):
+        registrar(case.conn, replace(ref, schema_ref="conflicting.v1.0"), None, clock)
+    assert captured.value.code == "INTEGRITY_FAILED"
+    assert captured.value.problem.message == "artifact identity conflict"
+    assert catalog_rows(case.conn) == before and not case.conn.in_transaction
+
+
+@pytest.mark.parametrize("registrar", [catalog.register_artifact, register_artifact], ids=["catalog", "checkpoints"])
+def test_shared_registration_rolls_back_with_its_callers_transaction(case, registrar):
+    ref = case.store.publish_bytes(b"diagnostic", schema_ref="problem.v1.0")
+    before = catalog_rows(case.conn)
+    original = RuntimeError("caller commit failed")
+    with pytest.raises(RuntimeError) as captured, catalog.transaction(case.conn):
+        registrar(case.conn, ref, case.claim.attempt_id, case.clock)
+        assert case.conn.in_transaction
+        assert tuple(case.conn.execute("SELECT * FROM artifacts").fetchone()) == (
+            ref.artifact_id, catalog.dumps(ref), case.claim.attempt_id, format_timestamp(case.clock.now()))
+        raise original
+    assert captured.value is original
+    assert catalog_rows(case.conn) == before and not case.conn.in_transaction
+
+
+def test_checkpoint_registration_wrapper_preserves_arguments_and_exception_identity(case, monkeypatch):
+    ref = case.store.publish_bytes(b"diagnostic", schema_ref="problem.v1.0")
+    original = RuntimeError("unexpected catalog error")
+
+    def broken(conn, supplied_ref, attempt_id, clock):
+        assert conn is case.conn and supplied_ref is ref and clock is case.clock
+        assert attempt_id == case.claim.attempt_id
+        raise original
+
+    monkeypatch.setattr(catalog, "register_artifact", broken)
+    before = catalog_rows(case.conn)
+    with pytest.raises(RuntimeError) as captured:
+        register_artifact(case.conn, ref, case.claim.attempt_id, case.clock)
+    assert captured.value is original
+    assert catalog_rows(case.conn) == before and not case.conn.in_transaction
+
+
 def test_unexpected_publication_error_propagates_unchanged(case, full_problem, monkeypatch):
     original = RuntimeError("unexpected delegate error")
 

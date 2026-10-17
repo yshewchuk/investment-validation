@@ -430,6 +430,8 @@ def test_interrupted_publication_reconciles_without_duplicate_rows(source, tmp_p
             _collect(source, ledger_path=ledger)
         assert error.value.code == "RESOURCE_UNAVAILABLE"
         assert error.value.problem.retryable is True
+        assert error.value.problem.message == ("sweep collection publication was interrupted" if failure in {"export", "index"}
+                                                else "native publication was interrupted; replay its intent")
     assert not any(any(key.endswith("_index") for key in evidence) for evidence in _evidence(source))
     saved_evidence = _evidence(source)
     result = _collect(source, ledger_path=ledger)
@@ -475,6 +477,7 @@ def test_collection_preserves_native_publication_runtime_error_policy(source, tm
         with pytest.raises(OpsError) as error:
             _collect(source, ledger_path=ledger)
     assert error.value.code == "RESOURCE_UNAVAILABLE" and error.value.problem.retryable is True
+    assert error.value.problem.message == "native publication was interrupted; replay its intent"
     assert "private native" not in str(error.value)
     assert not ledger.exists()
     assert all("native_sweep_recorded_index" not in item for item in _evidence(source))
@@ -1232,6 +1235,8 @@ def test_observer_types_polling_interruptions_without_retrying(monkeypatch, exce
     with pytest.raises(OpsError) as error:
         cli.run_sweep(None, None, None, {}, code_root=REPO, no_ledger=True, timeout_seconds=1)
     assert error.value.code == code and error.value.problem.retryable is retryable
+    assert error.value.problem.message == ("sweep observation catalog constraint failed"
+        if exception is sqlite3.IntegrityError else "sweep observation was interrupted")
     assert len(calls) == 1 and "private observer" not in canonical_json(to_document(error.value.problem))
 
 
