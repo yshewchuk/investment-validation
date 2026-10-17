@@ -156,6 +156,10 @@ failure rather than a stale sentence.
 `migrations.require_current`, `schema.OWNER`/`MIGRATIONS`, `experiments.experiment_spec_from_document`, `errors.OpsError`/`fail` and `fingerprints.environment_identity`/`source_closure`/`worker_source_manifest`
 to submit an immutable common-snapshot roster atomically. Child artifacts are
 unrecorded evaluation evidence; operations success is not scientific sweep completion.
+`experiments/native_sweep_collection.py` consumes `catalog.transaction`,
+`checkpoints.registered_artifact`, `experiments.experiment_spec_from_document`,
+`fingerprints.source_closure`, `submission.get_job` and `errors.fail` for collection.
+`experiments/v2_gate_collect.py` consumes `catalog.connect`, `submission.get_job` and `errors.OpsError`/`fail` for an observer-only CLI.
 
 No other production package imports ops. The CLI starts the coordinator, and
 serving reads a versioned health artifact without a peer-layer import. The one

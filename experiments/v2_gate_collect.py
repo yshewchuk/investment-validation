@@ -49,8 +49,8 @@ def main(argv=None):
     try:
         if args.purpose != "sweep":
             raise fail("HOLDOUT_ACCESS_DENIED", "gate sweep collection has no final-read authority")
-        if not args.no_ledger and args.ledger is None:
-            raise fail("INVALID_EXPERIMENT_SPEC", "recorded sweep collection requires --ledger")
+        if args.no_ledger == (args.ledger is not None):
+            raise fail("INVALID_EXPERIMENT_SPEC", "choose --no-ledger or --ledger")
         document = json.loads(read_native_staged_input(Path(args.roster)))
         conn = connect(args.catalog, must_exist=True)
         store = ArtifactStore(args.store_root)
@@ -64,7 +64,7 @@ def main(argv=None):
     except (OpsError, DataError, ArtifactError, ValueError, TypeError, KeyError, RecursionError,
             OSError, sqlite3.Error) as error:
         print(json.dumps({"refused": error.code if isinstance(error, (OpsError, DataError, ArtifactError)) else
-                          "INPUT_CHANGED" if isinstance(error, (OSError, sqlite3.Error)) else "INVALID_EXPERIMENT_SPEC"}))
+                          "RESOURCE_UNAVAILABLE" if isinstance(error, (OSError, sqlite3.Error)) else "INVALID_EXPERIMENT_SPEC"}))
         return 2
     finally:
         if conn is not None:

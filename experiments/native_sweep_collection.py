@@ -15,7 +15,7 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.ops.catalog import transaction
-from engine.v2.ops.checkpoints import artifact
+from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from engine.v2.ops.fingerprints import source_closure
@@ -26,6 +26,8 @@ from experiments.gate_report import render_gate_report
 from experiments.v2_gate_sweep import submit_sweep
 
 TERMINAL = frozenset({"succeeded", "failed", "cancelled", "blocked"})
+MAX_GATE_RESULT_BYTES = 16 * 1024 * 1024
+MAX_FAILURE_BYTES = 1024 * 1024
 
 
 def _typed(action):
@@ -36,18 +38,23 @@ def _typed(action):
         except (ArtifactError, ValueError, TypeError, KeyError, RecursionError, SyntaxError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep collection evidence cannot be verified") from None
         except (OSError, sqlite3.Error):
-            raise fail("INPUT_CHANGED", "sweep collection inputs are unavailable") from None
+            raise fail("RESOURCE_UNAVAILABLE", "sweep collection publication was interrupted") from None
     return call
 
 
 def _mode(no_ledger, ledger_path):
-    if type(no_ledger) is not bool or (not no_ledger and ledger_path is None):
-        raise fail("INVALID_EXPERIMENT_SPEC", "recorded sweep collection requires a ledger destination")
+    if type(no_ledger) is not bool or no_ledger == (ledger_path is not None):
+        raise fail("INVALID_EXPERIMENT_SPEC", "choose smoke collection or one ledger destination")
     if no_ledger:
         return "smoke", None
-    raw = os.fspath(ledger_path)
-    path = Path(raw)
-    if not raw or path.is_symlink() or path.is_dir():
+    try:
+        raw = os.fspath(ledger_path)
+        if not isinstance(raw, str) or not raw or "\x00" in raw:
+            raise ValueError
+        path = Path(raw)
+    except (ValueError, TypeError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "sweep ledger destination must be a valid path") from None
+    if path.is_symlink() or path.is_dir():
         raise fail("INVALID_EXPERIMENT_SPEC", "sweep ledger destination must name a regular file")
     return "recorded", path.resolve()
 
@@ -84,23 +91,34 @@ def _bind(conn, store, anchor, key, document):
 
 def _terminal(conn, store, job, registration):
     """Never use JobReceipt.output_refs: it unions outputs from old attempts."""
-    attempt = conn.execute("SELECT * FROM attempts WHERE job_id=? AND attempt_number=?",
-                           (job.job_id, job.attempt_count)).fetchone()
+    encoding = conn.execute("PRAGMA encoding").fetchone()[0]
+    limit = MAX_FAILURE_BYTES * (2 if encoding.startswith("UTF-16") else 1)
+    attempt = conn.execute(
+        "SELECT attempt_id, state, ended_at, fence, failure_json IS NOT NULL AS has_failure, "
+        "CASE WHEN typeof(failure_json)='text' AND length(CAST(failure_json AS BLOB))<=? "
+        "THEN CAST(failure_json AS BLOB) END AS failure_json FROM attempts "
+        "WHERE job_id=? AND attempt_number=?", (limit, job.job_id, job.attempt_count)).fetchone()
     if job.attempt_count and (attempt is None or attempt["state"] != job.state or attempt["ended_at"] is None
             or attempt["fence"] > job.fence or (job.state == "succeeded" and attempt["fence"] != job.fence)):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep terminal attempt differs from its job")
     outputs = [] if attempt is None else conn.execute(
         "SELECT name, artifact_id FROM attempt_outputs WHERE attempt_id=?", (attempt["attempt_id"],)).fetchall()
     result, problem = None, job.failure
-    if problem is None and attempt is not None and attempt["failure_json"] is not None:
-        problem = from_document(Problem, json.loads(attempt["failure_json"]))
+    if attempt is not None and attempt["has_failure"]:
+        payload = attempt["failure_json"]
+        if payload is None or len(payload.decode(encoding).encode("utf-8")) > MAX_FAILURE_BYTES:
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep attempt failure exceeds its byte bound")
+        if problem is None:
+            problem = from_document(Problem, json.loads(payload.decode(encoding)))
     if problem is None and job.state == "cancelled":
         problem = fail("CANCELLED", "sweep child was cancelled").problem
     worker_problem = problem
     if job.state == "succeeded" and outputs:
         if len(outputs) != 1 or outputs[0]["name"] != "native_gate_result":
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep terminal attempt has unexpected outputs")
-        ref = artifact(conn, store, outputs[0]["artifact_id"])
+        ref = registered_artifact(conn, outputs[0]["artifact_id"])
+        if ref.byte_size > MAX_GATE_RESULT_BYTES:
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep result exceeds its byte bound")
         payload = store.read_verified(ref)
         result = json.loads(payload)
         if (ref.schema_ref != "native_gate_result.v1.0" or canonical_json(result).encode() != payload
@@ -113,8 +131,7 @@ def _terminal(conn, store, job, registration):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "failed sweep attempt has successful output")
     if result is None:
         if problem is None or problem.code == "WORKER_FAILED":
-            problem = fail("EXPERIMENT_VARIANT_FAILED", "sweep child produced no scientific result",
-                           details={"worker_failure_code": None if problem is None else problem.code}).problem
+            problem = fail("EXPERIMENT_VARIANT_FAILED", "sweep child produced no scientific result").problem
         elif (problem.code not in FAILURE_CODES
               or (problem.category, problem.retryable) != FAILURE_CODES[problem.code]):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep child refusal differs from its registered policy")
