@@ -539,7 +539,7 @@ Only a tracked path absent from the worktree reads as empty.
   into the board-analog and paired residual pools, advances the trailing
   cutoff, re-verifies the chooser-analog pool and the three driver residual
   pools (which do not themselves grow with new events — see
-  `engine/v2/models/ARCHITECTURE.md` §2.1), and produces a new, gated,
+  `engine/v2/models/ARCHITECTURE.md` §2.1, §2.3), and produces a new, gated,
   auto-promoted release that carries every model binding over unchanged.
   Retraining the champion/gate/chooser models themselves, monthly inside the
   nightly, is cutover PR-13b (not implemented; contract: `engine/v2/models/

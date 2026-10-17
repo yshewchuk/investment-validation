@@ -135,8 +135,9 @@ size check. Existing callers omitting the ceiling retain their read contract.
   row's objects wholesale; every other member row is copied unchanged;
   `sources.pool_cutoff` advances to `cutoff` and `sources.carried_from` names
   the prior release id. A `PoolOutput` may be `carried=True` (default
-  `False`): an object that only changes on a retrain (driver residual pools,
-  chooser row) is re-supplied unchanged. It carries a
+  `False`): an object that does not change between monthly refreshes (driver
+  residual pools, which do not grow with new events and change only on a
+  retrain; the chooser row until its monthly advance, §2.3) is re-supplied unchanged. It carries a
   caller-supplied `cutoff` (an extended ISO date not after `cutoff`; catalog rows
   record none, `prior_carry_set` supplies the prior `pool_cutoff`) and must equal an object of the
   same member in the prior row (name, `content_hash`, `payload_bytes`). Every
