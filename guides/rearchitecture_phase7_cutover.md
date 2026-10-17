@@ -24,7 +24,7 @@ official decisions or mutate research multiple-testing ledgers.
 
 | Task | Deliverable | Acceptance / negative control |
 |---|---|---|
-| P7-1 Candidate and authority manifest | Exact code/config, snapshots, model deployment, job graph, consumer inventory, scheduler/credential ownership and old deployment refs. | No implicit latest dependency; no unaccounted scheduled writer or background job. |
+| P7-1 Candidate and authority manifest | Exact code/config, snapshots, model deployment, job graph, consumer inventory, scheduler/credential ownership and old deployment refs. | No implicit latest dependency (consumer-inventory labels are exempt); no unaccounted scheduled writer or background job. |
 | P7-2 Qualify completed sessions | Ten consecutive completed-session runs on the integrated cutover path under automatic resource admission. | Real dated evidence, full expected population, selfcheck/engineering/publication success; retries count once; missing sessions unknown; manual CPU placement disqualifies a run. |
 | P7-3 Rehearse switch and rollback | Scratch/private-target drill using retained deployment, data/catalog backups, pointer and authority-fence changes. | Interrupted switch never leaves two official writers; rollback reconciles new decisions instead of deleting history. |
 | P7-4 Review concrete release | Candidate report and exact tested switch/backout commands, downtime expectation, snapshot/deployment refs and open dispositions. | All entry requirements and qualification records present; no untested placeholder command. |
@@ -56,7 +56,12 @@ sides' values cannot be swapped), with retained old deployment refs, and
 hash-verified 3B/4/5/6 phase evidence that must be JSON objects binding the
 exact candidate commit and, for Phase 5, the deployed release (missing
 bindings fail closed; 3A preview evidence cannot substitute). It rejects
-implicit latest refs, duplicate or unaccounted scheduled writers/background
+implicit latest refs in every pinned identity (commit, config, snapshot,
+release, retained deployment, ownership; consumer-inventory entries are
+labels of existing readers, e.g. `GET /release/current`, and are exempt by
+user decision of 2026-10-16: the dashboard reads the moving current-release
+pointer),
+duplicate or unaccounted scheduled writers/background
 jobs, conflicting writer ownership, and stale or malformed evidence. It is
 read-only: it never writes authority, production pointers, credentials or
 release state. A green run validates manifest consistency only; it is not a
