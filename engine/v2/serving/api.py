@@ -867,7 +867,7 @@ def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> 
     try:
         return native_parity_projection.native_parity_freshness(
             serving_db, resolve, as_of, open_index_untranslated, projections.get_release,
-            (ApiError, OSError, _ParityIndexUnreadable))
+            (ApiError, OSError))
     except (_ParityIndexUnreadable, DocumentError):
         raise _index_unreadable() from None
 
