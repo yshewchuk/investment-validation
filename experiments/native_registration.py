@@ -229,11 +229,12 @@ def prepare_native_registration(repository, spec, *, code_root, as_of_month, sco
     return NativeRegistration(run_id, canonical_json(document).encode("utf-8")), spec
 
 
-def native_registration_exists(conn, store, registration):
+def native_registration_exists(conn, store, registration, *, max_evidence_bytes=None):
     """Read exact expected evidence: absent is false; changed or corrupt is R6."""
     try:
         ref = artifact_reference(registration.binding_json, registration.document["schema_version"])
-        binding = verified_registration_bytes(conn, store, registration.run_id, expected_ref=ref)
+        binding = verified_registration_bytes(conn, store, registration.run_id, expected_ref=ref,
+                                              max_evidence_bytes=max_evidence_bytes)
         return binding is not None
     except (ArtifactError, ValueError, TypeError, KeyError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration differs from its immutable binding") from None
@@ -312,9 +313,10 @@ def require_native_registration(conn, store, repository, spec, *, code_root,
     return registration
 
 
-def verify_native_registration(conn, store, registration):
+def verify_native_registration(conn, store, registration, *, max_evidence_bytes=None):
     """Verify stored admission without claiming current-request revalidation."""
-    if not isinstance(registration, NativeRegistration) or not native_registration_exists(conn, store, registration):
+    if not isinstance(registration, NativeRegistration) or not native_registration_exists(
+            conn, store, registration, max_evidence_bytes=max_evidence_bytes):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native outcome requires an intact registration")
 
 
