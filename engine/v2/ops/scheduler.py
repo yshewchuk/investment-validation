@@ -50,7 +50,7 @@ from engine.v2.contracts import (
     ResourceProfile,
 )
 from engine.v2.foundation import Clock, content_hash, format_timestamp, parse_timestamp
-from engine.v2.ops.catalog import dumps, load_json, transaction
+from engine.v2.ops.catalog import dumps, dumps_failure, load_json, transaction
 from engine.v2.ops.errors import OpsError, fail, make_problem
 from engine.v2.ops.lifecycle import block_descendants
 from engine.v2.ops.profiles import profile_named
@@ -245,7 +245,7 @@ def _advance_headroom_ceiling_window(conn: sqlite3.Connection, row: sqlite3.Row,
                      "window_s": HEADROOM_CEILING_WINDOW_SECONDS, "samples": samples})
         conn.execute("UPDATE jobs SET state = 'failed', queue_reason_json = NULL, "
                     "failure_json = ?, updated_at = ? WHERE job_id = ?",
-                    (dumps(problem), format_timestamp(now), row["job_id"]))
+                    (dumps_failure(problem), format_timestamp(now), row["job_id"]))
         block_descendants(conn, row["job_id"], now)
         return None
     available = dict(reason.available)

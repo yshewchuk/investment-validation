@@ -17,6 +17,7 @@ while WAL holds committed pages is not a consistent backup (§6.1), and
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import sqlite3
 from collections.abc import Iterator
@@ -29,15 +30,18 @@ from engine.v2.ops.errors import fail
 
 __all__ = [
     "BUSY_TIMEOUT_MS",
+    "MAX_JOB_FAILURE_BYTES",
     "backup_to",
     "connect",
     "dumps",
+    "dumps_failure",
     "integrity_errors",
     "load_json",
     "transaction",
 ]
 
 BUSY_TIMEOUT_MS = 5_000
+MAX_JOB_FAILURE_BYTES = 1024 * 1024
 _SYNC_FULL = 2
 
 
@@ -106,6 +110,14 @@ def integrity_errors(conn: sqlite3.Connection) -> list[str]:
 def dumps(value: Any) -> str:
     """Canonical JSON of a contract value, for a JSON column."""
     return canonical_json(to_document(value))
+
+
+def dumps_failure(problem):
+    """Serialise a Problem for failure_json within MAX_JOB_FAILURE_BYTES."""
+    text = dumps(problem)
+    if len(text.encode("utf-8")) <= MAX_JOB_FAILURE_BYTES:
+        return text
+    return dumps(dataclasses.replace(problem, details={}, message=problem.message[:4096]))
 
 
 def load_json(cls: type, text: str | None) -> Any:
