@@ -276,6 +276,15 @@ def test_write_object_accepts_empty_payload(tmp_path):
     assert digest == "sha256:" + hashlib.sha256(b"").hexdigest()
 
 
+def test_write_object_refuses_existing_larger_object(tmp_path):
+    digest, rel = layout.write_object(tmp_path, b"abc")
+    dest = layout.deployment_root(tmp_path) / rel
+    dest.write_bytes(b"abcdef")
+    with pytest.raises(layout.ObjectVerificationError):
+        layout.write_object(tmp_path, b"abc")
+    assert dest.read_bytes() == b"abcdef"
+
+
 def test_legacy_fallback_requires_matching_id_and_local_needs_no_root(tmp_path):
     _stage(tmp_path)
     deployment.promote(layout.deployment_root(tmp_path), "A")
