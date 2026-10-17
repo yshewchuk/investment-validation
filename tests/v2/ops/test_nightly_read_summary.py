@@ -518,3 +518,32 @@ def test_delta_rebases_after_a_failed_snapshot():
     assert t.delta() == {}
     assert t.delta() == {}
     assert t.delta() == {"t": {"rows_decoded": 2, "bytes_read": 3}}
+
+
+def test_progress_event_schema_version_is_v1_1():
+    from engine.v2.contracts import operations as ops
+
+    assert ops.PROGRESS_EVENT_V1 == 'progress_event.v1.1'
+    event = ops.ProgressEvent(job_id='j', attempt_id='a', stage_id=None,
+                               sequence=0, recorded_at='t', kind='progress',
+                               elapsed_seconds=0.0, message='m')
+    assert event.schema_version == 'progress_event.v1.1'
+    assert event.step_reads is None
+
+
+def test_delta_recovers_after_failed_initial_snapshot():
+    class _Counter:
+        def __init__(self):
+            self._n = 0
+
+        def snapshot(self):
+            self._n += 1
+            if self._n == 1:
+                raise RuntimeError('boom')
+            if self._n == 2:
+                return {'t': {'rows_decoded': 5, 'bytes_read': 5}}
+            return {'t': {'rows_decoded': 8, 'bytes_read': 9}}
+
+    tracker = ReadTracker(_Counter())
+    assert tracker.delta() == {}
+    assert tracker.delta() == {'t': {'rows_decoded': 3, 'bytes_read': 4}}

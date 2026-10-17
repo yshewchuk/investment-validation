@@ -88,8 +88,10 @@ class ReadTracker:
                 unavailable.append("peak_rss_bytes")
             try:
                 with open("/proc/self/io", "r", encoding="utf-8") as stream:
-                    process_read = next(
-                        int(line.split()[1]) for line in stream if line.startswith("rchar:"))
+                    text = stream.read(4096)
+                    line = next(text_line for text_line in text.splitlines()
+                                if text_line.startswith("rchar:"))
+                    process_read = int(line.split()[1])
             except Exception:
                 process_read = None
                 unavailable.append("process_read_bytes")
