@@ -218,6 +218,42 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 | R5 partial failure | Orphan objects, a staged manifest, or a candidate catalog written before a light-check refusal may remain; no success output, no promotion, the deployed release is unchanged. Inventory drift refuses before any object is written |
 | R6 idempotency | Same inputs give the same catalog; the same `release_id` with different content refuses `ID_CONFLICT` |
 
+### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
+
+Objects that change only on a retrain are refreshed monthly inside the nightly, on the first run after a calendar month completes, covering that month (user decision 2026-10-16). One more `Service.tick()` reconcile (same shape as `_reconcile_computed_moves_refresh` and the planned `_reconcile_pool_nightly_refresh`, #192 slice 4; never a `GRAPH`/`_DAG_STAGES` node) submits it through `phase5_state_stage` (§2.2; no submitter yet). §2.2 accepts exactly the three advancing members and carries the rest; the monthly path also needs supplied driver pools and the chooser, a slice 1 change to `classify`/`prior_carry_set`. Options and open decisions D1-D8 live in #805 and the PR #822 description, not here.
+
+| Object | Nightly | Monthly |
+|---|---|---|
+| Board analog, paired residual pools, trailing cutoff | Advance to the settled-event cutoff | Unchanged |
+| Three driver residual pools | Carried | Regenerated; content changes only if models retrain (cutoff-independent) |
+| Chooser analog pool and row | Carried | Advances to `M_end`: keyed `(pool_id, cutoff)`, rows closed before the cutoff (the §2.1 line saying the chooser changes only on a retrain is corrected by slice 1) |
+| Champion and gate models | Carried | Retrained if the models decision (D1) says so |
+
+**Trigger.** Completed months are all calendar months before the session's month. Each with no durable record (retrain or `superseded`) is due; the target `M` is the latest due, with cutoff `M_end` its last calendar day (a data date fixed by `M`). `M` runs when the settled-event cutoff has reached `M_end` (later than "first run after month end" by the settlement lag; the user should confirm), the session's required graph and nightly pool refresh succeeded, and no heavy job runs. Older due months get a durable `superseded:{M1}` marker naming `M`, once (a first run supersedes all earlier due months).
+
+**Idempotency.** Job key `retrain:{M}`; a key in any state is never resubmitted and a failed key is terminal for `M` (operator recovery, open gap #154). State is derived from durable job and release state each tick. Stage key `retrain-stage:{M}:{n}` (n = attempt, 1 or 2); candidate release id `retrain-{M}-{n}`, recomputable after a crash. The stage job reads `prior_release_id` at stage time (a slice 1 change; today fixed at submit), carries the nightly-advanced members from that base and records it as `sources.carried_from`; the promote guard checks that recorded id. Later steps `retrain-accept|check|promote:{candidate_release_id}`; the reconcile submits the first step with no succeeded key. A second stage attempt happens only after the promote job fails `ConcurrentPromote` (branch key `details.exception_class`); every other failure is terminal for `M`.
+
+**Retrained set and causality.** Inputs are the base release, `M_end` and the pinned snapshot; a row filter on event and outcome data dates admits nothing after `M_end` (never `computed_at`) and no live registry is read. Training rows are inclusive of `M_end`; pool cutoffs keep their exclusive convention (`residual_artifact.py`); slice 1 names the boundary per member. Catalog `sources.retrain_cutoff` (ISO date not after `pool_cutoff`) is new: retrained members carry it, nightly-advanced members the session cutoff, carried members their prior cutoff; no advance refuses `CUTOFF_NOT_ADVANCED`. Experiment holdouts are not applied to production training (D7).
+
+**Promotion.** A pool-only release follows the nightly path: stage, light checks, release-scope `phase5_acceptance` (sole writer of the staging-success record, §7.2), auto-promote with `expected_previous_release_id`. A model-changing candidate (new semantic hash) also needs a non-regression check on month `C = M − 6`, the newest month outside the rolling experiment holdout for as-of `M` (`ExperimentHoldouts`). A check candidate and a check incumbent, each refit at `C_start − 1` with every pool and the trailing cutoff pinned to that date, score the same events of `C`, excluding "random" and "ambiguous" holdout events. The check measures rank and paired-difference consistency, not a magnitude cutoff. Its receipt binds the check candidate, release candidate and incumbent hashes; promotion requires a receipt naming the release hash being promoted plus the staging-success record. Failure at any step leaves the candidate staged, the incumbent deployed and a failure receipt.
+
+**Rollback.** `rollback` undoes one promotion per call (§7.2), and nightly promotions follow the retrain's, so it cannot target the retrain after one night. Designed path: forward-promote a release re-derived from the pre-retrain models; a re-promote with changed model bindings passes the same acceptance and non-regression gate as any model-changing candidate.
+
+**Resource.** A heavy job under the existing exclusive heavy profile (`engine/v2/contracts/operations.py`, `tools/bounded_run.py --heavy`). `bounded_run` blocks and has no job deadline, so the reconcile needs a non-blocking probe (candidate: `engine/v2/ops/scheduler.py` `_claim_row`/`HEAVY_SLOT_HELD`) and the jobs an enforced deadline (`deadline_at` exists, unenforced); both are slice deliverables sized from a measured peak-memory and wall-time receipt. A retrain still running at the next session delays that session's heavy steps, including scoring.
+
+**Parity.** Parity reports do not record the release id today (`native_parity_report.py` stamps `as_of` and `generated_at`); slice 7 records it and marks the first session under a new release `release_changed`; tolerances are unchanged.
+
+| R | Retrain job | Stage | Accept / check / promote |
+|---|---|---|---|
+| R1 verified input | Base release, `M_end` and training inputs verified before compute; a cutoff past the settled-event cutoff refuses `VALIDATION_FAILED` | Output hashes, `retrain_cutoff`, member ids and base payload hashes re-verified; drift refuses (`VALIDATION_FAILED`, `details.code` `PRIOR_MISMATCH`) before any write | Receipt and staging-success hash match the candidate; base equals the guard |
+| R2 cache | None; durable state each tick | None | Pointer read per swap |
+| R3 retry | Failed is terminal; the next due month supersedes | At most two keys per `M`; the second only after `ConcurrentPromote` | A failed key is terminal for that candidate; no alternate target |
+| R4 transaction | Outputs private to the attempt, hashed after a clean exit | New candidate id; `DEPLOYED` untouched | Existing atomic pointer swap |
+| R5 partial failure | Orphans may remain; nothing staged | Orphans stay unused | Refusal leaves pointer and history unchanged |
+| R6 idempotency | One key per month | Same inputs give the same catalog; a reused id with other content refuses | Re-promoting the live id is a no-op |
+
+Split list (code, in order; estimates in #822): 1 catalog `retrain_cutoff`, stage input contract, stage-time base and the §2.1 chooser line; 2 due-month decision and keys; 3 pool/chooser regeneration job with deadline; 4 monthly sidecar with admission probe; 5a champion/gate retrain kind and check fits; 5b acceptance wiring and non-regression check; 6 promotion and forward rollback; 7 parity release-id recording and marker.
+
 ## 3. Inputs
 
 **Forward serving-fold contract.** Offline descriptor authoring is described
