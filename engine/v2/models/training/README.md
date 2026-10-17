@@ -66,6 +66,17 @@ P5-3 (current dataset/training recipes):
 - `run_training_job` — the only entry that fits a recipe; resumable per fold,
   guarded by the shared no-fit switch.
 
+`d14_dataset.build_d14_dataset` builds the two monthly D14 datasets from an
+explicit Repository, SnapshotRef and pinned calendar. Earnings and daily-state
+calculations use native readers/math; the historical panel producer remains a
+dependency through its snapshot-pinned history columns. It does not substitute
+the live panel-row population. The additive CLI,
+`python -m tools.phase5_d14_inputs --role implied_t1 --out OUT`, requires
+`--catalog`, `--artifact-root`, `--snapshot-id`, and `--receipt-id`. Existing
+phase5 and supervised routes remain unchanged pending joint input integration. The receipt must belong to that snapshot and pin its original
+calendar. `run_training_job(input_identity=...)` records those source pins in
+the resume identity, alongside the unchanged dataset and recipe fingerprints.
+
 P5-4 (`residuals.py`) adds the frozen residual-pool builders:
 `build_driver_residual_pool_artifact` (bucketing via `native_payoff`
 unchanged) and `build_paired_residual_pool_artifact` (legacy

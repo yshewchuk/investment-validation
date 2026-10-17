@@ -55,6 +55,31 @@ Invalid shapes/nonfinite labels or predictions raise `ValueError`; the experimen
 caller translates fitting failures to `EXPERIMENT_VARIANT_FAILED`. The shared
 no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
 
+### Snapshot-pinned D14 monthly datasets
+
+`training.d14_dataset.build_d14_dataset` calculates only the `implied_t1` and
+`runup_move` monthly inputs. Bounded native Repository scans pin earnings,
+daily state and the stored `feature_panel` history block to one SnapshotRef.
+History retains the original panel population and missing values; this slice
+does not replace its historical producer or reconstruct it with `scan_panel_row`.
+Only daily features at the D14 entry and labels at the session-aware exit are
+calculated. The original calendar is read from one explicit committed import
+receipt, verified against the snapshot and object hash, with native projection
+math. No mutable calendar file, head resolution or legacy reader is used.
+
+`python -m tools.phase5_d14_inputs` requires explicit catalog, artifact root,
+snapshot and import-receipt identifiers for this additive monthly training path.
+Existing phase5 and supervised callers are unchanged until their input-binding
+integration can switch together; this slice does not cut them over.
+The existing preparation, fold planning and label/membership receipts remain
+unchanged. `run_training_job(input_identity=...)` additionally binds the pinned
+source identity in `job.json`; changed sources refuse resume even if values
+match. Champion jobs, scheduling, source-finality admission, historical panel
+reconstruction, held-out residual pools and serving publication are separate.
+No eligible decisions refuse before history/daily reads, preventing a zero-fold
+success. An absent panel history row stays missing; missing quotes retain legacy as-of
+and positional-lag behavior. Nonpositive prices produce missing move labels.
+
 An automated nightly append cycle for the pool/residual/cutoff artifacts:
 release assembly is §2.1; the rest is design only — see #192.
 
