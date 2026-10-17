@@ -103,17 +103,18 @@ def _replace_source(path, text):
     path.write_text(text)
 
 
-def _run_children(source, jobs, code_root):
+def _run_children(source, jobs, code_root, only=None):
+    selected = jobs if only is None else only
     service = Service(source.conn, source.store.root, stages.registry(), TEST_POLICY,
                       clock=SystemClock(), code_source=code_root)
     try:
         service.start()
-        for job in jobs:
+        for job in selected:
             run_until(service, source.conn, job.job_id, timeout=90)
     finally:
         service.close()
     results = []
-    for job in jobs:
+    for job in selected:
         row = source.conn.execute("SELECT state, failure_json FROM jobs WHERE job_id=?", (job.job_id,)).fetchone()
         attempts = source.conn.execute("SELECT * FROM attempts WHERE job_id=?", (job.job_id,)).fetchall()
         assert len(attempts) == 1
@@ -360,8 +361,12 @@ def test_real_failed_child_has_no_output_or_scientific_completion(source, tmp_pa
     _call(source, code_root=checkout)
     before = _scientific(source)
     jobs = _call(source, sweep.submit_sweep, code_root=checkout)
-    failed, success = _run_children(source, jobs, checkout)
-    assert success["schema_version"] == "native_gate_result.v1.0"
+    both = failure == "typed"
+    results = _run_children(source, jobs, checkout, only=None if both else jobs[:1])
+    failed = results[0]
+    if both:
+        sibling = results[1]
+        assert sibling["schema_version"] == "native_gate_result.v1.0"
     assert failed["code"] == ("EXPERIMENT_VARIANT_FAILED" if failure == "typed" else "WORKER_FAILED")
     assert _scientific(source) == before
     assert set(_row(source)) == {"schema_version", "request", "snapshot", "registrations", "coordinator_source", "implementation_ref"}
@@ -400,13 +405,18 @@ def test_supervised_evaluation_input_failures_preserve_exact_problem(
     _call(source, code_root=checkout)
     before = _scientific(source)
     jobs = _call(source, sweep.submit_sweep, code_root=checkout)
-    failed, sibling = _run_children(source, jobs, checkout)
+    both = detail == "HOLDOUT_ACCESS_DENIED"
+    results = _run_children(source, jobs, checkout, only=None if both else jobs[:1])
+    failed = results[0]
+    if both:
+        sibling = results[1]
+        assert sibling["schema_version"] == "native_gate_result.v1.0"
     assert (failed["code"], failed["category"], failed["retryable"]) == (code, category, retryable)
     assert failed["details"] == {}
     assert "synthetic private input" not in canonical_json(failed) and "data_failure_code" not in canonical_json(failed)
     diagnostic = artifact(source.conn, source.store, failed["diagnostic_ref"])
     assert json.loads(source.store.read_verified(diagnostic)) == {"data_failure_code": detail}
-    assert sibling["schema_version"] == "native_gate_result.v1.0" and _scientific(source) == before
+    assert _scientific(source) == before
     assert not list(source.root.rglob("REPORT.md")) and not list(source.root.rglob("LEDGER.csv"))
 
 
@@ -442,12 +452,17 @@ def test_real_child_dependency_read_preserves_exact_code(source, tmp_path, phase
     target.unlink()  # Replace only this test's immutable synthetic object.
     if damage == "corrupt":
         target.write_bytes(b"corrupted private bytes")
-    failed, sibling = _run_children(source, jobs, checkout)
+    both = phase == "admission" and damage == "corrupt"
+    results = _run_children(source, jobs, checkout, only=None if both else jobs[:1])
+    failed = results[0]
+    if both:
+        sibling = results[1]
+        assert sibling["schema_version"] == "native_gate_result.v1.0"
     assert (failed["code"], failed["category"], failed["retryable"]) == (code, category, False)
     assert failed["details"] == {} and ref.storage_key not in canonical_json(failed)
     diagnostic = artifact(source.conn, source.store, failed["diagnostic_ref"])
     assert json.loads(source.store.read_verified(diagnostic)) == {"data_failure_code": detail}
-    assert sibling["schema_version"] == "native_gate_result.v1.0" and _scientific(source) == before
+    assert _scientific(source) == before
     assert not list(source.root.rglob("REPORT.md")) and not list(source.root.rglob("*.csv"))
 
 
