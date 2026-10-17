@@ -156,6 +156,8 @@ imports the same artifact type plus the no-fit guard constructors to build one
 from causal source rows. engine.v2.ops.cli imports the no-fit guard
 (`no_fit_guard`) for the read-only `ops rescore` command. `tools/phase5_inventory.py`
 (not a v2 package, so not part of this graph) is the P5-1 inventory's CLI.
+`experiments/magnitude_search_trials.py` and `experiments/magnitude_search_execution.py`
+consume `no_fit.forbid_fitting` before native trial claims and fixed-child fitting.
 `tools/phase5_serving_folds.py` consumes the chooser policy/descriptor types
 and `semantic_release_hash`, plus `engine.v2.foundation` typed-document conversion,
 for offline fold metadata. `tools/phase5_prepare_release.py`

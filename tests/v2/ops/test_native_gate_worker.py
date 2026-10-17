@@ -216,10 +216,12 @@ def test_fixed_child_imports_pricing_only_after_pid_launch_gate(source, tmp_path
     adapter = checkout / RUNNER
     for path in (entry, adapter):
         path.chmod(0o600)
+    # File creation is the readiness signal: write_text exposes an empty file
+    # before its contents are written, so reading the payload races the child.
     entry.write_text(entry.read_text().replace(
         'if __name__ == "__main__":',
         'if __name__ == "__main__":\n    from pathlib import Path\n'
-        f'    Path({str(ready)!r}).write_text("ready")'))
+        f'    Path({str(ready)!r}).touch()'))
     adapter.write_text(adapter.read_text().replace(
         "from pathlib import Path\n", "from pathlib import Path\n"
         f'Path({str(imported)!r}).write_text("imported")\n'))
@@ -231,7 +233,7 @@ def test_fixed_child_imports_pricing_only_after_pid_launch_gate(source, tmp_path
         deadline = time.monotonic() + 10
         while not ready.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert ready.read_text() == "ready"
+        assert ready.exists()
         assert not imported.exists()
         result = record_launch(*args, **kwargs)
         assert not imported.exists()
@@ -240,7 +242,7 @@ def test_fixed_child_imports_pricing_only_after_pid_launch_gate(source, tmp_path
 
     monkeypatch.setattr(executor, "record_launch", observe_gate)
     result = _supervise(tmp_path, source, *request, code_source=checkout)
-    assert result["variant_id"] == request[1].variant_id
+    assert result.get("variant_id") == request[1].variant_id, result
     assert imported.read_text() == "imported" and launches == [True]
 
 

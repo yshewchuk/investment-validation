@@ -14,28 +14,82 @@ from engine.v2.foundation import (
 )
 from engine.v2.ops.errors import OpsError, fail
 
+MAX_NATIVE_EVIDENCE_BYTES = 16 * 1024 * 1024
 
-def verified_registration_bytes(conn, store, run_id, *, expected_ref=None):
-    """Return exact verified registration bytes, or None for an absent reservation."""
+
+def read_native_evidence(conn, run_id, *, max_bytes=MAX_NATIVE_EVIDENCE_BYTES):
+    """Return verifier metadata and bounded object evidence from one SQL row."""
+    encoding = conn.execute("PRAGMA encoding").fetchone()[0]
+    limit = max_bytes * (2 if encoding.startswith("UTF-16") else 1)
     row = conn.execute(
-        "SELECT e.*, h.input_hash AS registered_input, h.payload_hash AS registered_payload, "
-        "h.payload_json AS registered_document FROM experiment_runs e "
+        "SELECT e.run_id, e.spec_hash, e.mode, e.input_hash, "
+        "CASE WHEN typeof(e.evidence_json)='text' AND length(CAST(e.evidence_json AS BLOB))<=? "
+        "THEN CAST(e.evidence_json AS BLOB) END AS evidence_json, "
+        "h.input_hash AS registered_input, h.payload_hash AS registered_payload, "
+        "CASE WHEN h.payload_json='{}' THEN '{}' END AS registered_document FROM experiment_runs e "
         "LEFT JOIN hypotheses h ON h.run_id=e.run_id AND h.spec_hash=e.spec_hash "
-        "WHERE e.run_id=?", (run_id,)).fetchone()
+        "WHERE e.run_id=?", (limit, run_id)).fetchone()
     if row is None:
         return None
     try:
-        evidence = json.loads(row["evidence_json"])
+        if row["evidence_json"] is None:
+            raise ValueError
+        payload = row["evidence_json"].decode(encoding)
+        if len(payload.encode("utf-8")) > max_bytes:
+            raise ValueError
+        evidence = json.loads(payload)
+        if not isinstance(evidence, dict):
+            raise ValueError
+        native_evidence_json(evidence, max_bytes=max_bytes)
+    except (ValueError, TypeError, RecursionError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native evidence requires bounded JSON object text") from None
+    return row, evidence
+
+
+def native_evidence_json(document, *, max_bytes=MAX_NATIVE_EVIDENCE_BYTES):
+    """Encode canonical object evidence within the native UTF-8 byte ceiling."""
+    try:
+        if not isinstance(document, dict):
+            raise ValueError
+        payload = canonical_json(document)
+        if len(payload) > max_bytes or len(payload.encode("utf-8")) > max_bytes:
+            raise ValueError
+        return payload
+    except (ValueError, TypeError, RecursionError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native evidence exceeds its canonical object contract") from None
+
+
+def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_evidence_bytes=None):
+    """Return exact verified registration bytes, or None for an absent reservation."""
+    if max_evidence_bytes is None:
+        row = conn.execute(
+            "SELECT e.*, h.input_hash AS registered_input, h.payload_hash AS registered_payload, "
+            "h.payload_json AS registered_document FROM experiment_runs e "
+            "LEFT JOIN hypotheses h ON h.run_id=e.run_id AND h.spec_hash=e.spec_hash "
+            "WHERE e.run_id=?", (run_id,)).fetchone()
+    else:
+        saved = read_native_evidence(conn, run_id, max_bytes=max_evidence_bytes)
+        row, evidence = (None, None) if saved is None else saved
+    if row is None:
+        return None
+    try:
+        if max_evidence_bytes is None:
+            evidence = json.loads(row["evidence_json"])
         ref = from_document(ArtifactRef, evidence["native_registration"])
         if (ref.schema_ref not in ("native_experiment_registration.v1.0", "native_experiment_registration.v1.1",
                                   "native_experiment_registration.v1.2", "native_experiment_registration.v1.3",
                                   "native_experiment_registration.v1.4", "native_experiment_registration.v1.5")
+                or (max_evidence_bytes is not None and ref.byte_size > max_evidence_bytes)
                 or (expected_ref is not None and ref != expected_ref)):
             raise ValueError
         binding = store.read_verified(ref)
         document = json.loads(binding)
         valid = _matches(row, evidence, ref, binding, document)
     except (ArtifactError, ValueError, TypeError, KeyError):
+        valid = False
+    except RecursionError:
+        if max_evidence_bytes is None:
+            raise
         valid = False
     if not valid:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration differs from its immutable binding")
