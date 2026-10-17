@@ -310,8 +310,8 @@ class Service:
         self._reconcile_computed_moves_refresh()
         self._reconcile_native_score_batch_shadow()
         self._reconcile_native_parity()
-        self._reconcile_pool_nightly_refresh()
-        return bool(self.running or claim)
+        pool_submitted = self._reconcile_pool_nightly_refresh()
+        return bool(self.running or claim or pool_submitted)
 
     def record_nightly_completion(self, identity: SessionIdentity, generation: int,
                                   expected: Mapping[str, str],
@@ -1006,23 +1006,24 @@ class Service:
         policy = NamespacePolicy({"operator": frozenset({"shadow"})})
         try:
             release_root = deployment.production_release_root()
-            submit_pool_nightly_refresh_if_ready(
+            receipts = submit_pool_nightly_refresh_if_ready(
                 self.conn, self.registry, policy, self.store, release_root,
                 code_source=self.code_source, clock=self.clock)
         except deployment.MissingReleaseRoot:
-            return
+            return False
         except Exception as exc:
             problem = exc.problem if isinstance(exc, OpsError) else make_problem(
                 "VALIDATION_FAILED", "pool nightly refresh reconciliation failed")
             problem_key = (problem.code, problem.message)
             if problem_key == self._last_pool_refresh_problem:
-                return
+                return False
             self._last_pool_refresh_problem = problem_key
             print(json.dumps({"event": "pool_nightly_refresh_reconcile_failed",
                               "problem": {field: to_document(problem)[field]
                                           for field in ("code", "category", "retryable", "message")}}))
-            return
+            return False
         self._last_pool_refresh_problem = None
+        return bool(receipts)
 
     def _clock_check(self):
         wall, mono = self.clock.now(), self.clock.monotonic()

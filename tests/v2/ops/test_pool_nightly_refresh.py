@@ -9,13 +9,10 @@ graceful degradation.
 """
 from __future__ import annotations
 
-import ast
 import hashlib
-import inspect
 import json
 import os
 import sqlite3
-import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,7 +20,7 @@ import pytest
 
 from engine.v2.foundation import content_hash, to_document
 from engine.v2.models import deployment
-from engine.v2.ops import pool_refresh, training
+from engine.v2.ops import pool_refresh, supervisor, training
 from engine.v2.ops.errors import OpsError, fail, make_problem
 from engine.v2.ops.fingerprints import (
     CODE_ASSET_DIRS,
@@ -263,6 +260,21 @@ def test_two_manifests_same_session_and_prior_use_distinct_tags(monkeypatch, tmp
     # ... while the old tag's release id does not suppress the new tag's work
     _wire(monkeypatch, tmp_path, pointer=f"pools-{SESSION}-{old_tag}")
     assert _submit(conn, tmp_path) == ["receipt"] * 3
+
+
+def test_phase_keys_differ_across_incumbents(monkeypatch, tmp_path):
+    for phase in pool_refresh.PHASES:
+        assert (pool_refresh.phase_key(SESSION, phase, "prior-A", TAG)
+                != pool_refresh.phase_key(SESSION, phase, "prior-B", TAG))
+    rec = _wire(monkeypatch, tmp_path, pointer="prior-B")
+    conn = _db()
+    _add_score(conn)
+    for phase in pool_refresh.TRAINING_PHASES:
+        _add_training(conn, phase, prior="prior-A", state="succeeded")
+    assert _submit(conn, tmp_path) == ["receipt"] * 3
+    assert [key for _plan, key in rec.requests] == [
+        pool_refresh.phase_key(SESSION, phase, "prior-B", TAG)
+        for phase in pool_refresh.TRAINING_PHASES]
 
 
 # --------------------------------------------------------------------------
@@ -541,7 +553,7 @@ def test_reconcile_swallows_missing_root_and_reports_once(monkeypatch, capsys):
         raise deployment.MissingReleaseRoot()
 
     monkeypatch.setattr(deployment, "production_release_root", _missing)
-    assert Service._reconcile_pool_nightly_refresh(service) is None
+    assert Service._reconcile_pool_nightly_refresh(service) is False
     assert capsys.readouterr().out == ""
     assert service._last_pool_refresh_problem is None
 
@@ -572,25 +584,30 @@ def test_reconcile_swallows_missing_root_and_reports_once(monkeypatch, capsys):
     assert service._last_pool_refresh_problem is None
 
 
-def test_tick_calls_reconcile_pool_nightly_refresh():
-    tree = ast.parse(textwrap.dedent(inspect.getsource(Service.tick)))
-    func = tree.body[0]
-    assert isinstance(func, ast.FunctionDef)
-    body = func.body
-    reconcile_index = None
-    final_return_index = None
-    for index, node in enumerate(body):
-        if isinstance(node, ast.Return):
-            final_return_index = index
-        if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-                and isinstance(node.value.func, ast.Attribute)
-                and node.value.func.attr == "_reconcile_pool_nightly_refresh"
-                and isinstance(node.value.func.value, ast.Name)
-                and node.value.func.value.id == "self"):
-            reconcile_index = index
-    assert final_return_index is not None
-    assert reconcile_index is not None
-    assert reconcile_index < final_return_index
+def test_tick_calls_reconcile_pool_nightly_refresh(monkeypatch):
+    monkeypatch.setattr(supervisor, "claim_next", lambda *args, **kwargs: None)
+    monkeypatch.setattr(supervisor, "expire_leases", lambda *args, **kwargs: None)
+    monkeypatch.setattr(supervisor, "sample_capacity", lambda *args, **kwargs: None)
+    fake_self = SimpleNamespace(
+        _clock_check=lambda: None,
+        _reclaim_terminal_staging=lambda: None,
+        reconcile=lambda: None,
+        running={},
+        conn=None,
+        clock=None,
+        root=None,
+        identity=None,
+        policy=None,
+        registry=None,
+        _reconcile_publication_status=lambda: None,
+        _reconcile_computed_moves_refresh=lambda: None,
+        _reconcile_native_score_batch_shadow=lambda: None,
+        _reconcile_native_parity=lambda: None,
+    )
+    fake_self._reconcile_pool_nightly_refresh = lambda: True
+    assert Service.tick(fake_self) is True
+    fake_self._reconcile_pool_nightly_refresh = lambda: False
+    assert Service.tick(fake_self) is False
 
 
 # --------------------------------------------------------------------------
@@ -611,6 +628,14 @@ def test_identity_ignores_the_unparseable_key_and_blank_created_at():
     _raw_score(conn, "j-null-time", "nightly:2026-01-06:sha256:x:score", None, "null")
     _raw_score(conn, "j-blank-time", "nightly:2026-01-07:sha256:y:score", "", "blank")
     _add_score(conn, session="2026-01-02", manifest="good")
+    assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-02", "good")
+
+
+def test_identity_ignores_a_malformed_score_key_inside_the_scan_range():
+    conn = _db()
+    _raw_score(conn, "j-nightly-bad", "nightly:bad", "2026-01-09T00:00:00Z", "bad")
+    _add_score(conn, session="2026-01-02", manifest="good",
+               created_at="2026-01-01T00:00:00Z")
     assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-02", "good")
 
 
