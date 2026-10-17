@@ -1,0 +1,135 @@
+"""#192 slice 4: the scheduled serve holds for a pending pool cycle.
+
+``nightly_trigger._drive_jobs_to_terminal`` gains a ``hold_for_pool`` keyword:
+when true, the ``until`` predicate stays false while
+``pool_refresh.pool_cycle_pending`` reports the latest session's cycle is still
+pending, so the scheduled serve keeps ticking (bounded by the serve deadline)
+until the pool release is deployed or the cycle stalls. The snapshot-import
+serve never passes it. All synthetic -- a fake ``serve`` captures the ``until``
+callable and a fake catalog connection answers the terminal-state reads.
+"""
+from __future__ import annotations
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from engine.v2.ops import nightly_trigger, supervisor
+
+ET = ZoneInfo("America/New_York")
+
+
+class _FakeClock:
+    def now(self):
+        return datetime(2026, 9, 26, 8, 0, tzinfo=ET)
+
+    def monotonic(self):
+        return 0.0
+
+
+class _FakeConn:
+    """The minimal ``jobs`` table ``_job_states`` reads."""
+
+    def __init__(self, states):
+        self._rows = [{"state": state} for state in states]
+
+    def execute(self, sql, params=()):
+        return self
+
+    def fetchall(self):
+        return self._rows
+
+
+class _DummyConn:
+    def close(self):
+        return None
+
+
+def _capture_until(monkeypatch, outcome="deadline_exceeded"):
+    captured = {}
+
+    def fake_serve(service, *, until=None, deadline_at=None):
+        captured["until"] = until
+        captured["deadline_at"] = deadline_at
+        return outcome
+
+    monkeypatch.setattr(supervisor, "serve", fake_serve)
+    return captured
+
+
+def test_hold_for_pool_keeps_until_false_while_a_cycle_is_pending(monkeypatch):
+    captured = _capture_until(monkeypatch)
+    monkeypatch.setattr(nightly_trigger, "_pool_pending", lambda conn: True)
+    conn = _FakeConn(("succeeded", "succeeded"))
+
+    outcome = nightly_trigger._drive_jobs_to_terminal(
+        None, conn, ("job_a", "job_b"), None, hold_for_pool=True)
+
+    assert outcome == "timed_out"
+    assert captured["until"]() is False
+
+
+def test_hold_for_pool_lets_until_finish_once_the_cycle_is_done(monkeypatch):
+    captured = _capture_until(monkeypatch)
+    monkeypatch.setattr(nightly_trigger, "_pool_pending", lambda conn: False)
+    conn = _FakeConn(("succeeded", "succeeded"))
+
+    outcome = nightly_trigger._drive_jobs_to_terminal(
+        None, conn, ("job_a", "job_b"), None, hold_for_pool=True)
+
+    assert outcome == "timed_out"
+    assert captured["until"]() is True
+
+
+def test_default_until_ignores_the_pool(monkeypatch):
+    captured = _capture_until(monkeypatch)
+    monkeypatch.setattr(nightly_trigger, "_pool_pending",
+                        lambda conn: (_ for _ in ()).throw(
+                            AssertionError("the pool must not be consulted")))
+    conn = _FakeConn(("succeeded", "succeeded"))
+
+    outcome = nightly_trigger._drive_jobs_to_terminal(
+        None, conn, ("job_a", "job_b"), None)
+
+    assert outcome == "timed_out"
+    assert captured["until"]() is True
+
+
+def test_last_job_still_running_keeps_until_false(monkeypatch):
+    captured = _capture_until(monkeypatch)
+    monkeypatch.setattr(nightly_trigger, "_pool_pending", lambda conn: False)
+    conn = _FakeConn(("succeeded", "running"))
+
+    nightly_trigger._drive_jobs_to_terminal(
+        None, conn, ("job_a", "job_b"), None, hold_for_pool=True)
+
+    assert captured["until"]() is False
+
+
+def test_pool_pending_is_false_without_a_release_root(monkeypatch):
+    from engine.v2.models import deployment
+
+    def _missing():
+        raise deployment.MissingReleaseRoot()
+
+    monkeypatch.setattr(deployment, "production_release_root", _missing)
+    assert nightly_trigger._pool_pending(object()) is False
+
+
+def test_default_serve_holds_for_the_pool(tmp_path, monkeypatch):
+    from engine.v2.ops import bootstrap, supervisor as sup
+    from engine.v2.ops.workflows import commands
+
+    monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
+    monkeypatch.setattr(commands, "_submit_command",
+                        lambda args, root, conn, clock, host_policy: {"jobs": [{"job_id": "job_1"}]})
+    monkeypatch.setattr(sup, "Service", lambda *a, **k: object())
+    captured = {}
+
+    def fake_drive(service, conn, job_ids, deadline_at, *, hold_for_pool=False):
+        captured["hold_for_pool"] = hold_for_pool
+        return "completed"
+
+    monkeypatch.setattr(nightly_trigger, "_drive_jobs_to_terminal", fake_drive)
+
+    assert nightly_trigger._default_serve(tmp_path, "plan_hold", _FakeClock()) == "completed"
+    assert captured["hold_for_pool"] is True

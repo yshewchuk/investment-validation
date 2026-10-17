@@ -2,7 +2,7 @@
 
 Advances the three ``phase5_state_stage`` pool members (``paired_residual_pool``,
 ``board_analog_matcher``, ``trailing_pnl_cutoff``) one cutoff per night: the session
-of the latest succeeded legacy ``score`` job. Contract:
+of the latest succeeded legacy ``finality`` or ``features`` job. Contract:
 ``engine/v2/models/ARCHITECTURE.md`` section 2.2.1. Called from ``Service.tick()``;
 never a GRAPH node; the Service sidecar catches and reports any failure. Reads
 durable state only (no memo): each phase key is checked against the ``jobs`` table
@@ -18,8 +18,8 @@ from pathlib import Path
 from engine.v2.foundation import ArtifactError, content_hash, from_document
 from engine.v2.models import deployment
 from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
-from engine.v2.ops import nightly, state_stage, training
-from engine.v2.ops.errors import fail
+from engine.v2.ops import state_stage, training
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import worker_source_manifest
 from engine.v2.ops.plans import request_from_plan
 from engine.v2.ops.submission import job_id_for, submit
@@ -29,21 +29,29 @@ TRAINING_PHASES = PHASES[:3]
 
 FILL_ALPHA = 0.5  # engine.fills.MID.alpha, the shadow fill alpha native_score_batch scores with
 
-#: Largest ``spec_json`` a score job may carry to still be considered (a bound on
-#: the per-tick read; anything larger is ignored rather than parsed).
+#: Largest ``spec_json`` a finality or features job may carry to still be
+#: considered (a bound on the per-tick read; anything larger is ignored rather
+#: than parsed).
 MAX_SPEC_BYTES = 256 * 1024
 
 #: Newest ``nightly:`` job rows the inner identity query visits per tick, before
 #: the residual kind/state/spec-size filters run. With about ten job rows per
-#: night this is roughly 25 nights; a score job older than this window is never
-#: found.
+#: night this is roughly 25 nights; a finality or features job older than this
+#: window is never found.
 MAX_SCAN_ROWS = 256
 
-#: Most succeeded score-job rows the outer identity query keeps per tick. Score
-#: keys are ``nightly:<ISO session>:<scope>:score``, so descending key order
-#: lists the newest session first and a bounded read of the latest rows is
-#: enough.
+#: Most succeeded finality/features job rows the outer identity query keeps per
+#: tick. Their keys are ``nightly:<ISO session>:<scope>:<stage>``, so descending
+#: key order lists the newest session first and a bounded read of the latest
+#: rows is enough.
 MAX_SCORE_ROWS = 32
+
+#: The legacy nightly stages that keep the plan's ``legacy_manifest.json``
+#: binding in snapshot mode (``score`` does not), so their succeeded jobs carry
+#: the session's scoring manifest.
+_FINALITY_KIND = "legacy_finality"
+_FEATURES_KIND = "legacy_features"
+_STAGE_NAMES = ("finality", "features")
 
 #: Identity selection query. The inner query visits at most ``MAX_SCAN_ROWS``
 #: newest ``nightly:`` keys (a range SEARCH on the (namespace, idempotency_key)
@@ -55,7 +63,7 @@ IDENTITY_SQL = (
     "WHERE namespace = 'shadow' "
     "AND idempotency_key >= 'nightly:' AND idempotency_key < 'nightly;' "
     "ORDER BY idempotency_key DESC LIMIT ?) "
-    "WHERE kind = ? AND state = 'succeeded' AND length(spec_json) <= ? "
+    "WHERE kind IN (?, ?) AND state = 'succeeded' AND length(spec_json) <= ? "
     "ORDER BY idempotency_key DESC LIMIT ?"
 )
 
@@ -71,12 +79,34 @@ def phase_key(session, phase, prior, tag):
     return f"nightly:{session}:pool:{phase}:{tag}:{prior}"
 
 
+def _session_scope_from_stage_key(idempotency_key):
+    """Recover ``(session, scope_hash)`` from a legacy ``finality`` or ``features``
+    job's own idempotency key (``"nightly:<session>:<scope_hash>:<stage>"``).
+
+    Mirrors ``nightly._session_scope_from_score_key``: ``partition``/``rpartition``
+    rather than a fixed ``split(":")`` count, because ``scope_hash`` itself is a
+    content-hash string (``"sha256:<hex>"``) that already contains its own colon.
+    Only the ``"nightly"`` prefix, the session field and the trailing stage suffix
+    are structural; ``stage`` must be exactly ``"finality"`` or ``"features"``.
+    Returns ``None`` for anything that does not match this exact shape."""
+    prefix, sep1, rest = idempotency_key.partition(":")
+    if prefix != "nightly" or not sep1:
+        return None
+    session, sep2, remainder = rest.partition(":")
+    if not sep2 or not session:
+        return None
+    scope_hash, sep3, stage = remainder.rpartition(":")
+    if not sep3 or stage not in _STAGE_NAMES or not scope_hash:
+        return None
+    return session, scope_hash
+
+
 def pool_refresh_identity(conn):
-    """``(session, manifest_id)`` from the latest succeeded legacy ``score`` job,
-    or ``None``. Mirrors ``nightly._native_score_batch_identity``: max by
-    (session, created_at, scope_hash) over parseable keys with a usable
-    ``created_at``; ``manifest_id`` is that job's ``legacy_manifest.json`` binding.
-    Returns ``None`` when no score job exists or its binding is absent/not a string."""
+    """``(session, manifest_id)`` from the latest succeeded legacy ``finality``
+    or ``features`` job, or ``None``. Max by (session, created_at, scope_hash)
+    over parseable keys with a usable ``created_at``; ``manifest_id`` is that
+    job's ``legacy_manifest.json`` binding. Returns ``None`` when no such job
+    exists or its binding is absent/not a string."""
     # Bounded per-tick read: IDENTITY_SQL's inner query visits at most
     # MAX_SCAN_ROWS newest ``nightly:`` keys (the ``idempotency_key`` range pins
     # the scan to the ``nightly:`` key space -- ``:`` is followed by ``;`` in
@@ -86,11 +116,11 @@ def pool_refresh_identity(conn):
     # created_at.
     rows = conn.execute(
         IDENTITY_SQL,
-        (MAX_SCAN_ROWS, nightly.LEGACY_SCORE_KIND, MAX_SPEC_BYTES,
+        (MAX_SCAN_ROWS, _FINALITY_KIND, _FEATURES_KIND, MAX_SPEC_BYTES,
          MAX_SCORE_ROWS)).fetchall()
     candidates = []
     for row in rows:
-        parsed = nightly.session_scope_from_score_key(row["idempotency_key"])
+        parsed = _session_scope_from_stage_key(row["idempotency_key"])
         if parsed is None:
             continue
         created_at = row["created_at"]
@@ -165,6 +195,41 @@ def _read_pointer(deployment_root):
         raise fail("VALIDATION_FAILED", "deployment pointer could not be decoded")
 
 
+#: Phase states that end the cycle's wait for operator recovery (#154).
+_STALLED_STATES = frozenset({"failed", "cancelled", "blocked"})
+
+
+def pool_cycle_pending(conn, release_root):
+    """Is the latest session's pool cycle still pending?
+
+    ``True`` when a candidate release for the identity session is not yet
+    deployed and no phase job of this cycle has failed or stalled; ``False``
+    when there is no connection, no identity, no readable pointer, the pointer
+    already names this cycle's release (``pools-<session>-<tag>``), or any of
+    the cycle's five phase jobs is in a terminal stall state. Reads only the
+    same durable state as the sidecar and never writes."""
+    if conn is None:
+        return False
+    identity = pool_refresh_identity(conn)
+    if identity is None:
+        return False
+    session, manifest_id = identity
+    tag = manifest_tag(manifest_id)
+    try:
+        pointer = _read_pointer(Path(release_root) / "deployment")
+    except OpsError:
+        return False
+    if pointer is None:
+        return False
+    prior = pointer.release_id
+    if prior == f"pools-{session}-{tag}":
+        return False
+    if any(_state(conn, phase_key(session, phase, prior, tag)) in _STALLED_STATES
+           for phase in PHASES):
+        return False
+    return True
+
+
 def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_root, *,
                                          code_source, clock):
     """Submit at most the ready phase of the pool-nightly cycle; returns this call's
@@ -207,7 +272,7 @@ def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_
         plan = state_stage.state_stage_plan(
             release_root=str(release_root), prior_release_id=prior,
             release_id=release_id, cutoff=session, state_refs=state_refs,
-            source_root=code_source)
+            manifest_ref=manifest_id, source_root=code_source)
         return [submit(conn, registry, policy,
                        request_from_plan(plan, stage_key), clock=clock)]
     if _state(conn, stage_key) != "succeeded":

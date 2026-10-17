@@ -254,7 +254,10 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 - Parameters: `release_root` (the store's parent; empty resolves the production root at
   plan time), `prior_release_id`, `release_id`, `cutoff` (extended ISO), `state_files` and
   `input_bindings` (file name -> `training` output id, equal key sets; the job framework requires
-  the producing job to have succeeded).
+  the producing job to have succeeded), plus a required `legacy_manifest.json` binding (the pinned legacy
+  manifest, as `training` jobs bind it): the kind declares a `legacy_store` read, so the job's read set
+  carries the legacy tree the inventory reads the champion registry from. A plan without the manifest
+  is refused `INVALID_REQUEST`.
 - The bound files must cover exactly the advancing members `paired_residual_pool`,
   `board_analog_matcher`, `trailing_pnl_cutoff`. Paired and board objects carry `cutoff` as
   the last name segment; trailing objects are stamped with `cutoff`.
@@ -283,7 +286,7 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 Called from `Service.tick()` beside the other sidecars (`engine/v2/ops/pool_refresh.py`); never a `GRAPH` node, and a
 failure never blocks required job dispatch. It advances only the three members `phase5_state_stage` stages
 (`paired_residual_pool`, `board_analog_matcher`, `trailing_pnl_cutoff`); driver pools and the chooser stay carried (monthly
-retrain is PR-13b, #805). It trains at one cutoff per night: the session of the latest succeeded legacy `score` job. Alpha is
+retrain is PR-13b, #805). It trains at one cutoff per night: the session of the latest succeeded legacy `finality` or `features` job (the stages that keep the plan's `legacy_manifest.json` binding in snapshot mode, which the scheduled nightly uses; `score` does not). Alpha is
 the shadow fill alpha 0.5 (`engine.fills.MID`, as `native_score_batch._SHADOW_FILL_ALPHA`); strategies are the default of
 the `board_analog` mode (`strategies=()`: those present in the replay trades). Selection stays exact-key with no latest fallback: a
 row whose cutoff is not the session cutoff still needs a release carrying it, which this does not provide (follow-up #825:
@@ -296,7 +299,8 @@ of the newest nightly jobs, so a score older than that window is not found.
 
 | Rule | Behaviour |
 |---|---|
-| R1 verified input | session and manifest id from the latest succeeded `score` job (its `legacy_manifest.json` binding); prior release from the live pointer; a missing one submits nothing |
+| R1 verified input | session and manifest id from the latest succeeded `finality`/`features` job (its `legacy_manifest.json` binding); prior release from the live pointer; a missing one submits nothing |
+| R7 serve lifetime | the scheduled serve (not the snapshot-import serve) also stays up while the latest session's pool cycle is pending: a candidate release for it is not yet deployed and no phase job has failed; a missing release root or a failed phase ends the wait, and the serve deadline still bounds it |
 | R2 cache | durable job and pointer state is re-read each tick; no memo (reads are cheap indexed selects) |
 | R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); an incumbent changed before staging starts a new cycle under new keys; once a candidate is staged, the staged id or the guarded promote refuses and the cycle stalls |
 | R4 transaction | phase N+1 is submitted only once every phase-N job has succeeded; a sidecar failure is caught and reported (deduped), never raised |

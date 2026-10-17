@@ -95,13 +95,46 @@ _STATES = {
 def _params(**changes):
     values = dict(expected_ids=("phase5_state_stage",), release_root="/r", prior_release_id="prior1",
                   release_id="cand1", cutoff="2026-10-01", state_files=tuple(sorted(_STATES)),
-                  input_bindings={name: f"job_x#training/{name}" for name in _STATES})
+                  input_bindings={**{name: f"job_x#training/{name}" for name in _STATES},
+                                  "legacy_manifest.json": "artifact_manifest"})
     values.update(changes)
     return StateStageParameters(**values)
 
 
 def test_valid_parameters_have_no_problems():
     assert state_stage_parameter_problems(None, _params()) == []
+
+
+def test_bindings_without_the_manifest_key_are_reported():
+    bindings = {name: f"job_x#training/{name}" for name in _STATES}
+    assert state_stage_parameter_problems(
+        None, _params(input_bindings=bindings)) == [
+            "input_bindings keys must equal state_files plus legacy_manifest.json"]
+
+
+def test_bindings_with_an_extra_manifest_key_are_reported():
+    bindings = {**{name: f"job_x#training/{name}" for name in _STATES},
+                "legacy_manifest.json": "artifact_manifest", "extra.json": "j#o"}
+    assert state_stage_parameter_problems(
+        None, _params(input_bindings=bindings)) == [
+            "input_bindings keys must equal state_files plus legacy_manifest.json"]
+
+
+@pytest.mark.parametrize("manifest_ref", [None, "", 5])
+def test_manifest_binding_must_be_a_non_empty_string(manifest_ref):
+    bindings = {**{name: f"job_x#training/{name}" for name in _STATES},
+                "legacy_manifest.json": manifest_ref}
+    assert state_stage_parameter_problems(
+        None, _params(input_bindings=bindings)) == [
+            "input_bindings['legacy_manifest.json'] must be a non-empty string"]
+
+
+def test_state_files_must_not_list_the_manifest():
+    params = _params(state_files=tuple(sorted(_STATES)) + ("legacy_manifest.json",),
+                     input_bindings={**{name: "j#o" for name in _STATES},
+                                     "legacy_manifest.json": "artifact_manifest"})
+    assert state_stage_parameter_problems(None, params) == [
+        "state_files must not list legacy_manifest.json"]
 
 
 @pytest.mark.parametrize("changes", [
@@ -120,7 +153,8 @@ def test_kind_is_registered_and_leases_the_pointer():
     assert kind.effects == ("staged",)
     assert kind.checkpoint_contract == "phase5_state_stage_result.v1.0"
     assert kind.namespaces == frozenset({"shadow", "smoke"})
-    assert kind.store_domains == (("deployment_pointer", "write"),)
+    assert kind.store_domains == (("deployment_pointer", "write"), ("legacy_store", "read"))
+    assert ("legacy_store", "read") in state_stage_job_kind().store_domains
     from engine.v2.ops.submission import RetryPolicy
 
     assert state_stage_job_kind().retry == RetryPolicy("none", 1)
@@ -130,11 +164,12 @@ def test_plan_pins_files_refs_and_absolute_root(tmp_path):
     refs = {name: f"job_x#training/{name}" for name in _STATES}
     plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
                             release_id="cand1", cutoff="2026-10-01", state_refs=refs,
-                            source_root=REPO_ROOT)
+                            manifest_ref="artifact_manifest", source_root=REPO_ROOT)
     assert plan["kind"] == "phase5_state_stage"
     assert plan["parameters"]["release_root"] == str(tmp_path.resolve())
-    assert plan["input_refs"] == sorted(refs.values())
+    assert plan["input_refs"] == [*sorted(refs.values()), "artifact_manifest"]
     assert plan["parameters"]["state_files"] == tuple(sorted(refs))
+    assert plan["parameters"]["input_bindings"]["legacy_manifest.json"] == "artifact_manifest"
     assert plan["mode"] == "shadow" and plan["effects"] == ["staged"]
     assert plan["resource_class"] == "delivery"
     assert plan["schema_version"] == "operations_plan.v1.0"
@@ -145,8 +180,20 @@ def test_plan_refuses_invalid_request(tmp_path):
     with pytest.raises(OpsError) as err:
         state_stage_plan(release_root=str(tmp_path), prior_release_id="p", release_id="p",
                          cutoff="2026-10-01", state_refs={"a.json": "j#o"},
+                         manifest_ref="artifact_manifest", source_root=REPO_ROOT)
+    assert err.value.code == "INVALID_REQUEST"
+
+
+@pytest.mark.parametrize("manifest_ref", [None, ""])
+def test_plan_without_a_manifest_ref_is_an_invalid_request(tmp_path, manifest_ref):
+    with pytest.raises(OpsError) as err:
+        state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
+                         release_id="cand1", cutoff="2026-10-01",
+                         state_refs={"a.json": "j#o"}, manifest_ref=manifest_ref,
                          source_root=REPO_ROOT)
     assert err.value.code == "INVALID_REQUEST"
+    assert err.value.problem.details == {"problems": [
+        "input_bindings['legacy_manifest.json'] must be a non-empty string"]}
 
 
 def _wire(tmp_path, monkeypatch, states=None, drift=(), prior_names=None):
@@ -171,7 +218,8 @@ def _wire(tmp_path, monkeypatch, states=None, drift=(), prior_names=None):
     parameters = {"expected_ids": ["phase5_state_stage"], "release_root": str(tmp_path),
                   "prior_release_id": "prior1", "release_id": "cand1", "cutoff": "2026-10-01",
                   "state_files": sorted(states),
-                  "input_bindings": {name: f"job_x#training/{name}" for name in states}}
+                  "input_bindings": {**{name: f"job_x#training/{name}" for name in states},
+                                     "legacy_manifest.json": "artifact_manifest"}}
     return parameters, staging
 
 
@@ -306,7 +354,9 @@ def test_worker_refuses_a_cutoff_that_does_not_advance(tmp_path, monkeypatch):
     (("x.summary.json",), "plain .json"),
 ])
 def test_state_file_shape_problems_name_the_defect(files, text):
-    params = _params(state_files=files, input_bindings={name: "j#o" for name in files})
+    params = _params(state_files=files,
+                     input_bindings={**{name: "j#o" for name in files},
+                                     "legacy_manifest.json": "artifact_manifest"})
     problems = state_stage_parameter_problems(None, params)
     assert any(text in problem for problem in problems)
 
@@ -377,7 +427,7 @@ def test_plan_resolves_the_production_release_root(tmp_path, monkeypatch):
     monkeypatch.setattr(deployment, "production_release_root", lambda: tmp_path)
     plan = state_stage_plan(release_root="", prior_release_id="prior1", release_id="cand1",
                             cutoff="2026-10-01", state_refs={"a.json": "j#o"},
-                            source_root=REPO_ROOT)
+                            manifest_ref="artifact_manifest", source_root=REPO_ROOT)
     assert plan["parameters"]["release_root"] == str(tmp_path.resolve())
 
 
@@ -391,7 +441,7 @@ def test_plan_without_any_release_root_is_an_invalid_request(monkeypatch):
     with pytest.raises(OpsError) as err:
         state_stage_plan(release_root="", prior_release_id="prior1", release_id="cand1",
                          cutoff="2026-10-01", state_refs={"a.json": "j#o"},
-                         source_root=REPO_ROOT)
+                         manifest_ref="artifact_manifest", source_root=REPO_ROOT)
     assert err.value.code == "INVALID_REQUEST"
 
 
@@ -619,7 +669,7 @@ def test_registered_kind_validates_and_plan_hash_matches(tmp_path):
     refs = {name: f"job_x#training/{name}" for name in _STATES}
     plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
                             release_id="cand1", cutoff="2026-10-01", state_refs=refs,
-                            source_root=REPO_ROOT)
+                            manifest_ref="artifact_manifest", source_root=REPO_ROOT)
     assert plan["spec_hash"] == content_hash(plan["parameters"])
     assert plan["implementation_ref"] and plan["environment_ref"]
 
@@ -639,7 +689,7 @@ def test_plan_hashes_pin_the_source_root_and_environment(tmp_path, monkeypatch):
     refs = {name: f"job_x#training/{name}" for name in _STATES}
     plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
                             release_id="cand1", cutoff="2026-10-01", state_refs=refs,
-                            source_root=REPO_ROOT)
+                            manifest_ref="artifact_manifest", source_root=REPO_ROOT)
     assert plan["implementation_ref"] == content_hash(worker_source_manifest(REPO_ROOT))
     assert plan["environment_ref"] == content_hash(environment_identity(3))
 
@@ -659,20 +709,22 @@ def test_plan_environment_ref_falls_back_to_the_pinned_profile_cpu_count(tmp_pat
     refs = {name: f"job_x#training/{name}" for name in _STATES}
     plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
                             release_id="cand1", cutoff="2026-10-01", state_refs=refs,
-                            source_root=REPO_ROOT)
+                            manifest_ref="artifact_manifest", source_root=REPO_ROOT)
     assert plan["environment_ref"] == content_hash(environment_identity(5))
 
 
 def test_plan_refusal_publishes_the_exact_problems(tmp_path):
     with pytest.raises(OpsError) as err:
         state_stage_plan(release_root=str(tmp_path), prior_release_id="p", release_id="p",
-                         cutoff="2026-10-01", state_refs={"a.json": "j#o"}, source_root=REPO_ROOT)
+                         cutoff="2026-10-01", state_refs={"a.json": "j#o"},
+                         manifest_ref="artifact_manifest", source_root=REPO_ROOT)
     assert err.value.problem.details == {"problems": ["release_id must differ from prior_release_id"]}
 
 
 def test_one_bad_file_among_good_ones_is_reported():
     params = _params(state_files=("a.json", "x.txt"),
-                     input_bindings={"a.json": "j#o", "x.txt": "j#o"})
+                     input_bindings={"a.json": "j#o", "x.txt": "j#o",
+                                     "legacy_manifest.json": "artifact_manifest"})
     assert "state_files must be plain .json names, not summaries" in state_stage_parameter_problems(
         None, params)
 
@@ -719,7 +771,8 @@ def test_state_file_one_byte_over_the_cap_is_refused(tmp_path, monkeypatch):
     ({"release_id": "a\x00b"}, "prior_release_id and release_id must be safe non-empty ids"),
     ({"release_id": "prior1"}, "release_id must differ from prior_release_id"),
     ({"cutoff": "2026-9-1"}, "cutoff must be an extended ISO date (YYYY-MM-DD)"),
-    ({"input_bindings": None}, "input_bindings keys must equal state_files"),
+    ({"input_bindings": None},
+     "input_bindings keys must equal state_files plus legacy_manifest.json"),
 ])
 def test_each_invalid_parameter_reports_its_exact_problem(changes, problem):
     assert state_stage_parameter_problems(None, _params(**changes)) == [problem]
@@ -740,7 +793,8 @@ def test_plan_hashes_follow_the_source_root(tmp_path, monkeypatch):
     first, second = tmp_path / "a", tmp_path / "b"
     plans = [state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
                               release_id="cand1", cutoff="2026-10-01", state_refs=refs,
-                              source_root=root) for root in (first, second)]
+                              manifest_ref="artifact_manifest", source_root=root)
+             for root in (first, second)]
     assert seen == [first, second]
     assert plans[0]["implementation_ref"] == content_hash({"root": str(first)})
     assert plans[1]["implementation_ref"] == content_hash({"root": str(second)})
@@ -845,7 +899,8 @@ def test_worker_refuses_a_traversing_state_file_before_staging(tmp_path, monkeyp
     parameters, staging = _wire(tmp_path, monkeypatch)
     parameters["state_files"] = [*parameters["state_files"], "../evil.json"]
     parameters["input_bindings"] = {
-        name: f"job_x#training/{name}" for name in parameters["state_files"]}
+        **{name: f"job_x#training/{name}" for name in parameters["state_files"]},
+        "legacy_manifest.json": "artifact_manifest"}
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
     assert str(err.value) == "VALIDATION_FAILED: state stage parameters are invalid"

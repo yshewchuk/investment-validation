@@ -28,7 +28,8 @@ class StateStageParameters:
     prior_release_id: str
     release_id: str
     cutoff: str
-    #: Frozen-state file names; exactly the keys of ``input_bindings``.
+    #: Frozen-state file names; exactly the ``input_bindings`` keys other than
+    #: the pinned ``legacy_manifest.json`` read-set binding.
     state_files: tuple[str, ...]
     input_bindings: dict[str, str] | None = None
 
@@ -71,8 +72,14 @@ def _file_problems(params) -> list[str]:
     problems = []
     if not all(_plain_json_name(name) for name in files):
         problems.append("state_files must be plain .json names, not summaries")
-    if params.input_bindings is None or set(params.input_bindings) != set(files):
-        problems.append("input_bindings keys must equal state_files")
+    if "legacy_manifest.json" in files:
+        problems.append("state_files must not list legacy_manifest.json")
+    expected = set(files) | {"legacy_manifest.json"}
+    if params.input_bindings is None or set(params.input_bindings) != expected:
+        problems.append("input_bindings keys must equal state_files plus legacy_manifest.json")
+    elif not isinstance(params.input_bindings.get("legacy_manifest.json"), str) \
+            or not params.input_bindings["legacy_manifest.json"]:
+        problems.append("input_bindings['legacy_manifest.json'] must be a non-empty string")
     return problems
 
 
@@ -90,12 +97,15 @@ def state_stage_job_kind() -> JobKind:
                    checkpoint_contract=RESULT_SCHEMA,
                    namespaces=frozenset({"shadow", "smoke"}),
                    validate=state_stage_parameter_problems,
-                   store_domains=(("deployment_pointer", "write"),))
+                   store_domains=(("deployment_pointer", "write"), ("legacy_store", "read")))
 
 
-def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, state_refs, source_root) -> dict:
+def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, state_refs,
+                     manifest_ref, source_root) -> dict:
     """Build a ``phase5_state_stage`` plan; ``state_refs`` maps file name -> training output id.
-    ``source_root`` is the code checkout the implementation fingerprint is taken from (the caller's code source)."""
+    ``manifest_ref`` is the pinned ``legacy_input_manifest.v1.0`` artifact the supervisor's
+    launch-time ``_pin_read_set`` stages as ``staging/legacy``. ``source_root`` is the code
+    checkout the implementation fingerprint is taken from (the caller's code source)."""
     from engine.v2.foundation import content_hash
     from engine.v2.models import deployment
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
@@ -112,7 +122,8 @@ def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, stat
     params = StateStageParameters(
         expected_ids=("phase5_state_stage",), release_root=release_root,
         prior_release_id=prior_release_id, release_id=release_id, cutoff=cutoff,
-        state_files=tuple(sorted(refs)), input_bindings=refs)
+        state_files=tuple(sorted(refs)),
+        input_bindings={**refs, "legacy_manifest.json": manifest_ref})
     problems = state_stage_parameter_problems(None, params)
     if problems:
         raise fail("INVALID_REQUEST", "state stage plan is invalid",
@@ -120,7 +131,7 @@ def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, stat
     root3 = Path(source_root)
     return {"schema_version": "operations_plan.v1.0", "kind": "phase5_state_stage",
             "mode": "shadow", "effects": ["staged"], "parameters": vars(params),
-            "input_refs": sorted(refs.values()), "blocked_prerequisites": [],
+            "input_refs": [*sorted(refs.values()), manifest_ref], "blocked_prerequisites": [],
             "spec_hash": content_hash(vars(params)),
             "implementation_ref": content_hash(worker_source_manifest(root3)),
             "environment_ref": content_hash(

@@ -2,8 +2,8 @@
 
 Synthetic only: an in-memory ``sqlite3`` fake plus monkeypatched planners and
 submission, so nothing here reads or writes a real model release store or
-``data/``. Each test proves one step of the phase machine: score identity, the
-three training submitters, the ``phase5_state_stage`` stage, and the
+``data/``. Each test proves one step of the phase machine: finality/features
+identity, the three training submitters, the ``phase5_state_stage`` stage, and the
 ``models_promote`` swap -- plus ``Service._reconcile_pool_nightly_refresh``'s
 graceful degradation.
 """
@@ -55,20 +55,21 @@ def _db():
 
 
 def _add_score(conn, *, session=SESSION, manifest=MANIFEST, scope="sha256:abc",
-               created_at="2026-01-01T00:00:00Z", state="succeeded"):
-    key = f"nightly:{session}:{scope}:score"
+               created_at="2026-01-01T00:00:00Z", state="succeeded", stage="finality"):
+    key = f"nightly:{session}:{scope}:{stage}"
     bindings = {} if manifest is None else {"legacy_manifest.json": manifest}
     spec = json.dumps({"parameters": {"input_bindings": bindings}})
     conn.execute("INSERT INTO jobs (job_id, kind, state, idempotency_key, spec_json, created_at) "
-                 "VALUES (?, 'legacy_score', ?, ?, ?, ?)",
-                 (job_id_for("shadow", key), state, key, spec, created_at))
+                 "VALUES (?, ?, ?, ?, ?, ?)",
+                 (job_id_for("shadow", key), f"legacy_{stage}", state, key, spec, created_at))
     return key
 
 
-def _add_score_spec(conn, *, key, created_at, spec_json, state="succeeded"):
+def _add_score_spec(conn, *, key, created_at, spec_json, state="succeeded",
+                    kind="legacy_finality"):
     conn.execute("INSERT INTO jobs (job_id, kind, state, idempotency_key, spec_json, created_at) "
-                 "VALUES (?, 'legacy_score', ?, ?, ?, ?)",
-                 (job_id_for("shadow", key), state, key, spec_json, created_at))
+                 "VALUES (?, ?, ?, ?, ?, ?)",
+                 (job_id_for("shadow", key), kind, state, key, spec_json, created_at))
 
 
 def _add_training(conn, phase, *, session=SESSION, prior=PRIOR, tag=TAG, state="queued"):
@@ -188,6 +189,25 @@ def test_identity_is_none_for_a_non_string_or_empty_binding(binding):
     assert pool_refresh.pool_refresh_identity(conn) is None
 
 
+def test_identity_from_a_features_only_session():
+    conn = _db()
+    _add_score(conn, stage="features", manifest="features-manifest")
+    assert pool_refresh.pool_refresh_identity(conn) == (SESSION, "features-manifest")
+
+
+def test_identity_is_none_for_a_legacy_score_row_alone():
+    conn = _db()
+    _add_score(conn, stage="score", manifest="score-manifest")
+    assert pool_refresh.pool_refresh_identity(conn) is None
+
+
+def test_identity_prefers_the_later_session_across_finality_and_features():
+    conn = _db()
+    _add_score(conn, session="2026-01-01", stage="finality", manifest="old")
+    _add_score(conn, session="2026-01-02", stage="features", manifest="new")
+    assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-02", "new")
+
+
 # --------------------------------------------------------------------------
 # 2. nothing to do: no pointer, no conn, already-advanced pointer
 # --------------------------------------------------------------------------
@@ -203,6 +223,65 @@ def test_no_pointer_no_conn_or_already_advanced_submits_nothing(monkeypatch, tmp
     rec2 = _wire(monkeypatch, tmp_path, pointer=f"pools-{SESSION}-{TAG}")
     assert _submit(conn, tmp_path) == []
     assert rec.submits == [] and rec2.submits == []
+
+
+# --------------------------------------------------------------------------
+# 2b. pool_cycle_pending: durable-state-only "is this cycle still running?"
+# --------------------------------------------------------------------------
+
+
+def test_pool_cycle_pending_true_with_identity_and_pointer(tmp_path):
+    conn = _db()
+    _add_score(conn)
+    _write_pointer(tmp_path, PRIOR)
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is True
+
+
+def test_pool_cycle_pending_true_while_a_training_job_runs(tmp_path):
+    conn = _db()
+    _add_score(conn)
+    _write_pointer(tmp_path, PRIOR)
+    _add_training(conn, "train-paired", state="running")
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is True
+
+
+def test_pool_cycle_pending_false_when_the_release_is_deployed(tmp_path):
+    conn = _db()
+    _add_score(conn)
+    _write_pointer(tmp_path, f"pools-{SESSION}-{TAG}")
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+
+
+@pytest.mark.parametrize("state", ["failed", "cancelled", "blocked"])
+def test_pool_cycle_pending_false_when_a_phase_stalled(tmp_path, state):
+    conn = _db()
+    _add_score(conn)
+    _write_pointer(tmp_path, PRIOR)
+    _add_training(conn, "stage", state=state)
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+
+
+def test_pool_cycle_pending_false_without_a_pointer(tmp_path):
+    conn = _db()
+    _add_score(conn)
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+
+
+def test_pool_cycle_pending_false_without_identity_or_conn(tmp_path):
+    conn = _db()
+    _write_pointer(tmp_path, PRIOR)
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+    _add_score(conn)
+    assert pool_refresh.pool_cycle_pending(None, tmp_path) is False
+
+
+def test_pool_cycle_pending_false_when_the_pointer_is_malformed(tmp_path):
+    conn = _db()
+    _add_score(conn)
+    deploy = tmp_path / "deployment"
+    deploy.mkdir()
+    (deploy / "DEPLOYED").write_bytes(b"{not json")
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
 
 
 # --------------------------------------------------------------------------
@@ -349,6 +428,7 @@ def test_all_training_succeeded_submits_the_stage_with_plain_refs(monkeypatch, t
     assert stage["release_id"] == f"pools-{SESSION}-{TAG}"
     assert stage["cutoff"] == SESSION
     assert stage["release_root"] == str(tmp_path)
+    assert stage["manifest_ref"] == MANIFEST
     assert stage["source_root"] == REPO_ROOT
     assert stage["state_refs"] == {
         "paired_residual_pool.json": f"{paired}#training/paired_residual_pool.json",
@@ -510,12 +590,13 @@ def test_real_request_from_plan_accepts_a_state_stage_plan(tmp_path):
     plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="a", release_id="b",
                             cutoff="2026-10-01",
                             state_refs={"x.json": "job_abc#training/x.json"},
-                            source_root=REPO_ROOT)
+                            manifest_ref=MANIFEST, source_root=REPO_ROOT)
     request = real_request_from_plan(plan, "nightly:2026-10-01:pool:stage:a")
     assert request.job.kind == "phase5_state_stage"
     validate_request(registry(), NamespacePolicy({"operator": frozenset({"shadow"})}), request)
     assert request.job.dependency_job_ids == ("job_abc",)
-    assert request.job.input_refs == ()
+    assert request.job.input_refs == (MANIFEST,)
+    assert request.job.parameters["input_bindings"]["legacy_manifest.json"] == MANIFEST
     assert request.job.retry_policy_ref == "none"
 
 
@@ -524,20 +605,21 @@ def test_real_request_from_plan_separates_job_refs_from_direct_artifact_refs(tmp
                             cutoff="2026-10-01",
                             state_refs={"x.json": "job_a#training/x.json",
                                         "y.json": "artifact_1"},
-                            source_root=REPO_ROOT)
+                            manifest_ref=MANIFEST, source_root=REPO_ROOT)
     request = real_request_from_plan(plan, "nightly:2026-10-01:pool:stage:a")
     assert request.job.dependency_job_ids == ("job_a",)
-    assert request.job.input_refs == ("artifact_1",)
+    assert request.job.input_refs == ("artifact_1", MANIFEST)
 
 
 def test_real_request_from_plan_maps_every_job_ref_to_a_dependency(tmp_path):
     refs = {"p.json": "job_a#training/p.json", "b.json": "job_b#training/b.json",
             "t.json": "job_c#training/t.json"}
     plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="a", release_id="b",
-                            cutoff="2026-10-01", state_refs=refs, source_root=REPO_ROOT)
+                            cutoff="2026-10-01", state_refs=refs,
+                            manifest_ref=MANIFEST, source_root=REPO_ROOT)
     request = real_request_from_plan(plan, "nightly:2026-10-01:pool:stage:a")
     assert request.job.dependency_job_ids == ("job_a", "job_b", "job_c")
-    assert request.job.input_refs == ()
+    assert request.job.input_refs == (MANIFEST,)
 
 
 # --------------------------------------------------------------------------
@@ -615,18 +697,18 @@ def test_tick_calls_reconcile_pool_nightly_refresh(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def _raw_score(conn, job_id, key, created_at, manifest):
+def _raw_score(conn, job_id, key, created_at, manifest, *, kind="legacy_finality"):
     spec = json.dumps({"parameters": {"input_bindings": {"legacy_manifest.json": manifest}}})
     conn.execute("INSERT INTO jobs (job_id, kind, state, idempotency_key, spec_json, created_at) "
-                 "VALUES (?, 'legacy_score', 'succeeded', ?, ?, ?)",
-                 (job_id, key, spec, created_at))
+                 "VALUES (?, ?, 'succeeded', ?, ?, ?)",
+                 (job_id, kind, key, spec, created_at))
 
 
 def test_identity_ignores_the_unparseable_key_and_blank_created_at():
     conn = _db()
     _raw_score(conn, "j-bad-key", "garbage", "2026-01-05T00:00:00Z", "bad")
-    _raw_score(conn, "j-null-time", "nightly:2026-01-06:sha256:x:score", None, "null")
-    _raw_score(conn, "j-blank-time", "nightly:2026-01-07:sha256:y:score", "", "blank")
+    _raw_score(conn, "j-null-time", "nightly:2026-01-06:sha256:x:finality", None, "null")
+    _raw_score(conn, "j-blank-time", "nightly:2026-01-07:sha256:y:finality", "", "blank")
     _add_score(conn, session="2026-01-02", manifest="good")
     assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-02", "good")
 
@@ -634,6 +716,15 @@ def test_identity_ignores_the_unparseable_key_and_blank_created_at():
 def test_identity_ignores_a_malformed_score_key_inside_the_scan_range():
     conn = _db()
     _raw_score(conn, "j-nightly-bad", "nightly:bad", "2026-01-09T00:00:00Z", "bad")
+    _add_score(conn, session="2026-01-02", manifest="good",
+               created_at="2026-01-01T00:00:00Z")
+    assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-02", "good")
+
+
+def test_identity_ignores_an_unparseable_stage_suffix():
+    conn = _db()
+    _raw_score(conn, "j-other-stage", "nightly:2026-01-09:sha256:x:refresh",
+               "2026-01-09T00:00:00Z", "other")
     _add_score(conn, session="2026-01-02", manifest="good",
                created_at="2026-01-01T00:00:00Z")
     assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-02", "good")
@@ -785,28 +876,28 @@ def _oversize_score_spec():
 def test_identity_ignores_an_oversize_spec_and_keeps_the_older_job():
     conn = _db()
     _add_score(conn, session="2026-01-02", manifest="good")
-    _add_score_spec(conn, key="nightly:2026-01-05:sha256:z:score",
+    _add_score_spec(conn, key="nightly:2026-01-05:sha256:z:finality",
                     created_at="2026-01-09T00:00:00Z", spec_json=_oversize_score_spec())
     assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-02", "good")
 
 
 def test_identity_is_none_when_the_only_score_spec_is_oversize():
     conn = _db()
-    _add_score_spec(conn, key="nightly:2026-01-05:sha256:z:score",
+    _add_score_spec(conn, key="nightly:2026-01-05:sha256:z:finality",
                     created_at="2026-01-09T00:00:00Z", spec_json=_oversize_score_spec())
     assert pool_refresh.pool_refresh_identity(conn) is None
 
 
 def test_identity_is_none_for_an_unparseable_spec_without_raising():
     conn = _db()
-    _add_score_spec(conn, key="nightly:2026-01-05:sha256:z:score",
+    _add_score_spec(conn, key="nightly:2026-01-05:sha256:z:finality",
                     created_at="2026-01-05T00:00:00Z", spec_json="{not json")
     assert pool_refresh.pool_refresh_identity(conn) is None
 
 
 def test_identity_is_none_for_a_non_mapping_spec():
     conn = _db()
-    _add_score_spec(conn, key="nightly:2026-01-05:sha256:z:score",
+    _add_score_spec(conn, key="nightly:2026-01-05:sha256:z:finality",
                     created_at="2026-01-05T00:00:00Z", spec_json="[]")
     assert pool_refresh.pool_refresh_identity(conn) is None
 
@@ -1103,8 +1194,9 @@ def test_identity_query_plan_searches_the_key_range_without_sorting():
         "created_at TEXT, PRIMARY KEY (namespace, idempotency_key))")
     rows = conn.execute(
         "EXPLAIN QUERY PLAN " + pool_refresh.IDENTITY_SQL,
-        (pool_refresh.MAX_SCAN_ROWS, pool_refresh.nightly.LEGACY_SCORE_KIND,
-         pool_refresh.MAX_SPEC_BYTES, pool_refresh.MAX_SCORE_ROWS)).fetchall()
+        (pool_refresh.MAX_SCAN_ROWS, pool_refresh._FINALITY_KIND,
+         pool_refresh._FEATURES_KIND, pool_refresh.MAX_SPEC_BYTES,
+         pool_refresh.MAX_SCORE_ROWS)).fetchall()
     inner = [row for row in rows if "jobs" in row["detail"]]
     inner_plan = " ".join(row["detail"] for row in inner)
     assert inner_plan, " ".join(row["detail"] for row in rows)
