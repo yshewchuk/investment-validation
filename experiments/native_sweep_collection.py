@@ -2,6 +2,7 @@
 import json
 import os
 import sqlite3
+import stat
 from functools import wraps
 from pathlib import Path
 
@@ -45,8 +46,15 @@ except (OpsError, ArtifactError, OSError, SyntaxError, ValueError, RecursionErro
 def _implementation(code_root):
     """Verify an import-time on-disk snapshot, not a Python bytecode attestation."""
     try:
+        root = Path(code_root)
+        metadata = root.stat()
+    except (TypeError, ValueError, FileNotFoundError, NotADirectoryError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "sweep code root must name an existing directory") from None
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise fail("INVALID_EXPERIMENT_SPEC", "sweep code root must name an existing directory")
+    try:
         current = source_closure(_COLLECTOR_ROOT, _COLLECTOR_ENTRIES)
-        caller = source_closure(Path(code_root), _COLLECTOR_ENTRIES)
+        caller = source_closure(root, _COLLECTOR_ENTRIES)
         if (_COLLECTOR_SOURCE_ERROR is not None or current != _COLLECTOR_SOURCES
                 or any(caller.get(entry) != current[entry] for entry in _COLLECTOR_ENTRIES)):
             raise ValueError
@@ -115,7 +123,8 @@ def _bind(conn, store, anchor, key, document):
         except (ValueError, RecursionError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep stored artifact reference cannot be decoded") from None
         if ref != expected or _verified_bytes(store, ref) != payload:
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep collection roster/source/mode/ledger intent or terminal index differs; restore original context or seal a new experiment")
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep collection roster/source/mode/ledger intent or "
+                       "terminal index differs; restore original context or seal a new experiment")
         return to_document(ref)
     ref = _publish(store, document)
     native.verify_native_registration(conn, store, anchor, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)

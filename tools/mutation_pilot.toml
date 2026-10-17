@@ -668,6 +668,7 @@ tests = [
     "tests/v2/ops/test_gate_sweep_collection.py",
     "tests/v2/ops/test_native_evidence_bounds.py",
     "tests/v2/ops/test_sweep_native_bounds.py",
+    "tests/v2/ops/test_sweep_report_bounds.py",
     "tests/v2/models/training/test_magnitude_estimators.py",
     "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/v2/ops/test_final_holdout_authority.py",
@@ -704,7 +705,7 @@ tests = [
 [modules.ops_experiment_folds]
 why = "Fold-local experiment fitting: an experiment's fit must stay inside its own fold boundaries; a leaked boundary or wrong fold map contaminates the out-of-sample result."
 mutate = ["engine/v2/ops/experiment_folds.py"]
-tests = ["tests/test_v2_ops_experiment_folds.py", "tests/v2/research/test_prediction_report.py", "tests/v2/research/test_gate_report.py", "tests/v2/ops/test_gate_sweep.py", "tests/v2/ops/test_gate_sweep_collection.py", "tests/v2/ops/test_native_evidence_bounds.py", "tests/v2/ops/test_sweep_native_bounds.py"]
+tests = ["tests/test_v2_ops_experiment_folds.py", "tests/v2/research/test_prediction_report.py", "tests/v2/research/test_gate_report.py", "tests/v2/ops/test_gate_sweep.py", "tests/v2/ops/test_gate_sweep_collection.py", "tests/v2/ops/test_native_evidence_bounds.py", "tests/v2/ops/test_sweep_native_bounds.py", "tests/v2/ops/test_sweep_report_bounds.py"]
 
 [modules.ops_runtime]
 why = "Supervisor, workers, executors, resources, recovery and provider budget: job execution and admission."
@@ -728,6 +729,7 @@ tests = [
     "tests/v2/ops/test_gate_sweep_collection.py",
     "tests/v2/ops/test_native_evidence_bounds.py",
     "tests/v2/ops/test_sweep_native_bounds.py",
+    "tests/v2/ops/test_sweep_report_bounds.py",
     "tests/v2/ops/test_massive_accounting_hooks.py",
     "tests/v2/ops/test_massive_coverage.py",
     "tests/v2/ops/test_massive_pagination.py",
@@ -789,6 +791,7 @@ tests = [
     "tests/v2/ops/test_gate_sweep_collection.py",
     "tests/v2/ops/test_native_evidence_bounds.py",
     "tests/v2/ops/test_sweep_native_bounds.py",
+    "tests/v2/ops/test_sweep_report_bounds.py",
     "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/research/test_final_holdout_requests.py",
     "tests/v2/ops/test_forward_calendar_budget.py",
@@ -909,6 +912,7 @@ tests = [
     "tests/v2/ops/test_gate_sweep_collection.py",
     "tests/v2/ops/test_native_evidence_bounds.py",
     "tests/v2/ops/test_sweep_native_bounds.py",
+    "tests/v2/ops/test_sweep_report_bounds.py",
     "tests/v2/ops/test_provider_requirements.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
@@ -1050,6 +1054,7 @@ tests = [
     "tests/v2/ops/test_gate_sweep_collection.py",
     "tests/v2/ops/test_native_evidence_bounds.py",
     "tests/v2/ops/test_sweep_native_bounds.py",
+    "tests/v2/ops/test_sweep_report_bounds.py",
     "tests/v2/ops/test_runup_model_inputs.py",
     "tests/v2/ops/test_runup_worker_activation.py",
     "tests/v2/ops/test_native_driver_declarations.py",
@@ -1150,6 +1155,7 @@ tests = [
     "tests/v2/ops/test_gate_sweep_collection.py",
     "tests/v2/ops/test_native_evidence_bounds.py",
     "tests/v2/ops/test_sweep_native_bounds.py",
+    "tests/v2/ops/test_sweep_report_bounds.py",
     "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/v2/research/test_gate_variant.py",
     "tests/v2/research/test_gate_report.py",

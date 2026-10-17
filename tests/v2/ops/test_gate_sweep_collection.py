@@ -5,6 +5,7 @@ import inspect
 import json
 import sqlite3
 from dataclasses import asdict, replace
+from pathlib import Path
 from time import sleep
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -450,8 +451,12 @@ def test_blocked_job_is_terminal_and_freezes_an_incomplete_index(source, tmp_pat
 def test_observer_timeout_never_claims_or_cancels_jobs(source, monkeypatch):
     call_sweep(source)
     pending = _collect(source, no_ledger=True)
-    clock = iter((0, 1))
-    monkeypatch.setattr(cli, "monotonic", lambda: next(clock))
+    ticks = 0
+    def clock():
+        nonlocal ticks
+        ticks += 1
+        return min(ticks - 1, 1)
+    monkeypatch.setattr(cli, "monotonic", clock)
     monkeypatch.setattr(cli, "sleep", forbid_effect)
     result = call_sweep(source, cli.run_sweep, no_ledger=True, timeout_seconds=0.5)
     assert result == pending
@@ -1052,6 +1057,35 @@ def test_unavailable_import_time_collector_snapshot_refuses_before_submission(mo
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
 
 
+@pytest.mark.parametrize("kind", ["missing", "file", "file-parent", "invalid-type", "nul"])
+def test_invalid_code_root_refuses_before_source_reads_or_submission(tmp_path, monkeypatch, kind):
+    file = tmp_path / "file"
+    file.write_bytes(b"not a directory")
+    root = {"missing": tmp_path / "missing", "file": file, "file-parent": file / "child",
+            "invalid-type": None, "nul": "\x00"}[kind]
+    monkeypatch.setattr(collection, "source_closure", forbid_effect)
+    monkeypatch.setattr(collection, "submit_sweep", forbid_effect)
+    with pytest.raises(OpsError) as error:
+        collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
+                                 code_root=root, as_of_month=MONTH, no_ledger=True)
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC" and error.value.problem.retryable is False
+
+
+def test_code_root_stat_io_is_retryable_before_source_reads_or_submission(monkeypatch):
+    original = Path.stat
+    def interrupted(path, *args, **kwargs):
+        if path == REPO:
+            raise OSError(errno.EIO, "private stat failure")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "stat", interrupted)
+    monkeypatch.setattr(collection, "source_closure", forbid_effect)
+    monkeypatch.setattr(collection, "submit_sweep", forbid_effect)
+    with pytest.raises(OpsError) as error:
+        collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
+                                 code_root=REPO, as_of_month=MONTH, no_ledger=True)
+    assert error.value.code == "RESOURCE_UNAVAILABLE" and error.value.problem.retryable is True
+
+
 @pytest.mark.parametrize("fault,code", [("io", "RESOURCE_UNAVAILABLE"), ("sqlite", "RESOURCE_UNAVAILABLE"),
                                        ("invalid-json", "INVALID_EXPERIMENT_SPEC")])
 def test_cli_serializes_exact_raw_failure_code_without_private_details(tmp_path, monkeypatch, capsys, fault, code):
@@ -1268,8 +1302,12 @@ def test_job_failure_invalid_encoding_is_typed_before_receipt_decoding(tmp_path,
 
 @pytest.mark.parametrize("reader", ["get-job", "submit-replay"])
 @pytest.mark.parametrize("exception", [TypeError, KeyError])
-def test_job_failure_decoder_programming_errors_propagate(tmp_path, monkeypatch, reader, exception):
+@pytest.mark.parametrize("stored_failure", [False, True])
+def test_job_failure_decoder_programming_errors_propagate(tmp_path, monkeypatch, reader, exception, stored_failure):
     job = submitted_job(tmp_path)
+    if stored_failure:
+        payload = canonical_json(to_document(fail("WORKER_FAILED", "stored worker failure").problem))
+        job.conn.execute("UPDATE jobs SET failure_json=?", (payload,))
     original = exception("unexpected failure decoder implementation defect")
     decode = submission.load_json
     def damaged(cls, value):

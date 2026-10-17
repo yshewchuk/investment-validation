@@ -1,7 +1,9 @@
 """Immutable native outcomes and replay; filesystem effects stay outside SQL."""
+import errno
 import json
 import os
 import sqlite3
+import stat
 import tempfile
 from datetime import date, datetime, timezone
 from functools import wraps
@@ -78,14 +80,43 @@ def _evidence(conn, registration, max_evidence_bytes=None):
     return evidence
 
 
-def _report_path(store, registration, key, report=None, report_ref=None):
+def _report_bytes(path, expected, max_evidence_bytes):
+    """Opt-in report comparison uses its expected size, not the JSON budget."""
+    if max_evidence_bytes is None:
+        return path.read_bytes()
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError("report must not be a symbolic link") from None
+        raise
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > len(expected):
+            raise ValueError("report exceeds its expected regular-file size")
+        chunks, remaining = [], len(expected) + 1
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > len(expected):
+            raise ValueError("report exceeds its expected regular-file size")
+        return data
+    finally:
+        os.close(fd)
+
+
+def _report_path(store, registration, key, report=None, report_ref=None, *, max_evidence_bytes=None):
     mode = "smoke" if key == "native_smoke" else "recorded"
     path = store.root / "native_reports" / registration.run_id / mode / "REPORT.md"
     if report is not None:
         stored = store.root / report_ref["storage_key"]
         if (any(parent.exists() and not parent.is_dir() for parent in path.parents)
                 or path.is_symlink() or path.resolve() != path or (path.exists()
-                and (not path.is_file() or path.read_bytes() != report
+                and (not path.is_file() or _report_bytes(path, report, max_evidence_bytes) != report
                      or (stored.exists() and path.samefile(stored))))):
             raise _conflict(store, registration)
     return path
@@ -168,7 +199,7 @@ def _reconcile(conn, store, registration, key, destination, ledger_path, ref_doc
     if export_path is not None and report_ref is None:
         raise fail("INVALID_EXPERIMENT_SPEC", "native outcome has no completed report")
     if report_ref is not None:
-        _report_path(store, registration, key, report, report_ref)
+        _report_path(store, registration, key, report, report_ref, max_evidence_bytes=max_evidence_bytes)
     if key != "native_smoke":
         ledger_append([row], path=ledger_path, unique_by=("id", "spec_hash"))
     completion = _publish(store, receipt, receipt["schema_version"], max_evidence_bytes=max_evidence_bytes)
@@ -245,7 +276,8 @@ def publish_native_outcome(conn, store, registration, *, report=None, problem=No
         existing = evidence[key]
     else:
         if report:
-            _report_path(store, registration, key, report.encode(), document["report_ref"])
+            _report_path(store, registration, key, report.encode(), document["report_ref"],
+                         max_evidence_bytes=max_evidence_bytes)
             store.publish_bytes(report.encode(), schema_ref=report_ref.schema_ref)
         existing = _reserve(conn, registration, key, _publish(store, document, max_evidence_bytes=max_evidence_bytes),
                             max_evidence_bytes=max_evidence_bytes)
@@ -280,7 +312,7 @@ def export_native_report(conn, store, registration, *, no_ledger=False, ledger_p
             os.link(staged.name, path)
         except FileExistsError:
             if (path.is_symlink() or path.samefile(store.root / ref.storage_key)
-                    or path.read_bytes() != data):
+                    or _report_bytes(path, data, max_evidence_bytes) != data):
                 raise _conflict(store, registration)
     foundation.fsync_directory(path.parent)
     return path

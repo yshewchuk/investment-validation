@@ -204,8 +204,10 @@ def test_oversized_outcome_write_refuses_before_publication_or_ledger(source, tm
     monkeypatch.setattr(outcomes, "ledger_append", forbid)
     assert_conflict(lambda: invoke(ACTIONS[0], source, registration, tmp_path / "ledger.csv",
                                   report=None, problem=problem, max_evidence_bytes=CAP))
+    # The outcome writer refuses before publication; the public R6 boundary then publishes its private refusal.
     assert schemas == ["native_experiment_refusal.v1.0"]
     assert _evidence(source, registration.run_id) == before
+    assert not (tmp_path / "ledger.csv").exists()
 
 
 @pytest.mark.parametrize("options", [{}, {"max_evidence_bytes": None}], ids=["omitted", "explicit-none"])
