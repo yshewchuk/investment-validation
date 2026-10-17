@@ -213,11 +213,13 @@ def test_interrupted_fit_or_admission_cannot_be_reconciled(native, monkeypatch, 
 
 @pytest.mark.parametrize("slot, mutation", [
     ("execution-result", "missing"), ("execution-result", "extra"), ("execution-result", "trial"),
+    ("execution-result", "non_object"), ("execution-result", "result_non_object"),
     ("execution-result", "candidate"), ("execution-result", "limits"), ("execution-result", "inputs"),
     ("execution-result", "result_extra"), ("execution-result", "status"), ("execution-result", "forecasts"),
     ("execution-result", "forecast_value"), ("execution-result", "forecast_order"),
-    ("execution", "count"), ("execution", "digest"),
+    ("execution", "count"), ("execution", "digest"), ("execution", "non_object"),
     ("forecasts", "value"), ("validation", "targets"), ("terminal", "metrics"),
+    ("terminal", "non_object"),
     ("fit-started", "missing"), ("fit-completed", "missing"), ("fit-completed", "matrix"),
     ("start", "limits"), ("execution-start", "limits"), ("inputs", "inputs"), ("cohort", "training"),
 ])
@@ -230,6 +232,8 @@ def test_valid_hash_mutations_cannot_authorize_reconciliation(native, monkeypatc
             body = copy.deepcopy(body)
             if mutation == "missing":
                 return body
+            if mutation == "non_object":
+                return append(name, [], **kwargs)
             if slot == "execution-result":
                 if mutation == "extra":
                     body["extra"] = True
@@ -243,6 +247,8 @@ def test_valid_hash_mutations_cannot_authorize_reconciliation(native, monkeypatc
                     body["inputs_id"] = "wrong"
                 elif mutation == "result_extra":
                     body["result"]["extra"] = True
+                elif mutation == "result_non_object":
+                    body["result"] = []
                 elif mutation == "status":
                     body["result"]["event"] = "resource_limit"
                 elif mutation == "forecasts":

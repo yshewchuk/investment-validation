@@ -103,8 +103,13 @@ no outer-evaluation, deployment or final-read authority. The library-only `Searc
 positive integer `memory_bytes`, `cpu_seconds` and `wall_seconds` limits. A fixed Linux
 child reuses the native fresh-fit pipeline for each horizon; immutable fit-admission
 and completion receipts bind matrices, candidate and complete forecasts. A fit admission
-does not prove physical invocation after an interruption. Resource/shared failures remain
-unfinished and cannot be retried or converted to candidate exclusion. Completed native
+does not prove physical invocation after an interruption. Resource/shared failures do not
+authorize a fit retry or candidate exclusion. Completed native
 replay verifies the whole chain without fitting or reopening labels. Limits apply to
-the fit child, not parent native admission or shared-host capacity. No CLI is added;
-interrupted-attempt reconciliation, outer evaluation and reporting remain unimplemented.
+the fit child, not parent native admission or shared-host capacity. The library-only
+`SearchTrials.reconcile(outer_year, inner_year, candidate_id, limits=...)` verifies the
+exact sealed trial, limits, inputs and fit markers against its durable post-exit
+`execution-result`, then idempotently finishes missing publication without fitting,
+resetting claims or replacing forecasts. Interruptions before that durable result
+remain unrecoverable; lost child-result or forecast content cannot be reconstructed.
+No CLI, outer evaluation or reporting is implemented by this slice.
