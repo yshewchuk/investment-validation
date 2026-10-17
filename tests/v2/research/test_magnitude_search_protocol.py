@@ -36,6 +36,7 @@ def run_wire(progress=lambda *args: None):
     ("print('not JSON')", "EXPERIMENT_IDENTITY_CONFLICT", "search worker protocol differs"),
     ("print('[]')", "EXPERIMENT_IDENTITY_CONFLICT", "search worker protocol differs"),
     ("print('null')", "EXPERIMENT_IDENTITY_CONFLICT", "search worker protocol differs"),
+    ("print('{}')", "EXPERIMENT_IDENTITY_CONFLICT", "search worker protocol differs"),
     ("print('{\"event\":\"succeeded\",\"forecasts\":[]}\\n{\"event\":\"failed\"}')",
         "EXPERIMENT_IDENTITY_CONFLICT", "search worker protocol differs"),
     ("pass", "RESOURCE_UNAVAILABLE", "search execution infrastructure is unavailable"),
@@ -61,6 +62,61 @@ def test_child_receives_only_fit_inputs_and_success_removes_scratch(monkeypatch)
     assert request == {"inputs": {"features": [], "training": []}, "inner": {},
                        "plan": {"horizons": [1]}, "execution": {}}
     assert child.returncode == 0
+    assert not scratch.exists()
+
+
+@pytest.mark.parametrize("event", ["started", "completed"])
+@pytest.mark.parametrize("malformation", ["missing-fit", "extra-key"])
+def test_malformed_progress_refuses_before_callback_and_removes_scratch(monkeypatch, event, malformation):
+    message = {"event": event}
+    if malformation == "extra-key":
+        message.update(fit={}, extra=True)
+    terminal = {"event": "succeeded", "forecasts": []}
+    wire = json.dumps(message) + "\n" + json.dumps(terminal)
+    observed = wire_child(monkeypatch, f"print({wire!r}, flush=True)")
+    progress = []
+    with pytest.raises(OpsError) as caught:
+        run_wire(lambda *args: progress.append(args))
+    assert caught.value.problem == fail(
+        "RESOURCE_UNAVAILABLE", "search execution infrastructure is unavailable").problem
+    assert progress == []
+    child, scratch, _ = observed[0]
+    assert child.poll() is not None
+    assert not scratch.exists()
+
+
+def test_post_eof_wait_timeout_is_typed_and_kills_and_reaps_child(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(execution.time, "monotonic", lambda: now[0])
+    popen = subprocess.Popen
+    original_wait = popen.wait
+    observed = wire_child(monkeypatch, "import os, time; os.close(1); time.sleep(60)")
+    original_read = execution.os.read
+    wait_timeouts = []
+
+    def read(fd, count):
+        chunk = original_read(fd, count)
+        # Popen also reads its error pipe before the launched child is recorded.
+        if observed and fd == observed[0][0].stdout.fileno() and not chunk:
+            now[0] += LIMITS["wall_seconds"] + 1
+        return chunk
+
+    def wait(child, timeout=None):
+        if timeout is not None:
+            wait_timeouts.append(timeout)
+        return original_wait(child, timeout=timeout)
+
+    monkeypatch.setattr(execution.os, "read", read)
+    monkeypatch.setattr(popen, "wait", wait)
+    with pytest.raises(OpsError) as caught:
+        run_wire()
+    assert caught.value.problem == fail(
+        "RESOURCE_LIMIT_EXCEEDED", "search execution exceeded its resource limits").problem
+    assert wait_timeouts == [0]
+    child, scratch, _ = observed[0]
+    assert child.returncode == -signal.SIGKILL
+    with pytest.raises(ChildProcessError):
+        execution.os.waitpid(child.pid, execution.os.WNOHANG)
     assert not scratch.exists()
 
 
@@ -133,3 +189,15 @@ def test_affinity_unavailable_is_typed(monkeypatch, available):
     with pytest.raises(OpsError) as caught:
         execution.execution_limits(LIMITS)
     assert caught.value.problem == fail("RESOURCE_UNAVAILABLE", "search execution requires Linux resource containment").problem
+
+
+def test_parent_affinity_oserror_is_typed(monkeypatch):
+    def affinity(pid):
+        assert pid == 0
+        raise OSError("synthetic affinity failure")
+
+    monkeypatch.setattr(execution.os, "sched_getaffinity", affinity)
+    with pytest.raises(OpsError) as caught:
+        execution.execution_limits(LIMITS)
+    assert caught.value.problem == fail(
+        "RESOURCE_UNAVAILABLE", "search execution requires Linux resource containment").problem
