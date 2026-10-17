@@ -91,6 +91,11 @@ Bumped to v11: ``tests/test_v2_serving_fold_loader.py`` moved to
 the fixed selector retains that path and package counts remain historical,
 not a fresh coverage measurement.
 
+Bumped to v12: tests/test_v2_serving_bridge.py moved to tests/v2/serving/
+(registered through PHASE1_RENAMED). The declared file list and measurement
+identity change; package counts remain historical, not a fresh coverage
+measurement.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
@@ -116,7 +121,9 @@ to derive this from, unlike phase1/phase2), kept only if it exists on disk.
 produce the ``coverage_receipt_ref`` evidence document and
 ``rearchitecture_phase3_evidence.py`` calls ``phase3_coverage_findings`` to
 ratchet it, reusing this module's ``package_counts`` rather than
-reimplementing it.
+reimplementing it. The baseline schema was bumped to v1.1 when two
+fixed-suite paths relocated under tests/v2/serving/; counts remain
+historical.
 """
 from __future__ import annotations
 
@@ -182,7 +189,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v11"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v12"
 
 
 # Baseline tests whose file was renamed (not just moved) after the baseline was written.
@@ -585,7 +592,7 @@ def phase2_validate_measurement(measured, root=ROOT, registry=None):
 
 PHASE3_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase3_baseline.json"
 PHASE3_COVERAGE_SCHEMA = "phase3_coverage.v1.0"
-PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.0"
+PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.1"
 
 #: A scope choice (no phase3_acceptance.json "tests" registry exists to
 #: derive this from, unlike phase1/phase2) -- every real test file that

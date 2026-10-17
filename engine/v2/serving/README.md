@@ -315,7 +315,7 @@ the mock disagree, §6 wins":**
   src/api/client.ts` sends) succeeds on every route, not just proves the
   logic exists.
 
-<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, get_event, event_query_hash, projection_binding, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, api, create_app, ApiError, open_index_untranslated, legacy_bundle, load_legacy_bundle, load_score_document, read_score_bytes, read_capped_bytes, MAX_ARTIFACT_BYTES, LegacyBundleError, score_projection, legacy_score_projection -->
+<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, get_event, event_query_hash, projection_binding, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, api, create_app, ApiError, open_index_untranslated, legacy_bundle, load_legacy_bundle, load_score_document, parse_score_document, read_score_bytes, read_capped_bytes, MAX_ARTIFACT_BYTES, LegacyBundleError, score_projection, legacy_score_projection -->
 
 ## Consumers
 

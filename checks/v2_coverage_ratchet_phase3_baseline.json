@@ -1,5 +1,5 @@
 {
-  "schema_version": "phase3_coverage_baseline.v1.0",
+  "schema_version": "phase3_coverage_baseline.v1.1",
   "suite": [
     "tests/v2/serving/test_v2_serving_api.py",
     "tests/v2/serving/test_serving_root_current.py",

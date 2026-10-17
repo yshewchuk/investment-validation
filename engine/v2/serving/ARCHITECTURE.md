@@ -19,7 +19,7 @@ The [README](README.md) lists the checked exports (the only names other packages
   `get_release`, `list_events`, `event_scores`, `get_event`, `get_score_detail`,
   `event_query_hash`, `ServingIndexError`, `DEFAULT_PAGE_SIZE`, `MAX_PAGE_SIZE`.
 - `bridge`: `build_bridges`, `LEGACY_DISPLAY_MAPPING_V1`; `legacy_bundle`: `load_legacy_bundle`,
-  `load_score_document`, `read_score_bytes`, `read_capped_bytes`, `MAX_ARTIFACT_BYTES`,
+  `load_score_document`, `parse_score_document`, `read_score_bytes`, `read_capped_bytes`, `MAX_ARTIFACT_BYTES`,
   `LegacyBundleError`; `score_projection.legacy_score_projection`.
 
 Not in the README's checked list, so not part of the public interface: the route
@@ -50,7 +50,7 @@ loads such a row (current-release discovery, the pinned release, events and scor
 `SERVING_INDEX_UNREADABLE` (503, retryable; the trigger is a `DocumentError` from a stored
 release that fails its contract, which includes an older schema, in addition to the
 `sqlite3.Error`/`json.JSONDecodeError` triggers in the failure table), including the
-native-parity freshness read of such a row. The freshness check reports `available` only when
+native-parity freshness read of such a row. The freshness check reports `available` when the current release is readable and not older than the report, and otherwise only when
 the resolver raises a non-`SERVING_INDEX_UNREADABLE` `ApiError`/`OSError`, the pointer is absent,
 or a `sqlite3.OperationalError` occurs on re-open or while reading the release (the release is
 treated as absent). A resolver `SERVING_INDEX_UNREADABLE` (including a stored old-schema release)
