@@ -16,6 +16,7 @@ from engine.v2.data.repository import Repository
 from engine.v2.foundation import (
     ArtifactStore,
     SystemClock,
+    canonical_json,
     content_hash,
     from_document,
     to_document,
@@ -71,11 +72,11 @@ def journal_slots(case):
         "SELECT slot, ref_json FROM magnitude_search_records ORDER BY slot")]
 
 
-def assert_source_seals(case):
+def assert_source_seals(case, year="2024"):
     shared = {"experiments/magnitude_search_evidence.py", "experiments/magnitude_search_trials.py",
               "experiments/magnitude_search_execution.py", "experiments/magnitude_search_worker.py"}
     for sources, required in ((case.recorder._read("seal")["recorder_sources"], shared),
-            (slot(case, "start")["outer_sources"], shared | {"experiments/magnitude_search_outer.py"})):
+            (slot(case, "start", year)["outer_sources"], shared | {"experiments/magnitude_search_outer.py"})):
         assert sources.keys() >= required
         assert sources == {name: "sha256:" + hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
                            for name in sources}
@@ -125,6 +126,13 @@ def assert_fold_oracle(case, result, year):
     selection = next(item for item in case.selected["selections"] if item["outer_year"] == year)
     candidate = next(item for item in case.plan["candidates"]
                      if item["candidate_id"] == selection["selected_candidate_id"])
+    started = slot(case, "start", year)
+    assert_source_seals(case, year)
+    expected_start = {"outer_id": content_hash([case.plan["plan_id"], year]), "plan_id": case.plan["plan_id"],
+        "outer_year": year, "selection_id": content_hash(case.selected), "candidate": candidate,
+        "limits": LIMITS, "outer_sources": started["outer_sources"],
+        "prospective_candidate_id": case.selected["prospective_candidate_id"]}
+    assert canonical_json(started) == canonical_json(expected_start)
     inputs, execution, validation = (slot(case, name, year) for name in ("inputs", "execution", "validation"))
     assert {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]} == targets
     training_inputs = expected_training_receipt(case, year)
