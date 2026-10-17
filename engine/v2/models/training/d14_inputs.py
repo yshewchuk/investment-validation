@@ -11,7 +11,7 @@ from engine.v2.contracts import ArtifactRef
 from engine.v2.data import computed_moves, errors, reference_catalog, repository
 from engine.v2.foundation import ArtifactError, ArtifactStore
 
-from .d14_dataset import _calculate_frame
+from .d14_dataset import calculate_frame, validate_role
 
 MAX_CALENDAR_BYTES = 16 * 1024 * 1024
 
@@ -19,6 +19,8 @@ MAX_CALENDAR_BYTES = 16 * 1024 * 1024
 def _calendar(store, reference):
     if reference.byte_size > MAX_CALENDAR_BYTES:
         raise errors.fail("RESULT_LIMIT_EXCEEDED", "D14 calendar exceeds its byte bound")
+    # The original reference importer publishes every file, including CSV,
+    # under parquet_fragment.v1; preserve that registered artifact identity.
     digest = reference.content_hash.removeprefix("sha256:")
     ref = ArtifactRef(artifact_id=reference.object_id, content_hash=reference.content_hash,
                       byte_size=reference.byte_size, schema_ref="parquet_fragment.v1",
@@ -39,6 +41,7 @@ def _calendar(store, reference):
 
 def build_d14_dataset(role, *, catalog, artifact_root, snapshot_id, receipt_id):
     """Load one pinned calendar and snapshot, then attach source resume identity."""
+    validate_role(role)
     try:
         conn = sqlite3.connect(Path(catalog).resolve().as_uri() + "?mode=ro", uri=True)
     except sqlite3.Error as exc:
@@ -59,7 +62,7 @@ def build_d14_dataset(role, *, catalog, artifact_root, snapshot_id, receipt_id):
             raise errors.fail("CONTRACT_MISMATCH", "D14 receipt must pin exactly one calendar")
         calendar_ref = calendars[0]
         calendar = _calendar(store, calendar_ref)
-        frame = _calculate_frame(reader, snapshot, calendar=calendar, role=role)
+        frame = calculate_frame(reader, snapshot, calendar=calendar, role=role)
         frame.attrs["training_inputs"] = {
             "schema_version": "d14.snapshot_dataset.v1", "snapshot_id": snapshot.snapshot_id,
             "receipt_id": receipt_id, "calendar_hash": calendar_ref.content_hash,

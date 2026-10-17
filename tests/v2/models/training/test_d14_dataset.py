@@ -24,7 +24,7 @@ from engine.v2.models.training import (
     receipt_issues,
     run_training_job,
 )
-from engine.v2.models.training.d14_dataset import _calculate_frame
+from engine.v2.models.training.d14_dataset import calculate_frame
 from tests.v2.models.training.d14_support import forbidden, legacy_frame
 from tests.v2.models.training.d14_support import pinned as pinned
 from tools import phase5_d14_inputs
@@ -54,7 +54,8 @@ def test_exact_frame_masks_folds_receipts_and_single_scan(pinned, role, monkeypa
         assert receipt_issues(_recipe(role), *b) == ()
     repo = pinned["repository"]
     calendar = native_trading_calendar({"index": pd.DataFrame({"date": pinned["days"]})})
-    _calculate_frame(repo, pinned["snapshot"], calendar=calendar, role=role)
+    calculated = calculate_frame(repo, pinned["snapshot"], calendar=calendar, role=role)
+    assert "training_inputs" not in calculated.attrs
     counters = repo.read_counters.snapshot()
     assert counters["daily_market"]["scans"] == 1
 
@@ -118,7 +119,7 @@ def test_future_quotes_do_not_leak_into_features_or_labels(pinned, cutoff, monke
 
     baseline = phase5_d14_inputs.build_dataset("runup_move", **pinned["inputs"])
     event = baseline[baseline.ticker == "AMC"].iloc[0]
-    original = d14_dataset._rows
+    original = d14_dataset.input_rows
 
     def rows(*args, **kwargs):
         for row in original(*args, **kwargs):
@@ -127,7 +128,7 @@ def test_future_quotes_do_not_leak_into_features_or_labels(pinned, cutoff, monke
                 row = {**row, "implied_move": 900.0, "spot": 900.0, "iv30": 900.0}
             yield row
 
-    monkeypatch.setattr(d14_dataset, "_rows", rows)
+    monkeypatch.setattr(d14_dataset, "input_rows", rows)
     changed = phase5_d14_inputs.build_dataset("runup_move", **pinned["inputs"])
     columns = list(_recipe("runup_move").features)
     if cutoff == "last_pre_print":
@@ -187,12 +188,16 @@ def test_native_cli_plan_is_idempotent_with_legacy_readers_disabled(pinned, monk
 
 
 @pytest.mark.parametrize("root", ("data", "artifact"))
-def test_cli_respects_configured_data_root(pinned, monkeypatch, tmp_path, root):
+@pytest.mark.parametrize("child", (False, True))
+def test_cli_respects_configured_data_root(pinned, monkeypatch, tmp_path, root, child):
     from engine import paths
 
     alternate = tmp_path / "alternate-root" / "data"
     monkeypatch.setattr(paths, "DATA", alternate)
-    unsafe = (alternate if root == "data" else pinned["inputs"]["artifact_root"]) / "unsafe"
+    unsafe = alternate if root == "data" else pinned["inputs"]["artifact_root"]
+    if child:
+        unsafe /= "unsafe"
+    monkeypatch.setattr(phase5_d14_inputs, "build_dataset", forbidden)
     args = ["--role", "implied_t1", "--out", str(unsafe), "--plan-only"]
     for name, value in pinned["inputs"].items():
         args += ["--" + name.replace("_", "-"), str(value)]
@@ -206,8 +211,8 @@ def test_cli_respects_configured_data_root(pinned, monkeypatch, tmp_path, root):
 def test_no_decisions_refuse_before_history_or_daily_reads(pinned, case, monkeypatch):
     from engine.v2.models.training import d14_dataset
 
-    original = d14_dataset._scan
-    original_rows = d14_dataset._rows
+    original = d14_dataset.input_frame
+    original_rows = d14_dataset.input_rows
     calls = []
 
     def rows(*args, **kwargs):
@@ -226,8 +231,8 @@ def test_no_decisions_refuse_before_history_or_daily_reads(pinned, case, monkeyp
             events["event_date"] = pd.Timestamp("2000-01-01")
         return events
 
-    monkeypatch.setattr(d14_dataset, "_scan", scan)
-    monkeypatch.setattr(d14_dataset, "_rows", rows)
+    monkeypatch.setattr(d14_dataset, "input_frame", scan)
+    monkeypatch.setattr(d14_dataset, "input_rows", rows)
     with pytest.raises(errors.DataError, match="no eligible decision") as err:
         phase5_d14_inputs.build_dataset("implied_t1", **pinned["inputs"])
     assert err.value.code == "CONTRACT_MISMATCH"
@@ -238,5 +243,5 @@ def test_wrong_snapshot_ref_refuses_before_reads(pinned):
     calendar = native_trading_calendar({"index": pd.DataFrame({"date": pinned["days"]})})
     forged = dataclasses.replace(pinned["snapshot"], calendar_version="different")
     with pytest.raises(errors.DataError, match="catalog identity") as err:
-        _calculate_frame(pinned["repository"], forged, calendar=calendar, role="implied_t1")
+        calculate_frame(pinned["repository"], forged, calendar=calendar, role="implied_t1")
     assert err.value.code == "IDENTITY_CONFLICT"

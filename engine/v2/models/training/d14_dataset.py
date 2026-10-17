@@ -31,7 +31,7 @@ _TABLES = ("earnings_events", "feature_panel", "daily_market")
 _EVENT_START, _WINDOW_END = "2017-01-01", "2027-01-01"
 
 
-def _rows(repository, snapshot, table, columns, *, start, end, cap=500000):
+def input_rows(repository, snapshot, table, columns, *, start, end, cap=500000):
     """One explicitly bounded read; Repository owns contract and object checks."""
     contract = repository.table_contract(snapshot, table)
     version = snapshot.table_versions[table]
@@ -58,11 +58,12 @@ def _rows(repository, snapshot, table, columns, *, start, end, cap=500000):
             yield row
 
 
-def _scan(repository, snapshot, table, columns, **kwargs):
-    return pd.DataFrame(_rows(repository, snapshot, table, columns, **kwargs), columns=columns)
+def input_frame(repository, snapshot, table, columns, **kwargs):
+    """Materialize input_rows as a frame with the requested column order."""
+    return pd.DataFrame(input_rows(repository, snapshot, table, columns, **kwargs), columns=columns)
 
 
-def _decisions(events, calendar):
+def decision_rows(events, calendar):
     """Same supplied-session index arithmetic as legacy's pre-print/shift pair."""
     try:
         days = pd.DatetimeIndex(getattr(calendar, "days", ()))
@@ -89,11 +90,12 @@ def _decisions(events, calendar):
                                        "entry_date", "days_before_print", "year"))
 
 
-def _daily_features(frame, repository, snapshot):
+def daily_features(frame, repository, snapshot):
+    """Attach entry/exit state in place from one bounded native daily scan."""
     for column in (*DAILY_COLUMNS, "im_t1", "exit_spot"):
         frame[column] = np.nan
     groups = {ticker: group for ticker, group in frame.groupby("ticker", sort=True)}
-    stream = _rows(repository, snapshot, "daily_market",
+    stream = input_rows(repository, snapshot, "daily_market",
                    ("ticker", "date", "src_iv", *panel_math.DAILY_STATE_FIELDS),
                    start="2016-01-01", end=_WINDOW_END, cap=20000000)
     for ticker, stream_rows in groupby(stream, key=lambda row: row["ticker"]):
@@ -115,39 +117,48 @@ def _daily_features(frame, repository, snapshot):
     return frame
 
 
-def _calculate_frame(repository, snapshot, *, calendar, role):
-    """Build either monthly frame; never read a mutable head or legacy file.
+def validate_role(role):
+    """Refuse an unsupported monthly role before any input read."""
+    if role not in ("implied_t1", "runup_move"):
+        raise errors.fail("CONTRACT_MISMATCH", "D14 datasets support only implied_t1 and runup_move")
 
-    The supplied calendar must come from the pinned original calendar object.
+
+def calculate_frame(repository, snapshot, *, calendar, role):
+    """Calculate a frame from caller-admitted inputs, without a source receipt.
+
+    This helper checks the supplied snapshot against its repository, for direct
+    callers too. It does not certify calendar provenance or attach training_inputs;
+    use build_d14_dataset for the receipt-verified training boundary.
     Snapshot provenance and session cutoffs do not certify original intraday
     availability or independently validate the stored historical aggregates.
     """
-    if role not in ("implied_t1", "runup_move"):
-        raise errors.fail("CONTRACT_MISMATCH", "D14 datasets support only implied_t1 and runup_move")
+    validate_role(role)
     if repository.resolve(snapshot.snapshot_id) != snapshot:
         raise errors.fail("IDENTITY_CONFLICT", "D14 snapshot differs from its catalog identity")
     if any(table not in snapshot.table_versions for table in _TABLES):
         raise errors.fail("CONTRACT_MISMATCH", "D14 snapshot lacks a required input table")
-    events = _scan(repository, snapshot, "earnings_events",
+    events = input_frame(repository, snapshot, "earnings_events",
                    ("event_id", "ticker", "event_date", "session", "year"),
                    start=_EVENT_START, end=_WINDOW_END)
     # Legacy reads year partitions in order, with event_id order inside each.
     events = events.sort_values(["year", "event_id"], kind="stable")
-    frame = _decisions(events, calendar)
+    frame = decision_rows(events, calendar)
     if frame.empty:
         raise errors.fail("CONTRACT_MISMATCH", "D14 inputs contain no eligible decision rows")
-    history = _scan(repository, snapshot, "feature_panel", ("ticker", "date", *HISTORY_COLUMNS),
+    history = input_frame(repository, snapshot, "feature_panel", ("ticker", "date", *HISTORY_COLUMNS),
                     start=_EVENT_START, end=_WINDOW_END)
     # Arrow's all-null/empty projection otherwise becomes object dtype, changing
     # the legacy dataset fingerprint even though the missing mask is identical.
     for column in HISTORY_COLUMNS:
         dtype = "int64" if column in ("n_prior", "signed_streak") else "float64"
+        if dtype == "int64" and history[column].isna().any():
+            raise errors.fail("CONTRACT_MISMATCH", "D14 integer history contains nulls")
         history[column] = pd.to_numeric(history[column]).astype(dtype)
     history["date"] = pd.to_datetime(history["date"])
     frame["event_date"] = pd.to_datetime(frame["event_date"])
     frame = frame.merge(history.rename(columns={"date": "event_date"}),
                         on=["ticker", "event_date"], how="left", validate="many_to_one")
-    frame = _daily_features(frame, repository, snapshot)
+    frame = daily_features(frame, repository, snapshot)
     frame["days_to_print"] = (frame["event_date"] - pd.to_datetime(frame["entry_date"])).dt.days.astype(float)
     for column in ("iv30", "iv10", "exern_iv30", "exern_iv10"):
         frame[f"pre_{column}"] = frame[column]

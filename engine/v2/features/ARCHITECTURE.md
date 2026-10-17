@@ -313,6 +313,8 @@ uses no implicit clock, and owns no cache.
 
 ## Dependencies and callers
 
+- `engine.v2.models.training.d14_dataset` calls `panel_math.daily_state_lookup`
+  for D14 entry/exit observations; stored historical panel columns remain inputs.
 - `panel_math` depends only on `numpy` and `pandas` (both third-party). It
   imports nothing from `engine.v2.data`, `engine.v2.contracts`,
   `engine.v2.foundation`, or any legacy `engine.*` module, and no legacy

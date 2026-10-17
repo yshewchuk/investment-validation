@@ -107,6 +107,9 @@ def pinned(tmp_path, request):
     # Original yfinance CSV's three header rows, then dates. Exact immutable object.
     data = ("Price,Close\nTicker,^GSPC\nDate,\n" +
             "\n".join(f"{d.date()},100" for d in days) + "\n").encode()
+    if case in ("calendar_at_limit", "calendar_past_limit"):
+        size = 16 * 1024 * 1024 + (case == "calendar_past_limit")
+        data += b"\n" * (size - len(data))
     obj = publish_bytes(store, data if calendar_bytes is None else calendar_bytes)
     ref = ReferenceInput(kind="model_registry" if case == "no_calendar" else "calendar", legacy_path="data/raw/yf/index.csv",
                          object_id=obj.object_id, content_hash=obj.content_hash, byte_size=obj.byte_size)
