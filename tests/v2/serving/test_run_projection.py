@@ -122,6 +122,18 @@ def _spy_row_source(calls: list):
     return spy
 
 
+def _assert_no_release_row(serving_root: Path) -> None:
+    index_path = serving_root / "serving.sqlite"
+    assert not index_path.exists() or index_path.stat().st_size == 0
+    if index_path.exists():
+        serving_conn = projections.connect(str(index_path))
+        try:
+            assert serving_conn.execute(
+                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
+        finally:
+            serving_conn.close()
+
+
 # 1. run_projection(...) == main([...])'s printed JSON, fresh serving root each
 def test_run_projection_matches_main_cli_print_for_same_inputs(tmp_path, capsys):
     from tools.v2_dashboard_project import main
@@ -214,15 +226,7 @@ def test_native_plan_without_native_inputs_raises_and_writes_no_release(tmp_path
                                native_inputs=None))
     assert error.value.code == "INVALID_REQUEST"
 
-    index_path = serving_root / "serving.sqlite"
-    assert not index_path.exists() or index_path.stat().st_size == 0
-    if index_path.exists():
-        serving_conn = projections.connect(str(index_path))
-        try:
-            assert serving_conn.execute(
-                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
-        finally:
-            serving_conn.close()
+    _assert_no_release_row(serving_root)
 
 
 # 4b. a plan that is a JSON list, not JSON at all, or unreadable is INVALID_REQUEST
@@ -242,16 +246,7 @@ def test_run_projection_refuses_list_or_non_json_plan(tmp_path):
             run_projection(**_args(inputs, serving_root, nightly_plan=plan_path))
         assert error.value.code == "INVALID_REQUEST"
         assert error.value.problem.message == message
-
-    index_path = serving_root / "serving.sqlite"
-    assert not index_path.exists() or index_path.stat().st_size == 0
-    if index_path.exists():
-        serving_conn = projections.connect(str(index_path))
-        try:
-            assert serving_conn.execute(
-                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
-        finally:
-            serving_conn.close()
+        _assert_no_release_row(serving_root)
 
 
 # 9. no-plan run records the default legacy_bundle row source
@@ -277,15 +272,7 @@ def test_run_projection_unknown_bundle_format_raises_and_writes_no_release(tmp_p
         run_projection(**_args(inputs, serving_root, bundle_format="bogus"))
     assert error.value.code == "INVALID_REQUEST"
 
-    index_path = serving_root / "serving.sqlite"
-    assert not index_path.exists() or index_path.stat().st_size == 0
-    if index_path.exists():
-        serving_conn = projections.connect(str(index_path))
-        try:
-            assert serving_conn.execute(
-                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
-        finally:
-            serving_conn.close()
+    _assert_no_release_row(serving_root)
 
 
 # 11. read_capped_bytes refuses past the cap and returns the bytes up to it
@@ -296,8 +283,9 @@ def test_read_capped_refuses_over_cap_and_returns_at_cap(tmp_path):
     over_cap.write_bytes(b"0123456789A")
 
     assert read_capped_bytes(at_cap, cap=10) == b"0123456789"
-    with pytest.raises(LegacyBundleError):
+    with pytest.raises(LegacyBundleError) as exc:
         read_capped_bytes(over_cap, cap=10)
+    assert exc.value.code == "ARTIFACT_TOO_LARGE"
 
     inputs = _flat_inputs(tmp_path / "inputs")
     missing_plan = tmp_path / "missing_plan.json"
@@ -307,15 +295,43 @@ def test_read_capped_refuses_over_cap_and_returns_at_cap(tmp_path):
     assert error.value.code == "INVALID_REQUEST"
     assert error.value.problem.message == "nightly plan is unreadable"
 
-    index_path = serving_root / "serving.sqlite"
-    assert not index_path.exists() or index_path.stat().st_size == 0
-    if index_path.exists():
-        serving_conn = projections.connect(str(index_path))
-        try:
-            assert serving_conn.execute(
-                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
-        finally:
-            serving_conn.close()
+    _assert_no_release_row(serving_root)
+
+
+# 11b. read_capped_bytes refuses a negative cap before opening the file
+def test_read_capped_refuses_negative_cap(tmp_path):
+    path = tmp_path / "any.bin"
+    path.write_bytes(b"x")
+    with pytest.raises(ValueError):
+        read_capped_bytes(path, cap=-2)
+
+
+# 11c. a symlinked score.json -> INVALID_REQUEST, no release row
+def test_run_projection_refuses_symlinked_score_json(tmp_path):
+    inputs = _flat_inputs(tmp_path / "inputs")
+    link = tmp_path / "score.json"
+    link.symlink_to(inputs["score_json"])
+    serving_root = tmp_path / "serving_symlink"
+
+    with pytest.raises(OpsError) as error:
+        run_projection(**_args(inputs, serving_root, score_json=link))
+    assert error.value.code == "INVALID_REQUEST"
+    assert "SYMLINK_REFUSED" in error.value.problem.message
+    assert link.name in error.value.problem.message
+    _assert_no_release_row(serving_root)
+
+
+# 11d. a missing score.json -> INVALID_REQUEST, no release row
+def test_run_projection_refuses_missing_score_json(tmp_path):
+    inputs = _flat_inputs(tmp_path / "inputs")
+    serving_root = tmp_path / "serving_missing_score"
+
+    with pytest.raises(OpsError) as error:
+        run_projection(**_args(inputs, serving_root,
+                               score_json=tmp_path / "missing_score.json"))
+    assert error.value.code == "INVALID_REQUEST"
+    assert "MISSING_FILE" in error.value.problem.message
+    _assert_no_release_row(serving_root)
 
 
 # 5. run_projection records the plan's row_sources on the stored release, and
@@ -427,15 +443,7 @@ def test_run_projection_oversized_nightly_plan_raises_and_writes_no_release(tmp_
     assert error.value.code == "INVALID_REQUEST"
     assert error.value.problem.message == "nightly plan exceeds 1 MiB"
 
-    index_path = serving_root / "serving.sqlite"
-    assert not index_path.exists() or index_path.stat().st_size == 0
-    if index_path.exists():
-        serving_conn = projections.connect(str(index_path))
-        try:
-            assert serving_conn.execute(
-                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
-        finally:
-            serving_conn.close()
+    _assert_no_release_row(serving_root)
 
 
 # 8. nightly plan size boundary: exactly 1 MiB is allowed, one byte over refused
@@ -462,15 +470,7 @@ def test_run_projection_plan_size_boundary(tmp_path):
         run_projection(**_args(inputs, serving_root, nightly_plan=over_path))
     assert error.value.code == "INVALID_REQUEST"
 
-    index_path = serving_root / "serving.sqlite"
-    assert not index_path.exists() or index_path.stat().st_size == 0
-    if index_path.exists():
-        serving_conn = projections.connect(str(index_path))
-        try:
-            assert serving_conn.execute(
-                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
-        finally:
-            serving_conn.close()
+    _assert_no_release_row(serving_root)
 
 
 # 9. a no-plan run records the legacy_bundle row source on the stored release
@@ -497,15 +497,7 @@ def test_run_projection_refuses_bogus_bundle_format(tmp_path):
         run_projection(**_args(inputs, serving_root, bundle_format="bogus"))
     assert error.value.code == "INVALID_REQUEST"
 
-    index_path = serving_root / "serving.sqlite"
-    assert not index_path.exists() or index_path.stat().st_size == 0
-    if index_path.exists():
-        serving_conn = projections.connect(str(index_path))
-        try:
-            assert serving_conn.execute(
-                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
-        finally:
-            serving_conn.close()
+    _assert_no_release_row(serving_root)
 
 
 # 12. a directory as the nightly plan -> INVALID_REQUEST, no release row
@@ -519,15 +511,7 @@ def test_run_projection_plan_path_is_a_directory_refused(tmp_path):
         run_projection(**_args(inputs, serving_root, nightly_plan=plan_dir))
     assert error.value.code == "INVALID_REQUEST"
 
-    index_path = serving_root / "serving.sqlite"
-    assert not index_path.exists() or index_path.stat().st_size == 0
-    if index_path.exists():
-        serving_conn = projections.connect(str(index_path))
-        try:
-            assert serving_conn.execute(
-                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
-        finally:
-            serving_conn.close()
+    _assert_no_release_row(serving_root)
 
 
 # 13. the preview input read is capped: over it -> INVALID_REQUEST, no release row
@@ -539,25 +523,23 @@ def test_run_projection_over_cap_preview_input_refused(tmp_path, monkeypatch):
     with pytest.raises(OpsError) as error:
         run_projection(**_args(inputs, serving_root))
     assert error.value.code == "INVALID_REQUEST"
+    assert inputs["preview_input"].name in error.value.problem.message
+    assert "ARTIFACT_TOO_LARGE" in error.value.problem.message
 
-    index_path = serving_root / "serving.sqlite"
-    assert not index_path.exists() or index_path.stat().st_size == 0
-    if index_path.exists():
-        serving_conn = projections.connect(str(index_path))
-        try:
-            assert serving_conn.execute(
-                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
-        finally:
-            serving_conn.close()
+    _assert_no_release_row(serving_root)
 
 
 # 14. a cap larger than the preview input but smaller than score.json refuses
 def test_run_projection_over_cap_score_json_refused(tmp_path, monkeypatch):
     inputs = _flat_inputs(tmp_path / "inputs")
     preview_size = inputs["preview_input"].stat().st_size
-    score_size = inputs["score_json"].stat().st_size
-    if score_size <= preview_size:
-        pytest.skip("score.json is not larger than the preview input")
+    score_path = inputs["score_json"]
+    if score_path.stat().st_size <= preview_size:
+        score_path.write_bytes(
+            score_path.read_bytes()
+            + b" " * (preview_size - score_path.stat().st_size + 1))
+    score_size = score_path.stat().st_size
+    assert score_size > preview_size
 
     cap = preview_size
     assert preview_size <= cap < score_size
@@ -567,13 +549,7 @@ def test_run_projection_over_cap_score_json_refused(tmp_path, monkeypatch):
     with pytest.raises(OpsError) as error:
         run_projection(**_args(inputs, serving_root))
     assert error.value.code == "INVALID_REQUEST"
+    assert score_path.name in error.value.problem.message
+    assert "ARTIFACT_TOO_LARGE" in error.value.problem.message
 
-    index_path = serving_root / "serving.sqlite"
-    assert not index_path.exists() or index_path.stat().st_size == 0
-    if index_path.exists():
-        serving_conn = projections.connect(str(index_path))
-        try:
-            assert serving_conn.execute(
-                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
-        finally:
-            serving_conn.close()
+    _assert_no_release_row(serving_root)

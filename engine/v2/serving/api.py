@@ -842,13 +842,33 @@ def open_index_untranslated(serving_db):
     return projections.connect(str(serving_db))
 
 
+class _ParityIndexUnreadable(Exception):
+    """A resolver's ``SERVING_INDEX_UNREADABLE`` ApiError, surfaced past the
+    freshness check's "any ApiError means unknown current" rule."""
+
+
 def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> str:
-    """Classify report freshness; an ApiError/OSError resolver means unknown current."""
+    """Classify report freshness; an ApiError/OSError resolver means unknown current.
+
+    The production resolver's ``SERVING_INDEX_UNREADABLE`` (a stored
+    old-schema current release) must not read as "available", so it is
+    re-raised as :class:`_ParityIndexUnreadable` by ``resolve`` below and
+    turned into the 503 here; every other ``ApiError``/``OSError`` still
+    means an unknown current release.
+    """
+    def resolve() -> str | None:
+        try:
+            return resolve_current()
+        except ApiError as exc:
+            if exc.problem.get("code") == "SERVING_INDEX_UNREADABLE":
+                raise _ParityIndexUnreadable() from None
+            raise
+
     try:
         return native_parity_projection.native_parity_freshness(
-            serving_db, resolve_current, as_of, open_index_untranslated, projections.get_release,
-            (ApiError, OSError))
-    except DocumentError:
+            serving_db, resolve, as_of, open_index_untranslated, projections.get_release,
+            (ApiError, OSError, _ParityIndexUnreadable))
+    except (_ParityIndexUnreadable, DocumentError):
         raise _index_unreadable() from None
 
 

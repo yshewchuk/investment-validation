@@ -182,6 +182,13 @@ def test_l03_every_new_contract_round_trips_exactly(sample):
     assert from_document(type(sample), to_document(sample)) == sample
 
 
+def test_l03_preview_release_schema_version_is_pinned_to_the_literal():
+    """Pin the wire string the bridge writes, not the ``PREVIEW_RELEASE_V1``
+    code constant that also defines it -- a rename of that constant must not
+    silently change the release schema version clients and fixtures read."""
+    assert _preview_release().schema_version == "preview_release.v1.1"
+
+
 def test_l03_unknown_field_is_refused():
     doc = to_document(_bridge_sample())
     doc["not_a_real_field"] = 1

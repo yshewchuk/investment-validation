@@ -458,6 +458,35 @@ def test_native_parity_with_stripped_current_release_is_a_typed_503(live, tmp_pa
         _stop(server, thread)
 
 
+def test_native_parity_with_stripped_current_release_via_publication_resolver_is_a_typed_503(live, tmp_path):
+    """The same stripped-current-release refusal as
+    ``test_native_parity_with_stripped_current_release_is_a_typed_503``, but
+    resolved through the PRODUCTION pointer chain rather than an injected
+    ``resolver=lambda``: the fenced ops ``CURRENT`` -> its bound
+    ``projection_binding.json`` -> reverification against the live serving
+    index. Stripping ``row_sources`` makes that reverification raise
+    ``DocumentError``, which the freshness read maps to the same retryable
+    ``SERVING_INDEX_UNREADABLE`` 503 -- never an unhandled 500."""
+    _, serving_root, release_a, _ = live
+    _missing_row_sources_release(serving_root, release_a.release_id)
+    report_path = tmp_path / "native_parity_report.json"
+    report_path.write_text(json.dumps(_native_parity_report_document()))
+    app = create_app(serving_db=str(serving_root / "serving.sqlite"),
+                     store_root=str(serving_root / "objects"),
+                     serving_root=str(serving_root),
+                     publication_root=str(serving_root / "_publication"),
+                     token=TOKEN,
+                     native_parity_report_path=str(report_path))
+    server, thread, base = _start(app)
+    try:
+        code, body, _ = _get(base, "/api/v1/native_parity", token=TOKEN)
+        assert code == 503
+        assert json.loads(body)["code"] == "SERVING_INDEX_UNREADABLE"
+        assert json.loads(body)["retryable"] is True
+    finally:
+        _stop(server, thread)
+
+
 def test_release_current_is_no_store_with_etag_304_for_the_4s_poll(live):
     """The UI polls `/api/v1/releases/current` roughly every 4s (guide §7,
     `ui/src/hooks.ts` `usePinnedRelease`'s background poll) to detect a

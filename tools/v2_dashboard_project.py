@@ -36,6 +36,13 @@ flat`` keeps the pre-P3-4 simplification (one ``<ticker>.json`` file per
 ticker, each a JSON array of ``compact_row``-shaped dicts) for tests that
 predate the real adapter; it leaves ``--preview-input``'s own
 ``bundle_manifest_ref`` untouched.
+
+:func:`run_projection` reads ``score.json`` exactly once through
+:func:`engine.v2.serving.legacy_bundle.read_score_bytes`, the strict reader
+that refuses a missing file or a symlink and caps the read at 64 MiB; the
+same bytes are hashed into the source-provenance check and parsed into the
+release's document. Bundle members are read through the same capped reader
+(``read_capped_bytes``, the 64 MiB cap shared by both).
 """
 from __future__ import annotations
 
@@ -71,6 +78,7 @@ from engine.v2.serving.legacy_bundle import (  # noqa: E402
     load_legacy_bundle,
     parse_score_document,
     read_capped_bytes,
+    read_score_bytes,
 )
 from engine.v2.serving.projections import build_candidate, connect  # noqa: E402
 
@@ -135,15 +143,17 @@ def _read_plan(path: Path) -> dict:
     return plan
 
 
-def _read_input(path: Path) -> bytes:
-    """Read a delivered input artifact through the shared bounded reader.
+def _read_input(path: Path, *, score: bool = False) -> bytes:
+    """Read a delivered input artifact through a shared bounded reader.
 
     ``read_capped_bytes`` refuses anything over its cap with
-    :class:`LegacyBundleError`; the tool reports every such refusal as a typed
-    ``INVALID_REQUEST`` so a bad delivered input stays one failure kind.
+    :class:`LegacyBundleError`, and ``read_score_bytes`` additionally refuses
+    a missing file or a symlink (the score is read through it); the tool
+    reports every such refusal as a typed ``INVALID_REQUEST`` so a bad
+    delivered input stays one failure kind.
     """
     try:
-        return read_capped_bytes(path)
+        return read_score_bytes(path) if score else read_capped_bytes(path)
     except LegacyBundleError as exc:
         raise fail("INVALID_REQUEST", f"{path.name} is unreadable ({exc.code})") from None
 
@@ -323,7 +333,7 @@ def run_projection(*, preview_input: Path, source_provenance: Path | None, score
     preview = from_document(PreviewInput, json.loads(_read_input(preview_input).decode("utf-8")))
     # Read the score bytes once: the same bytes are hashed into the provenance
     # check and parsed into the document the release is built from.
-    score_bytes = _read_input(score_json)
+    score_bytes = _read_input(score_json, score=True)
     score_doc = parse_score_document(score_bytes)
 
     plan: dict | None = None

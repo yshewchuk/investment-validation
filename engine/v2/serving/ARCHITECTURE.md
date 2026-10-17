@@ -19,7 +19,8 @@ The [README](README.md) lists the checked exports (the only names other packages
   `get_release`, `list_events`, `event_scores`, `get_event`, `get_score_detail`,
   `event_query_hash`, `ServingIndexError`, `DEFAULT_PAGE_SIZE`, `MAX_PAGE_SIZE`.
 - `bridge`: `build_bridges`, `LEGACY_DISPLAY_MAPPING_V1`; `legacy_bundle`: `load_legacy_bundle`,
-  `load_score_document`, `LegacyBundleError`; `score_projection.legacy_score_projection`.
+  `load_score_document`, `read_score_bytes`, `read_capped_bytes`, `MAX_ARTIFACT_BYTES`,
+  `LegacyBundleError`; `score_projection.legacy_score_projection`.
 
 Not in the README's checked list, so not part of the public interface: the route
 enumeration `operations.route_table` (with `STATIC_ROUTES`, `PARAMETERIZED_ROUTES`), the
@@ -49,8 +50,11 @@ loads such a row (current-release discovery, the pinned release, events and scor
 `SERVING_INDEX_UNREADABLE` (503, retryable; the trigger is a `DocumentError` from a stored
 release that fails its contract, which includes an older schema, in addition to the
 `sqlite3.Error`/`json.JSONDecodeError` triggers in the failure table), including the
-native-parity freshness read of such a row. Only the freshness check's resolver failure
-(an unresolvable current pointer) and `sqlite3.OperationalError` re-open report `available`. `build_candidate`
+native-parity freshness read of such a row. The freshness check reports `available` only when
+the resolver raises a non-`SERVING_INDEX_UNREADABLE` `ApiError`/`OSError`, the pointer is absent,
+or a `sqlite3.OperationalError` occurs on re-open or while reading the release (the release is
+treated as absent). A resolver `SERVING_INDEX_UNREADABLE` (including a stored old-schema release)
+or a read-time `DocumentError` is the 503 `SERVING_INDEX_UNREADABLE`. `build_candidate`
 refuses invalid `row_sources` with `ValueError` before any write (internal callers only).
 The projection tool exposes `run_projection(...)`; the CLI is a thin wrapper over it.
 
@@ -222,7 +226,7 @@ ceiling, while a larger population retains the lookup limit.
 |---|---|
 | Missing input: identity | No or wrong token: `UNAUTHORIZED` (401). Event-scores and score-detail routes without a release pin: `RELEASE_ID_REQUIRED` (400); no route searches across releases. `GET /events` without a pin uses the current release. |
 | Missing input: data | Unknown release/event/score: 404. No current release: `NO_CURRENT_RELEASE` (503, retryable). Binding that fails re-verification: `CURRENT_BINDING_INVALID` (500, not retryable). Bad filter/limit: `INVALID_REQUEST` (422). |
-| Missing input: files | Absent, indirect or unreadable health file: 503. Analog index missing, failing to open, or outdated: 503 with a `reason_code`; post-open `sqlite3.Error` or `json.JSONDecodeError` during currency checks or analog reads returns `SERVING_INDEX_UNREADABLE` (503, typed JSON). API `sqlite3.Error` while opening the index (except the native-parity freshness check, which reads a `sqlite3.OperationalError` re-open as `available`), or post-open `sqlite3.Error`, `json.JSONDecodeError` or `DocumentError` (a stored release of an older schema) during index projection reads or current-binding verification returns `SERVING_INDEX_UNREADABLE` (503, retryable `Problem`, no raw exception text); connections always close. Artifact decoding failures retain their existing behavior. Parity report absent is `no_report` (200); malformed is `unavailable` (503). Legacy bundle: `LegacyBundleError` with a code, never coerced or dropped. |
+| Missing input: files | Absent, indirect or unreadable health file: 503. Analog index missing, failing to open, or outdated: 503 with a `reason_code`; post-open `sqlite3.Error` or `json.JSONDecodeError` during currency checks or analog reads returns `SERVING_INDEX_UNREADABLE` (503, typed JSON). API `sqlite3.Error` while opening the index (except the native-parity freshness check, which reads a `sqlite3.OperationalError` re-open or release read as `available`, while a resolver `SERVING_INDEX_UNREADABLE` stays 503), or post-open `sqlite3.Error`, `json.JSONDecodeError` or `DocumentError` (a stored release of an older schema) during index projection reads or current-binding verification returns `SERVING_INDEX_UNREADABLE` (503, retryable `Problem`, no raw exception text); connections always close. Artifact decoding failures retain their existing behavior. Parity report absent is `no_report` (200); malformed is `unavailable` (503). Legacy bundle: `LegacyBundleError` with a code, never coerced or dropped. |
 | Cache | `/releases/current` is `no-store` with a strong ETag over the complete response including `scope` (304 on match; a changed `scope` changes the ETag). `/releases/{id}`, event-scores and score detail are immutable with an ETag (304 on match). `/events`: current reads are `no-store` without an ETag; explicit-release reads are immutable with an ETag but never 304. A cursor bound to another release or filter set: `CURSOR_MISMATCH` (409). |
 | Retry | None inside serving: no read retries and no job is started by a GET. Callers retry only when `retryable`. Command POSTs pass through the configured callback's status and body (a queued job identity or typed refusal is the callback's contract); a callback exception is 500. |
 | Transaction | The serving index uses short `BEGIN IMMEDIATE` transactions; any error rolls back. A schema newer than the code, or an edited migration: `INTEGRITY_FAILED`. The operations analog read opens the index `mode=ro` and never migrates; the API opens it through `connect`, which applies pending migrations. |

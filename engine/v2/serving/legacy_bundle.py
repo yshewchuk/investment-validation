@@ -55,6 +55,7 @@ from typing import Any
 __all__ = [
     "LegacyBundleError", "MAX_ARTIFACT_BYTES", "load_legacy_bundle",
     "load_score_document", "parse_score_document", "read_capped_bytes",
+    "read_score_bytes",
 ]
 
 
@@ -106,9 +107,12 @@ def read_capped_bytes(path: Path | str, cap: int | None = None) -> bytes:
     ``cap`` defaults to the module's :data:`MAX_ARTIFACT_BYTES`, read at call
     time so a caller (or test) may lower it without reimporting. ``cap + 1``
     bytes are requested so a file exactly at the cap passes and one byte
-    longer refuses rather than being silently truncated.
+    longer refuses rather than being silently truncated. A non-int or
+    negative ``cap`` is refused before the file is opened.
     """
     cap = MAX_ARTIFACT_BYTES if cap is None else cap
+    if not isinstance(cap, int) or isinstance(cap, bool) or cap < 0:
+        raise ValueError("cap must be a non-negative int")
     with open(path, "rb") as handle:
         data = handle.read(cap + 1)
     if len(data) > cap:
@@ -375,6 +379,18 @@ def load_legacy_bundle(bundle_root: Path | str) -> tuple[dict[str, list[dict]], 
 _SCORE_DOCUMENT_LABEL = Path("<score document>")
 
 
+def read_score_bytes(path: Path | str) -> bytes:
+    """Strict byte-bound ``score.json`` read: refuse a symlink or a missing
+    file, then read through :func:`read_capped_bytes` (the 64 MiB
+    :data:`MAX_ARTIFACT_BYTES` cap)."""
+    path = Path(path)
+    if path.is_symlink():
+        raise LegacyBundleError("SYMLINK_REFUSED", f"{path} is a symlink")
+    if not path.is_file():
+        raise LegacyBundleError("MISSING_FILE", f"{path} is missing")
+    return read_capped_bytes(path)
+
+
 def parse_score_document(raw: bytes) -> dict:
     """Strictly-shaped ``score.json`` document parsed from ``raw`` bytes:
     ``rows``/``ladder``/``expected_population`` present as lists, no
@@ -409,9 +425,4 @@ def load_score_document(path: Path | str) -> dict:
     ``expected_population`` present as lists, no unrecognized top-level key,
     no symlink.
     """
-    path = Path(path)
-    if path.is_symlink():
-        raise LegacyBundleError("SYMLINK_REFUSED", f"{path} is a symlink")
-    if not path.is_file():
-        raise LegacyBundleError("MISSING_FILE", f"{path} is missing")
-    return parse_score_document(read_capped_bytes(path))
+    return parse_score_document(read_score_bytes(path))
