@@ -66,6 +66,10 @@ Shared catalog identity reconciliation retains first-stored lineage/provenance.
 The exhaustive name-by-name list is `README.md`'s checker-enforced Public
 interface section; this names only the load-bearing entry points.
 
+`documents.reject_duplicate_keys(pairs)` is the public, pure stdlib JSON hook
+used by `loads_document` and `experiments.v2_runup_exits`; it returns an object
+dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
+
 - **Snapshot commit** — `catalog.commit_snapshot`/`.record_failed_import`/
   `.move_head`: the one place a snapshot's rows, membership and head move
   together inside one transaction (Failure semantics).
@@ -365,6 +369,8 @@ supplies a candidate `fence_check`; Massive acquisition fences raw receipts). `e
 (7.0) imports `repository.Repository`. `engine.v2.research` (6.0/7.0) reads
 pinned snapshots and calls `generic_incremental.commit_generic_table_candidate`
 (no `fence_check`) and `incremental_tables.revision_hash`/`GenericRevision`.
+`engine.v2.models.training` uses `errors`, `Repository`, `reference_catalog` and
+`computed_moves` for snapshot/receipt-pinned D14 datasets and calendar sessions.
 `tools/*`, `checks/*`, `tests/test_v2_data_*.py` exercise this package
 directly.
 

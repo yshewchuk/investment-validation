@@ -154,3 +154,29 @@ def test_undecodable_py_lets_the_builtin_error_escape(tmp_path):
 def test_absolute_from_import_names_the_module_and_each_imported_name():
     fingerprints._IMPORT_NAMES.clear()
     assert fingerprints._import_names("from pkg.mod import a, b\n", ["x"]) == ("pkg.mod", "pkg.mod.a", "pkg.mod.b")
+
+
+def test_source_closure_resolves_each_dotted_name_at_most_once_per_call(tmp_path, monkeypatch):
+    for rel, text in {
+        "a.py": "import pkg.x\nimport pkg.y\n",
+        "b.py": "import pkg.x\nimport pkg.y\n",
+        "pkg/__init__.py": "",
+        "pkg/x.py": "",
+        "pkg/y.py": "",
+    }.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    counts: dict[str, int] = {}
+    real = fingerprints._module_files
+
+    def counting(root, name):
+        counts[name] = counts.get(name, 0) + 1
+        return real(root, name)
+
+    monkeypatch.setattr(fingerprints, "_module_files", counting)
+    closure = fingerprints.source_closure(tmp_path, ["a.py", "b.py"])
+    assert set(counts) == {"pkg.x", "pkg.y"}
+    assert all(count == 1 for count in counts.values())
+    assert sum(counts.values()) == len(set(counts))
+    assert set(closure) == {"a.py", "b.py", "pkg/__init__.py", "pkg/x.py", "pkg/y.py"}

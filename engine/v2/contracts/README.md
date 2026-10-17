@@ -56,7 +56,9 @@ failure rather than a stale sentence.
 - `engine/v2/models` — `ChangeSet`/`RowChange` (`lineage.propagate_corrections`, P5-4: Phase 3B changesets invalidate frozen model state by declared dependency).
 - `engine/v2/ledger` — `ArtifactRef` (P6-3: `calibration.py` round-trips the published health/report artifact reference through the `ledger_calibration_state` table).
 - `engine/v2/research` — research tools reading pinned snapshots (Phase 6 slice 6).
-<!-- consumers: engine.v2.foundation, engine.v2.ops, engine.v2.data, engine.v2.serving, engine.v2.features, engine.v2.registry, engine.v2.scoring, engine.v2.models, engine.v2.ledger, engine.v2.research -->
+- `engine/v2/models/training` — `DataQuery`, `KeyPredicate`, `TimeInterval` for bounded D14 dataset reads; `ArtifactRef` for verified original calendar bytes.
+
+<!-- consumers: engine.v2.foundation, engine.v2.ops, engine.v2.data, engine.v2.serving, engine.v2.features, engine.v2.registry, engine.v2.scoring, engine.v2.models, engine.v2.ledger, engine.v2.research, engine.v2.models.training -->
 
 ## Usage
 

@@ -37,6 +37,7 @@ _MAX_SOURCE_BYTES = 8 * 1024 * 1024
 def source_closure(root, entries):
     """Resolve local static imports; callers also declare runtime/configuration edges."""
     pending, found = list(entries), {}
+    resolved = {}
     while pending:
         rel = pending.pop()
         safe_relative_path(rel)
@@ -52,7 +53,7 @@ def source_closure(root, entries):
             if len(data) > _MAX_SOURCE_BYTES:
                 raise fail("INPUT_CHANGED", "declared implementation file exceeds the size bound")
             found[rel] = "sha256:" + hashlib.sha256(data).hexdigest()
-            pending.extend(_imports(root, rel, data.decode("utf-8")))
+            pending.extend(_imports(root, rel, data.decode("utf-8"), resolved))
         else:
             found[rel] = file_hash(path)
     return dict(sorted(found.items()))
@@ -242,11 +243,16 @@ def _import_names(source, package):
     return result
 
 
-def _imports(root, rel, source):
+def _imports(root, rel, source, resolved=None):
     package = rel.removesuffix(".py").replace("/", ".").split(".")[:-1]
     paths = set()
     for name in _import_names(source, package):
-        paths.update(_module_files(root, name))
+        files = resolved.get(name) if resolved is not None else None
+        if files is None:
+            files = tuple(_module_files(root, name))
+            if resolved is not None:
+                resolved[name] = files
+        paths.update(files)
     return sorted(paths)
 
 

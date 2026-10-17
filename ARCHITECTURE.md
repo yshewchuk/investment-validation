@@ -541,15 +541,16 @@ Only a tracked path absent from the worktree reads as empty.
   `GRAPH`/`_DAG_STAGES` node — that nightly appends newly-settled events
   into the board-analog and paired residual pools, advances the trailing
   cutoff, re-verifies the chooser-analog pool and the three driver residual
-  pools (which do not themselves grow with new events — see the models doc
-  finding), and produces a new, gated, auto-promoted release that carries
-  every model binding over unchanged.
-  Retraining the champion/gate/chooser models themselves, monthly, is
-  cutover PR-13b; a native producer for the Tier-4 forecasts table native
-  currently only imports from a legacy snapshot is cutover PR-13c. Forward
-  inference instead uses the design in `engine/v2/scoring/ARCHITECTURE.md`;
-  it needs no stored forward row. See `engine/v2/ops/ARCHITECTURE.md`'s "Native nightly
-  pool/residual refresh", `engine/v2/models/ARCHITECTURE.md` §§1, 2, 8, and
+  pools (which do not themselves grow with new events — see
+  `engine/v2/models/ARCHITECTURE.md` §2.1, §2.3), and produces a new, gated,
+  auto-promoted release that carries every model binding over unchanged.
+  Retraining the champion/gate/chooser models themselves, monthly inside the
+  nightly, is cutover PR-13b (not implemented; contract: `engine/v2/models/
+  ARCHITECTURE.md` §2.3); a native producer for the
+  Tier-4 forecasts table native currently only imports from a legacy snapshot
+  is cutover PR-13c. Forward inference instead uses the design in
+  `engine/v2/scoring/ARCHITECTURE.md`; it needs no stored forward row. See
+  `engine/v2/models/ARCHITECTURE.md` §§1, 2, 8, and
   issue #192 for the full design.
 - **Captured native comparison export (tools, read-only inputs).**
   `tools/captured_native_comparison.py` exports one explicitly selected,
@@ -694,6 +695,11 @@ change their arithmetic or imply that source receipt production is available.
   calculated answer in (a forbidden-field map) or that arrives with a
   prebuilt geometry or pricing object. Legacy records are expected values
   for a comparator only — never a native input.
+  This contract adds a migration exception: `training.build_d14_dataset` for monthly
+  `implied_t1`/`runup_move`: it retains imported `feature_panel` history
+  with explicit snapshot/receipt/calendar/table-version lineage.
+  This is compatibility history, not native historical production or proof of
+  EOD availability/finality. Native scoring/capture's answer-free rule is unchanged.
 - **Missing input → typed refusal, never a silent default.** A missing or
   unusable input produces an explicit withheld/refused status (see
   `Problem`/`FAILURE_CODES` in `engine/v2/contracts/operations.py`, and
