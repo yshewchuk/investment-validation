@@ -50,6 +50,13 @@ def test_every_test_file_is_in_exactly_one_shard():
     assert REAL_FILES, "no test files discovered"
 
 
+def test_every_explicit_file_in_research_a_and_research_b_exists():
+    by_name = {s.name: s for s in REAL_SHARDS}
+    for name in ("research-a", "research-b"):
+        for pattern in by_name[name].patterns:
+            assert (ROOT / pattern).is_file(), f"{name}: {pattern}"
+
+
 def _first_unclaimed_pattern(shards, files):
     """The first (shard, pattern) that claims no file an earlier pattern left over."""
     claimed: set[str] = set()
@@ -188,6 +195,8 @@ def test_ownership_matches_an_independently_written_table(tmp_path):
     ("tests/v2/ops/test_native_gate_worker.py", "ops-sweep"),
     ("tests/v2/ops/test_computed_moves_bounded_retention.py", "ops-sweep"),
     ("tests/v2/research/test_a.py", "research"),
+    ("tests/v2/research/test_gate_report.py", "research-a"),
+    ("tests/v2/research/test_magnitude_history_model.py", "research-b"),
     ("tests/v2/integration/test_a.py", "integration"),
     ("tests/test_v2_research_foo.py", "research"),
     ("tests/test_checks_phase2_gate.py", "checks"),

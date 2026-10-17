@@ -7,7 +7,11 @@
 # Shards are ORDERED and the first shard whose pattern matches a file owns it.
 # The last shard is the remainder: it owns every test file no earlier pattern
 # claims, so a new test file or package can never silently fall out of CI.
-# Measured 2026-10-11, before ops-sweep/integration existed (CPU seconds over 3475 total,
+# On 2026-10-17 main run 39038193408 the research JUnit summed 3725 CPU-s
+# (~16 min wall at ~3.8x); research-a / research-b / research are balanced by
+# per-file JUnit time (~1270 / ~1220 / ~1237 CPU-s, ~5.5 min wall each);
+# rebalance by moving a file between the explicit lists. Earlier, 2026-10-11,
+# before ops-sweep/integration existed (CPU seconds over 3475 total,
 # ~3.8x parallel on a 4-core runner): ops ~1224, research ~902, checks ~474,
 # rest ~876. Rebalance by moving a pattern; keep every shard under ~15 minutes
 # of pytest wall time on CI.
@@ -26,6 +30,24 @@ patterns = [
 [[shard]]
 name = "ops"
 patterns = ["tests/v2/ops/*", "tests/test_v2_ops_*.py"]
+
+[[shard]]
+name = "research-a"
+patterns = [
+  "tests/v2/research/test_magnitude_fitted_model.py",
+  "tests/v2/research/test_gate_report.py",
+  "tests/v2/research/test_magnitude_search_execution.py",
+  "tests/v2/research/test_magnitude_baseline.py",
+]
+
+[[shard]]
+name = "research-b"
+patterns = [
+  "tests/v2/research/test_magnitude_history_model.py",
+  "tests/v2/research/test_magnitude_history_store.py",
+  "tests/v2/research/test_magnitude_search_trials.py",
+  "tests/v2/research/test_magnitude_execution_registration.py",
+]
 
 [[shard]]
 name = "research"
