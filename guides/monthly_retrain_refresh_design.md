@@ -34,7 +34,7 @@ on any night. There is no second release-assembly path.
 
 **Due set.** For a refresh session dated `s`, the *completed* months are all
 calendar months before `s`'s month. Evaluate every completed month with no
-durable record (retrain or `superseded`); the **target** is the latest due one,
+durable record (retrain or `superseded`; the first run marks all history before the first target `superseded`); the **target** is the latest due one,
 `M`. Its **retrain cutoff** is the last calendar day of `M` (`M_end`), a data
 date, fixed by `M` alone and independent of the night the job runs.
 
@@ -115,9 +115,9 @@ stage refuses `PRIOR_MISMATCH` and the retrain is wasted, not applied.
 ## 4. Promotion, gating and rollback
 
 Pool/chooser-only retrains (models unchanged) follow the nightly path: staged by
-`phase5_state_stage`, light consistency checks, the staging-success record
-(models doc §7.2, written by the stage job's check step), auto-promoted with
-`expected_previous_release_id`.
+`phase5_state_stage`, light consistency checks, then release-scope
+`phase5_acceptance` (the only writer of the staging-success record, models doc
+§7.2), auto-promoted with `expected_previous_release_id`.
 
 A release with **changed champion/gate bindings** has a new semantic hash and
 needs the full staging gate before it can be promoted:
@@ -125,15 +125,16 @@ needs the full staging gate before it can be promoted:
 1. `phase5_acceptance` release-scope acceptance passes and
    `mark_staging_succeeded` records it (a failed or missing record refuses
    promotion, models doc §7.2).
-2. A non-regression comparison on month `M`. A **check candidate** (same recipe
-   as the release candidate, fit with training cutoff `M_start − 1`, the day
-   before `M` begins) and the incumbent both score the same events whose data
-   dates fall within `M`, with every pool and the trailing cutoff pinned to
-   `M_start − 1` for both, so no scored event sits in a model or pool that scores
-   it. Events in an experiment holdout (3% random or rolling-month,
-   `engine/v2/foundation/experiment_holdouts.py`) are excluded from the
-   population; the check reads no holdout. Slice 5b tests assert both pins and
-   the exclusion. The extra fit is part of the heavy-job budget (§6). The check
+2. A non-regression comparison on the **check month** `C = M − 6`. With
+   `ExperimentHoldouts(as_of_month=M)` (`engine/v2/foundation/experiment_holdouts.py`)
+   every event in `M−5 … M` is "rolling" and later ones "ambiguous", so `C` is
+   the newest month outside the rolling holdout. A **check candidate** (same
+   recipe, fit with training cutoff `C_start − 1`) and the incumbent both score
+   events dated within `C`, with every pool and the trailing cutoff pinned to
+   `C_start − 1` for both, so no scored event sits in a model or pool that scores
+   it. Events labelled "random" (3%) or "ambiguous" are excluded (about 97% of
+   `C` remains); the check uses no holdout outcomes. Slice 5b tests assert both
+   pins and the exclusion. The extra fit counts in the heavy-job budget (§6). The check
    certifies the *recipe*, not the release fit: its receipt is bound to the
    check candidate hash, the release candidate hash and the incumbent id, and
    the promote step requires a receipt naming exactly the release hash being
@@ -147,7 +148,7 @@ needs the full staging gate before it can be promoted:
    and last stage attempt (§2) under a key naming the new incumbent.
 
 Failure at 1-3 leaves the candidate staged and unpromoted, the incumbent
-deployed, and a visible receipt; the nightly continues on the incumbent.
+deployed, and a failure receipt (the job result naming the step and refusal code, e.g. `StaleReleaseHash`); no automatic next-tick action, operator recovery as in §2.
 
 **Rollback.** `deployment.rollback` undoes exactly one promotion, and nightly
 promotions follow the retrain promotion, so it cannot target the retrain itself
@@ -165,7 +166,7 @@ re-advances the board pool from it.
 | R3 retry | No resubmission of a key in any state; failed is terminal; the next due month supersedes | At most two stage keys per `M`: one per incumbent, the second only after `ConcurrentPromote`; other failures terminal | No retry or alternate target on refusal |
 | R4 transaction | Training outputs are written to per-attempt staging and hashed only after a clean exit | New candidate release id; `DEPLOYED` untouched | Existing atomic pointer/history swap |
 | R5 partial failure | Orphan outputs may remain; nothing is staged or promoted; incumbent keeps serving | Orphan objects or a manifest without a catalog may remain unused; a later stage attempt only under R3's `ConcurrentPromote` rule; no promotion | A refusal leaves pointer and history unchanged; the candidate stays staged |
-| R6 idempotency | Same month, same key, never trains twice | Identical inputs derive identical catalog content; a reused id with different content refuses | Re-promoting the live id is a no-op |
+| R6 idempotency | Same month, same key, never trains twice | Planned-job rule: identical inputs derive identical catalog content; a reused id with different content refuses | Re-promoting the live id is a no-op |
 
 Reconcile-level rows:
 
@@ -194,9 +195,11 @@ waits for admission rather than being denied. Consequences, stated once:
   (including required-graph heavy steps) wait for admission until the retrain
   ends; non-heavy steps proceed. Accepted because a monthly cadence makes overlap
   rare.
-- A retrain wall-clock deadline does not exist today. Building it (a timeout on
-  the training job, failing it terminal) is an explicit deliverable of split-list
-  slice 3, sized from the measured receipt below.
+- Neither a wall-clock deadline nor a non-blocking admission probe exists today
+  (`bounded_run` only blocks; nearest is `ops/scheduler.py`). Both are new work:
+  the deadline (job timeout, terminal failure) is a deliverable of each job's
+  slice (3 for pools, 5a for models), sized from the receipt below; the probe
+  and the D6(b) start window belong to slice 4.
 
 Slice 3 records measured peak memory and wall time as a receipt; budgets in the
 job spec come from that measurement, not from this document.
@@ -271,8 +274,7 @@ Sizes are non-test code / test / doc lines, estimated.
    `retrain-stage` job (retrained members non-carried), with the §2 crash and
    race rules. 140-180 / 150-200 / 35-50. Depends on 1-3 and #192 slice 4.
 5. **Champion/gate retrain** (D1 b). Retrain kind, acceptance gate wiring, the
-   non-regression check and receipt; the retrain job gets a wall-clock deadline
-   like slice 3. Split: 5a retrain kind and check-candidate
+   non-regression check and receipt; 5a owns the model retrain deadline. Split: 5a retrain kind and check-candidate
    fit, 150-190 / 130-170 / 30-40; 5b acceptance wiring and the non-regression
    check with receipt, 120-160 / 120-160 / 30-40.
 6. **Promotion and rollback path** (D2, D3). Guarded promotion of a
