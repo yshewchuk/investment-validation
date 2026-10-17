@@ -361,9 +361,9 @@ def test_run_projection_native_plan_records_native_shadow(tmp_path, monkeypatch)
 
     monkeypatch.setattr(tool, "_load_native_inputs", lambda path: {})
 
-    # The native source returns a fresh rows mapping: an extra ticker's display
-    # row on top of the caller's own rows, distinguishable from the legacy
-    # bundle's AAA-only rows.  It does not touch ``score_doc``.
+    # The native source returns its own fresh rows mapping: only the native
+    # ticker's display row, with no carry-over from the legacy bundle's rows.
+    # It does not touch ``score_doc``.
     native_score_row = _row(ticker="BBB")
     native_display_row = _compact(native_score_row)
 
@@ -371,7 +371,7 @@ def test_run_projection_native_plan_records_native_shadow(tmp_path, monkeypatch)
 
     def native_row_source(plan, score_doc, bundle_rows_by_ticker, pairs):
         calls.append(plan)
-        return {**bundle_rows_by_ticker, "BBB": [native_display_row]}
+        return {"BBB": [native_display_row]}
 
     monkeypatch.setattr(tool, "shadow_serving_row_source", native_row_source)
 
@@ -389,9 +389,8 @@ def test_run_projection_native_plan_records_native_shadow(tmp_path, monkeypatch)
             return real_build_candidate(preview_input, score_doc, bundle_rows_by_ticker, **kwargs)
         joined = {
             **score_doc,
-            "rows": [*score_doc["rows"], native_score_row],
-            "expected_population": sorted(
-                {*score_doc["expected_population"], "BBB|STR-THRU|2024-01-05"}),
+            "rows": [native_score_row],
+            "expected_population": ["BBB|STR-THRU|2024-01-05"],
         }
         return real_build_candidate(preview_input, joined, bundle_rows_by_ticker, **kwargs)
 
@@ -405,6 +404,7 @@ def test_run_projection_native_plan_records_native_shadow(tmp_path, monkeypatch)
     assert native_doc["release_id"] != bundle_doc["release_id"]
     assert len(calls) == 1
     assert "BBB" in captured["rows"]
+    assert "AAA" not in captured["rows"]
 
     conn = projections.connect(str(tmp_path / "serving_native" / "serving.sqlite"))
     try:
@@ -414,7 +414,7 @@ def test_run_projection_native_plan_records_native_shadow(tmp_path, monkeypatch)
         conn.close()
     assert release.row_sources == ("native_shadow",)
     listed = {item.event_ref.event_id for item in page.items}
-    assert listed == {"e1", "e2"}
+    assert listed == {"e2"}
 
 
 # 6. legacy plan -> only the legacy_bundle row source, shadow source unused

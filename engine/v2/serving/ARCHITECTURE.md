@@ -50,11 +50,7 @@ loads such a row (current-release discovery, the pinned release, events and scor
 `SERVING_INDEX_UNREADABLE` (503, retryable; the trigger is a `DocumentError` from a stored
 release that fails its contract, which includes an older schema, in addition to the
 `sqlite3.Error`/`json.JSONDecodeError` triggers in the failure table), including the
-native-parity freshness read of such a row. The freshness check reports `available` when the current release is readable and its `resolved_as_of` is not later than the report's `as_of` (a later one is `stale`), and otherwise only when
-the resolver raises a non-`SERVING_INDEX_UNREADABLE` `ApiError`/`OSError`, the pointer is absent,
-or a `sqlite3.OperationalError` occurs on re-open or while reading the release (the release is
-treated as absent). A resolver `SERVING_INDEX_UNREADABLE` (including a stored old-schema release)
-or a read-time `DocumentError` is the 503 `SERVING_INDEX_UNREADABLE`. `build_candidate`
+native-parity freshness read of such a row (freshness outcomes are in the root `ARCHITECTURE.md` native-parity section). `build_candidate`
 refuses invalid `row_sources` with `ValueError` before any write (internal callers only).
 The projection tool exposes `run_projection(...)`; the CLI is a thin wrapper over it.
 
