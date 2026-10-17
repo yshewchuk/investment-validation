@@ -310,6 +310,7 @@ resolution (a stored entry-time record is #849).
 | R4 transaction | Objects go to the content-addressed store; the staged manifest and catalog exist only under the new id; pool and calibration members advance in one candidate or not at all; promotion stays the guarded `models_promote` |
 | R5 partial failure | Orphan objects or a staged candidate may remain; the deployed release is unchanged and a retry completes or refuses |
 | R6 idempotency | Same inputs give the same catalog; same key and hash is a no-op; same key with different content, or the same release id with different content, refuses `ID_CONFLICT` |
+| Scoring: no object under the row's exact `(strategy, alpha, cutoff)` key (entry night produced none, or the row predates this) | The row refuses `MODEL_NOT_READY` with a fixed detail, counted by strategy and cutoff; no fallback to another cutoff |
 
 ### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
 
