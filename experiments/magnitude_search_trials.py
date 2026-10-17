@@ -150,13 +150,14 @@ class SearchTrials:
         """Run one bounded native inner trial once, or verify its completed replay."""
         plan = self._admit()
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
-        resolved = execution_limits(limits)
+        validate_execution_limits(limits)
         attempt = {"limits": dict(limits), "candidate_id": candidate_id, "trial_id": key}
         completed = self._read("execution:" + key)
         if completed is not None:
             return self._executed(plan, outer_year, inner_year, candidate_id, attempt)
         forbid_fitting("SearchTrials.execute")
         forbid_legacy_fitting("SearchTrials.execute")
+        resolved = execution_limits(limits)
         started = self._start(outer_year, inner_year, candidate_id, attempt)
         inputs = started["inputs"]
         execution = {**self.registration.document["magnitude_execution"], "fit_recipe": candidate["recipe"]}

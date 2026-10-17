@@ -9,6 +9,7 @@ from engine.v2.foundation import content_hash, to_document
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.native_registration import magnitude_fitted_execution_document
+from experiments import magnitude_search_execution as execution
 from experiments import magnitude_search_trials as trials
 from tests.v2.research.test_magnitude_search_execution import LIMITS
 from tests.v2.research.test_magnitude_search_trial_integrity import (
@@ -46,6 +47,61 @@ def native(journal, monkeypatch):
         return {"event": "succeeded", "forecasts": rows(2.0)}
     monkeypatch.setattr(trials, "run_fitted_trial", fit)
     return journal
+
+
+@pytest.mark.parametrize("affinity", ["missing", "empty", "oserror"])
+def test_completed_native_replay_does_not_query_host_affinity(native, monkeypatch, affinity):
+    # The synthetic fit needs no host capability even while creating its receipt.
+    monkeypatch.setattr(execution.os, "sched_getaffinity", lambda pid: {0}, raising=False)
+    result = native.recorder.execute("2024", "2023", "a-first", limits=LIMITS)
+    before = native.conn.total_changes
+    queries = []
+
+    def unavailable(pid):
+        queries.append(pid)
+        if affinity == "oserror":
+            raise OSError("synthetic affinity failure")
+        return set()
+
+    if affinity == "missing":
+        monkeypatch.delattr(execution.os, "sched_getaffinity")
+    else:
+        monkeypatch.setattr(execution.os, "sched_getaffinity", unavailable)
+    monkeypatch.setattr(native.recorder, "_append", lambda *a, **k: pytest.fail("replay appended evidence"))
+    monkeypatch.setattr(native.recorder, "_inputs", lambda *a: pytest.fail("replay opened native inputs"))
+    monkeypatch.setattr(trials, "run_fitted_trial", lambda *a: pytest.fail("replay launched fit"))
+    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("replay opened labels"))
+    with no_fit_guard(), legacy_guard():
+        assert native.recorder.execute("2024", "2023", "a-first", limits=LIMITS) == result
+        with pytest.raises(OpsError) as caught:
+            native.recorder.execute("2024", "2023", "a-first", limits={**LIMITS, "cpu_seconds": 31})
+        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs").problem
+        with pytest.raises(OpsError) as caught:
+            native.recorder.execute("2024", "2023", "a-first", limits={**LIMITS, "cpu_seconds": True})
+        assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC",
+            "search execution requires explicit positive integer resource limits").problem
+    assert queries == []
+    assert native.conn.total_changes == before
+
+
+def test_fresh_native_affinity_failure_precedes_claim_and_inputs(native, monkeypatch):
+    before = native.conn.total_changes
+    queries = []
+
+    def unavailable(pid):
+        queries.append(pid)
+        raise OSError("synthetic affinity failure")
+
+    monkeypatch.setattr(execution.os, "sched_getaffinity", unavailable, raising=False)
+    monkeypatch.setattr(native.recorder, "_append", lambda *a, **k: pytest.fail("failed affinity appended evidence"))
+    monkeypatch.setattr(native.recorder, "_inputs", lambda *a: pytest.fail("failed affinity opened native inputs"))
+    monkeypatch.setattr(trials, "run_fitted_trial", lambda *a: pytest.fail("failed affinity launched fit"))
+    with pytest.raises(OpsError) as caught:
+        native.recorder.execute("2024", "2023", "a-first", limits=LIMITS)
+    assert caught.value.problem == fail("RESOURCE_UNAVAILABLE",
+        "search execution requires Linux resource containment").problem
+    assert queries == [0]
+    assert native.conn.total_changes == before
 
 
 @pytest.mark.parametrize("mutation", [None, "attempt_count", "completed_count", "boolean_count", "fit_digest",
