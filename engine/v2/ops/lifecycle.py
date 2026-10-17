@@ -36,7 +36,7 @@ from engine.v2.contracts import (
     ResolvedResources,
 )
 from engine.v2.foundation import Clock, format_timestamp
-from engine.v2.ops.catalog import dumps, load_json, transaction
+from engine.v2.ops.catalog import dumps, dumps_failure, load_json, transaction
 from engine.v2.ops.errors import fail, make_problem
 from engine.v2.ops.submission import RetryPolicy
 
@@ -271,7 +271,7 @@ def end_attempt(conn: sqlite3.Connection, attempt_id: str, state: str, outcome: 
     conn.execute("UPDATE attempts SET state = ?, process_state = ?, exit_code = ?, "
                  "failure_json = ?, ended_at = ? WHERE attempt_id = ?",
                  (state, outcome.process_state, outcome.exit_code,
-                  None if outcome.failure is None else dumps(outcome.failure), stamp,
+                  None if outcome.failure is None else dumps_failure(outcome.failure), stamp,
                   attempt_id))
     if outcome.process_state in RELEASABLE_PROCESS_STATES:
         release_reservations(conn, attempt_id, now, reason=state)
@@ -305,7 +305,7 @@ def advance_job(conn: sqlite3.Connection, job: sqlite3.Row, outcome: Outcome,
         state = "failed"
     conn.execute("UPDATE jobs SET state = ?, active_attempt_id = NULL, next_eligible_at = ?, "
                  "failure_json = ?, updated_at = ? WHERE job_id = ?",
-                 (state, eligible, None if outcome.failure is None else dumps(outcome.failure),
+                 (state, eligible, None if outcome.failure is None else dumps_failure(outcome.failure),
                   format_timestamp(now), job["job_id"]))
     if state == "failed":
         block_descendants(conn, job["job_id"], now)
@@ -324,7 +324,7 @@ def block_descendants(conn: sqlite3.Connection, job_id: str, now: datetime) -> i
            UPDATE jobs SET state = 'blocked', failure_json = ?, next_eligible_at = NULL,
                            updated_at = ?
            WHERE job_id IN (SELECT id FROM below) AND state IN ('queued', 'retry_wait')""",
-        (job_id, dumps(problem), format_timestamp(now)))
+        (job_id, dumps_failure(problem), format_timestamp(now)))
     return cursor.rowcount
 
 
@@ -394,7 +394,7 @@ def complete_cancel(conn: sqlite3.Connection, job_id: str, *, process_state: str
                     Outcome(succeeded=False, process_state=process_state, failure=failure), now)
         conn.execute("UPDATE jobs SET state = 'cancelled', active_attempt_id = NULL, "
                      "failure_json = ?, updated_at = ? WHERE job_id = ?",
-                     (dumps(failure), stamp, job_id))
+                     (dumps_failure(failure), stamp, job_id))
         block_descendants(conn, job_id, now)
         return CancellationReceipt(state="cancelled", completed_at=stamp, **base)
 
