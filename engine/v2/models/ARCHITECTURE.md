@@ -127,7 +127,7 @@ size check. Existing callers omitting the ceiling retain their read contract.
 
 | `write_object` condition | Outcome |
 |---|---|
-| New object | Durable before return; only invocation-owned staging is cleaned |
+| New object | Durable before return; only invocation-owned staging is cleaned; no unbounded read or cross-filesystem copy fallback |
 | Existing/racing identical regular object, or retry | Verify exact bytes (allowance = payload length, including zero) and sync directories; keep the incumbent |
 | Wrong/oversized/unreadable bytes or symlink to a regular file | `ObjectVerificationError` (`ReleaseLayoutError`); incumbent retained |
 | Dangling/nonregular-target symlink, other collision or publication I/O failure | `ReleaseLayoutError` with original `OSError`; never replace; no catalog/pointer (a complete unreferenced object may remain) |
