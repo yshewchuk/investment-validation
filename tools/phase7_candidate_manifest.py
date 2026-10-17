@@ -120,9 +120,13 @@ _SCANNED_TREES = ("engine/", "tools/", "dashboard/", "checks/", "experiments/")
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
     try:
+        # ``-C`` does not override these, so an inherited value could make git inspect a
+        # different repository than the one whose registry and inventory are described.
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
         return subprocess.run(["git", "--no-optional-locks", "-C", str(root), *args],
                               capture_output=True, text=True,
-                              check=False, timeout=30)
+                              check=False, timeout=30, env=env)
     except (subprocess.SubprocessError, OSError) as exc:
         raise SpecError(f"commit: git {args[0]} failed ({type(exc).__name__})") from exc
 

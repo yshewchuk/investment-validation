@@ -647,3 +647,20 @@ def test_touched_but_identical_tracked_file_is_clean(tmp_path):
                           text=True, check=True).stdout.strip()
     (repo / "a.txt").write_text("1")  # same content, new mtime
     assert _REAL_COMMIT({"commit": head}, repo) == head
+
+
+def test_inherited_git_environment_does_not_redirect_the_check(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "a.txt").write_text("1")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-q", "-m", "x")
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
+                          text=True, check=True).stdout.strip()
+    other = tmp_path / "other"
+    other.mkdir()
+    _git(other, "init", "-q")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    assert _REAL_COMMIT({"commit": head}, repo) == head
