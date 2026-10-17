@@ -187,6 +187,13 @@ def registry_jobs(owner: str, official_kinds=(), non_official_kinds=()) -> list[
     other namespace is refused unless listed in ``official_registry_kinds`` (then it is the
     official writer), and a shadow-only one may not be listed official."""
     reg, rows = stages.registry(), []
+    for key, decided in (("official_registry_kinds", official_kinds),
+                         ("non_official_registry_kinds", non_official_kinds)):
+        if not set(decided) <= set(reg.names()):
+            raise SpecError(f"{key}: must be a list of registry job kind names")
+    if set(official_kinds) & set(non_official_kinds):
+        raise SpecError("official_registry_kinds and non_official_registry_kinds overlap: "
+                        f"{sorted(set(official_kinds) & set(non_official_kinds))}")
     for name in reg.names():
         kind = reg.get(name)
         writes_store = any(mode == "write" for _, mode in kind.store_domains)
@@ -217,12 +224,12 @@ def _kind_list(spec: dict, key: str) -> set:
     return set(value)
 
 
-def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
+def assemble(spec: dict, out_dir: Path) -> dict:
     spec = _obj("spec", spec)
     out_dir = Path(out_dir).resolve()
-    if out_dir.is_relative_to(root.resolve()):
+    if out_dir.is_relative_to(ROOT.resolve()):
         raise SpecError("out-dir: must be outside the repository")
-    commit = check_commit(spec, root)
+    commit = check_commit(spec, ROOT)  # the checkout whose registry is imported above
     owner = spec.get("registry_owner")
     if not isinstance(owner, str) or not owner:
         raise SpecError("registry_owner: required string")
@@ -272,7 +279,7 @@ def assemble(spec: dict, out_dir: Path, root: Path = ROOT) -> dict:
                            for i, r in enumerate(evidence)],
     }
     try:
-        found = discover_entrypoints(root)
+        found = discover_entrypoints(ROOT)
     except (SyntaxError, OSError, ValueError) as exc:
         raise SpecError(f"consumer discovery failed in this checkout: "
                         f"{type(exc).__name__}: {exc}") from exc

@@ -664,3 +664,17 @@ def test_inherited_git_environment_does_not_redirect_the_check(tmp_path, monkeyp
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(other))
     assert _REAL_COMMIT({"commit": head}, repo) == head
+
+
+def test_registry_jobs_validates_decisions_on_direct_calls():
+    with pytest.raises(asm.SpecError, match=r"official_registry_kinds: must be a list of registry"):
+        asm.registry_jobs("o", {"no_such_kind"}, {"experiment"})
+    with pytest.raises(asm.SpecError, match=r"non_official_registry_kinds: must be a list of registry"):
+        asm.registry_jobs("o", (), {"no_such_kind"})
+    with pytest.raises(asm.SpecError, match=r"kind lists overlap|registry_kinds overlap"):
+        asm.registry_jobs("o", {"experiment"}, {"experiment"})
+
+
+def test_assemble_takes_no_root_override(spec, tmp_path):
+    with pytest.raises(TypeError):
+        asm.assemble(spec, _out(tmp_path), root=tmp_path)
