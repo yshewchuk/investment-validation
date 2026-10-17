@@ -52,13 +52,17 @@ signing, the CURRENT/health files and the launcher. The shape is pinned by
  dataclass's own field names, so the two cannot drift silently.
 
 **A serving index that opens but cannot be read is one typed 503** (#342):
-every connection-owning read block -- the publication resolver's binding
+the connection-owning read blocks that call projections directly -- the
+publication resolver's binding
 reverification, ``/releases/{id}`` + ``/releases/current``, ``/events``,
-``/events/{id}/scores``, ``/scores/{id}`` -- wraps only its projection calls in
-``except (projections.sqlite3.Error, json.JSONDecodeError, DocumentError)``
--- the last a stored release of an older schema -- and raises
-``_index_unreadable()``, keeping the existing guaranteed-close ``finally``.
-Artifact decoding (still the existing 500), binding-invalid
+``/events/{id}/scores``, ``/scores/{id}`` -- wraps its projection calls and
+raises ``_index_unreadable()``, keeping the existing guaranteed-close
+``finally``. The resolver's reverification and the release blocks catch
+``(projections.sqlite3.Error, json.JSONDecodeError, DocumentError)``; the
+events/score routes get ``DocumentError`` mapped by ``_require_release``
+(``sqlite3.Error``/``json.JSONDecodeError`` are caught inline). There
+``DocumentError`` means a stored release that fails its contract, including an
+older schema. Artifact decoding (still the existing 500), binding-invalid
 (500), unknown release/event/score (404) and every validation refusal are
 unchanged; no global SQLite/JSON exception hook is registered. An open-time
 ``sqlite3.Error`` (``_open`` and the resolver's connect) and a post-open one

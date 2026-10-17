@@ -130,10 +130,23 @@ def _read_plan(path: Path) -> dict:
     return plan
 
 
+def _read_capped(path: Path, cap: int = 64 * 1024 * 1024) -> bytes:
+    """Read an input artifact with a bounded read.
+
+    Reads ``cap`` + 1 bytes so anything larger than the cap is refused as
+    ``INVALID_REQUEST`` rather than exhausting memory.
+    """
+    with open(path, "rb") as fh:
+        raw = fh.read(cap + 1)
+    if len(raw) > cap:
+        raise fail("INVALID_REQUEST", f"{path.name} exceeds the {cap}-byte read cap")
+    return raw
+
+
 def _load_flat_bundle(bundle_dir: Path) -> dict[str, list[dict]]:
     bundle: dict[str, list[dict]] = {}
     for path in sorted(bundle_dir.glob("*.json")):
-        rows = json.loads(path.read_text())
+        rows = json.loads(_read_capped(path).decode("utf-8"))
         if not isinstance(rows, list):
             raise ValueError(f"{path}: expected a JSON array of rendered rows")
         bundle[path.stem] = rows
@@ -177,7 +190,7 @@ def _load_native_inputs(path: Path) -> dict[str, tuple[ScoreRequest, NativeScore
     """
     from engine.v2.ops.native.input_decoding import _load_native_score_inputs
 
-    doc = json.loads(path.read_text())
+    doc = json.loads(_read_capped(path).decode("utf-8"))
     return {key: (from_document(ScoreRequest, pair["request"]),
                   _load_native_score_inputs(_with_contract_quote_keys(pair["inputs"])))
             for key, pair in sorted(doc.items())}
@@ -227,7 +240,7 @@ def _verify_source_provenance(preview: PreviewInput, path: Path, *, score_path: 
     to that retained proof, rather than allowing a caller to swap either one
     after the verifier ran.
     """
-    doc = json.loads(path.read_text())
+    doc = json.loads(_read_capped(path).decode("utf-8"))
     if not isinstance(doc, dict) or doc.get("schema_version") != "phase3_source_provenance.v1.0":
         raise ValueError("source provenance has an unsupported schema")
     if doc.get("release_id") != preview.source_release_id or \
@@ -241,7 +254,7 @@ def _verify_source_provenance(preview: PreviewInput, path: Path, *, score_path: 
             refs["finality_artifact"].get("content_hash") != preview.finality_ref or \
             refs["model_evidence_artifact"].get("content_hash") != preview.model_evidence_ref:
         raise ValueError("source provenance and preview artifact bindings disagree")
-    if _sha256(score_path.read_bytes()) != refs["score_artifact"].get("content_hash"):
+    if _sha256(_read_capped(score_path)) != refs["score_artifact"].get("content_hash"):
         raise ValueError("score json is not the verified score artifact")
     if doc.get("bundle_manifest_ref") != bundle_manifest_ref:
         raise ValueError("bundle directory is not the verified delivered bundle")
@@ -256,7 +269,7 @@ def _verify_source_provenance(preview: PreviewInput, path: Path, *, score_path: 
             receipt_path.relative_to(path.parent.resolve())
         except ValueError:
             raise ValueError(f"{name} escapes source provenance directory")
-        receipt_bytes = receipt_path.read_bytes()
+        receipt_bytes = _read_capped(receipt_path)
         receipt = from_document(ComparisonReceipt, json.loads(receipt_bytes))
         if _sha256(receipt_bytes) != expected_ref or ref.get("content_hash") != expected_ref \
                 or receipt.comparison_kind != expected_kind:
@@ -290,7 +303,9 @@ def run_projection(*, preview_input: Path, source_provenance: Path | None, score
                    serving_root: Path, requested_as_of: str, resolved_as_of: str,
                    bundle_format: str = "legacy", nightly_plan: Path | None = None,
                    native_inputs: Path | None = None) -> tuple[int, dict]:
-    preview = from_document(PreviewInput, json.loads(preview_input.read_text()))
+    if bundle_format not in ("flat", "legacy"):
+        raise fail("INVALID_REQUEST", "bundle_format must be flat or legacy")
+    preview = from_document(PreviewInput, json.loads(_read_capped(preview_input).decode("utf-8")))
     score_doc = load_score_document(score_json)
 
     plan: dict | None = None

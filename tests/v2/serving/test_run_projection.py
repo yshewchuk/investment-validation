@@ -35,7 +35,7 @@ from tests.test_v2_serving_projections import (  # noqa: E402
     _score_doc,
     _serving,
 )
-from tools.v2_dashboard_project import run_projection  # noqa: E402
+from tools.v2_dashboard_project import _read_capped, run_projection  # noqa: E402
 
 _NATIVE_PLAN = {"shadow_serving_scorer": "native"}
 
@@ -239,15 +239,64 @@ def test_run_projection_refuses_list_or_non_json_plan(tmp_path):
         assert error.value.code == "INVALID_REQUEST"
         assert error.value.problem.message == message
 
-        index_path = serving_root / "serving.sqlite"
-        assert not index_path.exists() or index_path.stat().st_size == 0
-        if index_path.exists():
-            serving_conn = projections.connect(str(index_path))
-            try:
-                assert serving_conn.execute(
-                    "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
-            finally:
-                serving_conn.close()
+    index_path = serving_root / "serving.sqlite"
+    assert not index_path.exists() or index_path.stat().st_size == 0
+    if index_path.exists():
+        serving_conn = projections.connect(str(index_path))
+        try:
+            assert serving_conn.execute(
+                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
+        finally:
+            serving_conn.close()
+
+
+# 9. no-plan run records the default legacy_bundle row source
+def test_run_projection_no_plan_records_legacy_bundle(tmp_path):
+    inputs = _flat_inputs(tmp_path / "inputs")
+
+    _, doc = run_projection(**_args(inputs, tmp_path / "serving"))
+
+    conn = projections.connect(str(tmp_path / "serving" / "serving.sqlite"))
+    try:
+        release = projections.get_release(conn, doc["release_id"])
+    finally:
+        conn.close()
+    assert release.row_sources == ("legacy_bundle",)
+
+
+# 10. unknown bundle_format -> INVALID_REQUEST, no release row
+def test_run_projection_unknown_bundle_format_raises_and_writes_no_release(tmp_path):
+    inputs = _flat_inputs(tmp_path / "inputs")
+    serving_root = tmp_path / "serving"
+
+    with pytest.raises(OpsError) as error:
+        run_projection(**_args(inputs, serving_root, bundle_format="bogus"))
+    assert error.value.code == "INVALID_REQUEST"
+
+    index_path = serving_root / "serving.sqlite"
+    assert not index_path.exists() or index_path.stat().st_size == 0
+    if index_path.exists():
+        serving_conn = projections.connect(str(index_path))
+        try:
+            assert serving_conn.execute(
+                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
+        finally:
+            serving_conn.close()
+
+
+# 11. _read_capped refuses past the cap and returns the bytes up to it
+def test_read_capped_refuses_over_cap_and_returns_at_cap(tmp_path):
+    from tools.v2_dashboard_project import _read_capped
+
+    at_cap = tmp_path / "at_cap.bin"
+    at_cap.write_bytes(b"0123456789")
+    over_cap = tmp_path / "over_cap.bin"
+    over_cap.write_bytes(b"0123456789A")
+
+    assert _read_capped(at_cap, cap=10) == b"0123456789"
+    with pytest.raises(OpsError) as error:
+        _read_capped(over_cap, cap=10)
+    assert error.value.code == "INVALID_REQUEST"
 
     unreadable = tmp_path / "plan_dir"
     unreadable.mkdir()
@@ -421,3 +470,51 @@ def test_run_projection_plan_size_boundary(tmp_path):
                 "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
         finally:
             serving_conn.close()
+
+
+# 9. a no-plan run records the legacy_bundle row source on the stored release
+def test_run_projection_without_plan_records_legacy_bundle(tmp_path):
+    inputs = _flat_inputs(tmp_path / "inputs")
+    serving_root = tmp_path / "serving_no_plan"
+
+    _, doc = run_projection(**_args(inputs, serving_root))
+
+    conn = projections.connect(str(serving_root / "serving.sqlite"))
+    try:
+        release = projections.get_release(conn, doc["release_id"])
+    finally:
+        conn.close()
+    assert release.row_sources == ("legacy_bundle",)
+
+
+# 10. a bogus bundle_format -> INVALID_REQUEST and no release row
+def test_run_projection_refuses_bogus_bundle_format(tmp_path):
+    inputs = _flat_inputs(tmp_path / "inputs")
+    serving_root = tmp_path / "serving_bogus"
+
+    with pytest.raises(OpsError) as error:
+        run_projection(**_args(inputs, serving_root, bundle_format="bogus"))
+    assert error.value.code == "INVALID_REQUEST"
+
+    index_path = serving_root / "serving.sqlite"
+    assert not index_path.exists() or index_path.stat().st_size == 0
+    if index_path.exists():
+        serving_conn = projections.connect(str(index_path))
+        try:
+            assert serving_conn.execute(
+                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
+        finally:
+            serving_conn.close()
+
+
+# 11. _read_capped's boundary: an 11-byte file refused at cap=10, a 10-byte file read
+def test_read_capped_refuses_over_cap_and_returns_at_cap(tmp_path):
+    at_cap = tmp_path / "at_cap.bin"
+    at_cap.write_bytes(b"x" * 10)
+    assert _read_capped(at_cap, cap=10) == b"x" * 10
+
+    over_cap = tmp_path / "over_cap.bin"
+    over_cap.write_bytes(b"x" * 11)
+    with pytest.raises(OpsError) as error:
+        _read_capped(over_cap, cap=10)
+    assert error.value.code == "INVALID_REQUEST"
