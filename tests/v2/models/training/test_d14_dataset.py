@@ -9,14 +9,16 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
-from engine.calendar import projected_trading_days
+from engine.calendar import TradingCalendar, projected_trading_days
 from engine.data.features import tier4
 from engine.v2.data import errors
 from engine.v2.data.computed_moves import native_trading_calendar
 from engine.v2.models.training import (
     RecipeKey,
     TrainingRefused,
+    build_d14_dataset,
     current_recipes,
+    d14_inputs,
     dataset_fingerprint,
     fold_receipts,
     plan_folds,
@@ -72,7 +74,11 @@ def test_predictions_receipts_and_resume_identity(pinned, role, monkeypatch, tmp
     out1, out2 = tmp_path / "legacy", tmp_path / "native"
     run_training_job(recipe, legacy, out1)
     run_training_job(recipe, native, out2, input_identity=native.attrs["training_inputs"])
-    for path in out1.glob("folds/*/predictions.parquet"):
+    predictions = list(out1.glob("folds/*/predictions.parquet"))
+    assert predictions
+    assert {p.relative_to(out1) for p in predictions} == {
+        p.relative_to(out2) for p in out2.glob("folds/*/predictions.parquet")}
+    for path in predictions:
         assert_frame_equal(pd.read_parquet(path), pd.read_parquet(out2 / path.relative_to(out1)),
                            check_exact=True)
     resumed = run_training_job(recipe, native, out2, input_identity=native.attrs["training_inputs"])
@@ -168,9 +174,66 @@ def test_pinned_calendar_retains_exact_legacy_projection(last):
     assert list(actual.days) == expected
 
 
+def build_with_projection_oracle(pinned, monkeypatch):
+    """Observe the public calculation boundary without bypassing verified loading."""
+    observed = pinned["days"]
+    expected = TradingCalendar([*observed, *projected_trading_days(
+        observed[-1], observed[-1] + pd.Timedelta(days=400))])
+    original = d14_inputs.calculate_frame
+    calls = []
+
+    def calculate(repository, snapshot, *, calendar, role):
+        assert list(calendar.days) == list(expected.days), "calendar projection differs"
+        assert calendar.observed_through == observed[-1]
+        frame = original(repository, snapshot, calendar=calendar, role=role)
+        calls.append(repository.read_counters.snapshot())
+        return frame
+
+    monkeypatch.setattr(d14_inputs, "calculate_frame", calculate)
+    frame = build_d14_dataset("implied_t1", **pinned["inputs"])
+    assert len(calls) == 1
+    assert calls[0]["daily_market"]["scans"] == 1
+    return frame
+
+
+def test_verified_builder_retains_exact_legacy_projection(pinned, monkeypatch):
+    expected = legacy_frame(pinned, "implied_t1", monkeypatch)
+    # This fixture's 401st day is a trading session, making the +1 error observable.
+    assert pinned["days"][-1] == pd.Timestamp("2025-03-31")
+    assert projected_trading_days("2026-05-05", "2026-05-06") == [pd.Timestamp("2026-05-06")]
+    actual = build_with_projection_oracle(pinned, monkeypatch)
+    assert_frame_equal(actual[expected.columns], expected, check_exact=True)
+    corrupted = actual[expected.columns].copy()
+    corrupted.loc[0, "spot"] += 1
+    with pytest.raises(AssertionError, match="spot"):
+        assert_frame_equal(corrupted, expected, check_exact=True)
+
+
+@pytest.mark.parametrize("extension", (0, 401))
+def test_public_projection_oracle_rejects_planted_extension_defects(pinned, monkeypatch, extension):
+    original = d14_inputs.computed_moves.native_trading_calendar
+
+    def calendar(frames, **kwargs):
+        return original(frames, **{**kwargs, "extend_days": extension})
+
+    monkeypatch.setattr(d14_inputs.computed_moves, "native_trading_calendar", calendar)
+    with pytest.raises(AssertionError, match="calendar projection differs"):
+        build_with_projection_oracle(pinned, monkeypatch)
+
+
 def test_native_cli_plan_is_idempotent_with_legacy_readers_disabled(pinned, monkeypatch, tmp_path):
+    from engine.v2.models import training
+
     monkeypatch.setattr("engine.features.load_panel", forbidden)
     monkeypatch.setattr(tier4.store, "read_table", forbidden)
+    original = training.run_training_job
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(kwargs["plan_only"])
+        return original(*args, **kwargs, fit=forbidden)
+
+    monkeypatch.setattr(training, "run_training_job", run)
     args = ["--role", "implied_t1", "--out", str(tmp_path / "planned"), "--plan-only"]
     for name, value in pinned["inputs"].items():
         args += ["--" + name.replace("_", "-"), str(value)]
@@ -179,6 +242,10 @@ def test_native_cli_plan_is_idempotent_with_legacy_readers_disabled(pinned, monk
     assert phase5_d14_inputs.main(args) == 0
     assert (tmp_path / "planned" / "job.json").read_text() == identity
     job = json.loads((tmp_path / "planned" / "job.json").read_text())
+    assert calls == [True, True]
+    assert job["plan_only"] is True
+    assert job["folds"]
+    assert not list((tmp_path / "planned").glob("folds/*/predictions.parquet"))
     assert job["input_identity"] == {
         "schema_version": "d14.snapshot_dataset.v1", "receipt_id": "r1",
         "snapshot_id": pinned["snapshot"].snapshot_id,

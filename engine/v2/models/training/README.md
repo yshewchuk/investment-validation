@@ -73,7 +73,8 @@ calculations use native readers/math; the historical panel producer remains a
 dependency through its snapshot-pinned history columns. It does not substitute
 the live panel-row population. The CLI,
 `python -m tools.phase5_d14_inputs --role implied_t1 --out OUT`, requires
-`--catalog`, `--artifact-root`, `--snapshot-id`, and `--receipt-id`. Existing
+`--catalog`, `--artifact-root`, `--snapshot-id`, and `--receipt-id`; optional
+`--plan-only` writes receipts without fitting. Existing
 phase5 and supervised routes are separate entry points. The receipt must belong to that snapshot and pin its original
 calendar. `run_training_job(input_identity=...)` records those source pins in
 the resume identity, alongside the unchanged dataset and recipe fingerprints.
@@ -84,7 +85,8 @@ neither certifies calendar provenance nor attaches `training_inputs`; use
 `build_d14_dataset` for verified training inputs. The same module exposes
 `input_rows`/`input_frame` (bounded reads), `decision_rows` (session decisions),
 `daily_features` (in-place daily-state attachment) and `validate_role` (early
-role refusal). These helpers do not imply receipt or source admission.
+role refusal). These are public module members, not package-root re-exports;
+they do not imply receipt or source admission.
 
 P5-4 (`residuals.py`) adds the frozen residual-pool builders:
 `build_driver_residual_pool_artifact` (bucketing via `native_payoff`

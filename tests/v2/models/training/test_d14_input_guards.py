@@ -24,7 +24,8 @@ def test_fixed_monthly_population_matches_legacy_across_year_boundary(pinned, mo
     expected = legacy_frame(pinned, "implied_t1", monkeypatch)
     actual = phase5_d14_inputs.build_dataset("implied_t1", **pinned["inputs"])
     assert_frame_equal(actual[expected.columns], expected, check_exact=True)
-    assert set(actual.year) == {2024, 2025}
+    assert set(actual.year) == {2024, 2025, 2026}
+    assert pd.Timestamp("2026-01-02") in set(actual.event_date)
 
 
 @pytest.mark.parametrize("pinned", ("blank_session",), indirect=True)
@@ -228,6 +229,36 @@ def test_catalog_errors_are_typed(pinned, tmp_path, case):
     assert err.value.code == "CONTRACT_MISMATCH"
 
 
+def test_absent_snapshot_has_typed_refusal(pinned):
+    with pytest.raises(errors.DataError) as err:
+        build_d14_dataset("implied_t1", **{**pinned["inputs"], "snapshot_id": "missing"})
+    assert err.value.code == "SNAPSHOT_NOT_FOUND"
+
+
+@pytest.mark.parametrize("failure", ("catalog", "training"))
+def test_cli_reports_typed_refusals_without_traceback(pinned, monkeypatch, tmp_path, capsys, failure):
+    from engine.v2.models import training
+
+    inputs = dict(pinned["inputs"])
+    if failure == "catalog":
+        inputs["catalog"] = tmp_path / "missing.sqlite"
+        expected = "CONTRACT_MISMATCH: D14 catalog is unavailable"
+    else:
+        def refuse(*args, **kwargs):
+            raise training.TrainingRefused((training.ReceiptIssue("fixture", "FUTURE_LABEL", "late"),))
+
+        monkeypatch.setattr(training, "run_training_job", refuse)
+        expected = "FUTURE_LABEL at fixture: late"
+    args = ["--role", "implied_t1", "--out", str(tmp_path / "out"), "--plan-only"]
+    for name, value in inputs.items():
+        args += ["--" + name.replace("_", "-"), str(value)]
+    assert phase5_d14_inputs.main(args) == 2
+    captured = capsys.readouterr()
+    assert captured.err == expected + "\n"
+    assert captured.out == ""
+    assert not (tmp_path / "out").exists()
+
+
 @pytest.mark.parametrize("past_limit", (False, True))
 def test_calendar_byte_bound_is_inclusive(pinned, monkeypatch, past_limit):
     monkeypatch.setattr(d14_inputs, "MAX_CALENDAR_BYTES", pinned["calendar_ref"].byte_size - past_limit)
@@ -237,7 +268,9 @@ def test_calendar_byte_bound_is_inclusive(pinned, monkeypatch, past_limit):
             build_d14_dataset("implied_t1", **pinned["inputs"])
         assert err.value.code == "RESULT_LIMIT_EXCEEDED"
     else:
-        assert not build_d14_dataset("implied_t1", **pinned["inputs"]).empty
+        expected = legacy_frame(pinned, "implied_t1", monkeypatch)
+        actual = build_d14_dataset("implied_t1", **pinned["inputs"])
+        assert_frame_equal(actual[expected.columns], expected, check_exact=True)
 
 
 @pytest.mark.parametrize("pinned,past_limit", (

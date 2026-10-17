@@ -159,10 +159,12 @@ and positional-lag behavior. Nonpositive prices produce missing move labels.
 | Input exceeds table, ticker or calendar-byte bound | `RESULT_LIMIT_EXCEEDED` |
 | Snapshot identity or committed receipt association differs | `IDENTITY_CONFLICT` |
 | Committed receipt has no pinned reference inputs | `SNAPSHOT_NOT_READY` |
+| Explicit snapshot identifier is absent from the catalog | `SNAPSHOT_NOT_FOUND` |
 | Null session or fewer than 14 prior calendar sessions | Event excluded, matching legacy membership |
 | Catalog, required table/calendar, non-null session outside AMC/BMO, role, integer history or decision population invalid | `CONTRACT_MISMATCH` |
 | Calendar object bytes differ from their registered hash/size | `OBJECT_CORRUPT` |
 | CLI output is inside configured data root or input store | argparse exit 2 before reads/writes |
+| CLI receives a typed data/training refusal | stderr refusal detail and exit 2; no traceback |
 
 ### 2.1 Pool release assembly
 

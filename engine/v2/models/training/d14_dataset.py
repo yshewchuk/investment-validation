@@ -159,7 +159,8 @@ def calculate_frame(repository, snapshot, *, calendar, role):
     frame = frame.merge(history.rename(columns={"date": "event_date"}),
                         on=["ticker", "event_date"], how="left", validate="many_to_one")
     frame = daily_features(frame, repository, snapshot)
-    frame["days_to_print"] = (frame["event_date"] - pd.to_datetime(frame["entry_date"])).dt.days.astype(float)
+    span = frame["event_date"] - pd.to_datetime(frame["entry_date"])
+    frame["days_to_print"] = span.dt.days.astype(float)
     for column in ("iv30", "iv10", "exern_iv30", "exern_iv10"):
         frame[f"pre_{column}"] = frame[column]
     frame["runup_pp"] = frame["im_t1"] - frame["im"]

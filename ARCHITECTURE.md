@@ -691,7 +691,7 @@ change their arithmetic or imply that source receipt production is available.
   calculated answer in (a forbidden-field map) or that arrives with a
   prebuilt geometry or pricing object. Legacy records are expected values
   for a comparator only — never a native input.
-  The named migration exception is `training.build_d14_dataset` for monthly
+  This contract adds a migration exception: `training.build_d14_dataset` for monthly
   `implied_t1`/`runup_move`: it retains imported `feature_panel` history and
   membership with explicit snapshot/receipt/calendar/table-version lineage.
   This is compatibility history, not native historical production or proof of

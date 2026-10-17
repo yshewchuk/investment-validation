@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
+from engine.v2.data.errors import DataError
 from engine.v2.models.training.d14_inputs import build_d14_dataset as build_dataset
 
 
@@ -11,7 +13,12 @@ def main(argv=None):
     """Explicit native monthly training; existing supervised routes stay unchanged."""
     from engine import paths
     from engine.v2.models import no_fit
-    from engine.v2.models.training import RecipeKey, current_recipes, run_training_job
+    from engine.v2.models.training import (
+        RecipeKey,
+        TrainingRefused,
+        current_recipes,
+        run_training_job,
+    )
     from engine.v2.models.training.estimators import forbid_fitting
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -26,11 +33,15 @@ def main(argv=None):
         parser.error("--out must be outside data/ and the input artifact store")
     no_fit.forbid_fitting("tools.phase5_d14_inputs.main")
     forbid_fitting("tools.phase5_d14_inputs.main")
-    frame = build_dataset(args.role, catalog=args.catalog, artifact_root=args.artifact_root,
-                          snapshot_id=args.snapshot_id, receipt_id=args.receipt_id)
-    recipe = current_recipes()[RecipeKey(args.role, "*", "tier4_monthly")]
-    result = run_training_job(recipe, frame, out, plan_only=args.plan_only,
-                              input_identity=frame.attrs["training_inputs"])
+    try:
+        frame = build_dataset(args.role, catalog=args.catalog, artifact_root=args.artifact_root,
+                              snapshot_id=args.snapshot_id, receipt_id=args.receipt_id)
+        recipe = current_recipes()[RecipeKey(args.role, "*", "tier4_monthly")]
+        result = run_training_job(recipe, frame, out, plan_only=args.plan_only,
+                                  input_identity=frame.attrs["training_inputs"])
+    except (DataError, TrainingRefused) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     print(f"{recipe.recipe_id}: rows={len(frame)} folds={len(result.outcomes)}")
     return 0
 

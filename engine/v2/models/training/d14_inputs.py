@@ -40,7 +40,7 @@ def _calendar(store, reference):
 
 
 def build_d14_dataset(role, *, catalog, artifact_root, snapshot_id, receipt_id):
-    """Load one pinned calendar and snapshot, then attach source resume identity."""
+    """Load pinned inputs; set frame.attrs["training_inputs"] for job resume binding."""
     validate_role(role)
     try:
         conn = sqlite3.connect(Path(catalog).resolve().as_uri() + "?mode=ro", uri=True)
