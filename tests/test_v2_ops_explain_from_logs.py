@@ -298,8 +298,9 @@ def test_progress_event_fields_carry_no_business_value(tmp_path, monkeypatch):
     """Structural guard: every ``ProgressEvent`` field the supervisor
     actually fills is a step name, a count, a byte size, a duration or a
     fixed enum-like message -- never a value read out of legacy-computed
-    data (a price, a score, a PnL number). A future field added to carry
-    something else would need to change this whitelist, on purpose."""
+    data (a price, a score, a PnL number). ``step_reads`` is structural
+    too: table names with a row count per table. A future field added to
+    carry something else would need to change this whitelist, on purpose."""
     from dataclasses import fields
 
     from engine.v2.contracts import ProgressEvent
@@ -307,7 +308,7 @@ def test_progress_event_fields_carry_no_business_value(tmp_path, monkeypatch):
               "elapsed_seconds", "message", "completed_units", "total_units",
               "memory_current_bytes", "memory_peak_bytes", "checkpoint_ref", "eta_seconds",
               "latest_error_code", "step", "step_duration_seconds", "step_units",
-              "schema_version"}
+              "step_reads", "schema_version"}
     assert {f.name for f in fields(ProgressEvent)} == allowed
 
 

@@ -108,7 +108,7 @@ def step_start(name: str) -> None:
                   "rss_bytes": _rss_bytes()})
 
 
-def step_end(name: str, *, units: int | None = None) -> None:
+def step_end(name: str, *, units: int | None = None, reads: dict | None = None) -> None:
     if _active is None:
         return
     _active._open.pop(name, None)
@@ -116,6 +116,8 @@ def step_end(name: str, *, units: int | None = None) -> None:
              "rss_bytes": _rss_bytes()}
     if units is not None:
         record["units"] = units
+    if isinstance(reads, dict):
+        record["reads"] = reads
     _active.write(record)
 
 

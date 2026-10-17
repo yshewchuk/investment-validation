@@ -1257,11 +1257,12 @@ class Service:
         self._emit_progress(running, kind="progress", step=name, message="step complete",
                            elapsed_seconds=elapsed, memory_current_bytes=record.get("rss_bytes"),
                            memory_peak_bytes=peak, duration_seconds=duration,
-                           units=record.get("units"))
+                           units=record.get("units"),
+                           step_reads=record.get("reads") if isinstance(record.get("reads"), dict) else None)
 
     def _emit_progress(self, running, *, kind, message, elapsed_seconds, step=None,
                        memory_current_bytes=None, memory_peak_bytes=None,
-                       duration_seconds=None, units=None):
+                       duration_seconds=None, units=None, step_reads=None):
         claim = running.claim
         sequence = self._next_sequence(claim.attempt_id)
         event = ProgressEvent(
@@ -1269,7 +1270,7 @@ class Service:
             sequence=sequence, recorded_at=format_timestamp(self.clock.now()), kind=kind,
             elapsed_seconds=float(elapsed_seconds or 0.0), message=message, step=step,
             memory_current_bytes=memory_current_bytes, memory_peak_bytes=memory_peak_bytes,
-            step_duration_seconds=duration_seconds, step_units=units)
+            step_duration_seconds=duration_seconds, step_units=units, step_reads=step_reads)
         record_progress(self.conn, event)
 
     def _next_sequence(self, attempt_id):

@@ -118,6 +118,10 @@ caller: it resolves the pinned snapshot and invokes the producer in the worker
 process. `Service._reconcile_native_score_batch_shadow` only submits producer
 parameters for an eligible pinned-snapshot identity. See the component
 architecture contract.
+`nightly_read_summary.ReadTracker` is the producer's observation-only read
+attribution (per-step `reads` deltas and the job-end `read_summary`);
+`nightly_raw_row_producer` is its only caller, and its output rides on
+`ProgressEvent.step_reads`.
 
 The internal `native_score_batch._STRATEGY_REGISTRY` declares each admitted
 row's ordered forecast outputs and exact/alias driver roles, gate, policy key,

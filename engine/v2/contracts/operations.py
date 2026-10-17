@@ -215,6 +215,7 @@ class ProgressEvent:
     step: str | None = None
     step_duration_seconds: float | None = None
     step_units: int | None = None
+    step_reads: dict[str, Any] | None = None
     schema_version: str = PROGRESS_EVENT_V1
 
 
