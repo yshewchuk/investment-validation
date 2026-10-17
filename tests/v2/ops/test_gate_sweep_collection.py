@@ -1332,19 +1332,19 @@ def test_unavailable_import_time_collector_snapshot_refuses_before_submission(mo
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
 
 
-@pytest.mark.parametrize("mode", ["rb", "r"])
 @pytest.mark.parametrize("number,retryable", [
     (errno.EIO, True), (errno.EMFILE, True), (errno.ENFILE, True),
     (errno.EACCES, False), (errno.EPERM, False), (errno.ENOENT, False),
     (errno.ENOTDIR, False), (errno.EISDIR, False), (errno.EINVAL, False), (None, False),
 ])
-def test_collector_source_reads_distinguish_resources_from_unverifiable_code(monkeypatch, mode, number, retryable):
+def test_collector_source_reads_distinguish_resources_from_unverifiable_code(monkeypatch, number, retryable):
     original, reads = Path.open, []
     target = collection._COLLECTOR_ROOT / "experiments/v2_gate_collect.py"
     def interrupted(path, *args, **kwargs):
         opened_mode = args[0] if args else kwargs.get("mode", "r")
-        if path == target and opened_mode == mode:
+        if path == target:
             reads.append((path, opened_mode))
+            assert opened_mode == "rb"
             raise OSError(number, "private source read detail")
         return original(path, *args, **kwargs)
     monkeypatch.setattr(Path, "open", interrupted)
@@ -1352,7 +1352,7 @@ def test_collector_source_reads_distinguish_resources_from_unverifiable_code(mon
     with pytest.raises(OpsError) as error:
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=REPO, as_of_month=MONTH, no_ledger=True)
-    assert reads == [(target, mode)]
+    assert reads == [(target, "rb")]
     assert error.value.code == ("RESOURCE_UNAVAILABLE" if retryable else "EXPERIMENT_IDENTITY_CONFLICT")
     assert error.value.problem.retryable is retryable
     assert "private" not in canonical_json(to_document(error.value.problem))
