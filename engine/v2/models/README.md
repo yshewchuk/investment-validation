@@ -162,7 +162,7 @@ for offline fold metadata. `tools/phase5_prepare_release.py`
 consumes `ChooserFoldPolicy` and `chooser_fold_outputs`, obtains registered
 policies, and invokes `tools/phase5_serving_folds.py`'s `preflight_chooser_fold`
 before publication.
-`release_layout.py` reads catalogs via `release_objects.read_regular_file`, a bounded final-component no-follow open. `tools/phase5_prepare_release.py` and `checks/phase5_acceptance.py` make no such bound promise: their operator-supplied and staged file reads are uncapped (tracked in #819).
+`release_layout.py` reads catalogs via `release_objects.read_regular_file`, a bounded final-component no-follow open. `tools/phase5_prepare_release.py` bounds its serving-fold reads (`read_bounded_state`, `MAX_FOLD_BYTES`) and frozen-state reads when a cap is passed; its other release-file reads (`path.read_bytes()`/`read_text()` near lines 185-204) and `checks/phase5_acceptance.py`'s staged-member and report reads are uncapped (tracked in #819).
 `checks/phase5_acceptance.py` publishes staging success after acceptance.
 `tools/phase5_prepare_release.py` invalidates prior success before re-preparation.
 `checks/phase5_release_assembly.py` re-stages a prior release under a new id
