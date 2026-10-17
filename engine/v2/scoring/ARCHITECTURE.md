@@ -468,8 +468,8 @@ rather than its own. `native_score_batch` goes through `score_one`, never
 ### `release_bindings.py` (4c R1–R6)
 
 - **R1, missing input.** `resolve_release_binding(release_root)` validates
-  its argument, computes `<release_root>/deployment` inline (ported from
-  `checks/phase5_release.py`, not imported), then resolves the live pointer
+  its argument, computes `<release_root>/deployment` inline (the same literal as
+  `engine/v2/models/release_objects.py`, not imported), then resolves the live pointer
   and, once known, reads the staged manifest **exactly once** (never through
   the public `resolve_release()` wrapper, and never re-read for the hash
   check below):

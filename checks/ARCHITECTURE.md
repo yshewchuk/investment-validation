@@ -12,22 +12,13 @@ every other path, including undeclared paths under `data/`, uses ordinary
 
 No package-wide runner/schema exists; invoke each CLI directly, e.g. `python3 checks/repo_hygiene.py`.
 Some checks also expose callable report functions.
+`phase5_modules.modules_available` probes optional modules (kept here: production code may not import dynamically).
 `phase5_release_assembly` (`derive_catalog`, `carry_forward_release`) assembles a carried-forward
 release catalog (plus `prior_carry_set`, which lists a prior release's objects as carried);
 its contract and refusal codes are `engine/v2/models/ARCHITECTURE.md` §2.1. The ops job
 `phase5_state_stage` reaches it through `tools/phase5_state_stage_job.py` (§2.2).
 
-`phase5_release.write_object` returns hash/path in the existing flat deployment layout after exact bounded no-follow byte verification.
-New objects are durable before return; create-only publication never overwrites or repairs incumbents.
-Every retry verifies the object and syncs its directories; the byte allowance is the supplied payload length, including zero.
-Only invocation-owned staging is cleaned; no unbounded read or cross-filesystem copy fallback is permitted.
-Post-link failure may leave a complete unreferenced object, but no new catalog/pointer. Whole-release concurrency/root ownership stays with callers.
-
-| Object publication condition | Outcome |
-|---|---|
-| Existing/racing identical regular object | Verify exact bytes and retain the incumbent |
-| Wrong/oversized/unreadable bytes or symlink to a regular file | Fixed `ObjectVerificationError` (`ReleaseLayoutError`); retain bounded-read/I/O cause and incumbent |
-| Dangling/nonregular-target symlink, other collision or publication I/O failure | Fixed `ReleaseLayoutError` with original `OSError`; never replace; no catalog/pointer |
+The `write_object` contract (`engine.v2.models.release_objects`) is in `engine/v2/models/ARCHITECTURE.md` §2.1.
 
 `tier0_support.py` owns `DEFAULT_CORPUS`, `round_params` and `finding_dicts`.
 The default retains the corpus runner's checkout-relative `fixtures/tier0`
@@ -79,8 +70,8 @@ Commands write findings/progress to standard streams and may write reports or ev
 ## Dependencies
 
 Checks use Python and repository metadata; evidence checks may import application packages or read built stores. `repo_hygiene.py` avoids `engine` imports.
-`phase5_release` uses foundation's public `ensure_directory`/`fsync_directory`
-and models deployment for the existing store/catalog contracts.
+`engine/v2/models/release_objects.py` uses foundation's public `ensure_directory`/`fsync_directory`
+and `frozen_state_io.read_bounded_state`; `release_layout.py` uses models deployment for the existing store/catalog contracts.
 Tier-0 support imports only the standard library and the diagnosis receipt
 interface; it never imports the corpus runner or starts a process.
 

@@ -285,12 +285,12 @@ builder to `tools/phase5_prepare_release.py` (or a `--state` job that it
 collects). Add its probe to `checks.phase5_consumers.CONSUMERS`, and add a
 synthetic test. If a Phase 4 trace pins the member, add it to
 `checks.phase5_phase4_replay` so the replay serves it from the release. The
-catalog in `checks/phase5_release.py` already names it.
+catalog in `engine/v2/models/release_layout.py` already names it.
 
 ## 6. Tests
 
 Synthetic only, no real data:
 
-    timeout 600 python3 -m pytest -q -p no:xdist tests/test_checks_phase5_acceptance.py \
-        tests/test_checks_phase5_phase4_replay.py tests/test_phase5_calibration_keys.py \
-        tests/test_v2_scoring_native_entry_rule.py tests/test_phase4_chooser_trace.py
+    timeout 600 python3 -m pytest -q -p no:xdist tests/v2/models/test_checks_phase5_acceptance.py \
+        tests/v2/models/test_checks_phase5_phase4_replay.py tests/v2/models/test_phase5_calibration_keys.py \
+        tests/test_v2_scoring_native_entry_rule.py tests/v2/models/test_phase4_chooser_trace.py
