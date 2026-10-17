@@ -1,7 +1,9 @@
 """Bounded real native fits, causal ordering, sealed zero-retry and crash controls."""
 # ruff: noqa: F811
+import signal
 import subprocess
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -13,9 +15,8 @@ from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_execution as execution
 from experiments import magnitude_search_trials as trials
+from tests.v2.research.magnitude_trial_support import trial_cases, trial_forecasts, trial_slots
 from tests.v2.research.test_magnitude_search_trials import (
-    _cases,
-    _slots,
     base_source,  # noqa: F401
     case,  # noqa: F401
 )
@@ -33,19 +34,23 @@ def problem(code, message):
 def inject_child(monkeypatch, body):
     """Inject only a synthetic estimator failure into an otherwise real fixed child."""
     original = subprocess.Popen
+    children = []
     script = ("import sys; sys.argv = sys.argv[1:]; from experiments import magnitude_fitted as fitted; "
               + "exec(" + repr(body) + "); fitted.fit_magnitude_predictions = injected; "
               "from experiments.magnitude_search_worker import main; main()")
     def launch(args, **kwargs):
-        return original([args[0], "-c", script, *args[2:]], **kwargs)
+        child = original([args[0], "-c", script, *args[2:]], **kwargs)
+        children.append((child, Path(args[3]).parent))
+        return child
     monkeypatch.setattr(execution.subprocess, "Popen", launch)
+    return children
 
 
 def test_real_ridge_accounting_forecasts_before_labels_and_zero_work_replay(case, monkeypatch):
-    args = _cases(case)[0]
+    args = trial_cases(case)[0]
     original = trials.load_magnitude_targets
     def labels(*a, **kw):
-        slots = dict(_slots(case))
+        slots = dict(trial_slots(case))
         assert sum(slot.startswith("fit-started:") for slot in slots) == 3
         assert sum(slot.startswith("fit-completed:") for slot in slots) == 3
         assert sum(slot.startswith("forecasts:") for slot in slots) == 1
@@ -57,13 +62,13 @@ def test_real_ridge_accounting_forecasts_before_labels_and_zero_work_replay(case
     assert [fit["horizon_sessions"] for fit in result["fits"]] == [5, 3, 1]
     assert result["terminal"]["metrics"] == {"count": 12, "rmse": pytest.approx(39 ** 0.5), "mae": 5.5}
     assert {row["predicted_absolute_move_pct"] for row in result["terminal"]["predictions"]} == {2.0}
-    before = _slots(case)
+    before = trial_slots(case)
     monkeypatch.setattr(trials, "run_fitted_trial", lambda *a: pytest.fail("replay launched fit"))
     monkeypatch.setattr(case.recorder, "_inputs", lambda *a: pytest.fail("replay opened native inputs"))
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("replay opened labels"))
     with no_fit_guard(), legacy_guard():
         assert case.recorder.execute(*args, limits=LIMITS) == result
-    assert _slots(case) == before
+    assert trial_slots(case) == before
     with problem("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs"):
         case.recorder.execute(*args, limits={**LIMITS, "cpu_seconds": 31})
 
@@ -74,7 +79,7 @@ def test_candidate_fit_failure_retains_exact_prefix_and_replays(case, monkeypatc
         "    global count\n    count += 1\n"
         f"    if count == {number}: raise ValueError('private estimator diagnostic')\n"
         "    return [2.0] * len(test)\n")
-    args = _cases(case)[0]
+    args = trial_cases(case)[0]
     result = case.recorder.execute(*args, limits=LIMITS)
     assert result["fit_attempt_count"] == number
     assert result["completed_fit_count"] == number - 1
@@ -82,9 +87,9 @@ def test_candidate_fit_failure_retains_exact_prefix_and_replays(case, monkeypatc
     assert result["terminal"]["problem"] == to_document(
         fail("EXPERIMENT_VARIANT_FAILED", "search trial did not complete").problem)
     assert "private" not in str(result)
-    before = _slots(case)
+    before = trial_slots(case)
     assert case.recorder.execute(*args, limits=LIMITS) == result
-    assert _slots(case) == before
+    assert trial_slots(case) == before
 
 
 @pytest.mark.parametrize("kind", ["memory", "allocation", "io", "runtime", "wall", "cpu"])
@@ -93,47 +98,54 @@ def test_resource_failures_leave_unfinished_claims_and_no_retry(case, monkeypatc
               "runtime": "raise RuntimeError('thread creation failed')",
               "wall": "import time; time.sleep(10); return [2.0] * len(test)",
               "cpu": "\n    while True: pass"}
-    inject_child(monkeypatch, "def injected(recipe, train, labels, test):\n    " + bodies[kind] + "\n")
+    children = inject_child(monkeypatch, "def injected(recipe, train, labels, test):\n    " + bodies[kind] + "\n")
     limits = {**LIMITS, **({"wall_seconds": 2} if kind == "wall" else
                          {"cpu_seconds": 2, "wall_seconds": 10} if kind == "cpu" else {})}
     code, text = ("RESOURCE_UNAVAILABLE", "search execution infrastructure is unavailable") if kind in ("io", "runtime") else (
         "RESOURCE_LIMIT_EXCEEDED", "search execution exceeded its resource limits")
     with problem(code, text):
-        case.recorder.execute(*_cases(case)[0], limits=limits)
-    slots = [slot for slot, _ in _slots(case)]
+        case.recorder.execute(*trial_cases(case)[0], limits=limits)
+    child, scratch = children[0]
+    assert child.poll() is not None
+    assert not scratch.exists()
+    if kind == "cpu":
+        assert child.returncode == -signal.SIGXCPU
+    if kind == "wall":
+        assert child.returncode == -signal.SIGKILL
+    slots = [slot for slot, _ in trial_slots(case)]
     assert not any(slot.startswith(("terminal:", "execution:", "forecasts:")) for slot in slots)
     with problem("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt"):
         case.recorder.freeze()
     with problem("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
-        case.recorder.execute(*_cases(case)[0], limits=limits)
+        case.recorder.execute(*trial_cases(case)[0], limits=limits)
 
 
 @pytest.mark.parametrize("guard, error", [(no_fit_guard, RuntimeFitForbidden), (legacy_guard, LegacyRuntimeFitForbidden)])
 def test_parent_no_fit_guard_precedes_claim_and_launch(case, monkeypatch, guard, error):
-    before = _slots(case)
+    before = trial_slots(case)
     monkeypatch.setattr(trials, "run_fitted_trial", lambda *a: pytest.fail("fit launched"))
     with guard(), pytest.raises(error, match="SearchTrials.execute"):
-        case.recorder.execute(*_cases(case)[0], limits=LIMITS)
-    assert _slots(case) == before
+        case.recorder.execute(*trial_cases(case)[0], limits=LIMITS)
+    assert trial_slots(case) == before
 
 
 @pytest.mark.parametrize("limits", [{}, {**LIMITS, "cpu_seconds": True}, {**LIMITS, "memory_bytes": 0},
                                     {**LIMITS, "wall_seconds": 1.2}, {**LIMITS, "extra": 1}])
 def test_invalid_resource_contract_precedes_claim(case, limits):
-    before = _slots(case)
+    before = trial_slots(case)
     with problem("INVALID_EXPERIMENT_SPEC", "search execution requires explicit positive integer resource limits"):
-        case.recorder.execute(*_cases(case)[0], limits=limits)
-    assert _slots(case) == before
+        case.recorder.execute(*trial_cases(case)[0], limits=limits)
+    assert trial_slots(case) == before
 
 
 def test_validation_admission_failure_keeps_native_result_unfinished(case, monkeypatch):
-    args = _cases(case)[0]
+    args = trial_cases(case)[0]
     def refuse(*a, **kw):
         raise fail("EXPERIMENT_VARIANT_FAILED", "shared validation refusal")
     monkeypatch.setattr(trials, "load_magnitude_targets", refuse)
     with problem("EXPERIMENT_VARIANT_FAILED", "shared validation refusal"):
         case.recorder.execute(*args, limits=LIMITS)
-    slots = [slot for slot, _ in _slots(case)]
+    slots = [slot for slot, _ in trial_slots(case)]
     assert sum(slot.startswith("execution:") for slot in slots) == 1
     assert sum(slot.startswith("forecasts:") for slot in slots) == 1
     assert not any(slot.startswith("terminal:") for slot in slots)
@@ -148,24 +160,23 @@ def test_launch_error_is_infrastructure_and_cannot_be_submitted_as_candidate_fai
     def unavailable(*a, **kw):
         raise OSError("private launch")
     monkeypatch.setattr(execution.subprocess, "Popen", unavailable)
-    args = _cases(case)[0]
+    args = trial_cases(case)[0]
     with problem("RESOURCE_UNAVAILABLE", "search execution infrastructure is unavailable"):
         case.recorder.execute(*args, limits=LIMITS)
     with problem("EXPERIMENT_IDENTITY_CONFLICT", "native execution must finish before recording"):
         case.recorder.record(*args, failure=fail("EXPERIMENT_VARIANT_FAILED", "candidate failure").problem)
-    assert not any(slot.startswith("fit-started:") for slot, _ in _slots(case))
+    assert not any(slot.startswith("fit-started:") for slot, _ in trial_slots(case))
 
 
 def test_submitted_terminal_cannot_gain_native_execution_authority(case, monkeypatch):
-    from tests.v2.research.test_magnitude_search_trials import _forecasts
-    args = _cases(case)[0]
+    args = trial_cases(case)[0]
     case.recorder.start(*args)
-    case.recorder.record(*args, forecasts=_forecasts(case, args))
-    before = _slots(case)
+    case.recorder.record(*args, forecasts=trial_forecasts(case, args))
+    before = trial_slots(case)
     monkeypatch.setattr(trials, "run_fitted_trial", lambda *a: pytest.fail("already submitted trial launched"))
     with problem("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
         case.recorder.execute(*args, limits=LIMITS)
-    assert _slots(case) == before
+    assert trial_slots(case) == before
 
 
 def test_source_seal_explicitly_binds_fixed_child(case):

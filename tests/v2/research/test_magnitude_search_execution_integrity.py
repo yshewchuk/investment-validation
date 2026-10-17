@@ -140,6 +140,9 @@ def test_native_failure_still_requires_all_planned_candidates(native, monkeypatc
     result = native.recorder.execute("2024", "2023", "z-last", limits=LIMITS)
     assert result["fit_attempt_count"] == 1 and result["completed_fit_count"] == 0
     with pytest.raises(OpsError) as caught:
+        native.recorder.record("2024", "2023", "z-last", forecasts=rows())
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording").problem
+    with pytest.raises(OpsError) as caught:
         native.recorder.freeze()
     assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt").problem
     monkeypatch.setattr(trials, "run_fitted_trial", original)
@@ -204,7 +207,7 @@ def test_malformed_native_receipt_is_typed_and_cannot_open_labels(native, monkey
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("malformed receipt read labels"))
     with pytest.raises(OpsError) as caught:
         native.recorder.execute("2024", "2023", "a-first", limits=LIMITS)
-    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "native execution must finish before recording").problem
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording").problem
 
 
 def test_public_record_cannot_recover_failed_native_failure_publication(native, monkeypatch):
@@ -244,3 +247,50 @@ def test_completed_native_public_record_replay_is_read_only(native, monkeypatch)
     monkeypatch.setattr(trials, "run_fitted_trial", lambda *a: pytest.fail("replay launched fit"))
     assert native.recorder.record("2024", "2023", "a-first", forecasts=rows(2.0)) == result["terminal"]
     assert native.conn.total_changes == before
+
+
+@pytest.mark.parametrize("mutation", ["matrix", "repeated_start", "completion_first"])
+def test_parent_refuses_child_progress_before_committing_bad_marker(native, monkeypatch, mutation):
+    original = trials.run_fitted_trial
+    def corrupt(*args):
+        progress = args[-1]
+        def changed(state, evidence):
+            if mutation == "matrix":
+                progress(state, {**evidence, "training_matrix_id": "wrong"})
+            elif mutation == "completion_first":
+                progress("completed", evidence)
+            else:
+                progress(state, evidence)
+                progress(state, evidence)
+        return original(*args[:-1], changed)
+    monkeypatch.setattr(trials, "run_fitted_trial", corrupt)
+    with pytest.raises(OpsError) as caught:
+        native.recorder.execute("2024", "2023", "a-first", limits=LIMITS)
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit progress differs from admitted inputs").problem
+    slots = [row[0] for row in native.conn.execute("SELECT slot FROM magnitude_search_records")]
+    assert sum(slot.startswith("fit-started:") for slot in slots) == (1 if mutation == "repeated_start" else 0)
+    assert not any(slot.startswith(("fit-completed:", "execution:", "terminal:", "forecasts:")) for slot in slots)
+
+
+@pytest.mark.parametrize("mutation", ["early_success", "unstarted_failure", "extra_success", "extra_failure"])
+def test_parent_refuses_child_completion_before_receipt_or_labels(native, monkeypatch, mutation):
+    original = trials.run_fitted_trial
+    def corrupt(*args):
+        if mutation == "early_success":
+            return {"event": "succeeded", "forecasts": rows(2.0)}
+        if mutation == "unstarted_failure":
+            return {"event": "failed"}
+        if mutation == "extra_success":
+            return {**original(*args), "extra": True}
+        def started(state, evidence):
+            args[-1](state, evidence)
+            raise ValueError("stop after admitted fit")
+        with pytest.raises(ValueError, match="stop after admitted fit"):
+            original(*args[:-1], started)
+        return {"event": "failed", "extra": True}
+    monkeypatch.setattr(trials, "run_fitted_trial", corrupt)
+    with pytest.raises(OpsError) as caught:
+        native.recorder.execute("2024", "2023", "a-first", limits=LIMITS)
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit completion differs from admitted attempts").problem
+    slots = [row[0] for row in native.conn.execute("SELECT slot FROM magnitude_search_records")]
+    assert not any(slot.startswith(("execution:", "terminal:", "forecasts:")) for slot in slots)

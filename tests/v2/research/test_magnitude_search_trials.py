@@ -40,6 +40,9 @@ from tests.v2.research.magnitude_trial_support import (
     magnitude_dataset,
     magnitude_source,
     poison_outcomes,
+    trial_cases,
+    trial_forecasts,
+    trial_slots,
 )
 from tests.v2.research.test_magnitude_search_plan import source as base_source  # noqa: F401
 
@@ -69,31 +72,13 @@ def case(base_source, tmp_path, monkeypatch):  # noqa: F811
     conn.close()
 
 
-def _cases(case):
-    return [(outer["outer"]["year"], inner["year"], candidate["candidate_id"])
-            for outer in case.plan["folds"] for inner in outer["inner"] for candidate in case.plan["candidates"]]
-
-
-def _forecasts(case, args, value=7):
-    outer, year, _ = args
-    fold = next(inner for item in case.plan["folds"] if item["outer"]["year"] == outer
-                for inner in item["inner"] if inner["year"] == year)
-    return [{"event_id": event, "horizon_sessions": horizon, "predicted_absolute_move_pct": value}
-            for event in fold["evaluation_event_ids"] for horizon in (5, 3, 1)]
-
-
 def _all(case, *, fail_case=None, values=None):
-    for args in _cases(case):
+    for args in trial_cases(case):
         case.recorder.start(*args)
         if args == fail_case:
             case.recorder.record(*args, failure=fail("EXPERIMENT_VARIANT_FAILED", "private diagnostic").problem)
         else:
-            case.recorder.record(*args, forecasts=_forecasts(case, args, (values or {}).get(args, 7)))
-
-
-def _slots(case):
-    return [tuple(row) for row in case.source.conn.execute(
-        "SELECT slot, ref_json FROM magnitude_search_records ORDER BY slot")]
+            case.recorder.record(*args, forecasts=trial_forecasts(case, args, (values or {}).get(args, 7)))
 
 
 @contextmanager
@@ -109,7 +94,7 @@ def test_native_complete_journal_pools_metrics_freezes_latest_and_replays(case, 
     first, second = [item["candidate_id"] for item in case.plan["candidates"]]
     values = {args: (7 if args[0] == "2024" and args[2] == first else
                      0 if args[0] == "2024" else 10 if args[2] == second else
-                     7 if args[1] == "2023" else 0) for args in _cases(case)}
+                     7 if args[1] == "2023" else 0) for args in trial_cases(case)}
     with no_fit_guard():
         _all(case, values=values)
         frozen = case.recorder.freeze()
@@ -133,21 +118,21 @@ def test_native_complete_journal_pools_metrics_freezes_latest_and_replays(case, 
             assert score["metrics"] == {"count": len(errors),
                 "rmse": pytest.approx(math.sqrt(sum(error ** 2 for error in errors) / len(errors))),
                 "mae": pytest.approx(sum(errors) / len(errors))}
-    before = _slots(case)
+    before = trial_slots(case)
     monkeypatch.setattr(case.recorder, "_inputs", lambda *a: pytest.fail("replay reopened native inputs"))
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("replay reopened labels"))
     assert case.recorder.freeze() == frozen
-    assert _slots(case) == before
+    assert trial_slots(case) == before
     actual = catalog_rows(case.source.conn)
     assert {key: value for key, value in actual.items() if key != "magnitude_search_records"} == {
         key: value for key, value in case.catalog_before.items() if key != "magnitude_search_records"}
-    args = _cases(case)[0]
-    assert case.recorder.record(*args, forecasts=_forecasts(case, args, values[args]))["status"] == "succeeded"
-    assert _slots(case) == before
+    args = trial_cases(case)[0]
+    assert case.recorder.record(*args, forecasts=trial_forecasts(case, args, values[args]))["status"] == "succeeded"
+    assert trial_slots(case) == before
 
 
 def test_shared_training_cohort_and_forecasts_committed_before_validation(case, monkeypatch):
-    args, other = _cases(case)[:2]
+    args, other = trial_cases(case)[:2]
     one, two = case.recorder.start(*args), case.recorder.start(*other)
     assert one["inputs"] == two["inputs"]
     train = one["inputs"]["training_inputs"]
@@ -169,25 +154,25 @@ def test_shared_training_cohort_and_forecasts_committed_before_validation(case, 
     original = trials.load_magnitude_targets
     def labels(*a, **kw):
         committed = case.recorder._read("forecasts:" + one["trial_id"])
-        assert committed == sorted(_forecasts(case, args), key=lambda row: (row["event_id"], row["horizon_sessions"]))
+        assert committed == sorted(trial_forecasts(case, args), key=lambda row: (row["event_id"], row["horizon_sessions"]))
         assert not case.source.conn.in_transaction
         assert kw["labels_before"] == "2024-01-01"
         return original(*a, **kw)
     monkeypatch.setattr(trials, "load_magnitude_targets", labels)
-    result = case.recorder.record(*args, forecasts=_forecasts(case, args))
+    result = case.recorder.record(*args, forecasts=trial_forecasts(case, args))
     assert result["evaluation_inputs"]["labels_before"] == "2024-01-01"
     assert result["inputs_id"] == _hash(one["inputs"])
 
 
 @pytest.mark.parametrize("state", ["missing", "started", "submitted"])
 def test_incomplete_attempts_refuse_freeze_without_partial_selection(case, monkeypatch, state):
-    args = _cases(case)[0]
+    args = trial_cases(case)[0]
     if state != "missing":
         case.recorder.start(*args)
     if state == "submitted":
         monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("crash")))
         with pytest.raises(RuntimeError, match="crash"):
-            case.recorder.record(*args, forecasts=_forecasts(case, args))
+            case.recorder.record(*args, forecasts=trial_forecasts(case, args))
     with _assert_error("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt"):
         case.recorder.freeze()
     assert case.recorder._read("selection") is None
@@ -201,13 +186,13 @@ def test_empty_outer_folds_refuse_freeze_before_native_payloads_or_selection(cas
     request["inner_years"] = {}
     recorder = trials.SearchTrials(case.source.conn, case.source.store, case.source.repository,
         case.source.registration, request, case.recorder.plan_ref)
-    before = _slots(case)
+    before = trial_slots(case)
     monkeypatch.setattr(recorder, "_inputs", lambda *a: pytest.fail("native inputs opened"))
     monkeypatch.setattr(case.source.store, "read_verified", lambda *a, **k: pytest.fail("artifact opened"))
     with _assert_error("INVALID_EXPERIMENT_SPEC",
                        "search requires explicit valid axes, inner years and count caps"):
         recorder.freeze()
-    assert _slots(case) == before
+    assert trial_slots(case) == before
     assert all(slot != "selection" for slot, _ in before)
 
 
@@ -219,28 +204,28 @@ def test_failure_excludes_entire_candidate_and_redacts_diagnostics(case):
     assert frozen["selections"][1]["scores"][0] == {"candidate_id": first, "metrics": None}
     assert frozen["selections"][1]["scores"][1]["metrics"]["count"] == 24
     assert frozen["selections"][0]["selected_candidate_id"] == first
-    assert "private diagnostic" not in str([case.recorder._read(slot) for slot, _ in _slots(case)])
+    assert "private diagnostic" not in str([case.recorder._read(slot) for slot, _ in trial_slots(case)])
     with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "terminal trial cannot accept another submission"):
-        case.recorder.record(*failed, forecasts=_forecasts(case, failed))
+        case.recorder.record(*failed, forecasts=trial_forecasts(case, failed))
 
 
 def test_all_failed_refuses_and_retains_every_failure(case):
-    for args in _cases(case):
+    for args in trial_cases(case):
         case.recorder.start(*args)
         case.recorder.record(*args, failure=fail("EXPERIMENT_VARIANT_FAILED", "fit failed").problem)
-    before = _slots(case)
+    before = trial_slots(case)
     with _assert_error("EXPERIMENT_VARIANT_FAILED", "all candidates failed for an outer fold"):
         case.recorder.freeze()
-    assert _slots(case) == before
+    assert trial_slots(case) == before
     assert len([slot for slot, _ in before if slot.startswith("terminal:")]) == 6
 
 
 def test_invalid_submissions_refuse_before_any_validation_labels(case, monkeypatch):
-    args = _cases(case)[0]
+    args = trial_cases(case)[0]
     started = case.recorder.start(*args)
     for mutation in ("missing", "duplicate", "extra", "unknown", "extra_field", "boolean_horizon",
                      "boolean_value", "negative", "nan", "infinity", "overflow", "none", "both"):
-        rows = _forecasts(case, args)
+        rows = trial_forecasts(case, args)
         if mutation == "missing":
             rows.pop()
         elif mutation == "duplicate":
@@ -270,11 +255,11 @@ def test_invalid_submissions_refuse_before_any_validation_labels(case, monkeypat
 
 def test_unplanned_trial_or_missing_start_refuses_before_native_reads(case, monkeypatch):
     monkeypatch.setattr(case.recorder, "_inputs", lambda *a: pytest.fail("native inputs opened"))
-    args = _cases(case)[0]
+    args = trial_cases(case)[0]
     with _assert_error("INVALID_EXPERIMENT_SPEC", "trial is outside the sealed search plan"):
         case.recorder.start("2024", "2024", args[2])
     with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "trial must be started before recording"):
-        case.recorder.record(*args, forecasts=_forecasts(case, args))
+        case.recorder.record(*args, forecasts=trial_forecasts(case, args))
 
 
 def test_source_and_plan_drift_refuse_before_native_payloads(case, monkeypatch):
@@ -284,7 +269,7 @@ def test_source_and_plan_drift_refuse_before_native_payloads(case, monkeypatch):
     monkeypatch.setattr(trials, "source_closure", changed)
     monkeypatch.setattr(case.recorder, "_inputs", lambda *a: pytest.fail("native inputs opened"))
     with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search recording requires its exact sealed plan"):
-        case.recorder.start(*_cases(case)[0])
+        case.recorder.start(*trial_cases(case)[0])
     monkeypatch.setattr(trials, "source_closure", original)
     request = copy.deepcopy(case.request)
     request["space"]["history_ridge"]["alpha"] = [1, 3]
@@ -296,27 +281,27 @@ def test_source_and_plan_drift_refuse_before_native_payloads(case, monkeypatch):
 
 
 def test_native_input_drift_blocks_selection_without_excluding_candidate(case, monkeypatch):
-    args = _cases(case)[0]
+    args = trial_cases(case)[0]
     started = case.recorder.start(*args)
     original = case.recorder._inputs
     monkeypatch.setattr(case.recorder, "_inputs", lambda fold: {**original(fold), "stored_inputs_id": "changed"})
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("validation opened"))
     with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start"):
-        case.recorder.record(*args, forecasts=_forecasts(case, args))
+        case.recorder.record(*args, forecasts=trial_forecasts(case, args))
     assert case.recorder._read("terminal:" + started["trial_id"]) is None
     with _assert_error("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt"):
         case.recorder.freeze()
 
 
 def test_native_history_binding_drift_refuses_exactly_before_readmission(case, monkeypatch):
-    args = _cases(case)[0]
+    args = trial_cases(case)[0]
     started = case.recorder.start(*args)
     changed = {**case.source.registration.document["magnitude_history"], "unexpected_identity": "changed"}
     monkeypatch.setattr(trials, "history_binding", lambda *a, **k: changed)
     monkeypatch.setattr(trials, "preflight_magnitude_targets", lambda *a, **k: pytest.fail("preflight opened"))
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("validation opened"))
     with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"):
-        case.recorder.record(*args, forecasts=_forecasts(case, args))
+        case.recorder.record(*args, forecasts=trial_forecasts(case, args))
     assert case.recorder._read("forecasts:" + started["trial_id"]) is not None
     assert case.recorder._read("terminal:" + started["trial_id"]) is None
     with _assert_error("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt"):
@@ -329,7 +314,7 @@ def test_native_history_binding_drift_refuses_exactly_before_readmission(case, m
 def test_corrupt_any_link_blocks_freeze(case):
     _all(case)
     for slot_prefix in ("start", "inputs", "cohort", "forecasts", "validation", "terminal"):
-        slot, document = next(item for item in _slots(case) if item[0].startswith(slot_prefix + ":"))
+        slot, document = next(item for item in trial_slots(case) if item[0].startswith(slot_prefix + ":"))
         ref = from_document(ArtifactRef, json.loads(document))
         path = case.source.store.root / ref.storage_key
         original = path.read_bytes()
@@ -347,14 +332,14 @@ def test_corrupt_any_link_blocks_freeze(case):
 @pytest.mark.parametrize("statement", ["UPDATE magnitude_search_records SET slot='replacement'",
     "DELETE FROM magnitude_search_records", "INSERT OR REPLACE INTO magnitude_search_records SELECT * FROM magnitude_search_records"])
 def test_catalog_rejects_rewritten_deleted_or_replaced_records(case, statement):
-    before = _slots(case)
+    before = trial_slots(case)
     with pytest.raises(sqlite3.IntegrityError, match="magnitude search records are immutable"):
         case.source.conn.execute(statement)
-    assert _slots(case) == before
+    assert trial_slots(case) == before
 
 
 def test_failure_winning_concurrent_submission_prevents_label_read(case, monkeypatch):
-    args = _cases(case)[0]
+    args = trial_cases(case)[0]
     started = case.recorder.start(*args)
     original = case.recorder._append
     def interleaved(slot, body, **kwargs):
@@ -364,25 +349,25 @@ def test_failure_winning_concurrent_submission_prevents_label_read(case, monkeyp
     monkeypatch.setattr(case.recorder, "_append", interleaved)
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("labels opened"))
     with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search trial phase is already committed"):
-        case.recorder.record(*args, forecasts=_forecasts(case, args))
+        case.recorder.record(*args, forecasts=trial_forecasts(case, args))
     assert case.recorder._read("forecasts:" + started["trial_id"]) is None
     assert case.recorder._read("terminal:" + started["trial_id"])["status"] == "failed"
 
 
 def test_submitted_forecasts_cannot_be_replaced_after_interruption(case, monkeypatch):
-    args = _cases(case)[0]
+    args = trial_cases(case)[0]
     case.recorder.start(*args)
     original = trials.load_magnitude_targets
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("crash")))
     with pytest.raises(RuntimeError, match="crash"):
-        case.recorder.record(*args, forecasts=_forecasts(case, args))
+        case.recorder.record(*args, forecasts=trial_forecasts(case, args))
     with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
-        case.recorder.record(*args, forecasts=_forecasts(case, args, 0))
+        case.recorder.record(*args, forecasts=trial_forecasts(case, args, 0))
     with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search trial phase is already committed"):
         case.recorder.record(*args, failure=fail("EXPERIMENT_VARIANT_FAILED", "fit failed").problem)
     monkeypatch.setattr(trials, "load_magnitude_targets", original)
     with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
-        case.recorder.record(*args, forecasts=_forecasts(case, args))
+        case.recorder.record(*args, forecasts=trial_forecasts(case, args))
 
 
 def test_artifact_publication_failure_leaves_no_admitted_start(case, monkeypatch):
@@ -392,10 +377,10 @@ def test_artifact_publication_failure_leaves_no_admitted_start(case, monkeypatch
             raise ArtifactError("IO_ERROR", "/private/path")
         return original(store, data, schema_ref=schema_ref)
     monkeypatch.setattr(ArtifactStore, "publish_bytes", unavailable)
-    before = _slots(case)
+    before = trial_slots(case)
     with _assert_error("RESOURCE_UNAVAILABLE", "search journal artifact could not be published"):
-        case.recorder.start(*_cases(case)[0])
-    assert _slots(case) == before
+        case.recorder.start(*trial_cases(case)[0])
+    assert trial_slots(case) == before
 
 
 def test_plan_reference_metadata_drift_cannot_initialize_records(case):
@@ -425,10 +410,10 @@ def test_cutoff_equal_validation_label_leaves_unfinished_claim_and_blocks_freeze
         recorder.seal(clock=SystemClock())
         forbid_history_rebuild(monkeypatch)
         case = SimpleNamespace(source=source, plan=sealed["plan"], recorder=recorder)
-        args = _cases(case)[0]
+        args = trial_cases(case)[0]
         started = recorder.start(*args)
         with pytest.raises(DataError) as caught:
-            recorder.record(*args, forecasts=_forecasts(case, args))
+            recorder.record(*args, forecasts=trial_forecasts(case, args))
         assert caught.value.problem == data_fail(
             "EXPERIMENT_VARIANT_FAILED", "magnitude label is not available before cutoff").problem
         assert recorder._read("terminal:" + started["trial_id"]) is None

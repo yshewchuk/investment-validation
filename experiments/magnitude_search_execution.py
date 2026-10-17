@@ -38,7 +38,8 @@ def run_fitted_trial(inputs, inner, plan, execution, limits, progress):
     """Run only the installed fit child; commit every progress marker before its ACK."""
     forbid_fitting("run_fitted_trial")
     forbid_legacy_fitting("run_fitted_trial")
-    payload = canonical_json({"inputs": inputs, "inner": inner, "plan": {"horizons": plan["horizons"]},
+    payload = canonical_json({"inputs": {name: inputs[name] for name in ("features", "training")},
+                              "inner": inner, "plan": {"horizons": plan["horizons"]},
                               "execution": execution}).encode()
     if len(payload) > MAX_BYTES:
         raise fail("RESOURCE_LIMIT_EXCEEDED", "search execution input exceeds its byte limit")

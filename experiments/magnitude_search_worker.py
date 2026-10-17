@@ -1,4 +1,4 @@
-"""Fixed fit-only child: admitted training rows, never validation data or a catalog."""
+"""Fixed fit-only child: admitted features/training targets, never validation targets."""
 import json
 import os
 import resource

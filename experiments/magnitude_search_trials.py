@@ -286,7 +286,7 @@ class SearchTrials:
             if (not isinstance(completed, dict) or completed.get("status") != ("failed" if failure is not None else "succeeded")
                     or (forecasts is not None and content_hash(self._forecasts(forecasts, inner, plan["horizons"]))
                         != completed.get("forecasts_id"))):
-                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native execution must finish before recording")
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording")
         if failure is not None:
             problem = _problem(failure)
             if not _candidate_failure(problem):

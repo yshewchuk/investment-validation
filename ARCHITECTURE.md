@@ -99,6 +99,9 @@ evidence. See the models and data component contracts.
   owners (`engine.v2.ops.executor`, `engine.v2.ops.legacy_adapter`). A
   legacy module importing `checks/` or `tests/`, or shelling out from
   outside those two modules, is not enforced against by either rule.
+  `experiments.magnitude_search_execution` separately owns its fixed bounded
+  fit-only child: a synchronous research call needs no ops job/recovery lifecycle.
+  This experiment owner is outside that v2-only enforcement.
 - **Operator CLIs and experiments.** These operator and research entrypoints
   may call into the legacy and v2 engines. They are not uniformly leaf-only:
   `engine.v2.ops.training` imports the `phase5_training_job` module while
