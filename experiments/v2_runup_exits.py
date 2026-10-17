@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
+import stat
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from engine.v2.data.documents import _reject_duplicate_keys
+from engine.v2.data.documents import reject_duplicate_keys
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, canonical_json
@@ -17,12 +19,18 @@ from experiments.runup_exit_report import compare_runup_exits, validate_request
 
 
 def _request(path):
-    with path.open("rb") as stream:
-        data = stream.read(1024 * 1024 + 1)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise fail("INVALID_EXPERIMENT_SPEC", "comparison request must be a regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            data = stream.read(1024 * 1024 + 1)
+    finally:
+        os.close(descriptor)
     try:
         if len(data) > 1024 * 1024:
             raise ValueError
-        return validate_request(json.loads(data, object_pairs_hook=_reject_duplicate_keys))
+        return validate_request(json.loads(data, object_pairs_hook=reject_duplicate_keys))
     except (ValueError, UnicodeError, RecursionError):
         raise fail("INVALID_EXPERIMENT_SPEC", "invalid comparison JSON request") from None
 
@@ -34,6 +42,7 @@ def main(argv=None):
     parser.add_argument("--snapshot-id", required=True)
     parser.add_argument("--as-of-month", required=True)
     parser.add_argument("--request", type=Path, required=True)
+    parser.add_argument("--no-ledger", action="store_true", help="accepted no-op; comparison never writes a ledger")
     args = parser.parse_args(argv)
     try:
         request = _request(args.request)

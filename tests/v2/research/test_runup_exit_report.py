@@ -1,5 +1,9 @@
 """Same-cohort comparison over committed synthetic Parquet, no outcome stubs."""
 import json
+import os
+import sqlite3
+import subprocess
+import sys
 
 import pandas as pd
 import pytest
@@ -81,6 +85,18 @@ def by_arm(report):
     return {row["arm_id"]: row for row in report["rows"]}
 
 
+def assert_refusal(error, code, category):
+    assert error.code == error.problem.code == code
+    assert error.problem.category == category
+    assert error.problem.retryable is False
+
+
+def expected_position(event_id=EVENT_ID, ticker="TEST"):
+    return {"trade_id": event_id, "ticker": ticker, "entry_date": "2024-04-12",
+            "legs": tuple({"expiry": "2024-05-17", "strike": 100.0, "right": right,
+                           "side": "buy", "qty": 1} for right in ("C", "P"))}
+
+
 def test_exact_hand_calculated_pairing_and_identity(source):
     snapshot = commit(source)
     report = run(source, snapshot=snapshot)
@@ -104,8 +120,11 @@ def test_exact_hand_calculated_pairing_and_identity(source):
         assert row["pnl_basis"] == "mark_based"
         assert row["pnl_units"] == comparison.UNITS
         assert row["fill_alpha"] == row["exit_fill_alpha"] == 0.5
+        assert row["fixed_day_pnl"] == 4.0
+        assert row["fixed_day_exit_date"] == "2024-05-02"
     binding = report["binding"]
-    assert binding["request"] == comparison.validate_request(request())
+    assert binding["request"] == request()
+    assert binding["positions"] == [expected_position()]
     assert binding["baseline"] == {"kind": "fixed_day", "trading_days": 14}
     assert binding["cost_policy"]["commissions"] == "not_modeled"
     assert binding["cost_policy"]["contract_multiplier"] == "not_applied"
@@ -166,7 +185,7 @@ def test_missing_held_leg_refuses_even_after_early_target(source, missing):
         row["obs_date"] == DATES[missing] and row["strike"] == 100 and row["right"] == "P")]
     with pytest.raises((DataError, OpsError)) as caught:
         run(source, rows=rows)
-    assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
+    assert_refusal(caught.value, "EXPERIMENT_VARIANT_FAILED", "internal")
     assert caught.value.problem.details["compared_count"] == 0
     if missing:
         assert caught.value.problem.details["stage"] == "common_horizon_coverage"
@@ -183,8 +202,9 @@ def test_coverage_preflight_finishes_before_any_threshold_arm(source, monkeypatc
 
     monkeypatch.setattr(comparison, "walk_exit", observe)
     rows = [row for row in chain_rows() if row["obs_date"] != DATES[12]]
-    with pytest.raises(DataError):
+    with pytest.raises(DataError) as caught:
         run(source, rows=rows)
+    assert_refusal(caught.value, "EXPERIMENT_VARIANT_FAILED", "internal")
     assert called == ["fixed_day"]
 
 
@@ -203,6 +223,17 @@ def test_no_future_reselection_and_input_permutation_is_stable(source):
     assert [row["pnl"] for row in permuted["rows"]] == [row["pnl"] for row in report["rows"]]
 
 
+def test_selects_first_expiry_meeting_thirty_dte(source):
+    rows = chain_rows()
+    for expiry in (pd.Timestamp("2024-05-10"), pd.Timestamp("2024-05-24")):
+        rows.extend({**row, "expiry": expiry, "dte": (expiry - row["obs_date"]).days,
+                     "bid": row["bid"] * 2, "ask": row["ask"] * 2} for row in chain_rows())
+    report = run(source, rows=rows)
+    assert report["binding"]["positions"] == [expected_position()]
+    assert by_arm(report)["fixed_day"]["entry_cost"] == 6.0
+    assert by_arm(report)["fixed_day"]["pnl"] == 4.0
+
+
 def test_request_order_does_not_change_report(source):
     snapshot = commit(source)
     reordered = request()
@@ -216,6 +247,10 @@ def test_changed_recipe_fill_or_snapshot_changes_identity(source):
     changed = request()
     changed["arms"][0]["target_pnl"] = 3
     altered_recipe = run(source, snapshot=snapshot, document=changed)
+    assert altered_recipe["binding"]["request"]["arms"][0]["target_pnl"] == 3.0
+    assert by_arm(altered_recipe)["early"]["exit_date"] == "2024-04-16"
+    assert by_arm(altered_recipe)["early"]["pnl"] == 4.0
+    assert by_arm(altered_recipe)["early"]["pnl_difference"] == 0.0
     altered_fill = run(source, snapshot=snapshot, document=request(0.25))
     rows = chain_rows()
     rows[-1]["ask"] += 1
@@ -228,7 +263,7 @@ def test_changed_recipe_fill_or_snapshot_changes_identity(source):
 def test_insufficient_observed_calendar_refuses(source, dates):
     with pytest.raises(OpsError) as caught:
         run(source, dates=dates)
-    assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
+    assert_refusal(caught.value, "EXPERIMENT_VARIANT_FAILED", "internal")
     assert caught.value.problem.details["compared_count"] == 0
 
 
@@ -240,6 +275,7 @@ def test_invalid_entry_dte_refuses_even_when_expiry_survives_horizon(source, exp
         row["dte"] = 30
     with pytest.raises(OpsError) as caught:
         run(source, rows=rows)
+    assert_refusal(caught.value, "EXPERIMENT_VARIANT_FAILED", "internal")
     assert caught.value.problem.details["stage"] == "entry_selection"
     assert caught.value.problem.details["compared_count"] == 0
 
@@ -250,6 +286,7 @@ def test_whole_explicit_cohort_refuses_missing_sibling(source):
     document["event_ids"].append("MISSING_2024-05-02")
     with pytest.raises(OpsError) as caught:
         run(source, events=events, document=document)
+    assert_refusal(caught.value, "EXPERIMENT_VARIANT_FAILED", "internal")
     assert caught.value.problem.details["requested_count"] == 2
     assert caught.value.problem.details["admitted_count"] == 2
     assert caught.value.problem.details["compared_count"] == 0
@@ -269,11 +306,17 @@ def test_two_event_population_remains_paired_under_reordered_request(source):
     assert report == run(source, snapshot=snapshot, document=document)
     assert report["counts"]["compared_count"] == 2
     assert len(report["rows"]) == 6
-    baseline = {row["trade_id"]: row for row in report["rows"] if row["arm_id"] == "fixed_day"}
+    assert report["binding"]["positions"] == [expected_position(second_id, "SECOND"), expected_position()]
     for row in report["rows"]:
-        control = baseline[row["trade_id"]]
-        assert row["entry_cost"] == control["entry_cost"]
-        assert row["pnl_difference"] == row["pnl"] - control["pnl"]
+        scale = 2 if row["trade_id"] == second_id else 1
+        early = row["arm_id"] == "early"
+        assert row["entry_cost"] == 6.0 * scale
+        assert row["exit_value"] == (8.0 if early else 10.0) * scale
+        assert row["pnl"] == (2.0 if early else 4.0) * scale
+        assert row["pnl_difference"] == (-2.0 if early else 0.0) * scale
+        assert row["fixed_day_pnl"] == 4.0 * scale
+        assert row["fixed_day_exit_date"] == "2024-05-02"
+        assert row["exit_date"] == ("2024-04-15" if early else "2024-05-02")
 
 
 @pytest.mark.parametrize("bad_quote", [{"bid": None}, {"bid": 5.0, "ask": 4.0}, {"ask": 0.0}])
@@ -284,6 +327,7 @@ def test_unusable_daily_held_quote_after_target_refuses(source, bad_quote):
             row.update(bad_quote)
     with pytest.raises(DataError) as caught:
         run(source, rows=rows)
+    assert_refusal(caught.value, "EXPERIMENT_VARIANT_FAILED", "internal")
     assert caught.value.problem.details["stage"] == "common_horizon_coverage"
     assert caught.value.problem.details["compared_count"] == 0
 
@@ -301,7 +345,7 @@ def test_random_holdout_refuses_before_quote_reads(source, monkeypatch):
     monkeypatch.setattr(comparison, "_positions", forbidden)
     with pytest.raises(DataError) as caught:
         run(source, snapshot=snapshot, document=document)
-    assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
+    assert_refusal(caught.value, "HOLDOUT_ACCESS_DENIED", "validation")
     assert caught.value.problem.details["stage"] == "population"
 
 
@@ -315,7 +359,7 @@ def test_holdout_refuses_before_selection(source, monkeypatch):
     with pytest.raises(DataError) as caught:
         comparison.compare_runup_exits(Repository(source[0], source[2]), snapshot,
                                        as_of_month="2024-05", document=request())
-    assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
+    assert_refusal(caught.value, "HOLDOUT_ACCESS_DENIED", "validation")
     assert caught.value.problem.details["stage"] == "population"
     assert caught.value.problem.details["admitted_count"] == 0
 
@@ -329,11 +373,34 @@ def test_holdout_refuses_before_selection(source, monkeypatch):
     {"arms": [{"arm_id": "x", "target_pnl": 0, "stop_pnl": -1}]},
     {"arms": [{"arm_id": "x", "target_pnl": 1, "stop_pnl": 0}]},
     {"arms": [{"arm_id": "x", "target_pnl": 1, "stop_pnl": -1, "trading_days": 1}]},
+    {"event_ids": [str(n) for n in range(10001)]},
+    {"arms": request()["arms"] * 2},
+    *[{"arms": [{"arm_id": name, "target_pnl": 1, "stop_pnl": -1}]}
+      for name in ("", " ", None)],
+    *[{"arms": [{"arm_id": "x", "target_pnl": target, "stop_pnl": stop}]}
+      for target, stop in ((float("nan"), -1), (float("inf"), -1), (1, -float("inf")), (True, -1))],
+    {"arms": [{"arm_id": str(n), "target_pnl": 1, "stop_pnl": -1} for n in range(9)]},
 ])
 def test_bad_request_refuses_before_reads(change):
     with pytest.raises(OpsError) as caught:
         comparison.compare_runup_exits(None, None, as_of_month="2025-01", document={**request(), **change})
-    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert_refusal(caught.value, "INVALID_EXPERIMENT_SPEC", "validation")
+    assert caught.value.problem.details == {}
+
+
+@pytest.mark.parametrize("document", [None, [], "request", 1])
+def test_nonobject_request_refuses_before_reads(document):
+    with pytest.raises(OpsError) as caught:
+        comparison.compare_runup_exits(None, None, as_of_month="2025-01", document=document)
+    assert_refusal(caught.value, "INVALID_EXPERIMENT_SPEC", "validation")
+
+
+def test_maximum_declaration_bounds_are_accepted():
+    document = {**request(), "event_ids": [str(n) for n in range(10000)],
+                "arms": [{"arm_id": str(n), "target_pnl": 1, "stop_pnl": -1} for n in range(8)]}
+    result = comparison.validate_request(document)
+    assert result["event_ids"] == sorted(document["event_ids"])
+    assert result["arms"] == document["arms"]
 
 
 def cli_args(tmp_path, snapshot):
@@ -343,16 +410,32 @@ def cli_args(tmp_path, snapshot):
             "--snapshot-id", snapshot.snapshot_id, "--as-of-month", "2025-01", "--request", str(path)]
 
 
-def test_real_cli_is_read_only_and_exactly_one_json_report(source, tmp_path, capsys):
+def test_real_cli_is_read_only_and_exactly_one_json_report(source, tmp_path, capsys, monkeypatch):
     snapshot = commit(source)
     args = cli_args(tmp_path, snapshot)
     before = list(source[0].iterdump())
+    files = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("exploratory comparison attempted a database write")
+
+    original = sqlite3.connect
+
+    def observe(*args, **kwargs):
+        connection = original(*args, **kwargs)
+        connection.set_authorizer(lambda action, *unused: forbidden() if action in {
+            sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE} else sqlite3.SQLITE_OK)
+        return connection
+
+    monkeypatch.setattr(cli.sqlite3, "connect", observe)
     assert cli.main(args) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["status"] == "complete"
     assert report["counts"]["compared_count"] == 1
+    assert cli.main([*args, "--no-ledger"]) == 0
+    assert json.loads(capsys.readouterr().out) == report
     assert list(source[0].iterdump()) == before
-    assert not list(tmp_path.rglob("REPORT.md"))
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == files
 
 
 def test_cli_refusal_has_counts_and_no_partial_metrics(source, tmp_path, capsys):
@@ -375,5 +458,28 @@ def test_cli_invalid_json_refuses_without_catalog_creation(tmp_path, capsys, con
     path.write_bytes(contents)
     assert cli.main(["--catalog", str(tmp_path / "absent.sqlite"), "--store-root", str(tmp_path / "store"),
                      "--snapshot-id", "missing", "--as-of-month", "2025-01", "--request", str(path)]) == 2
-    assert json.loads(capsys.readouterr().out)["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "refused", "refused": "INVALID_EXPERIMENT_SPEC", "details": {}}
     assert not (tmp_path / "absent.sqlite").exists()
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_cli_nonregular_request_refuses_without_waiting_or_catalog_creation(tmp_path, kind):
+    path = tmp_path / "request"
+    os.mkfifo(path) if kind == "fifo" else path.mkdir()
+    result = subprocess.run([sys.executable, "-m", "experiments.v2_runup_exits",
+                             "--catalog", str(tmp_path / "absent.sqlite"),
+                             "--store-root", str(tmp_path / "store"), "--snapshot-id", "missing",
+                             "--as-of-month", "2025-01", "--request", str(path)],
+                            capture_output=True, text=True, timeout=20, check=False)
+    assert result.returncode == 2
+    assert json.loads(result.stdout) == {"status": "refused", "refused": "INVALID_EXPERIMENT_SPEC", "details": {}}
+    assert not (tmp_path / "absent.sqlite").exists()
+
+
+def test_regular_symlink_request_retains_supported_file_behavior(tmp_path):
+    target = tmp_path / "request.json"
+    target.write_text(json.dumps(request()))
+    link = tmp_path / "request-link.json"
+    link.symlink_to(target)
+    assert cli._request(link) == request()

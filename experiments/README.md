@@ -40,9 +40,10 @@ Neither grants scientific collection or ledger authority.
 ## RUNUP daily exit comparison
 
 Run `python -m experiments.v2_runup_exits --catalog CATALOG --store-root STORE
---snapshot-id SNAPSHOT --as-of-month YYYY-MM --request REQUEST.json` on a pinned
+--snapshot-id SNAPSHOT --as-of-month YYYY-MM --request REQUEST.json --no-ledger` on a pinned
 native snapshot. The command prints one exploratory JSON report (or a refusal)
 and exits 0 on success, 2 on refusal. It writes no catalog, ledger or report files.
+`--no-ledger` is optional and has no effect; the request must be a regular file.
 
 The closed request has `event_ids` (nonempty unique strings), `fill_alpha` (0–1),
 `threshold_units` (exactly `quote_price_times_quantity`) and `arms` (1–8 objects).

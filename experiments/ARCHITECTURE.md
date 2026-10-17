@@ -526,8 +526,9 @@ They use the merged native population, calendar, entry selector and exit walker;
 there is no scheduler, model fitting, threshold search or production caller.
 The closed request requires explicit unique event IDs, one fill alpha, explicit
 `quote_price_times_quantity` threshold units and one to eight named target/stop arms.
-The CLI requires an exact snapshot ID and holdout as-of month; its JSON input is
-bounded to 1 MiB. Shared selection-purpose admission precedes any quote read.
+The CLI requires an exact snapshot ID and holdout as-of month; its JSON input
+must be a regular file bounded to 1 MiB. Admission precedes any quote read.
+`--no-ledger` is an accepted no-op; both CLI modes are equally read-only.
 
 The existing D−14 entry and last-pre-print exit use only observed snapshot sessions.
 All admitted events must plan successfully. Contracts are selected once from each
@@ -550,7 +551,14 @@ entry contracts, snapshot/holdout pins, full recipes, source closure and environ
 identity. Its canonical binding hash identifies reproducible inputs; a separate
 report hash covers the complete output. This is exploratory evidence, not a sealed
 preregistration, recorded hypothesis, immutable run or promotion authority.
-Refusals return a typed code, stage and population counts with no partial metrics.
 The CLI opens the catalog read-only and prints once; neither helper nor CLI writes
-reports, artifacts, ledger rows or orders. Repository integrity refusals propagate;
-there is no retry, fallback source, projected calendar or partial-success mode.
+reports, artifacts, ledger rows or orders. No refusal contains partial metrics.
+There is no retry, fallback source, projected calendar or partial-success mode.
+
+| Condition | Refusal and context |
+| --- | --- |
+| Malformed/duplicate-key, nonregular, oversized or invalid request | `INVALID_EXPERIMENT_SPEC` before repository access; no stage/counts. |
+| Holdout exclusion or invalid admission context | `HOLDOUT_ACCESS_DENIED`, population stage/counts. |
+| Entry selection, common coverage or pairing fails | `EXPERIMENT_VARIANT_FAILED`, current stage/counts; zero compared. |
+| Repository integrity or unresolved snapshot | Native code; stage/counts only after comparison admission starts. |
+| CLI filesystem or SQLite failure | `INPUT_CHANGED`, no stage/counts. |

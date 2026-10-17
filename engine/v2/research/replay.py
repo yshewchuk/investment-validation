@@ -59,6 +59,7 @@ __all__ = [
     "ReplayResult",
     "replay_one",
     "replay",
+    "clean_chain_rows",
 ]
 
 #: Fill alphas every replayed trade is priced at. Worst / mid / best are the
@@ -77,7 +78,7 @@ def _log(message: str) -> None:
 # --------------------------------------------------------------------------
 
 
-def _clean(rows: pd.DataFrame) -> pd.DataFrame:
+def clean_chain_rows(rows: pd.DataFrame) -> pd.DataFrame:
     """Drop rows a pricing path must never see.
 
     ``FillModel`` raises on a NaN or crossed quote, by design — those are
@@ -117,8 +118,8 @@ def _chain_rows(
     if exit_rows is None or exit_rows.empty:
         return None, None, None, "no_exit_chain"
 
-    entry_rows = _clean(entry_rows)
-    exit_rows = _clean(exit_rows)
+    entry_rows = clean_chain_rows(entry_rows)
+    exit_rows = clean_chain_rows(exit_rows)
     if entry_rows.empty or exit_rows.empty:
         return None, None, None, "bad_quote"
     return decision_rows, entry_rows, exit_rows, None
@@ -148,7 +149,7 @@ def _decision_price(
 
     Returns ``(legs, cost, spot, dte, skip_reason)``.
     """
-    decision_rows = _clean(decision_rows)
+    decision_rows = clean_chain_rows(decision_rows)
     if decision_rows.empty:
         return None, float("nan"), float("nan"), None, "bad_quote"
     decision_snap = _chain_snapshot(ticker, decision_date, plan_row, decision_rows)

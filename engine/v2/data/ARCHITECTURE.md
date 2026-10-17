@@ -66,6 +66,10 @@ Shared catalog identity reconciliation retains first-stored lineage/provenance.
 The exhaustive name-by-name list is `README.md`'s checker-enforced Public
 interface section; this names only the load-bearing entry points.
 
+`documents.reject_duplicate_keys(pairs)` is the public, pure stdlib JSON hook
+used by `loads_document` and `experiments.v2_runup_exits`; it returns an object
+dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
+
 - **Snapshot commit** — `catalog.commit_snapshot`/`.record_failed_import`/
   `.move_head`: the one place a snapshot's rows, membership and head move
   together inside one transaction (Failure semantics).

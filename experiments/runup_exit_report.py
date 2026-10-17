@@ -22,7 +22,7 @@ from engine.v2.research._pricing import (
 )
 from engine.v2.research.experiment_exits import EnteredPosition, PositionLeg, walk_exit
 from engine.v2.research.experiment_population import load_population
-from engine.v2.research.replay import _clean
+from engine.v2.research.replay import clean_chain_rows
 
 UNITS = "quote_price_times_quantity"
 HORIZON = 14
@@ -83,7 +83,7 @@ def _positions(repository, snapshot, events, fill):
             if rows is None or rows.empty:
                 raise ValueError
             chain = ChainSnapshot(row.ticker, row.entry_date, row.event_date,
-                                  _clean(rows).sort_values(["expiry", "strike", "right"]),
+                                  clean_chain_rows(rows).sort_values(["expiry", "strike", "right"]),
                                   session=row.session)
             if not isfinite(chain.spot_price) or chain.spot_price <= 0:
                 raise ValueError

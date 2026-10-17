@@ -139,6 +139,10 @@ either required table. Their current consumer is
 
 ## Consumers
 
+`experiments/runup_exit_report.py` consumes `fingerprints.source_closure` /
+`environment_identity` and `errors.OpsError` / `fail` for exploratory identity
+and typed refusals; `experiments/v2_runup_exits.py` consumes those typed errors.
+
 Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
