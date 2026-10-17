@@ -33,10 +33,31 @@ FILL_ALPHA = 0.5  # engine.fills.MID.alpha, the shadow fill alpha native_score_b
 #: the per-tick read; anything larger is ignored rather than parsed).
 MAX_SPEC_BYTES = 256 * 1024
 
-#: Most succeeded score-job rows read in one tick. Score keys are
-#: ``nightly:<ISO session>:<scope>:score``, so descending key order lists the
-#: newest session first and a bounded read of the latest rows is enough.
+#: Newest ``nightly:`` job rows the inner identity query visits per tick, before
+#: the residual kind/state/spec-size filters run. With about ten job rows per
+#: night this is roughly 25 nights; a score job older than this window is never
+#: found.
+MAX_SCAN_ROWS = 256
+
+#: Most succeeded score-job rows the outer identity query keeps per tick. Score
+#: keys are ``nightly:<ISO session>:<scope>:score``, so descending key order
+#: lists the newest session first and a bounded read of the latest rows is
+#: enough.
 MAX_SCORE_ROWS = 32
+
+#: Identity selection query. The inner query visits at most ``MAX_SCAN_ROWS``
+#: newest ``nightly:`` keys (a range SEARCH on the (namespace, idempotency_key)
+#: index), so the residual filters never walk unbounded history; the outer query
+#: re-applies the key order and keeps at most ``MAX_SCORE_ROWS`` rows.
+IDENTITY_SQL = (
+    "SELECT idempotency_key, spec_json, created_at FROM ("
+    "SELECT idempotency_key, kind, state, spec_json, created_at FROM jobs "
+    "WHERE namespace = 'shadow' "
+    "AND idempotency_key >= 'nightly:' AND idempotency_key < 'nightly;' "
+    "ORDER BY idempotency_key DESC LIMIT ?) "
+    "WHERE kind = ? AND state = 'succeeded' AND length(spec_json) <= ? "
+    "ORDER BY idempotency_key DESC LIMIT ?"
+)
 
 #: Largest ``DEPLOYED`` pointer file that may be read as a regular file.
 MAX_POINTER_BYTES = 64 * 1024
@@ -56,20 +77,17 @@ def pool_refresh_identity(conn):
     (session, created_at, scope_hash) over parseable keys with a usable
     ``created_at``; ``manifest_id`` is that job's ``legacy_manifest.json`` binding.
     Returns ``None`` when no score job exists or its binding is absent/not a string."""
-    # Bounded per-tick read: the ``namespace`` prefix plus the key order lets
-    # SQLite walk the (namespace, idempotency_key) index in descending key order
-    # and stop after MAX_SCORE_ROWS, so only the newest session's rows are read;
-    # the Python max-selection below re-ranks those newest rows by created_at.
-    # The ``idempotency_key`` range pins the scan to the ``nightly:`` key space
-    # (``:`` is followed by ``;`` in ASCII) so the primary-key index is used as a
-    # range, never a full scan of every ``shadow`` key.
+    # Bounded per-tick read: IDENTITY_SQL's inner query visits at most
+    # MAX_SCAN_ROWS newest ``nightly:`` keys (the ``idempotency_key`` range pins
+    # the scan to the ``nightly:`` key space -- ``:`` is followed by ``;`` in
+    # ASCII -- so the primary-key index is used as a range, never a full scan of
+    # every ``shadow`` key), then the outer query filters and keeps the newest
+    # MAX_SCORE_ROWS. The Python max-selection below re-ranks those rows by
+    # created_at.
     rows = conn.execute(
-        "SELECT idempotency_key, spec_json, created_at FROM jobs "
-        "WHERE namespace = 'shadow' AND kind = ? AND state = 'succeeded' "
-        "AND length(spec_json) <= ? "
-        "AND idempotency_key >= 'nightly:' AND idempotency_key < 'nightly;' "
-        "ORDER BY idempotency_key DESC LIMIT ?",
-        (nightly.LEGACY_SCORE_KIND, MAX_SPEC_BYTES, MAX_SCORE_ROWS)).fetchall()
+        IDENTITY_SQL,
+        (MAX_SCAN_ROWS, nightly.LEGACY_SCORE_KIND, MAX_SPEC_BYTES,
+         MAX_SCORE_ROWS)).fetchall()
     candidates = []
     for row in rows:
         parsed = nightly.session_scope_from_score_key(row["idempotency_key"])

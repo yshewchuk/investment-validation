@@ -637,6 +637,24 @@ def test_identity_breaks_equal_created_at_on_the_larger_scope_hash():
     assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-02", "high")
 
 
+def test_identity_prefers_the_later_created_at_over_a_larger_scope_hash():
+    conn = _db()
+    _add_score(conn, session="2026-01-02", manifest="earlier-bigger-scope",
+               scope="sha256:zzz", created_at="2026-01-01T00:00:00Z")
+    _add_score(conn, session="2026-01-02", manifest="later-smaller-scope",
+               scope="sha256:aaa", created_at="2026-01-01T01:00:00Z")
+    assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-02", "later-smaller-scope")
+
+
+def test_identity_ties_created_at_to_the_larger_scope_hash_in_reverse_key_order():
+    conn = _db()
+    _add_score(conn, session="2026-01-02", manifest="smaller-scope",
+               scope="sha256:aaa", created_at="2026-01-01T00:00:00Z")
+    _add_score(conn, session="2026-01-02", manifest="larger-scope",
+               scope="sha256:zzz", created_at="2026-01-01T00:00:00Z")
+    assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-02", "larger-scope")
+
+
 def test_identity_prefers_the_later_session_over_an_earlier_created_at():
     conn = _db()
     _add_score(conn, session="2026-01-02", manifest="older_session",
@@ -768,15 +786,29 @@ def test_identity_is_none_for_a_non_mapping_spec():
     assert pool_refresh.pool_refresh_identity(conn) is None
 
 
-def test_identity_bounds_the_score_history_read_to_the_newest_rows():
+def _add_nonqualifying(conn, index, *, session="2021-01-01"):
+    """A newer ``nightly:`` key that the residual kind/succeeded filter rejects."""
+    key = f"nightly:{session}:sha256:{index:04d}:train"
+    conn.execute("INSERT INTO jobs (job_id, kind, state, idempotency_key, spec_json, created_at) "
+                 "VALUES (?, 'training', 'succeeded', ?, '{}', '2021-01-01T00:00:00Z')",
+                 (job_id_for("shadow", key), key))
+    return key
+
+
+def test_identity_scan_window_is_bounded_by_max_scan_rows():
     conn = _db()
-    _add_score(conn, session="2026-06-01", manifest="newest")
-    for index in range(pool_refresh.MAX_SCORE_ROWS + 5):
-        _add_score(conn, session=f"2026-05-{index + 1:02d}", manifest=f"older-{index}")
-    statements = []
-    conn.set_trace_callback(statements.append)
-    assert pool_refresh.pool_refresh_identity(conn) == ("2026-06-01", "newest")
-    assert "LIMIT" in " ".join(statements).upper()
+    _add_score(conn, session="2020-01-01", manifest="oldest")
+    for index in range(pool_refresh.MAX_SCAN_ROWS + 20):
+        _add_nonqualifying(conn, index)
+    assert pool_refresh.pool_refresh_identity(conn) is None
+
+
+def test_identity_finds_the_score_inside_the_scan_window():
+    conn = _db()
+    _add_score(conn, session="2020-01-01", manifest="oldest")
+    for index in range(10):
+        _add_nonqualifying(conn, index)
+    assert pool_refresh.pool_refresh_identity(conn) == ("2020-01-01", "oldest")
 
 
 def test_identity_is_unaffected_by_older_rows_beyond_the_limit():
@@ -1037,27 +1069,28 @@ def test_pointer_is_read_exactly_once_per_submission(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_identity_query_plan_has_no_temp_b_tree():
+def test_identity_query_plan_searches_the_key_range_without_sorting():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
         "CREATE TABLE jobs (namespace TEXT NOT NULL DEFAULT 'shadow', "
         "idempotency_key TEXT NOT NULL, kind TEXT, state TEXT, spec_json TEXT, "
         "created_at TEXT, PRIMARY KEY (namespace, idempotency_key))")
-    plan = " ".join(
-        row["detail"] for row in conn.execute(
-            "EXPLAIN QUERY PLAN "
-            "SELECT idempotency_key, spec_json, created_at FROM jobs "
-            "WHERE namespace = 'shadow' AND kind = ? AND state = 'succeeded' "
-            "AND length(spec_json) <= ? "
-            "AND idempotency_key >= 'nightly:' AND idempotency_key < 'nightly;' "
-            "ORDER BY idempotency_key DESC LIMIT ?",
-            (pool_refresh.nightly.LEGACY_SCORE_KIND, pool_refresh.MAX_SPEC_BYTES,
-             pool_refresh.MAX_SCORE_ROWS)))
-    assert "USE TEMP B-TREE FOR ORDER BY" not in plan.upper()
-    assert "SEARCH" in plan.upper()
-    assert "SCAN" not in plan.upper()
-    assert "idempotency_key>" in plan and "idempotency_key<" in plan
+    rows = conn.execute(
+        "EXPLAIN QUERY PLAN " + pool_refresh.IDENTITY_SQL,
+        (pool_refresh.MAX_SCAN_ROWS, pool_refresh.nightly.LEGACY_SCORE_KIND,
+         pool_refresh.MAX_SPEC_BYTES, pool_refresh.MAX_SCORE_ROWS)).fetchall()
+    inner = [row for row in rows if "jobs" in row["detail"]]
+    inner_plan = " ".join(row["detail"] for row in inner)
+    assert inner_plan, " ".join(row["detail"] for row in rows)
+    assert "SEARCH" in inner_plan.upper()
+    assert "SCAN" not in inner_plan.upper()
+    assert "idempotency_key>" in inner_plan and "idempotency_key<" in inner_plan
+    inner_parents = {row["parent"] for row in inner}
+    sorted_inner = [row["detail"] for row in rows
+                    if "USE TEMP B-TREE FOR ORDER BY" in row["detail"].upper()
+                    and row["parent"] in inner_parents]
+    assert not sorted_inner
 
 
 def test_identity_finds_the_score_job_among_later_keys():

@@ -230,10 +230,10 @@ the `board_analog` mode (`strategies=()`: those present in the replay trades). S
 row whose cutoff is not the session cutoff still needs a release carrying it, which this does not provide (follow-up #825:
 exact-cutoff payoff artifacts and per-row cutoffs).
 
-Phases, each only after the previous succeeded: (1) three `training` jobs (`state` `paired_residual_pool`, `board_analog`,
-`trailing_cutoff`) bound to the session's `legacy_manifest.json` artifact; (2) one `phase5_state_stage` job staging release
-`pools-<session>-<manifest tag>` over the deployed release, with state files taken from the training attempts' plain `training/*.json`
-outputs; (3) one `models_promote` job guarded by `expected_previous_release_id` = the prior release.
+Phases, each only after the previous succeeded: three `training` jobs (one per advancing member) bound to the session's
+scoring manifest; one `phase5_state_stage` job staging a candidate release from their outputs; one `models_promote` job
+guarded by `expected_previous_release_id` = the prior release. The scan for the latest scoring session covers a bounded window
+of the newest nightly jobs, so a score older than that window is not found.
 
 | Rule | Behaviour |
 |---|---|
