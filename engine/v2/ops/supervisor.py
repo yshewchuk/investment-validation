@@ -996,7 +996,7 @@ class Service:
         """#192 slice 4: the ONLY place the pool-nightly refresh phases are
         submitted (training, then ``phase5_state_stage``, then ``models_promote``);
         called every tick(), never through build_legacy_job_requests. Contract:
-        ops ARCHITECTURE.md "Pool-nightly refresh sidecar". All reads are cheap
+        ``engine/v2/models/ARCHITECTURE.md`` section 2.3. All reads are cheap
         indexed selects plus one pointer read, so there is no backoff memo; every
         exception is caught and reported (deduped), never crashing the tick."""
         from engine.v2.models import deployment

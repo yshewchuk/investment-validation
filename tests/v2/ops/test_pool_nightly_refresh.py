@@ -19,9 +19,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from engine.v2.foundation import content_hash
 from engine.v2.models import deployment
 from engine.v2.ops import pool_refresh
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.fingerprints import worker_source_manifest
 from engine.v2.ops.plans import request_from_plan as real_request_from_plan
 from engine.v2.ops.stages import registry
 from engine.v2.ops.state_stage import state_stage_plan
@@ -32,6 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SESSION = "2026-01-02"
 PRIOR = "prior1"
 MANIFEST = "manifest-1"
+TAG = pool_refresh.manifest_tag(MANIFEST)
 
 
 def _db():
@@ -57,8 +60,8 @@ def _add_score(conn, *, session=SESSION, manifest=MANIFEST, scope="sha256:abc",
     return key
 
 
-def _add_training(conn, phase, *, session=SESSION, prior=PRIOR, state="queued"):
-    key = pool_refresh.phase_key(session, phase, prior)
+def _add_training(conn, phase, *, session=SESSION, prior=PRIOR, tag=TAG, state="queued"):
+    key = pool_refresh.phase_key(session, phase, prior, tag)
     job_id = job_id_for("shadow", key)
     conn.execute("INSERT INTO jobs (job_id, kind, state, idempotency_key, spec_json, created_at) "
                  "VALUES (?, 'training', ?, ?, NULL, NULL)", (job_id, state, key))
@@ -159,7 +162,7 @@ def test_no_pointer_no_conn_or_already_advanced_submits_nothing(monkeypatch, tmp
     assert _submit(conn, tmp_path) == []
     assert _submit(None, tmp_path) == []
 
-    rec2 = _wire(monkeypatch, pointer=f"pools-{SESSION}")
+    rec2 = _wire(monkeypatch, pointer=f"pools-{SESSION}-{TAG}")
     assert _submit(conn, tmp_path) == []
     assert rec.submits == [] and rec2.submits == []
 
@@ -175,9 +178,11 @@ def test_all_training_phases_missing_submit_three(monkeypatch, tmp_path):
     _add_score(conn)
     assert _submit(conn, tmp_path) == ["receipt"] * 3
     assert [key for _plan, key in rec.requests] == [
-        pool_refresh.phase_key(SESSION, phase, PRIOR) for phase in pool_refresh.TRAINING_PHASES]
+        pool_refresh.phase_key(SESSION, phase, PRIOR, TAG)
+        for phase in pool_refresh.TRAINING_PHASES]
     assert [key for _plan, key in rec.requests] == [
-        f"nightly:{SESSION}:pool:{phase}:{PRIOR}" for phase in pool_refresh.TRAINING_PHASES]
+        f"nightly:{SESSION}:pool:{phase}:{TAG}:{PRIOR}"
+        for phase in pool_refresh.TRAINING_PHASES]
     for call in rec.training:
         assert call["cutoffs"] == (SESSION,)
         assert call["manifest_ref"] == MANIFEST
@@ -189,6 +194,34 @@ def test_all_training_phases_missing_submit_three(monkeypatch, tmp_path):
     for plan, _key in rec.requests:
         assert plan["mode"] == "shadow"
         assert plan["implementation_ref"] == "impl"
+
+
+def test_two_manifests_same_session_and_prior_use_distinct_tags(monkeypatch, tmp_path):
+    rec = _wire(monkeypatch)
+    conn = _db()
+    _add_score(conn, manifest="old-manifest", created_at="2026-01-01T00:00:00Z")
+    old_tag = pool_refresh.manifest_tag("old-manifest")
+    for phase in pool_refresh.TRAINING_PHASES:
+        _add_training(conn, phase, tag=old_tag, state="succeeded")
+    _add_score(conn, manifest="new-manifest", scope="sha256:zzz",
+               created_at="2026-01-01T01:00:00Z")
+    new_tag = pool_refresh.manifest_tag("new-manifest")
+    assert old_tag != new_tag
+    assert (pool_refresh.phase_key(SESSION, "train-paired", PRIOR, new_tag)
+            != pool_refresh.phase_key(SESSION, "train-paired", PRIOR, old_tag))
+
+    # the old tag's succeeded jobs do not suppress submission under the new tag
+    assert _submit(conn, tmp_path) == ["receipt"] * 3
+    assert [key for _plan, key in rec.requests] == [
+        pool_refresh.phase_key(SESSION, phase, PRIOR, new_tag)
+        for phase in pool_refresh.TRAINING_PHASES]
+
+    # the release id carries the tag: a pointer at the new tag's release is a no-op
+    _wire(monkeypatch, pointer=f"pools-{SESSION}-{new_tag}")
+    assert _submit(conn, tmp_path) == []
+    # ... while the old tag's release id does not suppress the new tag's work
+    _wire(monkeypatch, pointer=f"pools-{SESSION}-{old_tag}")
+    assert _submit(conn, tmp_path) == ["receipt"] * 3
 
 
 # --------------------------------------------------------------------------
@@ -203,8 +236,8 @@ def test_existing_failed_training_job_is_not_resubmitted(monkeypatch, tmp_path):
     _add_training(conn, "train-paired", state="failed")
     assert _submit(conn, tmp_path) == ["receipt"] * 2
     assert [key for _plan, key in rec.requests] == [
-        pool_refresh.phase_key(SESSION, "train-board", PRIOR),
-        pool_refresh.phase_key(SESSION, "train-trailing", PRIOR)]
+        pool_refresh.phase_key(SESSION, "train-board", PRIOR, TAG),
+        pool_refresh.phase_key(SESSION, "train-trailing", PRIOR, TAG)]
 
 
 # --------------------------------------------------------------------------
@@ -260,7 +293,7 @@ def test_all_training_succeeded_submits_the_stage_with_plain_refs(monkeypatch, t
     assert len(rec.stage) == 1
     stage = rec.stage[0]
     assert stage["prior_release_id"] == PRIOR
-    assert stage["release_id"] == f"pools-{SESSION}"
+    assert stage["release_id"] == f"pools-{SESSION}-{TAG}"
     assert stage["cutoff"] == SESSION
     assert stage["release_root"] == str(tmp_path)
     assert stage["state_refs"] == {
@@ -269,7 +302,7 @@ def test_all_training_succeeded_submits_the_stage_with_plain_refs(monkeypatch, t
         "trailing_pnl_cutoff__2026-10.json":
             f"{trailing}#training/trailing_pnl_cutoff__2026-10.json"}
     assert "board_analog_matcher.summary.json" not in stage["state_refs"]
-    assert rec.requests[-1][1] == pool_refresh.phase_key(SESSION, "stage", PRIOR)
+    assert rec.requests[-1][1] == pool_refresh.phase_key(SESSION, "stage", PRIOR, TAG)
 
 
 def test_state_refs_use_only_the_latest_succeeded_attempt(monkeypatch, tmp_path):
@@ -304,18 +337,22 @@ def test_duplicate_state_file_name_raises(monkeypatch, tmp_path):
     with pytest.raises(OpsError) as err:
         _submit(conn, tmp_path)
     assert err.value.code == "VALIDATION_FAILED"
+    assert err.value.problem.message == "a state file name appears twice"
+    assert err.value.problem.details == {"name": "paired.json"}
 
 
 def test_training_job_without_a_succeeded_attempt_raises(monkeypatch, tmp_path):
     _wire(monkeypatch)
     conn = _db()
     _add_score(conn)
-    _add_training(conn, "train-paired", state="succeeded")  # no attempt row
+    job_id = _add_training(conn, "train-paired", state="succeeded")  # no attempt row
     _succeeded_training(conn, "train-board", ["training/board.json"])
     _succeeded_training(conn, "train-trailing", ["training/trailing.json"])
     with pytest.raises(OpsError) as err:
         _submit(conn, tmp_path)
     assert err.value.code == "VALIDATION_FAILED"
+    assert err.value.problem.message == "a training job has no succeeded attempt"
+    assert err.value.problem.details == {"job_id": job_id}
 
 
 # --------------------------------------------------------------------------
@@ -358,9 +395,9 @@ def test_stage_succeeded_submits_a_guarded_promote(monkeypatch, tmp_path):
     assert _submit(conn, tmp_path) == ["receipt"]
     assert len(rec.promote) == 1
     assert rec.promote[0]["expected_previous_release_id"] == PRIOR
-    assert rec.promote[0]["release_id"] == f"pools-{SESSION}"
+    assert rec.promote[0]["release_id"] == f"pools-{SESSION}-{TAG}"
     assert rec.promote[0]["release_root"] == str(Path(tmp_path) / "deployment")
-    assert rec.requests[-1][1] == pool_refresh.phase_key(SESSION, "promote", PRIOR)
+    assert rec.requests[-1][1] == pool_refresh.phase_key(SESSION, "promote", PRIOR, TAG)
 
 
 def test_existing_promote_is_idempotent(monkeypatch, tmp_path):
@@ -430,10 +467,23 @@ def test_reconcile_swallows_missing_root_and_reports_once(monkeypatch, capsys):
 
 def test_tick_calls_reconcile_pool_nightly_refresh():
     tree = ast.parse(textwrap.dedent(inspect.getsource(Service.tick)))
-    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-             and isinstance(node.func, ast.Attribute)
-             and node.func.attr == "_reconcile_pool_nightly_refresh"]
-    assert calls
+    func = tree.body[0]
+    assert isinstance(func, ast.FunctionDef)
+    body = func.body
+    reconcile_index = None
+    final_return_index = None
+    for index, node in enumerate(body):
+        if isinstance(node, ast.Return):
+            final_return_index = index
+        if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Attribute)
+                and node.value.func.attr == "_reconcile_pool_nightly_refresh"
+                and isinstance(node.value.func.value, ast.Name)
+                and node.value.func.value.id == "self"):
+            reconcile_index = index
+    assert final_return_index is not None
+    assert reconcile_index is not None
+    assert reconcile_index < final_return_index
 
 
 # --------------------------------------------------------------------------
@@ -505,6 +555,7 @@ def test_state_refs_with_only_summaries_is_a_typed_refusal(monkeypatch, tmp_path
         _submit(conn, tmp_path)
     assert err.value.problem.code == "VALIDATION_FAILED"
     assert err.value.problem.message == "no training state files to stage"
+    assert err.value.problem.details == {}
 
 
 # --------------------------------------------------------------------------
@@ -534,7 +585,7 @@ def test_real_training_planners_build_the_three_phase_plans(monkeypatch, tmp_pat
     assert trailing["cutoffs"] == (SESSION,)
     for parameters in plans.values():
         assert parameters["input_bindings"] == {"legacy_manifest.json": MANIFEST}
-    impl = pool_refresh._implementation_ref(REPO_ROOT)
+    impl = content_hash(worker_source_manifest(REPO_ROOT))
     assert impl
     assert all(request.job.implementation_ref == impl for request in recorded)
 

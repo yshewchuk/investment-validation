@@ -188,7 +188,7 @@ content succeeds and different content refuses `ID_CONFLICT`.
 
 An ops job kind (`engine/v2/ops/state_stage.py`; logic in `tools/phase5_state_stage_job.py`
 because the assembly helpers live in `checks/`; `delivery` class, write lease on
-`deployment_pointer`; `state_stage_plan` builds the plan; the §2.3 sidecar submits it). It
+`deployment_pointer`; `state_stage_plan` builds the plan; the §2.3 sidecar or an operator submits it). It
 stages a candidate release; it never touches `DEPLOYED` (`models_promote` is separate).
 
 - Parameters: `release_root` (the store's parent; empty resolves the production root at
@@ -231,17 +231,17 @@ exact-cutoff payoff artifacts and per-row cutoffs).
 
 Phases, each only after the previous succeeded: (1) three `training` jobs (`state` `paired_residual_pool`, `board_analog`,
 `trailing_cutoff`) bound to the session's `legacy_manifest.json` artifact; (2) one `phase5_state_stage` job staging release
-`pools-<session>` over the deployed release, with state files taken from the training attempts' plain `training/*.json`
+`pools-<session>-<manifest tag>` over the deployed release, with state files taken from the training attempts' plain `training/*.json`
 outputs; (3) one `models_promote` job guarded by `expected_previous_release_id` = the prior release.
 
 | Rule | Behaviour |
 |---|---|
 | R1 verified input | session and manifest id from the latest succeeded `score` job (its `legacy_manifest.json` binding); prior release from the live pointer; a missing one submits nothing |
 | R2 cache | durable job and pointer state is re-read each tick; no memo (reads are cheap indexed selects) |
-| R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); a changed incumbent gives new keys, so a new cycle |
+| R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); an incumbent changed mid-cycle stalls it too (the staged id or the guarded promote refuses) |
 | R4 transaction | phase N+1 is submitted only once every phase-N job has succeeded; a sidecar failure is caught and reported (deduped), never raised |
 | R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; the prior release stays deployed |
-| R6 idempotency | keys `nightly:<session>:pool:<phase>:<prior release id>` are stable; a deployed release already named `pools-<session>` ends the cycle |
+| R6 idempotency | keys `nightly:<session>:pool:<phase>:<manifest tag>:<prior release id>` and release id `pools-<session>-<manifest tag>` (tag = first 8 hex of the manifest id's SHA-256) are stable, so a rerun scored from a new manifest retrains; a deployed release already named so ends the cycle |
 
 ## 3. Inputs
 

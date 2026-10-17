@@ -2,14 +2,15 @@
 
 Advances the three ``phase5_state_stage`` pool members (``paired_residual_pool``,
 ``board_analog_matcher``, ``trailing_pnl_cutoff``) one cutoff per night: the session
-of the latest succeeded legacy ``score`` job. Contract: ARCHITECTURE.md
-"Pool-nightly refresh sidecar". Called from ``Service.tick()``; never a GRAPH node;
-a failure is reported, never raised. Reads durable state only (no memo): each phase
-key is checked against the ``jobs`` table every call, and phase N+1 is submitted
-only once every phase-N job has succeeded.
+of the latest succeeded legacy ``score`` job. Contract:
+``engine/v2/models/ARCHITECTURE.md`` section 2.3. Called from ``Service.tick()``;
+never a GRAPH node; the Service sidecar catches and reports any failure. Reads
+durable state only (no memo): each phase key is checked against the ``jobs`` table
+every call, and phase N+1 is submitted only once every phase-N job has succeeded.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -27,8 +28,12 @@ TRAINING_PHASES = PHASES[:3]
 FILL_ALPHA = 0.5  # engine.fills.MID.alpha, the shadow fill alpha native_score_batch scores with
 
 
-def phase_key(session, phase, prior):
-    return f"nightly:{session}:pool:{phase}:{prior}"
+def manifest_tag(manifest_id):
+    return hashlib.sha256(manifest_id.encode()).hexdigest()[:8]
+
+
+def phase_key(session, phase, prior, tag):
+    return f"nightly:{session}:pool:{phase}:{tag}:{prior}"
 
 
 def pool_refresh_identity(conn):
@@ -102,16 +107,17 @@ def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_
     if identity is None:
         return []
     session, manifest_id = identity
+    tag = manifest_tag(manifest_id)
     pointer = deployment.current_pointer(Path(release_root) / "deployment")
     if pointer is None:
         return []
     prior = pointer.release_id
-    release_id = f"pools-{session}"
+    release_id = f"pools-{session}-{tag}"
     if prior == release_id:
         return []
 
     missing = [phase for phase in TRAINING_PHASES
-               if not _exists(conn, phase_key(session, phase, prior))]
+               if not _exists(conn, phase_key(session, phase, prior, tag))]
     if missing:
         built = _training_plans(session, manifest_id, missing)
         receipts = []
@@ -119,16 +125,16 @@ def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_
         for phase in missing:
             plan = built[phase]
             plan["implementation_ref"] = impl
-            request = request_from_plan(plan, phase_key(session, phase, prior))
+            request = request_from_plan(plan, phase_key(session, phase, prior, tag))
             receipts.append(submit(conn, registry, policy, request, clock=clock))
         return receipts
-    if any(_state(conn, phase_key(session, phase, prior)) != "succeeded"
+    if any(_state(conn, phase_key(session, phase, prior, tag)) != "succeeded"
            for phase in TRAINING_PHASES):
         return []
 
-    stage_key = phase_key(session, "stage", prior)
+    stage_key = phase_key(session, "stage", prior, tag)
     if not _exists(conn, stage_key):
-        state_refs = _state_refs(conn, session, prior, code_source)
+        state_refs = _state_refs(conn, session, prior, tag, code_source)
         plan = state_stage.state_stage_plan(
             release_root=str(release_root), prior_release_id=prior,
             release_id=release_id, cutoff=session, state_refs=state_refs,
@@ -138,7 +144,7 @@ def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_
     if _state(conn, stage_key) != "succeeded":
         return []
 
-    promote_key = phase_key(session, "promote", prior)
+    promote_key = phase_key(session, "promote", prior, tag)
     if _exists(conn, promote_key):
         return []
     plan = training.promote_plan(
@@ -149,14 +155,14 @@ def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_
                    request_from_plan(plan, promote_key), clock=clock)]
 
 
-def _state_refs(conn, session, prior, code_source):
+def _state_refs(conn, session, prior, tag, code_source):
     """Latest succeeded attempt's plain ``training/*.json`` outputs across the three
     training jobs, keyed by file remainder (``paired.json`` etc.). A duplicate name
     or an empty set is ``VALIDATION_FAILED``; summaries (``*.summary.json``) and
     non-``.json`` names are excluded."""
     state_refs = {}
     for phase in TRAINING_PHASES:
-        key = phase_key(session, phase, prior)
+        key = phase_key(session, phase, prior, tag)
         job_id = job_id_for("shadow", key)
         attempt = conn.execute(
             "SELECT attempt_id FROM attempts WHERE job_id = ? AND state = 'succeeded' "
