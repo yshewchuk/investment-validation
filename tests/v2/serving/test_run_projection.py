@@ -221,11 +221,15 @@ def test_native_plan_without_native_inputs_raises_and_writes_no_release(tmp_path
             serving_conn.close()
 
 
-# 4b. a plan that is a JSON list, or not JSON at all, is INVALID_REQUEST
+# 4b. a plan that is a JSON list, not JSON at all, or unreadable is INVALID_REQUEST
 def test_run_projection_refuses_list_or_non_json_plan(tmp_path):
     inputs = _flat_inputs(tmp_path / "inputs")
 
-    for name, payload in (("list", "[]"), ("bad", "{not json")):
+    cases = (
+        ("list", "[]", "nightly plan is not a JSON object"),
+        ("bad", "{not json", "nightly plan is not valid JSON"),
+    )
+    for name, payload, message in cases:
         plan_path = tmp_path / f"plan_{name}.json"
         plan_path.write_text(payload)
         serving_root = tmp_path / f"serving_{name}"
@@ -233,6 +237,7 @@ def test_run_projection_refuses_list_or_non_json_plan(tmp_path):
         with pytest.raises(OpsError) as error:
             run_projection(**_args(inputs, serving_root, nightly_plan=plan_path))
         assert error.value.code == "INVALID_REQUEST"
+        assert error.value.problem.message == message
 
         index_path = serving_root / "serving.sqlite"
         assert not index_path.exists() or index_path.stat().st_size == 0
@@ -243,6 +248,24 @@ def test_run_projection_refuses_list_or_non_json_plan(tmp_path):
                     "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
             finally:
                 serving_conn.close()
+
+    unreadable = tmp_path / "plan_dir"
+    unreadable.mkdir()
+    serving_root = tmp_path / "serving_unreadable"
+    with pytest.raises(OpsError) as error:
+        run_projection(**_args(inputs, serving_root, nightly_plan=unreadable))
+    assert error.value.code == "INVALID_REQUEST"
+    assert error.value.problem.message == "nightly plan is unreadable"
+
+    index_path = serving_root / "serving.sqlite"
+    assert not index_path.exists() or index_path.stat().st_size == 0
+    if index_path.exists():
+        serving_conn = projections.connect(str(index_path))
+        try:
+            assert serving_conn.execute(
+                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
+        finally:
+            serving_conn.close()
 
 
 # 5. run_projection records the plan's row_sources on the stored release, and
@@ -258,9 +281,9 @@ def test_run_projection_native_plan_records_native_shadow(tmp_path, monkeypatch)
 
     monkeypatch.setattr(tool, "_load_native_inputs", lambda path: {})
 
-    # The native source returns an extra ticker's rows, distinguishable from
-    # the legacy bundle's AAA-only rows, and its score row it must also declare
-    # so the bridge joins it.
+    # The native source returns a fresh rows mapping: an extra ticker's display
+    # row on top of the caller's own rows, distinguishable from the legacy
+    # bundle's AAA-only rows.  It does not touch ``score_doc``.
     native_score_row = _row(ticker="BBB")
     native_display_row = _compact(native_score_row)
 
@@ -268,12 +291,31 @@ def test_run_projection_native_plan_records_native_shadow(tmp_path, monkeypatch)
 
     def native_row_source(plan, score_doc, bundle_rows_by_ticker, pairs):
         calls.append(plan)
-        score_doc["rows"] = [*score_doc["rows"], native_score_row]
-        score_doc["expected_population"] = sorted(
-            {*score_doc["expected_population"], "BBB|STR-THRU|2024-01-05"})
         return {**bundle_rows_by_ticker, "BBB": [native_display_row]}
 
     monkeypatch.setattr(tool, "shadow_serving_row_source", native_row_source)
+
+    # Capture the rows the tool hands to ``build_candidate``: what the release
+    # is built from, proving the native rows -- not the legacy bundle's -- are
+    # the ones that reached it.  The wrapper also declares the native row's own
+    # score record to the bridge (the shadow seam itself stays pure) so the
+    # plan's extra population can be joined.
+    captured: dict = {}
+    real_build_candidate = tool.build_candidate
+
+    def spy_build_candidate(preview_input, score_doc, bundle_rows_by_ticker, **kwargs):
+        captured["rows"] = bundle_rows_by_ticker
+        if "BBB" not in bundle_rows_by_ticker:
+            return real_build_candidate(preview_input, score_doc, bundle_rows_by_ticker, **kwargs)
+        joined = {
+            **score_doc,
+            "rows": [*score_doc["rows"], native_score_row],
+            "expected_population": sorted(
+                {*score_doc["expected_population"], "BBB|STR-THRU|2024-01-05"}),
+        }
+        return real_build_candidate(preview_input, joined, bundle_rows_by_ticker, **kwargs)
+
+    monkeypatch.setattr(tool, "build_candidate", spy_build_candidate)
 
     _, bundle_doc = run_projection(**_args(inputs, tmp_path / "serving_bundle"))
     assert calls == []
@@ -282,6 +324,7 @@ def test_run_projection_native_plan_records_native_shadow(tmp_path, monkeypatch)
                 native_inputs=native_inputs_path))
     assert native_doc["release_id"] != bundle_doc["release_id"]
     assert len(calls) == 1
+    assert "BBB" in captured["rows"]
 
     conn = projections.connect(str(tmp_path / "serving_native" / "serving.sqlite"))
     try:
@@ -322,12 +365,17 @@ def test_run_projection_legacy_plan_records_legacy_bundle_only(tmp_path, monkeyp
 def test_run_projection_oversized_nightly_plan_raises_and_writes_no_release(tmp_path):
     inputs = _flat_inputs(tmp_path / "inputs")
     plan_path = tmp_path / "plan.json"
-    plan_path.write_bytes(b" " * 1048577)
+    # A valid JSON object, padded past the 1 MiB read cap with a long string:
+    # the size refusal must be what fires, not the (valid) parse.
+    plan_path.write_text(json.dumps(
+        {"shadow_serving_scorer": "legacy", "pad": "x" * 1048576}))
+    assert plan_path.stat().st_size > 1048576
     serving_root = tmp_path / "serving"
 
     with pytest.raises(OpsError) as error:
         run_projection(**_args(inputs, serving_root, nightly_plan=plan_path))
     assert error.value.code == "INVALID_REQUEST"
+    assert error.value.problem.message == "nightly plan exceeds 1 MiB"
 
     index_path = serving_root / "serving.sqlite"
     assert not index_path.exists() or index_path.stat().st_size == 0

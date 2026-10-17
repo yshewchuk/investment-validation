@@ -112,17 +112,19 @@ def _read_plan(path: Path) -> dict:
     """Read the shadow nightly plan with a bounded read and object check.
 
     The file is read through a 1 MiB cap so an oversized plan cannot exhaust
-    memory; anything over the cap, or that is not valid JSON, or that is not a
-    JSON object, is refused as ``INVALID_REQUEST``.
+    memory; anything over the cap, that cannot be read, that is not valid JSON,
+    or that is not a JSON object, is refused as ``INVALID_REQUEST``.
     """
-    with open(path, "rb") as fh:
-        raw = fh.read(1048577)
-    if len(raw) > 1048576:
-        raise fail("INVALID_REQUEST", "nightly plan exceeds 1 MiB")
     try:
+        with open(path, "rb") as fh:
+            raw = fh.read(1048577)
+        if len(raw) > 1048576:
+            raise fail("INVALID_REQUEST", "nightly plan exceeds 1 MiB")
         plan = json.loads(raw)
+    except (OSError, RecursionError):
+        raise fail("INVALID_REQUEST", "nightly plan is unreadable") from None
     except ValueError:
-        raise fail("INVALID_REQUEST", "nightly plan is not a JSON object") from None
+        raise fail("INVALID_REQUEST", "nightly plan is not valid JSON") from None
     if not isinstance(plan, dict):
         raise fail("INVALID_REQUEST", "nightly plan is not a JSON object")
     return plan

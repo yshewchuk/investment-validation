@@ -55,7 +55,8 @@ signing, the CURRENT/health files and the launcher. The shape is pinned by
 every connection-owning read block -- the publication resolver's binding
 reverification, ``/releases/{id}`` + ``/releases/current``, ``/events``,
 ``/events/{id}/scores``, ``/scores/{id}`` -- wraps only its projection calls in
-``except (projections.sqlite3.Error, json.JSONDecodeError)`` and raises
+``except (projections.sqlite3.Error, json.JSONDecodeError, DocumentError)``
+-- the last a stored release of an older schema -- and raises
 ``_index_unreadable()``, keeping the existing guaranteed-close ``finally``.
 Artifact decoding (still the existing 500), binding-invalid
 (500), unknown release/event/score (404) and every validation refusal are
