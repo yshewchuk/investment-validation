@@ -661,7 +661,7 @@ returned result dictionaries carry their IDs and selected summaries, not all jou
 payloads. Collection does not persist a report artifact, export or ledger row.
 No holdout evaluation, final read, release or deployment authority is added.
 Research remains reconstructed, not observed point-in-time. Direct dependencies are
-existing search plan/journal/trial/child/evidence APIs, contracts, foundation, ops
-migrations/fingerprinting/errors and legacy/v2 no-fit guards. The evidence helper
-consumes native history admission and research stored-history/target APIs; no new
-scheduler, parser, estimator implementation or third-party dependency is needed.
+the search plan/journal/trial/execution/evidence modules, contracts, foundation,
+ops migrations/fingerprints/errors, both no-fit guards, `engine.v2.research.magnitude_inputs.load_magnitude_targets`
+for outer label reads and `magnitude_report.magnitude_metrics` for fold/aggregate scoring.
+The evidence helper separately consumes native history admission and research stored-history/target APIs; no new scheduler, parser, estimator implementation or third-party dependency is needed.
