@@ -9,12 +9,15 @@ import pytest
 from engine.v2.foundation import content_hash
 from experiments import magnitude_search_outer as outer
 from experiments import magnitude_search_trials as trials
+from tests.v2.models.training.test_magnitude_estimators import FEATURES, RIDGE_PARAMS
 from tests.v2.research.magnitude_trial_support import trial_cases, trial_forecasts
 from tests.v2.research.test_magnitude_search_execution import LIMITS, inject_child
 from tests.v2.research.test_magnitude_search_outer import (
     CONFLICT,
     base_source,  # noqa: F401
+    expected_fits,
     independent_metrics,
+    journal_slots,
     known_targets,
     native_outer_source,  # noqa: F401
     outer_case,  # noqa: F401
@@ -171,12 +174,25 @@ def test_bad_child_forecasts_refuse_before_outer_labels(outer_case, monkeypatch,
 
 def test_outer_child_receives_only_prior_training_labels(outer_case, monkeypatch):
     case = outer_case
-    children = inject_child(monkeypatch, """
+    recipe = {"schema_version": "magnitude_fitted_recipe.v1", "model": "history_ridge", "features": FEATURES,
+        "estimator": {"class": "Ridge", "params": {**RIDGE_PARAMS, "alpha": 0.5}},
+        "preprocessing": {"imputer": {"strategy": "median", "keep_empty_features": True},
+            "missing_indicator": {"features": "all", "sparse": False},
+            "scaler": {"with_mean": True, "with_std": True}, "output_features": 22},
+        "target_transform": "none", "prediction_projection": "clip_zero",
+        "fit_scope": "fold_and_horizon", "numerical_threads": 1}
+    winner = "sha256:121c0427eab3f4ca0034a44991aaa8147cc67385cc66dfda27f0a55be5084d91"
+    assert case.selected["selections"][0]["selected_candidate_id"] == winner
+    assert recipe != case.recorder.registration.document["magnitude_execution"]["fit_recipe"]
+    assert all(recipe != candidate["recipe"] for candidate in case.plan["candidates"]
+               if candidate["candidate_id"] != winner)
+    children = inject_child(monkeypatch, f"""
 def injected(recipe, train, labels, test):
+    assert recipe == {recipe!r}
     assert len(labels) == 10
     assert sorted(labels.tolist()) == [2, 2, 3, 3, 3, 3, 4, 6, 8, 12]
     assert len(test) == 8
-    return [5.0] * len(test)
+    return [10 * recipe['estimator']['params']['alpha']] * len(test)
 """)
     result = run(case)
     assert {row["predicted_absolute_move_pct"] for row in result["predictions"]} == {5.0}
@@ -185,7 +201,107 @@ def injected(recipe, train, labels, test):
                 for event in known_targets() if ":2024-" in event]
     assert result["per_horizon"] == [{"horizon_sessions": horizon, **independent_metrics(expected)}
                                       for horizon in [5, 3, 1]]
+    assert len(children) == 1
     assert all(child.poll() is not None and not path.exists() for child, path in children)
+
+
+def assert_live_child_refusal(case, started, completed):
+    names = ["outer-start", "outer-inputs"]
+    for index, fit in enumerate(expected_fits(case)):
+        assert slot(case, "fit-started:" + str(fit["horizon_sessions"])) == (fit if index < started else None)
+        assert slot(case, "fit-completed:" + str(fit["horizon_sessions"])) == (fit if index < completed else None)
+        for state, count in (("started", started), ("completed", completed)):
+            if index < count:
+                names.append("outer-fit-" + state + ":" + str(fit["horizon_sessions"]))
+    suffix = ":" + content_hash([case.plan["plan_id"], "2024"])
+    assert sorted(name for name, _ in journal_slots(case) if name.startswith("outer-")) == sorted(name + suffix for name in names)
+    assert all(slot(case, name) is None for name in ("execution", "forecasts", "validation", "terminal"))
+
+
+@pytest.mark.parametrize("kind, started, completed", [
+    ("wrong_matrix", 0, 0), ("wrong_horizon", 0, 0), ("completed_first", 0, 0),
+    ("duplicate_start", 1, 0), ("unknown_state", 1, 0), ("wrong_completion", 1, 0), ("overflow", 3, 3)])
+def test_fresh_child_progress_refuses_before_bad_event_publication(outer_case, monkeypatch, kind, started, completed):
+    case = outer_case
+    def fitted(inputs, fold, plan, execution, limits, progress):
+        fits = expected_fits(case)
+        for fit in fits[:completed]:
+            progress("started", fit)
+            progress("completed", fit)
+        if started > completed:
+            progress("started", fits[completed])
+        state, fit = "started", fits[0]
+        if kind in ("wrong_matrix", "wrong_completion"):
+            fit = {**fit, "prediction_matrix_id": "wrong"}
+        if kind == "wrong_horizon":
+            fit = {**fit, "horizon_sessions": 1}
+        if kind in ("completed_first", "wrong_completion"):
+            state = "completed"
+        if kind == "unknown_state":
+            state = "unexpected"
+        progress(state, fit)
+        pytest.fail("malformed live progress was accepted")
+    monkeypatch.setattr(outer, "run_fitted_trial", fitted)
+    monkeypatch.setattr(outer, "load_magnitude_targets", lambda *a, **kw: pytest.fail("bad progress opened labels"))
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+        run(case)
+    assert_live_child_refusal(case, started, completed)
+
+
+@pytest.mark.parametrize("kind, completed, pending", [
+    ("no_fits", 0, False), ("partial", 1, False), ("pending", 2, True), ("success_extra", 3, False),
+    ("failure_without_start", 0, False), ("failure_extra", 1, True), ("unknown_event", 1, True)])
+def test_fresh_child_completion_refuses_before_execution_publication(outer_case, monkeypatch, kind, completed, pending):
+    case = outer_case
+    def fitted(inputs, fold, plan, execution, limits, progress):
+        fits = expected_fits(case)
+        for fit in fits[:completed]:
+            progress("started", fit)
+            progress("completed", fit)
+        if pending:
+            progress("started", fits[completed])
+        if kind.startswith("failure") or kind == "unknown_event":
+            result = {"event": "unknown" if kind == "unknown_event" else "failed"}
+        else:
+            result = {"event": "succeeded", "forecasts": [{"event_id": event, "horizon_sessions": horizon,
+                "predicted_absolute_move_pct": 5.0} for event in fold["evaluation_event_ids"] for horizon in plan["horizons"]]}
+        if kind.endswith("extra"):
+            result["extra"] = "unexpected"
+        return result
+    monkeypatch.setattr(outer, "run_fitted_trial", fitted)
+    monkeypatch.setattr(outer, "load_magnitude_targets", lambda *a, **kw: pytest.fail("bad completion opened labels"))
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+        run(case)
+    assert_live_child_refusal(case, completed + int(pending), completed)
+
+
+@pytest.mark.parametrize("kind", ["cutoff", "purpose", "receipt_id", "reordered", "missing", "negative", "nonfinite", "boolean"])
+def test_fresh_targets_refuse_before_validation_publication(outer_case, monkeypatch, kind):
+    original = outer.load_magnitude_targets
+    def labels(*args, **kwargs):
+        frame = original(*args, **kwargs).copy(deep=True)
+        if kind in ("cutoff", "purpose", "receipt_id"):
+            key, value = {"cutoff": ("labels_before", "2026-01-01"), "purpose": ("purpose", "final"),
+                          "receipt_id": ("inputs_id", "wrong")}[kind]
+            frame.attrs[key] = value
+            if kind != "receipt_id":
+                frame.attrs["inputs_id"] = content_hash({key: value for key, value in frame.attrs.items()
+                                                        if key not in ("inputs_id", "holdout_exclusions")})
+        elif kind == "reordered":
+            frame = frame.iloc[::-1].copy()
+        elif kind == "missing":
+            frame = frame.iloc[1:].copy()
+        else:
+            frame["absolute_move_pct"] = frame["absolute_move_pct"].astype(object)
+            frame.loc[frame.index[0], "absolute_move_pct"] = {"negative": -1.0, "nonfinite": float("nan"), "boolean": True}[kind]
+        return frame
+    monkeypatch.setattr(outer, "load_magnitude_targets", labels)
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+        run(outer_case)
+    assert slot(outer_case, "forecasts") is not None
+    assert slot(outer_case, "execution")["status"] == "succeeded"
+    assert slot(outer_case, "validation") is None
+    assert slot(outer_case, "terminal") is None
 
 
 

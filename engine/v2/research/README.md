@@ -181,8 +181,10 @@ for same-position, read-only fixed-day versus target/stop comparisons.
 the pure magnitude window and metadata-only planner to bind research registrations.
 `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`
 to reconstruct outer metadata and plan nested folds with the same public rule.
-`experiments/magnitude_search_trials.py` consumes stored-history reads, target
-preflight, training qualification, complete target reads and `magnitude_inputs.magnitude_recipe` for recorded inner trials and exact validation-receipt admission.
+`experiments/magnitude_search_evidence.py` consumes stored-history reads, target
+preflight, training qualification and `magnitude_inputs.magnitude_recipe` for shared inner/outer evidence admission.
+`experiments/magnitude_search_trials.py` and `experiments/magnitude_search_outer.py`
+directly consume `load_magnitude_targets` for recorded inner and selected outer trials respectively.
 `experiments/magnitude_inputs.py` consumes `magnitude_inputs.preflight_magnitude_targets`.
 `experiments/magnitude_report.py` consumes that preflight, `load_magnitude_targets`
 and `qualify_magnitude_training_targets` for the admitted mean baseline.
@@ -248,6 +250,3 @@ chains, snapshot pinning, and the refusal paths.
 `tests/test_v2_research_reconcile_trades.py` covers the canonical-event prune:
 non-canonical rows tombstoned, everything else byte-identical, the pinned
 snapshot recorded, and an explicit `--snapshot-id` honoured.
-
-`experiments/magnitude_search_evidence.py` consumes `read_stored`, target preflight,
-training qualification and `magnitude_recipe` for shared inner/outer evidence; outer execution consumes complete target reads.

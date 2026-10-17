@@ -1,4 +1,5 @@
 """Native selected outer fits, temporal ordering and pooled independent oracles."""
+import hashlib
 import math
 import shutil
 from contextlib import contextmanager
@@ -26,7 +27,12 @@ from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_outer as outer
 from experiments import magnitude_search_trials as trials
 from experiments.magnitude_search_plan import seal_search_plan
-from tests.v2.research.magnitude_trial_support import history_event, poison_outcomes, trial_cases
+from tests.v2.research.magnitude_trial_support import (
+    ROOT,
+    history_event,
+    poison_outcomes,
+    trial_cases,
+)
 from tests.v2.research.test_magnitude_search_execution import LIMITS, inject_child
 from tests.v2.research.test_magnitude_search_plan import source as base_source  # noqa: F401
 
@@ -59,6 +65,16 @@ def known_targets():
 def journal_slots(case):
     return [tuple(row) for row in case.conn.execute(
         "SELECT slot, ref_json FROM magnitude_search_records ORDER BY slot")]
+
+
+def assert_source_seals(case):
+    shared = {"experiments/magnitude_search_evidence.py", "experiments/magnitude_search_trials.py",
+              "experiments/magnitude_search_execution.py", "experiments/magnitude_search_worker.py"}
+    for sources, required in ((case.recorder._read("seal")["recorder_sources"], shared),
+            (slot(case, "start")["outer_sources"], shared | {"experiments/magnitude_search_outer.py"})):
+        assert sources.keys() >= required
+        assert sources == {name: "sha256:" + hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
+                           for name in sources}
 
 
 def independent_metrics(rows):
@@ -198,6 +214,7 @@ def test_real_outer_selected_only_forecasts_precede_labels_and_replay(outer_case
         return original(*args, **kwargs)
     monkeypatch.setattr(outer, "load_magnitude_targets", labels)
     result = run(case)
+    assert_source_seals(case)
     scores = case.selected["selections"][0]["scores"]
     assert scores[0]["metrics"] == scores[1]["metrics"]
     assert result["candidate"]["candidate_id"] == min(item["candidate_id"] for item in scores)
@@ -245,11 +262,16 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
 
 
 @pytest.mark.parametrize("guard, exception", [(no_fit_guard, RuntimeFitForbidden), (legacy_guard, LegacyRuntimeFitForbidden)])
-def test_no_fit_guards_before_outer_claim(outer_case, guard, exception):
-    before = outer_case.conn.total_changes
-    with guard(), pytest.raises(exception, match="execute_outer_fold"):
+def test_no_fit_guards_before_outer_claim(outer_case, monkeypatch, guard, exception):
+    affinity = Mock(side_effect=AssertionError("guarded call resolved affinity"))
+    monkeypatch.setattr(outer, "execution_limits", affinity)
+    before = outer_case.conn.total_changes, journal_slots(outer_case)
+    with guard(), pytest.raises(exception) as caught:
         run(outer_case)
-    assert outer_case.conn.total_changes == before
+    assert type(caught.value) is exception
+    assert caught.value.args == ("no-fit guard active: execute_outer_fold",)
+    affinity.assert_not_called()
+    assert (outer_case.conn.total_changes, journal_slots(outer_case)) == before
     assert slot(outer_case, "start") is None
 
 
