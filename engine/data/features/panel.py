@@ -595,7 +595,10 @@ def add_runup_features(
 # --------------------------------------------------------------------------
 
 #: Tickers per daily_market batch. Peak RSS of the panel's daily_market reads is
-#: one year-partition plus one batch of tickers' rows, not the whole table.
+#: bounded by the batch, not the table: approximately one year-partition (plus
+#: the iterator's next-partition frame while it is still building) plus the
+#: batch's filtered rows, with a transient 2-3x of that batch during concat and
+#: coerce — not "one year plus one batch" exactly.
 _DAILY_BATCH_TICKERS = 800
 
 
@@ -605,6 +608,9 @@ def _iter_daily_batches(columns, tickers, batch_size=None):
     Each batch streams the table one year-partition at a time (``store.iter_table``),
     keeps only the batch's tickers, frees the partition, concatenates, then coerces
     exactly as ``store.read_table`` does (``store.coerce(out, "daily_market", only=list(columns))``).
+    Peak RSS is bounded by the batch, not the table: roughly one year-partition (plus the
+    iterator's next-partition frame while it is still building) plus the batch's filtered rows,
+    with a transient 2-3x of that batch during concat and coerce.
     ``tickers`` is an iterable of ticker strings; iterate ``sorted(set(tickers))`` in slices of
     ``batch_size or _DAILY_BATCH_TICKERS`` (read the module global at call time). A batch with no rows yields
     ``store.empty_frame("daily_market")[list(columns)]`` (same as read_table's empty case).
@@ -624,7 +630,9 @@ def _iter_daily_batches(columns, tickers, batch_size=None):
             continue
         out = pd.concat(frames, ignore_index=True)
         frames.clear()
-        yield store.coerce(out, "daily_market", only=list(columns))
+        holder = [store.coerce(out, "daily_market", only=list(columns))]
+        del out
+        yield holder.pop()
 
 
 def add_orats_features(
@@ -634,8 +642,11 @@ def add_orats_features(
 ) -> pd.DataFrame:
     """Join Tier-2 ``daily_market`` state as of the last row before each event.
 
-    The as-of rule is ``searchsorted(dates, as_of, "left") - 1``: the last EOD
-    row *strictly before* ``as_of_column``, which defaults to the event date.
+    The as-of rule is ``searchsorted(dates, as_of, "left") - 1``: the row used is
+    strictly before the *event* date, and when ``as_of_column`` is a decision-date
+    column the decision date's own row is admissible (an inclusive ceiling),
+    composed with that strict event-date ceiling by :func:`_anchor_index`.
+    ``as_of_column`` defaults to the event date.
     For a BMO print that is the previous close, which is exactly right. For an
     AMC print the event-date close is also pre-print and is therefore
     admissible, but the legacy panel used the prior close for both, so this
