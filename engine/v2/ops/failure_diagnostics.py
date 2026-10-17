@@ -9,6 +9,10 @@ from engine.v2.ops.catalog import MAX_JOB_FAILURE_BYTES, dumps, dumps_failure
 from engine.v2.ops.errors import OpsError, fail, make_problem
 
 
+class DiagnosticPublicationError(OpsError):
+    """The original Problem could not be published; completion must remain uncommitted."""
+
+
 def prepare_failure(problem: Problem, store: ArtifactStore) -> tuple[Problem, ArtifactRef | None]:
     """Publish the entire original envelope; no catalog write or completion happens here."""
     if (not isinstance(problem.code, str) or problem.code not in FAILURE_CODES
@@ -21,9 +25,11 @@ def prepare_failure(problem: Problem, store: ArtifactStore) -> tuple[Problem, Ar
     try:
         ref = store.publish_bytes(payload, schema_ref=PROBLEM_V1)
     except OSError:
-        raise fail("RESOURCE_UNAVAILABLE", "failure diagnostic could not be published") from OpsError(problem)
+        raise DiagnosticPublicationError(make_problem(
+            "RESOURCE_UNAVAILABLE", "failure diagnostic could not be published")) from OpsError(problem)
     except ArtifactError:
-        raise fail("INTEGRITY_FAILED", "failure diagnostic could not be published") from OpsError(problem)
+        raise DiagnosticPublicationError(make_problem(
+            "INTEGRITY_FAILED", "failure diagnostic could not be published")) from OpsError(problem)
     summary = replace(make_problem(problem.code, "failure details preserved in diagnostic artifact"),
                       retryable=problem.retryable, diagnostic_ref=ref.artifact_id)
     dumps_failure(summary)

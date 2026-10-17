@@ -4,6 +4,8 @@ No subprocesses, market-data fixture or automatic recovery protocol is involved.
 An interrupted publication may leave a complete content-addressed orphan; the
 catalog must never claim completion without its registered full diagnostic.
 """
+import json
+import os
 from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
@@ -13,6 +15,7 @@ import pytest
 from engine.v2.contracts import Problem
 from engine.v2.foundation import ArtifactError, ArtifactStore, artifact_reference, format_timestamp
 from engine.v2.ops import catalog, failure_diagnostics, lifecycle, recovery, scheduler, submission
+from engine.v2.ops import supervisor as supervisor_module
 from engine.v2.ops.checkpoints import register_artifact, registered_artifact
 from engine.v2.ops.decision_validation import validate
 from engine.v2.ops.errors import OpsError, make_problem
@@ -285,6 +288,7 @@ def test_failed_initial_publication_never_commits_or_loses_original_error(
     monkeypatch.setattr(case.store, "publish_bytes", unavailable)
     with pytest.raises(OpsError) as captured:
         case.service._commit_failure(case.claim, {"exit_code": 4}, full_problem)
+    assert isinstance(captured.value, failure_diagnostics.DiagnosticPublicationError)
     assert captured.value.code == code
     assert captured.value.problem.message == "failure diagnostic could not be published"
     assert "private" not in captured.value.problem.message
@@ -293,6 +297,163 @@ def test_failed_initial_publication_never_commits_or_loses_original_error(
     assert catalog_rows(case.conn) == before
     assert object_bytes(case.store) == {}
     assert not case.conn.in_transaction
+
+
+def fail_at_supervisor_boundary(case, monkeypatch, problem, entrypoint):
+    def failure(*args, **kwargs):
+        raise OpsError(problem)
+
+    if entrypoint == "finish":
+        monkeypatch.setattr(case.service, "_commit_success", failure)
+        return lambda: case.service._finish(SimpleNamespace(claim=case.claim), {"exit_code": 0})
+    case.service.code_source = case.path.parent
+    monkeypatch.setattr(supervisor_module, "worker_source_manifest", failure)
+    return lambda: case.service._launch(case.claim)
+
+
+@pytest.mark.parametrize("entrypoint", ["finish", "launch"])
+@pytest.mark.parametrize("error,code", [
+    (OSError("private storage detail"), "RESOURCE_UNAVAILABLE"),
+    (ArtifactError("HASH_MISMATCH", "private artifact detail"), "INTEGRITY_FAILED"),
+])
+def test_tick_contains_publication_failure_and_preserves_other_workers(
+        case, full_problem, monkeypatch, capsys, entrypoint, error, code):
+    service, conn, clock = case.service, case.conn, case.clock
+    identity = Supervisor(conn.execute("SELECT supervisor_epoch FROM attempts").fetchone()[0], "boot")
+    other = enqueue_claim(conn, clock, identity, key="other")
+    assert other is not None
+    service.boot, service.root = "boot", case.path.parent
+    service.policy, service.registry, service.identity = DEFAULT_POLICY, REGISTRY, identity
+    service.observed, service.running = {}, {}
+    for name in ("_clock_check", "_reclaim_terminal_staging", "_reconcile_publication_status",
+                 "_reconcile_computed_moves_refresh", "_reconcile_native_score_batch_shadow",
+                 "_reconcile_native_parity"):
+        monkeypatch.setattr(service, name, lambda: None)
+    monkeypatch.setattr(service, "_track_steps", lambda *args: None)
+    monkeypatch.setattr(service, "_observation_due", lambda *args: False)
+    monkeypatch.setattr(supervisor_module, "sample_capacity", lambda *args, **kwargs: sample(clock))
+    monkeypatch.setattr(supervisor_module, "prove_ownership_gone", lambda *args, **kwargs:
+                        recovery.OwnershipProof(True, (), (), ()))
+    fail_at_supervisor_boundary(case, monkeypatch, full_problem, entrypoint)
+    claims = iter([case.claim, None, None] if entrypoint == "launch" else [None, None, None])
+    monkeypatch.setattr(supervisor_module, "claim_next", lambda *args, **kwargs: next(claims))
+    stopped, polled, stranded = [], [], []
+    monkeypatch.setattr(supervisor_module.executor, "stop", lambda *args, **kwargs: stopped.append(args))
+    real_strand = service._strand
+
+    def strand(claim, problem):
+        stranded.append((claim, problem))
+        real_strand(claim, problem)
+
+    monkeypatch.setattr(service, "_strand", strand)
+
+    def unavailable(*args, **kwargs):
+        assert not conn.in_transaction
+        raise error
+
+    monkeypatch.setattr(case.store, "publish_bytes", unavailable)
+
+    def poll(conn, running, **kwargs):
+        polled.append(running.claim.attempt_id)
+        return {"done": running.claim is case.claim, "exit_code": 0, "memory": 0}
+
+    monkeypatch.setattr(supervisor_module.executor, "poll", poll)
+    read_fd, write_fd = os.pipe()
+    try:
+        if entrypoint == "finish":
+            service.running[case.claim.attempt_id] = SimpleNamespace(
+                claim=case.claim, failure=None, result_fd=read_fd)
+            service.launches[case.claim.attempt_id] = object()
+            service._progress_state[case.claim.attempt_id] = object()
+        survivor = SimpleNamespace(claim=other, failure=None)
+        service.running[other.attempt_id] = survivor
+        assert service.tick() is True
+        assert service.running == {other.attempt_id: survivor} and stopped == []
+        assert case.claim.attempt_id not in service.launches
+        assert case.claim.attempt_id not in service._progress_state
+        assert polled.count(other.attempt_id) == 1
+        assert len(stranded) == 1 and stranded[0][0] is case.claim
+        assert stranded[0][1].code == code
+        report = json.loads(capsys.readouterr().err)
+        assert report == {"event": "attempt_left_for_recovery", "job_id": case.claim.job_id,
+                          "attempt_id": case.claim.attempt_id,
+                          "problem": {"code": code, "category": stranded[0][1].category,
+                                      "retryable": stranded[0][1].retryable,
+                                      "message": "failure diagnostic could not be published"}}
+        attempt = conn.execute("SELECT state, ended_at, failure_json FROM attempts WHERE attempt_id=?",
+                               (case.claim.attempt_id,)).fetchone()
+        assert tuple(attempt) == ("starting", None, None)
+        assert get_job(conn, case.claim.job_id).state == "running"
+        assert conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
+        assert object_bytes(case.store) == {} and not conn.in_transaction
+        assert conn.execute("SELECT COUNT(*) FROM resource_reservations WHERE released_at IS NULL").fetchone()[0] == 2
+
+        # The failed attempt receives no more heartbeats. Its peer continues,
+        # and ordinary lease expiry/reconciliation settles only the abandoned one.
+        clock.advance(supervisor_module.LEASE_SECONDS - 1)
+        assert service.tick() is True
+        clock.advance(2)
+        assert service.tick() is True
+        assert service.running == {other.attempt_id: survivor} and stopped == []
+        assert polled.count(other.attempt_id) == 3
+        assert get_job(conn, other.job_id).state == "running"
+        receipt = get_job(conn, case.claim.job_id)
+        assert receipt.state == "retry_wait" and receipt.failure.code == "LEASE_LOST"
+        assert conn.execute("SELECT COUNT(*) FROM resource_reservations WHERE released_at IS NULL").fetchone()[0] == 1
+    finally:
+        if entrypoint == "launch" or case.claim.attempt_id in service.running:
+            os.close(read_fd)
+        os.close(write_fd)
+
+
+@pytest.mark.parametrize("entrypoint", ["finish", "launch"])
+@pytest.mark.parametrize("error", [OSError("storage unavailable"), ArtifactError("HASH_MISMATCH", "mismatch")])
+def test_failed_publication_after_lease_expiry_strands_without_completion(
+        case, full_problem, monkeypatch, entrypoint, error):
+    boundary = fail_at_supervisor_boundary(case, monkeypatch, full_problem, entrypoint)
+
+    def slow_failure(*args, **kwargs):
+        case.clock.advance(supervisor_module.LEASE_SECONDS + 1)
+        raise error
+
+    monkeypatch.setattr(case.store, "publish_bytes", slow_failure)
+    boundary()
+    job = case.conn.execute("SELECT state, fence, failure_json FROM jobs").fetchone()
+    attempt = case.conn.execute("SELECT state, ended_at, failure_json FROM attempts").fetchone()
+    assert tuple(job) == ("running", case.claim.fence + 1, None)
+    assert tuple(attempt) == ("recovery_pending", None, None)
+    assert case.conn.execute("SELECT released_at FROM resource_reservations").fetchone()[0] is None
+    assert case.conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
+    assert object_bytes(case.store) == {} and not case.conn.in_transaction
+
+
+@pytest.mark.parametrize("entrypoint", ["finish", "launch"])
+@pytest.mark.parametrize("phase", ["classification", "publication", "commit-storage", "commit-integrity"])
+def test_supervisor_boundary_does_not_swallow_unrelated_errors(case, full_problem, monkeypatch, entrypoint, phase):
+    original = (RuntimeError("unexpected publication error") if phase == "publication" else
+                OpsError(make_problem("RESOURCE_UNAVAILABLE" if phase == "commit-storage" else
+                                      "INTEGRITY_FAILED", "unrelated commit error")))
+    problem = replace(full_problem, category="invalid") if phase == "classification" else full_problem
+    boundary = fail_at_supervisor_boundary(case, monkeypatch, problem, entrypoint)
+
+    def broken(*args, **kwargs):
+        raise original
+
+    if phase == "publication":
+        monkeypatch.setattr(case.store, "publish_bytes", broken)
+    elif phase.startswith("commit"):
+        monkeypatch.setattr(supervisor_module, "commit_attempt", broken)
+    monkeypatch.setattr(case.service, "_strand", lambda *args: pytest.fail("not a publication refusal"))
+    before = catalog_rows(case.conn)
+    with pytest.raises((OpsError, RuntimeError)) as captured:
+        boundary()
+    if phase == "classification":
+        assert captured.value.code == "INTEGRITY_FAILED"
+        assert captured.value.problem.message == "failure diagnostic requires a valid Problem classification"
+        assert captured.value.__cause__.problem is problem
+    else:
+        assert captured.value is original
+    assert catalog_rows(case.conn) == before and not case.conn.in_transaction
 
 
 @pytest.mark.parametrize("mismatch", ["reference", "schema", "success"])
