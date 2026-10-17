@@ -278,40 +278,6 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 | R5 partial failure | Orphan objects, a staged manifest, or a candidate catalog written before a light-check refusal may remain; no success output, no promotion, the deployed release is unchanged. Inventory drift refuses before any object is written |
 | R6 idempotency | Same inputs give the same catalog; the same `release_id` with different content refuses `ID_CONFLICT` |
 
-#### 2.2.1 Nightly calibration members (design, #825; not yet implemented)
-
-The nightly release also advances three calibration members at the session cutoff, with every earlier
-night's objects retained (carried, never replaced). Selection stays exact-key
-`(strategy, round(alpha, 4), cutoff)` (`payoff_artifact_key`; alpha 0.5, the shadow fill alpha). A row's
-cutoff is `min(as_of, entry_date)`: on its entry night that is the session cutoff, so later nights read the
-retained entry-night object. A row with no object under its exact key refuses `MODEL_NOT_READY` with a fixed
-detail, counted by strategy and cutoff; there is no latest-cutoff fallback, no backfill and no per-row release
-resolution (a stored entry-time record is #849).
-
-| Member | Nightly | Fit and dataset |
-|---|---|---|
-| `payoff_line:STR-THRU`, `payoff_surface:STR-RUNUP` | advance | least-squares over `payoff_trades` |
-| `recalibration_map:STR-THRU` | advances | isotonic fit over `recalibration_pairs.parquet` (a different dataset, so its dataset cost is separate) |
-| `payoff_line:STR-RUNUP`, `recalibration_map:STR-RUNUP` | carried | not read by the scorer |
-
-- Assembly appends the new object to the prior member row. Same key and hash is a no-op; same key with
-  different content refuses `ID_CONFLICT`. `pool_cutoff` still advances strictly and no object older than the
-  session is added.
-- Scoring must declare the retained recalibration map, as it does the payoff artifact: without a declaration
-  `stages._recalibrated_output` returns the raw output and the new maps would go unused.
-- Out of scope: driver pools and chooser (#805); rows entered before this ships or on a missed night stay
-  refused until they expire (the standard rebuild closes any gap).
-
-| Rule | Behaviour |
-|---|---|
-| R1 verified input | Plain `training/*.json` outputs of succeeded jobs bound to the session manifest; the stage job re-classifies by schema and member; each object's cutoff equals the session cutoff and its key/alpha match |
-| R2 cache | None; prior catalog, objects and outputs are re-read each call |
-| R3 retry | One attempt per job; a failed training job blocks the stage and stalls the cycle for operator recovery (#154); the prior release stays deployed |
-| R4 transaction | Objects go to the content-addressed store; the staged manifest and catalog exist only under the new id; pool and calibration members advance in one candidate or not at all; promotion stays the guarded `models_promote` |
-| R5 partial failure | Orphan objects or a staged candidate may remain; the deployed release is unchanged and a retry completes or refuses |
-| R6 idempotency | Same inputs give the same catalog; same key and hash is a no-op; same key with different content, or the same release id with different content, refuses `ID_CONFLICT` |
-| Scoring: no object under the row's exact `(strategy, alpha, cutoff)` key (entry night produced none, or the row predates this) | The row refuses `MODEL_NOT_READY` with a fixed detail, counted by strategy and cutoff; no fallback to another cutoff |
-
 ### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
 
 Once per calendar month, inside the nightly, the chooser analog pool advances and the objects that change only on a retrain (driver residual pools, and champion/gate models if retrained) are refreshed, covering the month just completed. The run rule is the Trigger paragraph below (user decision 2026-10-16, timing pending D9). One more `Service.tick()` reconcile (same shape as `_reconcile_computed_moves_refresh` and the planned `_reconcile_pool_nightly_refresh`, #192 slice 4; never a `GRAPH`/`_DAG_STAGES` node) submits it through `phase5_state_stage` (§2.2; no submitter yet). §2.2 accepts exactly the three advancing members and carries the rest; the monthly path also needs supplied driver pools and the chooser, a slice 1 change to `classify`/`prior_carry_set`. Options and open decisions D1-D9 live in #805 and the PR #822 description, not here.
