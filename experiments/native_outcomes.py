@@ -210,7 +210,8 @@ def _verify_outcome_registration(conn, store, registration, max_evidence_bytes=N
 
 
 @_typed
-def replay_native_outcome(conn, store, registration, *, no_ledger=False, ledger_path=None, max_evidence_bytes=None):
+def replay_native_outcome(conn, store, registration, *, no_ledger=False, ledger_path=None,
+                          max_evidence_bytes=None):
     """Verify and finish a saved intent, or return None without evaluating."""
     key, destination, ledger_path = _slot(no_ledger, ledger_path)
     _verify_outcome_registration(conn, store, registration, max_evidence_bytes)

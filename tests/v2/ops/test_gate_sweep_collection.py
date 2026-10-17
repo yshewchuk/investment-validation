@@ -726,6 +726,82 @@ def test_collect_preserves_unexpected_delegate_programming_errors(monkeypatch, e
     assert error.value is original
 
 
+@pytest.mark.parametrize("target,exception", [
+    ("registered_artifact", KeyError), ("registered_artifact", TypeError),
+    ("registered_artifact", RuntimeError), ("read_verified", ValueError),
+    ("read_verified", TypeError), ("read_verified", KeyError),
+    ("read_verified", RecursionError), ("read_verified", RuntimeError),
+])
+def test_terminal_preserves_unexpected_reader_programming_errors(terminal, monkeypatch, target, exception):
+    original = exception("unexpected terminal implementation defect")
+    def damaged(*args, **kwargs):
+        raise original
+    monkeypatch.setattr(collection if target == "registered_artifact" else terminal.store, target, damaged)
+    with pytest.raises(exception) as error:
+        collection._terminal(terminal.conn, terminal.store, terminal.job, terminal.registration)
+    assert error.value is original
+
+
+def test_collect_preserves_key_error_from_inside_terminal_reader(source, monkeypatch):
+    call_sweep(source)
+    _complete(source, call_sweep(source, sweep.submit_sweep))
+    original = KeyError("unexpected terminal implementation defect")
+    def damaged(*args, **kwargs):
+        raise original
+    monkeypatch.setattr(collection, "registered_artifact", damaged)
+    with pytest.raises(KeyError) as error:
+        _collect(source, no_ledger=True)
+    assert error.value is original
+
+
+@pytest.mark.parametrize("reader", ["collector", "observer"])
+@pytest.mark.parametrize("exception", [TypeError, KeyError])
+def test_collection_job_read_preserves_programming_errors(source, monkeypatch, reader, exception):
+    original = exception("unexpected receipt reader implementation defect")
+    def damaged(*args, **kwargs):
+        raise original
+    if reader == "collector":
+        call_sweep(source)
+        monkeypatch.setattr(collection, "get_job", damaged)
+    else:
+        pending = {"index": {"complete": False, "variants": [{"job_id": "job-1"}]}, "index_ref": None}
+        monkeypatch.setattr(cli, "collect_sweep", lambda *args, **kwargs: pending)
+        monkeypatch.setattr(cli, "get_job", damaged)
+        monkeypatch.setattr(cli, "sleep", forbid_effect)
+    with pytest.raises(exception) as error:
+        if reader == "collector":
+            _collect(source, no_ledger=True)
+        else:
+            cli.run_sweep(source.conn, source.store, None, {}, code_root=REPO, no_ledger=True)
+    assert error.value is original
+
+
+@pytest.mark.parametrize("target", ["publish_bytes", "verify_native_registration"])
+@pytest.mark.parametrize("exception", [ValueError, TypeError, KeyError, RecursionError, RuntimeError])
+def test_bind_preserves_unexpected_publication_programming_errors(terminal, monkeypatch, target, exception):
+    original = exception("unexpected bind implementation defect")
+    def damaged(*args, **kwargs):
+        raise original
+    monkeypatch.setattr(collection, "_stored_evidence", lambda *_: {})
+    monkeypatch.setattr(terminal.store if target == "publish_bytes" else native_registration, target, damaged)
+    with pytest.raises(exception) as error:
+        collection._bind(terminal.conn, terminal.store, terminal.registration, "intent",
+                         {"schema_version": "native_gate_collection.v1.0"})
+    assert error.value is original and not terminal.conn.in_transaction
+
+
+@pytest.mark.parametrize("reference", [[], {}, "not-an-object",
+                                      {"schema_version": "artifact_ref.v" + "1" * 5000 + ".0"}])
+def test_bind_types_only_malformed_stored_reference(terminal, monkeypatch, reference):
+    monkeypatch.setattr(collection, "_stored_evidence", lambda *_: {"intent": reference})
+    monkeypatch.setattr(terminal.store, "publish_bytes", forbid_effect)
+    with pytest.raises(OpsError) as error:
+        collection._bind(terminal.conn, terminal.store, terminal.registration, "intent",
+                         {"schema_version": "native_gate_collection.v1.0"})
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert not terminal.conn.in_transaction
+
+
 def test_collect_types_raw_catalog_integrity_constraints(monkeypatch):
     def damaged(*args, **kwargs):
         raise sqlite3.IntegrityError("private catalog detail")
@@ -1002,6 +1078,30 @@ def test_terminal_decoding_translates_actual_malformed_evidence(terminal, payloa
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
 
 
+@pytest.mark.parametrize("field", ["reference", "failure"])
+@pytest.mark.parametrize("payload", ["{broken", "[]", "null", "{}", "1" * 5000,
+                                    '{"nested":' + "[" * 2000 + "]" * 2000 + "}"])
+def test_terminal_types_malformed_metadata_and_recovered_failures(terminal, field, payload):
+    if field == "reference":
+        terminal.conn.execute("UPDATE artifacts SET ref_json=?", (payload,))
+    else:
+        terminal.job.state = "failed"
+        terminal.conn.execute("UPDATE attempts SET state='failed', failure_json=?", (payload,))
+        terminal.conn.execute("DELETE FROM attempt_outputs")
+    with pytest.raises(OpsError) as error:
+        collection._terminal(terminal.conn, terminal.store, terminal.job, terminal.registration)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+
+
+def test_terminal_refuses_unencodable_stored_artifact_path(terminal):
+    damaged = replace(terminal.ref, content_hash="sha256:\ud800", storage_key="objects/\ud800/\ud800")
+    # Escaped JSON is valid UTF-8 text, but the decoded path cannot be encoded by os.open.
+    terminal.conn.execute("UPDATE artifacts SET ref_json=?", (json.dumps(to_document(damaged)),))
+    with pytest.raises(OpsError) as error:
+        collection._terminal(terminal.conn, terminal.store, terminal.job, terminal.registration)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+
+
 @pytest.mark.parametrize("payload", ["{broken", "[]", "null", '{"nested":' + "[" * 2000 + "]" * 2000 + "}"])
 def test_malformed_native_evidence_refuses_before_collection_effects(source, tmp_path, payload):
     call_sweep(source)
@@ -1156,6 +1256,46 @@ def test_job_failure_invalid_encoding_is_typed_before_receipt_decoding(tmp_path,
     job = submitted_job(tmp_path)
     try:
         job.conn.execute("UPDATE jobs SET failure_json=CAST(x'ff' AS TEXT)")
+        with pytest.raises(OpsError) as error:
+            if reader == "get-job":
+                submission.get_job(job.conn, job.job_id)
+            else:
+                submission.submit_graph(job.conn, REGISTRY, POLICY, [job.request], clock=job.clock)
+        assert error.value.code == "INTEGRITY_FAILED" and error.value.problem.retryable is False
+    finally:
+        job.conn.close()
+
+
+@pytest.mark.parametrize("reader", ["get-job", "submit-replay"])
+@pytest.mark.parametrize("exception", [TypeError, KeyError])
+def test_job_failure_decoder_programming_errors_propagate(tmp_path, monkeypatch, reader, exception):
+    job = submitted_job(tmp_path)
+    original = exception("unexpected failure decoder implementation defect")
+    decode = submission.load_json
+    def damaged(cls, value):
+        if cls.__name__ == "Problem":
+            raise original
+        return decode(cls, value)
+    monkeypatch.setattr(submission, "load_json", damaged)
+    try:
+        with pytest.raises(exception) as error:
+            if reader == "get-job":
+                submission.get_job(job.conn, job.job_id)
+            else:
+                submission.submit_graph(job.conn, REGISTRY, POLICY, [job.request], clock=job.clock)
+        assert error.value is original
+        assert job.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+    finally:
+        job.conn.close()
+
+
+@pytest.mark.parametrize("reader", ["get-job", "submit-replay"])
+@pytest.mark.parametrize("payload", ["[]", "{}", "1" * 5000,
+    '{"schema_version":"problem.v' + "1" * 5000 + '.0"}'])
+def test_malformed_job_failure_shapes_remain_typed(tmp_path, reader, payload):
+    job = submitted_job(tmp_path)
+    try:
+        job.conn.execute("UPDATE jobs SET failure_json=?", (payload,))
         with pytest.raises(OpsError) as error:
             if reader == "get-job":
                 submission.get_job(job.conn, job.job_id)

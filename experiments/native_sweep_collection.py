@@ -67,14 +67,11 @@ def _typed(action):
     return call
 
 
-def _evidence_boundary(action):
-    @wraps(action)
-    def call(*args, **kwargs):
-        try:
-            return action(*args, **kwargs)
-        except (ArtifactError, ValueError, TypeError, KeyError, RecursionError):
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep stored evidence cannot be verified") from None
-    return call
+def _verified_bytes(store, ref):
+    try:
+        return store.read_verified(ref)
+    except (ArtifactError, UnicodeEncodeError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep stored artifact cannot be verified") from None
 
 
 def _stored_evidence(conn, run_id):
@@ -105,7 +102,6 @@ def _publish(store, document):
     return store.publish_bytes(native_evidence_json(document).encode(), schema_ref=document["schema_version"])
 
 
-@_evidence_boundary
 def _bind(conn, store, anchor, key, document):
     """Compare immutable intent/index bytes; preserve all other arm evidence."""
     payload = native_evidence_json(document).encode()
@@ -114,8 +110,11 @@ def _bind(conn, store, anchor, key, document):
         evidence = _stored_evidence(conn, anchor.run_id)
         existing = evidence.get(key)
     if existing is not None:
-        ref = from_document(ArtifactRef, existing)
-        if ref != expected or store.read_verified(ref) != payload:
+        try:
+            ref = from_document(ArtifactRef, existing)
+        except (ValueError, RecursionError):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep stored artifact reference cannot be decoded") from None
+        if ref != expected or _verified_bytes(store, ref) != payload:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep collection roster/source/mode/ledger intent or terminal index differs; restore original context or seal a new experiment")
         return to_document(ref)
     ref = _publish(store, document)
@@ -130,7 +129,6 @@ def _bind(conn, store, anchor, key, document):
     return to_document(ref)
 
 
-@_evidence_boundary
 def _terminal(conn, store, job, registration):
     """Never use JobReceipt.output_refs: it unions outputs from old attempts."""
     encoding = conn.execute("PRAGMA encoding").fetchone()[0]
@@ -148,26 +146,36 @@ def _terminal(conn, store, job, registration):
     result, problem = None, job.failure
     if attempt is not None and attempt["has_failure"]:
         payload = attempt["failure_json"]
-        if payload is None or len(payload.decode(encoding).encode("utf-8")) > MAX_FAILURE_BYTES:
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep attempt failure exceeds its byte bound")
-        if problem is None:
-            problem = from_document(Problem, json.loads(payload.decode(encoding)))
+        try:
+            if payload is None or len(payload.decode(encoding).encode("utf-8")) > MAX_FAILURE_BYTES:
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep attempt failure exceeds its byte bound")
+            if problem is None:
+                problem = from_document(Problem, json.loads(payload.decode(encoding)))
+        except (ValueError, RecursionError):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep attempt failure cannot be decoded") from None
     if problem is None and job.state == "cancelled":
         problem = fail("CANCELLED", "sweep child was cancelled").problem
     worker_problem = problem
     if job.state == "succeeded" and outputs:
         if len(outputs) != 1 or outputs[0]["name"] != "native_gate_result":
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep terminal attempt has unexpected outputs")
-        ref = registered_artifact(conn, outputs[0]["artifact_id"], max_metadata_bytes=MAX_NATIVE_EVIDENCE_BYTES)
+        try:
+            ref = registered_artifact(conn, outputs[0]["artifact_id"], max_metadata_bytes=MAX_NATIVE_EVIDENCE_BYTES)
+        except (ValueError, RecursionError):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep result reference cannot be decoded") from None
         if ref.byte_size > MAX_GATE_RESULT_BYTES:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep result exceeds its byte bound")
-        payload = store.read_verified(ref)
-        result = json.loads(payload)
-        if (ref.schema_ref != "native_gate_result.v1.0" or canonical_json(result).encode() != payload
-                or result["schema_version"] != ref.schema_ref or type(result["attempted_variants"]) is not int
-                or result["attempted_variants"] != 1 or result["variant_id"] != registration.variant_id
-                or result["run_id"] != registration.run_id
-                or canonical_json(result["provenance"]) != canonical_json(registration.document)):
+        payload = _verified_bytes(store, ref)
+        try:
+            result = json.loads(payload)
+            canonical = canonical_json(result).encode()
+        except (ValueError, RecursionError):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep result cannot be decoded") from None
+        if (not isinstance(result, dict) or ref.schema_ref != "native_gate_result.v1.0" or canonical != payload
+                or result.get("schema_version") != ref.schema_ref or type(result.get("attempted_variants")) is not int
+                or result.get("attempted_variants") != 1 or result.get("variant_id") != registration.variant_id
+                or result.get("run_id") != registration.run_id
+                or canonical_json(result.get("provenance")) != canonical_json(registration.document)):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep child result differs from its sealed arm")
     elif outputs:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "failed sweep attempt has successful output")
@@ -210,7 +218,7 @@ def collect_sweep(conn, store, repository, document, *, code_root, as_of_month,
     for job, registration, spec_document in zip(jobs, registrations, sealed["request"]["variants"], strict=True):
         try:
             job = get_job(conn, job.job_id)
-        except (ArtifactError, ValueError, TypeError, KeyError, RecursionError):
+        except (ValueError, RecursionError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored sweep job receipt cannot be decoded") from None
         arm = {"variant_id": registration.variant_id, "arm_id": spec_document["primary_arm_id"],
                "job_id": job.job_id, "attempted_variants": int(job.attempt_count > 0),

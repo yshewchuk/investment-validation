@@ -43,7 +43,7 @@ def run_sweep(conn, store, repository, document, *, code_root, timeout_seconds=3
 def _job(conn, job_id):
     try:
         return get_job(conn, job_id)
-    except (ArtifactError, ValueError, TypeError, KeyError, RecursionError):
+    except (ValueError, RecursionError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored sweep job receipt cannot be decoded") from None
 
 

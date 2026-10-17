@@ -26,7 +26,7 @@ The owning modules expose these helpers to native experiment callers; no compati
 | `native_sweep_collection.collect_sweep` | The same sealed inputs plus exactly one smoke/ledger mode yield an index and terminal artifact reference (otherwise None). Rechecks the import-time installed-source snapshot and caller coordinator entry files before submission. Verifies exact attempts and bounded failure/result/native evidence bytes; recorded mode reconciles native outcomes/CSV/report exports, smoke only sweep artifacts. Identity/raw constraint conflicts refuse R6; raw boundary I/O is retryable `RESOURCE_UNAVAILABLE`. Delegated typed refusals are preserved; unexpected programming errors propagate. |
 | `native_outcomes.publish_native_outcome`, `replay_native_outcome`, `export_native_report` | Existing native publication/reconciliation APIs accept optional `max_evidence_bytes` for catalog evidence and registration/outcome/completion JSON reads and matching writes. Default None preserves existing caller behavior; collection opts into 16 MiB. Reports remain governed by registered artifact sizes. |
 | `v2_gate_collect.run_sweep` | Collection inputs and a positive finite timeout observe submitted jobs until terminal/deadline, then collect. Returns the same index shape; never owns workers, retries jobs or stops the supervisor. Observer I/O/non-constraint SQLite failures are retryable `RESOURCE_UNAVAILABLE`; integrity constraints or malformed stored receipts refuse R6 (stored job failures retain `INTEGRITY_FAILED`). Library/CLI timeout defaults are 3600 seconds. |
-| `v2_gate_collect.main` | CLI argument list selects collect/run, validates purpose/mode before opening inputs/catalog, prints the index or typed refusal JSON and returns 0 only for complete success, otherwise 2. Requires an existing migrated catalog. Missing/unreadable/nonregular or malformed/recursive roster input refuses R1; transient roster/storage I/O is retryable. Artifact/data refusals retain their original code. |
+| `v2_gate_collect.main` | CLI argument list selects collect/run, validates purpose/mode before opening inputs/catalog, prints the index or typed refusal JSON and returns 0 only for complete success, otherwise 2. Requires an existing migrated catalog. Missing/unreadable/nonregular or malformed/recursive roster input refuses `INVALID_EXPERIMENT_SPEC` (non-retryable); transient roster/storage I/O is retryable. Artifact/data refusals retain their original code. |
 
 ## Consumers and authority
 
@@ -69,7 +69,8 @@ cannot establish intraday stop execution or a trading advantage.
 
 After sealing a roster, `python -m experiments.v2_gate_collect run` accepts the
 `--roster`, `--catalog`, `--store-root`, `--code-root`, `--as-of-month` and either `--no-ledger` or
-`--ledger PATH`. It submits the exact sealed jobs, waits for the ordinary running
+`--ledger PATH`, with optional `--scope` (default `shadow`), repeatable `--event-id`
+and `--purpose` (only `sweep`). It submits the exact sealed jobs, waits for the ordinary running
 ops supervisor (up to `--timeout-seconds`, default 3600), and collects terminal
 attempts. `collect` submits/revalidates and collects immediately. Neither command
 starts or stops a supervisor; timeout leaves workers/jobs untouched.

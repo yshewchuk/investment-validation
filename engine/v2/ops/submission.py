@@ -372,7 +372,7 @@ def get_job(conn: sqlite3.Connection, job_id: str) -> JobReceipt:
             if len(failure.encode("utf-8")) > MAX_JOB_FAILURE_BYTES:
                 raise fail("INTEGRITY_FAILED", "stored job failure exceeds its UTF-8 byte bound")
         failure = load_json(Problem, failure)
-    except (ValueError, TypeError, KeyError, RecursionError):
+    except (ValueError, RecursionError):
         raise fail("INTEGRITY_FAILED", "stored job failure cannot be decoded") from None
     resources = None
     if row["active_attempt_id"] is not None:
