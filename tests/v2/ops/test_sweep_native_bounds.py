@@ -1,4 +1,5 @@
 """Opt-in collection bounds reach real native publication and replay boundaries."""
+import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import replace
@@ -6,11 +7,18 @@ from dataclasses import replace
 import pytest
 
 from engine.v2.contracts import ArtifactRef
-from engine.v2.foundation import artifact_reference, canonical_json, from_document, to_document
+from engine.v2.foundation import (
+    DocumentError,
+    artifact_reference,
+    canonical_json,
+    from_document,
+    to_document,
+)
 from engine.v2.ops import checkpoints
 from engine.v2.ops.errors import OpsError, make_problem
 from experiments import native_outcomes as outcomes
 from tests.v2.ops.native_bounds_support import (
+    BoundedSqlRows,
     native_evidence,
     register_native_case,
     registration_ref,
@@ -271,10 +279,17 @@ def test_registered_artifact_exact_utf8_bound_and_opt_in_default(encoding, chara
     with artifact_catalog(payload, encoding=encoding) as conn:
         assert checkpoints.registered_artifact(conn, "artifact") == ref
         assert checkpoints.registered_artifact(conn, "artifact", max_metadata_bytes=None) == ref
-        assert checkpoints.registered_artifact(conn, "artifact", max_metadata_bytes=size) == ref
+        multiplier = 2 if encoding.startswith("UTF-16") else 1
+        bounded = BoundedSqlRows(conn, max_bytes=size * multiplier, column=0, sql_fragment="FROM artifacts")
+        assert checkpoints.registered_artifact(bounded, "artifact", max_metadata_bytes=size) == ref
+        sql_size = len(payload.encode(encoding))
+        assert bounded.sizes == [sql_size]
+        bounded = BoundedSqlRows(conn, max_bytes=(size - 1) * multiplier, column=0,
+                                 sql_fragment="FROM artifacts")
         monkeypatch.setattr(checkpoints, "load_json", forbid)
         with pytest.raises(OpsError, match="INTEGRITY_FAILED"):
-            checkpoints.registered_artifact(conn, "artifact", max_metadata_bytes=size - 1)
+            checkpoints.registered_artifact(bounded, "artifact", max_metadata_bytes=size - 1)
+        assert bounded.sizes == [None if sql_size > (size - 1) * multiplier else sql_size]
 
 
 @pytest.mark.parametrize("payload", [None, b"{}"])
@@ -292,15 +307,23 @@ def test_registered_artifact_invalid_utf8_is_bounded_before_sql_text_decoding(ov
                      (b"\xff" * (CAP + 1 if oversized else 1),))
         with pytest.raises(sqlite3.OperationalError):
             conn.execute("SELECT ref_json FROM artifacts").fetchone()
+        bounded = BoundedSqlRows(conn, max_bytes=CAP, column=0, sql_fragment="FROM artifacts")
         monkeypatch.setattr(checkpoints, "load_json", forbid)
         with pytest.raises(OpsError, match="INTEGRITY_FAILED"):
-            checkpoints.registered_artifact(conn, "artifact", max_metadata_bytes=CAP)
+            checkpoints.registered_artifact(bounded, "artifact", max_metadata_bytes=CAP)
+        assert bounded.sizes == [None if oversized else 1]
 
 
-@pytest.mark.parametrize("payload", ["{", "[]", "null", "{}"])
-def test_registered_artifact_keeps_strict_metadata_decoder(payload):
+@pytest.mark.parametrize("payload, exception, code", [
+    ("{", json.JSONDecodeError, None), ("[]", DocumentError, "BAD_TYPE"),
+    ("null", DocumentError, "BAD_TYPE"), ("{}", DocumentError, "MISSING_FIELD"),
+])
+def test_registered_artifact_keeps_strict_metadata_decoder(payload, exception, code):
     with artifact_catalog(payload) as conn:
-        with pytest.raises(ValueError):
+        with pytest.raises(exception) as error:
             checkpoints.registered_artifact(conn, "artifact", max_metadata_bytes=CAP)
+        assert type(error.value) is exception
+        if code is not None:
+            assert error.value.code == code
         with pytest.raises(OpsError, match="INTEGRITY_FAILED"):
             checkpoints.registered_artifact(conn, "missing", max_metadata_bytes=CAP)

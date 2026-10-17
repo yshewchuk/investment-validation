@@ -3,6 +3,7 @@ import csv
 import errno
 import inspect
 import json
+import os
 import sqlite3
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -49,6 +50,7 @@ from tests.v2.ops.gate_sweep_support import (
     sweep_request,
     terminal_case,
 )
+from tests.v2.ops.native_bounds_support import BoundedSqlRows
 from tests.v2.research.test_gate_report import MONTH, REPO, build_gate_spec
 from tests.v2.research.test_gate_report import source as source
 
@@ -265,6 +267,22 @@ def test_changed_collector_source_and_inputs_cannot_rebind_saved_intent(source, 
     assert _collect(source, code_root=checkout, no_ledger=True)["index_ref"] is None
 
 
+@pytest.mark.parametrize("entry", ["native_sweep_collection.py", "v2_gate_collect.py"])
+def test_caller_coordinator_entry_must_match_installed_source(source, tmp_path, entry):
+    checkout = sweep_checkout(tmp_path)
+    call_sweep(source, code_root=checkout)
+    before = scientific_rows(source)
+    path = checkout / "experiments" / entry
+    path.write_text(path.read_text() + "\n# synthetic caller-only source drift\n")
+    assert collection._COLLECTOR_ROOT == REPO
+    ledger = tmp_path / "LEDGER.csv"
+    with pytest.raises(OpsError) as error:
+        _collect(source, code_root=checkout, ledger_path=ledger)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert scientific_rows(source) == before and not ledger.exists()
+    assert source.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize("failure", ["ledger", "receipt", "export", "index"])
 def test_interrupted_publication_reconciles_without_duplicate_rows(source, tmp_path, monkeypatch, failure):
     call_sweep(source)
@@ -313,20 +331,22 @@ def test_preexisting_different_arm_outcome_is_not_blindly_replayed(source, tmp_p
     assert not any(any(key.endswith("_index") for key in evidence) for evidence in _evidence(source))
 
 
-@pytest.mark.parametrize("damage", ["identity", "wrong-schema", "wrong-name", "no-output", "terminal-attempt"])
+@pytest.mark.parametrize("damage", ["identity", "wrong-schema", "matched-wrong-schema", "wrong-name", "no-output", "terminal-attempt"])
 def test_terminal_output_is_exact_and_missing_result_is_r4(source, tmp_path, damage):
     call_sweep(source)
     jobs = call_sweep(source, sweep.submit_sweep)
     _complete(source, jobs)
     attempt = source.conn.execute("SELECT * FROM attempts WHERE job_id=?", (jobs[0].job_id,)).fetchone()
     output = source.conn.execute("SELECT * FROM attempt_outputs WHERE attempt_id=?", (attempt["attempt_id"],)).fetchone()
-    if damage in ("identity", "wrong-schema"):
+    if damage in ("identity", "wrong-schema", "matched-wrong-schema"):
         ref = artifact(source.conn, source.store, output["artifact_id"])
         result = json.loads(source.store.read_verified(ref))
         if damage == "identity":
             result["variant_id"] = "sha256:" + "0" * 64
+        if damage == "matched-wrong-schema":
+            result["schema_version"] = "incorrect.v1.0"
         replacement = source.store.publish_bytes(canonical_json(result).encode(),
-            schema_ref="incorrect.v1.0" if damage == "wrong-schema" else ref.schema_ref)
+            schema_ref="incorrect.v1.0" if damage in {"wrong-schema", "matched-wrong-schema"} else ref.schema_ref)
         register_artifact(source.conn, replacement, None, SystemClock())
         source.conn.execute("UPDATE attempt_outputs SET artifact_id=? WHERE attempt_id=?",
                             (replacement.artifact_id, attempt["attempt_id"]))
@@ -351,7 +371,8 @@ def test_terminal_output_is_exact_and_missing_result_is_r4(source, tmp_path, dam
 @pytest.mark.parametrize("arguments,code", [(["--purpose", "final"], "HOLDOUT_ACCESS_DENIED"),
                                            ([], "INVALID_EXPERIMENT_SPEC"),
                                            (["--no-ledger", "--ledger", "unused.csv"], "INVALID_EXPERIMENT_SPEC")])
-def test_cli_refuses_purpose_or_missing_mode_before_catalog(tmp_path, capsys, arguments, code):
+def test_cli_refuses_purpose_or_missing_mode_before_catalog(tmp_path, capsys, monkeypatch, arguments, code):
+    monkeypatch.setattr(cli, "_catalog", forbid_effect)
     absent = tmp_path / "absent"
     args = ["collect", "--roster", str(absent), "--catalog", str(absent), "--store-root", str(absent),
             "--code-root", str(REPO), "--as-of-month", MONTH] + arguments
@@ -620,9 +641,13 @@ def test_recovered_failure_is_bounded_before_json_decode(tmp_path, monkeypatch, 
                 else "x" * (collection.MAX_FAILURE_BYTES + 1))
         case.conn.execute("UPDATE attempts SET state='cancelled', failure_json=?", (text,))
         case.conn.execute("DELETE FROM attempt_outputs")
+        bounded = BoundedSqlRows(case.conn, max_bytes=collection.MAX_FAILURE_BYTES *
+                                 (2 if encoding.startswith("UTF-16") else 1), column="failure_json",
+                                 sql_fragment="end as failure_json from attempts")
         monkeypatch.setattr(collection.json, "loads", forbid_effect)
         with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
-            collection._terminal(case.conn, case.store, case.job, case.registration)
+            collection._terminal(bounded, case.store, case.job, case.registration)
+        assert bounded.sizes
     finally:
         case.conn.close()
 
@@ -649,16 +674,19 @@ def test_utf16_failure_uses_encoded_sql_allowance_and_utf8_contract(tmp_path, mo
         case.conn.execute("UPDATE attempts SET state='cancelled', failure_json=?", (payload,))
         case.conn.execute("DELETE FROM attempt_outputs")
         stored_bytes = case.conn.execute("SELECT length(CAST(failure_json AS BLOB)) FROM attempts").fetchone()[0]
+        bounded = BoundedSqlRows(case.conn, max_bytes=2 * collection.MAX_FAILURE_BYTES, column="failure_json",
+                                 sql_fragment="end as failure_json from attempts")
         if accepted:
             assert len(payload.encode("utf-8")) < 1024 * 1024 < stored_bytes < 2 * 1024 * 1024
-            _, result, collected, original = collection._terminal(case.conn, case.store, case.job, case.registration)
+            _, result, collected, original = collection._terminal(bounded, case.store, case.job, case.registration)
             assert result is None and collected == original == problem
         else:
             assert stored_bytes > 2 * 1024 * 1024
             monkeypatch.setattr(collection.json, "loads", forbid_effect)
             with pytest.raises(OpsError) as error:
-                collection._terminal(case.conn, case.store, case.job, case.registration)
+                collection._terminal(bounded, case.store, case.job, case.registration)
             assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+        assert bounded.sizes == [stored_bytes if accepted else None]
     finally:
         case.conn.close()
 
@@ -912,8 +940,8 @@ def test_cli_dispatches_requested_action_and_prints_result_and_exit(tmp_path, mo
     roster.write_text(json.dumps(document))
     conn, repository = SimpleNamespace(closed=False), object()
     conn.close = lambda: setattr(conn, "closed", True)
-    result = {"index": {"complete": complete, "variants": []},
-              "index_ref": {"test_ref": "immutable"} if complete else None}
+    result = {"index_ref": {"test_ref": "immutable"} if complete else None,
+              "index": {"variants": [], "complete": complete}}
     calls = []
     def selected(got_conn, store, got_repository, got_document, **kwargs):
         calls.append(kwargs)
@@ -927,13 +955,14 @@ def test_cli_dispatches_requested_action_and_prints_result_and_exit(tmp_path, mo
     monkeypatch.setattr(cli, "Repository", lambda got_conn, store: repository)
     monkeypatch.setattr(cli, "run_sweep" if action == "run" else "collect_sweep", selected)
     monkeypatch.setattr(cli, "collect_sweep" if action == "run" else "run_sweep", forbid_effect)
+    (tmp_path / "catalog.sqlite").touch()
     argv = [action, "--roster", str(roster), "--catalog", str(tmp_path / "catalog.sqlite"),
             "--store-root", str(tmp_path / "objects"), "--code-root", str(REPO),
             "--as-of-month", MONTH, "--scope", "shadow", "--event-id", "event-1",
             "--no-ledger", "--timeout-seconds", "2.5"]
     assert cli.main(argv) == (0 if complete else 2)
     output = capsys.readouterr()
-    assert json.loads(output.out) == result and output.err == ""
+    assert output.out == json.dumps(result, sort_keys=True) + "\n" and output.err == ""
     expected = {"code_root": REPO, "as_of_month": MONTH, "scope": "shadow", "event_ids": ["event-1"],
                 "no_ledger": True, "ledger_path": None}
     assert calls == [{**expected, **({"timeout_seconds": 2.5} if action == "run" else {})}]
@@ -983,10 +1012,13 @@ def test_job_failure_is_bounded_before_decode_on_all_receipt_paths(tmp_path, mon
         stored = (None if case == "null" else "{invalid JSON" if case == "malformed" else
                   payload.encode() if case == "wrong-type" else payload)
         job.conn.execute("UPDATE jobs SET state='failed', failure_json=? WHERE job_id=?", (stored, job.job_id))
+        bounded = BoundedSqlRows(job.conn, max_bytes=submission.MAX_JOB_FAILURE_BYTES *
+                                 (2 if case.startswith("utf16-") else 1), column="failure_json",
+                                 sql_fragment="end as failure_json from jobs")
         def read():
             if reader == "get-job":
-                return submission.get_job(job.conn, job.job_id)
-            return submission.submit_graph(job.conn, REGISTRY, POLICY, [job.request], clock=job.clock)[0]
+                return submission.get_job(bounded, job.job_id)
+            return submission.submit_graph(bounded, REGISTRY, POLICY, [job.request], clock=job.clock)[0]
         if case in {"wrong-type", "oversized", "unicode-oversized", "utf16-oversized", "utf16-unicode-oversized"}:
             original_load = submission.load_json
             def guarded_load(cls, value):
@@ -1009,6 +1041,7 @@ def test_job_failure_is_bounded_before_decode_on_all_receipt_paths(tmp_path, mon
                 assert job.conn.execute("SELECT length(CAST(failure_json AS BLOB)) FROM jobs").fetchone()[0] == 2 * 1024 * 1024
             receipt = read()
             assert receipt.job_id == job.job_id and receipt.failure == (None if case == "null" else problem)
+        assert bounded.sizes
         assert not job.conn.in_transaction
         assert job.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
     finally:
@@ -1193,6 +1226,60 @@ def _cli_args(tmp_path, *, action="collect", roster=None):
             "--code-root", str(REPO), "--as-of-month", MONTH, "--no-ledger"]
 
 
+@pytest.mark.parametrize("kind", ["missing", "directory", "fifo", "file-parent"])
+def test_cli_catalog_requires_existing_regular_file_before_connect(tmp_path, monkeypatch, capsys, kind):
+    (tmp_path / "roster.json").write_text("{}")
+    path = tmp_path / "catalog.sqlite"
+    if kind == "directory":
+        path.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(path)
+    elif kind == "file-parent":
+        path.write_text("not a directory")
+        path = path / "child"
+    argv = _cli_args(tmp_path)
+    argv[argv.index("--catalog") + 1] = str(path)
+    monkeypatch.setattr(cli, "connect", forbid_effect)
+    assert cli.main(argv) == 2
+    output = capsys.readouterr()
+    assert output.out == '{"refused": "INVALID_EXPERIMENT_SPEC"}\n' and output.err == ""
+    assert not (tmp_path / "objects").exists()
+    if kind == "missing":
+        assert not path.exists()
+
+
+@pytest.mark.parametrize("number", [errno.EACCES, errno.EPERM, errno.EIO, errno.EMFILE, errno.ENOMEM])
+def test_cli_catalog_stat_resource_errors_remain_retryable(tmp_path, monkeypatch, capsys, number):
+    (tmp_path / "roster.json").write_text("{}")
+    catalog = tmp_path / "catalog.sqlite"
+    original = Path.stat
+    def unavailable(path, *args, **kwargs):
+        if path == catalog:
+            raise OSError(number, "private catalog stat error")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "stat", unavailable)
+    monkeypatch.setattr(cli, "connect", forbid_effect)
+    assert cli.main(_cli_args(tmp_path)) == 2
+    output = capsys.readouterr()
+    assert output.out == '{"refused": "RESOURCE_UNAVAILABLE"}\n' and output.err == ""
+    assert not (tmp_path / "objects").exists()
+
+
+def test_cli_catalog_stat_does_not_reclassify_later_open_failure(tmp_path, monkeypatch, capsys):
+    (tmp_path / "roster.json").write_text("{}")
+    catalog = tmp_path / "catalog.sqlite"
+    catalog.touch()
+    def disappear(path, *, must_exist):
+        assert Path(path) == catalog and must_exist
+        catalog.unlink()
+        raise sqlite3.OperationalError("private catalog open failure after stat")
+    monkeypatch.setattr(cli, "connect", disappear)
+    assert cli.main(_cli_args(tmp_path)) == 2
+    output = capsys.readouterr()
+    assert output.out == '{"refused": "RESOURCE_UNAVAILABLE"}\n' and output.err == ""
+    assert not catalog.exists() and not (tmp_path / "objects").exists()
+
+
 @pytest.mark.parametrize("path_case", ["missing", "directory", "symlink"])
 def test_cli_invalid_roster_paths_refuse_before_catalog(tmp_path, monkeypatch, capsys, path_case):
     path = tmp_path / "input"
@@ -1210,6 +1297,8 @@ def test_cli_invalid_roster_paths_refuse_before_catalog(tmp_path, monkeypatch, c
 
 @pytest.mark.parametrize("number,code", [(errno.EACCES, "INVALID_EXPERIMENT_SPEC"),
     (errno.EPERM, "INVALID_EXPERIMENT_SPEC"), (errno.ENOTDIR, "INVALID_EXPERIMENT_SPEC"),
+    (errno.EINVAL, "INVALID_EXPERIMENT_SPEC"), (errno.ENAMETOOLONG, "INVALID_EXPERIMENT_SPEC"),
+    (errno.ENOENT, "INVALID_EXPERIMENT_SPEC"), (errno.ELOOP, "INVALID_EXPERIMENT_SPEC"),
     (errno.EIO, "RESOURCE_UNAVAILABLE"), (errno.EMFILE, "RESOURCE_UNAVAILABLE"),
     (errno.ENOMEM, "RESOURCE_UNAVAILABLE")])
 def test_cli_roster_io_distinguishes_bad_paths_from_resource_failures(tmp_path, monkeypatch, capsys, number, code):
@@ -1235,6 +1324,7 @@ def test_cli_recursive_roster_is_invalid_input_before_catalog(tmp_path, monkeypa
 @pytest.mark.parametrize("error", [ArtifactError("UNSAFE_PATH", "private artifact path"),
                                     data_fail("INPUT_CHANGED", "private input detail")])
 def test_cli_preserves_exact_typed_artifact_and_data_codes(tmp_path, monkeypatch, capsys, error):
+    (tmp_path / "catalog.sqlite").touch()
     conn = SimpleNamespace(closed=False)
     conn.close = lambda: setattr(conn, "closed", True)
     monkeypatch.setattr(cli, "read_native_staged_input", lambda path: b"{}")
@@ -1248,22 +1338,25 @@ def test_cli_preserves_exact_typed_artifact_and_data_codes(tmp_path, monkeypatch
     assert json.loads(output.out) == {"refused": error.code} and output.err == "" and conn.closed
 
 
-def test_cli_does_not_rebrand_an_unexpected_action_bug_as_bad_input(tmp_path, monkeypatch):
+@pytest.mark.parametrize("error_type", [ValueError, KeyError, TypeError])
+def test_cli_does_not_rebrand_an_unexpected_action_bug_as_bad_input(tmp_path, monkeypatch, error_type):
+    (tmp_path / "catalog.sqlite").touch()
     conn = SimpleNamespace(closed=False)
     conn.close = lambda: setattr(conn, "closed", True)
     monkeypatch.setattr(cli, "read_native_staged_input", lambda path: b"{}")
     monkeypatch.setattr(cli, "connect", lambda *args, **kwargs: conn)
     monkeypatch.setattr(cli, "Repository", lambda *args: object())
-    original = ValueError("implementation defect")
+    original = error_type("implementation defect")
     def broken(*args, **kwargs):
         raise original
     monkeypatch.setattr(cli, "collect_sweep", broken)
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises(error_type) as caught:
         cli.main(_cli_args(tmp_path))
     assert caught.value is original and conn.closed
 
 
 def test_library_and_cli_observer_defaults_are_one_hour(tmp_path, monkeypatch, capsys):
+    (tmp_path / "catalog.sqlite").touch()
     assert inspect.signature(cli.run_sweep).parameters["timeout_seconds"].default == 3600
     conn = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr(cli, "read_native_staged_input", lambda path: b"{}")

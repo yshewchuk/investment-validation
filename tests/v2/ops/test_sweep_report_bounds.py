@@ -141,11 +141,15 @@ def test_report_descriptor_rejects_unsafe_objects_before_payload_reads(tmp_path,
         path.symlink_to(target)
     else:
         path.mkdir()
+        # Isolate S_ISREG: the directory must pass the independent size bound.
+        expected = b"x" * max(len(expected), path.stat().st_size)
+        assert path.stat().st_size <= len(expected)
     real_open, opened = os.open, []
 
     def safe_open(candidate, flags):
         assert candidate == path
-        assert flags & os.O_NOFOLLOW and flags & os.O_NONBLOCK
+        assert flags & os.O_NOFOLLOW
+        assert flags & os.O_NONBLOCK
         fd = real_open(candidate, flags)
         opened.append(fd)
         return fd
@@ -153,13 +157,71 @@ def test_report_descriptor_rejects_unsafe_objects_before_payload_reads(tmp_path,
     with monkeypatch.context() as patch:
         patch.setattr(outcomes.os, "open", safe_open)
         patch.setattr(outcomes.os, "read", forbid)
-        with pytest.raises(ValueError):
+        message = ("report must not be a symbolic link" if kind == "symlink"
+                   else "report exceeds its expected regular-file size")
+        with pytest.raises(ValueError, match=f"^{message}$"):
             outcomes._report_bytes(path, expected, CAP)
     assert len(opened) == (0 if kind == "symlink" else 1)
     for fd in opened:
         with pytest.raises(OSError) as captured:
             os.fstat(fd)
         assert captured.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("replacement", ["directory", "symlink"])
+def test_report_replacement_after_path_prechecks_preserves_public_r6(
+        source, tmp_path, monkeypatch, action, replacement):
+    registration = register_native_case(source)
+    ledger = tmp_path / "ledger.csv"
+    directory = tmp_path / "replacement-directory"
+    directory.mkdir()
+    report = REPORT + "x" * directory.stat().st_size
+    if action != ACTIONS[0]:
+        invoke(ACTIONS[0], source, registration, ledger, report=report)
+    path = report_path(source, registration)
+    path.parent.mkdir(parents=True)
+    path.write_text(report)
+    original = tmp_path / "original-report.md"
+    target = tmp_path / "symlink-target.md"
+    target.write_text(report)
+    catalog, objects = catalog_rows(source.conn), object_bytes(source.store)
+    ledger_bytes = ledger.read_bytes() if ledger.exists() else None
+    real_open, real_publish, replacements = os.open, source.store.publish_bytes, []
+
+    def replace_at_open(candidate, *args, **kwargs):
+        if Path(candidate) == path:
+            assert not replacements
+            path.rename(original)
+            if replacement == "directory":
+                directory.rename(path)
+                assert path.stat().st_size <= len(report.encode())
+            else:
+                path.symlink_to(target)
+            replacements.append(path.lstat())
+            forbid_report_reads(patch, path)
+        return real_open(candidate, *args, **kwargs)
+
+    def refusal_only(data, *, schema_ref):
+        assert schema_ref == "native_experiment_refusal.v1.0"
+        return real_publish(data, schema_ref=schema_ref)
+
+    options = {"report": report} if action == ACTIONS[0] else {}
+    with monkeypatch.context() as patch:
+        patch.setattr(outcomes.os, "open", replace_at_open)
+        patch.setattr(source.store, "publish_bytes", refusal_only)
+        patch.setattr(outcomes, "ledger_append", forbid)
+        patch.setattr(outcomes, "_reserve", forbid)
+        with pytest.raises(OpsError) as captured:
+            invoke(action, source, registration, ledger, max_evidence_bytes=CAP, **options)
+    assert_identity_refusal(source, captured, registration)
+    assert len(replacements) == 1
+    assert path.lstat() == replacements[0]
+    assert original.read_text() == target.read_text() == report
+    assert catalog_rows(source.conn) == catalog
+    assert_objects_preserved(source, objects)
+    assert (ledger.read_bytes() if ledger.exists() else None) == ledger_bytes
+    assert not source.conn.in_transaction
 
 
 def test_report_growth_after_descriptor_precheck_reads_only_expected_plus_one(tmp_path, monkeypatch):
@@ -188,7 +250,7 @@ def test_report_growth_after_descriptor_precheck_reads_only_expected_plus_one(tm
     with monkeypatch.context() as patch:
         patch.setattr(outcomes.os, "fstat", grow_after_stat)
         patch.setattr(outcomes.os, "read", bounded_read)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="^report exceeds its expected regular-file size$"):
             outcomes._report_bytes(path, expected, CAP)
     assert len(descriptors) == 1
     assert len(requests) > 1

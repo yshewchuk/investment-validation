@@ -4,6 +4,7 @@ import errno
 import json
 import math
 import sqlite3
+import stat
 from pathlib import Path
 from time import monotonic, sleep
 
@@ -62,6 +63,16 @@ def _roster(path):
         raise fail("INVALID_EXPERIMENT_SPEC", "sweep roster requires bounded JSON") from None
 
 
+def _catalog(path):
+    try:
+        metadata = Path(path).stat()
+    except (FileNotFoundError, NotADirectoryError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "sweep catalog must name an existing regular file") from None
+    if not stat.S_ISREG(metadata.st_mode):
+        raise fail("INVALID_EXPERIMENT_SPEC", "sweep catalog must name an existing regular file")
+    return connect(path, must_exist=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("collect", "run"))
@@ -80,7 +91,7 @@ def main(argv=None):
         if args.no_ledger == (args.ledger is not None):
             raise fail("INVALID_EXPERIMENT_SPEC", "choose --no-ledger or --ledger")
         document = _roster(args.roster)
-        conn = connect(args.catalog, must_exist=True)
+        conn = _catalog(args.catalog)
         store = ArtifactStore(args.store_root)
         action = run_sweep if args.action == "run" else collect_sweep
         result = action(conn, store, Repository(conn, store), document,

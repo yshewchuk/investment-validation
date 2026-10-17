@@ -10,6 +10,7 @@ import pytest
 from engine.v2.foundation import artifact_reference, canonical_json, content_hash, to_document
 from engine.v2.ops import native_registration as native
 from engine.v2.ops.errors import OpsError
+from tests.v2.ops.native_bounds_support import BoundedSqlRows
 
 CAP = 16 * 1024 * 1024
 
@@ -71,6 +72,60 @@ def test_native_evidence_cap_is_sixteen_mib():
     assert native.MAX_NATIVE_EVIDENCE_BYTES == CAP
 
 
+@pytest.mark.parametrize("encoding", ["UTF-8", "UTF-16le", "UTF-16be"])
+@pytest.mark.parametrize("storage", ["text", "blob"])
+@pytest.mark.parametrize("reader", ["fetchone", "fetchmany", "fetchall", "iterate"])
+def test_sql_row_oracle_preserves_rows_and_checks_all_fetch_methods(encoding, storage, reader):
+    with evidence_catalog(encoding=encoding) as conn:
+        seen = []
+        def record_row(cursor, values):
+            row = sqlite3.Row(cursor, values)
+            seen.append(row)
+            return row
+        conn.row_factory = record_row
+        payload = "漢"
+        value = payload if storage == "text" else payload.encode(encoding)
+        size = len(payload.encode(encoding))
+        bounded = BoundedSqlRows(conn, max_bytes=size, column="evidence_json", sql_fragment="SELECT ?")
+        assert bounded.row_factory is record_row and bounded.in_transaction is conn.in_transaction
+        cursor = bounded.execute("SELECT ? AS evidence_json", (value,))
+        assert cursor.description[0][0] == "evidence_json"
+        rows = (list(cursor) if reader == "iterate" else [cursor.fetchone()] if reader == "fetchone"
+                else getattr(cursor, reader)())
+        assert rows == seen[-1:] and rows[0] is seen[-1]
+        assert rows[0]["evidence_json"] == value and tuple(rows[0]) == (value,)
+        assert bounded.sizes == [size]
+        assert cursor.fetchone() is None and bounded.sizes == [size]
+        oversized = bounded.execute("SELECT ? AS evidence_json", (value + value,))
+        with pytest.raises(AssertionError, match="SQL row-transfer bound"):
+            if reader == "iterate":
+                list(oversized)
+            else:
+                getattr(oversized, reader)()
+
+
+@pytest.mark.parametrize("stage", ["execute", "fetchone", "fetchmany", "fetchall", "iterate"])
+def test_sql_row_oracle_preserves_original_sql_errors(stage):
+    original = sqlite3.OperationalError("synthetic SQL interruption")
+    def interrupted(*args, **kwargs):
+        raise original
+    with evidence_catalog() as conn:
+        bounded = BoundedSqlRows(conn, max_bytes=CAP, column="evidence_json", sql_fragment="SELECT")
+        if stage == "execute":
+            bounded.conn = SimpleNamespace(execute=interrupted)
+            def action():
+                return bounded.execute("SELECT evidence_json FROM experiment_runs")
+        else:
+            cursor = bounded.execute("SELECT evidence_json FROM experiment_runs")
+            class InterruptedCursor:
+                fetchone = fetchmany = fetchall = __next__ = interrupted
+            cursor.cursor = InterruptedCursor()
+            action = (lambda: next(cursor)) if stage == "iterate" else getattr(cursor, stage)
+        with pytest.raises(sqlite3.OperationalError) as error:
+            action()
+        assert error.value is original
+
+
 def test_native_evidence_reads_metadata_and_object_in_one_sql_snapshot():
     with evidence_catalog() as conn:
         statements = []
@@ -93,15 +148,20 @@ def test_native_evidence_exact_and_over_utf8_bound(encoding, character, extra, m
     document, payload = sized_object(CAP + extra, character)
     with evidence_catalog(encoding=encoding) as conn:
         conn.execute("UPDATE experiment_runs SET evidence_json=?", (payload,))
+        limit = CAP * (2 if encoding.startswith("UTF-16") else 1)
+        bounded = BoundedSqlRows(conn, max_bytes=limit, column="evidence_json",
+                                 sql_fragment="FROM experiment_runs")
         if extra:
             monkeypatch.setattr(native.json, "loads", forbid_decode)
             with pytest.raises(OpsError) as error:
-                native.read_native_evidence(conn, "native-test")
+                native.read_native_evidence(bounded, "native-test")
             assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not error.value.problem.retryable
         else:
-            row, decoded = native.read_native_evidence(conn, "native-test")
+            row, decoded = native.read_native_evidence(bounded, "native-test")
             assert decoded == document
             assert row["evidence_json"].decode(encoding) == payload
+        sql_size = len(payload.encode(encoding))
+        assert bounded.sizes == [None if sql_size > limit else sql_size]
 
 
 @pytest.mark.parametrize("payload", ["{", "[]", "null", "true", "1", '"text"', "[" * 2000 + "0" + "]" * 2000],
@@ -131,10 +191,13 @@ def test_native_evidence_sql_projection_handles_invalid_utf8_without_text_transf
         # A raw TEXT projection would fail inside sqlite's UTF-8 conversion.
         with pytest.raises(sqlite3.OperationalError):
             conn.execute("SELECT evidence_json FROM experiment_runs").fetchone()
+        bounded = BoundedSqlRows(conn, max_bytes=CAP, column="evidence_json",
+                                 sql_fragment="FROM experiment_runs")
         monkeypatch.setattr(native.json, "loads", forbid_decode)
         with pytest.raises(OpsError) as error:
-            native.read_native_evidence(conn, "native-test")
+            native.read_native_evidence(bounded, "native-test")
         assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not error.value.problem.retryable
+        assert bounded.sizes == [None if oversized else 1]
 
 
 @pytest.mark.parametrize("exception", [OSError, sqlite3.OperationalError, sqlite3.IntegrityError])
@@ -205,10 +268,13 @@ def test_registration_evidence_bound_is_opt_in_and_precedes_json_and_store_read(
         assert len(payload.encode()) > CAP
         conn.execute("UPDATE experiment_runs SET evidence_json=?", (payload,))
         assert native.verified_registration_bytes(conn, registration_store(binding, ref), "native-test") == binding
+        bounded = BoundedSqlRows(conn, max_bytes=CAP, column="evidence_json",
+                                 sql_fragment="FROM experiment_runs")
         monkeypatch.setattr(native.json, "loads", forbid_decode)
         with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
-            native.verified_registration_bytes(conn, SimpleNamespace(read_verified=forbid_decode), "native-test",
+            native.verified_registration_bytes(bounded, SimpleNamespace(read_verified=forbid_decode), "native-test",
                                                max_evidence_bytes=CAP)
+        assert bounded.sizes == [None]
 
 
 def test_registration_artifact_bound_is_opt_in_and_precedes_store_read():
