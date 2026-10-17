@@ -197,17 +197,60 @@ def _read_pointer(deployment_root):
 
 #: Phase states that end the cycle's wait for operator recovery (#154).
 _STALLED_STATES = frozenset({"failed", "cancelled", "blocked"})
+_TERMINAL_STATES = _STALLED_STATES | {"succeeded"}
+
+#: Bounded lookup for a promote attempt whose key embeds a ``prior`` that is no
+#: longer readable from the pointer (the pointer already names the candidate).
+PROMOTE_LOOKUP_SQL = (
+    "SELECT state FROM jobs WHERE namespace = 'shadow' AND idempotency_key LIKE ? "
+    "ORDER BY idempotency_key DESC LIMIT 8"
+)
+
+
+def _promote_states_with_unknown_prior(conn, session, tag):
+    rows = conn.execute(
+        PROMOTE_LOOKUP_SQL, (f"nightly:{session}:pool:promote:{tag}:%",)).fetchall()
+    return [row["state"] for row in rows]
+
+
+def _pointer_named_candidate_states(conn, session, tag):
+    """Classify the promote attempts when the pointer already names the candidate
+    release: ``"stalled"`` when an attempt is failed/cancelled/blocked,
+    ``"active"`` while one has not reached a terminal state, else ``"clear"``."""
+    states = _promote_states_with_unknown_prior(conn, session, tag)
+    if any(state in _STALLED_STATES for state in states):
+        return "stalled"
+    if any(state not in _TERMINAL_STATES for state in states):
+        return "active"
+    return "clear"
+
+
+def _cycle_job_states(conn, session, prior, tag, release_id):
+    """Classify this cycle's five phase jobs: ``"stalled"`` when one is
+    failed/cancelled/blocked, ``"active"`` while an existing phase job has not
+    succeeded, else ``"clear"``."""
+    if prior == release_id:
+        return _pointer_named_candidate_states(conn, session, tag)
+    states = [_state(conn, phase_key(session, phase, prior, tag)) for phase in PHASES]
+    if any(state in _STALLED_STATES for state in states):
+        return "stalled"
+    if any(state is not None and state != "succeeded" for state in states):
+        return "active"
+    return "clear"
 
 
 def pool_cycle_pending(conn, release_root):
     """Is the latest session's pool cycle still pending?
 
     ``True`` when a candidate release for the identity session is not yet
-    deployed and no phase job of this cycle has failed or stalled; ``False``
-    when there is no connection, no identity, no readable pointer, the pointer
-    already names this cycle's release (``pools-<session>-<tag>``), or any of
-    the cycle's five phase jobs is in a terminal stall state. Reads only the
-    same durable state as the sidecar and never writes."""
+    deployed and no phase job of this cycle has failed or stalled; also
+    ``True`` while an existing phase job (including the promote attempt) has
+    not succeeded, even if the pointer already names the candidate release:
+    the promote must be drained before the serve closes the worker. ``False``
+    when there is no connection, no identity, no readable pointer, any of the
+    cycle's five phase jobs is in a terminal stall state, or the pointer names
+    the candidate and every existing phase job succeeded. Reads only the same
+    durable state as the sidecar and never writes."""
     if conn is None:
         return False
     identity = pool_refresh_identity(conn)
@@ -222,12 +265,13 @@ def pool_cycle_pending(conn, release_root):
     if pointer is None:
         return False
     prior = pointer.release_id
-    if prior == f"pools-{session}-{tag}":
+    release_id = f"pools-{session}-{tag}"
+    job_states = _cycle_job_states(conn, session, prior, tag, release_id)
+    if job_states == "stalled":
         return False
-    if any(_state(conn, phase_key(session, phase, prior, tag)) in _STALLED_STATES
-           for phase in PHASES):
-        return False
-    return True
+    if job_states == "active":
+        return True
+    return prior != release_id
 
 
 def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_root, *,

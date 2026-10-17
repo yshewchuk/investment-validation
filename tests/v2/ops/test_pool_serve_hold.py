@@ -80,6 +80,52 @@ def test_hold_for_pool_lets_until_finish_once_the_cycle_is_done(monkeypatch):
     assert captured["until"]() is True
 
 
+def test_hold_for_pool_passes_the_conn_and_resolved_release_root(monkeypatch, tmp_path):
+    from engine.v2.models import deployment
+    from engine.v2.ops import pool_refresh
+
+    captured = _capture_until(monkeypatch)
+    calls = []
+    pending = {"value": True}
+
+    def fake_pending(conn, release_root):
+        calls.append((conn, release_root))
+        return pending["value"]
+
+    monkeypatch.setattr(deployment, "production_release_root", lambda: tmp_path)
+    monkeypatch.setattr(pool_refresh, "pool_cycle_pending", fake_pending)
+    conn = _FakeConn(("succeeded", "succeeded"))
+
+    outcome = nightly_trigger._drive_jobs_to_terminal(
+        None, conn, ("job_a", "job_b"), None, hold_for_pool=True)
+
+    assert outcome == "timed_out"
+    assert captured["until"]() is False
+    assert calls == [(conn, tmp_path)]
+    pending["value"] = False
+    assert captured["until"]() is True
+    assert calls == [(conn, tmp_path), (conn, tmp_path)]
+
+
+def test_pool_pending_exception_does_not_hold(monkeypatch):
+    from engine.v2.models import deployment
+    from engine.v2.ops import pool_refresh
+
+    captured = _capture_until(monkeypatch)
+
+    def broken(conn, release_root):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(deployment, "production_release_root", lambda: "/release")
+    monkeypatch.setattr(pool_refresh, "pool_cycle_pending", broken)
+    conn = _FakeConn(("succeeded", "succeeded"))
+
+    nightly_trigger._drive_jobs_to_terminal(
+        None, conn, ("job_a", "job_b"), None, hold_for_pool=True)
+
+    assert captured["until"]() is True
+
+
 def test_default_until_ignores_the_pool(monkeypatch):
     captured = _capture_until(monkeypatch)
     monkeypatch.setattr(nightly_trigger, "_pool_pending",

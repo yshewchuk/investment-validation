@@ -172,7 +172,7 @@ before publication.
 `tools/phase5_state_stage_job.py` (behind the `phase5_state_stage` ops job) calls `carry_forward_release`
 and `prior_carry_set` and the same bounded reader, and takes its inventory from `current_release_inventory`; it then calls `deployment.mark_staging_succeeded`.
 `engine/v2/ops/pool_refresh.py` (the nightly pool sidecar, `Service._reconcile_pool_nightly_refresh`) reads the `DEPLOYED` pointer through the bounded state reader
-each tick (`PointerState` decoded directly) and submits the stage and `models_promote` jobs; the supervisor resolves `production_release_root`.
+each tick (`PointerState` decoded directly) and submits the stage and `models_promote` jobs; the supervisor and `engine/v2/ops/nightly_trigger.py` (scheduled-serve hold) resolve `production_release_root`.
 engine.v2.serving.operations (P6-4) imports the deployment pointer
 (`current_pointer`, `resolve_release`, plus the two refusal exception types)
 to serve the deployed model release read-only at `/models/release.json` --

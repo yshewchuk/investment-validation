@@ -261,6 +261,30 @@ def test_pool_cycle_pending_false_when_a_phase_stalled(tmp_path, state):
     assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
 
 
+def test_pool_cycle_pending_true_while_the_promote_runs_after_the_pointer_moved(tmp_path):
+    conn = _db()
+    _add_score(conn)
+    _write_pointer(tmp_path, f"pools-{SESSION}-{TAG}")
+    _add_training(conn, "promote", state="running")
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is True
+
+
+def test_pool_cycle_pending_false_when_the_promote_succeeded_and_pointer_moved(tmp_path):
+    conn = _db()
+    _add_score(conn)
+    _write_pointer(tmp_path, f"pools-{SESSION}-{TAG}")
+    _add_training(conn, "promote", state="succeeded")
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+
+
+def test_pool_cycle_pending_false_when_the_promote_failed(tmp_path):
+    conn = _db()
+    _add_score(conn)
+    _write_pointer(tmp_path, f"pools-{SESSION}-{TAG}")
+    _add_training(conn, "promote", state="failed")
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+
+
 def test_pool_cycle_pending_false_without_a_pointer(tmp_path):
     conn = _db()
     _add_score(conn)
@@ -1220,3 +1244,59 @@ def test_identity_finds_the_score_job_among_later_keys():
             "VALUES (?, 'training', 'succeeded', ?, '{}', '2027-01-01T00:00:00Z')",
             (job_id_for("shadow", key), key))
     assert pool_refresh.pool_refresh_identity(conn) == (SESSION, MANIFEST)
+
+
+# --------------------------------------------------------------------------
+# 24. stalled cycles are not resubmitted and are not pending
+# --------------------------------------------------------------------------
+
+
+def test_failed_training_phase_is_a_stalled_cycle(monkeypatch, tmp_path):
+    rec = _wire(monkeypatch, tmp_path)
+    conn = _db()
+    _add_score(conn)
+    _add_training(conn, "train-paired", state="succeeded")
+    _add_training(conn, "train-board", state="failed")
+    _add_training(conn, "train-trailing", state="succeeded")
+
+    assert _submit(conn, tmp_path) == []
+    assert rec.submits == []
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+
+
+def test_failed_promote_phase_is_a_stalled_cycle(monkeypatch, tmp_path):
+    rec = _wire(monkeypatch, tmp_path)
+    conn = _db()
+    _add_score(conn)
+    _all_training_succeeded(conn)
+    _add_training(conn, "stage", state="succeeded")
+    _add_training(conn, "promote", state="failed")
+
+    assert _submit(conn, tmp_path) == []
+    assert rec.submits == []
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+
+
+def test_running_stage_is_pending_and_not_resubmitted(monkeypatch, tmp_path):
+    rec = _wire(monkeypatch, tmp_path)
+    conn = _db()
+    _add_score(conn)
+    _all_training_succeeded(conn)
+    _add_training(conn, "stage", state="running")
+
+    assert _submit(conn, tmp_path) == []
+    assert rec.submits == []
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is True
+
+
+def test_running_promote_is_pending_and_not_resubmitted(monkeypatch, tmp_path):
+    rec = _wire(monkeypatch, tmp_path)
+    conn = _db()
+    _add_score(conn)
+    _all_training_succeeded(conn)
+    _add_training(conn, "stage", state="succeeded")
+    _add_training(conn, "promote", state="running")
+
+    assert _submit(conn, tmp_path) == []
+    assert rec.submits == []
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is True

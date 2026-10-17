@@ -149,7 +149,7 @@ def test_invalid_parameters_are_reported(changes):
 def test_kind_is_registered_and_leases_the_pointer():
     kind = stages.registry().get("phase5_state_stage")
     assert kind.worker == "phase5_state_stage"
-    assert kind.resource_classes == frozenset({"delivery"})
+    assert kind.resource_classes == frozenset({"projection"})
     assert kind.effects == ("staged",)
     assert kind.checkpoint_contract == "phase5_state_stage_result.v1.0"
     assert kind.namespaces == frozenset({"shadow", "smoke"})
@@ -171,9 +171,20 @@ def test_plan_pins_files_refs_and_absolute_root(tmp_path):
     assert plan["parameters"]["state_files"] == tuple(sorted(refs))
     assert plan["parameters"]["input_bindings"]["legacy_manifest.json"] == "artifact_manifest"
     assert plan["mode"] == "shadow" and plan["effects"] == ["staged"]
-    assert plan["resource_class"] == "delivery"
+    assert plan["resource_class"] == "projection"
     assert plan["schema_version"] == "operations_plan.v1.0"
     assert plan["blocked_prerequisites"] == []
+
+
+def test_plan_uses_the_projection_scratch_for_the_legacy_read_set(tmp_path):
+    from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
+
+    plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
+                            release_id="cand1", cutoff="2026-10-01",
+                            state_refs={"a.json": "j#o"},
+                            manifest_ref="artifact_manifest", source_root=REPO_ROOT)
+    assert plan["resource_class"] == "projection"
+    assert profile_named(DEFAULT_POLICY, "projection").scratch_bytes >= 2 * 1024**3
 
 
 def test_plan_refuses_invalid_request(tmp_path):
@@ -182,6 +193,9 @@ def test_plan_refuses_invalid_request(tmp_path):
                          cutoff="2026-10-01", state_refs={"a.json": "j#o"},
                          manifest_ref="artifact_manifest", source_root=REPO_ROOT)
     assert err.value.code == "INVALID_REQUEST"
+    assert err.value.problem.message == "state stage plan is invalid"
+    assert err.value.problem.details == {
+        "problems": ["release_id must differ from prior_release_id"]}
 
 
 @pytest.mark.parametrize("manifest_ref", [None, ""])
@@ -192,6 +206,7 @@ def test_plan_without_a_manifest_ref_is_an_invalid_request(tmp_path, manifest_re
                          state_refs={"a.json": "j#o"}, manifest_ref=manifest_ref,
                          source_root=REPO_ROOT)
     assert err.value.code == "INVALID_REQUEST"
+    assert err.value.problem.message == "state stage plan is invalid"
     assert err.value.problem.details == {"problems": [
         "input_bindings['legacy_manifest.json'] must be a non-empty string"]}
 
@@ -443,6 +458,8 @@ def test_plan_without_any_release_root_is_an_invalid_request(monkeypatch):
                          cutoff="2026-10-01", state_refs={"a.json": "j#o"},
                          manifest_ref="artifact_manifest", source_root=REPO_ROOT)
     assert err.value.code == "INVALID_REQUEST"
+    assert err.value.problem.message == (
+        "no release root given and no production release root is configured")
 
 
 def test_worker_refuses_a_symlinked_state_file(tmp_path, monkeypatch):
@@ -682,9 +699,9 @@ def test_plan_hashes_pin_the_source_root_and_environment(tmp_path, monkeypatch):
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
     from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 
-    delivery = replace(profile_named(DEFAULT_POLICY, "delivery"), thread_count=3)
+    projection = replace(profile_named(DEFAULT_POLICY, "projection"), thread_count=3)
     monkeypatch.setattr(state_stage, "DEFAULT_POLICY", replace(
-        DEFAULT_POLICY, profiles=tuple(delivery if profile.name == "delivery" else profile
+        DEFAULT_POLICY, profiles=tuple(projection if profile.name == "projection" else profile
                                        for profile in DEFAULT_POLICY.profiles)))
     refs = {name: f"job_x#training/{name}" for name in _STATES}
     plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
@@ -702,9 +719,9 @@ def test_plan_environment_ref_falls_back_to_the_pinned_profile_cpu_count(tmp_pat
     from engine.v2.ops.fingerprints import environment_identity
     from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 
-    delivery = replace(profile_named(DEFAULT_POLICY, "delivery"), thread_count=0, cpu_count=5)
+    projection = replace(profile_named(DEFAULT_POLICY, "projection"), thread_count=0, cpu_count=5)
     monkeypatch.setattr(state_stage, "DEFAULT_POLICY", replace(
-        DEFAULT_POLICY, profiles=tuple(delivery if profile.name == "delivery" else profile
+        DEFAULT_POLICY, profiles=tuple(projection if profile.name == "projection" else profile
                                        for profile in DEFAULT_POLICY.profiles)))
     refs = {name: f"job_x#training/{name}" for name in _STATES}
     plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
@@ -718,6 +735,7 @@ def test_plan_refusal_publishes_the_exact_problems(tmp_path):
         state_stage_plan(release_root=str(tmp_path), prior_release_id="p", release_id="p",
                          cutoff="2026-10-01", state_refs={"a.json": "j#o"},
                          manifest_ref="artifact_manifest", source_root=REPO_ROOT)
+    assert err.value.problem.message == "state stage plan is invalid"
     assert err.value.problem.details == {"problems": ["release_id must differ from prior_release_id"]}
 
 

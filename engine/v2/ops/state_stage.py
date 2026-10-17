@@ -92,7 +92,7 @@ def state_stage_job_kind() -> JobKind:
     """Candidate write only; the pointer lease serialises it against ``models_promote``."""
     return JobKind(name="phase5_state_stage", worker="phase5_state_stage",
                    parameters=StateStageParameters,
-                   resource_classes=frozenset({"delivery"}), effects=("staged",),
+                   resource_classes=frozenset({"projection"}), effects=("staged",),
                    retry=RetryPolicy("none", 1),
                    checkpoint_contract=RESULT_SCHEMA,
                    namespaces=frozenset({"shadow", "smoke"}),
@@ -117,7 +117,7 @@ def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, stat
             raise fail("INVALID_REQUEST", "no release root given and no production "
                        "release root is configured") from exc
     release_root = str(Path(release_root).expanduser().resolve())
-    profile = profile_named(DEFAULT_POLICY, "delivery")
+    profile = profile_named(DEFAULT_POLICY, "projection")
     refs = dict(state_refs)
     params = StateStageParameters(
         expected_ids=("phase5_state_stage",), release_root=release_root,
@@ -136,7 +136,7 @@ def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, stat
             "implementation_ref": content_hash(worker_source_manifest(root3)),
             "environment_ref": content_hash(
                 environment_identity(profile.thread_count or profile.cpu_count)),
-            "resource_class": "delivery"}
+            "resource_class": "projection"}
 
 
 def _worker_problems(parameters) -> list[str]:
