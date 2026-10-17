@@ -188,7 +188,7 @@ content succeeds and different content refuses `ID_CONFLICT`.
 
 An ops job kind (`engine/v2/ops/state_stage.py`; logic in `tools/phase5_state_stage_job.py`
 because the assembly helpers live in `checks/`; `delivery` class, write lease on
-`deployment_pointer`; `state_stage_plan` builds the plan, nothing submits it yet). It
+`deployment_pointer`; `state_stage_plan` builds the plan; the §2.3 sidecar submits it). It
 stages a candidate release; it never touches `DEPLOYED` (`models_promote` is separate).
 
 - Parameters: `release_root` (the store's parent; empty resolves the production root at

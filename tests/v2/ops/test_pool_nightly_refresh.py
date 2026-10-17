@@ -434,3 +434,130 @@ def test_tick_calls_reconcile_pool_nightly_refresh():
              and isinstance(node.func, ast.Attribute)
              and node.func.attr == "_reconcile_pool_nightly_refresh"]
     assert calls
+
+
+# --------------------------------------------------------------------------
+# 11. identity: unparseable key and blank created_at rows are ignored
+# --------------------------------------------------------------------------
+
+
+def _raw_score(conn, job_id, key, created_at, manifest):
+    spec = json.dumps({"parameters": {"input_bindings": {"legacy_manifest.json": manifest}}})
+    conn.execute("INSERT INTO jobs (job_id, kind, state, idempotency_key, spec_json, created_at) "
+                 "VALUES (?, 'legacy_score', 'succeeded', ?, ?, ?)",
+                 (job_id, key, spec, created_at))
+
+
+def test_identity_ignores_the_unparseable_key_and_blank_created_at():
+    conn = _db()
+    _raw_score(conn, "j-bad-key", "garbage", "2026-01-05T00:00:00Z", "bad")
+    _raw_score(conn, "j-null-time", "nightly:2026-01-06:sha256:x:score", None, "null")
+    _raw_score(conn, "j-blank-time", "nightly:2026-01-07:sha256:y:score", "", "blank")
+    _add_score(conn, session="2026-01-02", manifest="good")
+    assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-02", "good")
+
+
+# --------------------------------------------------------------------------
+# 12. identity tie-breaks within a session, and session before created_at
+# --------------------------------------------------------------------------
+
+
+def test_identity_prefers_the_later_created_at_within_a_session():
+    conn = _db()
+    _add_score(conn, session="2026-01-02", manifest="early", scope="sha256:aaa",
+               created_at="2026-01-01T00:00:00Z")
+    _add_score(conn, session="2026-01-02", manifest="late", scope="sha256:bbb",
+               created_at="2026-01-01T01:00:00Z")
+    assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-02", "late")
+
+
+def test_identity_breaks_equal_created_at_on_the_larger_scope_hash():
+    conn = _db()
+    _add_score(conn, session="2026-01-02", manifest="low", scope="sha256:aaa",
+               created_at="2026-01-01T00:00:00Z")
+    _add_score(conn, session="2026-01-02", manifest="high", scope="sha256:zzz",
+               created_at="2026-01-01T00:00:00Z")
+    assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-02", "high")
+
+
+def test_identity_prefers_the_later_session_over_an_earlier_created_at():
+    conn = _db()
+    _add_score(conn, session="2026-01-02", manifest="older_session",
+               created_at="2026-01-01T00:00:00Z")
+    _add_score(conn, session="2026-01-05", manifest="newer_session",
+               created_at="2020-01-01T00:00:00Z")
+    assert pool_refresh.pool_refresh_identity(conn) == ("2026-01-05", "newer_session")
+
+
+# --------------------------------------------------------------------------
+# 13. an all-summary output set is an empty stage set -> refuse
+# --------------------------------------------------------------------------
+
+
+def test_state_refs_with_only_summaries_is_a_typed_refusal(monkeypatch, tmp_path):
+    _wire(monkeypatch)
+    conn = _db()
+    _add_score(conn)
+    for phase in pool_refresh.TRAINING_PHASES:
+        _succeeded_training(conn, phase,
+                            ["training/x.summary.json", "training_result"])
+    with pytest.raises(OpsError) as err:
+        _submit(conn, tmp_path)
+    assert err.value.problem.code == "VALIDATION_FAILED"
+    assert err.value.problem.message == "no training state files to stage"
+
+
+# --------------------------------------------------------------------------
+# 14. the real training planners build the three phase plans
+# --------------------------------------------------------------------------
+
+
+def test_real_training_planners_build_the_three_phase_plans(monkeypatch, tmp_path):
+    recorded = []
+    monkeypatch.setattr(pool_refresh.deployment, "current_pointer",
+                        lambda root: SimpleNamespace(release_id=PRIOR))
+
+    def submit(conn, registry, policy, request, *, clock):
+        recorded.append(request)
+        return "receipt"
+
+    monkeypatch.setattr(pool_refresh, "submit", submit)
+    conn = _db()
+    _add_score(conn)
+    assert _submit(conn, tmp_path) == ["receipt"] * 3
+
+    plans = {request.job.parameters["mode"]: request.job.parameters for request in recorded}
+    assert set(plans) == {"state", "board_analog", "trailing_cutoff"}
+    paired, board, trailing = plans["state"], plans["board_analog"], plans["trailing_cutoff"]
+    assert paired["state"] == "paired_residual_pool" and paired["cutoffs"] == (SESSION,)
+    assert board["alpha"] == pool_refresh.FILL_ALPHA and board["cutoffs"] == (SESSION,)
+    assert trailing["cutoffs"] == (SESSION,)
+    for parameters in plans.values():
+        assert parameters["input_bindings"] == {"legacy_manifest.json": MANIFEST}
+    impl = pool_refresh._implementation_ref(REPO_ROOT)
+    assert impl
+    assert all(request.job.implementation_ref == impl for request in recorded)
+
+
+# --------------------------------------------------------------------------
+# 15. a generic reconcile failure is typed and sanitized
+# --------------------------------------------------------------------------
+
+
+def test_reconcile_generic_failure_is_typed_and_sanitized(monkeypatch, capsys):
+    service = SimpleNamespace(conn=None, registry=None, store=None, code_source=None,
+                              clock=None, _last_pool_refresh_problem=None)
+    monkeypatch.setattr(deployment, "production_release_root", lambda: "/somewhere")
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("secret /tmp/path")
+
+    monkeypatch.setattr(pool_refresh, "submit_pool_nightly_refresh_if_ready", _boom)
+    Service._reconcile_pool_nightly_refresh(service)
+    assert service._last_pool_refresh_problem == (
+        "VALIDATION_FAILED", "pool nightly refresh reconciliation failed")
+    out = capsys.readouterr().out
+    assert "VALIDATION_FAILED" in out
+    assert "pool nightly refresh reconciliation failed" in out
+    assert "secret" not in out
+    assert "/tmp/path" not in out
