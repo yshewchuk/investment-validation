@@ -911,6 +911,7 @@ mutate = [
     "engine/v2/ops/source_availability.py",
 ]
 tests = [
+    "tests/v2/ops/test_receipt_failure_bounds.py",
     "tests/v2/ops/test_gate_sweep.py",
     "tests/v2/ops/test_gate_sweep_collection.py",
     "tests/v2/ops/test_native_evidence_bounds.py",
