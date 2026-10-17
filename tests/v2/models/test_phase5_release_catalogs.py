@@ -212,6 +212,9 @@ def test_catalog_cap_constant_and_regular_file_guard(tmp_path):
             release_objects.read_regular_file(tmp_path / "absent", bad)
     with pytest.raises(layout.ReleaseLayoutError, match="not a bounded regular file"):
         release_objects.read_regular_file(small, 0)
+    empty = tmp_path / "empty.bin"
+    empty.write_bytes(b"")
+    assert release_objects.read_regular_file(empty, 0) == b""
 
 
 def test_read_regular_file_requests_at_most_limit_plus_one(tmp_path, monkeypatch):

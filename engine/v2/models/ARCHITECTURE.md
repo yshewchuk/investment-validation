@@ -130,6 +130,8 @@ size check. Existing callers omitting the ceiling retain their read contract.
 | New object | Durable before return; only invocation-owned staging is cleaned; no unbounded read or cross-filesystem copy fallback |
 | Existing/racing identical regular object, or retry | Verify exact bytes (allowance = payload length, including zero) and sync directories; keep the incumbent |
 | Wrong/oversized/unreadable bytes or symlink to a regular file | `ObjectVerificationError` (`ReleaseLayoutError`); incumbent retained |
+| `read_regular_file(path, limit)`: `limit` not a non-negative int (bool excluded) | `ReleaseLayoutError`; nothing is opened |
+| `read_regular_file`: absent path / regular file within `limit` (zero allowed) / directory, FIFO, or longer than `limit` | `None` / its bytes / `ReleaseLayoutError`; a symlink raises `OSError` (callers wrap it) |
 | Dangling/nonregular-target symlink, other collision or publication I/O failure | `ReleaseLayoutError` with original `OSError`; never replace; no catalog/pointer (a complete unreferenced object may remain) |
 
 `checks/phase5_release_assembly.py`, beside the catalog layout in `engine/v2/models/release_layout.py` (object hashing, `write_object` and the bounded catalog read live in `release_objects.py`, re-exported by `release_layout`; the `modules_available` probe stays in `checks/phase5_modules.py` because production code may not import dynamically):
