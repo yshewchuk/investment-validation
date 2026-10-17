@@ -711,6 +711,7 @@ tests = ["tests/test_v2_ops_experiment_folds.py", "tests/v2/research/test_predic
 why = "Supervisor, workers, executors, resources, recovery and provider budget: job execution and admission."
 mutate = [
     "engine/v2/ops/supervisor.py",
+    "engine/v2/ops/failure_diagnostics.py",
     "engine/v2/ops/worker.py",
     "engine/v2/ops/worker_progress.py",
     "engine/v2/ops/executor*.py",
@@ -725,6 +726,7 @@ mutate = [
     "engine/v2/ops/providers/*.py",
 ]
 tests = [
+    "tests/v2/ops/test_failure_diagnostic_persistence.py",
     "tests/v2/ops/test_gate_sweep.py",
     "tests/v2/ops/test_gate_sweep_collection.py",
     "tests/v2/ops/test_native_evidence_bounds.py",
@@ -787,6 +789,7 @@ mutate = [
     "engine/v2/ops/schema_runtime.py",
 ]
 tests = [
+    "tests/v2/ops/test_failure_diagnostic_persistence.py",
     "tests/v2/ops/test_gate_sweep.py",
     "tests/v2/ops/test_gate_sweep_collection.py",
     "tests/v2/ops/test_native_evidence_bounds.py",
@@ -826,6 +829,7 @@ mutate = [
     "engine/v2/ops/errors.py",
 ]
 tests = [
+    "tests/v2/ops/test_failure_diagnostic_persistence.py",
     "tests/v2/ops/test_final_holdout_authority.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
@@ -878,6 +882,7 @@ mutate = [
     "engine/v2/ops/store_barrier.py",
 ]
 tests = [
+    "tests/v2/ops/test_failure_diagnostic_persistence.py",
     "tests/v2/ops/test_provider_requirements.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",
     "tests/test_v2_ops_authority.py",
@@ -911,6 +916,8 @@ mutate = [
     "engine/v2/ops/source_availability.py",
 ]
 tests = [
+    "tests/v2/ops/test_failure_diagnostic_persistence.py",
+    "tests/v2/ops/test_receipt_failure_bounds.py",
     "tests/v2/ops/test_gate_sweep.py",
     "tests/v2/ops/test_gate_sweep_collection.py",
     "tests/v2/ops/test_native_evidence_bounds.py",

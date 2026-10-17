@@ -3,7 +3,13 @@ from __future__ import annotations
 
 from engine.v2.contracts import ArtifactRef, CheckpointReceipt
 from engine.v2.foundation import ArtifactStore, content_hash, format_timestamp
-from engine.v2.ops.catalog import dumps, load_json, transaction
+from engine.v2.ops.catalog import (
+    decode_bounded_text,
+    dumps,
+    load_json,
+    sql_text_budget,
+    transaction,
+)
 from engine.v2.ops.errors import fail
 from engine.v2.ops.lifecycle import verify_fence
 
@@ -34,8 +40,7 @@ def registered_artifact(conn, artifact_id, *, max_metadata_bytes=None):
     if max_metadata_bytes is None:
         row = conn.execute("SELECT ref_json FROM artifacts WHERE artifact_id = ?", (artifact_id,)).fetchone()
     else:
-        encoding = conn.execute("PRAGMA encoding").fetchone()[0]
-        limit = max_metadata_bytes * (2 if encoding.startswith("UTF-16") else 1)
+        encoding, limit = sql_text_budget(conn, max_metadata_bytes)
         row = conn.execute("SELECT CASE WHEN typeof(ref_json)='text' "
                            "AND length(CAST(ref_json AS BLOB))<=? THEN CAST(ref_json AS BLOB) END "
                            "FROM artifacts WHERE artifact_id=?", (limit, artifact_id)).fetchone()
@@ -44,11 +49,7 @@ def registered_artifact(conn, artifact_id, *, max_metadata_bytes=None):
     payload = row[0]
     if max_metadata_bytes is not None:
         try:
-            if payload is None:
-                raise ValueError
-            payload = payload.decode(encoding)
-            if len(payload.encode("utf-8")) > max_metadata_bytes:
-                raise ValueError
+            payload = decode_bounded_text(payload, encoding, max_metadata_bytes)
         except (ValueError, UnicodeError):
             raise fail("INTEGRITY_FAILED", "artifact reference requires bounded text") from None
     return load_json(ArtifactRef, payload)

@@ -47,6 +47,7 @@ from engine.v2.ops.effects_graph import (
 )
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.executor_watchdog import is_alive, signal_owned
+from engine.v2.ops.failure_diagnostics import prepare_failure
 from engine.v2.ops.fingerprints import (
     environment_identity,
     snapshot_code,
@@ -1522,10 +1523,12 @@ class Service:
 
     def _commit_failure(self, claim, status, problem):
         """Record the failure under the fence — only while the fence is still held (B)."""
-        outcome = Outcome(False, "verified_dead", status["exit_code"], problem)
         if fence_held(self.conn, claim.attempt_id, claim.fence, clock=self.clock):
+            problem, diagnostic = prepare_failure(problem, self.store)
+            outcome = Outcome(False, "verified_dead", status["exit_code"], problem)
             try:
-                commit_attempt(self.conn, claim.attempt_id, claim.fence, outcome, clock=self.clock)
+                commit_attempt(self.conn, claim.attempt_id, claim.fence, outcome, clock=self.clock,
+                               failure_artifact=diagnostic)
                 return
             except OpsError as exc:
                 if exc.code not in _FENCE_LOST_CODES:

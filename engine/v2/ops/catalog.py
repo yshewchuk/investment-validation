@@ -24,20 +24,26 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from engine.v2.contracts import Problem
 from engine.v2.foundation import canonical_json, from_document, to_document
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 
 __all__ = [
     "BUSY_TIMEOUT_MS",
+    "MAX_JOB_FAILURE_BYTES",
     "backup_to",
     "connect",
+    "decode_bounded_text",
     "dumps",
+    "dumps_failure",
     "integrity_errors",
     "load_json",
+    "sql_text_budget",
     "transaction",
 ]
 
 BUSY_TIMEOUT_MS = 5_000
+MAX_JOB_FAILURE_BYTES = 1024 * 1024
 _SYNC_FULL = 2
 
 
@@ -108,6 +114,31 @@ def dumps(value: Any) -> str:
     return canonical_json(to_document(value))
 
 
+def dumps_failure(problem: Problem) -> str:
+    """Preserve canonical bytes or refuse; oversized failures need a durable diagnostic."""
+    text = dumps(problem)
+    if len(text.encode("utf-8")) > MAX_JOB_FAILURE_BYTES:
+        raise fail("RESOURCE_LIMIT_EXCEEDED",
+                   "failure requires a diagnostic artifact before persistence") from OpsError(problem)
+    return text
+
+
 def load_json(cls: type, text: str | None) -> Any:
     """Strictly decode a JSON column back into its contract type."""
     return None if text is None else from_document(cls, json.loads(text))
+
+
+def sql_text_budget(conn: sqlite3.Connection, max_utf8_bytes: int) -> tuple[str, int]:
+    """Encoding and SQL BLOB allowance for a caller's UTF-8 text budget."""
+    encoding = conn.execute("PRAGMA encoding").fetchone()[0]
+    return encoding, max_utf8_bytes * (2 if encoding.startswith("UTF-16") else 1)
+
+
+def decode_bounded_text(payload: bytes | None, encoding: str, max_utf8_bytes: int) -> str:
+    """Admit a bounded SQL projection; the caller owns the refusal policy."""
+    if payload is None:
+        raise ValueError("stored text was not admitted by its SQL byte bound")
+    text = payload.decode(encoding)
+    if len(text.encode("utf-8")) > max_utf8_bytes:
+        raise ValueError("stored text exceeds its UTF-8 byte bound")
+    return text

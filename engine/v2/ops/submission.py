@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from engine.v2.contracts import (
+    FAILURE_CODES,
     JobReceipt,
     JobSpec,
     Problem,
@@ -48,7 +49,15 @@ from engine.v2.foundation import (
     parse_timestamp,
     to_document,
 )
-from engine.v2.ops.catalog import dumps, load_json, transaction
+from engine.v2.ops.catalog import (
+    MAX_JOB_FAILURE_BYTES,
+    decode_bounded_text,
+    dumps,
+    dumps_failure,
+    load_json,
+    sql_text_budget,
+    transaction,
+)
 from engine.v2.ops.errors import fail, make_problem
 from engine.v2.ops.provider_requirements import validate_scalar_provider_shape
 
@@ -63,13 +72,14 @@ __all__ = [
     "request_digest",
     "submit",
     "submit_graph",
+    "validate_receipt_read_policy",
     "validate_request",
 ]
 
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _BLOCKING_PARENT_STATES = frozenset({"failed", "cancelled", "blocked"})
-# Same byte ceiling as executor result pipes; diagnostics belong in artifacts.
-MAX_JOB_FAILURE_BYTES = 1024 * 1024
+# Historical receipts have a finite recovery margin above the current write ceiling.
+DEFAULT_JOB_FAILURE_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -285,8 +295,11 @@ def submit(conn: sqlite3.Connection, registry: KindRegistry, policy: NamespacePo
 
 
 def submit_graph(conn: sqlite3.Connection, registry: KindRegistry, policy: NamespacePolicy,
-                 requests: Sequence[SubmitRequest], *, clock: Clock) -> list[JobReceipt]:
+                 requests: Sequence[SubmitRequest], *, clock: Clock,
+                 receipt_decode_failure_code: str | None = None,
+                 max_failure_bytes: int | None = None) -> list[JobReceipt]:
     """Validate every node, reject cycles, then insert all nodes or none."""
+    validate_receipt_read_policy(receipt_decode_failure_code, max_failure_bytes)
     kinds = {job_id_for(r.namespace, r.idempotency_key): validate_request(registry, policy, r)
              for r in requests}
     ordered = _topological(requests)
@@ -295,7 +308,9 @@ def submit_graph(conn: sqlite3.Connection, registry: KindRegistry, policy: Names
         for request in ordered:
             job_id = job_id_for(request.namespace, request.idempotency_key)
             _insert_or_match(conn, request, kinds[job_id], policy, stamp)
-        return [get_job(conn, job_id_for(r.namespace, r.idempotency_key)) for r in requests]
+        return [get_job(conn, job_id_for(r.namespace, r.idempotency_key),
+                        receipt_decode_failure_code=receipt_decode_failure_code,
+                        max_failure_bytes=max_failure_bytes) for r in requests]
 
 
 def _insert_or_match(conn: sqlite3.Connection, request: SubmitRequest, kind: JobKind,
@@ -323,7 +338,7 @@ def _insert_or_match(conn: sqlite3.Connection, request: SubmitRequest, kind: Job
         (job_id, request.namespace, request.idempotency_key, digest, request.principal,
          job.kind, job.spec_hash, dumps(job), job.resource_class, job.checkpoint_contract_ref,
          dumps(kind.retry), "blocked" if blocked else "queued", job.priority, job.deadline_at,
-         kind.retry.max_attempts, stamp, stamp, None if failure is None else dumps(failure)))
+         kind.retry.max_attempts, stamp, stamp, None if failure is None else dumps_failure(failure)))
     conn.executemany(
         "INSERT INTO job_dependencies (child_job_id, parent_job_id, required_output_contract) "
         "VALUES (?, ?, ?)",
@@ -351,26 +366,52 @@ def _parents(conn: sqlite3.Connection, request: SubmitRequest,
 # --------------------------------------------------------------------------
 
 
-def get_job(conn: sqlite3.Connection, job_id: str) -> JobReceipt:
-    """Read a receipt; cap failure text before transfer/decoding, never truncate."""
-    encoding = conn.execute("PRAGMA encoding").fetchone()[0]
-    limit = MAX_JOB_FAILURE_BYTES * (2 if encoding.startswith("UTF-16") else 1)
+def validate_receipt_read_policy(code: str | None, max_failure_bytes: int | None = None) -> None:
+    """Admit optional registered failure policy and SQL-safe budget before effects."""
+    if code is not None and (not isinstance(code, str) or code not in FAILURE_CODES):
+        raise fail("INVALID_REQUEST", "receipt decoder requires a registered failure code")
+    if max_failure_bytes is not None and (type(max_failure_bytes) is not int
+            or not 0 < max_failure_bytes <= (2**63 - 1) // 2):
+        raise fail("INVALID_REQUEST", "receipt failure budget must be a positive SQL-safe integer")
+
+
+def _receipt_json(cls: type, text: str | None, failure_code: str | None) -> Any:
+    try:
+        return load_json(cls, text)
+    except (ValueError, RecursionError):
+        if failure_code is None:
+            raise
+        raise fail(failure_code, "stored job receipt cannot be decoded") from None
+
+
+def get_job(conn: sqlite3.Connection, job_id: str, *,
+            receipt_decode_failure_code: str | None = None,
+            max_failure_bytes: int | None = None) -> JobReceipt:
+    """Read a receipt under an 8 MiB default or an explicit finite recovery budget."""
+    validate_receipt_read_policy(receipt_decode_failure_code, max_failure_bytes)
+    budget = DEFAULT_JOB_FAILURE_BYTES if max_failure_bytes is None else max_failure_bytes
+    encoding, limit = sql_text_budget(conn, budget)
     row = conn.execute(
         "SELECT job_id, namespace, idempotency_key, request_digest, kind, spec_hash, state, priority, "
         "created_at, fence, attempt_count, active_attempt_id, next_eligible_at, queue_reason_json, "
-        "failure_json IS NOT NULL AS has_failure, CASE WHEN typeof(failure_json)='text' "
-        "AND length(CAST(failure_json AS BLOB))<=? THEN CAST(failure_json AS BLOB) END AS failure_json "
+        "failure_json IS NOT NULL AS has_failure, typeof(failure_json)='text' AS failure_is_text, "
+        "CASE WHEN typeof(failure_json)='text' AND length(CAST(failure_json AS BLOB))<=? "
+        "THEN CAST(failure_json AS BLOB) END AS failure_json "
         "FROM jobs WHERE job_id=?", (limit, job_id)).fetchone()
     if row is None:
         raise fail("INVALID_REQUEST", "unknown job", details={"reason": "not_found"})
     failure = None
+    if row["has_failure"]:
+        if not row["failure_is_text"]:
+            raise fail("INTEGRITY_FAILED", "stored job failure requires text")
+        try:
+            failure = decode_bounded_text(row["failure_json"], encoding, budget)
+        except UnicodeError:
+            raise fail("INTEGRITY_FAILED", "stored job failure cannot be decoded") from None
+        except ValueError:
+            raise fail(receipt_decode_failure_code or "RESOURCE_LIMIT_EXCEEDED",
+                       "stored job failure exceeds its byte bound") from None
     try:
-        if row["has_failure"]:
-            if row["failure_json"] is None:
-                raise fail("INTEGRITY_FAILED", "stored job failure requires bounded text")
-            failure = row["failure_json"].decode(encoding)
-            if len(failure.encode("utf-8")) > MAX_JOB_FAILURE_BYTES:
-                raise fail("INTEGRITY_FAILED", "stored job failure exceeds its UTF-8 byte bound")
         failure = load_json(Problem, failure)
     except (ValueError, RecursionError):
         raise fail("INTEGRITY_FAILED", "stored job failure cannot be decoded") from None
@@ -378,7 +419,7 @@ def get_job(conn: sqlite3.Connection, job_id: str) -> JobReceipt:
     if row["active_attempt_id"] is not None:
         attempt = conn.execute("SELECT resources_json FROM attempts WHERE attempt_id = ?",
                                (row["active_attempt_id"],)).fetchone()
-        resources = load_json(ResolvedResources, attempt["resources_json"])
+        resources = _receipt_json(ResolvedResources, attempt["resources_json"], receipt_decode_failure_code)
     progress = conn.execute("SELECT body_json FROM progress_events WHERE job_id = ? "
                             "ORDER BY recorded_at DESC, sequence DESC LIMIT 1",
                             (job_id,)).fetchone()
@@ -397,11 +438,11 @@ def get_job(conn: sqlite3.Connection, job_id: str) -> JobReceipt:
         priority=row["priority"], created_at=row["created_at"], fence=row["fence"],
         attempt_count=row["attempt_count"], active_attempt_id=row["active_attempt_id"],
         next_eligible_at=row["next_eligible_at"],
-        queue_reason=load_json(QueueReason, row["queue_reason_json"]),
+        queue_reason=_receipt_json(QueueReason, row["queue_reason_json"], receipt_decode_failure_code),
         resolved_resources=resources,
         checkpoint_refs=tuple(row[0] for row in checkpoint_rows),
         output_refs=tuple(row[0] for row in output_rows),
-        latest_progress=None if progress is None else load_json(ProgressEvent,
-                                                                progress["body_json"]),
+        latest_progress=None if progress is None else _receipt_json(
+            ProgressEvent, progress["body_json"], receipt_decode_failure_code),
         failure=failure,
     )

@@ -18,7 +18,7 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.foundation.final_holdout import declaration_from_document, request_from_registration
-from engine.v2.ops.catalog import transaction
+from engine.v2.ops.catalog import decode_bounded_text, sql_text_budget, transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import (
     NATIVE_GATE_ENTRYPOINT,
@@ -48,8 +48,7 @@ MAX_GATE_SWEEP_BYTES = 16 * 1024 * 1024
 
 def read_native_gate_sweep(conn, experiment_id):
     """Read bounded stored text atomically; None means no seal, never invalid text."""
-    encoding = conn.execute("PRAGMA encoding").fetchone()[0]
-    limit = MAX_GATE_SWEEP_BYTES * (2 if encoding.startswith("UTF-16") else 1)
+    encoding, limit = sql_text_budget(conn, MAX_GATE_SWEEP_BYTES)
     row = conn.execute("SELECT CASE WHEN typeof(document_json)='text' "
                        "AND length(CAST(document_json AS BLOB))<=? THEN CAST(document_json AS BLOB) END "
                        "FROM native_gate_sweeps WHERE experiment_id=?",
@@ -57,12 +56,7 @@ def read_native_gate_sweep(conn, experiment_id):
     if row is None:
         return None
     try:
-        if row[0] is None:
-            raise ValueError
-        payload = row[0].decode(encoding)
-        if len(payload.encode("utf-8")) > MAX_GATE_SWEEP_BYTES:
-            raise ValueError
-        return payload
+        return decode_bounded_text(row[0], encoding, MAX_GATE_SWEEP_BYTES)
     except (ValueError, UnicodeError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored sweep requires bounded text") from None
 
