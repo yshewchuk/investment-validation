@@ -550,6 +550,7 @@ The source seal explicitly includes the fixed child and its transitive fitting s
 | Condition | Outcome |
 |---|---|
 | Explicit positive integer `memory_bytes`, `cpu_seconds`, `wall_seconds` | Bind these limits to the immutable trial execution start. Linux child affinity uses the lowest currently allowed CPU; numerical thread variables are one. This selects a core without reserving it from other host work. |
+| Concurrent `SearchTrials.execute` calls on one host | Serialize trials per host or size `wall_seconds` for peak concurrency (#845). |
 | Missing/extra limit keys, Boolean/noninteger/nonpositive or platform-unrepresentable values | `INVALID_EXPERIMENT_SPEC` before a claim or subprocess launch. |
 | Direct `run_fitted_trial` call | Requires exactly those three resource keys plus an integer `cpu_id` in `[0, 2**31 - 1)`, excluding Boolean values. Revalidates all limits before input access, scratch creation or launch; malformed resolved limits refuse `INVALID_EXPERIMENT_SPEC`. CPU availability is still enforced by child setup, not reserved by this pure check. |
 | Parent Linux affinity query unavailable or empty | `RESOURCE_UNAVAILABLE` before a claim or subprocess launch. Child limit/affinity setup failure instead preserves the post-claim unfinished attempt and refuses `RESOURCE_UNAVAILABLE`. |
