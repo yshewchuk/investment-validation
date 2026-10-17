@@ -253,7 +253,7 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 
 - Parameters: `release_root` (the store's parent; empty resolves the production root at
   plan time), `prior_release_id`, `release_id`, `cutoff` (extended ISO), `state_files` and
-  `input_bindings` (file name -> `training` output id, equal key sets; the job framework requires
+  `input_bindings` (a mapping from each state file name to its `training` output id; the job framework requires
   the producing job to have succeeded), plus a required `legacy_manifest.json` binding (the pinned legacy
   manifest, as `training` jobs bind it): the kind declares a `legacy_store` read, so the job's read set
   carries the legacy tree the inventory reads the champion registry from. A plan without the manifest

@@ -1342,3 +1342,17 @@ def test_promote_lookup_returns_a_prior_with_uppercase_and_odd_chars():
     conn = _db()
     _add_promote(conn, prior="Prior_ABC-1!?", state="running")
     assert pool_refresh._promote_states_with_unknown_prior(conn, SESSION, TAG) == ["running"]
+
+
+def test_promote_lookup_honours_both_key_bounds():
+    conn = _db()
+    _add_promote(conn, prior="", state="failed")
+    _add_promote(conn, prior="9", state="running")
+    for suffix, state in ((";x", "cancelled"), ("9", "blocked")):
+        key = f"nightly:{SESSION}:pool:promote:{TAG}{suffix}"
+        conn.execute(
+            "INSERT INTO jobs (job_id, kind, state, idempotency_key, spec_json, created_at) "
+            "VALUES (?, 'training', ?, ?, NULL, NULL)",
+            (job_id_for("shadow", key), state, key))
+    assert pool_refresh._promote_states_with_unknown_prior(conn, SESSION, TAG) == [
+        "running", "failed"]

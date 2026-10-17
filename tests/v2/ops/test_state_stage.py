@@ -129,6 +129,14 @@ def test_manifest_binding_must_be_a_non_empty_string(manifest_ref):
             "input_bindings['legacy_manifest.json'] must be a non-empty string"]
 
 
+@pytest.mark.parametrize("input_bindings", [
+    ["a.json", "legacy_manifest.json"], "a.json", None])
+def test_non_mapping_input_bindings_are_reported_not_raised(input_bindings):
+    params = _params(state_files=("a.json",), input_bindings=input_bindings)
+    assert state_stage_parameter_problems(None, params) == [
+        "input_bindings keys must equal state_files plus legacy_manifest.json"]
+
+
 def test_state_files_must_not_list_the_manifest():
     params = _params(state_files=tuple(sorted(_STATES)) + ("legacy_manifest.json",),
                      input_bindings={**{name: "j#o" for name in _STATES},
@@ -363,17 +371,19 @@ def test_worker_refuses_a_cutoff_that_does_not_advance(tmp_path, monkeypatch):
     assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
 
 
-@pytest.mark.parametrize("files,text", [
-    ((), "non-empty tuple"), (("a.json", "a.json"), "without duplicates"),
-    (("a.txt",), "plain .json"), (("../x.json",), "plain .json"), (("a/b.json",), "plain .json"),
-    (("x.summary.json",), "plain .json"),
+@pytest.mark.parametrize("files,expected", [
+    ((), "state_files must be a non-empty tuple without duplicates"),
+    (("a.json", "a.json"), "state_files must be a non-empty tuple without duplicates"),
+    (("a.txt",), "state_files must be plain .json names, not summaries"),
+    (("../x.json",), "state_files must be plain .json names, not summaries"),
+    (("a/b.json",), "state_files must be plain .json names, not summaries"),
+    (("x.summary.json",), "state_files must be plain .json names, not summaries"),
 ])
-def test_state_file_shape_problems_name_the_defect(files, text):
+def test_state_file_shape_problems_name_the_defect(files, expected):
     params = _params(state_files=files,
                      input_bindings={**{name: "j#o" for name in files},
                                      "legacy_manifest.json": "artifact_manifest"})
-    problems = state_stage_parameter_problems(None, params)
-    assert any(text in problem for problem in problems)
+    assert state_stage_parameter_problems(None, params) == [expected]
 
 
 def test_trailing_objects_are_stamped_and_paired_objects_use_their_name_cutoff(tmp_path, monkeypatch):

@@ -8,6 +8,7 @@ Contract: ``engine/v2/models/ARCHITECTURE.md`` section 2.2 (``phase5_state_stage
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -75,10 +76,11 @@ def _file_problems(params) -> list[str]:
     if "legacy_manifest.json" in files:
         problems.append("state_files must not list legacy_manifest.json")
     expected = set(files) | {"legacy_manifest.json"}
-    if params.input_bindings is None or set(params.input_bindings) != expected:
+    bindings = params.input_bindings
+    if not isinstance(bindings, Mapping) or set(bindings) != expected:
         problems.append("input_bindings keys must equal state_files plus legacy_manifest.json")
-    elif not isinstance(params.input_bindings.get("legacy_manifest.json"), str) \
-            or not params.input_bindings["legacy_manifest.json"]:
+    elif not isinstance(bindings.get("legacy_manifest.json"), str) \
+            or not bindings["legacy_manifest.json"]:
         problems.append("input_bindings['legacy_manifest.json'] must be a non-empty string")
     return problems
 

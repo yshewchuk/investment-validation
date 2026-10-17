@@ -1092,6 +1092,7 @@ tests = [
     "tests/v2/ops/test_v2_ops_render_parity.py",
     "tests/v2/ops/test_state_stage.py",
     "tests/v2/ops/test_pool_nightly_refresh.py",
+    "tests/v2/ops/test_pool_serve_hold.py",
     "tests/v2/ops/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_runtime.py",
     "tests/v2/ops/test_v2_ops_scope_separation.py",
