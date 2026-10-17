@@ -141,6 +141,42 @@ def test_candidate_failure_reconciliation_retains_exact_attempt_prefix(native, m
     assert native.recorder._read("selection") is None
 
 
+@pytest.mark.parametrize("mutation", ["started_hole", "started_matrix", "completed_matrix",
+                                      "pending_completion", "beyond_completion"])
+def test_failed_result_corruption_cannot_publish_candidate_terminal(native, monkeypatch, mutation):
+    recorder = native.recorder
+    append = recorder._append
+    failed_child(monkeypatch, completed=1)
+
+    def corrupt(slot, body, **kwargs):
+        if mutation == "started_hole" and slot == "fit-started:" + KEY + ":5":
+            return body
+        if ((mutation == "started_matrix" and slot == "fit-started:" + KEY + ":3")
+                or (mutation == "completed_matrix" and slot == "fit-completed:" + KEY + ":5")):
+            body = {**body, "prediction_matrix_id": content_hash({"wrong_matrix": True})}
+        return append(slot, body, **kwargs)
+
+    monkeypatch.setattr(recorder, "_append", corrupt)
+    interrupt(monkeypatch, recorder, "execution-result", after=True)
+    monkeypatch.setattr(recorder, "_append", append)
+    if mutation in ("pending_completion", "beyond_completion"):
+        fit = expected_fits()[1 if mutation == "pending_completion" else 2]
+        append("fit-completed:" + KEY + ":" + str(fit["horizon_sessions"]), fit)
+    assert recorder._read("execution-result:" + KEY)["result"] == {"event": "failed"}
+    assert recorder._read("execution:" + KEY) is None
+    before = durable_evidence(native)
+    no_launch(monkeypatch)
+    monkeypatch.setattr(recorder, "_append", lambda *a, **k: pytest.fail("corrupt failed result published evidence"))
+    monkeypatch.setattr(recorder, "_inputs", lambda *a: pytest.fail("corrupt failed result opened inputs"))
+    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("corrupt failed result opened labels"))
+    with no_fit_guard(), legacy_guard(), pytest.raises(OpsError) as caught:
+        recorder.reconcile(*ARGS, limits=LIMITS)
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs").problem
+    assert durable_evidence(native) == before
+    assert recorder._read("terminal:" + KEY) is None
+    assert recorder._read("selection") is None
+
+
 @pytest.mark.parametrize("stage", ["start", "execution-start", "inputs", "fit-started", "fit-completed"])
 def test_interrupted_fit_or_admission_cannot_be_reconciled(native, monkeypatch, stage):
     interrupt(monkeypatch, native.recorder, stage, after=True)
