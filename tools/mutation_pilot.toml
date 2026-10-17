@@ -474,7 +474,7 @@ tests = [
     "tests/test_v2_models_admissible_table.py",
     "tests/test_v2_models_deployment.py",
     "tests/test_v2_models_inference.py",
-    "tests/test_v2_models_inventory.py",
+    "tests/v2/models/test_inventory.py",
     "tests/test_v2_models_lineage.py",
     "tests/v2/models/test_v2_models_no_fit.py",
     "tests/test_v2_models_no_fit_native.py",
@@ -509,7 +509,7 @@ mutate = [
 ]
 tests = [
     "tests/test_v2_models_board_analog.py",
-    "tests/test_v2_models_inventory.py",
+    "tests/v2/models/test_inventory.py",
 ]
 
 [modules.chooser]
@@ -1023,6 +1023,7 @@ mutate = [
     "engine/v2/ops/incremental_data.py",
     "engine/v2/ops/provider_response.py",
     "engine/v2/ops/training.py",
+    "engine/v2/ops/state_stage.py",
     "engine/v2/ops/unit_receipts.py",
     "engine/v2/ops/computed_moves_store.py",
     "engine/v2/ops/pinned_partition_reader.py",
@@ -1085,6 +1086,7 @@ tests = [
     "tests/v2/ops/test_v2_ops_nightly_decision_clock.py",
     "tests/v2/ops/test_v2_ops_nightly_trigger.py",
     "tests/v2/ops/test_v2_ops_render_parity.py",
+    "tests/v2/ops/test_state_stage.py",
     "tests/v2/ops/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_runtime.py",
     "tests/v2/ops/test_v2_ops_scope_separation.py",

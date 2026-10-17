@@ -224,7 +224,8 @@ def frozen_state_files(paths: Iterable[Path]) -> list[Path]:
     return files
 
 
-def frozen_state_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]:
+def frozen_state_payloads(files: Iterable[Path],
+                          max_bytes: int | None = None) -> dict[str, dict[str, bytes]]:
     """Pre-built P5-4 frozen states (residual pools, tables), by member.
 
     The training job's ``--state`` outputs
@@ -232,13 +233,17 @@ def frozen_state_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]:
     ``board_analog_matcher__<strategy>__<alpha>__<cutoff>.json``,
     ``trailing_pnl_cutoff__<month>.json``) are
     classified by their own schema and role, not by file name.
+    ``max_bytes`` bounds each read and the loader; only the first read is no-follow,
+    the loader re-reads the resolved path and its bytes must hash to that first read.
     """
     from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
+    from engine.v2.models.frozen_state_io import read_bounded_state
 
     found: dict[str, dict[str, bytes]] = {}
     for path in frozen_state_files(files):
-        data = path.read_bytes()
-        state = FrozenStateLoader(path.parent).load(
+        data = path.read_bytes() if max_bytes is None else read_bounded_state(
+            path, max_bytes, no_follow=True)
+        state = FrozenStateLoader(path.parent, max_bytes=max_bytes).load(
             FrozenStateRef(path=path.name, content_hash=sha256_bytes(data)))
         schema = state.schema_version
         if schema.startswith("driver_residual_pool"):
