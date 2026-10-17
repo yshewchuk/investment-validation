@@ -123,11 +123,14 @@ size check. Existing callers omitting the ceiling retain their read contract.
 
 ### 2.1 Pool release assembly
 
-`release_objects.write_object` returns hash/path in the existing flat deployment layout after exact bounded no-follow byte verification.
-New objects are durable before return; create-only publication never overwrites or repairs incumbents.
-Every retry verifies the object and syncs its directories; the byte allowance is the supplied payload length, including zero.
-Only invocation-owned staging is cleaned; no unbounded read or cross-filesystem copy fallback is permitted.
-Post-link failure may leave a complete unreferenced object, but no new catalog/pointer. Whole-release concurrency/root ownership stays with callers.
+`release_objects.write_object` returns hash/path in the flat deployment layout; objects are durable before return and publication is create-only. Whole-release concurrency and root ownership stay with callers.
+
+| `write_object` condition | Outcome |
+|---|---|
+| New object | Durable before return; only invocation-owned staging is cleaned |
+| Existing/racing identical regular object, or retry | Verify exact bytes (allowance = payload length, including zero) and sync directories; keep the incumbent |
+| Wrong/oversized/unreadable bytes or symlink to a regular file | `ObjectVerificationError` (`ReleaseLayoutError`); incumbent retained |
+| Dangling/nonregular-target symlink, other collision or publication I/O failure | `ReleaseLayoutError` with original `OSError`; never replace; no catalog/pointer (a complete unreferenced object may remain) |
 
 `checks/phase5_release_assembly.py`, beside the catalog layout in `engine/v2/models/release_layout.py` (object hashing, `write_object` and the bounded catalog read live in `release_objects.py`, re-exported by `release_layout`; the `modules_available` probe stays in `checks/phase5_modules.py` because production code may not import dynamically):
 

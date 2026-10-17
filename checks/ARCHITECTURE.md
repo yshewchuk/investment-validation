@@ -18,13 +18,7 @@ release catalog (plus `prior_carry_set`, which lists a prior release's objects a
 its contract and refusal codes are `engine/v2/models/ARCHITECTURE.md` §2.1. The ops job
 `phase5_state_stage` reaches it through `tools/phase5_state_stage_job.py` (§2.2).
 
-The `write_object` durability contract (`engine.v2.models.release_objects`) is in `engine/v2/models/ARCHITECTURE.md` §2.1.
-
-| Object publication condition | Outcome |
-|---|---|
-| Existing/racing identical regular object | Verify exact bytes and retain the incumbent |
-| Wrong/oversized/unreadable bytes or symlink to a regular file | Fixed `ObjectVerificationError` (`ReleaseLayoutError`); retain bounded-read/I/O cause and incumbent |
-| Dangling/nonregular-target symlink, other collision or publication I/O failure | Fixed `ReleaseLayoutError` with original `OSError`; never replace; no catalog/pointer |
+The `write_object` contract (`engine.v2.models.release_objects`) is in `engine/v2/models/ARCHITECTURE.md` §2.1.
 
 `tier0_support.py` owns `DEFAULT_CORPUS`, `round_params` and `finding_dicts`.
 The default retains the corpus runner's checkout-relative `fixtures/tier0`
