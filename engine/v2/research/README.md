@@ -249,5 +249,5 @@ chains, snapshot pinning, and the refusal paths.
 non-canonical rows tombstoned, everything else byte-identical, the pinned
 snapshot recorded, and an explicit `--snapshot-id` honoured.
 
-`experiments/magnitude_search_outer.py` consumes `read_stored`, target preflight,
-training qualification, complete target reads and `magnitude_recipe` for selected outer folds.
+`experiments/magnitude_search_evidence.py` consumes `read_stored`, target preflight,
+training qualification and `magnitude_recipe` for shared inner/outer evidence; outer execution consumes complete target reads.

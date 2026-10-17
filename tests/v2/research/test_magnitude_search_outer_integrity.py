@@ -1,23 +1,40 @@
 """No-launch prerequisites and valid-hash negatives for the outer evidence chain."""
 # ruff: noqa: F811
 import copy
+from fractions import Fraction
 
+import numpy as np
 import pytest
 
 from engine.v2.foundation import content_hash
-from engine.v2.ops.errors import OpsError
 from experiments import magnitude_search_outer as outer
 from experiments import magnitude_search_trials as trials
 from tests.v2.research.magnitude_trial_support import trial_cases, trial_forecasts
 from tests.v2.research.test_magnitude_search_execution import LIMITS, inject_child
 from tests.v2.research.test_magnitude_search_outer import (
+    CONFLICT,
     base_source,  # noqa: F401
+    independent_metrics,
+    known_targets,
     native_outer_source,  # noqa: F401
     outer_case,  # noqa: F401
+    outer_problem,
     run,
     slot,
 )
 from tests.v2.research.test_magnitude_search_trials import case  # noqa: F401
+
+
+@pytest.mark.parametrize("horizon, value", [(np.int64(1), 2.5), (1, np.float32(2.5)), (1, Fraction(5, 2))])
+def test_shared_forecast_validation_preserves_inner_and_outer_numeric_policies(horizon, value):
+    fold = {"evaluation_event_ids": ["synthetic-event"]}
+    forecasts = [{"event_id": "synthetic-event", "horizon_sessions": horizon, "predicted_absolute_move_pct": value}]
+    normalized = trials.SearchTrials._forecasts(forecasts, fold, [1])
+    assert normalized == [{"event_id": "synthetic-event", "horizon_sessions": 1, "predicted_absolute_move_pct": 2.5}]
+    assert type(normalized[0]["horizon_sessions"]) is int
+    assert type(normalized[0]["predicted_absolute_move_pct"]) is float
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+        outer._forecasts(forecasts, fold, [1])
 
 
 @pytest.mark.parametrize("missing", ["selection", "execution", "terminal"])
@@ -32,9 +49,10 @@ def test_missing_or_submitted_only_native_evidence_cannot_launch(outer_case, mon
     monkeypatch.setattr(trials.SearchTrials, "execute", lambda *a, **kw: pytest.fail("attempted inner execute"))
     monkeypatch.setattr(outer, "_inputs", lambda *a: pytest.fail("opened outer inputs"))
     before = case.conn.total_changes
-    with pytest.raises(OpsError) as error:
+    message = ("outer evaluation requires an existing frozen selection" if missing == "selection" else
+               "outer evaluation requires completed native inner trials")
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", message):
         run(case)
-    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert case.conn.total_changes == before
 
 
@@ -119,16 +137,14 @@ def test_valid_hash_outer_evidence_tampering_refuses_replay(outer_case, monkeypa
         return original(conn, store, run_id, name, body, **kwargs)
     monkeypatch.setattr(outer, "append_record", append)
     # Valid content-addressed record bytes are published, not hash-corrupt files.
-    with pytest.raises(OpsError) as error:
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
         run(case)
-    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert slot(case, "terminal") is not None
     before = case.conn.total_changes
     monkeypatch.setattr(outer, "run_fitted_trial", lambda *a: pytest.fail("tampered replay fitted"))
     monkeypatch.setattr(outer, "load_magnitude_targets", lambda *a, **kw: pytest.fail("tampered replay opened labels"))
-    with pytest.raises(OpsError) as repeated:
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
         run(case)
-    assert repeated.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert case.conn.total_changes == before
 
 
@@ -147,9 +163,8 @@ def test_bad_child_forecasts_refuse_before_outer_labels(outer_case, monkeypatch,
         return result
     monkeypatch.setattr(outer, "run_fitted_trial", fitted)
     monkeypatch.setattr(outer, "load_magnitude_targets", lambda *a, **kw: pytest.fail("invalid forecast opened labels"))
-    with pytest.raises(OpsError) as error:
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
         run(outer_case)
-    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert slot(outer_case, "forecasts") is None
     assert slot(outer_case, "terminal") is None
 
@@ -165,7 +180,11 @@ def injected(recipe, train, labels, test):
 """)
     result = run(case)
     assert {row["predicted_absolute_move_pct"] for row in result["predictions"]} == {5.0}
-    assert result["metrics"]["rmse"] == pytest.approx((276 / 8) ** 0.5)
+    assert result["metrics"] == {"count": 24, "rmse": pytest.approx((276 / 8) ** 0.5), "mae": 4.0}
+    expected = [{"event_id": event, "predicted_absolute_move_pct": 5.0}
+                for event in known_targets() if ":2024-" in event]
+    assert result["per_horizon"] == [{"horizon_sessions": horizon, **independent_metrics(expected)}
+                                      for horizon in [5, 3, 1]]
     assert all(child.poll() is not None and not path.exists() for child, path in children)
 
 
@@ -179,7 +198,7 @@ def test_actual_submitted_forecast_selection_has_no_outer_execution_authority(ca
     before = r.conn.total_changes
     monkeypatch.setattr(trials.SearchTrials, "execute", lambda *a, **kw: pytest.fail("submitted trial executed"))
     monkeypatch.setattr(outer, "_inputs", lambda *a: pytest.fail("submitted selection opened outer inputs"))
-    with pytest.raises(OpsError, match="completed native inner trials"):
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", "outer evaluation requires completed native inner trials"):
         outer.execute_outer_fold(r.conn, r.store, r.repository, r.registration,
                                  r.request, r.plan_ref, "2024", limits=LIMITS)
     assert r.conn.total_changes == before

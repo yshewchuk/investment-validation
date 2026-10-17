@@ -8,15 +8,14 @@ from engine.v2.models.no_fit import forbid_fitting
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.migrations import require_current
-from engine.v2.research.magnitude_history_store import read_stored
-from engine.v2.research.magnitude_inputs import (
-    load_magnitude_targets,
-    magnitude_recipe,
-    preflight_magnitude_targets,
-    qualify_magnitude_training_targets,
-)
-from experiments.magnitude_history_inputs import history_binding
+from engine.v2.research.magnitude_inputs import load_magnitude_targets
 from experiments.magnitude_report import magnitude_metrics
+from experiments.magnitude_search_evidence import (
+    admit_fold_inputs,
+    fit_evidence,
+    normalize_forecasts,
+    validate_targets,
+)
 from experiments.magnitude_search_execution import (
     execution_limits,
     run_fitted_trial,
@@ -63,85 +62,23 @@ def _native_selection(trials, plan, read):
 
 
 def _inputs(repository, binding, fold):
-    snapshot = from_document(SnapshotRef, binding["snapshot"])
-    month = binding["holdouts"]["holdout_as_of_month"]
-    history = history_binding(repository, snapshot, binding["magnitude_plan"],
-        binding["magnitude_history_request"], as_of_month=month, event_ids=binding["event_ids"])
-    _equal(history, binding["magnitude_history"])
-    participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
-    preflight = preflight_magnitude_targets(repository, snapshot, as_of_month=month, event_ids=sorted(participants))
-    stored = read_stored(repository, from_document(SnapshotRef, history["feature_snapshot"]), history["context"])
-    train = qualify_magnitude_training_targets(repository, snapshot, as_of_month=month,
-        labels_before=fold["training_labels_before"], event_ids=fold["training_candidate_event_ids"])
-    return {"preflight": preflight, "stored_inputs_id": stored["inputs_id"], "training_inputs": dict(train.attrs),
-            "training": train[["event_id", "absolute_move_pct"]].to_dict("records"),
-            "features": [row for row in stored["rows"] if row["event_id"] in participants]}
-
-
-def _fit_evidence(inputs, fold, plan, execution):
-    indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
-    train = [row["event_id"] for row in inputs["training"]]
-    result = []
-    for horizon in plan["horizons"]:
-        documents = []
-        for events in (train, fold["evaluation_event_ids"]):
-            rows = [indexed[event, horizon] for event in events]
-            documents.append({"columns": execution["features"], "row_keys": [
-                [row[name] for name in ("event_id", "context_id", "horizon_sessions")] for row in rows],
-                "values": [[row[name] for name in execution["features"]] for row in rows]})
-        documents[0]["absolute_move_pct"] = [row["absolute_move_pct"] for row in inputs["training"]]
-        result.append({"horizon_sessions": horizon, "training_event_ids": train,
-            "evaluation_event_ids": fold["evaluation_event_ids"], "training_matrix_id": content_hash(documents[0]),
-            "prediction_matrix_id": content_hash(documents[1])})
-    return result
+    return admit_fold_inputs(repository, binding, fold, history_failure=_conflict(), strict_json=True)
 
 
 def _forecasts(rows, fold, horizons):
-    import math
-
     try:
-        expected = {(event, horizon) for event in fold["evaluation_event_ids"] for horizon in horizons}
-        found = {}
-        if not isinstance(rows, list) or len(rows) != len(expected):
-            raise ValueError
-        for row in rows:
-            if set(row) != {"event_id", "horizon_sessions", "predicted_absolute_move_pct"}:
-                raise ValueError
-            value, horizon = row["predicted_absolute_move_pct"], row["horizon_sessions"]
-            pair = (row["event_id"], horizon)
-            if (type(horizon) is not int or type(value) not in (int, float) or not math.isfinite(value)
-                    or value < 0 or pair not in expected or pair in found):
-                raise ValueError
-            found[pair] = {**row, "predicted_absolute_move_pct": float(value)}
-        return [found[pair] for pair in sorted(expected)]
+        return normalize_forecasts(rows, fold, horizons, strict_json=True)
     except (ValueError, TypeError, KeyError, OverflowError):
         raise _conflict() from None
 
 
 def _validate_targets(inputs, validation, fold):
-    """Reconstruct the exact protected native receipt, without reopening labels."""
-    import math
-
-    preflight = inputs["preflight"]
-    events = set(fold["evaluation_event_ids"])
-    consumed = [row for row in preflight["planned_inputs"] if row["event_id"] in events]
-    ordered = [row["event_id"] for row in consumed]
-    if len(ordered) != len(events) or set(ordered) != events:
-        raise _conflict()
-    recipe = magnitude_recipe()
-    receipt = {"schema_version": "research_magnitude_targets.v1",
-        **{name: preflight[name] for name in ("snapshot_id", "holdout_as_of_month", "random_membership_version",
-            "rolling_membership_version", "population_use", "purpose", "computed_moves_version")},
-        "labels_before": fold["evaluation_labels_before"], "target_recipe": recipe,
-        "target_recipe_id": content_hash(recipe), "consumed_inputs": consumed, "excluded_future_events": []}
-    _equal(validation["evaluation_inputs"], {**receipt, "inputs_id": content_hash(receipt), "holdout_exclusions": []})
-    if set(validation) != {"evaluation_inputs", "targets"} or [row["event_id"] for row in validation["targets"]] != ordered:
-        raise _conflict()
-    for row in validation["targets"]:
-        value = row["absolute_move_pct"]
-        if (set(row) != {"event_id", "absolute_move_pct"} or type(value) not in (int, float)
-                or value < 0 or not math.isfinite(value)):
-            raise _conflict()
+    try:
+        if set(validation) != {"evaluation_inputs", "targets"}:
+            raise ValueError
+        validate_targets(inputs["preflight"], fold, validation["evaluation_inputs"], validation["targets"], strict_json=True)
+    except (ValueError, TypeError, KeyError, OverflowError):
+        raise _conflict() from None
 
 
 def _result(started, inputs, execution, forecasts, validation, fold, horizons):
@@ -167,7 +104,7 @@ def _replay(read, started, fold, plan, execution):
     try:
         _equal(read("start"), started)
         inputs = read("inputs")
-        fits = _fit_evidence(inputs, fold, plan, execution)
+        fits = fit_evidence(inputs, fold, plan, execution)
         forecasts = _forecasts(read("forecasts"), fold, plan["horizons"])
         receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
                    "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
@@ -221,7 +158,7 @@ def execute_outer_fold(conn, store, repository, registration, request, plan_ref,
     append("start", started)
     inputs = _inputs(repository, binding, fold)
     append("inputs", inputs)
-    expected = _fit_evidence(inputs, fold, plan, execution)
+    expected = fit_evidence(inputs, fold, plan, execution)
     fits, pending = [], []
     def progress(state, fit):
         index = len(fits)

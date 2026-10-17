@@ -1,7 +1,10 @@
 """Native selected outer fits, temporal ordering and pooled independent oracles."""
 import math
 import shutil
+from contextlib import contextmanager
+from functools import cache
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -9,7 +12,13 @@ from engine.models.no_fit import RuntimeFitForbidden as LegacyRuntimeFitForbidde
 from engine.models.no_fit import no_fit_guard as legacy_guard
 from engine.v2.contracts import ArtifactRef
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactStore, SystemClock, content_hash, from_document
+from engine.v2.foundation import (
+    ArtifactStore,
+    SystemClock,
+    content_hash,
+    from_document,
+    to_document,
+)
 from engine.v2.models.adapters import RuntimeFitForbidden
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.catalog import connect
@@ -17,9 +26,102 @@ from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_outer as outer
 from experiments import magnitude_search_trials as trials
 from experiments.magnitude_search_plan import seal_search_plan
-from tests.v2.research.magnitude_trial_support import poison_outcomes, trial_cases
+from tests.v2.research.magnitude_trial_support import history_event, poison_outcomes, trial_cases
 from tests.v2.research.test_magnitude_search_execution import LIMITS, inject_child
 from tests.v2.research.test_magnitude_search_plan import source as base_source  # noqa: F401
+
+HORIZONS = [5, 3, 1]
+CONFLICT = "outer evaluation evidence differs from its sealed inputs"
+HOLDOUTS = {"random": "excluded; not evaluated", "rolling": "excluded; not evaluated"}
+
+
+@contextmanager
+def outer_problem(code, message, *, category="validation", retryable=False):
+    with pytest.raises(OpsError) as caught:
+        yield
+    assert to_document(caught.value.problem) == {
+        "schema_version": "problem.v1.0", "code": code, "category": category,
+        "retryable": retryable, "message": message, "stage": None, "trace_id": None,
+        "dependency_refs": [], "retry_after_seconds": None, "diagnostic_ref": None, "details": {}}
+
+
+@cache
+def known_targets():
+    """Fixture-owned truth, independent of recorded validation or returned predictions."""
+    days = ("2022-06-02", "2022-12-22", "2022-12-23", "2023-01-03", "2023-06-02",
+            "2024-06-12", "2024-06-17", "2024-12-27", "2024-12-30", "2025-01-07")
+    values = {"SYNTH_A": (2, 3, 3, 4, 6, 10, 8, 3, 3, 12),
+              "SYNTH_B": (2, 3, 3, 8, 12, 20, 4, 3, 3, 16)}
+    return {history_event(day, ticker=ticker)["event_id"]: float(value)
+            for ticker, moves in values.items() for day, value in zip(days, moves)}
+
+
+def journal_slots(case):
+    return [tuple(row) for row in case.conn.execute(
+        "SELECT slot, ref_json FROM magnitude_search_records ORDER BY slot")]
+
+
+def independent_metrics(rows):
+    errors = [abs(row["predicted_absolute_move_pct"] - known_targets()[row["event_id"]]) for row in rows]
+    return {"count": len(errors), "mae": pytest.approx(math.fsum(errors) / len(errors)),
+            "rmse": pytest.approx(math.sqrt(math.fsum(error ** 2 for error in errors) / len(errors)))}
+
+
+def assert_fold_oracle(case, result, year):
+    targets = {event: target for event, target in known_targets().items() if event.split(":")[1][:4] == year}
+    forecasts = slot(case, "forecasts", year)
+    indexed = {(row["event_id"], row["horizon_sessions"]): row["predicted_absolute_move_pct"] for row in forecasts}
+    expected_predictions = [{"event_id": event, "horizon_sessions": horizon,
+        "predicted_absolute_move_pct": indexed[event, horizon], "absolute_move_pct": targets[event]}
+        for event in sorted(targets) for horizon in sorted(HORIZONS)]
+    assert forecasts == [{key: value for key, value in row.items() if key != "absolute_move_pct"}
+                         for row in expected_predictions]
+    selection = next(item for item in case.selected["selections"] if item["outer_year"] == year)
+    candidate = next(item for item in case.plan["candidates"]
+                     if item["candidate_id"] == selection["selected_candidate_id"])
+    inputs, execution, validation = (slot(case, name, year) for name in ("inputs", "execution", "validation"))
+    assert {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]} == targets
+    assert inputs["training_inputs"]["labels_before"] == {"2024": "2024-01-01", "2025": "2024-12-27"}[year]
+    assert validation["evaluation_inputs"]["labels_before"] == "2025-02-01"
+    assert validation["evaluation_inputs"]["purpose"] == "selection"
+    assert case.plan["horizons"] == HORIZONS
+    expected = {"schema_version": "magnitude_search_outer_result.v1",
+        "outer_id": content_hash([case.plan["plan_id"], year]), "plan_id": case.plan["plan_id"],
+        "outer_year": year, "candidate": candidate, "selection_id": content_hash(case.selected),
+        "inputs_id": content_hash(inputs), "execution_id": content_hash(execution),
+        "validation_id": content_hash(validation), "training_inputs": inputs["training_inputs"],
+        "evaluation_inputs": validation["evaluation_inputs"], "fit_attempt_count": 3,
+        "event_count": {"2024": 8, "2025": 2}[year], "forecast_count": {"2024": 24, "2025": 6}[year],
+        "predictions": expected_predictions, "metrics": independent_metrics(expected_predictions),
+        "per_horizon": [{"horizon_sessions": horizon, **independent_metrics([
+            row for row in expected_predictions if row["horizon_sessions"] == horizon])} for horizon in HORIZONS],
+        "prospective_candidate_id": case.selected["prospective_candidate_id"],
+        "evaluation_authority": "selected_outer_fold_only", "final_read_authority": "none",
+        "holdout_results": HOLDOUTS}
+    assert result == {**expected, "result_id": content_hash({key: value for key, value in result.items()
+                                                          if key != "result_id"})}
+    return expected_predictions
+
+
+def expected_fits(case, year="2024"):
+    """Rebuild matrix identities from the admitted features and fixture-known targets."""
+    inputs = slot(case, "inputs", year)
+    fold = next(item["outer"] for item in case.plan["folds"] if item["outer"]["year"] == year)
+    train = fold["training_candidate_event_ids"]
+    assert inputs["training"] == [{"event_id": event, "absolute_move_pct": known_targets()[event]} for event in train]
+    features = case.recorder.registration.document["magnitude_execution"]["features"]
+    indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
+    result = []
+    for horizon in HORIZONS:
+        matrices = [{"columns": features,
+            "row_keys": [[event, indexed[event, horizon]["context_id"], horizon] for event in events],
+            "values": [[indexed[event, horizon][name] for name in features] for event in events]}
+            for events in (train, fold["evaluation_event_ids"])]
+        matrices[0]["absolute_move_pct"] = [known_targets()[event] for event in train]
+        result.append({"horizon_sessions": horizon, "training_event_ids": train,
+            "evaluation_event_ids": fold["evaluation_event_ids"], "training_matrix_id": content_hash(matrices[0]),
+            "prediction_matrix_id": content_hash(matrices[1])})
+    return result
 
 
 @pytest.fixture(scope="module")
@@ -99,50 +201,47 @@ def test_real_outer_selected_only_forecasts_precede_labels_and_replay(outer_case
     scores = case.selected["selections"][0]["scores"]
     assert scores[0]["metrics"] == scores[1]["metrics"]
     assert result["candidate"]["candidate_id"] == min(item["candidate_id"] for item in scores)
-    assert result["candidate"]["candidate_id"] == case.selected["selections"][0]["selected_candidate_id"]
-    assert result["prospective_candidate_id"] == case.selected["prospective_candidate_id"]
-    assert result["evaluation_authority"] == "selected_outer_fold_only"
-    assert result["final_read_authority"] == "none"
-    assert result["event_count"] == 8 and result["forecast_count"] == 24
-    assert result["training_inputs"]["labels_before"] == "2024-01-01"
-    assert result["evaluation_inputs"]["labels_before"] == "2025-02-01"
-    errors = [abs(row["predicted_absolute_move_pct"] - row["absolute_move_pct"]) for row in result["predictions"]]
-    assert result["metrics"] == {"count": 24, "mae": pytest.approx(sum(errors) / 24),
-                                 "rmse": pytest.approx(math.sqrt(sum(e * e for e in errors) / 24))}
+    assert_fold_oracle(case, result, "2024")
     before = case.conn.total_changes
     forbid_work(monkeypatch)
     with no_fit_guard(), legacy_guard():
         assert run(case) == result
     assert case.conn.total_changes == before
-    with pytest.raises(OpsError) as error:
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
         run(case, limits={**LIMITS, "cpu_seconds": 31})
-    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(outer_case, monkeypatch):
     case = outer_case
     first = run(case)
-    with pytest.raises(OpsError, match="every completed outer fold"):
-        collect(case)
+    before = case.conn.total_changes, journal_slots(case)
+    public_replay = Mock(side_effect=AssertionError("incomplete collect attempted public outer replay"))
+    with monkeypatch.context() as patch:
+        patch.setattr(outer, "execute_outer_fold", public_replay)
+        with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", "outer report requires every completed outer fold"):
+            collect(case)
+    public_replay.assert_not_called()
+    assert (case.conn.total_changes, journal_slots(case)) == before
     assert slot(case, "start", "2025") is None
     second = run(case, "2025")
+    expected_predictions = [{**row, "outer_year": year} for year, result in (("2024", first), ("2025", second))
+                            for row in assert_fold_oracle(case, result, year)]
     forbid_work(monkeypatch)
-    before = case.conn.total_changes
+    before = case.conn.total_changes, journal_slots(case)
     with no_fit_guard(), legacy_guard():
         report = collect(case)
-    assert report["folds"] == [first, second]
-    assert report["event_count"] == 10
-    errors = [abs(row["predicted_absolute_move_pct"] - row["absolute_move_pct"]) for row in report["predictions"]]
-    expected = math.sqrt(sum(error ** 2 for error in errors) / len(errors))
-    assert report["metrics"]["rmse"] == pytest.approx(expected)
+    expected = {"schema_version": "magnitude_search_outer_report.v1", "plan_id": case.plan["plan_id"],
+        "folds": [first, second], "predictions": expected_predictions, "metrics": independent_metrics(expected_predictions),
+        "event_count": 10, "forecast_count": 30,
+        "per_horizon": [{"horizon_sessions": horizon, **independent_metrics([
+            row for row in expected_predictions if row["horizon_sessions"] == horizon])} for horizon in HORIZONS],
+        "prospective_candidate_id": case.selected["selections"][-1]["selected_candidate_id"],
+        "winner_policy": "latest_outer_inner_selection_before_its_evaluation",
+        "final_read_authority": "none", "holdout_results": HOLDOUTS}
+    assert report == {**expected, "result_id": content_hash({key: value for key, value in report.items()
+                                                          if key != "result_id"})}
     assert report["metrics"]["rmse"] != pytest.approx((first["metrics"]["rmse"] + second["metrics"]["rmse"]) / 2)
-    for metrics in report["per_horizon"]:
-        selected = [row for row in report["predictions"] if row["horizon_sessions"] == metrics["horizon_sessions"]]
-        assert metrics["count"] == 10
-        assert metrics["rmse"] == pytest.approx(math.sqrt(sum((row["predicted_absolute_move_pct"] - row["absolute_move_pct"]) ** 2
-                                                             for row in selected) / 10))
-    assert report["prospective_candidate_id"] == case.selected["selections"][-1]["selected_candidate_id"]
-    assert case.conn.total_changes == before
+    assert (case.conn.total_changes, journal_slots(case)) == before
 
 
 @pytest.mark.parametrize("guard, exception", [(no_fit_guard, RuntimeFitForbidden), (legacy_guard, LegacyRuntimeFitForbidden)])
@@ -154,36 +253,62 @@ def test_no_fit_guards_before_outer_claim(outer_case, guard, exception):
     assert slot(outer_case, "start") is None
 
 
-@pytest.mark.parametrize("stage", ["fit", "labels", "input"])
-def test_outer_failure_never_replaces_candidate_or_retries(outer_case, monkeypatch, stage):
+@pytest.mark.parametrize("number", [1, 2, 3])
+def test_outer_fit_failure_retains_exact_prefix_without_replacement_or_retry(outer_case, monkeypatch, number):
     case = outer_case
-    if stage == "fit":
-        inject_child(monkeypatch, "def injected(*args): raise ValueError('synthetic estimator failure')")
-    else:
-        def refused(*args, **kwargs):
-            raise fail("RESOURCE_UNAVAILABLE", "synthetic shared failure")
-        monkeypatch.setattr(outer, "load_magnitude_targets" if stage == "labels" else "_inputs", refused)
-    with pytest.raises(OpsError) as error:
+    children = inject_child(monkeypatch, "count = 0\ndef injected(recipe, train, labels, test):\n"
+        "    global count\n    count += 1\n"
+        f"    if count == {number}: raise ValueError('synthetic estimator failure')\n"
+        "    return [2.0] * len(test)\n")
+    monkeypatch.setattr(outer, "load_magnitude_targets", lambda *a, **kw: pytest.fail("failed fit opened outer labels"))
+    with outer_problem("EXPERIMENT_VARIANT_FAILED",
+            "selected outer candidate failed; replacement and retry are forbidden", category="internal"):
         run(case)
-    assert error.value.code == ("EXPERIMENT_VARIANT_FAILED" if stage == "fit" else "RESOURCE_UNAVAILABLE")
-    assert slot(case, "start") is not None and slot(case, "terminal") is None
-    if stage == "fit":
-        assert slot(case, "execution")["fit_attempt_count"] == 1
-        assert slot(case, "execution")["completed_fit_count"] == 0
-        assert slot(case, "forecasts") is None
-    elif stage == "labels":
-        assert slot(case, "forecasts") is not None
+    fits = expected_fits(case)
+    assert slot(case, "execution") == {"status": "failed", "fits": fits[:number - 1],
+        "fit_attempt_count": number, "completed_fit_count": number - 1, "forecasts_id": None}
+    for index, fit in enumerate(fits):
+        assert slot(case, "fit-started:" + str(fit["horizon_sessions"])) == (fit if index < number else None)
+        assert slot(case, "fit-completed:" + str(fit["horizon_sessions"])) == (fit if index < number - 1 else None)
+    assert all(slot(case, name) is None for name in ("forecasts", "validation", "terminal"))
+    candidate = next(item for item in case.plan["candidates"]
+                     if item["candidate_id"] == case.selected["selections"][0]["selected_candidate_id"])
+    assert slot(case, "start")["candidate"] == candidate
+    before = case.conn.total_changes, journal_slots(case)
     monkeypatch.setattr(outer, "run_fitted_trial", lambda *a: pytest.fail("retried outer fit"))
-    with pytest.raises(OpsError, match="already committed"):
+    monkeypatch.setattr(outer, "_inputs", lambda *a: pytest.fail("retried outer inputs"))
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
         run(case)
     assert case.recorder.freeze() == case.selected
+    assert (case.conn.total_changes, journal_slots(case)) == before
+    assert len(children) == 1
+    assert all(child.poll() is not None and not path.exists() for child, path in children)
+
+
+@pytest.mark.parametrize("stage", ["labels", "input"])
+def test_outer_shared_failure_never_replaces_candidate_or_retries(outer_case, monkeypatch, stage):
+    case = outer_case
+    def refused(*args, **kwargs):
+        raise fail("RESOURCE_UNAVAILABLE", "synthetic shared failure")
+    monkeypatch.setattr(outer, "load_magnitude_targets" if stage == "labels" else "_inputs", refused)
+    with outer_problem("RESOURCE_UNAVAILABLE", "synthetic shared failure", category="resource", retryable=True):
+        run(case)
+    assert slot(case, "start") is not None and slot(case, "terminal") is None
+    assert (slot(case, "forecasts") is not None) == (stage == "labels")
+    before = case.conn.total_changes, journal_slots(case)
+    monkeypatch.setattr(outer, "run_fitted_trial", lambda *a: pytest.fail("retried outer fit"))
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
+        run(case)
+    assert case.recorder.freeze() == case.selected
+    assert (case.conn.total_changes, journal_slots(case)) == before
 
 
 @pytest.mark.parametrize("year, limits", [("2026", LIMITS), (2024, LIMITS), ("2024", {}),
     ("2024", {**LIMITS, "wall_seconds": True})])
 def test_invalid_request_never_claims(outer_case, year, limits):
     before = outer_case.conn.total_changes
-    with pytest.raises(OpsError) as error:
+    message = ("outer fold is outside the sealed search plan" if year != "2024" else
+               "search execution requires explicit positive integer resource limits")
+    with outer_problem("INVALID_EXPERIMENT_SPEC", message):
         run(outer_case, year, limits=limits)
-    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
     assert outer_case.conn.total_changes == before

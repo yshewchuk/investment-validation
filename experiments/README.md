@@ -109,9 +109,11 @@ refits only that year's frozen inner winner on qualified prior labels. Submitted
 forecasts alone cannot authorize it. All planned native inner completions,
 including permitted candidate failures, are verified before outer execution.
 
-Each result preserves the selected recipe, input/source evidence, actual fit count,
-complete forecast/target pairs, event/forecast counts and pooled/per-horizon
-RMSE/MAE. Forecasts are durably fixed before that fold's evaluation targets open.
+The immutable outer journal owns source bindings, native inputs and full fit evidence.
+Returned results contain the selected recipe, evidence IDs, training/evaluation
+receipts, actual fit count, complete forecast/target pairs, event/forecast counts
+and pooled/per-horizon RMSE/MAE; they do not inline all journal evidence. Forecasts
+are durably fixed before that fold's evaluation targets open.
 Repeating a completed call verifies the original evidence without fitting or
 opening native payloads. Any incomplete outer attempt must remain unresolved;
 there is no retry, replacement candidate or recovery API in this slice.
@@ -120,5 +122,12 @@ there is no retry, replacement candidate or recovery API in this slice.
 requires all outer folds complete and returns their verified results plus pooled
 and per-horizon event-error metrics. It never launches missing work or chooses a
 winner using outer results: `prospective_candidate_id` is the latest fold's inner
-selection. Both APIs are library-only; no CLI, real-data execution, holdout/final
+selection. Collection returns a dictionary only; it does not persist an aggregate
+artifact, export or ledger row. Both APIs are library-only; no CLI, real-data
+execution, holdout/final
 access, ledger publication or release authority is implied.
+
+`magnitude_search_evidence` supplies shared fold input admission, matrix evidence,
+forecast normalization and target-receipt validation. Inner wrappers retain submitted
+Real/Integral support and their original refusal envelopes; outer wrappers enforce
+JSON-native numeric types. The static dependency is included in source seals.
