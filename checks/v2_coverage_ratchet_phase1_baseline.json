@@ -1,6 +1,6 @@
 {
   "schema_version": "phase1_coverage.v1.0",
-  "suite_version": "phase1_coverage_suite.v12",
+  "suite_version": "phase1_coverage_suite.v13",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_dashboard_board_filters_ops_root.py",
@@ -62,7 +62,7 @@
     "tests/test_v2_ops_experiment_context.py",
     "tests/test_v2_ops_experiment_folds.py",
     "tests/test_v2_ops_experiment_reports.py",
-    "tests/test_v2_ops_explain_from_logs.py",
+    "tests/v2/ops/test_v2_ops_explain_from_logs.py",
     "tests/test_v2_ops_fingerprints_code_assets.py",
     "tests/test_v2_ops_fingerprints_model_scan.py",
     "tests/test_v2_ops_fixtures.py",
