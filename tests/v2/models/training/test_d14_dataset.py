@@ -306,9 +306,10 @@ def test_no_decisions_refuse_before_history_or_daily_reads(pinned, case, monkeyp
     assert calls == ["earnings_events"]
 
 
-def test_wrong_snapshot_ref_refuses_before_reads(pinned):
+def test_wrong_snapshot_ref_refuses_before_reads(pinned, monkeypatch):
     calendar = native_trading_calendar({"index": pd.DataFrame({"date": pinned["days"]})})
     forged = dataclasses.replace(pinned["snapshot"], calendar_version="different")
+    monkeypatch.setattr(pinned["repository"], "scan", forbidden)
     with pytest.raises(errors.DataError, match="catalog identity") as err:
         calculate_frame(pinned["repository"], forged, calendar=calendar, role="implied_t1")
     assert err.value.code == "IDENTITY_CONFLICT"
