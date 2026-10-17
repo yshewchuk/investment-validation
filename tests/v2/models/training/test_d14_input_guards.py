@@ -26,6 +26,10 @@ def test_fixed_monthly_population_matches_legacy_across_year_boundary(pinned, mo
     assert_frame_equal(actual[expected.columns], expected, check_exact=True)
     assert set(actual.year) == {2024, 2025, 2026}
     assert pd.Timestamp("2026-01-02") in set(actual.event_date)
+    history = actual.loc[actual.event_date == pd.Timestamp("2026-01-02"), list(d14_dataset.HISTORY_COLUMNS)]
+    assert len(history) == 1 and history.notna().all().all()
+    assert history.iloc[0].n_prior == 26
+    assert history.iloc[0].mean_prior_move == 26.5
 
 
 @pytest.mark.parametrize("pinned", ("blank_session",), indirect=True)

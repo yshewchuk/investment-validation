@@ -50,8 +50,8 @@ incrementally: the math is reached in production through
 Research's `event_history.load_event_history` feeds `history_features` only
 after canonical holdout, physical object-isolation and availability admission.
 That read boundary owns provenance and missing-history status; the math is unchanged.
-The additive `training.d14_dataset` path uses `daily_state_lookup` for entry/exit
-market observations, preserving stored panel history rather than rebuilding it.
+The additive `engine.v2.models.training.d14_dataset` path uses `daily_state_lookup`
+for entry/exit market observations, preserving stored panel history rather than rebuilding it.
 
 ### Runup feature math
 

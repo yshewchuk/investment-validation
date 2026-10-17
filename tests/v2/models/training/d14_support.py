@@ -73,6 +73,10 @@ def pinned(tmp_path, request):
             event = events.iloc[0].to_dict()
             event.update(event_id=f"boundary-{year}", event_date=pd.Timestamp(f"{year}-01-02"), year=year)
             events = pd.concat([events, pd.DataFrame([event])], ignore_index=True)
+            if year == 2026:
+                history = panel.iloc[0].to_dict()
+                history.update(date=event["event_date"], year=year, n_prior=26, mean_prior_move=26.5)
+                panel = pd.concat([panel, pd.DataFrame([history])], ignore_index=True)
     elif case == "blank_session":
         events.loc[0, "session"] = ""
     elif case == "warmup":

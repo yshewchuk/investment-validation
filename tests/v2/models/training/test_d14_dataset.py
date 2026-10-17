@@ -199,8 +199,8 @@ def build_with_projection_oracle(pinned, monkeypatch):
 def test_verified_builder_retains_exact_legacy_projection(pinned, monkeypatch):
     expected = legacy_frame(pinned, "implied_t1", monkeypatch)
     # This fixture's 401st day is a trading session, making the +1 error observable.
-    assert pinned["days"][-1] == pd.Timestamp("2025-03-31")
-    assert projected_trading_days("2026-05-05", "2026-05-06") == [pd.Timestamp("2026-05-06")]
+    last = pinned["days"][-1]
+    assert projected_trading_days(last, last + pd.Timedelta(days=401))[-1] == last + pd.Timedelta(days=401)
     actual = build_with_projection_oracle(pinned, monkeypatch)
     assert_frame_equal(actual[expected.columns], expected, check_exact=True)
     corrupted = actual[expected.columns].copy()

@@ -131,8 +131,9 @@ certify calendar provenance or attach `training_inputs`. Its bounded-read,
 decision and daily-state helpers are declared in the training README.
 Bounded native Repository scans pin earnings,
 daily state and the stored `feature_panel` history block to one SnapshotRef.
-History retains the original panel population and missing values from its
-historical producer; it is not reconstructed with `scan_panel_row`.
+History is left-joined by ticker/event date; earnings defines decision membership.
+Stored history values and missingness are retained from the historical producer,
+without reconstruction through `scan_panel_row`.
 This is root §5's named compatibility-history exception for these two recipes,
 not a claim of native historical production or source availability/finality.
 Only daily features at the D14 entry and labels at the session-aware exit are
@@ -141,13 +142,15 @@ receipt, verified against the snapshot and object hash, with native projection
 math. The consumed calendar bytes are hash-verified and capped at 16 MiB.
 No mutable calendar file, head resolution or legacy reader is used.
 
-`python -m tools.phase5_d14_inputs` requires explicit catalog, artifact root,
-snapshot and import-receipt identifiers, delegating to that same public API. The fixed
+The opt-in `python -m tools.phase5_d14_inputs` CLI has no nightly or ops caller.
+It requires explicit catalog, artifact root, snapshot and import-receipt
+identifiers, delegating to that same public API. The fixed
 2017–2026 event window is the current monthly recipe population, with daily
 history from 2016. Snapshot coverage does not widen that recipe contract.
 The existing preparation, fold planning and label/membership receipts remain
 unchanged. `run_training_job(input_identity=...)` additionally binds the pinned
-source identity in `job.json`; changed sources refuse resume even if values
+source identity in `job.json`: `schema_version`, `snapshot_id`, `receipt_id`,
+`calendar_hash` and `table_versions`. Changed sources refuse resume even if values
 match. Champion jobs, scheduling, source-finality admission, historical panel
 reconstruction, held-out residual pools and serving publication are separate.
 No eligible decisions refuse before history/daily reads, preventing a zero-fold

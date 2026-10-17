@@ -692,8 +692,8 @@ change their arithmetic or imply that source receipt production is available.
   prebuilt geometry or pricing object. Legacy records are expected values
   for a comparator only — never a native input.
   This contract adds a migration exception: `training.build_d14_dataset` for monthly
-  `implied_t1`/`runup_move`: it retains imported `feature_panel` history and
-  membership with explicit snapshot/receipt/calendar/table-version lineage.
+  `implied_t1`/`runup_move`: it retains imported `feature_panel` history
+  with explicit snapshot/receipt/calendar/table-version lineage.
   This is compatibility history, not native historical production or proof of
   EOD availability/finality. Native scoring/capture's answer-free rule is unchanged.
 - **Missing input → typed refusal, never a silent default.** A missing or
