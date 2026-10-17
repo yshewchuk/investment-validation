@@ -69,7 +69,8 @@ def pinned(tmp_path, request):
     elif case == "all_null":
         panel["ema12_prior_move"] = np.nan
     elif case == "boundary":
-        for year in (2016, 2026, 2027):
+        days = projected_trading_days("2015-11-01", days[-1])
+        for year in (2016, 2017, 2026, 2027):
             event = events.iloc[0].to_dict()
             event.update(event_id=f"boundary-{year}", event_date=pd.Timestamp(f"{year}-01-02"), year=year)
             events = pd.concat([events, pd.DataFrame([event])], ignore_index=True)

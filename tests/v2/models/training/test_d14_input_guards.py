@@ -21,10 +21,15 @@ from tools import phase5_d14_inputs
 
 @pytest.mark.parametrize("pinned", ("boundary",), indirect=True)
 def test_fixed_monthly_population_matches_legacy_across_year_boundary(pinned, monkeypatch):
+    outside = pinned["events"].loc[pinned["events"].event_id == "boundary-2016"].iloc[0]
+    assert outside.session == "AMC"
+    assert sum(pinned["days"] <= outside.event_date) >= 15
     expected = legacy_frame(pinned, "implied_t1", monkeypatch)
     actual = phase5_d14_inputs.build_dataset("implied_t1", **pinned["inputs"])
     assert_frame_equal(actual[expected.columns], expected, check_exact=True)
-    assert set(actual.year) == {2024, 2025, 2026}
+    assert set(actual.year) == {2017, 2024, 2025, 2026}
+    assert outside.event_date not in set(actual.event_date)
+    assert pd.Timestamp("2017-01-02") in set(actual.event_date)
     assert pd.Timestamp("2026-01-02") in set(actual.event_date)
     history = actual.loc[actual.event_date == pd.Timestamp("2026-01-02"), list(d14_dataset.HISTORY_COLUMNS)]
     assert len(history) == 1 and history.notna().all().all()
@@ -81,6 +86,21 @@ def test_verified_builder_refuses_unknown_role_before_io(monkeypatch):
         build_d14_dataset("unsupported", catalog=None, artifact_root=None,
                           snapshot_id=None, receipt_id=None)
     assert err.value.code == "CONTRACT_MISMATCH"
+
+
+def test_cli_refuses_unknown_role_before_inputs(pinned, monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(phase5_d14_inputs, "build_dataset", forbidden)
+    out = tmp_path / "out"
+    args = ["--role", "unsupported", "--out", str(out)]
+    for name, value in pinned["inputs"].items():
+        args += ["--" + name.replace("_", "-"), str(value)]
+    with pytest.raises(SystemExit) as caught:
+        phase5_d14_inputs.main(args)
+    assert caught.value.code == 2
+    captured = capsys.readouterr()
+    assert "argument --role: invalid choice" in captured.err
+    assert captured.out == ""
+    assert not out.exists()
 
 
 @pytest.mark.parametrize("column", ("n_prior", "signed_streak"))
