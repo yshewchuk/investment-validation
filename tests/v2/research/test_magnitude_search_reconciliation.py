@@ -80,6 +80,28 @@ def failed_child(monkeypatch, completed):
     monkeypatch.setattr(trials, "run_fitted_trial", failed)
 
 
+@pytest.mark.parametrize("result", [[], {"event": "unknown"}], ids=["non-object", "unknown-event"])
+def test_malformed_child_return_refuses_before_durable_result_publication(native, monkeypatch, result):
+    before = []
+
+    def malformed(*args):
+        args[-1]("started", expected_fits()[0])
+        before.append(durable_evidence(native))
+        return result
+
+    monkeypatch.setattr(trials, "run_fitted_trial", malformed)
+    with pytest.raises(OpsError) as caught:
+        native.recorder.execute(*ARGS, limits=LIMITS)
+    assert caught.value.problem == fail(
+        "EXPERIMENT_IDENTITY_CONFLICT", "search fit completion differs from admitted attempts").problem
+    assert len(before) == 1
+    assert durable_evidence(native) == before[0]
+    assert native.recorder._read("fit-started:" + KEY + ":5") == expected_fits()[0]
+    assert native.recorder._read("fit-completed:" + KEY + ":5") is None
+    for slot in ("execution-result", "execution", "forecasts", "terminal"):
+        assert native.recorder._read(slot + ":" + KEY) is None
+
+
 @pytest.mark.parametrize("stage", ["execution-result", "execution", "forecasts", "validation", "terminal"])
 @pytest.mark.parametrize("after", [False, True])
 def test_publication_faults_reconcile_only_durable_results(native, monkeypatch, stage, after):
