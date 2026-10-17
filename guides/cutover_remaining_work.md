@@ -64,7 +64,7 @@ pair. The retained serving projection returns `no_report` when the parity report
 
 Later Phase 7 work, not started: replacing `LegacyScoreBridge`
 (`engine/v2/serving/bridge.py`), native decisions-predictions, the nightly
-pool/residual refresh implementation
-([#192](https://github.com/yshewchuk/investment-validation/issues/192);
+pool/residual refresh payoff artifacts and per-row cutoffs (slices 1–4 of
+[#192](https://github.com/yshewchuk/investment-validation/issues/192) are in; follow-up #825;
 related gaps #137, #149, #154), and the 10-session qualification run, during
 which the legacy board keeps publishing.
