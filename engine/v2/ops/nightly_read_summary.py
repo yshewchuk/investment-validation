@@ -61,10 +61,16 @@ class ReadTracker:
         only a wholly unexpected error yields ``{"unavailable": ["summary"]}``."""
         unavailable: list[str] = []
         try:
-            wall = time.monotonic() - self._t0 if self._t0 is not None else None
+            try:
+                wall = time.monotonic() - self._t0 if self._t0 is not None else None
+            except Exception:
+                wall = None
             if wall is None:
                 unavailable.append("wall_seconds")
-            cpu = time.process_time() - self._cpu0 if self._cpu0 is not None else None
+            try:
+                cpu = time.process_time() - self._cpu0 if self._cpu0 is not None else None
+            except Exception:
+                cpu = None
             if cpu is None:
                 unavailable.append("cpu_seconds")
             try:

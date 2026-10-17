@@ -4,6 +4,8 @@ from __future__ import annotations
 import builtins
 import io
 import json
+import resource
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -112,6 +114,41 @@ def test_summary_complete_payload():
     assert s["unavailable"] == []
 
 
+def test_summary_isolates_clocks_rss(monkeypatch):
+    """Wall/cpu each in their own try: pinned sequences give independent
+    expected diffs, and a mocked ru_maxrss pins peak_rss_bytes."""
+    wall = iter([10.0, 12.5])
+    cpu = iter([1.0, 1.75])
+    monkeypatch.setattr(nightly_read_summary.time, "monotonic", lambda: next(wall))
+    monkeypatch.setattr(nightly_read_summary.time, "process_time", lambda: next(cpu))
+    monkeypatch.setattr(resource, "getrusage",
+                        lambda who: SimpleNamespace(ru_maxrss=2048))
+    summary = ReadTracker(None).summary()
+    assert summary["wall_seconds"] == 2.5
+    assert summary["cpu_seconds"] == 0.75
+    assert summary["peak_rss_bytes"] == 2048 * 1024
+
+
+def test_summary_none_counters_unavailable_tables():
+    summary = ReadTracker(None).summary()
+    assert summary["tables"] is None
+    assert "tables" in summary["unavailable"]
+
+
+def test_summary_tie_break_sorted_by_name():
+    """Equal rows_decoded ranks name-first via dict insertion order."""
+    c = _counters([{
+        "b": {"rows_decoded": 10, "bytes_read": 100},
+        "a": {"rows_decoded": 10, "bytes_read": 100},
+    }])
+    summary = ReadTracker(c).summary()
+    assert list(summary["tables"]) == ["b", "a"]
+    ranked = sorted(
+        summary["tables"].items(),
+        key=lambda item: (-item[1]["rows_decoded"], item[0]))
+    assert [name for name, _ in ranked] == ["a", "b"]
+
+
 def test_process_read_bytes_parses_rchar(monkeypatch):
     payload = io.StringIO("rchar: 4096\nwchar: 1\n")
     real_open = builtins.open
@@ -207,35 +244,60 @@ def _rig(tmp_path, monkeypatch):
     return repository, snapshot, rig
 
 
+def _build(repository, snapshot, **kwargs):
+    from engine.v2.ops import nightly_raw_row_producer as nrp
+    return nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=producer_as_of(), horizon_days=producer_horizon(),
+        **kwargs)
+
+
+def _summary_and_compose(records):
+    summary_ends = [r for r in records if r[0] == "end" and r[1] == "read_summary"]
+    compose_ends = [r for r in records
+                    if r[0] == "end" and r[1].startswith("compose_event_")]
+    return summary_ends, compose_ends
+
+
 def test_producer_records_step_reads_and_summary(tmp_path, monkeypatch):
     repository, snapshot, rig = _rig(tmp_path, monkeypatch)
     from engine.v2.ops import nightly_raw_row_producer as nrp
 
     records = []
-    real_start, real_end = nrp.worker_progress.step_start, nrp.worker_progress.step_end
 
-    def start(name):
+    def start(name, *args, **kwargs):
         records.append(("start", name, None, None))
 
-    def end(name, *, units=None, reads=None):
+    def end(name, *args, units=None, reads=None, **kwargs):
         records.append(("end", name, units, reads))
 
     monkeypatch.setattr(nrp.worker_progress, "step_start", start)
     monkeypatch.setattr(nrp.worker_progress, "step_end", end)
-    events, _ = nrp.build_native_score_batch_events(
-        repository, snapshot, as_of=producer_as_of(), horizon_days=producer_horizon())
 
-    compose_ends = [r for r in records
-                    if r[0] == "end" and r[1].startswith("compose_event_")]
+    real = nrp._compose_event
+
+    def counted(repository, snapshot, key, **kwargs):
+        repository.read_counters.add("option_chains", rows_decoded=10, bytes_read=100)
+        return real(repository, snapshot, key, **kwargs)
+
+    monkeypatch.setattr(nrp, "_compose_event", counted)
+    events, refusals = _build(repository, snapshot)
+
+    summary_ends, compose_ends = _summary_and_compose(records)
     assert compose_ends
     for _event, name, units, reads in compose_ends:
         assert units == 1
         assert isinstance(reads, dict)
-    summary_ends = [r for r in records if r[0] == "end" and r[1] == "read_summary"]
+        assert reads == {"option_chains": {"rows_decoded": 10, "bytes_read": 100}}
     assert len(summary_ends) == 1
-    assert isinstance(summary_ends[0][3], dict)
-    assert "tables" in summary_ends[0][3]
-    assert summary_ends[0][3]["wall_seconds"] is not None
+    reads = summary_ends[0][3]
+    assert isinstance(reads, dict)
+    assert "tables" in reads
+    assert reads["tables"]["option_chains"]["rows_decoded"] >= 10 * len(events)
+    assert isinstance(reads["wall_seconds"], float)
+    assert reads["wall_seconds"] > 0 or reads["wall_seconds"] == 0
+    assert events and refusals["refusals"] == []
+    assert len(events) == 20
+    assert sorted({e["key"]["ticker"] for e in events}) == ["AAA", "BBB"]
 
 
 def producer_as_of():
@@ -264,24 +326,72 @@ def test_producer_summary_recorded_on_compose_exception(tmp_path, monkeypatch):
 
     monkeypatch.setattr(nrp, "_compose_event", boom)
     monkeypatch.setattr(nrp.worker_progress, "step_start",
-                        lambda name: records.append(("start", name)))
+                        lambda name, *args, **kwargs: records.append(("start", name)))
     monkeypatch.setattr(nrp.worker_progress, "step_end",
-                        lambda name, *, units=None, reads=None:
+                        lambda name, *args, units=None, reads=None, **kwargs:
                         records.append(("end", name, units, reads)))
 
     with pytest.raises(RuntimeError, match="compose failed"):
-        nrp.build_native_score_batch_events(
-            repository, snapshot, as_of=producer_as_of(),
-            horizon_days=producer_horizon())
-    assert any(r[0] == "end" and r[1] == "read_summary" for r in records)
+        _build(repository, snapshot)
+    summary_ends = [r for r in records if r[0] == "end" and r[1] == "read_summary"]
+    assert len(summary_ends) == 1
+    assert isinstance(summary_ends[0][3], dict)
+    assert "tables" in summary_ends[0][3]
+
+
+def test_producer_empty_enumeration_still_emits_summary(tmp_path, monkeypatch):
+    repository, snapshot = _empty_rig(tmp_path, monkeypatch)
+    records = []
+
+    def start(name, *args, **kwargs):
+        records.append(("start", name))
+
+    def end(name, *args, units=None, reads=None, **kwargs):
+        records.append(("end", name, units, reads))
+
+    from engine.v2.ops import nightly_raw_row_producer as nrp
+    monkeypatch.setattr(nrp.worker_progress, "step_start", start)
+    monkeypatch.setattr(nrp.worker_progress, "step_end", end)
+
+    events, refusals = _build(repository, snapshot)
+    assert events == []
+    assert refusals["refusals"] == []
+    summary_ends = [r for r in records if r[0] == "end" and r[1] == "read_summary"]
+    assert len(summary_ends) == 1
+    assert isinstance(summary_ends[0][3], dict)
+    assert "tables" in summary_ends[0][3]
+
+
+def _empty_rig(tmp_path, monkeypatch):
+    from engine.v2.ops import nightly_raw_row_producer as nrp
+    from tests.v2.ops import test_nightly_raw_row_producer as producer_tests
+
+    repository, snapshot = producer_tests._snapshot(tmp_path, [
+        producer_tests._event_row("AAA", __import__("pandas").Timestamp("2025-06-17"),
+                                  "BMO", event_id="aaa-2025")], partition="2025")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("context reader invoked on an empty enumeration")
+
+    from engine.v2.features import panel_row_inputs
+    from engine.v2.ops import nightly_calendar_inputs, nightly_quote_rows
+    producer_tests._patch_reader(monkeypatch, nightly_calendar_inputs,
+                                 "scan_decision_calendar", forbidden)
+    producer_tests._patch_reader(monkeypatch, nightly_calendar_inputs,
+                                 "scan_calendar_row_inputs", forbidden)
+    producer_tests._patch_reader(monkeypatch, panel_row_inputs, "scan_panel_row", forbidden)
+    producer_tests._patch_reader(monkeypatch, nightly_quote_rows, "scan_quote_rows", forbidden)
+    return repository, snapshot
 
 
 def test_producer_unaffected_by_read_counters_failure(tmp_path, monkeypatch):
     repository, snapshot, rig = _rig(tmp_path, monkeypatch)
-    from engine.v2.ops import nightly_raw_row_producer as nrp
 
-    normal = nrp.build_native_score_batch_events(
-        repository, snapshot, as_of=producer_as_of(), horizon_days=producer_horizon())
+    normal_events, normal_refusals = _build(repository, snapshot)
+    normal = (normal_events, normal_refusals)
+    assert normal_events and normal_refusals["refusals"] == []
+    assert len(normal_events) == 20
+    assert sorted({e["key"]["ticker"] for e in normal_events}) == ["AAA", "BBB"]
 
     class Boom:
         def snapshot(self):
@@ -290,6 +400,8 @@ def test_producer_unaffected_by_read_counters_failure(tmp_path, monkeypatch):
         def add(self, *args, **kwargs):
             return None
     monkeypatch.setattr(repository, "read_counters", Boom(), raising=False)
-    degraded = nrp.build_native_score_batch_events(
-        repository, snapshot, as_of=producer_as_of(), horizon_days=producer_horizon())
+    degraded = _build(repository, snapshot)
     assert degraded == normal
+    assert len(degraded[0]) == 20
+    assert sorted({e["key"]["ticker"] for e in degraded[0]}) == ["AAA", "BBB"]
+    assert degraded[1]["refusals"] == []

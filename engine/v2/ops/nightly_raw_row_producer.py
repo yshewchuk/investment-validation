@@ -255,6 +255,22 @@ def build_native_score_batch_events(
     never falls back to per-key scans.
     """
     tracker = ReadTracker(getattr(repository, "read_counters", None))
+    try:
+        return _build_events(repository, snapshot, as_of=as_of,
+                             horizon_days=horizon_days, tickers=tickers,
+                             tracker=tracker)
+    finally:
+        # One summary per build: emission is the wrapper's alone, so every
+        # early return and every error path below still reports it exactly once.
+        worker_progress.step_start("read_summary")
+        worker_progress.step_end("read_summary", reads=tracker.summary())
+
+
+def _build_events(repository: Repository, snapshot: SnapshotRef, *,
+                  as_of: Any, horizon_days: int,
+                  tickers: Iterable[str] | None,
+                  tracker: ReadTracker) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """One build's whole body; ``tracker`` is caller-owned, never created here."""
     requests = tuple(scan_forward_board_requests(
         repository, snapshot, as_of=as_of, horizon_days=horizon_days, tickers=tickers))
     refusals: dict[int, dict[str, Any]] = {}
@@ -307,26 +323,22 @@ def _compose_admitted(repository: Repository, snapshot: SnapshotRef,
     """Compose every admitted request's event, mutating ``refusals`` for each in-place refusal."""
     tracker.delta()  # discard: reset the baseline so step 1's reads cover only step 1
     events: list[dict[str, Any]] = []
-    try:
-        for done, (position, key) in enumerate(admitted, 1):
-            # Live progress: one step per row, "done_of_total" in its name (no-op outside a worker).
-            name = f"compose_event_{done}_of_{len(admitted)}"
-            worker_progress.step_start(name)
-            t0 = time.monotonic()
-            try:
-                event, refusal = _compose_event(
-                    repository, snapshot, key, decision_session=decision_session,
-                    calendar=calendar, panel=panels[_panel_marker(key)],
-                    chain_rows=chains[key.ticker])
-            finally:
-                reads = tracker.delta()
-                worker_progress.step_end(name, units=1, reads=reads)
-                tracker.record(name, time.monotonic() - t0, reads)
-            if refusal is None:
-                events.append(event)
-            else:
-                refusals[position] = refusal
-    finally:
-        worker_progress.step_start("read_summary")
-        worker_progress.step_end("read_summary", reads=tracker.summary())
+    for done, (position, key) in enumerate(admitted, 1):
+        # Live progress: one step per row, "done_of_total" in its name (no-op outside a worker).
+        name = f"compose_event_{done}_of_{len(admitted)}"
+        worker_progress.step_start(name)
+        t0 = time.monotonic()
+        try:
+            event, refusal = _compose_event(
+                repository, snapshot, key, decision_session=decision_session,
+                calendar=calendar, panel=panels[_panel_marker(key)],
+                chain_rows=chains[key.ticker])
+        finally:
+            reads = tracker.delta()
+            worker_progress.step_end(name, units=1, reads=reads)
+            tracker.record(name, time.monotonic() - t0, reads)
+        if refusal is None:
+            events.append(event)
+        else:
+            refusals[position] = refusal
     return events
