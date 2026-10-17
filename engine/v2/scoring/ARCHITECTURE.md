@@ -192,6 +192,8 @@ hash. The helper verifies summaries, not original records or policy hashes.
 | Complete mixed or all-refused menu | Return seven summaries in registry order; no eligibility, winner, margin or meta record |
 
 There is no I/O, retry, fitting or source/finality/causal-training admission.
+No cache or transaction exists, no partial result escapes (a refusal returns
+no summaries), and equal inputs return equal tuples (see Failure semantics).
 Only tests consume this preparatory interface; existing selection and nightly
 dispatch are unchanged. See README for fields and ownership obligations.
 
