@@ -99,5 +99,12 @@ infrastructure/resource/shared-identity failures also block selection. Exact rep
 terminal submission or freeze is idempotent; another start is a forbidden retry.
 Journal writes above 16 MiB refuse nonretryable `RESOURCE_LIMIT_EXCEEDED` before publishing that record.
 The submitted forecasts do not prove that an estimator ran. Frozen selections grant
-no outer-evaluation, deployment or final-read authority. A resource-capped executor,
+no outer-evaluation, deployment or final-read authority. The library-only `SearchTrials.execute` runs one planned candidate/inner fold with explicit
+positive integer `memory_bytes`, `cpu_seconds` and `wall_seconds` limits. A fixed Linux
+child reuses the native fresh-fit pipeline for each horizon; immutable fit-admission
+and completion receipts bind matrices, candidate and complete forecasts. A fit admission
+does not prove physical invocation after an interruption. Resource/shared failures remain
+unfinished and cannot be retried or converted to candidate exclusion. Completed native
+replay verifies the whole chain without fitting or reopening labels. Limits apply to
+the fit child, not parent native admission or shared-host capacity. No CLI is added;
 interrupted-attempt reconciliation, outer evaluation and reporting remain unimplemented.

@@ -566,6 +566,8 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   serve `/models/release.json`; never promotes.
 - `tools/phase5_prepare_release.py`, `tools/phase5_inventory.py` and
   `tools/phase5_serving_folds.py` — release preparation, inventory and fold metadata.
+- `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_execution.py`
+  — `no_fit.forbid_fitting` before native trial claims and fixed-child fitting.
 
 ## 6. External systems and libraries
 

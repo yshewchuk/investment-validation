@@ -221,7 +221,7 @@ both flag states publish/verify the same plan and never write a ledger.
 
 ## Recorded magnitude-search selection
 
-`magnitude_search_trials.SearchTrials` is library-only, with no CLI or production caller. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies are contracts, foundation, ops migrations/catalog/fingerprints/errors, and research stored-history/target reads. `magnitude_history_inputs.history_binding` and `magnitude_search_plan.read_search_plan` own native/plan admission; public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
+`magnitude_search_trials.SearchTrials` is library-only, with no CLI or production caller. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies are contracts, foundation, ops migrations/catalog/fingerprints/errors, and research stored-history/target reads. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. `magnitude_history_inputs.history_binding` and `magnitude_search_plan.read_search_plan` own native/plan admission; public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
 
 | Condition | Outcome |
 |---|---|
@@ -244,7 +244,7 @@ both flag states publish/verify the same plan and never write a ledger.
 | Unavailable artifact, raw `OSError`, or read-time `UNSAFE_PATH` after stored-path syntax admission | Refuse sanitized retryable `RESOURCE_UNAVAILABLE`, including open-time OS errors and symlink rejection; no journal association changes, symlink traversal or attempt-retry authorization. |
 | Invalid stored-path syntax or reference; publication `UNSAFE_PATH` | Refuse `EXPERIMENT_IDENTITY_CONFLICT`; invalid reference syntax is rejected before artifact access. Content/hash mismatch during verified reads remains an identity conflict. |
 | Journal payload exceeds 16 MiB | Refuse nonretryable `RESOURCE_LIMIT_EXCEEDED` before publishing that record; incomplete attempts remain unfinished and block selection. |
-| Submitted-forecast selection | The source-sealed journal binds recorder-owned native admission, not independently authenticated execution; wholesale fabrication of the cohort and matching terminals is outside its consistency guarantee. Estimator execution stays unverified; no fitting, outer evaluation, deployment, ledger or final-read authority. |
+| Submitted-forecast selection | These submission/selection methods do not fit or authenticate estimator execution; wholesale fabrication of matching evidence is outside their consistency guarantee. Native fitting is separately described under [bounded inner-trial execution](#bounded-inner-trial-execution). Neither path grants outer evaluation, deployment, ledger or final-read authority. |
 
 ## Stored research-history entrypoint
 
@@ -538,6 +538,39 @@ Stored spec/source/snapshot/scope/environment identity is checked before populat
 admission, so a changed request cannot consume an original variant's refusal slot.
 A current holdout denial preserves R5 and its private receipt even when an earlier
 immutable completion prevents a second terminal CSV row; prior reports stay unchanged.
+
+## Bounded inner-trial execution
+
+`SearchTrials.execute(outer_year, inner_year, candidate_id, limits=...)` is a library-only
+native caller of the existing recorder and `magnitude_fitted.fitted_forecasts`.
+It consumes one declared candidate and inner fold; it does not run outer evaluation,
+recover claims, change the selection policy, write a ledger or grant final-read authority.
+The source seal explicitly includes the fixed child and its transitive fitting sources.
+
+| Condition | Outcome |
+|---|---|
+| Explicit positive integer `memory_bytes`, `cpu_seconds`, `wall_seconds` | Bind these limits to the immutable trial execution start. Linux child affinity uses the lowest currently allowed CPU; numerical thread variables are one. This selects a core without reserving it from other host work. |
+| Missing/extra limit keys, Boolean/noninteger/nonpositive or platform-unrepresentable values | `INVALID_EXPERIMENT_SPEC` before a claim or subprocess launch. |
+| Direct `run_fitted_trial` call | Requires exactly those three resource keys plus an integer `cpu_id` in `[0, 2**31 - 1)`, excluding Boolean values. Revalidates all limits before input access, scratch creation or launch; malformed resolved limits refuse `INVALID_EXPERIMENT_SPEC`. CPU availability is still enforced by child setup, not reserved by this pure check. |
+| Parent Linux affinity query unavailable or empty | `RESOURCE_UNAVAILABLE` before a claim or subprocess launch. Child limit/affinity setup failure instead preserves the post-claim unfinished attempt and refuses `RESOURCE_UNAVAILABLE`. |
+| Serialized input or a buffered child-output record exceeds 16 MiB | `RESOURCE_LIMIT_EXCEEDED`; preserve the unfinished claim, publish no candidate failure and block freeze. |
+| Started trial with admitted cohort | A fixed fit-only subprocess receives stored features and qualified training targets, never a repository, catalog or validation targets. Every horizon uses the existing fresh-fit pipeline and declared candidate recipe. |
+| Child reaches a horizon fit | Parent independently reconstructs its matrix/event evidence and commits a non-replayable fit admission before acknowledging. Completion is separately acknowledged only after its immutable evidence commits. Counts distinguish admitted fit attempts from completed fits; an interrupted admission does not prove the estimator was entered. |
+| Child completes all fits | Publish execution receipt and complete forecasts before validation labels open through the internal native recorder path; original candidate/validation scoring policy applies. Public `record` cannot finish an unfinished native attempt. |
+| Candidate scoring refuses after successful native fits | Preserve the successful execution receipt and durable `refused` terminal. Initial scoring propagates `EXPERIMENT_VARIANT_FAILED`; replay returns the intact receipt without refitting or rescoring, and freeze excludes that candidate while retaining successful peers. |
+| Estimator-local `EXPERIMENT_VARIANT_FAILED` | Record the attempted/completed prefix and candidate failure. Other candidates and folds remain required by `freeze`. |
+| Memory, CPU or elapsed-time limit; launch/import/pipe/protocol/abnormal-exit failure | Limits refuse `RESOURCE_LIMIT_EXCEEDED`; invalid JSON, missing events, messages after a result or evidence/completion mismatches refuse `EXPERIMENT_IDENTITY_CONFLICT`; unsupported events/progress envelopes, setup, I/O, missing results and other infrastructure failures refuse `RESOURCE_UNAVAILABLE`. Retain the unfinished claim and block freeze; never convert these failures into candidate exclusion or retry, even for retryable Problems. |
+| Resource enforcement | Child `RLIMIT_AS` bounds virtual address space and `RLIMIT_CPU` bounds process CPU time; the parent bounds child elapsed lifetime, including waits for journal acknowledgements. Parent I/O is not preempted; an expired child deadline is checked when it returns and after child exit, before accepting completion. These are per-process fit caps, not shared-host reservations or a cap on parent admission/journal I/O. Only fixed single-threaded native estimators run. |
+| Native completion replay/freeze | Revalidate every admitted/completed horizon, matrix digest, complete forecast digest and ordinary terminal chain; launch nothing and reopen no native labels/features. Changed limits, missing/corrupt evidence and caller-submitted terminals refuse native replay. |
+| Interrupted execution or label admission | Existing immutable start/forecast slots prevent restart; public recording cannot finish any unfinished native attempt, including a failed forecast publication. Receipt publication can precede a later failed forecast/terminal write; the unfinished trial remains blocking. |
+| Fitting guard active | Both parent no-fit guards refuse before a new claim or subprocess launch; completed replay remains read-only. |
+
+The child uses standard-library subprocess, selectors, resource limits and JSON; no
+optimizer, alternate estimator pipeline or general-purpose scheduler is introduced.
+Execution uses ops thread-environment constants and existing foundation/journal publication.
+Scratch inputs are removed when the call exits. Completed evidence is consistency-checked,
+not cryptographically authenticated against wholesale journal fabrication. Frozen selections
+retain their existing submitted-forecast label and confer no additional execution authority.
 
 ## Exploratory RUNUP exit comparison
 
