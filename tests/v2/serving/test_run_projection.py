@@ -25,6 +25,10 @@ from engine.v2.diagnosis.receipt import ComparisonReceipt, Envelope, Population 
 from engine.v2.foundation import to_document  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.serving import projections  # noqa: E402
+from engine.v2.serving.legacy_bundle import (  # noqa: E402
+    LegacyBundleError,
+    read_capped_bytes,
+)
 from tests.test_v2_serving_projections import (  # noqa: E402
     _bundle,
     _compact,
@@ -35,7 +39,7 @@ from tests.test_v2_serving_projections import (  # noqa: E402
     _score_doc,
     _serving,
 )
-from tools.v2_dashboard_project import _read_capped, run_projection  # noqa: E402
+from tools.v2_dashboard_project import run_projection  # noqa: E402
 
 _NATIVE_PLAN = {"shadow_serving_scorer": "native"}
 
@@ -284,25 +288,22 @@ def test_run_projection_unknown_bundle_format_raises_and_writes_no_release(tmp_p
             serving_conn.close()
 
 
-# 11. _read_capped refuses past the cap and returns the bytes up to it
+# 11. read_capped_bytes refuses past the cap and returns the bytes up to it
 def test_read_capped_refuses_over_cap_and_returns_at_cap(tmp_path):
-    from tools.v2_dashboard_project import _read_capped
-
     at_cap = tmp_path / "at_cap.bin"
     at_cap.write_bytes(b"0123456789")
     over_cap = tmp_path / "over_cap.bin"
     over_cap.write_bytes(b"0123456789A")
 
-    assert _read_capped(at_cap, cap=10) == b"0123456789"
-    with pytest.raises(OpsError) as error:
-        _read_capped(over_cap, cap=10)
-    assert error.value.code == "INVALID_REQUEST"
+    assert read_capped_bytes(at_cap, cap=10) == b"0123456789"
+    with pytest.raises(LegacyBundleError):
+        read_capped_bytes(over_cap, cap=10)
 
-    unreadable = tmp_path / "plan_dir"
-    unreadable.mkdir()
-    serving_root = tmp_path / "serving_unreadable"
+    inputs = _flat_inputs(tmp_path / "inputs")
+    missing_plan = tmp_path / "missing_plan.json"
+    serving_root = tmp_path / "serving_missing_plan"
     with pytest.raises(OpsError) as error:
-        run_projection(**_args(inputs, serving_root, nightly_plan=unreadable))
+        run_projection(**_args(inputs, serving_root, nightly_plan=missing_plan))
     assert error.value.code == "INVALID_REQUEST"
     assert error.value.problem.message == "nightly plan is unreadable"
 
@@ -507,14 +508,72 @@ def test_run_projection_refuses_bogus_bundle_format(tmp_path):
             serving_conn.close()
 
 
-# 11. _read_capped's boundary: an 11-byte file refused at cap=10, a 10-byte file read
-def test_read_capped_refuses_over_cap_and_returns_at_cap(tmp_path):
-    at_cap = tmp_path / "at_cap.bin"
-    at_cap.write_bytes(b"x" * 10)
-    assert _read_capped(at_cap, cap=10) == b"x" * 10
+# 12. a directory as the nightly plan -> INVALID_REQUEST, no release row
+def test_run_projection_plan_path_is_a_directory_refused(tmp_path):
+    inputs = _flat_inputs(tmp_path / "inputs")
+    plan_dir = tmp_path / "plan_dir"
+    plan_dir.mkdir()
+    serving_root = tmp_path / "serving"
 
-    over_cap = tmp_path / "over_cap.bin"
-    over_cap.write_bytes(b"x" * 11)
     with pytest.raises(OpsError) as error:
-        _read_capped(over_cap, cap=10)
+        run_projection(**_args(inputs, serving_root, nightly_plan=plan_dir))
     assert error.value.code == "INVALID_REQUEST"
+
+    index_path = serving_root / "serving.sqlite"
+    assert not index_path.exists() or index_path.stat().st_size == 0
+    if index_path.exists():
+        serving_conn = projections.connect(str(index_path))
+        try:
+            assert serving_conn.execute(
+                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
+        finally:
+            serving_conn.close()
+
+
+# 13. the preview input read is capped: over it -> INVALID_REQUEST, no release row
+def test_run_projection_over_cap_preview_input_refused(tmp_path, monkeypatch):
+    inputs = _flat_inputs(tmp_path / "inputs")
+    monkeypatch.setattr("engine.v2.serving.legacy_bundle.MAX_ARTIFACT_BYTES", 64)
+    serving_root = tmp_path / "serving"
+
+    with pytest.raises(OpsError) as error:
+        run_projection(**_args(inputs, serving_root))
+    assert error.value.code == "INVALID_REQUEST"
+
+    index_path = serving_root / "serving.sqlite"
+    assert not index_path.exists() or index_path.stat().st_size == 0
+    if index_path.exists():
+        serving_conn = projections.connect(str(index_path))
+        try:
+            assert serving_conn.execute(
+                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
+        finally:
+            serving_conn.close()
+
+
+# 14. a cap larger than the preview input but smaller than score.json refuses
+def test_run_projection_over_cap_score_json_refused(tmp_path, monkeypatch):
+    inputs = _flat_inputs(tmp_path / "inputs")
+    preview_size = inputs["preview_input"].stat().st_size
+    score_size = inputs["score_json"].stat().st_size
+    if score_size <= preview_size:
+        pytest.skip("score.json is not larger than the preview input")
+
+    cap = preview_size
+    assert preview_size <= cap < score_size
+    monkeypatch.setattr("engine.v2.serving.legacy_bundle.MAX_ARTIFACT_BYTES", cap)
+    serving_root = tmp_path / "serving"
+
+    with pytest.raises(OpsError) as error:
+        run_projection(**_args(inputs, serving_root))
+    assert error.value.code == "INVALID_REQUEST"
+
+    index_path = serving_root / "serving.sqlite"
+    assert not index_path.exists() or index_path.stat().st_size == 0
+    if index_path.exists():
+        serving_conn = projections.connect(str(index_path))
+        try:
+            assert serving_conn.execute(
+                "SELECT COUNT(*) FROM serving_release").fetchone()[0] == 0
+        finally:
+            serving_conn.close()

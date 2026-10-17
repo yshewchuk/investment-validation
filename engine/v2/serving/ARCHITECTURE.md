@@ -48,9 +48,9 @@ never share an id; the release names its row sources. Stored `v1.0` releases are
 loads such a row (current-release discovery, the pinned release, events and score routes) is
 `SERVING_INDEX_UNREADABLE` (503, retryable; the trigger is a `DocumentError` from a stored
 release that fails its contract, which includes an older schema, in addition to the
-`sqlite3.Error`/`json.JSONDecodeError` triggers in the failure table). The one exception is
-the native-parity freshness check, which treats an unreadable current release as unknown
-and reports `available` (it is advisory and never gates the report). `build_candidate`
+`sqlite3.Error`/`json.JSONDecodeError` triggers in the failure table), including the
+native-parity freshness read of such a row. Only the freshness check's resolver failure
+(an unresolvable current pointer) and `sqlite3.OperationalError` re-open report `available`. `build_candidate`
 refuses invalid `row_sources` with `ValueError` before any write (internal callers only).
 The projection tool exposes `run_projection(...)`; the CLI is a thin wrapper over it.
 
@@ -58,7 +58,7 @@ The projection tool exposes `run_projection(...)`; the CLI is a thin wrapper ove
 |---|---|
 | Native plan without native inputs | `INVALID_REQUEST` |
 | Plan over 1 MiB, unreadable, invalid JSON, or not a JSON object | `INVALID_REQUEST` |
-| `bundle_format` not `flat`/`legacy`, or an input artifact over the read cap | `INVALID_REQUEST` |
+| `bundle_format` not `flat`/`legacy`, or an input artifact over the 64 MiB read cap | `INVALID_REQUEST`; a legacy-bundle member over the cap is a `LegacyBundleError` from the loader |
 
 The plan is read once, and that one parse picks both the rows and `row_sources`. On any of
 these the release and the serving pointer are unchanged.

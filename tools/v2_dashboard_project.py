@@ -66,7 +66,12 @@ from engine.v2.ops.native_shadow_render import native_shadow_serving_mode  # noq
 from engine.v2.scoring.stages import NativeScoreInputs  # noqa: E402
 from engine.v2.serving.native_shadow_render import shadow_serving_row_source  # noqa: E402
 from engine.v2.serving import projections  # noqa: E402
-from engine.v2.serving.legacy_bundle import load_legacy_bundle, load_score_document  # noqa: E402
+from engine.v2.serving.legacy_bundle import (  # noqa: E402
+    LegacyBundleError,
+    load_legacy_bundle,
+    parse_score_document,
+    read_capped_bytes,
+)
 from engine.v2.serving.projections import build_candidate, connect  # noqa: E402
 
 
@@ -130,23 +135,23 @@ def _read_plan(path: Path) -> dict:
     return plan
 
 
-def _read_capped(path: Path, cap: int = 64 * 1024 * 1024) -> bytes:
-    """Read an input artifact with a bounded read.
+def _read_input(path: Path) -> bytes:
+    """Read a delivered input artifact through the shared bounded reader.
 
-    Reads ``cap`` + 1 bytes so anything larger than the cap is refused as
-    ``INVALID_REQUEST`` rather than exhausting memory.
+    ``read_capped_bytes`` refuses anything over its cap with
+    :class:`LegacyBundleError`; the tool reports every such refusal as a typed
+    ``INVALID_REQUEST`` so a bad delivered input stays one failure kind.
     """
-    with open(path, "rb") as fh:
-        raw = fh.read(cap + 1)
-    if len(raw) > cap:
-        raise fail("INVALID_REQUEST", f"{path.name} exceeds the {cap}-byte read cap")
-    return raw
+    try:
+        return read_capped_bytes(path)
+    except LegacyBundleError as exc:
+        raise fail("INVALID_REQUEST", f"{path.name} is unreadable ({exc.code})") from None
 
 
 def _load_flat_bundle(bundle_dir: Path) -> dict[str, list[dict]]:
     bundle: dict[str, list[dict]] = {}
     for path in sorted(bundle_dir.glob("*.json")):
-        rows = json.loads(_read_capped(path).decode("utf-8"))
+        rows = json.loads(_read_input(path).decode("utf-8"))
         if not isinstance(rows, list):
             raise ValueError(f"{path}: expected a JSON array of rendered rows")
         bundle[path.stem] = rows
@@ -190,7 +195,7 @@ def _load_native_inputs(path: Path) -> dict[str, tuple[ScoreRequest, NativeScore
     """
     from engine.v2.ops.native.input_decoding import _load_native_score_inputs
 
-    doc = json.loads(_read_capped(path).decode("utf-8"))
+    doc = json.loads(_read_input(path).decode("utf-8"))
     return {key: (from_document(ScoreRequest, pair["request"]),
                   _load_native_score_inputs(_with_contract_quote_keys(pair["inputs"])))
             for key, pair in sorted(doc.items())}
@@ -231,7 +236,8 @@ def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
-def _verify_source_provenance(preview: PreviewInput, path: Path, *, score_path: Path,
+def _verify_source_provenance(preview: PreviewInput, path: Path, *,
+                              score_bytes: bytes | None = None, score_path: Path | None = None,
                               bundle_manifest_ref: str) -> None:
     """Refuse detached score/bundle inputs at the real coordinator boundary.
 
@@ -239,8 +245,17 @@ def _verify_source_provenance(preview: PreviewInput, path: Path, *, score_path: 
     Phase 2 store. This second check binds the files delivered to this command
     to that retained proof, rather than allowing a caller to swap either one
     after the verifier ran.
+
+    ``score_bytes`` is the already-read score artifact the caller parsed; when
+    only ``score_path`` is supplied (legacy callers/tests), the file is read
+    here through :func:`_read_input` so the hash still binds the delivered
+    bytes.
     """
-    doc = json.loads(_read_capped(path).decode("utf-8"))
+    if score_bytes is None:
+        if score_path is None:
+            raise ValueError("source provenance requires the score bytes or path")
+        score_bytes = _read_input(score_path)
+    doc = json.loads(_read_input(path).decode("utf-8"))
     if not isinstance(doc, dict) or doc.get("schema_version") != "phase3_source_provenance.v1.0":
         raise ValueError("source provenance has an unsupported schema")
     if doc.get("release_id") != preview.source_release_id or \
@@ -254,7 +269,7 @@ def _verify_source_provenance(preview: PreviewInput, path: Path, *, score_path: 
             refs["finality_artifact"].get("content_hash") != preview.finality_ref or \
             refs["model_evidence_artifact"].get("content_hash") != preview.model_evidence_ref:
         raise ValueError("source provenance and preview artifact bindings disagree")
-    if _sha256(_read_capped(score_path)) != refs["score_artifact"].get("content_hash"):
+    if _sha256(score_bytes) != refs["score_artifact"].get("content_hash"):
         raise ValueError("score json is not the verified score artifact")
     if doc.get("bundle_manifest_ref") != bundle_manifest_ref:
         raise ValueError("bundle directory is not the verified delivered bundle")
@@ -269,7 +284,7 @@ def _verify_source_provenance(preview: PreviewInput, path: Path, *, score_path: 
             receipt_path.relative_to(path.parent.resolve())
         except ValueError:
             raise ValueError(f"{name} escapes source provenance directory")
-        receipt_bytes = _read_capped(receipt_path)
+        receipt_bytes = _read_input(receipt_path)
         receipt = from_document(ComparisonReceipt, json.loads(receipt_bytes))
         if _sha256(receipt_bytes) != expected_ref or ref.get("content_hash") != expected_ref \
                 or receipt.comparison_kind != expected_kind:
@@ -305,8 +320,11 @@ def run_projection(*, preview_input: Path, source_provenance: Path | None, score
                    native_inputs: Path | None = None) -> tuple[int, dict]:
     if bundle_format not in ("flat", "legacy"):
         raise fail("INVALID_REQUEST", "bundle_format must be flat or legacy")
-    preview = from_document(PreviewInput, json.loads(_read_capped(preview_input).decode("utf-8")))
-    score_doc = load_score_document(score_json)
+    preview = from_document(PreviewInput, json.loads(_read_input(preview_input).decode("utf-8")))
+    # Read the score bytes once: the same bytes are hashed into the provenance
+    # check and parsed into the document the release is built from.
+    score_bytes = _read_input(score_json)
+    score_doc = parse_score_document(score_bytes)
 
     plan: dict | None = None
     if nightly_plan is not None:
@@ -328,7 +346,7 @@ def run_projection(*, preview_input: Path, source_provenance: Path | None, score
     if source_provenance is None:
         raise ValueError("projection requires --source-provenance")
     _verify_source_provenance(preview, source_provenance,
-                              score_path=score_json, bundle_manifest_ref=bundle_manifest_ref)
+                              score_bytes=score_bytes, bundle_manifest_ref=bundle_manifest_ref)
 
     bundle_rows_by_ticker = _shadow_rows(
         argparse.Namespace(nightly_plan=nightly_plan, native_inputs=native_inputs),
