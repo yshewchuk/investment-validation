@@ -524,12 +524,12 @@ def run_training_worker(parameters, root) -> dict:
 def run_promote_worker(parameters, root) -> dict:
     """Run one operator-submitted promote inside its staging root.
 
-    Refusal is free: ``deployment.promote`` already raises
-    ``ReleaseNotStaged`` for an unstaged ``release_id``, so this worker (and
-    therefore the whole job) can only ever succeed against a release an
-    operator staged first. There is no other caller of this worker at all --
-    no nightly stage names ``"models_promote"``; the only path that creates
-    one is a ``submit`` an operator ran by hand.
+    Refusal is free because ``deployment.promote`` raises
+    ``ReleaseNotStaged`` for an unstaged release and ``StagingNotSuccessful``
+    without a staging-success record, so this worker (and therefore the whole
+    job) can only ever succeed against a release that was staged and marked
+    successful first. Its callers are operator ``submit``s and the
+    pool-nightly sidecar (``engine/v2/ops/pool_refresh.py``).
     """
     from engine.v2.foundation import to_document
     from engine.v2.models import deployment

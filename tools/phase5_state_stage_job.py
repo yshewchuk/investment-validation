@@ -121,6 +121,7 @@ def stage_candidate(parameters, root: Path) -> dict:
         prior_carry_set,
     )
     from engine.v2.foundation import ArtifactError
+    from engine.v2.models import deployment
     from engine.v2.models.deployment import DeploymentError
     from engine.v2.models.inventory import current_release_inventory
 
@@ -170,6 +171,11 @@ def stage_candidate(parameters, root: Path) -> dict:
     except (rel.ReleaseLayoutError, OSError) as exc:
         raise StageRefused("candidate release could not be published") from exc
     light_checks(release_root, parameters, new_hashes)
+    try:
+        deployment.mark_staging_succeeded(Path(release_root) / "deployment",
+                                          parameters["release_id"])
+    except (deployment.DeploymentError, OSError) as exc:
+        raise StageRefused("staging success could not be recorded") from exc
     return {"release_id": parameters["release_id"],
             "prior_release_id": parameters["prior_release_id"], "cutoff": cutoff,
             "n_new": n_new, "n_carried": len(outputs) - n_new + len(chooser)}

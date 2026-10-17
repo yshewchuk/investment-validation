@@ -214,7 +214,7 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 | R1 verified input | Bound files are bounded regular files, re-classified by schema and member (self-consistency only: the loader hashes the bytes it read, no recorded hash is compared); assembly validates prior, cutoff, objects and inventory; an incomplete or extra member set refuses |
 | R2 cache | None; bound files, prior catalog and inventory are re-read each call |
 | R3 retry | One attempt (`RetryPolicy("none", 1)`); a failed job is not retried |
-| R4 transaction | New objects go to the shared content-addressed store; the staged manifest and catalog exist only under the new id; `stage_result.json` follows the light checks |
+| R4 transaction | New objects go to the shared content-addressed store; the staged manifest and catalog exist only under the new id; `deployment.mark_staging_succeeded` (the record `models_promote` requires) and then `stage_result.json` follow the light checks |
 | R5 partial failure | Orphan objects, a staged manifest, or a candidate catalog written before a light-check refusal may remain; no success output, no promotion, the deployed release is unchanged. Inventory drift refuses before any object is written |
 | R6 idempotency | Same inputs give the same catalog; the same `release_id` with different content refuses `ID_CONFLICT` |
 
@@ -224,8 +224,8 @@ Called from `Service.tick()` beside the other sidecars (`engine/v2/ops/pool_refr
 failure never blocks required job dispatch. It advances only the three members `phase5_state_stage` stages
 (`paired_residual_pool`, `board_analog_matcher`, `trailing_pnl_cutoff`); driver pools and the chooser stay carried (monthly
 retrain is PR-13b, #805). It trains at one cutoff per night: the session of the latest succeeded legacy `score` job. Alpha is
-the shadow fill alpha 0.5 (`engine.fills.MID`, as `native_score_batch._SHADOW_FILL_ALPHA`); strategies are the board's
-registered set (the `strategies=()` default of the `board_analog` mode). Selection stays exact-key with no latest fallback: a
+the shadow fill alpha 0.5 (`engine.fills.MID`, as `native_score_batch._SHADOW_FILL_ALPHA`); strategies are the default of
+the `board_analog` mode (`strategies=()`: those present in the replay trades). Selection stays exact-key with no latest fallback: a
 row whose cutoff is not the session cutoff still needs a release carrying it, which this does not provide (follow-up #825:
 exact-cutoff payoff artifacts and per-row cutoffs).
 
@@ -238,7 +238,7 @@ outputs; (3) one `models_promote` job guarded by `expected_previous_release_id` 
 |---|---|
 | R1 verified input | session and manifest id from the latest succeeded `score` job (its `legacy_manifest.json` binding); prior release from the live pointer; a missing one submits nothing |
 | R2 cache | durable job and pointer state is re-read each tick; no memo (reads are cheap indexed selects) |
-| R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); an incumbent changed mid-cycle stalls it too (the staged id or the guarded promote refuses) |
+| R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); an incumbent changed before staging starts a new cycle under new keys; once a candidate is staged, the staged id or the guarded promote refuses and the cycle stalls |
 | R4 transaction | phase N+1 is submitted only once every phase-N job has succeeded; a sidecar failure is caught and reported (deduped), never raised |
 | R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; the prior release stays deployed |
 | R6 idempotency | keys `nightly:<session>:pool:<phase>:<manifest tag>:<prior release id>` and release id `pools-<session>-<manifest tag>` (tag = first 8 hex of the manifest id's SHA-256) are stable, so a rerun scored from a new manifest retrains; a deployed release already named so ends the cycle |

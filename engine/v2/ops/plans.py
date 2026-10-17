@@ -205,8 +205,9 @@ def request_from_plan(plan, key):
     dependency_job_ids: tuple[str, ...] = ()
     retry_policy_ref = "bounded"
     if plan["kind"] == "phase5_state_stage":
-        input_refs = ()
-        dependency_job_ids = tuple(sorted({ref.partition("#")[0] for ref in plan["input_refs"]}))
+        input_refs = tuple(ref for ref in plan["input_refs"] if "#" not in ref)
+        dependency_job_ids = tuple(sorted({ref.partition("#")[0]
+                                           for ref in plan["input_refs"] if "#" in ref}))
         retry_policy_ref = "none"
     job = JobSpec(kind=_PLAN_JOB_KINDS.get(plan["kind"], plan["kind"]),
                   implementation_ref=plan["implementation_ref"],

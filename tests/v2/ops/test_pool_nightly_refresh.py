@@ -10,6 +10,7 @@ graceful degradation.
 from __future__ import annotations
 
 import ast
+import hashlib
 import inspect
 import json
 import sqlite3
@@ -150,6 +151,18 @@ def test_identity_is_none_when_the_binding_is_missing():
     assert pool_refresh.pool_refresh_identity(conn) is None
 
 
+def test_manifest_tag_matches_a_literal_hashlib_oracle():
+    expected = hashlib.sha256(b"sha256:abc").hexdigest()[:8]
+    assert pool_refresh.manifest_tag("sha256:abc") == expected
+
+
+@pytest.mark.parametrize("binding", [5, ""])
+def test_identity_is_none_for_a_non_string_or_empty_binding(binding):
+    conn = _db()
+    _add_score(conn, manifest=binding)
+    assert pool_refresh.pool_refresh_identity(conn) is None
+
+
 # --------------------------------------------------------------------------
 # 2. nothing to do: no pointer, no conn, already-advanced pointer
 # --------------------------------------------------------------------------
@@ -200,12 +213,12 @@ def test_two_manifests_same_session_and_prior_use_distinct_tags(monkeypatch, tmp
     rec = _wire(monkeypatch)
     conn = _db()
     _add_score(conn, manifest="old-manifest", created_at="2026-01-01T00:00:00Z")
-    old_tag = pool_refresh.manifest_tag("old-manifest")
+    old_tag = hashlib.sha256(b"old-manifest").hexdigest()[:8]
     for phase in pool_refresh.TRAINING_PHASES:
         _add_training(conn, phase, tag=old_tag, state="succeeded")
     _add_score(conn, manifest="new-manifest", scope="sha256:zzz",
                created_at="2026-01-01T01:00:00Z")
-    new_tag = pool_refresh.manifest_tag("new-manifest")
+    new_tag = hashlib.sha256(b"new-manifest").hexdigest()[:8]
     assert old_tag != new_tag
     assert (pool_refresh.phase_key(SESSION, "train-paired", PRIOR, new_tag)
             != pool_refresh.phase_key(SESSION, "train-paired", PRIOR, old_tag))
@@ -296,6 +309,7 @@ def test_all_training_succeeded_submits_the_stage_with_plain_refs(monkeypatch, t
     assert stage["release_id"] == f"pools-{SESSION}-{TAG}"
     assert stage["cutoff"] == SESSION
     assert stage["release_root"] == str(tmp_path)
+    assert stage["source_root"] == REPO_ROOT
     assert stage["state_refs"] == {
         "paired_residual_pool.json": f"{paired}#training/paired_residual_pool.json",
         board_file: f"{board}#training/{board_file}",
@@ -320,6 +334,24 @@ def test_state_refs_use_only_the_latest_succeeded_attempt(monkeypatch, tmp_path)
     assert refs["paired_residual_pool.json"] == (
         f"{job_id}#training/paired_residual_pool.json")
     assert "paired_residual_pool__old.json" not in refs
+
+
+def test_state_refs_exclude_wrong_prefix_suffix_and_failed_attempts(monkeypatch, tmp_path):
+    rec = _wire(monkeypatch)
+    conn = _db()
+    _add_score(conn)
+    paired = _add_training(conn, "train-paired", state="succeeded")
+    _add_attempt(conn, paired, "att-paired", 1,
+                 ["training/paired.json", "other/x.json", "training/x.txt"])
+    _succeeded_training(conn, "train-board", ["training/board.json"])
+    trailing = _add_training(conn, "train-trailing", state="succeeded")
+    _add_attempt(conn, trailing, "att-trailing", 1, ["training/trailing.json"])
+    _add_attempt(conn, trailing, "att-failed", 2, ["training/y.json"], state="failed")
+
+    assert _submit(conn, tmp_path) == ["receipt"]
+    refs = rec.stage[0]["state_refs"]
+    assert set(refs) == {"paired.json", "board.json", "trailing.json"}
+    assert "x.json" not in refs and "y.json" not in refs
 
 
 # --------------------------------------------------------------------------
@@ -411,6 +443,23 @@ def test_existing_promote_is_idempotent(monkeypatch, tmp_path):
     assert rec.submits == []
 
 
+def test_promote_request_pins_the_code_source_implementation(monkeypatch, tmp_path):
+    recorded = []
+    monkeypatch.setattr(pool_refresh.deployment, "current_pointer",
+                        lambda root: SimpleNamespace(release_id=PRIOR))
+    monkeypatch.setattr(
+        pool_refresh, "submit",
+        lambda conn, registry, policy, request, *, clock: recorded.append(request) or "receipt")
+    conn = _db()
+    _add_score(conn)
+    _all_training_succeeded(conn)
+    _add_training(conn, "stage", state="succeeded")
+
+    assert _submit(conn, tmp_path) == ["receipt"]
+    expected = content_hash(worker_source_manifest(REPO_ROOT))
+    assert recorded[0].job.implementation_ref == expected
+
+
 # --------------------------------------------------------------------------
 # 9. request_from_plan accepts a real state_stage_plan document
 # --------------------------------------------------------------------------
@@ -427,6 +476,27 @@ def test_real_request_from_plan_accepts_a_state_stage_plan(tmp_path):
     assert request.job.dependency_job_ids == ("job_abc",)
     assert request.job.input_refs == ()
     assert request.job.retry_policy_ref == "none"
+
+
+def test_real_request_from_plan_separates_job_refs_from_direct_artifact_refs(tmp_path):
+    plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="a", release_id="b",
+                            cutoff="2026-10-01",
+                            state_refs={"x.json": "job_a#training/x.json",
+                                        "y.json": "artifact_1"},
+                            source_root=REPO_ROOT)
+    request = real_request_from_plan(plan, "nightly:2026-10-01:pool:stage:a")
+    assert request.job.dependency_job_ids == ("job_a",)
+    assert request.job.input_refs == ("artifact_1",)
+
+
+def test_real_request_from_plan_maps_every_job_ref_to_a_dependency(tmp_path):
+    refs = {"p.json": "job_a#training/p.json", "b.json": "job_b#training/b.json",
+            "t.json": "job_c#training/t.json"}
+    plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="a", release_id="b",
+                            cutoff="2026-10-01", state_refs=refs, source_root=REPO_ROOT)
+    request = real_request_from_plan(plan, "nightly:2026-10-01:pool:stage:a")
+    assert request.job.dependency_job_ids == ("job_a", "job_b", "job_c")
+    assert request.job.input_refs == ()
 
 
 # --------------------------------------------------------------------------

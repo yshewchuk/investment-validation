@@ -203,6 +203,50 @@ def test_worker_stages_candidate_carrying_the_unadvanced_members(tmp_path, monke
     assert names == {"prior.bin", "STR-THRU|0.5000|2026-10-01"}
 
 
+def test_successful_stage_publishes_the_staging_success_record(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    assert run_state_stage_worker(parameters, staging)["completed_ids"] == ["phase5_state_stage"]
+    status = (phase5_release.deployment_root(tmp_path) / "releases" / "cand1"
+              / "staging-status.json")
+    assert json.loads(status.read_text())["state"] == "succeeded"
+
+
+def test_light_check_failure_leaves_no_staging_success_record(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    _tamper_catalog(monkeypatch, _drop_board_objects)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: candidate release failed the light checks"
+    status = (phase5_release.deployment_root(tmp_path) / "releases" / "cand1"
+              / "staging-status.json")
+    assert not status.exists()
+
+
+def test_a_mark_failure_refuses_with_a_fixed_message(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+
+    def broken(root, release_id):
+        raise DeploymentError("boom")
+
+    monkeypatch.setattr(deployment, "mark_staging_succeeded", broken)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert str(err.value) == "VALIDATION_FAILED: staging success could not be recorded"
+    status = (phase5_release.deployment_root(tmp_path) / "releases" / "cand1"
+              / "staging-status.json")
+    assert not status.exists()
+
+
+def test_a_staged_candidate_promotes_without_a_staging_refusal(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    assert run_state_stage_worker(parameters, staging)["completed_ids"] == ["phase5_state_stage"]
+    store = phase5_release.deployment_root(tmp_path)
+    state = deployment.promote(store, "cand1")
+    assert state.release_id == "cand1"
+    assert deployment.current_pointer(store).release_id == "cand1"
+
+
 def test_worker_refuses_a_missing_advancing_member(tmp_path, monkeypatch):
     states = {"paired.json": _STATES["paired.json"]}
     parameters, staging = _wire(tmp_path, monkeypatch, states=states)

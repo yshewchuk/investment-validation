@@ -935,7 +935,7 @@ waits without submitting until its paired succeeded inputs are ready.
   functions and writes `training_result.json`; `run_promote_worker` calls `deployment.promote`;
   `run_rollback_worker` uses its plan-pinned incumbent and target, then writes
   `pointer_state.json`. Recovery recognizes that exact prior swap without
-  moving the pointer again. None run in the nightly DAG; operators submit with
+  moving the pointer again. None run in the nightly DAG; the pool sidecar (models doc §2.3) or operators submit with
   `ops plan training|promote|rollback` + `ops submit`. Rollback uses principal
   `operator`, namespace `shadow` and the caller idempotency key like promote.
 - `board_requests`: a tuple of `BoardRequest`, ordered by
