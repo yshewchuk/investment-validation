@@ -113,11 +113,16 @@ def dumps(value: Any) -> str:
 
 
 def dumps_failure(problem):
-    """Serialise a Problem for failure_json within MAX_JOB_FAILURE_BYTES."""
+    """Serialise a Problem for failure_json within MAX_JOB_FAILURE_BYTES,
+    bounding every free-form field."""
     text = dumps(problem)
     if len(text.encode("utf-8")) <= MAX_JOB_FAILURE_BYTES:
         return text
-    return dumps(dataclasses.replace(problem, details={}, message=problem.message[:4096]))
+    reduced = dumps(dataclasses.replace(problem, details={}, message=problem.message[:4096]))
+    if len(reduced.encode("utf-8")) <= MAX_JOB_FAILURE_BYTES:
+        return reduced
+    return dumps(dataclasses.replace(problem, details={}, message=problem.message[:256], stage=None,
+                                     trace_id=None, dependency_refs=(), diagnostic_ref=None))
 
 
 def load_json(cls: type, text: str | None) -> Any:

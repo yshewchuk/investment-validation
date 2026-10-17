@@ -48,7 +48,13 @@ from engine.v2.foundation import (
     parse_timestamp,
     to_document,
 )
-from engine.v2.ops.catalog import MAX_JOB_FAILURE_BYTES, dumps, load_json, transaction
+from engine.v2.ops.catalog import (
+    MAX_JOB_FAILURE_BYTES,
+    dumps,
+    dumps_failure,
+    load_json,
+    transaction,
+)
 from engine.v2.ops.errors import fail, make_problem
 from engine.v2.ops.provider_requirements import validate_scalar_provider_shape
 
@@ -321,7 +327,7 @@ def _insert_or_match(conn: sqlite3.Connection, request: SubmitRequest, kind: Job
         (job_id, request.namespace, request.idempotency_key, digest, request.principal,
          job.kind, job.spec_hash, dumps(job), job.resource_class, job.checkpoint_contract_ref,
          dumps(kind.retry), "blocked" if blocked else "queued", job.priority, job.deadline_at,
-         kind.retry.max_attempts, stamp, stamp, None if failure is None else dumps(failure)))
+         kind.retry.max_attempts, stamp, stamp, None if failure is None else dumps_failure(failure)))
     conn.executemany(
         "INSERT INTO job_dependencies (child_job_id, parent_job_id, required_output_contract) "
         "VALUES (?, ?, ?)",
