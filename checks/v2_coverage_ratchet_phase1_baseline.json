@@ -1,6 +1,6 @@
 {
   "schema_version": "phase1_coverage.v1.0",
-  "suite_version": "phase1_coverage_suite.v11",
+  "suite_version": "phase1_coverage_suite.v12",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_dashboard_board_filters_ops_root.py",
@@ -109,7 +109,6 @@
     "tests/test_v2_ops_worker_typed_failures.py",
     "tests/test_v2_serving_analog_ids.py",
     "tests/test_v2_serving_analogs.py",
-    "tests/test_v2_serving_bridge.py",
     "tests/test_v2_serving_derivation.py",
     "tests/v2/models/test_v2_serving_fold_loader.py",
     "tests/test_v2_serving_legacy_bundle.py",
@@ -146,6 +145,7 @@
     "tests/v2/ops/test_v2_ops_tier4_coverage.py",
     "tests/v2/serving/test_v2_serving_api.py",
     "tests/v2/serving/test_v2_serving_api_index_reads.py",
+    "tests/v2/serving/test_v2_serving_bridge.py",
     "tests/v2/serving/test_v2_serving_publication_binding.py"
   ],
   "source_hash": "sha256:56d7bf3eb6aa11a4b62385198efe03a80ae769ada533b128855fc1cce06c92a4",
