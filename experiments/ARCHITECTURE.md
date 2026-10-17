@@ -221,7 +221,7 @@ both flag states publish/verify the same plan and never write a ledger.
 
 ## Recorded magnitude-search selection
 
-`magnitude_search_trials.SearchTrials` is library-only, with no CLI or production caller. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies are contracts, foundation, ops migrations/catalog/fingerprints/errors, and research stored-history/target reads. `magnitude_history_inputs.history_binding` and `magnitude_search_plan.read_search_plan` own native/plan admission; public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
+`magnitude_search_trials.SearchTrials` is library-only, with no CLI or production caller. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies are contracts, foundation, ops migrations/catalog/fingerprints/errors, and research stored-history/target reads. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. `magnitude_history_inputs.history_binding` and `magnitude_search_plan.read_search_plan` own native/plan admission; public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
 
 | Condition | Outcome |
 |---|---|
@@ -244,7 +244,7 @@ both flag states publish/verify the same plan and never write a ledger.
 | Unavailable artifact, raw `OSError`, or read-time `UNSAFE_PATH` after stored-path syntax admission | Refuse sanitized retryable `RESOURCE_UNAVAILABLE`, including open-time OS errors and symlink rejection; no journal association changes, symlink traversal or attempt-retry authorization. |
 | Invalid stored-path syntax or reference; publication `UNSAFE_PATH` | Refuse `EXPERIMENT_IDENTITY_CONFLICT`; invalid reference syntax is rejected before artifact access. Content/hash mismatch during verified reads remains an identity conflict. |
 | Journal payload exceeds 16 MiB | Refuse nonretryable `RESOURCE_LIMIT_EXCEEDED` before publishing that record; incomplete attempts remain unfinished and block selection. |
-| Submitted-forecast selection | The source-sealed journal binds recorder-owned native admission, not independently authenticated execution; wholesale fabrication of the cohort and matching terminals is outside its consistency guarantee. Estimator execution stays unverified; no fitting, outer evaluation, deployment, ledger or final-read authority. |
+| Submitted-forecast selection | These submission/selection methods do not fit or authenticate estimator execution; wholesale fabrication of matching evidence is outside their consistency guarantee. Native fitting is separately described under [bounded inner-trial execution](#bounded-inner-trial-execution). Neither path grants outer evaluation, deployment, ledger or final-read authority. |
 
 ## Stored research-history entrypoint
 
@@ -443,6 +443,27 @@ This manual CLI is separate from the admitted smoke worker; neither authorizes p
 | Repeated call or failure | No cache, internal retry, transaction or publication; recompute from the same pin and never retain a partial result. |
 | CLI omits `--no-ledger` | Refuse before opening the catalog; recorded execution is unavailable. |
 
+## Scientific gate sweep collection
+
+| Condition | Outcome |
+| --- | --- |
+| Collection or observer requested | `native_sweep_collection.collect_sweep` returns immediately after sealed `submit_sweep` admission/exact job replay and collection. `v2_gate_collect.run_sweep` waits for submitted jobs to terminate or reach its positive finite timeout, then collects. Neither starts/stops workers or takes over supervisor ownership; timeout leaves jobs pending. No new scheduler; workers retain no recording authority. |
+| CLI purpose, mode and context | Both actions require an existing migrated catalog and seal, explicit source/holdout context, and exactly one smoke opt-in or ledger destination. Non-sweep purpose refuses `HOLDOUT_ACCESS_DENIED`; missing/conflicting mode refuses `INVALID_EXPERIMENT_SPEC`, both before CLI catalog/input access. `main(argv)` prints sorted index/refusal JSON: exit 0 for complete success, 2 for incomplete results or handled refusals; unexpected programming errors propagate. |
+| Collection/CLI dependency boundary | The collector consumes `v2_gate_sweep.submit_sweep`, native registration/outcomes, `gate_report.render_gate_report`, ops catalog transactions, registered artifacts, spec parsing, fingerprints, bounded native evidence readers/writers, job reads/`MAX_JOB_FAILURE_BYTES`/errors, contracts and foundation. `native_outcomes` consumes `ops.native_registration.read_native_evidence` and `native_evidence_json` for bounded publication/replay. The CLI consumes staged-input reading, ops catalog/job reads/errors, data `Repository`/errors and foundation artifacts; its only execution edge is to the collector. |
+| Immutable collection context and replay | The first canonical arm owns immutable `native_sweep_{mode}_intent` and `native_sweep_{mode}_index` references without replacing other registration evidence. The intent binds roster hash, installed collector-source closure, mode and normalized ledger address; its hash is the collection run ID. Drift under an existing mode refuses R6 with immutable-context recovery. Smoke/recorded identities are separate but use the same staged jobs. Exact replay compares immutable index/result bytes without fitting, job retry, duplicate recording or evidence replacement. Complete content-addressed objects may remain unreferenced after interrupted reservation. |
+| Unverifiable collector implementation | R6; recognized propagated source-read I/O interruptions instead yield retryable `RESOURCE_UNAVAILABLE`. Before submission, admission requires the installed on-disk closure to match its import-time snapshot and both caller coordinator entries to match installed entries; a failed baseline or known installed drift refuses before further source reads. The inherited shared source closure currently refuses `.py` files over 8 MiB with `INPUT_CHANGED`, mapped here to R6. The persisted-evidence bounds below still apply. The installed-root exception in root architecture §5 permits source comparison only: no catalog/artifact/network effects or bytecode-attestation claim, and no caller-data path uses that root. Other worker sources remain governed by the seal. |
+| Terminal output admissibility | Success requires the job's exact terminal attempt number/state/fence, its sole named canonical `native_gate_result` and exact registered identity/provenance; outputs from other attempts cannot substitute. Cancellation/recovery may advance the job fence. After exact-attempt admission, a succeeded attempt’s sole `native_gate_result` output naming an absent artifact registration refuses `INTEGRITY_FAILED`. |
+| Generic worker failure or missing result | A dispatched child ending in generic `WORKER_FAILED` or with neither a result nor a typed refusal receives immutable coordinator R4 (`EXPERIMENT_VARIANT_FAILED`) in either mode, distinct from the original ops retry policy. In recorded mode its permanent CSV row is keyed by `(id, spec_hash)` with `stage=failed`, preventing a later `ran` row under that identity. The original ops problem/diagnostic reference remains in the index; worker records are not rewritten. |
+| Registered refusal | Apart from the explicit generic-worker R4 accounting above, preserve code, category and retryability. Native-supported R4/R5/feature refusals use existing outcomes; identity and typed infrastructure refusals remain indexed without fabricated scientific outcomes. |
+| Recorded success | Render the arm's own result, compare/publish the existing native outcome, reconcile its replay-keyed ledger row and export its report. A conflicting earlier single-arm outcome refuses R6. |
+| Smoke | Publish only mode-labelled report/index artifacts and sweep-specific metadata. Never call native outcome/replay/export APIs, write native smoke/outcome slots, or touch a ledger. |
+| Interrupted publication | Raw collector/observer boundary I/O and non-constraint SQLite failures are retryable `RESOURCE_UNAVAILABLE`; raw SQLite integrity constraints and malformed stored collector/observer evidence refuse R6. The collector/observer translates only known evidence decoder failures; other errors reaching those boundaries propagate. Delegated APIs retain their policies, including unchanged foundation `ArtifactError` from direct collector-owned intent/smoke-report/index publication (the CLI preserves its code) and native outcomes mapping structural KeyError/TypeError/ValueError to R6 and RuntimeError to retryable `RESOURCE_UNAVAILABLE`. Changed sealed context remains R6. Intent and per-arm native intents resume ledger/report reconciliation; no final index exists until every terminal arm's applicable publication finishes. |
+| Invalid collection input or active caller transaction | `INVALID_EXPERIMENT_SPEC` for rejected mode, path or roster admission, or a non-idle catalog connection; other input-admission filesystem I/O remains retryable `RESOURCE_UNAVAILABLE`. Ledger admission permits absent destinations/parents and any existing ledger leaf must be regular without following symlinks; this preflight does not prevent later replacement races. |
+| Pending, attempted or failed arms | Each admitted/dispatched variant counts once, regardless of success, refusal or failure; queued/cancelled jobs without an attempt count zero. Pending states, including `retry_wait`, have no native recording or frozen index and cannot complete a run. Once all children are terminal, the index is immutable with `complete=false` if any arm failed/refused, retaining successful siblings. |
+| Native evidence byte admission | Collection opts into a 16 MiB UTF-8 budget for native registration/outcome/completion/result JSON and registered-reference metadata before decoding or verified object reads. SQL-returned evidence is capped at 32 MiB for UTF-16 and rechecked as UTF-8; shared native-evidence reads retain one verifier snapshot. Matching canonical evidence writes, including collector intent/index writes, share the budget. Existing intent/index references must exactly match the reference derived from bounded expected bytes before object reads; verified reads remain no-follow and bounded by registered size. `max_evidence_bytes` covers submission, registration verification and native outcome/replay/export; default None preserves existing callers. SQLite transactions, foundation identity/artifact verification and native publication own persistence; filesystem work stays outside catalog write transactions. |
+| Existing report comparison | Collection accepts only an exact byte match through a bounded, no-follow regular-file read; oversize, growth or differing bytes refuse R6. The comparison allowance is the expected report byte length plus one, derived from rendered bounded results or registered-size verification. This is a comparison bound, not a report-wide JSON ceiling; callers that do not opt in retain existing limits. |
+| Stored job/attempt failures and authority | Both shared ops job-failure reads (including submit replay/observer) and collector attempt-failure reads cap SQL-returned bytes at 1 MiB UTF-8 or 2 MiB UTF-16, then enforce 1 MiB UTF-8 before JSON decoding. No truncation is accepted; oversized/malformed job failures refuse `INTEGRITY_FAILED`, oversized attempt failures R6. SQLite internals and other receipt fields are outside this failure-field bound. The collection does not grant final-read, promotion or winner authority. Existing reconstructed-history/holdout limitations remain unchanged. |
+
 ## Evaluation recording and promotion receipts
 
 | Condition | Outcome |
@@ -517,3 +538,81 @@ Stored spec/source/snapshot/scope/environment identity is checked before populat
 admission, so a changed request cannot consume an original variant's refusal slot.
 A current holdout denial preserves R5 and its private receipt even when an earlier
 immutable completion prevents a second terminal CSV row; prior reports stay unchanged.
+
+## Bounded inner-trial execution
+
+`SearchTrials.execute(outer_year, inner_year, candidate_id, limits=...)` is a library-only
+native caller of the existing recorder and `magnitude_fitted.fitted_forecasts`.
+It consumes one declared candidate and inner fold; it does not run outer evaluation,
+recover claims, change the selection policy, write a ledger or grant final-read authority.
+The source seal explicitly includes the fixed child and its transitive fitting sources.
+
+| Condition | Outcome |
+|---|---|
+| Explicit positive integer `memory_bytes`, `cpu_seconds`, `wall_seconds` | Bind these limits to the immutable trial execution start. Linux child affinity uses the lowest currently allowed CPU; numerical thread variables are one. This selects a core without reserving it from other host work. |
+| Missing/extra limit keys, Boolean/noninteger/nonpositive or platform-unrepresentable values | `INVALID_EXPERIMENT_SPEC` before a claim or subprocess launch. |
+| Direct `run_fitted_trial` call | Requires exactly those three resource keys plus an integer `cpu_id` in `[0, 2**31 - 1)`, excluding Boolean values. Revalidates all limits before input access, scratch creation or launch; malformed resolved limits refuse `INVALID_EXPERIMENT_SPEC`. CPU availability is still enforced by child setup, not reserved by this pure check. |
+| Parent Linux affinity query unavailable or empty | `RESOURCE_UNAVAILABLE` before a claim or subprocess launch. Child limit/affinity setup failure instead preserves the post-claim unfinished attempt and refuses `RESOURCE_UNAVAILABLE`. |
+| Serialized input or a buffered child-output record exceeds 16 MiB | `RESOURCE_LIMIT_EXCEEDED`; preserve the unfinished claim, publish no candidate failure and block freeze. |
+| Started trial with admitted cohort | A fixed fit-only subprocess receives stored features and qualified training targets, never a repository, catalog or validation targets. Every horizon uses the existing fresh-fit pipeline and declared candidate recipe. |
+| Child reaches a horizon fit | Parent independently reconstructs its matrix/event evidence and commits a non-replayable fit admission before acknowledging. Completion is separately acknowledged only after its immutable evidence commits. Counts distinguish admitted fit attempts from completed fits; an interrupted admission does not prove the estimator was entered. |
+| Child completes all fits | Publish execution receipt and complete forecasts before validation labels open through the internal native recorder path; original candidate/validation scoring policy applies. Public `record` cannot finish an unfinished native attempt. |
+| Candidate scoring refuses after successful native fits | Preserve the successful execution receipt and durable `refused` terminal. Initial scoring propagates `EXPERIMENT_VARIANT_FAILED`; replay returns the intact receipt without refitting or rescoring, and freeze excludes that candidate while retaining successful peers. |
+| Estimator-local `EXPERIMENT_VARIANT_FAILED` | Record the attempted/completed prefix and candidate failure. Other candidates and folds remain required by `freeze`. |
+| Memory, CPU or elapsed-time limit; launch/import/pipe/protocol/abnormal-exit failure | Limits refuse `RESOURCE_LIMIT_EXCEEDED`; invalid JSON, missing events, messages after a result or evidence/completion mismatches refuse `EXPERIMENT_IDENTITY_CONFLICT`; unsupported events/progress envelopes, setup, I/O, missing results and other infrastructure failures refuse `RESOURCE_UNAVAILABLE`. Retain the unfinished claim and block freeze; never convert these failures into candidate exclusion or retry, even for retryable Problems. |
+| Resource enforcement | Child `RLIMIT_AS` bounds virtual address space and `RLIMIT_CPU` bounds process CPU time; the parent bounds child elapsed lifetime, including waits for journal acknowledgements. Parent I/O is not preempted; an expired child deadline is checked when it returns and after child exit, before accepting completion. These are per-process fit caps, not shared-host reservations or a cap on parent admission/journal I/O. Only fixed single-threaded native estimators run. |
+| Native completion replay/freeze | Revalidate every admitted/completed horizon, matrix digest, complete forecast digest and ordinary terminal chain; launch nothing and reopen no native labels/features. Changed limits, missing/corrupt evidence and caller-submitted terminals refuse native replay. |
+| Interrupted execution or label admission | Existing immutable start/forecast slots prevent restart; public recording cannot finish any unfinished native attempt, including a failed forecast publication. Receipt publication can precede a later failed forecast/terminal write; the unfinished trial remains blocking. |
+| Fitting guard active | Both parent no-fit guards refuse before a new claim or subprocess launch; completed replay remains read-only. |
+
+The child uses standard-library subprocess, selectors, resource limits and JSON; no
+optimizer, alternate estimator pipeline or general-purpose scheduler is introduced.
+Execution uses ops thread-environment constants and existing foundation/journal publication.
+Scratch inputs are removed when the call exits. Completed evidence is consistency-checked,
+not cryptographically authenticated against wholesale journal fabrication. Frozen selections
+retain their existing submitted-forecast label and confer no additional execution authority.
+
+## Exploratory RUNUP exit comparison
+
+`runup_exit_report.compare_runup_exits` and `python -m experiments.v2_runup_exits`
+compare a declared target/stop roster with the existing STR-RUNUP fixed-day control.
+They use the merged native population, calendar, entry selector and exit walker;
+there is no scheduler, model fitting, threshold search or production caller.
+The closed request requires explicit unique event IDs, one fill alpha, explicit
+`quote_price_times_quantity` threshold units and one to eight named target/stop arms.
+The CLI requires an exact snapshot ID and holdout as-of month; its JSON input
+must be a regular file bounded to 1 MiB. Admission precedes any quote read.
+`--no-ledger` is an accepted no-op; both CLI modes are equally read-only.
+
+The existing D−14 entry and last-pre-print exit use only observed snapshot sessions.
+All admitted events must plan successfully. Contracts are selected once from each
+entry chain using native STR-RUNUP (long ATM call/put, first expiry at least 30 DTE).
+Selected DTE must agree with expiry minus entry day; ATM ties use lower strikes.
+A fixed-day walk validates every held leg on every session through the common
+14-session horizon before any target/stop arm runs. Missing/ambiguous/unusable
+marks, expiry overrun or incomplete calendar refuse the entire cohort, including
+when an arm would have exited before the missing mark. No survivor subset returns.
+
+Every arm retains those exact contracts, quantities, entry dates and fill alpha.
+Daily crossing, equality and conservative ambiguous-stop behavior belong to
+`experiment_exits.walk_exit`; ambiguous stops use alpha zero at exit. Values are
+quote price × quantity: spread is modeled, commissions/fees and the option
+contract multiplier are absent. These are daily mark-based hypothetical results,
+not intraday execution, stop-price fills, realized returns or an optimized strategy.
+
+The JSON report contains paired per-event outcomes and deltas, all-arm counts,
+entry contracts, snapshot/holdout pins, full recipes, source closure and environment
+identity. Its canonical binding hash identifies reproducible inputs; a separate
+report hash covers the complete output. This is exploratory evidence, not a sealed
+preregistration, recorded hypothesis, immutable run or promotion authority.
+The CLI opens the catalog read-only and prints once; neither helper nor CLI writes
+reports, artifacts, ledger rows or orders. No refusal contains partial metrics.
+There is no retry, fallback source, projected calendar or partial-success mode.
+
+| Condition | Refusal and context |
+| --- | --- |
+| Malformed/duplicate-key, nonregular, oversized or invalid request | `INVALID_EXPERIMENT_SPEC` before repository access; no stage/counts. |
+| Holdout exclusion or invalid admission context | `HOLDOUT_ACCESS_DENIED`, population stage/counts. |
+| Entry selection, common coverage or pairing fails | `EXPERIMENT_VARIANT_FAILED`, current stage/counts; zero compared. |
+| Repository integrity or unresolved snapshot | Native code; stage/counts only after comparison admission starts. |
+| CLI filesystem or SQLite failure | `INPUT_CHANGED`, no stage/counts. |

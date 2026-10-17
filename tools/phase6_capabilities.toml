@@ -476,7 +476,7 @@ old = ["route:legacy-app GET /api/ticker/{sym}"]
 new = ["route:v2-api GET /api/v1/events/{event_id}/scores", "route:v2-api GET /api/v1/scores/{score_id}", "view:ui #event", "view:ui #score"]
 producer = "LegacyScoreBridge rows (Phase 3 bridge) published as immutable objects"
 identity = "release_id + score_id; lazy detail with ETag"
-tests = ["tests/v2/serving/test_v2_serving_api.py", "tests/test_v2_serving_bridge.py", "tests/test_checks_phase3_browser.py"]
+tests = ["tests/v2/serving/test_v2_serving_api.py", "tests/v2/serving/test_v2_serving_bridge.py", "tests/test_checks_phase3_browser.py"]
 disposition = "compatibility-adapter"
 owner = "P6-4"
 notes = "Replace the bridge's legacy-score input with the canonical projection."
@@ -542,12 +542,14 @@ evidence = "job:training"
 area = "models"
 capability = "Retrain current model roles and register candidates"
 old = ["cli:engine/models/training/train_all.py", "cli:tools/build_chooser_pool.py"]
-new = ["cli:tools/phase5_training_job.py", "py:engine/v2/models/deployment.py::promote",
+new = ["cli:tools/phase5_training_job.py", "cli:tools/phase5_d14_inputs.py",
+       "py:engine/v2/models/deployment.py::promote",
        "py:engine/v2/ops/training.py::training_plan", "py:engine/v2/ops/training.py::promote_plan",
        "py:engine/v2/ops/training.py::training_job_kind", "py:engine/v2/ops/training.py::promote_job_kind"]
-producer = "P5-3 supervised training job over legacy dataset builders; P5-5 staged deployment"
+producer = "P5-3 supervised legacy builders plus explicit native D14 inputs; P5-5 staged deployment"
 identity = "training receipt + staged ModelRelease id"
-tests = ["tests/test_training.py", "tests/test_v2_models_deployment.py", "tests/test_v2_models_phase5_datasets.py"]
+tests = ["tests/test_training.py", "tests/test_v2_models_deployment.py", "tests/test_v2_models_phase5_datasets.py",
+         "tests/v2/models/training/test_d14_dataset.py", "tests/v2/models/training/test_d14_input_guards.py"]
 disposition = "compatibility-adapter"
 owner = "P6-2"
 notes = "Phase 5 owns the lifecycle; P6-2 wires it as an ops job. training and models_promote are now reached through ops plan/ops submit (ops plan training, ops plan promote), operator-triggered only -- never part of the nightly DAG."
@@ -843,8 +845,8 @@ ids = ["cli:tools/land.py"]
 reason = "Supervisor merge/gate/push wrapper (hygiene + bounded tests before pushing a branch to main); development tooling, not a board/nightly consumer."
 
 [[excluded]]
-ids = ["cli:tools/captured_native_comparison.py", "cli:tools/phase4_targeted_replay.py", "cli:tools/phase5_calibration_keys.py", "cli:tools/phase5_inventory.py", "cli:tools/phase5_prepare_release.py", "cli:tools/prepare_phase4_tier4_caches.py", "cli:tools/phase6_inventory.py"]
-reason = "Phase 4/5/6 migration preparation, inventory and targeted replay diagnostic tooling; evidence producers, not production consumers."
+ids = ["cli:tools/captured_native_comparison.py", "cli:tools/phase4_targeted_replay.py", "cli:tools/phase5_calibration_keys.py", "cli:tools/phase5_inventory.py", "cli:tools/phase5_prepare_release.py", "cli:tools/prepare_phase4_tier4_caches.py", "cli:tools/phase6_inventory.py", "cli:tools/phase7_candidate_manifest.py"]
+reason = "Phase 4/5/6/7 migration preparation, inventory and targeted replay diagnostic tooling; evidence producers, not production consumers."
 
 [[excluded]]
 ids = ["cli:tools/verify_incremental_rebuild.py"]

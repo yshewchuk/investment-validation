@@ -131,6 +131,7 @@ def _preview_release(
         "snapshot_ref": "snapshot-" + release_id,
         "score_batch_ref": "batch-" + release_id,
         "bundle_manifest_ref": "bundle-" + release_id,
+        "row_sources": ["legacy_bundle"],
         "model_registry_artifact_refs": ["model-1"],
         "model_evidence_ref": None,
         "comparison_receipt_refs": ["receipt-" + release_id],
@@ -144,7 +145,7 @@ def _preview_release(
         "score_format": "legacy_score_bridge.v1.0",
         "producer": "legacy_via_v2",
         "capabilities": {"read": True, "submit_jobs": False, "collect_live": False},
-        "schema_version": "preview_release.v1.0",
+        "schema_version": "preview_release.v1.1",
     }
 
 

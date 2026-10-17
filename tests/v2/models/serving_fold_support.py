@@ -5,7 +5,7 @@ import json
 
 import joblib
 
-from checks import phase5_release as layout
+from engine.v2.models import release_layout as layout
 from engine.v2.foundation import from_document
 from engine.v2.models import (
     ArtifactInventoryMember,

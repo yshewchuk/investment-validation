@@ -8,6 +8,7 @@ as data (:mod:`.recipes`), reproduces their membership and folds
 (:mod:`.job`). See ``README.md``.
 """
 
+from .d14_inputs import build_d14_dataset
 from .estimators import (
     EqualWeightBlend,
     LogTargetModel,
@@ -60,6 +61,7 @@ __all__ = [
     "RecipeDataError", "RecipeKey", "ResidualRule", "RowFilter", "SeedMeanEnsemble",
     "TRAINING_JOB_V1", "TargetSpec", "ThresholdRule", "TrainingJobResult", "TrainingRecipe",
     "TrainingRefused", "UnsupportedEstimator", "UpstreamDependency", "ValueMask",
-    "current_recipes", "dataset_fingerprint", "fit_recipe_estimator", "fold_receipts",
+    "build_d14_dataset", "current_recipes", "dataset_fingerprint", "fit_recipe_estimator",
+    "fold_receipts",
     "plan_folds", "prepare_dataset", "receipt_issues", "recipe_fingerprint", "run_training_job",
 ]

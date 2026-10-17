@@ -469,7 +469,7 @@ class Service:
         Three calls, gated in two stages: deployment.production_release_root()
         (one os.environ read) and deployment.current_pointer() against this
         release root's own "deployment" subdirectory (one file stat, one
-        small JSON decode -- checks/phase5_release.py's own DEPLOYMENT_DIR
+        small JSON decode -- engine/v2/models/release_objects.py's own DEPLOYMENT_DIR
         constant is the precedent for this exact literal, since
         release_bindings._DEPLOYMENT_DIR is private to that module) are both
         genuinely cheap and run every call; resolve_production_release_binding()

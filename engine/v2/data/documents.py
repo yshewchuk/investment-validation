@@ -42,7 +42,7 @@ from engine.v2.foundation import DocumentError, from_document, parse_timestamp
 
 from . import time_formats
 
-__all__ = ["decode_document", "loads_document"]
+__all__ = ["decode_document", "loads_document", "reject_duplicate_keys"]
 
 _HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -97,7 +97,7 @@ _FORMATS: dict[tuple[str, str], str] = {
 
 def loads_document(cls: type, text: str) -> Any:
     """Parse ``text`` as JSON, refusing a duplicate key, then decode it."""
-    doc = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+    doc = json.loads(text, object_pairs_hook=reject_duplicate_keys)
     return decode_document(cls, doc)
 
 
@@ -108,7 +108,8 @@ def decode_document(cls: type, doc: Any) -> Any:
     return instance
 
 
-def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Standard JSON object-pairs hook; duplicate names raise ``DocumentError``."""
     seen: dict[str, Any] = {}
     for key, value in pairs:
         if key in seen:

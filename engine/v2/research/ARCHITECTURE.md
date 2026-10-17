@@ -62,6 +62,11 @@ one; the library entrypoints below are this package's real public interface:
 `_pricing.STRUCTURES`, `_pricing.trading_calendar_from_snapshot`,
 `_pricing.execution_variant_label`.
 
+The RUNUP comparison's public entry-selection seams are
+`replay.clean_chain_rows` (returns valid quote rows without input mutation),
+`_pricing.MIN_MEANINGFUL_COST`, `ChainSnapshot`, `FillModel`, `StructureError`
+and `price_structure` (existing pure native selection/spread arithmetic).
+
 `experiment_trades.load_trades(repository, snapshot, strategy, *, as_of_month,
 purpose="training", event_ids=None)` is a second
 kind of entrypoint: a plain library call (no `tools/v2_*.py` CLI of its own),
@@ -552,6 +557,8 @@ shape. Merging the two remains issue #69: that would change both
 modules' callers, outside this PR's one concern.
 
 Callers: no `engine/` modules import this package (checked by `checks/import_layers.py`).
+`experiments/runup_exit_report.py` consumes population admission, calendar/plan,
+chain index, the entry-selection seams above and exit walking for read-only comparisons.
 `experiments/magnitude_inputs.py` consumes `magnitude_inputs.preflight_magnitude_targets`;
 `experiments/magnitude_report.py` consumes `preflight_magnitude_targets`,
 `load_magnitude_targets` and `qualify_magnitude_training_targets`.
@@ -559,7 +566,9 @@ Callers: no `engine/` modules import this package (checked by `checks/import_lay
 `experiment_population.load_population` and `magnitude_folds`' window/planner.
 `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`.
 `experiments/magnitude_search_trials.py` consumes `read_stored`, `preflight_magnitude_targets`,
-`qualify_magnitude_training_targets`, `load_magnitude_targets` and `magnitude_recipe`; it never fits or performs outer evaluation.
+`qualify_magnitude_training_targets`, `load_magnitude_targets` and `magnitude_recipe`.
+That external caller owns legacy/v2 no-fit guards and delegates bounded inner fitting to
+`experiments.magnitude_search_execution` (using ops executor thread constants); it performs no outer evaluation.
 `experiments/magnitude_history_store.py` consumes the stored-history context, build and read APIs.
 Other consumers include `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
 trade, calendar, and chain inputs from pinned v2 data. The archived

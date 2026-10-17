@@ -7,7 +7,7 @@ from engine.models.no_fit import RuntimeFitForbidden as LegacyRuntimeFitForbidde
 from engine.v2.foundation import content_hash
 from engine.v2.models.adapters import RuntimeFitForbidden
 from engine.v2.models.training.magnitude import fit_magnitude_predictions
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 
 
 def _matrix(indexed, event_ids, horizon, columns):
@@ -19,7 +19,7 @@ def _matrix(indexed, event_ids, horizon, columns):
     return document, np.asarray(document["values"], dtype=float)
 
 
-def fitted_forecasts(indexed, train, fold, plan, execution):
+def fitted_forecasts(indexed, train, fold, plan, execution, *, progress=None, strict_failures=False):
     """Freeze fresh fits and input digests before the caller opens evaluation labels."""
     predictions, evidence = {}, []
     train_ids, test_ids = train.event_id.tolist(), fold["evaluation_event_ids"]
@@ -32,6 +32,8 @@ def fitted_forecasts(indexed, train, fold, plan, execution):
         fit = {"horizon_sessions": horizon, "training_event_ids": list(train_ids),
             "evaluation_event_ids": list(test_ids), "training_matrix_id": content_hash(training),
             "prediction_matrix_id": content_hash(prediction)}
+        if progress is not None:
+            progress("started", fit)
         try:
             values = fit_magnitude_predictions(execution["fit_recipe"], matrix, labels.copy(), test_matrix)
             if (len(values) != len(test_ids) or any(isinstance(value, bool)
@@ -39,8 +41,16 @@ def fitted_forecasts(indexed, train, fold, plan, execution):
                 raise ValueError
         except (RuntimeFitForbidden, LegacyRuntimeFitForbidden):
             raise
-        except Exception:
+        except (MemoryError, OSError, ImportError, OpsError):
+            if strict_failures:
+                raise
+            raise fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed") from None
+        except Exception as error:
+            if strict_failures and not isinstance(error, (ValueError, ArithmeticError)):
+                raise
             raise fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed") from None
         predictions.update({(event, horizon): float(value) for event, value in zip(test_ids, values)})
         evidence.append(fit)
+        if progress is not None:
+            progress("completed", fit)
     return predictions, evidence

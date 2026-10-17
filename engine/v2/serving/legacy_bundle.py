@@ -52,7 +52,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-__all__ = ["LegacyBundleError", "load_legacy_bundle", "load_score_document"]
+__all__ = [
+    "LegacyBundleError", "MAX_ARTIFACT_BYTES", "load_legacy_bundle",
+    "load_score_document", "parse_score_document", "read_capped_bytes",
+    "read_score_bytes",
+]
 
 
 class LegacyBundleError(Exception):
@@ -93,6 +97,29 @@ _SCORE_DOC_ALLOWED = _SCORE_DOC_REQUIRED | _SCORE_DOC_OPTIONAL
 # strict, hashed, symlink-refusing file reads
 # --------------------------------------------------------------------------
 
+#: Refuse to read (and hash) any single artifact file larger than this.
+MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
+
+
+def read_capped_bytes(path: Path | str, cap: int | None = None) -> bytes:
+    """Read ``path`` in binary, refusing a file longer than ``cap`` bytes.
+
+    ``cap`` defaults to the module's :data:`MAX_ARTIFACT_BYTES`, read at call
+    time so a caller (or test) may lower it without reimporting. ``cap + 1``
+    bytes are requested so a file exactly at the cap passes and one byte
+    longer refuses rather than being silently truncated. A non-int or
+    negative ``cap`` is refused before the file is opened.
+    """
+    cap = MAX_ARTIFACT_BYTES if cap is None else cap
+    if not isinstance(cap, int) or isinstance(cap, bool) or cap < 0:
+        raise ValueError("cap must be a non-negative int")
+    with open(path, "rb") as handle:
+        data = handle.read(cap + 1)
+    if len(data) > cap:
+        raise LegacyBundleError(
+            "ARTIFACT_TOO_LARGE", f"{path} exceeds the {cap}-byte size cap")
+    return data
+
 
 def _sha256_hex(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
@@ -131,7 +158,7 @@ def _read_and_hash(bundle_root: Path, path: Path, manifest: dict[str, str]) -> b
     if not path.is_file():
         raise LegacyBundleError("MISSING_FILE", f"{path} is missing",
                                 details={"path": str(path.relative_to(bundle_root).as_posix())})
-    data = path.read_bytes()
+    data = read_capped_bytes(path)
     manifest[str(path.relative_to(bundle_root).as_posix())] = _sha256_hex(data)
     return data
 
@@ -349,31 +376,53 @@ def load_legacy_bundle(bundle_root: Path | str) -> tuple[dict[str, list[dict]], 
 # load_score_document
 # --------------------------------------------------------------------------
 
+_SCORE_DOCUMENT_LABEL = Path("<score document>")
+
+
+def read_score_bytes(path: Path | str) -> bytes:
+    """Strict byte-bound ``score.json`` read: refuse a symlink or a missing
+    file, then read through :func:`read_capped_bytes` (the 64 MiB
+    :data:`MAX_ARTIFACT_BYTES` cap)."""
+    path = Path(path)
+    if path.is_symlink():
+        raise LegacyBundleError("SYMLINK_REFUSED", f"{path} is a symlink")
+    if not path.is_file():
+        raise LegacyBundleError("MISSING_FILE", f"{path} is missing")
+    return read_capped_bytes(path)
+
+
+def parse_score_document(raw: bytes) -> dict:
+    """Strictly-shaped ``score.json`` document parsed from ``raw`` bytes:
+    ``rows``/``ladder``/``expected_population`` present as lists, no
+    unrecognized top-level key. The byte-bound, symlink-refusing read is the
+    caller's responsibility (see :func:`load_score_document`).
+    """
+    doc = _parse_json_text(raw.decode("utf-8"), _SCORE_DOCUMENT_LABEL)
+    if not isinstance(doc, dict):
+        raise LegacyBundleError(
+            "UNKNOWN_STRUCTURE", f"{_SCORE_DOCUMENT_LABEL}: expected a JSON object")
+    unknown = set(doc) - _SCORE_DOC_ALLOWED
+    if unknown:
+        raise LegacyBundleError(
+            "UNKNOWN_STRUCTURE",
+            f"{_SCORE_DOCUMENT_LABEL}: unknown score-document keys {sorted(unknown)}",
+            details={"unknown_keys": sorted(unknown)})
+    missing = _SCORE_DOC_REQUIRED - set(doc)
+    if missing:
+        raise LegacyBundleError(
+            "UNKNOWN_STRUCTURE",
+            f"{_SCORE_DOCUMENT_LABEL}: missing required keys {sorted(missing)}",
+            details={"missing_keys": sorted(missing)})
+    for key in ("rows", "ladder", "expected_population"):
+        if not isinstance(doc[key], list):
+            raise LegacyBundleError(
+                "UNKNOWN_STRUCTURE", f"{_SCORE_DOCUMENT_LABEL}: {key!r} must be a list")
+    return doc
+
 
 def load_score_document(path: Path | str) -> dict:
     """Strictly-shaped ``score.json`` read: ``rows``/``ladder``/
     ``expected_population`` present as lists, no unrecognized top-level key,
     no symlink.
     """
-    path = Path(path)
-    if path.is_symlink():
-        raise LegacyBundleError("SYMLINK_REFUSED", f"{path} is a symlink")
-    if not path.is_file():
-        raise LegacyBundleError("MISSING_FILE", f"{path} is missing")
-    doc = _parse_json_text(path.read_bytes().decode("utf-8"), path)
-    if not isinstance(doc, dict):
-        raise LegacyBundleError("UNKNOWN_STRUCTURE", f"{path}: expected a JSON object")
-    unknown = set(doc) - _SCORE_DOC_ALLOWED
-    if unknown:
-        raise LegacyBundleError(
-            "UNKNOWN_STRUCTURE", f"{path}: unknown score-document keys {sorted(unknown)}",
-            details={"unknown_keys": sorted(unknown)})
-    missing = _SCORE_DOC_REQUIRED - set(doc)
-    if missing:
-        raise LegacyBundleError(
-            "UNKNOWN_STRUCTURE", f"{path}: missing required keys {sorted(missing)}",
-            details={"missing_keys": sorted(missing)})
-    for key in ("rows", "ladder", "expected_population"):
-        if not isinstance(doc[key], list):
-            raise LegacyBundleError("UNKNOWN_STRUCTURE", f"{path}: {key!r} must be a list")
-    return doc
+    return parse_score_document(read_score_bytes(path))

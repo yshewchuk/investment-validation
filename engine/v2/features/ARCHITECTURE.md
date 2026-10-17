@@ -50,6 +50,8 @@ incrementally: the math is reached in production through
 Research's `event_history.load_event_history` feeds `history_features` only
 after canonical holdout, physical object-isolation and availability admission.
 That read boundary owns provenance and missing-history status; the math is unchanged.
+The additive `engine.v2.models.training.d14_dataset` path uses `daily_state_lookup`
+for entry/exit market observations, preserving stored panel history rather than rebuilding it.
 
 ### Runup feature math
 
@@ -311,6 +313,8 @@ uses no implicit clock, and owns no cache.
 
 ## Dependencies and callers
 
+- `engine.v2.models.training.d14_dataset` calls `panel_math.daily_state_lookup`
+  for D14 entry/exit observations; stored historical panel columns remain inputs.
 - `panel_math` depends only on `numpy` and `pandas` (both third-party). It
   imports nothing from `engine.v2.data`, `engine.v2.contracts`,
   `engine.v2.foundation`, or any legacy `engine.*` module, and no legacy
