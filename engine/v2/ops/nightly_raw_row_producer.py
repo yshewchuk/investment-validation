@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import numbers
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
 from typing import Any
@@ -47,6 +48,7 @@ from engine.v2.ops.nightly_calendar_inputs import (
 from engine.v2.ops.nightly_chain_batch import scan_chain_slices
 from engine.v2.ops.nightly_quote_rows import scan_quote_rows
 from engine.v2.ops.nightly_raw_rows import scan_forward_board_requests
+from engine.v2.ops.nightly_read_summary import ReadTracker
 from engine.v2.scoring.nightly_source_bundle import validated_as_of
 
 __all__ = ["build_native_score_batch_events"]
@@ -252,6 +254,23 @@ def build_native_score_batch_events(
     build (``scan_chain_slices``); a repository error there fails the build and
     never falls back to per-key scans.
     """
+    tracker = ReadTracker(getattr(repository, "read_counters", None))
+    try:
+        return _build_events(repository, snapshot, as_of=as_of,
+                             horizon_days=horizon_days, tickers=tickers,
+                             tracker=tracker)
+    finally:
+        # One summary per build: emission is the wrapper's alone, so every
+        # early return and every error path below still reports it exactly once.
+        worker_progress.step_start("read_summary")
+        worker_progress.step_end("read_summary", reads=tracker.summary())
+
+
+def _build_events(repository: Repository, snapshot: SnapshotRef, *,
+                  as_of: Any, horizon_days: int,
+                  tickers: Iterable[str] | None,
+                  tracker: ReadTracker) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """One build's whole body; ``tracker`` is caller-owned, never created here."""
     requests = tuple(scan_forward_board_requests(
         repository, snapshot, as_of=as_of, horizon_days=horizon_days, tickers=tickers))
     refusals: dict[int, dict[str, Any]] = {}
@@ -288,16 +307,38 @@ def build_native_score_batch_events(
     # One option_chains read per build: grouped by ticker, shared by both scanners.
     chains = scan_chain_slices(repository, snapshot, {key.ticker for _, key in admitted},
                                decision_session=decision_session)
+    events = _compose_admitted(repository, snapshot, admitted, decision_session=decision_session,
+                               calendar=calendar, panels=panels, chains=chains,
+                               refusals=refusals, tracker=tracker)
+    return events, _refusals_document(ordered())
+
+
+def _compose_admitted(repository: Repository, snapshot: SnapshotRef,
+                      admitted: list[tuple[int, BoardRequest]], *,
+                      decision_session: str, calendar: Any,
+                      panels: dict[tuple[str, str, str], PanelRowInputs],
+                      chains: Mapping[str, Sequence[Mapping[str, Any]]],
+                      refusals: dict[int, dict[str, Any]],
+                      tracker: ReadTracker) -> list[dict[str, Any]]:
+    """Compose every admitted request's event, mutating ``refusals`` for each in-place refusal."""
+    tracker.delta()  # discard: reset the baseline so step 1's reads cover only step 1
     events: list[dict[str, Any]] = []
     for done, (position, key) in enumerate(admitted, 1):
         # Live progress: one step per row, "done_of_total" in its name (no-op outside a worker).
-        with worker_progress.step(f"compose_event_{done}_of_{len(admitted)}", units=1):
+        name = f"compose_event_{done}_of_{len(admitted)}"
+        worker_progress.step_start(name)
+        t0 = time.monotonic()
+        try:
             event, refusal = _compose_event(
                 repository, snapshot, key, decision_session=decision_session,
                 calendar=calendar, panel=panels[_panel_marker(key)],
                 chain_rows=chains[key.ticker])
+        finally:
+            reads = tracker.delta()
+            worker_progress.step_end(name, units=1, reads=reads)
+            tracker.record(name, time.monotonic() - t0, reads)
         if refusal is None:
             events.append(event)
         else:
             refusals[position] = refusal
-    return events, _refusals_document(ordered())
+    return events

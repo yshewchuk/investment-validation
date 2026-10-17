@@ -43,7 +43,8 @@ __all__ = [
 ]
 
 PROBLEM_V1 = "problem.v1.0"
-PROGRESS_EVENT_V1 = "progress_event.v1.0"
+# v1.1 adds the optional step_reads; v1.0 bodies (no such key) stay readable.
+PROGRESS_EVENT_V1 = "progress_event.v1.1"
 RESOLVED_RESOURCES_V1 = "resolved_resources.v1.0"
 RESOURCE_POLICY_V1 = "resource_policy.v1.0"
 CAPACITY_SAMPLE_V1 = "capacity_sample.v1.0"
@@ -215,6 +216,7 @@ class ProgressEvent:
     step: str | None = None
     step_duration_seconds: float | None = None
     step_units: int | None = None
+    step_reads: dict[str, Any] | None = None
     schema_version: str = PROGRESS_EVENT_V1
 
 
