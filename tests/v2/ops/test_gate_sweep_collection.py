@@ -64,7 +64,10 @@ from tests.v2.research.test_gate_report import source as source
 
 
 def _collect(source, *, code_root=REPO, document=None, **kwargs):
-    return call_sweep(source, collection.collect_sweep, document, code_root=code_root, **kwargs)
+    result = call_sweep(source, collection.collect_sweep, document, code_root=code_root, **kwargs)
+    assert type(result["index"]["attempted_variants"]) is int
+    assert all(type(arm["attempted_variants"]) is int for arm in result["index"]["variants"])
+    return result
 
 
 def _run(source, *, code_root=REPO, document=None, **kwargs):
@@ -127,8 +130,13 @@ def _finish(source, claim, clock, *, problem=None):
 
 def _complete(source, jobs):
     clock, claim = _claimer(source)
+    attempts = {}
     for _ in jobs:
-        _finish(source, claim(), clock)
+        attempt = claim()
+        _finish(source, attempt, clock)
+        attempts[attempt.job_id] = attempt.attempt_id
+    assert set(attempts) == {job.job_id for job in jobs}
+    return attempts
 
 
 @pytest.mark.usefixtures("fixed_sweep_code")
@@ -335,10 +343,17 @@ def test_recorded_r4_cannot_later_be_replaced_by_success(source, tmp_path):
     call_sweep(source, sweep.submit_sweep)
     clock, claim = _claimer(source)
     failed = claim()
-    _finish(source, failed, clock, problem=fail("WORKER_FAILED", "synthetic worker failure").problem)
+    diagnostic = source.store.publish_bytes(b"synthetic worker diagnostic", schema_ref="worker_diagnostic.v1.0")
+    worker_problem = replace(fail("WORKER_FAILED", "synthetic worker failure").problem,
+                             diagnostic_ref=diagnostic.artifact_id)
+    _finish(source, failed, clock, problem=worker_problem)
     ledger = tmp_path / "LEDGER.csv"
     result = _collect(source, ledger_path=ledger)
     arm = next(arm for arm in result["index"]["variants"] if arm["job_id"] == failed.job_id)
+    assert arm["attempt_id"] == failed.attempt_id
+    assert arm["worker_problem"] == to_document(worker_problem)
+    assert arm["worker_problem"]["diagnostic_ref"] == diagnostic.artifact_id
+    assert source.store.read_verified(diagnostic) == b"synthetic worker diagnostic"
     assert arm["problem"]["code"] == "EXPERIMENT_VARIANT_FAILED"
     assert [row["stage"] for row in _rows(ledger)] == ["failed"]
     registration = next(item for item in _registrations(source) if item.variant_id == arm["variant_id"])
@@ -394,7 +409,7 @@ def test_caller_coordinator_entry_must_match_installed_source(source, tmp_path, 
 def test_interrupted_publication_reconciles_without_duplicate_rows(source, tmp_path, monkeypatch, failure):
     call_sweep(source)
     jobs = call_sweep(source, sweep.submit_sweep)
-    _complete(source, jobs)
+    attempts = _complete(source, jobs)
     ledger = tmp_path / "LEDGER.csv"
     original = (native_outcomes.ledger_append if failure == "ledger" else native_outcomes._publish
                 if failure == "receipt" else native_outcomes.export_native_report if failure == "export"
@@ -415,11 +430,39 @@ def test_interrupted_publication_reconciles_without_duplicate_rows(source, tmp_p
             _collect(source, ledger_path=ledger)
         assert error.value.code == "RESOURCE_UNAVAILABLE"
         assert error.value.problem.retryable is True
+        assert error.value.problem.message == ("sweep collection publication was interrupted" if failure in {"export", "index"}
+                                                else "native publication was interrupted; replay its intent")
     assert not any(any(key.endswith("_index") for key in evidence) for evidence in _evidence(source))
+    saved_evidence = _evidence(source)
     result = _collect(source, ledger_path=ledger)
-    assert result["index"]["complete"] and result["index_ref"] is not None
-    assert len(_rows(ledger)) == 2
-    assert _collect(source, ledger_path=ledger) == result and len(_rows(ledger)) == 2
+    for saved, reconciled in zip(saved_evidence, _evidence(source), strict=True):
+        assert {key: reconciled[key] for key in saved} == saved
+    index = result["index"]
+    assert index["complete"] is True and result["index_ref"] is not None
+    assert index["attempted_variants"] == 2
+    assert {arm["job_id"]: arm["attempt_id"] for arm in index["variants"]} == attempts
+    assert json.loads(source.store.read_verified(from_document(ArtifactRef, result["index_ref"]))) == index
+    expected_rows = []
+    for arm, registration in zip(index["variants"], _registrations(source), strict=True):
+        assert arm["state"] == "succeeded" and arm["problem"] is arm["worker_problem"] is None
+        assert arm["attempted_variants"] == 1
+        outcome = json.loads(source.store.read_verified(from_document(ArtifactRef, arm["outcome_ref"])))
+        receipt = json.loads(source.store.read_verified(from_document(ArtifactRef, arm["completion_ref"])))
+        assert outcome["run_id"] == registration.run_id and outcome["variant_id"] == registration.variant_id
+        assert type(outcome["attempted_variants"]) is int and outcome["attempted_variants"] == 1
+        assert outcome["failure_code"] is None and outcome["report_ref"] == arm["report_ref"]
+        assert receipt == {"schema_version": "native_experiment_completion.v1.0",
+                           "outcome_ref": arm["outcome_ref"], "recording_mode": "recorded",
+                           "report_ref": arm["report_ref"], "ledger_destination": content_hash(str(ledger.resolve())),
+                           "ledger_row_hash": content_hash(outcome["ledger_row"])}
+        report = source.store.read_verified(from_document(ArtifactRef, arm["report_ref"]))
+        assert (source.store.root / "native_reports" / registration.run_id / "recorded" / "REPORT.md").read_bytes() == report
+        expected_rows.append(outcome["ledger_row"])
+    assert _rows(ledger) == expected_rows
+    before, ledger_bytes = scientific_rows(source), ledger.read_bytes()
+    assert _collect(source, ledger_path=ledger) == result
+    assert scientific_rows(source) == before and ledger.read_bytes() == ledger_bytes
+    assert dict(source.conn.execute("SELECT job_id, attempt_id FROM attempts")) == attempts
 
 
 @pytest.mark.usefixtures("fixed_sweep_code")
@@ -434,11 +477,12 @@ def test_collection_preserves_native_publication_runtime_error_policy(source, tm
         with pytest.raises(OpsError) as error:
             _collect(source, ledger_path=ledger)
     assert error.value.code == "RESOURCE_UNAVAILABLE" and error.value.problem.retryable is True
+    assert error.value.problem.message == "native publication was interrupted; replay its intent"
     assert "private native" not in str(error.value)
     assert not ledger.exists()
     assert all("native_sweep_recorded_index" not in item for item in _evidence(source))
     result = _collect(source, ledger_path=ledger)
-    assert result["index"]["complete"] and len(_rows(ledger)) == 2
+    assert result["index"]["complete"] is True and len(_rows(ledger)) == 2
 
 
 @pytest.mark.usefixtures("fixed_sweep_code")
@@ -524,10 +568,10 @@ def test_cancellation_and_recovery_use_exact_fenced_terminal_attempt(source, tmp
     clock, claim = _claimer(source)
     if state == "queued-cancel":
         request_cancel(source.conn, jobs[0].job_id, None, clock=clock)
-        failed_job, attempted = jobs[0].job_id, 0
+        failed_job, failed_attempt, attempted = jobs[0].job_id, None, 0
     else:
         attempt = claim()
-        failed_job, attempted = attempt.job_id, 1
+        failed_job, failed_attempt, attempted = attempt.job_id, attempt.attempt_id, 1
         if state != "lease-lost":
             request_cancel(source.conn, attempt.job_id, attempt.attempt_id, clock=clock)
         if state == "live-cancel":
@@ -538,12 +582,16 @@ def test_cancellation_and_recovery_use_exact_fenced_terminal_attempt(source, tmp
             reconcile_attempt(source.conn, attempt.attempt_id, process_state="verified_dead", clock=clock)
         row = source.conn.execute("SELECT fence FROM jobs WHERE job_id=?", (failed_job,)).fetchone()
         assert row[0] > attempt.fence
-    _finish(source, claim(), clock)
+    successful = claim()
+    _finish(source, successful, clock)
     ledger = tmp_path / "LEDGER.csv"
     result = _collect(source, ledger_path=ledger)
     assert result["index_ref"] is not None and result["index"]["complete"] is False
     assert result["index"]["attempted_variants"] == 1 + attempted
     arm = next(item for item in result["index"]["variants"] if item["job_id"] == failed_job)
+    assert {item["job_id"]: item["attempt_id"] for item in result["index"]["variants"]} == {
+        failed_job: failed_attempt, successful.job_id: successful.attempt_id}
+    assert arm["attempted_variants"] == attempted
     assert arm["state"] == "refused"
     assert arm["problem"] == arm["worker_problem"]
     assert arm["problem"]["code"] == ("LEASE_LOST" if state == "lease-lost" else "CANCELLED")
@@ -655,6 +703,23 @@ def test_terminal_reader_uses_registered_bytes_without_preliminary_file_scan(ter
     assert problem is worker_problem is None
 
 
+def test_terminal_rejects_catalog_reference_rebound_to_different_valid_result(terminal):
+    # Both payloads satisfy the result schema and sealed provenance. Only the
+    # catalog reference's retained ID is inconsistent with its new bytes.
+    payload = canonical_json({**terminal.result, "synthetic_observation": "replacement"}).encode()
+    replacement = terminal.store.publish_bytes(payload, schema_ref=terminal.ref.schema_ref)
+    assert replacement.artifact_id != terminal.ref.artifact_id
+    rebound = replace(replacement, artifact_id=terminal.ref.artifact_id)
+    terminal.conn.execute("UPDATE artifacts SET ref_json=? WHERE artifact_id=?",
+                          (canonical_json(to_document(rebound)), terminal.ref.artifact_id))
+    assert terminal.store.read_verified(rebound) == payload
+    assert terminal.conn.execute("SELECT artifact_id FROM attempt_outputs").fetchone()[0] == terminal.ref.artifact_id
+    with pytest.raises(OpsError) as error:
+        collection._terminal(terminal.conn, terminal.store, terminal.job, terminal.registration)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert error.value.problem.message == "sweep child result differs from its sealed arm"
+
+
 def test_latest_failed_attempt_never_adopts_the_earlier_successful_output(terminal, monkeypatch):
     worker_problem = fail("WORKER_FAILED", "latest child failed").problem
     terminal.conn.execute("INSERT INTO attempts VALUES ('attempt-2', 'job-1', 2, 3, 'failed', 'ended-later', ?)",
@@ -734,6 +799,24 @@ def test_result_size_cap_refuses_metadata_before_opening_object(terminal, monkey
         collection._terminal(terminal.conn, terminal.store, terminal.job, terminal.registration)
 
 
+@pytest.mark.parametrize("damage", ["oversized", "wrong-type", "invalid-encoding"])
+def test_registered_metadata_admission_preserves_integrity_refusal(terminal, monkeypatch, damage):
+    monkeypatch.setattr(collection, "MAX_NATIVE_EVIDENCE_BYTES", 64)
+    monkeypatch.setattr(terminal.store, "read_verified", forbid_effect)
+    if damage == "wrong-type":
+        terminal.conn.execute("UPDATE artifacts SET ref_json=?", (b"{}",))
+    elif damage == "invalid-encoding":
+        terminal.conn.execute("UPDATE artifacts SET ref_json=CAST(x'ff' AS TEXT)")
+    else:
+        assert len(canonical_json(to_document(terminal.ref)).encode()) > 64
+    bounded = BoundedSqlRows(terminal.conn, max_bytes=64, column=0, sql_fragment="from artifacts")
+    with pytest.raises(OpsError) as error:
+        collection._terminal(bounded, terminal.store, terminal.job, terminal.registration)
+    assert error.value.code == "INTEGRITY_FAILED" and error.value.problem.retryable is False
+    assert error.value.problem.message == "artifact reference requires bounded text"
+    assert bounded.sizes == ([1] if damage == "invalid-encoding" else [None])
+
+
 def test_documented_collection_byte_caps_are_fixed():
     assert collection.MAX_GATE_RESULT_BYTES == 16 * 1024 * 1024
     assert collection.MAX_FAILURE_BYTES == 1024 * 1024
@@ -777,9 +860,12 @@ def test_recovered_failure_is_bounded_before_json_decode(tmp_path, monkeypatch, 
                                  (2 if encoding.startswith("UTF-16") else 1), column="failure_json",
                                  sql_fragment="end as failure_json from attempts")
         monkeypatch.setattr(collection.json, "loads", forbid_effect)
-        with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+        with pytest.raises(OpsError) as captured:
             collection._terminal(bounded, case.store, case.job, case.registration)
-        assert bounded.sizes
+        assert captured.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert captured.value.problem.message == "sweep attempt failure cannot be decoded"
+        sql_size = len(text.encode(encoding))
+        assert bounded.sizes == [sql_size if wide_text else None]
     finally:
         case.conn.close()
 
@@ -892,6 +978,27 @@ def test_ledger_preflight_accepts_regular_or_absent_nested_destination(tmp_path,
                                  code_root=REPO, as_of_month=MONTH, ledger_path=ledger)
     assert error.value is reached
     assert ledger.read_bytes() == b"existing ledger bytes" if existing else not ledger.parent.exists()
+
+
+@pytest.mark.parametrize("kind", ["file-parent", "loop-parent", "long-name"])
+def test_invalid_ledger_parent_refuses_before_source_or_submission(tmp_path, monkeypatch, kind):
+    parent = tmp_path / "parent"
+    if kind == "file-parent":
+        parent.write_text("not a directory")
+    elif kind == "loop-parent":
+        parent.symlink_to(parent)
+    else:
+        parent = tmp_path / ("x" * 256)
+    ledger = parent / "ledger.csv"
+    monkeypatch.setattr(collection, "_implementation", forbid_effect)
+    monkeypatch.setattr(collection, "submit_sweep", forbid_effect)
+    with pytest.raises(OpsError) as error:
+        collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
+                                 code_root=REPO, as_of_month=MONTH, ledger_path=ledger)
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC" and error.value.problem.retryable is False
+    assert error.value.problem.message == "sweep ledger destination must be a valid path"
+    assert str(ledger) not in str(error.value)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ([] if kind == "long-name" else ["parent"])
 
 
 @pytest.mark.parametrize("number", [errno.EACCES, errno.EPERM, errno.EIO, errno.EMFILE])
@@ -1010,7 +1117,7 @@ def test_collect_preserves_key_error_from_inside_terminal_reader(source, monkeyp
 
 
 @pytest.mark.parametrize("reader", ["collector", "observer"])
-@pytest.mark.parametrize("exception", [TypeError, KeyError])
+@pytest.mark.parametrize("exception", [ValueError, RecursionError, TypeError, KeyError])
 @pytest.mark.usefixtures("fixed_sweep_code")
 def test_collection_job_read_preserves_programming_errors(source, monkeypatch, reader, exception):
     original = exception("unexpected receipt reader implementation defect")
@@ -1128,7 +1235,9 @@ def test_observer_types_polling_interruptions_without_retrying(monkeypatch, exce
     def collect(*args, **kwargs):
         calls.append(kwargs)
         return pending
-    def interrupted(*args):
+    def interrupted(*args, receipt_decode_failure_code, max_failure_bytes):
+        assert receipt_decode_failure_code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert max_failure_bytes == submission.MAX_JOB_FAILURE_BYTES
         raise exception("private observer failure detail")
     monkeypatch.setattr(cli, "collect_sweep", collect)
     monkeypatch.setattr(cli, "get_job", interrupted)
@@ -1136,6 +1245,8 @@ def test_observer_types_polling_interruptions_without_retrying(monkeypatch, exce
     with pytest.raises(OpsError) as error:
         cli.run_sweep(None, None, None, {}, code_root=REPO, no_ledger=True, timeout_seconds=1)
     assert error.value.code == code and error.value.problem.retryable is retryable
+    assert error.value.problem.message == ("sweep observation catalog constraint failed"
+        if exception is sqlite3.IntegrityError else "sweep observation was interrupted")
     assert len(calls) == 1 and "private observer" not in canonical_json(to_document(error.value.problem))
 
 
@@ -1176,7 +1287,7 @@ def test_bind_reservation_race_preserves_the_committed_winner(source, monkeypatc
 
 def test_observer_uses_remaining_deadline_and_stops_without_zero_sleep(monkeypatch):
     pending = {"index": {"complete": False, "variants": [{"job_id": "job-1"}]}, "index_ref": None}
-    now, delays, collections = [10.0], [], []
+    now, delays, collections, reads = [10.0], [], [], []
     def collect(*args, **kwargs):
         collections.append(kwargs)
         return pending
@@ -1185,12 +1296,18 @@ def test_observer_uses_remaining_deadline_and_stops_without_zero_sleep(monkeypat
         assert len(delays) < 3, "observer exceeded its fixed deadline"
         delays.append(delay)
         now[0] += delay
+    def read_job(conn, job_id, **kwargs):
+        assert kwargs == {"max_failure_bytes": 1024 * 1024,
+                          "receipt_decode_failure_code": "EXPERIMENT_IDENTITY_CONFLICT"}
+        reads.append(job_id)
+        return SimpleNamespace(state="queued")
     monkeypatch.setattr(cli, "collect_sweep", collect)
-    monkeypatch.setattr(cli, "get_job", lambda *args: SimpleNamespace(state="queued"))
+    monkeypatch.setattr(cli, "get_job", read_job)
     monkeypatch.setattr(cli, "monotonic", lambda: now[0])
     monkeypatch.setattr(cli, "sleep", advance)
     assert cli.run_sweep(None, None, None, {}, code_root=REPO, timeout_seconds=1.25, no_ledger=True) == pending
     assert delays == [1, 0.25] and now[0] == 11.25
+    assert reads == ["job-1"] * 3
     assert len(collections) == 2 and collections[0] == collections[1]
 
 
@@ -1279,8 +1396,9 @@ def test_job_failure_is_bounded_before_decode_on_all_receipt_paths(tmp_path, mon
                                  sql_fragment="end as failure_json from jobs")
         def read():
             if reader == "get-job":
-                return submission.get_job(bounded, job.job_id)
-            return submission.submit_graph(bounded, REGISTRY, POLICY, [job.request], clock=job.clock)[0]
+                return submission.get_job(bounded, job.job_id, max_failure_bytes=submission.MAX_JOB_FAILURE_BYTES)
+            return submission.submit_graph(bounded, REGISTRY, POLICY, [job.request], clock=job.clock,
+                                           max_failure_bytes=submission.MAX_JOB_FAILURE_BYTES)[0]
         if case in {"wrong-type", "oversized", "unicode-oversized", "utf16-oversized", "utf16-unicode-oversized"}:
             original_load = submission.load_json
             def guarded_load(cls, value):
@@ -1290,11 +1408,15 @@ def test_job_failure_is_bounded_before_decode_on_all_receipt_paths(tmp_path, mon
             monkeypatch.setattr(submission, "load_json", guarded_load)
             with pytest.raises(OpsError) as error:
                 read()
-            assert error.value.code == "INTEGRITY_FAILED" and error.value.problem.retryable is False
+            assert error.value.code == ("INTEGRITY_FAILED" if case == "wrong-type" else "RESOURCE_LIMIT_EXCEEDED")
+            assert error.value.problem.retryable is False
+            assert error.value.problem.message == ("stored job failure requires text" if case == "wrong-type"
+                                                   else "stored job failure exceeds its byte bound")
         elif case == "malformed":
             with pytest.raises(OpsError) as error:
                 read()
             assert error.value.code == "INTEGRITY_FAILED"
+            assert error.value.problem.message == "stored job failure cannot be decoded"
         else:
             if case == "utf16-valid":
                 sql_size = job.conn.execute("SELECT length(CAST(failure_json AS BLOB)) FROM jobs").fetchone()[0]
@@ -1303,11 +1425,106 @@ def test_job_failure_is_bounded_before_decode_on_all_receipt_paths(tmp_path, mon
                 assert job.conn.execute("SELECT length(CAST(failure_json AS BLOB)) FROM jobs").fetchone()[0] == 2 * 1024 * 1024
             receipt = read()
             assert receipt.job_id == job.job_id and receipt.failure == (None if case == "null" else problem)
-        assert bounded.sizes
+        sql_size = (None if stored is None or not isinstance(stored, str)
+                    else len(stored.encode("UTF-16le" if case.startswith("utf16-") else "UTF-8")))
+        expected = None if sql_size is None or sql_size > bounded.max_bytes else sql_size
+        assert bounded.sizes == [expected]
         assert not job.conn.in_transaction
         assert job.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
     finally:
         job.conn.close()
+
+
+@pytest.mark.parametrize("reader", ["get-job", "submit-graph-replay"])
+@pytest.mark.parametrize("options", [{}, {"max_failure_bytes": None}], ids=["omitted", "explicit-none"])
+def test_default_job_failure_reads_preserve_oversized_receipt(tmp_path, reader, options):
+    job = submitted_job(tmp_path)
+    try:
+        previous = submission.get_job(job.conn, job.job_id)
+        problem = fail("RESOURCE_UNAVAILABLE", "uncapped receipt", details={"padding": "x" * (1024 * 1024)}).problem
+        payload = canonical_json(to_document(problem))
+        assert len(payload.encode()) > submission.MAX_JOB_FAILURE_BYTES
+        job.conn.execute("UPDATE jobs SET failure_json=?", (payload,))
+        if reader == "get-job":
+            receipt = submission.get_job(job.conn, job.job_id, **options)
+        else:
+            receipt = submission.submit_graph(job.conn, REGISTRY, POLICY, [job.request], clock=job.clock, **options)[0]
+        assert receipt == replace(previous, failure=problem)
+        assert job.conn.execute("SELECT failure_json FROM jobs").fetchone()[0] == payload
+        assert not job.conn.in_transaction
+    finally:
+        job.conn.close()
+
+
+@pytest.mark.parametrize("options", [{}, {"max_failure_bytes": None}], ids=["omitted", "explicit-none"])
+@pytest.mark.usefixtures("fixed_sweep_code")
+def test_default_sweep_submission_preserves_oversized_receipt(source, options):
+    call_sweep(source)
+    jobs = call_sweep(source, sweep.submit_sweep)
+    problem = fail("RESOURCE_UNAVAILABLE", "uncapped sweep receipt",
+                   details={"padding": "x" * (1024 * 1024)}).problem
+    payload = canonical_json(to_document(problem))
+    assert len(payload.encode()) > submission.MAX_JOB_FAILURE_BYTES
+    source.conn.execute("UPDATE jobs SET failure_json=? WHERE job_id=?", (payload, jobs[0].job_id))
+    assert call_sweep(source, sweep.submit_sweep, **options) == [replace(jobs[0], failure=problem), *jobs[1:]]
+    assert source.conn.execute("SELECT failure_json FROM jobs WHERE job_id=?", (jobs[0].job_id,)).fetchone()[0] == payload
+
+
+@pytest.mark.parametrize("reader", ["get-job", "submit-graph-replay"])
+@pytest.mark.parametrize("case", ["oversized", "malformed", "wrong-type", "invalid-encoding"])
+def test_failure_budget_policy_only_reclassifies_size_admission(tmp_path, reader, case):
+    job = submitted_job(tmp_path, strict=case != "wrong-type")
+    try:
+        problem = fail("RESOURCE_UNAVAILABLE", "synthetic stored failure").problem
+        payload = canonical_json(to_document(problem))
+        if case == "invalid-encoding":
+            job.conn.execute("UPDATE jobs SET failure_json=CAST(x'ff' AS TEXT)")
+        else:
+            value = {"oversized": payload, "malformed": "{broken", "wrong-type": b"{}"}[case]
+            job.conn.execute("UPDATE jobs SET failure_json=?", (value,))
+        options = {"max_failure_bytes": 64, "receipt_decode_failure_code": "EXPERIMENT_IDENTITY_CONFLICT"}
+        with pytest.raises(OpsError) as error:
+            if reader == "get-job":
+                submission.get_job(job.conn, job.job_id, **options)
+            else:
+                submission.submit_graph(job.conn, REGISTRY, POLICY, [job.request], clock=job.clock, **options)
+        assert error.value.code == ("EXPERIMENT_IDENTITY_CONFLICT" if case == "oversized" else "INTEGRITY_FAILED")
+        assert error.value.problem.retryable is False
+        assert error.value.problem.message == {
+            "oversized": "stored job failure exceeds its byte bound",
+            "malformed": "stored job failure cannot be decoded",
+            "wrong-type": "stored job failure requires text",
+            "invalid-encoding": "stored job failure cannot be decoded",
+        }[case]
+        assert not job.conn.in_transaction
+    finally:
+        job.conn.close()
+
+
+@pytest.mark.usefixtures("fixed_sweep_code")
+def test_collection_forwards_fixed_failure_budget_on_initial_replay_and_later_reads(source, monkeypatch):
+    call_sweep(source)
+    call_sweep(source, sweep.submit_sweep)
+    submit, read = collection.submit_sweep, submission.get_job
+    submissions, reads = [], []
+    expected = {"max_failure_bytes": 1024 * 1024, "receipt_decode_failure_code": "EXPERIMENT_IDENTITY_CONFLICT"}
+    def observed_submit(*args, **kwargs):
+        assert {key: kwargs[key] for key in expected} == expected
+        submissions.append(True)
+        return submit(*args, **kwargs)
+    def observed_read(stage):
+        def get_job(conn, job_id, **kwargs):
+            assert kwargs == expected
+            reads.append((stage, job_id))
+            return read(conn, job_id, **kwargs)
+        return get_job
+    monkeypatch.setattr(collection, "submit_sweep", observed_submit)
+    monkeypatch.setattr(submission, "get_job", observed_read("initial-replay"))
+    monkeypatch.setattr(collection, "get_job", observed_read("collector"))
+    result = _collect(source, no_ledger=True)
+    job_ids = [arm["job_id"] for arm in result["index"]["variants"]]
+    assert submissions == [True]
+    assert reads == [(stage, job_id) for stage in ("initial-replay", "collector") for job_id in job_ids]
 
 
 @pytest.mark.usefixtures("fixed_sweep_code")
@@ -1327,7 +1544,8 @@ def test_oversized_job_failure_refuses_public_collect_before_intent_or_ledger(so
     ledger = tmp_path / "LEDGER.csv"
     with pytest.raises(OpsError) as error:
         _collect(source, ledger_path=ledger)
-    assert error.value.code == "INTEGRITY_FAILED" and error.value.problem.retryable is False
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert error.value.problem.message == "stored job failure exceeds its byte bound"
     assert scientific_rows(source) == before and not ledger.exists()
     assert all(not any(key.startswith("native_sweep_") for key in evidence) for evidence in _evidence(source))
 
@@ -1342,6 +1560,7 @@ def test_other_code_root_coordinator_bytes_cannot_describe_installed_collector(t
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=checkout, as_of_month=MONTH, no_ledger=True)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert error.value.problem.message == "installed collector source cannot be verified"
 
 
 def test_unavailable_import_time_collector_snapshot_refuses_before_submission(monkeypatch):
@@ -1352,6 +1571,7 @@ def test_unavailable_import_time_collector_snapshot_refuses_before_submission(mo
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=REPO, as_of_month=MONTH, no_ledger=True)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert error.value.problem.message == "installed collector source cannot be verified"
 
 
 @pytest.mark.parametrize("number,retryable", [
@@ -1377,6 +1597,8 @@ def test_collector_source_reads_distinguish_resources_from_unverifiable_code(mon
     assert reads == [(target, "rb")]
     assert error.value.code == ("RESOURCE_UNAVAILABLE" if retryable else "EXPERIMENT_IDENTITY_CONFLICT")
     assert error.value.problem.retryable is retryable
+    assert error.value.problem.message == ("collector source verification was interrupted" if retryable
+                                           else "installed collector source cannot be verified")
     assert "private" not in canonical_json(to_document(error.value.problem))
 
 
@@ -1397,6 +1619,7 @@ def test_source_read_interruption_can_retry_without_replacing_import_snapshot(mo
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=REPO, as_of_month=MONTH, no_ledger=True)
     assert error.value.code == "RESOURCE_UNAVAILABLE" and error.value.problem.retryable is True
+    assert error.value.problem.message == "collector source verification was interrupted"
     with pytest.raises(RuntimeError) as retried:
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=REPO, as_of_month=MONTH, no_ledger=True)
@@ -1423,7 +1646,22 @@ def test_caller_source_read_errors_keep_the_same_policy_after_installed_verifica
                                  code_root=tmp_path, as_of_month=MONTH, no_ledger=True)
     assert reads == [target] and error.value.code == code
     assert error.value.problem.retryable is (number == errno.EIO)
+    assert error.value.problem.message == ("collector source verification was interrupted" if number == errno.EIO
+                                           else "installed collector source cannot be verified")
     assert "private" not in canonical_json(to_document(error.value.problem))
+
+
+def test_oversized_caller_source_maps_to_r6_before_submission(tmp_path, monkeypatch):
+    target = tmp_path / "experiments/v2_gate_collect.py"
+    target.parent.mkdir()
+    target.write_bytes(b"#" * (8 * 1024 * 1024 + 1))
+    monkeypatch.setattr(collection, "submit_sweep", forbid_effect)
+    with pytest.raises(OpsError) as error:
+        collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
+                                 code_root=tmp_path, as_of_month=MONTH, no_ledger=True)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert error.value.problem.retryable is False
+    assert error.value.problem.message == "installed collector source cannot be verified"
 
 
 def test_changed_installed_source_refuses_before_caller_closure(monkeypatch):
@@ -1439,6 +1677,7 @@ def test_changed_installed_source_refuses_before_caller_closure(monkeypatch):
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=REPO, as_of_month=MONTH, no_ledger=True)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert error.value.problem.message == "installed collector source cannot be verified"
     assert calls == [(collection._COLLECTOR_ROOT, collection._COLLECTOR_ENTRIES)]
 
 
@@ -1454,6 +1693,7 @@ def test_invalid_code_root_refuses_before_source_reads_or_submission(tmp_path, m
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=root, as_of_month=MONTH, no_ledger=True)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC" and error.value.problem.retryable is False
+    assert error.value.problem.message == "sweep code root must name an existing directory"
 
 
 def test_code_root_stat_io_is_retryable_before_source_reads_or_submission(monkeypatch):
@@ -1469,6 +1709,7 @@ def test_code_root_stat_io_is_retryable_before_source_reads_or_submission(monkey
         collection.collect_sweep(SimpleNamespace(in_transaction=False), None, None, {},
                                  code_root=REPO, as_of_month=MONTH, no_ledger=True)
     assert error.value.code == "RESOURCE_UNAVAILABLE" and error.value.problem.retryable is True
+    assert error.value.problem.message == "sweep collection publication was interrupted"
 
 
 @pytest.mark.parametrize("fault,code", [("io", "RESOURCE_UNAVAILABLE"), ("sqlite", "RESOURCE_UNAVAILABLE"),
@@ -1510,17 +1751,30 @@ def test_terminal_types_malformed_metadata_and_recovered_failures(terminal, fiel
     with pytest.raises(OpsError) as error:
         collection._terminal(terminal.conn, terminal.store, terminal.job, terminal.registration)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert error.value.problem.message == ("sweep result reference cannot be decoded" if field == "reference"
+                                           else "sweep attempt failure cannot be decoded")
 
 
-def test_terminal_decodes_attempt_failure_even_when_job_refusal_is_authoritative(terminal):
+@pytest.mark.parametrize("damage", ["malformed", "code", "category", "retryable"])
+def test_terminal_decodes_attempt_failure_even_when_job_refusal_is_authoritative(terminal, damage):
     terminal.job.state, terminal.job.attempt_count, terminal.job.fence = "failed", 2, 3
     terminal.job.failure = fail("RESOURCE_UNAVAILABLE", "authoritative refusal").problem
+    if damage == "malformed":
+        payload = "{broken"
+    else:
+        changes = {"code": {"code": "UNREGISTERED_CODE"}, "category": {"category": "internal"},
+                   "retryable": {"retryable": False}}[damage]
+        stored = replace(fail("RESOURCE_UNAVAILABLE", "stored attempt refusal").problem, **changes)
+        payload = canonical_json(to_document(stored))
+        assert json.loads(payload) == to_document(stored)
     terminal.conn.execute(
-        "INSERT INTO attempts VALUES ('attempt-2', 'job-1', 2, 3, 'failed', 'ended-later', '{broken')")
+        "INSERT INTO attempts VALUES ('attempt-2', 'job-1', 2, 3, 'failed', 'ended-later', ?)", (payload,))
     terminal.conn.execute("DELETE FROM attempt_outputs")
     with pytest.raises(OpsError) as error:
         collection._terminal(terminal.conn, terminal.store, terminal.job, terminal.registration)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and error.value.problem.retryable is False
+    assert error.value.problem.message == ("sweep attempt failure cannot be decoded" if damage == "malformed"
+                                           else "sweep child refusal differs from its registered policy")
 
 
 def test_terminal_refuses_unencodable_stored_artifact_path(terminal):
@@ -1581,6 +1835,155 @@ def test_observer_types_persisted_receipt_corruption_at_job_read(tmp_path, monke
         with pytest.raises(OpsError) as error:
             cli.run_sweep(job.conn, None, None, {}, code_root=REPO, no_ledger=True)
         assert error.value.code == code and error.value.problem.retryable is False
+        assert error.value.problem.message == ("stored job failure cannot be decoded" if field == "failure_json"
+                                               else "stored job receipt cannot be decoded")
+    finally:
+        job.conn.close()
+
+
+@pytest.mark.parametrize("action", ["collect", "run"])
+@pytest.mark.parametrize("field", ["queue_reason_json", "progress_json", "resources_json", "failure_json"])
+@pytest.mark.parametrize("payload", ["{broken", "[" * 2000 + "]" * 2000], ids=["malformed", "recursive"])
+@pytest.mark.usefixtures("fixed_sweep_code")
+def test_initial_collection_replay_types_corrupt_receipt_before_effects(
+        source, tmp_path, monkeypatch, action, field, payload):
+    call_sweep(source)
+    jobs = call_sweep(source, sweep.submit_sweep)
+    if field in {"progress_json", "resources_json"}:
+        _, claim = _claimer(source)
+        attempt = claim()
+        if field == "resources_json":
+            source.conn.execute("UPDATE attempts SET resources_json=? WHERE attempt_id=?",
+                                (payload, attempt.attempt_id))
+        else:
+            source.conn.execute("INSERT INTO progress_events VALUES (?,0,?,'progress','synthetic-time',?)",
+                                (attempt.attempt_id, attempt.job_id, payload))
+    else:
+        source.conn.execute(f"UPDATE jobs SET {field}=? WHERE job_id=?", (payload, jobs[0].job_id))
+    before = list(source.conn.iterdump())
+    monkeypatch.setattr(collection, "_bind", forbid_effect)
+    monkeypatch.setattr(native_outcomes, "ledger_append", forbid_effect)
+    monkeypatch.setattr(cli, "sleep", forbid_effect)
+    ledger = tmp_path / "LEDGER.csv"
+    with pytest.raises(OpsError) as error:
+        call_sweep(source, collection.collect_sweep if action == "collect" else cli.run_sweep, ledger_path=ledger)
+    assert error.value.code == ("INTEGRITY_FAILED" if field == "failure_json" else "EXPERIMENT_IDENTITY_CONFLICT")
+    assert error.value.problem.retryable is False
+    assert error.value.problem.message == ("stored job failure cannot be decoded" if field == "failure_json"
+                                           else "stored job receipt cannot be decoded")
+    assert list(source.conn.iterdump()) == before and not source.conn.in_transaction and not ledger.exists()
+
+
+@pytest.fixture
+def receipt_decoder_errors(monkeypatch):
+    """Observe the original decoder exception before the optional translation."""
+    original, errors = submission.load_json, []
+    def observed(cls, payload):
+        try:
+            return original(cls, payload)
+        except json.JSONDecodeError as error:
+            errors.append(error)
+            raise
+    monkeypatch.setattr(submission, "load_json", observed)
+    return errors
+
+
+@pytest.mark.parametrize("reader", ["get-job", "submit-graph-replay"])
+@pytest.mark.parametrize("options", [{}, {"receipt_decode_failure_code": None},
+                                    {"receipt_decode_failure_code": "EXPERIMENT_IDENTITY_CONFLICT"},
+                                    {"receipt_decode_failure_code": "RESOURCE_UNAVAILABLE"}],
+                         ids=["omitted", "explicit-none", "sweep-r6", "other-registered-code"])
+def test_shared_job_receipt_corruption_policy_is_opt_in(tmp_path, reader, options, receipt_decoder_errors):
+    job = submitted_job(tmp_path)
+    try:
+        job.conn.execute("UPDATE jobs SET queue_reason_json='{broken'")
+        before = list(job.conn.iterdump())
+        expected = OpsError if options.get("receipt_decode_failure_code") else json.JSONDecodeError
+        with pytest.raises(expected) as error:
+            if reader == "get-job":
+                submission.get_job(job.conn, job.job_id, **options)
+            else:
+                submission.submit_graph(job.conn, REGISTRY, POLICY, [job.request], clock=job.clock, **options)
+        if expected is OpsError:
+            assert error.value.code == options["receipt_decode_failure_code"]
+            assert error.value.problem.retryable is (error.value.code == "RESOURCE_UNAVAILABLE")
+            assert error.value.problem.message == "stored job receipt cannot be decoded"
+        else:
+            assert type(error.value) is json.JSONDecodeError
+            assert receipt_decoder_errors == [error.value] and error.value is receipt_decoder_errors[0]
+            assert (error.value.msg, error.value.doc, error.value.pos, error.value.lineno, error.value.colno) == (
+                "Expecting property name enclosed in double quotes", "{broken", 1, 1, 2)
+            assert str(error.value) == "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+        assert list(job.conn.iterdump()) == before and not job.conn.in_transaction
+    finally:
+        job.conn.close()
+
+
+@pytest.mark.parametrize("options", [{}, {"receipt_decode_failure_code": None},
+                                    {"receipt_decode_failure_code": "EXPERIMENT_IDENTITY_CONFLICT"},
+                                    {"receipt_decode_failure_code": "RESOURCE_UNAVAILABLE"}],
+                         ids=["omitted", "explicit-none", "sweep-r6", "other-registered-code"])
+@pytest.mark.usefixtures("fixed_sweep_code")
+def test_shared_sweep_submission_receipt_corruption_policy_is_opt_in(source, options, receipt_decoder_errors):
+    call_sweep(source)
+    jobs = call_sweep(source, sweep.submit_sweep)
+    source.conn.execute("UPDATE jobs SET queue_reason_json='{broken' WHERE job_id=?", (jobs[0].job_id,))
+    before = list(source.conn.iterdump())
+    expected = OpsError if options.get("receipt_decode_failure_code") else json.JSONDecodeError
+    with pytest.raises(expected) as error:
+        call_sweep(source, sweep.submit_sweep, **options)
+    if expected is OpsError:
+        assert error.value.code == options["receipt_decode_failure_code"]
+        assert error.value.problem.retryable is (error.value.code == "RESOURCE_UNAVAILABLE")
+        assert error.value.problem.message == "stored job receipt cannot be decoded"
+    else:
+        assert type(error.value) is json.JSONDecodeError
+        assert receipt_decoder_errors == [error.value] and error.value is receipt_decoder_errors[0]
+        assert (error.value.msg, error.value.doc, error.value.pos, error.value.lineno, error.value.colno) == (
+            "Expecting property name enclosed in double quotes", "{broken", 1, 1, 2)
+        assert str(error.value) == "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+    assert list(source.conn.iterdump()) == before and not source.conn.in_transaction
+
+
+@pytest.mark.parametrize("reader", ["get-job", "submit-graph", "submit-sweep"])
+@pytest.mark.parametrize("code", ["UNREGISTERED_CODE", True, [], {}])
+def test_invalid_receipt_decode_policy_refuses_before_catalog_access(reader, code):
+    conn = SimpleNamespace(execute=forbid_effect)
+    with pytest.raises(OpsError) as error:
+        if reader == "get-job":
+            submission.get_job(conn, "synthetic-job", receipt_decode_failure_code=code)
+        elif reader == "submit-graph":
+            submission.submit_graph(conn, REGISTRY, POLICY, [], clock=SystemClock(),
+                                    receipt_decode_failure_code=code)
+        else:
+            sweep.submit_sweep(conn, None, None, {}, code_root=REPO, as_of_month=MONTH,
+                               receipt_decode_failure_code=code)
+    assert error.value.code == "INVALID_REQUEST" and error.value.problem.retryable is False
+    assert error.value.problem.message == "receipt decoder requires a registered failure code"
+
+
+@pytest.mark.parametrize("reader", ["get-job", "submit-graph", "submit-sweep"])
+@pytest.mark.parametrize("limit", [0, -1, True, 1.0, "1", [], {}, (2**63 - 1) // 2 + 1])
+def test_invalid_failure_budget_refuses_before_catalog_or_submission(reader, limit):
+    conn = SimpleNamespace(execute=forbid_effect)
+    with pytest.raises(OpsError) as error:
+        if reader == "get-job":
+            submission.get_job(conn, "synthetic-job", max_failure_bytes=limit)
+        elif reader == "submit-graph":
+            submission.submit_graph(conn, REGISTRY, POLICY, [], clock=SystemClock(), max_failure_bytes=limit)
+        else:
+            sweep.submit_sweep(conn, None, None, {}, code_root=REPO, as_of_month=MONTH, max_failure_bytes=limit)
+    assert error.value.code == "INVALID_REQUEST" and error.value.problem.retryable is False
+    assert error.value.problem.message == "receipt failure budget must be a positive SQL-safe integer"
+
+
+@pytest.mark.parametrize("limit", [1, (2**63 - 1) // 2])
+def test_failure_budget_accepts_inclusive_positive_integer_endpoints(tmp_path, limit):
+    job = submitted_job(tmp_path, encoding="UTF-16le")
+    try:
+        assert submission.get_job(job.conn, job.job_id, max_failure_bytes=limit).failure is None
+        assert submission.submit_graph(job.conn, REGISTRY, POLICY, [job.request], clock=job.clock,
+                                       max_failure_bytes=limit)[0].job_id == job.job_id
     finally:
         job.conn.close()
 
@@ -1748,6 +2151,8 @@ def test_job_failure_invalid_encoding_is_typed_before_receipt_decoding(tmp_path,
     job = submitted_job(tmp_path)
     try:
         job.conn.execute("UPDATE jobs SET failure_json=CAST(x'ff' AS TEXT)")
+        with pytest.raises(sqlite3.OperationalError, match="Could not decode to UTF-8"):
+            job.conn.execute("SELECT failure_json FROM jobs").fetchone()
         with pytest.raises(OpsError) as error:
             if reader == "get-job":
                 submission.get_job(job.conn, job.job_id)

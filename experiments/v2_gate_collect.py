@@ -13,7 +13,7 @@ from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactError, ArtifactStore
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
-from engine.v2.ops.submission import get_job
+from engine.v2.ops.submission import MAX_JOB_FAILURE_BYTES, get_job
 from experiments.native_gate_worker import read_native_staged_input
 from experiments.native_sweep_collection import TERMINAL, collect_sweep
 
@@ -29,7 +29,9 @@ def run_sweep(conn, store, repository, document, *, code_root, timeout_seconds=3
     job_ids = [arm["job_id"] for arm in result["index"]["variants"]]
     deadline = monotonic() + timeout_seconds
     try:
-        while not all(_job(conn, job_id).state in TERMINAL for job_id in job_ids):
+        while not all(get_job(conn, job_id, receipt_decode_failure_code="EXPERIMENT_IDENTITY_CONFLICT",
+                             max_failure_bytes=MAX_JOB_FAILURE_BYTES).state
+                      in TERMINAL for job_id in job_ids):
             remaining = deadline - monotonic()
             if remaining <= 0:
                 break
@@ -39,13 +41,6 @@ def run_sweep(conn, store, repository, document, *, code_root, timeout_seconds=3
     except (OSError, sqlite3.Error):
         raise fail("RESOURCE_UNAVAILABLE", "sweep observation was interrupted") from None
     return collect_sweep(conn, store, repository, document, code_root=code_root, **kwargs)
-
-
-def _job(conn, job_id):
-    try:
-        return get_job(conn, job_id)
-    except (ValueError, RecursionError):
-        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored sweep job receipt cannot be decoded") from None
 
 
 def _roster(path):
