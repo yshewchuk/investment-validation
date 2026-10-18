@@ -28,6 +28,7 @@ from tests.v2.research.test_magnitude_search_outer import (
     independent_metrics,
     journal_slots,
     known_targets,
+    native_matrices,
     native_outer_source,  # noqa: F401
     outer_case,  # noqa: F401
     outer_problem,
@@ -402,6 +403,7 @@ def test_outer_child_receives_only_prior_training_labels(outer_case, monkeypatch
     assert all(recipe != candidate["recipe"] for candidate in case.plan["candidates"]
                if candidate["candidate_id"] != winner)
     children = inject_child(monkeypatch, f"""
+import numpy as np
 count = 0
 def injected(recipe, train, labels, test):
     global count
@@ -410,6 +412,10 @@ def injected(recipe, train, labels, test):
     assert len(labels) == 10
     assert sorted(labels.tolist()) == [2, 2, 3, 3, 3, 3, 4, 6, 8, 12]
     assert len(test) == 8
+    expected_train, expected_test = {native_matrices(case)!r}[count - 1]
+    assert labels.tolist() == expected_train['absolute_move_pct']
+    np.testing.assert_array_equal(train, np.asarray(expected_train['values'], dtype=float))
+    np.testing.assert_array_equal(test, np.asarray(expected_test['values'], dtype=float))
     return [10 * recipe['estimator']['params']['alpha'] + count + index for index in range(len(test))]
 """)
     result = run(case)

@@ -25,6 +25,7 @@ from engine.v2.models.adapters import RuntimeFitForbidden
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.research.magnitude_history_store import read_stored
 from experiments import magnitude_search_outer as outer
 from experiments import magnitude_search_trials as trials
 from experiments.magnitude_search_plan import seal_search_plan
@@ -134,6 +135,7 @@ def assert_fold_oracle(case, result, year):
         "prospective_candidate_id": case.selected["prospective_candidate_id"]}
     assert canonical_json(started) == canonical_json(expected_start)
     inputs, execution, validation = (slot(case, name, year) for name in ("inputs", "execution", "validation"))
+    assert execution["fits"] == expected_fits(case, year)
     assert {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]} == targets
     training_inputs = expected_training_receipt(case, year)
     assert inputs["training_inputs"] == training_inputs
@@ -158,14 +160,12 @@ def assert_fold_oracle(case, result, year):
     return expected_predictions
 
 
-def expected_fits(case, year="2024"):
-    """Rebuild matrix identities from the admitted features and fixture-known targets."""
-    inputs = slot(case, "inputs", year)
+def native_matrices(case, year="2024"):
+    """Rebuild matrices from native rows captured before any outer admission."""
     fold = next(item["outer"] for item in case.plan["folds"] if item["outer"]["year"] == year)
     train = fold["training_candidate_event_ids"]
-    assert inputs["training"] == [{"event_id": event, "absolute_move_pct": known_targets()[event]} for event in train]
     features = case.recorder.registration.document["magnitude_execution"]["features"]
-    indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
+    indexed = {(row["event_id"], row["horizon_sessions"]): row for row in case.native_inputs["rows"]}
     result = []
     for horizon in HORIZONS:
         matrices = [{"columns": features,
@@ -173,6 +173,22 @@ def expected_fits(case, year="2024"):
             "values": [[indexed[event, horizon][name] for name in features] for event in events]}
             for events in (train, fold["evaluation_event_ids"])]
         matrices[0]["absolute_move_pct"] = [known_targets()[event] for event in train]
+        result.append(matrices)
+    return result
+
+
+def expected_fits(case, year="2024"):
+    """Pin journal inputs and fit identities to independently read native evidence."""
+    inputs = slot(case, "inputs", year)
+    fold = next(item["outer"] for item in case.plan["folds"] if item["outer"]["year"] == year)
+    train = fold["training_candidate_event_ids"]
+    participants = set(train + fold["evaluation_event_ids"])
+    assert inputs["stored_inputs_id"] == case.native_inputs["inputs_id"]
+    assert canonical_json(inputs["features"]) == canonical_json([
+        row for row in case.native_inputs["rows"] if row["event_id"] in participants])
+    assert inputs["training"] == [{"event_id": event, "absolute_move_pct": known_targets()[event]} for event in train]
+    result = []
+    for horizon, matrices in zip(HORIZONS, native_matrices(case, year)):
         result.append({"horizon_sessions": horizon, "training_event_ids": train,
             "evaluation_event_ids": fold["evaluation_event_ids"], "training_matrix_id": content_hash(matrices[0]),
             "prediction_matrix_id": content_hash(matrices[1])})
@@ -193,7 +209,8 @@ def native_outer_source(base_source, tmp_path_factory):  # noqa: F811
     recorder = trials.SearchTrials(conn, store, Repository(conn, store), base_source.registration,
                                   request, from_document(ArtifactRef, sealed["plan_ref"]))
     recorder.seal(clock=SystemClock())
-    case = SimpleNamespace(recorder=recorder, plan=sealed["plan"])
+    native_inputs = read_stored(base_source.repository, base_source.feature_snapshot, base_source.build["context"])
+    case = SimpleNamespace(recorder=recorder, plan=sealed["plan"], native_inputs=native_inputs)
     for args in trial_cases(case):
         recorder.execute(*args, limits=LIMITS)
     selected = recorder.freeze()
