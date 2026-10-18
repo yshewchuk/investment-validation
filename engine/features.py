@@ -971,16 +971,14 @@ def daily_state_frame(
         out[column] = np.nan
 
     wanted = set(out["ticker"].unique())
-    daily = daily[daily["ticker"].isin(wanted)]
+    mask = daily["ticker"].isin(wanted)
     # IV-bearing rows only: `daily_market` also carries rows contributed purely
     # by the market-cap series, which have no surface on them. Letting one of
     # those be the as-of answer returns an all-NaN state for a date that does
     # have quotes.
     if "src_iv" in daily.columns:
-        surface = daily[daily["src_iv"].notna()]
-    else:  # pragma: no cover - projected reads always carry src_iv
-        surface = daily
-    surface = surface.sort_values(["ticker", "date"])
+        mask &= daily["src_iv"].notna()
+    surface = daily[mask].sort_values(["ticker", "date"])
 
     by_ticker = {t: g for t, g in surface.groupby("ticker", sort=False)}
     field_names = list(DAILY_STATE_FIELDS)

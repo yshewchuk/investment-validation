@@ -73,7 +73,8 @@ inside function bodies):
 - Top-level: `engine.paths` (all four of `model_evidence.py`/`nightly.py`/
   `publish.py`/`render.py`), `engine.data.throttle` (quota guard, also
   lazy in `nightly.py`), `engine.score` (`LADDER_STEP` and others, also
-  lazy in several functions), `engine.jsonio` (`json_safe`).
+  lazy in several functions), `engine.jsonio` (`json_safe`), `engine.features` (`model_evidence.py`:
+  `DAILY_STATE_FIELDS`, for the projected `daily_market` read; other uses lazy).
 - Lazy (function-local) only, never at module top level: `engine.calendar`
   (`model_evidence.py::_dataset_for`, `nightly.py::_date_change_flag`/
   `_panel_staleness_flags`/`refresh_forward_chains`/`run_nightly`);
