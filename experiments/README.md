@@ -9,7 +9,7 @@ The owning modules expose these helpers to native experiment callers; no compati
 
 | Owner and public function | Inputs, result and effects |
 | --- | --- |
-| `magnitude_report.magnitude_metrics` | Complete scored rows yield stable pooled RMSE, MAE and count; empty rows or nonfinite metrics refuse `EXPERIMENT_VARIANT_FAILED`. Fixed and history reporters and the search recorder share this scorer. |
+| `magnitude_report.magnitude_metrics` | Complete scored rows yield stable pooled RMSE, MAE and count; empty rows or nonfinite metrics refuse `EXPERIMENT_VARIANT_FAILED`. Fixed and history reporters, the search recorder and the outer evaluator (fold and aggregate metrics) share this scorer. |
 | `magnitude_search_errors.artifact_failure` / `SearchArtifactError` | Artifact error plus caller-owned messages yields a redacted `OpsError` with identity/resource policy; the subtype identifies artifact-origin failures without parsing messages. Journal reference syntax and publication `UNSAFE_PATH` are identity conflicts; read-time `UNSAFE_PATH` after syntax admission is a retryable resource failure, with no attempt-retry authorization. Plan publication retains its resource policy. |
 | `magnitude_search_trials.SearchTrials` | Verified plan/anchor, catalog/store and native repository; `seal(clock=...)`, `start(outer_year, inner_year, candidate_id)`, `record(..., forecasts=... or failure=Problem)` and `freeze()` persist immutable all-attempt evidence and selections from submitted forecasts. Candidate terminals are guarded here by stage and canonical `EXPERIMENT_VARIANT_FAILED` admission. A native-derived validation cohort independently binds terminal targets and the complete receipt to admitted preflight/cutoff/recipe; replay never reopens labels. This detects inconsistent journal evidence, not wholesale fabrication of all evidence. These submitted-forecast methods do not verify execution or fit models; native `execute` is described below. No outer evaluation or final authority. |
 | `SearchTrials.execute` | One declared candidate/inner fold plus explicit CPU-time, wall-time and address-space limits runs fresh native horizon fits in a fixed child. Immutable fit admission/completion counts and matrix/forecast digests feed the existing journal; completed replay launches nothing. Resource/shared failures stay unfinished, and no outer-evaluation or final-read authority is added. |
@@ -99,3 +99,36 @@ Restore the original installed sources and ledger address to replay, or seal a n
 experiment identity; existing intent and failed `(id, spec_hash)` CSV rows never change to success.
 Never replace an existing collection intent. If import-time source capture failed, start a fresh process after restoring source access; the failed process has no trustworthy baseline.
 The inherited shared `source_closure` currently refuses `.py` files over 8 MiB with `INPUT_CHANGED`; collector source admission maps this to `EXPERIMENT_IDENTITY_CONFLICT`. Catalog, artifact, result, failure and report comparison bounds remain enforced.
+
+## Selected outer folds
+
+After explicitly completing native inner trials and calling `SearchTrials.freeze`,
+call `magnitude_search_outer.execute_outer_fold(conn, store, repository,
+registration, request, plan_ref, outer_year, limits=...)`. Limits use the existing
+explicit `memory_bytes`, `cpu_seconds`, `wall_seconds` contract. This library API
+refits only that year's frozen inner winner on qualified prior labels. Submitted
+forecasts alone cannot authorize it. All planned native inner completions,
+including permitted candidate failures, are verified before outer execution.
+
+The immutable outer journal owns source bindings, native inputs and full fit evidence.
+Returned results contain the selected recipe, evidence IDs, training/evaluation
+receipts, actual fit count, complete forecast/target pairs, event/forecast counts
+and pooled/per-horizon RMSE/MAE; they do not inline all journal evidence. Forecasts
+are durably fixed before that fold's evaluation targets open.
+Repeating a completed call verifies the original evidence without fitting or
+opening native payloads. Any incomplete outer attempt must remain unresolved;
+there is no retry, replacement candidate or recovery API in this slice.
+
+`collect_outer_results(conn, store, repository, registration, request, plan_ref)`
+requires all outer folds complete and returns their verified results plus pooled
+and per-horizon event-error metrics. It never launches missing work or chooses a
+winner using outer results: `prospective_candidate_id` is the latest fold's inner
+selection. Collection returns a dictionary only; it does not persist an aggregate
+artifact, export or ledger row. Both APIs are library-only; no CLI, real-data
+execution, holdout/final
+access, ledger publication or release authority is implied.
+
+`magnitude_search_evidence` supplies shared fold input admission, matrix evidence,
+forecast normalization and target-receipt validation. Inner wrappers retain submitted
+Real/Integral support and their original refusal envelopes; outer wrappers enforce
+JSON-native numeric types. The static dependency is included in source seals.
