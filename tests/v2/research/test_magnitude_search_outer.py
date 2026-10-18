@@ -282,7 +282,13 @@ def forbid_work(monkeypatch):
         monkeypatch.setattr(module, "run_fitted_trial", forbidden)
         monkeypatch.setattr(module, "load_magnitude_targets", forbidden)
     monkeypatch.setattr(outer, "_inputs", forbidden)
+    monkeypatch.setattr(trials.SearchTrials, "_inputs", forbidden)
     monkeypatch.setattr(outer, "execution_limits", forbidden)
+    scan = Repository.scan
+    def metadata_only(self, query, *, table_name):
+        assert table_name not in {"research_magnitude_history", "computed_moves"}, "replay opened native payloads"
+        return scan(self, query, table_name=table_name)
+    monkeypatch.setattr(Repository, "scan", metadata_only)
 
 
 def test_real_outer_selected_only_forecasts_precede_labels_and_replay(outer_case, monkeypatch):
