@@ -264,7 +264,8 @@ def test_cli_rejects_duplicate_keys_in_every_metadata_input_before_dispatch(sour
 @pytest.mark.parametrize("action", ACTION_NAMES)
 @pytest.mark.parametrize("name", ["spec", "request", "plan-ref"])
 def test_excessively_nested_metadata_refuses_before_catalog_open(source, capsys, action, name):
-    depth = 2 * sys.getrecursionlimit()
+    # CPython's C JSON decoder has a separate stack limit from sys.getrecursionlimit().
+    depth = 1 << 20
     payload = b'{"nested":' + b"[" * depth + b"0" + b"]" * depth + b"}"
     assert len(payload) < METADATA_LIMIT
     # Prove real JSON decoding reaches the recursion handler, not a shallow syntax refusal.
