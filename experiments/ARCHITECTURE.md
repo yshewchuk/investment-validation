@@ -701,7 +701,7 @@ The evidence helper separately consumes native history admission and research st
 require that exact binding, without changing the scientific report hash. The complete roster is checked for unfinished claims and premature selections before new work. Durable inner results reconcile first; completed outer results replay next, before any fresh serial fitting. Scientific scoring refusals continue only after public reconciliation verifies the
 durable refused terminal; shared/resource failures stop. Freeze precedes all selected outer evaluation, with zero fit retries and unchanged winner policy.
 
-The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. Output is limited to 64 MiB UTF-8; an oversized report writes no stdout bytes and refuses without truncation. Collection preserves the existing outer report identity and uses a read-only
+The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. Output is limited to 64 MiB UTF-8; an oversized report is discarded without truncation and only the refusal document is written to stdout. Collection preserves the existing outer report identity and uses a read-only
 SQLite connection. No persisted report framework, scheduler, ledger, final-read or release authority is introduced.
 
 Each invocation revalidates bindings/evidence; there is no cross-call admission cache. The CLI calls `seal_search_run`/`run_search`; focused research tests also call these helpers. Direct engine dependencies are contracts, data, foundation and ops.
@@ -719,5 +719,5 @@ Each invocation revalidates bindings/evidence; there is no cross-call admission 
 | Candidate scoring refusal; shared/resource failure; no eligible candidate | Continue only after public reconciliation verifies the durable refused terminal; other failures stop. No eligible candidate refuses `EXPERIMENT_VARIANT_FAILED` before new outer work. |
 | Journal publication/transaction fails | Existing journal policy applies: failed transactions roll back their association, earlier evidence and unreferenced complete objects remain; no whole-run rollback or automatic retry. |
 | CLI typed `OpsError`/`DataError`; unexpected builtin failure | Preserve the complete typed `Problem` in one refusal document, exit 2; unexpected builtin errors propagate. An opened connection closes in either case. |
-| Output exceeds 64 MiB or output staging fails | No stdout bytes are written; emit `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Prior journal commits remain. |
+| Output exceeds 64 MiB or output staging fails | Report bytes are discarded; only the refusal document reaches stdout, emitting `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Prior journal commits remain. |
 | Stdout write or flush failure | The original stream error propagates with no retry and no second document; downstream may have received a prefix, and stdout remains caller-owned. |
