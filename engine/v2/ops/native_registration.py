@@ -12,6 +12,7 @@ from engine.v2.foundation import (
     from_document,
     to_document,
 )
+from engine.v2.ops.catalog import decode_bounded_text, sql_text_budget
 from engine.v2.ops.errors import OpsError, fail
 
 MAX_NATIVE_EVIDENCE_BYTES = 16 * 1024 * 1024
@@ -19,8 +20,7 @@ MAX_NATIVE_EVIDENCE_BYTES = 16 * 1024 * 1024
 
 def read_native_evidence(conn, run_id, *, max_bytes=MAX_NATIVE_EVIDENCE_BYTES):
     """Return verifier metadata and bounded object evidence from one SQL row."""
-    encoding = conn.execute("PRAGMA encoding").fetchone()[0]
-    limit = max_bytes * (2 if encoding.startswith("UTF-16") else 1)
+    encoding, limit = sql_text_budget(conn, max_bytes)
     row = conn.execute(
         "SELECT e.run_id, e.spec_hash, e.mode, e.input_hash, "
         "CASE WHEN typeof(e.evidence_json)='text' AND length(CAST(e.evidence_json AS BLOB))<=? "
@@ -32,11 +32,7 @@ def read_native_evidence(conn, run_id, *, max_bytes=MAX_NATIVE_EVIDENCE_BYTES):
     if row is None:
         return None
     try:
-        if row["evidence_json"] is None:
-            raise ValueError
-        payload = row["evidence_json"].decode(encoding)
-        if len(payload.encode("utf-8")) > max_bytes:
-            raise ValueError
+        payload = decode_bounded_text(row["evidence_json"], encoding, max_bytes)
         evidence = json.loads(payload)
         if not isinstance(evidence, dict):
             raise ValueError
