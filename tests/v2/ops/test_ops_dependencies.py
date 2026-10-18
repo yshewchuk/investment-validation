@@ -240,6 +240,34 @@ def test_real_tree_matches_enumerated_findings_and_layer_ci_entrypoint():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("target", ["supervisor", "stages"])
+def test_failure_diagnostics_is_core_and_cannot_import_orchestration(target):
+    rules = json.loads((ROOT / ops.POLICY).read_bytes())
+    assert "failure_diagnostics" in rules["packages"]["core"]
+    assert rules["exceptions"] == EMPTY
+    files = {path: (ROOT / path).read_bytes() for path in ops.tracked_paths(ROOT)
+             if path.startswith(ops.SOURCE) and path.endswith(".py")}
+    assert ops.findings(files, rules) == {"forbidden": set(), "cycles": set()}
+    missing = copy.deepcopy(rules)
+    missing["packages"]["core"].remove("failure_diagnostics")
+    with pytest.raises(ValueError, match=r"ops ownership mismatch: \['engine\.v2\.ops\.failure_diagnostics'\]"):
+        ops.findings(files, missing)
+    files[ops.SOURCE + "failure_diagnostics.py"] += (
+        f"\n\ndef _planted():\n    from engine.v2.ops import {target}\n".encode())
+    assert ops.findings(files, rules)["forbidden"] == {("failure_diagnostics", target)}
+
+
+def test_failure_registration_does_not_import_checkpoints_even_lazily():
+    rules = json.loads((ROOT / ops.POLICY).read_bytes())
+    files = {path: (ROOT / path).read_bytes() for path in ops.tracked_paths(ROOT)
+             if path.startswith(ops.SOURCE) and path.endswith(".py")}
+    assert ops.findings(files, rules) == {"forbidden": set(), "cycles": set()}
+    files[ops.SOURCE + "lifecycle.py"] += (
+        b"\n\ndef _planted():\n    from engine.v2.ops.checkpoints import register_artifact\n")
+    assert ops.findings(files, rules)["cycles"] == {
+        ("checkpoints", "lifecycle"), ("lifecycle", "checkpoints")}
+
+
 def test_worker_does_not_import_the_cli_entrypoint_even_lazily():
     rules = json.loads((ROOT / ops.POLICY).read_bytes())
     files = {path: (ROOT / path).read_bytes() for path in ops.tracked_paths(ROOT)

@@ -189,7 +189,7 @@ def test_native_evidence_sql_projection_handles_invalid_utf8_without_text_transf
         payload = b"\xff" * (CAP + 1 if oversized else 1)
         conn.execute("UPDATE experiment_runs SET evidence_json=CAST(? AS TEXT)", (payload,))
         # A raw TEXT projection would fail inside sqlite's UTF-8 conversion.
-        with pytest.raises(sqlite3.OperationalError):
+        with pytest.raises(sqlite3.OperationalError, match="Could not decode to UTF-8"):
             conn.execute("SELECT evidence_json FROM experiment_runs").fetchone()
         bounded = BoundedSqlRows(conn, max_bytes=CAP, column="evidence_json",
                                  sql_fragment="FROM experiment_runs")
