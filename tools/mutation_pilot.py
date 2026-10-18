@@ -1465,11 +1465,19 @@ def pytest_test_files(tracked_set: set[str]) -> list[str]:
                        or p.endswith("_test.py")))
 
 
+def full_suite_pattern(cfg: dict, path: str) -> str | None:
+    """The first [pr_selection] full_suite pattern `path` matches, or None.
+    Same fnmatch convention as is_inert_changed_path."""
+    for pat in cfg.get("pr_selection", {}).get("full_suite", []):
+        if fnmatch.fnmatchcase(path, pat):
+            return pat
+    return None
+
+
 def forces_full_suite(cfg: dict, path: str) -> bool:
     """True if `path` matches tools/mutation_pilot.toml's [pr_selection]
     full_suite allowlist. Same fnmatch convention as is_inert_changed_path."""
-    return any(fnmatch.fnmatchcase(path, pat)
-               for pat in cfg.get("pr_selection", {}).get("full_suite", []))
+    return full_suite_pattern(cfg, path) is not None
 
 
 _IMPORTLIB_METADATA_SAFE_QUERIES = {
@@ -1847,7 +1855,7 @@ _REGISTRATION_READERS = {
 _REGISTRATION_FIELDS = {
     "defaults": {"timeout_constant", "timeout_multiplier", "max_children",
                  "pytest_args", "deselect", "copy"},
-    "pr_selection": {"inert", "inert_skip", "full_suite", "always_run"},
+    "pr_selection": {"inert", "inert_skip", "full_suite", "always_run", "path_tests"},
 }
 
 
@@ -1872,6 +1880,12 @@ def registration_tests(cfg: dict, base: dict | None, changed: set[str],
                 for field, value in config[section].items():
                     if section == "defaults" and field in {"timeout_constant", "timeout_multiplier", "max_children"}:
                         if type(value) not in ({int} if field == "max_children" else {int, float}):
+                            return None
+                    elif field == "path_tests":
+                        if not isinstance(value, dict) or not all(
+                                isinstance(pat, str) and isinstance(listed, list)
+                                and all(isinstance(t, str) for t in listed)
+                                for pat, listed in value.items()):
                             return None
                     elif not isinstance(value, list) or not all(isinstance(p, str) for p in value):
                         return None
@@ -1962,7 +1976,8 @@ def registration_modules(cfg: dict, base: dict | None, changed: set[str],
 
 
 def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = None,
-                    graph: dict[str, set[str]] | None = None) -> list[str] | None:
+                    graph: dict[str, set[str]] | None = None,
+                    reasons: list[str] | None = None) -> list[str] | None:
     """The pytest test files (tests/test_*.py) a pull_request `test` CI run
     should collect. Returns None for "run the full suite" (a path on the
     full_suite allowlist, an unrecognized/unreached path, or any failure
@@ -1994,6 +2009,9 @@ def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = No
     construct DOES taint its dependents, because a test using one of its
     fixtures can have a real, invisible runtime dependency on whatever
     that fixture loads -- see _closure_from_roots's own docstring."""
+    def note(msg: str) -> None:
+        if reasons is not None:
+            reasons.append(msg)
     changed_set = set(changed)
     if not changed_set:
         return []
@@ -2004,16 +2022,21 @@ def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = No
             print(f"[mutation_pilot] import graph build failed "
                   f"({type(exc).__name__}: {exc}); selecting the full test suite",
                   file=sys.stderr, flush=True)
+            note("import graph build failed; selecting the full test suite")
             return None
     tracked_set = set(graph)
     registrations: set[str] = set()
     if _REGISTRATION_CONFIG in changed_set:
         registrations = registration_tests(cfg, base_cfg, changed_set, tracked_set)
         if registrations is None:
+            note(f"{_REGISTRATION_CONFIG} change is not an add-only registration")
             return None
         changed_set.remove(_REGISTRATION_CONFIG)
-    if any(forces_full_suite(cfg, p) for p in changed_set):
-        return None
+    for p in sorted(changed_set):
+        pat = full_suite_pattern(cfg, p)
+        if pat is not None:
+            note(f"{p} matches full_suite pattern {pat}")
+            return None
     tests = pytest_test_files(tracked_set)
     dyn = dynamic_files(graph)
     try:
@@ -2022,6 +2045,7 @@ def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = No
         print(f"[mutation_pilot] unresolved-import scan failed "
               f"({type(exc).__name__}: {exc}); selecting the full test suite",
               file=sys.stderr, flush=True)
+        note("unresolved-import scan failed; selecting the full test suite")
         return None
     closures: dict[str, set[str]] = {}
     failsafe: set[str] = set()
@@ -2037,19 +2061,43 @@ def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = No
     selected |= registrations
     docs: list[str] = []
     needs_failsafe = False
+    failsafe_path: str | None = None
+    path_tests = cfg.get("pr_selection", {}).get("path_tests", {})
     for path in sorted(changed_set):
+        by_path_tests = False
+        for pat, listed in path_tests.items():
+            if fnmatch.fnmatchcase(path, pat):
+                selected |= {t for t in listed if t in tests_set}
+                by_path_tests = True
         hit = {t for t in tests if path in closures[t]}
         selected |= hit
         if path in tests_set:
             continue  # a collected test file is a leaf: it affects only itself + its importers
         if hit:
             needs_failsafe = True
+            failsafe_path = failsafe_path or path
         elif is_doc_changed_path(cfg, path):
             docs.append(path)
+        elif not by_path_tests and (readers := _path_reader_tests([path], tests, closures)):
+            # A test names this unreached path in a literal: select its readers
+            # rather than falling back to the full suite. A `path_tests` match
+            # already named its test above (it reads the path by walk, so it is
+            # the proof) -- skip the literal scan for that path only.
+            selected |= readers
+            needs_failsafe = True
+            failsafe_path = failsafe_path or path
+        elif by_path_tests:
+            # path_tests named a test for this path (a tree-scanner meta-test,
+            # #672): it reads the path by walk, so it is the proof, not an
+            # import-closure miss. Fall through without selecting the full suite.
+            continue
         else:
+            note(f"{path} is not in any test's import closure and is not a doc")
             return None
     if needs_failsafe:
         selected |= failsafe
+        note(f"fail-safe set added ({len(failsafe)} tests) "
+             f"because {failsafe_path} is imported by tests")
     if docs:
         selected |= _doc_reader_tests(docs, tests, closures)
     return sorted(selected)
@@ -2087,10 +2135,28 @@ def _doc_reader_tests(docs: list[str], tests: list[str],
     files only) holds a non-docstring string literal naming the doc's file
     name. An unreadable or unparsable closure file counts as a match, never a
     silent skip."""
-    names = {d.rsplit("/", 1)[-1] for d in docs}
+    return _path_reader_tests(docs, tests, closures,
+                              names={d.rsplit("/", 1)[-1] for d in docs})
+
+
+def _path_reader_tests(paths: list[str], tests: list[str],
+                       closures: dict[str, set[str]],
+                       names: set[str] | None = None) -> set[str]:
+    """Tests whose import closure (python files only) holds a non-docstring
+    string literal containing one of `names`. When `names` is None the name
+    set comes from `paths`: each path's basename, plus its dotted module name
+    when it is a `.py` path (so `experiments/magnitude_search_worker.py` is
+    named by `experiments.magnitude_search_worker`). An unreadable or
+    unparsable closure file counts as a match, never a silent skip."""
+    if names is None:
+        names = set()
+        for path in paths:
+            names.add(path.rsplit("/", 1)[-1])
+            if path.endswith(".py"):
+                names.add(path[:-3].replace("/", "."))
     named: dict[str, bool] = {}
 
-    def names_a_doc(rel: str) -> bool:
+    def names_a_file(rel: str) -> bool:
         if rel not in named:
             try:
                 src = (REPO / rel).read_text(encoding="utf-8")
@@ -2099,7 +2165,7 @@ def _doc_reader_tests(docs: list[str], tests: list[str],
                 named[rel] = True
         return named[rel]
 
-    return {t for t in tests if any(names_a_doc(rel) for rel in closures[t])}
+    return {t for t in tests if any(names_a_file(rel) for rel in closures[t])}
 
 
 # -- work copy ---------------------------------------------------------------
@@ -2233,12 +2299,17 @@ def cmd_select_tests(cfg: dict, args) -> int:
     changed = read_changed_files(args.changed_files)
     base = (registration_base_config(getattr(args, "base_sha", ""), cfg, changed)
             if _REGISTRATION_CONFIG in changed else None)
-    selected = select_pr_tests(cfg, changed, base_cfg=base)
+    reasons: list[str] = []
+    selected = select_pr_tests(cfg, changed, base_cfg=base, reasons=reasons)
     if selected is None:
         print("__ALL__")
     else:
         for t in selected:
             print(t)
+        print(f"# selected {len(selected)} test files")
+    for reason in reasons:
+        print(f"# {reason}")
+        print(f"[mutation_pilot] select-tests: {reason}", file=sys.stderr, flush=True)
     return 0
 
 # Test-side changes mutmut cannot see: it re-tests a mutant only when the

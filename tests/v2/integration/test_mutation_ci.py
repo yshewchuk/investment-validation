@@ -2758,6 +2758,64 @@ def test_select_pr_tests_unrecognized_unreached_path_selects_none_sentinel(tmp_p
     assert selected is None
 
 
+def test_select_pr_tests_reports_a_reason_naming_the_full_suite_pattern(tmp_path, monkeypatch):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text("X = 1\n")
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(["tests/test_a.py"])
+    reasons: list[str] = []
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["tools/foo.py"],
+                                     graph=graph, reasons=reasons)
+    assert selected is None
+    assert reasons and "tools/*" in reasons[0]
+
+
+def test_select_pr_tests_reports_the_unreached_non_doc_reason(tmp_path, monkeypatch):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text("X = 1\n")
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(["tests/test_a.py"])
+    reasons: list[str] = []
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["some/unrelated/file.py"],
+                                     graph=graph, reasons=reasons)
+    assert selected is None
+    assert reasons == ["some/unrelated/file.py is not in any test's import closure "
+                       "and is not a doc"]
+
+
+def test_select_pr_tests_always_run_does_not_accept_an_unreached_path(tmp_path, monkeypatch):
+    cfg = {"pr_selection": {"inert": ["*.md"], "inert_skip": [], "full_suite": [],
+                             "always_run": ["tests/test_plain.py"]}}
+    tracked = _write_repo(tmp_path, {
+        "engine/v2/x.py": "Y = 1\n",
+        "tests/test_plain.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)  # no edge names some/unrelated/file.py
+    assert pilot.select_pr_tests(cfg, ["some/unrelated/file.py"], graph=graph) is None
+
+
+def test_select_pr_tests_path_tests_select_a_tree_scanner_without_an_import_edge(
+        tmp_path, monkeypatch):
+    cfg = {"pr_selection": {"inert": [], "inert_skip": [], "full_suite": [],
+                            "path_tests": {"engine/v2/*": ["tests/test_scan_tree.py"]}}}
+    tracked = _write_repo(tmp_path, {
+        "engine/v2/x.py": "Y = 1\n",
+        "tests/test_scan_tree.py": "import os\n",
+        "tests/test_plain.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)  # no edge names engine/v2/x.py
+    assert "tests/test_scan_tree.py" in pilot.pytest_test_files(set(tracked))
+    assert pilot.select_pr_tests(cfg, ["engine/v2/x.py"], graph=graph) == [
+        "tests/test_scan_tree.py"]
+
+
+def test_shipped_toml_declares_the_engine_v2_tree_scanner_test():
+    assert pilot.load_config()["pr_selection"]["path_tests"] == {
+        "engine/v2/*": ["tests/v2/foundation/test_v2_ops_foundation.py"]}
+
+
 def test_select_pr_tests_inert_path_selects_nothing(tmp_path, monkeypatch):
     (tmp_path / "engine").mkdir()
     (tmp_path / "engine" / "b.py").write_text("Y = 1\n")
