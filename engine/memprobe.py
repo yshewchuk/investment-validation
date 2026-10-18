@@ -16,6 +16,9 @@ Flags (read at call time; truthy is ``1``/``true``/``yes``/``on``):
 
 Output lines are prefixed with two spaces then ``[mem]`` and go to stdout,
 flushed. Size estimates are sampled, not exact.
+
+Every entry point never raises, except MemoryError which propagates; the
+disabled path returns before any diagnostic work.
 """
 from __future__ import annotations
 
@@ -44,8 +47,8 @@ _DEFAULT_EVERY = 250
 _DEFAULT_TOP = 12
 _PREFIX = "  [mem] "
 
-#: name -> (weakref.ref(owner) | module-name string, attr)
-_registry: dict[str, tuple[Any, str]] = {}
+#: (name, owner-id | None) -> (weakref.ref(owner) | module-name string, attr)
+_registry: dict[tuple[str, int | None], tuple[Any, str]] = {}
 _defaults_registered = False
 
 DEFAULT_WATCHES: tuple[tuple[str, str, str], ...] = (
@@ -120,27 +123,20 @@ def _fmt_mb(n: int) -> str:
 def watch(name: str, owner: Any, attr: str) -> None:
     """Register a named cache. ``owner`` is an object (stored as a weakref; if
     not weakref-able, store nothing) or a module-name string resolved through
-    ``sys.modules`` at sample time (never imported). Cheap and side-effect-free
-    even when disabled; never keeps the owner alive."""
+    ``sys.modules`` at sample time (never imported). Keyed by
+    ``(name, id(owner))`` for objects so multiple live Scorers each keep their
+    own watch; module-string watches key by ``(name, None)``. Registering the
+    same ``(name, owner)`` twice replaces. Cheap and side-effect-free even
+    when disabled; never keeps the owner alive."""
     if isinstance(owner, str):
-        _registry[name] = (owner, attr)
+        _registry[(name, None)] = (owner, attr)
         return
     try:
         import weakref
 
-        _registry[name] = (weakref.ref(owner), attr)
+        _registry[(name, id(owner))] = (weakref.ref(owner), attr)
     except TypeError:
         pass
-
-
-def _resolve(target: Any, attr: str) -> Any:
-    if isinstance(target, str):
-        mod = sys.modules.get(target)
-        if mod is None:
-            return None
-        return getattr(mod, attr, None)
-    ref = target() if target is not None else None
-    return ref
 
 
 def _ensure_defaults() -> None:
@@ -148,24 +144,48 @@ def _ensure_defaults() -> None:
     if _defaults_registered:
         return
     for name, mod, attr in DEFAULT_WATCHES:
-        if name not in _registry:
-            _registry[name] = (mod, attr)
+        _registry.setdefault((name, None), (mod, attr))
     _defaults_registered = True
 
 
 def _item_size(item: Any, sample: int) -> int:
-    base = sys.getsizeof(item)
-    if isinstance(item, (tuple, list, dict, set, frozenset)):
-        try:
-            members = list(item)[:8]
-        except Exception:
-            return base
-        for m in members:
-            try:
-                base += sys.getsizeof(m)
-            except Exception:
-                pass
+    """Never materialise ``item``; extrapolate nested containers to full
+    length from a strided first-N sample of members (measured one level only)."""
+    try:
+        base = sys.getsizeof(item)
+    except Exception:
+        return 0
+    try:
+        if isinstance(item, (tuple, list)):
+            if not item:
+                return base
+            members = list(itertools.islice(item, 8))
+            mean = sum(_one_level(m) for m in members) / len(members)
+            return base + len(item) * mean
+        if isinstance(item, dict):
+            if not item:
+                return base
+            pairs = list(itertools.islice(item.items(), 8))
+            mean = (
+                sum(_one_level(k) + _one_level(v) for k, v in pairs) / len(pairs)
+            )
+            return base + len(item) * mean
+        if isinstance(item, (set, frozenset)):
+            if not item:
+                return base
+            members = list(itertools.islice(item, 8))
+            mean = sum(_one_level(m) for m in members) / len(members)
+            return base + len(item) * mean
+    except Exception:
+        return base
     return base
+
+
+def _one_level(m: Any) -> int:
+    try:
+        return sys.getsizeof(m)
+    except Exception:
+        return 0
 
 
 def _sample_indices(n: int, sample: int) -> list[int]:
@@ -192,8 +212,23 @@ def _mean_item_size(items: list[Any], sample: int) -> int:
 
 def estimate_size(obj: Any, *, sample: int = 200) -> int:
     """Approximate deep bytes without walking everything. Sampled, not exact.
-    Never raises; returns 0 on any failure."""
+    Never raises, except MemoryError which propagates; returns 0 on any
+    other failure."""
     try:
+        if type(obj).__name__ == "Series":
+            total = int(obj.memory_usage(index=True, deep=False))
+            if getattr(obj.dtype, "kind", "") == "O":
+                n = len(obj)
+                if n:
+                    step = max(1, n // sample)
+                    sample_vals = list(obj.iloc[::step])[:sample]
+                    mean = (
+                        sum(sys.getsizeof(v) for v in sample_vals) / len(sample_vals)
+                        if sample_vals
+                        else 0
+                    )
+                    total += int(mean * n)
+            return total
         if hasattr(obj, "nbytes") and hasattr(obj, "shape"):
             return int(obj.nbytes)
         if hasattr(obj, "memory_usage") and hasattr(obj, "columns"):
@@ -235,21 +270,9 @@ def estimate_size(obj: Any, *, sample: int = 200) -> int:
             items = list(itertools.islice(obj, sample))
             mean = _mean_item_size(items, sample)
             return base + len(obj) * mean
-        if type(obj).__name__ == "Series":
-            total = int(obj.memory_usage(index=True, deep=False))
-            if getattr(obj.dtype, "kind", "") == "O":
-                n = len(obj)
-                if n:
-                    step = max(1, n // sample)
-                    sample_vals = list(obj.iloc[::step])[:sample]
-                    mean = (
-                        sum(sys.getsizeof(v) for v in sample_vals) / len(sample_vals)
-                        if sample_vals
-                        else 0
-                    )
-                    total += int(mean * n)
-            return total
         return sys.getsizeof(obj)
+    except MemoryError:
+        raise
     except Exception:
         return 0
 
@@ -326,12 +349,23 @@ def _describe(o: Any, name: str, is_df: bool) -> str:
 
 
 def snapshot(label: str, *, top: int | None = None) -> None:
-    """Print one diagnostic block, or return immediately if not enabled.
-    Never raises."""
+    """Print one diagnostic block, or return immediately if not enabled —
+    the disabled path returns before any diagnostic work. Never raises,
+    except MemoryError which propagates."""
     if not enabled():
         return
     try:
         _ensure_defaults()
+        for (key_name, owner_id), entry in list(_registry.items()):
+            target, attr = entry
+            if isinstance(target, str):
+                continue
+            try:
+                if target is None or target() is None:
+                    del _registry[(key_name, owner_id)]
+            except TypeError:
+                del _registry[(key_name, owner_id)]
+        seen_names: dict[str, int] = {}
         n = top if top is not None else _int_flag("INVESTING_PLAN_MEMPROFILE_TOP", _DEFAULT_TOP)
         pre = rss_bytes()
         trimmed = False
@@ -345,10 +379,13 @@ def snapshot(label: str, *, top: int | None = None) -> None:
         if trimmed:
             head += f" [trimmed from {_fmt(pre)}]"
         print(head, flush=True)
-        for name, (target, attr) in list(_registry.items()):
+        for (key_name, owner_id), (target, attr) in list(_registry.items()):
             if isinstance(target, str):
                 mod = sys.modules.get(target)
                 val = getattr(mod, attr, None) if mod is not None else None
+                if val is None:
+                    continue
+                display = key_name
             else:
                 owner = target() if target is not None else None
                 if owner is None:
@@ -357,8 +394,11 @@ def snapshot(label: str, *, top: int | None = None) -> None:
                     val = getattr(owner, attr, None)
                 except Exception:
                     continue
-            if val is None:
-                continue
+                if val is None:
+                    continue
+                k = seen_names.get(key_name, 0) + 1
+                seen_names[key_name] = k
+                display = key_name if k == 1 else f"{key_name}#{k}"
             try:
                 length: Any = len(val)
             except Exception:
@@ -370,7 +410,7 @@ def snapshot(label: str, *, top: int | None = None) -> None:
             if not isinstance(size, int):
                 size = 0
             size_str = _fmt_mb(size) if size else "0.0M"
-            print(f"{_PREFIX}  cache {name}: {length} entries ~{size_str}", flush=True)
+            print(f"{_PREFIX}  cache {display}: {length} entries ~{size_str}", flush=True)
         for nbytes, desc in top_objects(n):
             print(f"{_PREFIX}  obj {_fmt_mb(nbytes)} {desc}", flush=True)
     except MemoryError:

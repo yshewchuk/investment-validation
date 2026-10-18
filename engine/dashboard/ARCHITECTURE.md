@@ -58,8 +58,7 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 `malloc_trim(0)` before measuring, logging RSS before/after. Hooks:
 `NightlyReport.mark`, `score_calendar`, `load_chain_index`, `Scorer` caches.
 Estimates are sampled, not exact. The native (`engine/v2`) nightly is NOT
-covered because `engine/v2` must not import legacy `engine` (layer rule); a
-v2-side copy is a follow-up.
+covered because `engine/v2` must not import legacy `engine` (layer rule).
 
 ## Inputs
 
@@ -85,7 +84,9 @@ inside function bodies):
   `publish.py`/`render.py`), `engine.data.throttle` (quota guard, also
   lazy in `nightly.py`), `engine.score` (`LADDER_STEP` and others, also
   lazy in several functions), `engine.jsonio` (`json_safe`), `engine.features` (`model_evidence.py`:
-  `DAILY_STATE_FIELDS`, for the projected `daily_market` read; other uses lazy).
+  `DAILY_STATE_FIELDS`, for the projected `daily_market` read; other uses lazy),
+  `engine.memprobe` (`nightly.py`, also provided to `engine.score` and
+  `engine.replay`, which are outside this package).
 - Lazy (function-local) only, never at module top level: `engine.calendar`
   (`model_evidence.py::_dataset_for`, `nightly.py::_date_change_flag`/
   `_panel_staleness_flags`/`refresh_forward_chains`/`run_nightly`);
@@ -192,6 +193,9 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 - **Idempotency** — re-running re-reads, re-renders, re-publishes; the
   ledger refuses a duplicate `row_id` write rather than silently
   overwriting or double-counting it.
+- **Memory diagnostics** — a probe failure prints
+  `[mem] <label> probe failed: <ExcType>: <repr>` and the run continues;
+  MemoryError propagates; disabled = no output, no gc walk, no other effect.
 
 ## Invariants
 

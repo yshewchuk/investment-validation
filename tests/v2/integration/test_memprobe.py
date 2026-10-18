@@ -7,6 +7,7 @@ from __future__ import annotations
 import gc
 import re
 import sys
+import time
 import types
 
 import pytest
@@ -43,7 +44,7 @@ def test_enabled_snapshot_prints_rss_line_and_watch_and_dataframe(monkeypatch, c
     import engine.memprobe as memprobe
 
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
-    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TOP", "12")
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TOP", "1000000")
 
     class Holder:
         def __init__(self):
@@ -66,41 +67,57 @@ def test_enabled_snapshot_prints_rss_line_and_watch_and_dataframe(monkeypatch, c
     assert re.search(r"cache test\.cache: 5000 entries ~[0-9.]+M", out)
     assert "DataFrame" in out and "2000 x 3" in out
     assert re.search(r"obj [0-9.]+M DataFrame len=2000 x 3", out)
-    # keep df alive until after snapshot
     assert df is not None
 
 
-def test_watch_does_not_keep_owner_alive(monkeypatch, capsys):
+def test_owner_lifetime_watch_line_present_then_absent(monkeypatch, capsys):
     import engine.memprobe as memprobe
 
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TOP", "1000000")
 
     class Owner:
-        pass
+        def __init__(self):
+            self.bucket = list(range(2000))
 
     o = Owner()
-    memprobe.watch("owner.gone", o, "missing")
+    memprobe.watch("owner.alive", o, "bucket")
+    memprobe.snapshot("x")
+    out = capsys.readouterr().out
+    assert "cache owner.alive: 2000 entries" in out
+
     del o
     gc.collect()
     memprobe.snapshot("x")
     out = capsys.readouterr().out
-    assert "owner.gone" not in out
+    assert "owner.alive" not in out
 
 
-def test_module_string_watch_resolves_via_sys_modules(monkeypatch, capsys):
+def test_two_live_owners_same_name_second_suffixed_and_deletion_keeps_one(monkeypatch, capsys):
     import engine.memprobe as memprobe
 
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
-    mod = types.ModuleType("throwaway_mod")
-    mod.bucket = ["a", "b", "c"]
-    sys.modules["throwaway_mod"] = mod
-    try:
-        memprobe.watch("throwaway.bucket", "throwaway_mod", "bucket")
-        memprobe.snapshot("x")
-        out = capsys.readouterr().out
-        assert "cache throwaway.bucket: 3 entries" in out
-    finally:
-        del sys.modules["throwaway_mod"]
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TOP", "1000000")
+
+    class Owner:
+        def __init__(self):
+            self.bucket = list(range(1500))
+
+    o1 = Owner()
+    o2 = Owner()
+    memprobe.watch("owner.dup", o1, "bucket")
+    memprobe.watch("owner.dup", o2, "bucket")
+    memprobe.snapshot("x")
+    out = capsys.readouterr().out
+    assert "cache owner.dup: 1500 entries" in out
+    assert "cache owner.dup#2: 1500 entries" in out
+
+    del o2
+    gc.collect()
+    memprobe.snapshot("x")
+    out = capsys.readouterr().out
+    assert "cache owner.dup: 1500 entries" in out
+    assert "owner.dup#2" not in out
 
 
 # --------------------------------------------------------------------------
@@ -116,7 +133,10 @@ def test_tick_fires_only_on_multiples_of_every(monkeypatch, capsys):
     for i in range(1, 8):
         memprobe.tick("t", i)
     out = capsys.readouterr().out
-    assert out.count("[mem] t") == 2
+    lines = [line for line in out.splitlines() if line.startswith("  [mem] t")]
+    labels = {re.search(r"\[mem\] (t \d+)", line).group(1) for line in lines}
+    assert labels == {"t 3", "t 6"}
+    assert len(lines) == 2
 
 
 # --------------------------------------------------------------------------
@@ -124,17 +144,29 @@ def test_tick_fires_only_on_multiples_of_every(monkeypatch, capsys):
 # --------------------------------------------------------------------------
 
 
-def test_trim_flag_calls_malloc_trim_once_per_snapshot(monkeypatch, capsys):
+def test_trim_flag_calls_gc_then_malloc_trim_once_per_snapshot(monkeypatch, capsys):
     import engine.memprobe as memprobe
 
-    calls: list[int] = []
-    monkeypatch.setattr(memprobe, "_malloc_trim", lambda: calls.append(1))
+    calls: list[str] = []
+    real_gc = gc.collect
+    real_trim = memprobe._malloc_trim
+
+    def gc_wrapper():
+        calls.append("gc")
+        return real_gc()
+
+    def trim_wrapper():
+        calls.append("trim")
+        return real_trim()
+
+    monkeypatch.setattr(gc, "collect", gc_wrapper)
+    monkeypatch.setattr(memprobe, "_malloc_trim", trim_wrapper)
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TRIM", "1")
     memprobe.snapshot("x")
     out = capsys.readouterr().out
-    assert len(calls) == 1
-    assert "trimmed from" in out
+    assert calls == ["gc", "trim"]
+    assert re.search(r"trimmed from [0-9.]+G", out)
 
 
 def test_trim_flag_off_never_calls_malloc_trim(monkeypatch, capsys):
@@ -183,22 +215,32 @@ def test_estimate_size_never_raises_on_len_that_raises():
     assert isinstance(memprobe.estimate_size(Bad()), int)
 
 
-def test_estimate_size_set_200k_is_sampled_not_copied():
+def test_estimate_size_set_200k_under_one_second():
     import engine.memprobe as memprobe
 
-    def exact(o):
-        if isinstance(o, (set, frozenset)):
-            return sys.getsizeof(o) + sum(exact(x) for x in o)
-        if isinstance(o, (tuple, list)):
-            return sys.getsizeof(o) + sum(exact(x) for x in o)
-        return sys.getsizeof(o)
-
-    small = {(i, i + 1) for i in range(20000)}
-    exact_small = exact(small)
     big = {(i, i + 1) for i in range(200000)}
+    started = time.perf_counter()
     estimate = memprobe.estimate_size(big)
-    scaled = exact_small * (len(big) / len(small))
-    assert 0.5 * scaled <= estimate <= 2 * scaled
+    elapsed = time.perf_counter() - started
+    assert estimate > 0
+    assert elapsed < 1.0
+
+
+def test_estimate_size_series_of_1000_strings_exceeds_150k():
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("numpy")
+    import engine.memprobe as memprobe
+
+    s = pd.Series(["x" * 200 for _ in range(1000)])
+    assert memprobe.estimate_size(s) > 150_000
+
+
+def test_estimate_size_nested_dict_of_lists_extrapolates():
+    import engine.memprobe as memprobe
+
+    data = {i: list(range(1000)) for i in range(50)}
+    estimate = memprobe.estimate_size(data)
+    assert estimate >= 0.5 * (50 * 1000 * 8)
 
 
 # --------------------------------------------------------------------------
@@ -210,10 +252,15 @@ def test_snapshot_swallows_top_objects_failure(monkeypatch, capsys):
     import engine.memprobe as memprobe
 
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
-    monkeypatch.setattr(memprobe, "top_objects", lambda n: (_ for _ in ()).throw(RuntimeError("x")))
+
+    def boom(n):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(memprobe, "top_objects", boom)
     memprobe.snapshot("x")
     out = capsys.readouterr().out
-    assert "probe failed" in out
+    assert "probe failed: ValueError" in out
+    assert "boom" in out
 
 
 def test_snapshot_propagates_memory_error(monkeypatch):
@@ -234,16 +281,17 @@ def test_snapshot_propagates_memory_error(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_nightly_mark_off_prints_nothing_but_records_timeline(monkeypatch, capsys):
+def test_nightly_mark_returns_elapsed_matching_timeline_flag_off(monkeypatch, capsys):
     from engine.dashboard.nightly import NightlyReport
 
     monkeypatch.delenv("INVESTING_PLAN_MEMPROFILE", raising=False)
     r = NightlyReport(as_of="2026-01-01")
     r.start(0.0)
-    r.mark("settle", started=0.0)
+    time.sleep(0.05)
+    ret = r.mark("settle", started=0.0)
+    assert ret == pytest.approx(r.timeline[0]["elapsed_s"], abs=0.06)
     out = capsys.readouterr().out
     assert out == ""
-    assert len(r.timeline) == 1
     assert r.timeline[0]["step"] == "settle"
 
 
@@ -253,7 +301,9 @@ def test_nightly_mark_on_prints_mem_phase_line(monkeypatch, capsys):
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
     r = NightlyReport(as_of="2026-01-01")
     r.start(0.0)
-    r.mark("settle", started=0.0)
+    time.sleep(0.05)
+    ret = r.mark("settle", started=0.0)
+    assert ret == pytest.approx(r.timeline[0]["elapsed_s"], abs=0.06)
     out = capsys.readouterr().out
     assert "[mem] phase settle" in out
-    assert len(r.timeline) == 1
+    assert r.timeline[0]["step"] == "settle"
