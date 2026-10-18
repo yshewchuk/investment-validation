@@ -123,7 +123,8 @@ def test_full_presence_preflight_prevents_fitting(ready, monkeypatch, slot):
     monkeypatch.setattr(ready.recorder, "reconcile", forbidden)
     with pytest.raises(OpsError) as caught:
         run(ready)
-    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT",
+        "search contains an unfinished or orphan " + ("outer" if slot.startswith("outer-") else "inner") + " claim").problem
     assert durable_evidence(ready) == before
 
 
@@ -150,7 +151,7 @@ def test_later_claim_failure_stops_before_earlier_missing_fit(ready, monkeypatch
     if failure != "corrupt":
         assert caught.value is error
     else:
-        assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search durable execution result differs").problem
     assert durable_evidence(ready) == before
 
 
@@ -211,7 +212,7 @@ def test_candidate_named_error_is_not_enough_to_continue(ready, monkeypatch, pub
     with pytest.raises(OpsError) as caught:
         run(ready)
     if publication == "wrong_problem":
-        assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "invalid durable refusal").problem
     else:
         assert caught.value is error
 
@@ -221,7 +222,8 @@ def test_limits_admitted_before_any_journal_work(ready, monkeypatch, limits):
     monkeypatch.setattr(driver, "_admit_driver", forbidden)
     with pytest.raises(OpsError) as caught:
         driver.run_search(*ready.context, limits=limits)
-    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC",
+        "search execution requires explicit positive integer resource limits").problem
 
 
 def test_completed_and_pending_outer_claims_never_retry(ready, monkeypatch):
@@ -235,35 +237,62 @@ def test_completed_and_pending_outer_claims_never_retry(ready, monkeypatch):
     monkeypatch.setattr(driver, "execute_outer_fold", forbidden)
     with pytest.raises(OpsError) as caught:
         run(ready)
-    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT",
+        "search contains an unfinished or orphan outer claim").problem
     assert durable_evidence(ready) == before
 
 
 @pytest.mark.parametrize("ready", [2], indirect=True)
-@pytest.mark.parametrize("damage", ["limits", "terminal"])
+@pytest.mark.parametrize("damage", [None, "limits", "terminal"])
 def test_later_completed_outer_is_validated_before_earlier_fresh_fit(ready, monkeypatch, damage):
     r = ready.recorder
     for args in driver._roster(ready.plan):
         r.execute(*args, limits=LIMITS)
     r.freeze()
+    completed = content_hash(["plan", "2025"])
     if damage == "terminal":
         append = outer.append_record
+        original_terminal = []
         def corrupt(conn, store, run_id, slot, body, **kwargs):
-            if slot.startswith("outer-terminal:"):
+            if slot == "outer-terminal:" + completed:
+                original_terminal.append(body)
                 body = {**body, "result_id": "wrong"}
             return append(conn, store, run_id, slot, body, **kwargs)
         monkeypatch.setattr(outer, "append_record", corrupt)
-        with pytest.raises(OpsError):
+        with pytest.raises(OpsError) as caught:
             outer.execute_outer_fold(*ready.context, "2025", limits=LIMITS)
+        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT",
+            "outer evaluation evidence differs from its sealed inputs").problem
         monkeypatch.setattr(outer, "append_record", append)
+        assert len(original_terminal) == 1
+        original = original_terminal[0]
+        assert original["result_id"] == content_hash({key: value for key, value in original.items() if key != "result_id"})
+        assert original["outer_year"] == "2025" and original["forecast_count"] == 3
+        assert r._read("outer-terminal:" + completed) == {**original, "result_id": "wrong"}
     else:
-        outer.execute_outer_fold(*ready.context, "2025", limits={**LIMITS, "cpu_seconds": 31})
+        limits = {**LIMITS, "cpu_seconds": 31} if damage else LIMITS
+        original = outer.execute_outer_fold(*ready.context, "2025", limits=limits)
+        assert r._read("outer-terminal:" + completed) == original
+    assert r._read("outer-execution:" + completed)["status"] == "succeeded"
+    assert r._read("outer-start:" + completed) is not None
+    if damage is None:
+        fitted, calls = outer.run_fitted_trial, []
+        def fresh(*args):
+            calls.append(args[1]["year"])
+            return fitted(*args)
+        monkeypatch.setattr(trials, "run_fitted_trial", forbidden)
+        monkeypatch.setattr(outer, "run_fitted_trial", fresh)
+        result = run(ready)
+        assert calls == ["2024"]
+        assert result["folds"][1] == original
+        return
     before = durable_evidence(ready)
     monkeypatch.setattr(trials, "run_fitted_trial", forbidden)
     monkeypatch.setattr(outer, "run_fitted_trial", forbidden)
     with pytest.raises(OpsError) as caught:
         run(ready)
-    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT",
+        "outer evaluation evidence differs from its sealed inputs").problem
     assert r._read("outer-start:" + content_hash(["plan", "2024"])) is None
     assert durable_evidence(ready) == before
 
@@ -286,7 +315,9 @@ def test_valid_hash_bad_refusal_is_rejected_by_public_reconcile(ready, monkeypat
     monkeypatch.setattr(trials, "magnitude_metrics", refuse)
     with pytest.raises(OpsError) as caught:
         run(ready)
-    assert caught.value.code == ("EXPERIMENT_VARIANT_FAILED" if damage == "status" else "EXPERIMENT_IDENTITY_CONFLICT")
+    code, message = (("EXPERIMENT_VARIANT_FAILED", "synthetic scoring refusal") if damage == "status"
+        else ("EXPERIMENT_IDENTITY_CONFLICT", "search trial evidence chain differs"))
+    assert caught.value.problem == fail(code, message).problem
     assert r._read("start:" + KEY) is None
     assert r._read("selection") is None
 

@@ -154,29 +154,26 @@ def _render(document, *, scratch=True):
         raise
 
 
-def _positive(value):
-    try:
-        result = int(value)
-        if not 1 <= result < sys.maxsize:
-            raise ValueError
-        return result
-    except ValueError:
-        raise argparse.ArgumentTypeError("requires a positive platform-sized integer") from None
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("seal", "run", "collect"))
     for name in ("spec", "request", "plan-ref", "catalog", "store-root"):
         parser.add_argument("--" + name, required=True)
     for name in ("memory-bytes", "cpu-seconds", "wall-seconds"):
-        parser.add_argument("--" + name, type=_positive)
+        parser.add_argument("--" + name, type=int)
     parser.add_argument("--no-ledger", action="store_true", help="accepted no-op; no mode publishes a ledger")
     args = parser.parse_args(argv)
+    if any("\0" in getattr(args, name) for name in ("spec", "request", "plan_ref", "catalog", "store_root")):
+        parser.error("search paths must not contain NUL characters")
     limits = {name: getattr(args, name) for name in ("memory_bytes", "cpu_seconds", "wall_seconds")}
     if (args.action == "run" and any(value is None for value in limits.values())) or (
             args.action != "run" and any(value is not None for value in limits.values())):
         parser.error("run requires all three resource limits; seal and collect accept none")
+    if args.action == "run":
+        try:
+            validate_execution_limits(limits)
+        except OpsError as error:
+            parser.error(error.problem.message)
     conn, status = None, 0
     try:
         with redirect_stdout(sys.stderr):

@@ -11,7 +11,7 @@ from engine.models.no_fit import no_fit_guard as legacy_guard
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash, to_document
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.catalog import connect
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import source_closure
 from experiments import magnitude_search_records as records
 from experiments import magnitude_search_trials as trials
@@ -138,7 +138,8 @@ def test_missing_driver_binding_cannot_be_added_after_any_admitted_phase(driver_
     no_work(monkeypatch)
     with no_fit_guard(), legacy_guard(), pytest.raises(OpsError) as caught:
         seal(case)
-    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT",
+        "search driver cannot bind an already started journal").problem
     assert read(case, "driver-seal") is None
     assert snapshot(case) == before
 
@@ -165,7 +166,7 @@ def test_phase_inserted_during_driver_publication_wins_atomic_absence_guard(driv
     monkeypatch.setattr(case.store, "publish_bytes", publish)
     with pytest.raises(OpsError) as caught:
         seal(case)
-    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial phase is already committed").problem
     assert raced == [slot]
     assert read(case, slot) == {"raced": phase}
     assert read(case, "driver-seal") is None
@@ -196,7 +197,10 @@ def test_changed_driver_binding_refuses_without_writes_or_work(driver_case, monk
         "admit": lambda: driver._admit_driver(case.conn, case.store, case.registration, case.request, case.plan_ref)}
     with no_fit_guard(), legacy_guard(), pytest.raises(OpsError) as caught:
         operations[operation]()
-    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    message = ("search driver sources cannot be verified" if change == "missing_source" else
+        "search journal slot is already committed" if operation == "seal" else
+        "search execution requires its exact driver seal")
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", message).problem
     assert snapshot(case) == before
 
 
@@ -209,7 +213,10 @@ def test_run_without_driver_seal_is_read_only_and_cannot_start_work(driver_case,
     no_work(monkeypatch)
     with no_fit_guard(), legacy_guard(), pytest.raises(OpsError) as caught:
         driver.run_search(*case.args, limits=LIMITS)
-    assert caught.value.problem.code == ("EXPERIMENT_IDENTITY_CONFLICT" if scientific_sealed else "INTEGRITY_FAILED")
+    expected = (fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution requires its exact driver seal") if scientific_sealed
+        else fail("INTEGRITY_FAILED", "magnitude_search schema is missing migrations",
+            details={"reason": "schema_older", "owner": "magnitude_search", "missing": [1]}))
+    assert caught.value.problem == expected.problem
     assert snapshot(case) == before
 
 
@@ -222,10 +229,11 @@ def test_valid_hash_different_driver_seal_cannot_admit_or_be_replaced(driver_cas
     records.append_record(case.conn, case.store, "run", "driver-seal", changed)
     before = snapshot(case)
     no_work(monkeypatch)
-    for operation in (lambda: seal(case), lambda: driver.run_search(*case.args, limits=LIMITS)):
+    for operation, message in ((lambda: seal(case), "search journal slot is already committed"),
+            (lambda: driver.run_search(*case.args, limits=LIMITS), "search execution requires its exact driver seal")):
         with pytest.raises(OpsError) as caught:
             operation()
-        assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", message).problem
         assert snapshot(case) == before
 
 

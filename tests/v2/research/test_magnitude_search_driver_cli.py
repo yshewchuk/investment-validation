@@ -4,6 +4,7 @@ import io
 import json
 import os
 import sqlite3
+import sys
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -92,6 +93,16 @@ def _invoke(source, capsys, action="collect", *, status=0, extra=()):
     return document, captured.err
 
 
+def _refusal(code, message):
+    return {"refused": to_document(fail(code, message).problem)}
+
+
+def _parser_error(capsys, message):
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert captured.err.splitlines()[-1].endswith(": error: " + message)
+
+
 def _raising(error):
     def raise_error(*args, **kwargs):
         raise error
@@ -131,9 +142,7 @@ def test_every_action_requires_explicit_metadata_and_storage(source, capsys, act
     with pytest.raises(SystemExit) as caught:
         cli.main(arguments)
     assert caught.value.code == 2
-    captured = capsys.readouterr()
-    assert not captured.out
-    assert flag in captured.err
+    _parser_error(capsys, "the following arguments are required: " + flag)
     assert not source.calls
 
 
@@ -145,19 +154,21 @@ def test_run_requires_each_resource_flag(source, capsys, flag):
     with pytest.raises(SystemExit) as caught:
         cli.main(arguments)
     assert caught.value.code == 2
-    assert not capsys.readouterr().out
+    _parser_error(capsys, "run requires all three resource limits; seal and collect accept none")
     assert not source.calls
 
 
 @pytest.mark.parametrize("flag", RESOURCE_FLAGS)
-@pytest.mark.parametrize("value", ["0", "-1", "1.5", "true"])
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "true", str(sys.maxsize), str(sys.maxsize + 1), str(10 ** 100)])
 def test_run_resource_flags_require_positive_integers(source, capsys, flag, value):
     arguments = _args(source, "run")
     arguments[arguments.index(flag) + 1] = value
     with pytest.raises(SystemExit) as caught:
         cli.main(arguments)
     assert caught.value.code == 2
-    assert not capsys.readouterr().out
+    message = (f"argument {flag}: invalid int value: {value!r}" if value in ("1.5", "true")
+        else "search execution requires explicit positive integer resource limits")
+    _parser_error(capsys, message)
     assert not source.calls
 
 
@@ -167,16 +178,18 @@ def test_nonexecuting_actions_reject_resource_flags(source, capsys, action, flag
     with pytest.raises(SystemExit) as caught:
         cli.main([*_args(source, action), flag, "1"])
     assert caught.value.code == 2
-    assert not capsys.readouterr().out
+    _parser_error(capsys, "run requires all three resource limits; seal and collect accept none")
     assert not source.calls
 
 
 def test_unknown_action_and_execution_options_are_rejected(source, capsys):
-    for arguments in (["prepare", *_args(source)[1:]], [*_args(source), "--jobs", "2"]):
+    for arguments, message in ((["prepare", *_args(source)[1:]],
+            "argument action: invalid choice: 'prepare' (choose from seal, run, collect)"),
+            ([*_args(source), "--jobs", "2"], "unrecognized arguments: --jobs 2")):
         with pytest.raises(SystemExit) as caught:
             cli.main(arguments)
         assert caught.value.code == 2
-        assert not capsys.readouterr().out
+        _parser_error(capsys, message)
     assert not source.calls
 
 
@@ -188,7 +201,8 @@ def test_metadata_decoder_rejects_duplicates_nonobjects_and_invalid_json(tmp_pat
     path.write_bytes(payload)
     with pytest.raises(OpsError) as caught:
         cli._read_document(path)
-    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC",
+        "search requires valid JSON object metadata").problem
     assert str(path) not in str(caught.value)
 
 
@@ -208,7 +222,8 @@ def test_metadata_reader_requires_bounded_regular_nonsymlink_leaf(tmp_path, kind
         path.mkdir()
     with pytest.raises(OpsError) as caught:
         cli._read_document(path)
-    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    message = "native staging must not follow symlinks" if kind == "symlink" else "native staging requires bounded regular files"
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC", message).problem
 
 
 def test_metadata_byte_bound_is_inclusive_and_counts_utf8(tmp_path):
@@ -221,14 +236,14 @@ def test_metadata_byte_bound_is_inclusive_and_counts_utf8(tmp_path):
         stream.write(b" ")
     with pytest.raises(OpsError) as caught:
         cli._read_document(path)
-    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC", "native staging requires bounded regular files").problem
 
 
 @pytest.mark.parametrize("name", ["spec", "request", "plan-ref"])
 def test_cli_rejects_duplicate_keys_in_every_metadata_input_before_dispatch(source, capsys, name):
     source.paths[name].write_text('{"duplicate":1,"duplicate":2}', encoding="utf-8")
     result, stderr = _invoke(source, capsys, status=2)
-    assert result["refused"]["code"] == "INVALID_EXPERIMENT_SPEC"
+    assert result == _refusal("INVALID_EXPERIMENT_SPEC", "search requires valid JSON object metadata")
     assert not stderr
     assert not source.calls
 
@@ -242,7 +257,8 @@ def test_missing_inputs_are_not_created_and_private_paths_are_redacted(source, c
     else:
         setattr(source, missing, absent)
     result, stderr = _invoke(source, capsys, action, status=2)
-    assert result["refused"]["code"] == "RESOURCE_UNAVAILABLE"
+    message = "search requires an existing artifact store" if missing == "store" else "search request could not be completed"
+    assert result == _refusal("RESOURCE_UNAVAILABLE", message)
     assert "private-operator-path" not in canonical_json(result) + stderr
     assert not absent.exists()
     assert not absent.parent.exists()
@@ -287,7 +303,7 @@ def test_collect_requires_its_exact_driver_seal_before_reading_results(
     monkeypatch.setattr(cli, "collect_outer_results", _raising(AssertionError("unadmitted collection")))
     before = snapshot(case)
     result, stderr = _invoke(source, capsys, status=2)
-    assert result["refused"]["code"] == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert result == _refusal("EXPERIMENT_IDENTITY_CONFLICT", "search execution requires its exact driver seal")
     assert not stderr
     assert snapshot(case) == before
 
@@ -310,7 +326,7 @@ def test_typed_refusal_preserves_the_complete_problem(source, monkeypatch, capsy
 def test_untyped_infrastructure_failures_are_safely_redacted(source, monkeypatch, capsys, error):
     monkeypatch.setattr(cli, "collect_outer_results", _raising(error))
     result, stderr = _invoke(source, capsys, status=2)
-    assert result["refused"]["code"] == "RESOURCE_UNAVAILABLE"
+    assert result == _refusal("RESOURCE_UNAVAILABLE", "search request could not be completed")
     assert "private" not in canonical_json(result) + stderr
 
 
@@ -345,14 +361,14 @@ def test_render_budget_counts_utf8_and_final_newline_inclusively(monkeypatch, sc
     monkeypatch.setattr(cli, "MAX_REPORT_BYTES", budget - 1)
     with pytest.raises(OpsError) as caught:
         cli._render(document, scratch=scratch)
-    assert caught.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert caught.value.problem == fail("RESOURCE_LIMIT_EXCEEDED", "search report exceeds its stdout byte budget").problem
 
 
 def test_report_overflow_emits_one_refusal_and_no_partial_success(source, monkeypatch, capsys):
     monkeypatch.setattr(cli, "MAX_REPORT_BYTES", 1024)
     source.result = {"first_success_field": "partial must stay private", "padding": "é" * 1024}
     result, stderr = _invoke(source, capsys, status=2)
-    assert result["refused"]["code"] == "RESOURCE_LIMIT_EXCEEDED"
+    assert result == _refusal("RESOURCE_LIMIT_EXCEEDED", "search report exceeds its stdout byte budget")
     assert "first_success_field" not in canonical_json(result) + stderr
     assert "partial must stay private" not in canonical_json(result) + stderr
 
@@ -360,7 +376,7 @@ def test_report_overflow_emits_one_refusal_and_no_partial_success(source, monkey
 def test_tempfile_allocation_failure_still_emits_redacted_refusal(source, monkeypatch, capsys):
     monkeypatch.setattr(cli.tempfile, "TemporaryFile", _raising(OSError("private-scratch-path")))
     result, stderr = _invoke(source, capsys, status=2)
-    assert result["refused"]["code"] == "RESOURCE_UNAVAILABLE"
+    assert result == _refusal("RESOURCE_UNAVAILABLE", "search request could not be completed")
     assert "private-scratch-path" not in canonical_json(result) + stderr
 
 
@@ -374,7 +390,7 @@ def test_tempfile_write_failure_discards_partial_report_and_closes_scratch(sourc
     stream = FailingScratch()
     monkeypatch.setattr(cli.tempfile, "TemporaryFile", lambda *args, **kwargs: stream)
     result, stderr = _invoke(source, capsys, status=2)
-    assert result["refused"]["code"] == "RESOURCE_UNAVAILABLE"
+    assert result == _refusal("RESOURCE_UNAVAILABLE", "search request could not be completed")
     assert "private-full-disk-path" not in canonical_json(result) + stderr
     assert stream.closed
 
@@ -437,3 +453,42 @@ def test_broken_binary_stdout_does_not_fall_back_or_emit_second_document(source,
         with pytest.raises(BrokenPipeError, match="closed binary consumer"):
             cli.main(_args(source))
     assert output.buffer.writes == [(canonical_json(source.result) + "\n").encode("utf-8")]
+
+
+@pytest.mark.parametrize("flag", RESOURCE_FLAGS)
+@pytest.mark.parametrize("value", [1, sys.maxsize - 1])
+def test_cli_accepts_each_exact_resource_boundary(source, capsys, flag, value):
+    arguments = _args(source, "run")
+    arguments[arguments.index(flag) + 1] = str(value)
+    assert cli.main(arguments) == 0
+    assert json.loads(capsys.readouterr().out) == source.result
+    expected = {**LIMITS, flag[2:].replace("-", "_"): value}
+    assert source.calls[0][2]["limits"] == expected
+
+
+def test_cli_uses_shared_resource_admission_before_any_storage(source, monkeypatch, capsys):
+    calls = []
+    def reject(limits):
+        calls.append(limits)
+        raise fail("INVALID_EXPERIMENT_SPEC", "synthetic shared resource refusal")
+    monkeypatch.setattr(cli, "validate_execution_limits", reject)
+    monkeypatch.setattr(cli, "_read_document", _raising(AssertionError("storage before resource admission")))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(_args(source, "run"))
+    assert caught.value.code == 2
+    _parser_error(capsys, "synthetic shared resource refusal")
+    assert calls == [LIMITS]
+    assert not source.calls
+
+
+@pytest.mark.parametrize("action", ACTION_NAMES)
+@pytest.mark.parametrize("flag", ["--spec", "--request", "--plan-ref", "--catalog", "--store-root"])
+def test_embedded_nul_paths_refuse_before_storage(source, monkeypatch, capsys, action, flag):
+    arguments = _args(source, action)
+    arguments[arguments.index(flag) + 1] = "private-path\0suffix"
+    monkeypatch.setattr(cli, "_read_document", _raising(AssertionError("storage before path admission")))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(arguments)
+    assert caught.value.code == 2
+    _parser_error(capsys, "search paths must not contain NUL characters")
+    assert not source.calls
