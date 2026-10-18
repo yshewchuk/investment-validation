@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from engine.v2.contracts import (
+    PROBLEM_V1,
+    ArtifactRef,
     AttemptReceipt,
     CancellationReceipt,
     Problem,
@@ -36,7 +38,7 @@ from engine.v2.contracts import (
     ResolvedResources,
 )
 from engine.v2.foundation import Clock, format_timestamp
-from engine.v2.ops.catalog import dumps, dumps_failure, load_json, transaction
+from engine.v2.ops.catalog import dumps, dumps_failure, load_json, register_artifact, transaction
 from engine.v2.ops.errors import fail, make_problem
 from engine.v2.ops.submission import RetryPolicy
 
@@ -245,7 +247,8 @@ def record_measurement(conn: sqlite3.Connection, attempt_id: str, *, current_byt
 
 def commit_attempt(conn: sqlite3.Connection, attempt_id: str, fence: int, outcome: Outcome, *,
                    clock: Clock,
-                   effects: Callable[[sqlite3.Connection], None] | None = None) -> str:
+                   effects: Callable[[sqlite3.Connection], None] | None = None,
+                   failure_artifact: ArtifactRef | None = None) -> str:
     """Close an attempt under its fence; run ``effects`` in the same transaction.
 
     Returns the job's new state. Any refusal or effect error rolls back
@@ -255,9 +258,15 @@ def commit_attempt(conn: sqlite3.Connection, attempt_id: str, fence: int, outcom
         raise ValueError("a success carries no failure, and a failure must carry one")
     if outcome.process_state not in RELEASABLE_PROCESS_STATES:
         raise fail("STALE_EXPECTATION", "completion requires a reconciled process tree")
+    if failure_artifact is not None and (outcome.failure is None
+            or outcome.failure.diagnostic_ref != failure_artifact.artifact_id
+            or failure_artifact.schema_ref != PROBLEM_V1):
+        raise fail("INTEGRITY_FAILED", "failure diagnostic does not match its receipt")
     now = clock.now()
     with transaction(conn):
         job, _ = verify_fence(conn, attempt_id, fence, now)
+        if failure_artifact is not None:
+            register_artifact(conn, failure_artifact, attempt_id, clock)
         if effects is not None and outcome.succeeded:
             effects(conn)
         end_attempt(conn, attempt_id, "succeeded" if outcome.succeeded else "failed",

@@ -694,15 +694,19 @@ def test_sealed_membership_change_admits_r5_before_final_r6(source, monkeypatch,
 def test_atomic_graph_conflict_in_second_child_rolls_back_first(source, monkeypatch):
     _call(source)
     original = sweep.submit_graph
-    def conflict(conn, registry, policy, requests, *, clock):
+    def conflict(conn, registry, policy, requests, *, clock, receipt_decode_failure_code, max_failure_bytes):
         # A genuinely conflicting existing second request exercises the real SQL transaction rollback.
+        assert receipt_decode_failure_code is None and max_failure_bytes is None
         other = replace(requests[1], job=replace(requests[1].job, priority=7))
-        original(conn, registry, policy, [other], clock=clock)
-        return original(conn, registry, policy, requests, clock=clock)
+        original(conn, registry, policy, [other], clock=clock, receipt_decode_failure_code=receipt_decode_failure_code,
+                 max_failure_bytes=max_failure_bytes)
+        return original(conn, registry, policy, requests, clock=clock,
+                        receipt_decode_failure_code=receipt_decode_failure_code, max_failure_bytes=max_failure_bytes)
     monkeypatch.setattr(sweep, "submit_graph", conflict)
     with pytest.raises(OpsError) as caught:
         _call(source, sweep.submit_sweep)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.message == "sweep submission differs from its first request"
     rows = source.conn.execute("SELECT spec_json FROM jobs").fetchall()
     assert len(rows) == 1 and json.loads(rows[0][0])["priority"] == 7
 

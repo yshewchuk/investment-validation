@@ -70,6 +70,8 @@ def test_bounded_publication_replay_and_export_preserve_exact_results(source, tm
     # Reports are not JSON evidence: the opt-in metadata limit must not cap them.
     report = REPORT + "漢" * CAP
     first = invoke(ACTIONS[0], source, registration, ledger, report=report, **options)
+    assert type(first["outcome"]["attempted_variants"]) is int
+    assert first["outcome"]["attempted_variants"] == 1
     assert invoke(ACTIONS[1], source, registration, ledger, **options) == first
     assert invoke(ACTIONS[0], source, registration, ledger, report=report, **options) == first
     path = invoke(ACTIONS[2], source, registration, ledger, **options)
@@ -305,7 +307,7 @@ def test_registered_artifact_invalid_utf8_is_bounded_before_sql_text_decoding(ov
     with artifact_catalog("{}") as conn:
         conn.execute("UPDATE artifacts SET ref_json=CAST(? AS TEXT)",
                      (b"\xff" * (CAP + 1 if oversized else 1),))
-        with pytest.raises(sqlite3.OperationalError):
+        with pytest.raises(sqlite3.OperationalError, match="Could not decode to UTF-8"):
             conn.execute("SELECT ref_json FROM artifacts").fetchone()
         bounded = BoundedSqlRows(conn, max_bytes=CAP, column=0, sql_fragment="FROM artifacts")
         monkeypatch.setattr(checkpoints, "load_json", forbid)

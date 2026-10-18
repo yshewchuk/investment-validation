@@ -4,7 +4,7 @@
     "entry": ["", "__main__", "cli", "massive_acquire", "massive_snapshot"],
     "core": ["bootstrap", "catalog", "checkpoints", "core", "core.snapshot_contracts",
       "decision_replay", "decision_validation", "diagnostics", "discovery", "errors",
-      "executor_cgroup", "executor_watchdog", "fingerprints", "input_bindings", "lifecycle", "migrations", "outbox", "parity", "plans",
+      "executor_cgroup", "executor_watchdog", "failure_diagnostics", "fingerprints", "input_bindings", "lifecycle", "migrations", "outbox", "parity", "plans",
       "profiles", "provider_budget", "provider_requirements", "provider_response", "recovery", "resources", "scheduler", "schema", "schema_runtime",
       "session_backfill", "session_resolution", "store_barrier", "submission", "worker_progress"],
     "runtime": ["executor", "supervisor", "worker", "nightly_chain", "nightly_completion", "nightly_history", "nightly_readiness", "nightly_receipts", "nightly_repair", "nightly_session", "nightly_trigger"],

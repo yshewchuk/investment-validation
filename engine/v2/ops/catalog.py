@@ -17,7 +17,6 @@ while WAL holds committed pages is not a consistent backup (§6.1), and
 """
 from __future__ import annotations
 
-import dataclasses
 import json
 import sqlite3
 from collections.abc import Iterator
@@ -25,18 +24,22 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from engine.v2.foundation import canonical_json, from_document, to_document
-from engine.v2.ops.errors import fail
+from engine.v2.contracts import Problem
+from engine.v2.foundation import canonical_json, format_timestamp, from_document, to_document
+from engine.v2.ops.errors import OpsError, fail
 
 __all__ = [
     "BUSY_TIMEOUT_MS",
     "MAX_JOB_FAILURE_BYTES",
     "backup_to",
     "connect",
+    "decode_bounded_text",
     "dumps",
     "dumps_failure",
     "integrity_errors",
     "load_json",
+    "register_artifact",
+    "sql_text_budget",
     "transaction",
 ]
 
@@ -112,19 +115,43 @@ def dumps(value: Any) -> str:
     return canonical_json(to_document(value))
 
 
-def dumps_failure(problem):
-    """Serialise a Problem for failure_json within MAX_JOB_FAILURE_BYTES,
-    bounding every free-form field."""
+def dumps_failure(problem: Problem) -> str:
+    """Preserve canonical bytes or refuse; oversized failures need a durable diagnostic."""
     text = dumps(problem)
-    if len(text.encode("utf-8")) <= MAX_JOB_FAILURE_BYTES:
-        return text
-    reduced = dumps(dataclasses.replace(problem, details={}, message=problem.message[:4096]))
-    if len(reduced.encode("utf-8")) <= MAX_JOB_FAILURE_BYTES:
-        return reduced
-    return dumps(dataclasses.replace(problem, details={}, message=problem.message[:256], stage=None,
-                                     trace_id=None, dependency_refs=(), diagnostic_ref=None))
+    if len(text.encode("utf-8")) > MAX_JOB_FAILURE_BYTES:
+        raise fail("RESOURCE_LIMIT_EXCEEDED",
+                   "failure requires a diagnostic artifact before persistence") from OpsError(problem)
+    return text
 
 
 def load_json(cls: type, text: str | None) -> Any:
     """Strictly decode a JSON column back into its contract type."""
     return None if text is None else from_document(cls, json.loads(text))
+
+
+def register_artifact(conn, ref, attempt_id, clock):
+    """Register canonical metadata in the caller's transaction; no publication or fence check."""
+    old = conn.execute("SELECT ref_json FROM artifacts WHERE artifact_id = ?",
+                       (ref.artifact_id,)).fetchone()
+    if old:
+        if old[0] != dumps(ref):
+            raise fail("INTEGRITY_FAILED", "artifact identity conflict")
+        return
+    conn.execute("INSERT INTO artifacts VALUES (?, ?, ?, ?)",
+                 (ref.artifact_id, dumps(ref), attempt_id, format_timestamp(clock.now())))
+
+
+def sql_text_budget(conn: sqlite3.Connection, max_utf8_bytes: int) -> tuple[str, int]:
+    """Encoding and SQL BLOB allowance for a caller's UTF-8 text budget."""
+    encoding = conn.execute("PRAGMA encoding").fetchone()[0]
+    return encoding, max_utf8_bytes * (2 if encoding.startswith("UTF-16") else 1)
+
+
+def decode_bounded_text(payload: bytes | None, encoding: str, max_utf8_bytes: int) -> str:
+    """Admit a bounded SQL projection; the caller owns the refusal policy."""
+    if payload is None:
+        raise ValueError("stored text was not admitted by its SQL byte bound")
+    text = payload.decode(encoding)
+    if len(text.encode("utf-8")) > max_utf8_bytes:
+        raise ValueError("stored text exceeds its UTF-8 byte bound")
+    return text

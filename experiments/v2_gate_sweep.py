@@ -26,7 +26,11 @@ from engine.v2.ops.fingerprints import environment_identity, source_closure, wor
 from engine.v2.ops.migrations import require_current
 from engine.v2.ops.schema import MIGRATIONS, OWNER
 from engine.v2.ops.stages import registry
-from engine.v2.ops.submission import NamespacePolicy, submit_graph
+from engine.v2.ops.submission import (
+    NamespacePolicy,
+    submit_graph,
+    validate_receipt_read_policy,
+)
 from experiments import native_registration as native
 from experiments.gate_report import validate_gate_spec
 from experiments.native_gate_worker import read_native_staged_input
@@ -154,8 +158,9 @@ def register_sweep(conn, store, repository, document, *, code_root, as_of_month,
 
 @_typed_sweep_io
 def submit_sweep(conn, store, repository, document, *, code_root, as_of_month, scope="shadow", event_ids=None,
-                 max_evidence_bytes=None):
+                 max_evidence_bytes=None, receipt_decode_failure_code=None, max_failure_bytes=None):
     """Verify all sealed arms before atomically submitting unrecorded child jobs."""
+    validate_receipt_read_policy(receipt_decode_failure_code, max_failure_bytes)
     sealed, specs, registrations = _prepare(conn, repository, document, code_root=code_root,
                                            as_of_month=as_of_month, scope=scope, event_ids=event_ids, required=True)
     for registration in registrations:
@@ -181,7 +186,9 @@ def submit_sweep(conn, store, repository, document, *, code_root, as_of_month, s
             content_hash({"roster": content_hash(sealed), "variant": registration.variant_id}).removeprefix("sha256:"),
             principal="operator", job=job))
     try:
-        return submit_graph(conn, registry(), NamespacePolicy({"operator": frozenset({"smoke"})}), requests, clock=clock)
+        return submit_graph(conn, registry(), NamespacePolicy({"operator": frozenset({"smoke"})}), requests,
+                            clock=clock, receipt_decode_failure_code=receipt_decode_failure_code,
+                            max_failure_bytes=max_failure_bytes)
     except OpsError as error:
         if error.code == "IDEMPOTENCY_CONFLICT":
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep submission differs from its first request") from None
