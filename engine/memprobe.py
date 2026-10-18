@@ -58,7 +58,6 @@ _defaults_registered = False
 DEFAULT_WATCHES: tuple[tuple[str, str, str], ...] = (
     ("replay.available_chain_keys", "engine.replay", "_AVAILABLE_KEYS"),
     ("replay.chain_dates_by_ticker", "engine.replay", "_CHAIN_DATES_BY_TICKER"),
-    ("score.default_scorer", "engine.score", "_DEFAULT"),
 )
 
 
@@ -83,14 +82,15 @@ def _int_flag(name: str, default: int) -> int:
         return default
 
 
-def _malloc_trim() -> None:
+def _malloc_trim() -> bool:
     """Best-effort libc ``malloc_trim(0)``; swallow OSError/AttributeError."""
     try:
         ctypes.CDLL("libc.so.6").malloc_trim(0)
+        return True
     except MemoryError:
         raise
     except (OSError, AttributeError, TypeError):
-        pass
+        return False
 
 
 def _proc_field(field: str) -> int:
@@ -312,8 +312,10 @@ def top_objects(n: int) -> list[tuple[int, str]]:
     """Walk ``gc.get_objects()``, keep DataFrame/Series with >= 1000 rows,
     ndarrays with nbytes >= 1_000_000, and dict/list/set with len >= 1000,
     estimate each, and return the n largest as ``(bytes, description)``.
-    Deduplicates by id; never raises except MemoryError; does not check the
-    enable flag."""
+    Standalone numpy arrays are NOT reported because ``gc.get_objects()``
+    only returns gc-tracked objects; arrays are seen only through
+    DataFrame/Series sizes or containers holding them. Deduplicates by id;
+    never raises except MemoryError; does not check the enable flag."""
     seen: set[int] = set()
     candidates: list[tuple[int, str]] = []
     try:
@@ -421,8 +423,7 @@ def snapshot(label: str, *, top: int | None = None) -> None:
         trimmed = False
         if trim_enabled():
             gc.collect()
-            _malloc_trim()
-            trimmed = True
+            trimmed = bool(_malloc_trim())
         post = rss_bytes()
         peak = peak_rss_bytes()
         head = f"{_PREFIX}{label} rss={_fmt(post)} peak={_fmt(peak)}"

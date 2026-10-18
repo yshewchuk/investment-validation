@@ -327,7 +327,10 @@ def load_chain_index(
     wanted = {(str(t), pd.Timestamp(d).normalize()) for t, d in keys}
     if not wanted:
         return ChainIndex({})
-    memprobe.snapshot("load_chain_index start")
+    # bare score() calls load tiny indexes and must not flood [mem] output.
+    profile = len(wanted) >= 1000
+    if profile:
+        memprobe.snapshot("load_chain_index start")
     if years is None:
         years = sorted({d.year for _, d in wanted})
 
@@ -351,7 +354,8 @@ def load_chain_index(
                 f"{time.time() - started:.0f}s"
             )
     _log(f"chain index: {len(groups):,} of {len(wanted):,} requested keys present")
-    memprobe.snapshot("load_chain_index done")
+    if profile:
+        memprobe.snapshot("load_chain_index done")
     return ChainIndex(groups)
 
 

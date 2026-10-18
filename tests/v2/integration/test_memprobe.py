@@ -13,6 +13,14 @@ import types
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_memprobe_state(monkeypatch):
+    import engine.memprobe as memprobe
+
+    monkeypatch.setattr(memprobe, "_registry", {})
+    monkeypatch.setattr(memprobe, "_defaults_registered", False)
+
+
 # --------------------------------------------------------------------------
 # disabled by default
 # --------------------------------------------------------------------------
@@ -169,6 +177,35 @@ def test_trim_flag_calls_gc_then_malloc_trim_once_per_snapshot(monkeypatch, caps
     assert re.search(r"trimmed from [0-9.]+G", out)
 
 
+def test_trim_reports_trimmed_only_when_trim_returns_true(monkeypatch, capsys):
+    import engine.memprobe as memprobe
+
+    def rss_seq(values):
+        it = iter(values)
+        last = values[-1]
+
+        def fake():
+            return next(it, last)
+
+        return fake
+
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TRIM", "1")
+    monkeypatch.setattr(memprobe, "peak_rss_bytes", lambda: 4 * 2**30)
+
+    monkeypatch.setattr(memprobe, "rss_bytes", rss_seq([3 * 2**30, 2 * 2**30]))
+    monkeypatch.setattr(memprobe, "_malloc_trim", lambda: False)
+    memprobe.snapshot("x")
+    head = capsys.readouterr().out.splitlines()[0]
+    assert "trimmed from" not in head
+
+    monkeypatch.setattr(memprobe, "rss_bytes", rss_seq([3 * 2**30, 2 * 2**30]))
+    monkeypatch.setattr(memprobe, "_malloc_trim", lambda: True)
+    memprobe.snapshot("x")
+    head = capsys.readouterr().out.splitlines()[0]
+    assert "trimmed from" in head
+
+
 def test_trim_flag_off_never_calls_malloc_trim(monkeypatch, capsys):
     import engine.memprobe as memprobe
 
@@ -192,7 +229,7 @@ def test_trim_reports_rss_before_and_after(monkeypatch, capsys):
 
     monkeypatch.setattr(memprobe, "rss_bytes", fake_rss)
     monkeypatch.setattr(memprobe, "peak_rss_bytes", lambda: 4 * 2**30)
-    monkeypatch.setattr(memprobe, "_malloc_trim", lambda: None)
+    monkeypatch.setattr(memprobe, "_malloc_trim", lambda: True)
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TRIM", "1")
     memprobe.snapshot("x")
@@ -323,26 +360,23 @@ def test_estimate_size_arrow_string_series_not_double_counted():
 # --------------------------------------------------------------------------
 
 
-def test_top_objects_sorted_descending_and_honours_limit():
+def test_top_objects_sorted_descending_and_honours_limit(monkeypatch):
     import engine.memprobe as memprobe
 
     small = list(range(1000))
     medium = list(range(5000))
     big = list(range(20000))
-    sizes = [memprobe.estimate_size(obj) for obj in (small, medium, big)]
-    assert sizes == sorted(sizes)
+    monkeypatch.setattr(
+        memprobe.gc, "get_objects", lambda *a, **k: [small, medium, big]
+    )
 
-    res = memprobe.top_objects(1_000_000)
-    res_bytes = [b for b, _ in res]
-    assert res_bytes == sorted(res_bytes, reverse=True)
+    res = memprobe.top_objects(3)
+    assert [r[1] for r in res] == ["list len=20000", "list len=5000", "list len=1000"]
 
-    top2 = [b for b, _ in memprobe.top_objects(2)]
-    assert len(top2) == 2
-    assert top2 == res_bytes[:2]
-    assert len(memprobe.top_objects(1)) == 1
+    top2 = memprobe.top_objects(2)
+    assert [r[1] for r in top2] == ["list len=20000", "list len=5000"]
 
-    for i in range(len(sizes)):
-        assert sizes[i] in res_bytes
+    assert memprobe.top_objects(1)[0][0] >= 20000 * 8
 
 
 # --------------------------------------------------------------------------
@@ -484,26 +518,10 @@ def test_disabled_watch_leaves_no_dead_weakrefs_in_registry(monkeypatch):
         tmp = Tmp(i)
         memprobe.watch(f"tmp.dead.{i}", tmp, "bucket")
         del tmp
-    gc.collect()
+        gc.collect()
 
     keeper = Tmp(50)
-    memprobe.watch("tmp.alive", keeper, "bucket")
+    memprobe.watch("keeper.bucket", keeper, "bucket")
 
-    reg = memprobe._registry
-    assert isinstance(reg, dict)
-    assert len(reg) <= 10
-    for name, entry in reg.items():
-        if isinstance(name, str) and entry is None and name.startswith("tmp.dead"):
-            raise AssertionError(f"dead watch retained: {name}")
-        if isinstance(entry, tuple) and entry[0] is None:
-            raise AssertionError(f"dead owner weakref retained: {name}")
-        if isinstance(entry, str):
-            assert entry in (name, "bucket")
-        elif entry is not None:
-            owners = [part for part in entry if not isinstance(part, str)]
-            if owners:
-                assert all(owner() is not None for owner in owners), (
-                    f"dead owner in entry: {entry!r}"
-                )
-    assert keeper.bucket == [50]
-    assert keeper.bucket == [50]
+    assert len(memprobe._registry) == 1
+    assert next(iter(memprobe._registry)) == ("keeper.bucket", id(keeper))
