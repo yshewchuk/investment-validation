@@ -50,6 +50,17 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   not cover there), `secret_scan`, `access_probe`: the publication path
   and its own pre-publish secret scan of the rendered bundle.
 
+### Memory diagnostics (opt-in)
+
+`engine/memprobe.py` — four env flags (`INVESTING_PLAN_MEMPROFILE`, `_TRIM`,
+`_EVERY` default 250, `_TOP` default 12). Off = no output and no gc walk; on,
+`[mem]` lines go to stdout. `_TRIM` runs `gc.collect()` then libc
+`malloc_trim(0)` before measuring, logging RSS before/after. Hooks:
+`NightlyReport.mark`, `score_calendar`, `load_chain_index`, `Scorer` caches.
+Estimates are sampled, not exact. The native (`engine/v2`) nightly is NOT
+covered: `engine/v2` must not import legacy `engine` (layer rule); legacy
+adapters invoked from v2 run unprofiled.
+
 ## Inputs
 
 Tier-1/2 fetch data (via the quota-guarded fetch wrapper), the shared
@@ -74,7 +85,9 @@ inside function bodies):
   `publish.py`/`render.py`), `engine.data.throttle` (quota guard, also
   lazy in `nightly.py`), `engine.score` (`LADDER_STEP` and others, also
   lazy in several functions), `engine.jsonio` (`json_safe`), `engine.features` (`model_evidence.py`:
-  `DAILY_STATE_FIELDS`, for the projected `daily_market` read; other uses lazy).
+  `DAILY_STATE_FIELDS`, for the projected `daily_market` read; other uses lazy),
+  `engine.memprobe` (`nightly.py`, also provided to `engine.score` and
+  `engine.replay`, which are outside this package).
 - Lazy (function-local) only, never at module top level: `engine.calendar`
   (`model_evidence.py::_dataset_for`, `nightly.py::_date_change_flag`/
   `_panel_staleness_flags`/`refresh_forward_chains`/`run_nightly`);
@@ -181,6 +194,15 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 - **Idempotency** — re-running re-reads, re-renders, re-publishes; the
   ledger refuses a duplicate `row_id` write rather than silently
   overwriting or double-counting it.
+- **Memory diagnostics** — condition → outcome (the `_EVERY`/`_TOP` sampling
+  note above still applies):
+
+  | Condition | Outcome |
+  | --- | --- |
+  | Probe disabled (flag unset) | Snapshot/tick returns before any work; no output, no gc walk |
+  | Ordinary probe failure (any non-`MemoryError` exception, including a broken stdout) | Prints `[mem] <label> probe failed: <ExcType>: <repr>` when stdout works; the run continues |
+  | `MemoryError` anywhere in a probe | Propagates to the caller (nightly `MemoryError` handling unchanged) |
+  | Trim flag set but libc lacks `malloc_trim` | Trim skipped; RSS lines still printed |
 
 ## Invariants
 

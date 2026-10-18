@@ -44,7 +44,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from engine import paths
+from engine import memprobe, paths
 from engine.analogs import AnalogMatcher, AnalogSet, bucket_frame
 from engine.audit import FeatureVector, assert_causal, assert_decision_causal
 from engine.calendar import trading_calendar
@@ -1521,6 +1521,11 @@ class Scorer:
         #: that used to fit in the "five-minute budget" score_calendar's own
         #: docstring quotes and now runs much longer.
         self._live_features_cache: dict[tuple, dict[str, float]] = {}
+        memprobe.watch("scorer.live_features_cache", self, "_live_features_cache")
+        memprobe.watch("scorer.quotes", self, "_quotes")
+        memprobe.watch("scorer.payoffs", self, "_payoffs")
+        memprobe.watch("scorer.models", self, "_models")
+        memprobe.watch("scorer.serving_models", self, "_serving_models")
 
     # -- setup -------------------------------------------------------------
 
@@ -4911,6 +4916,7 @@ def score_calendar(
     horizon = as_of + pd.Timedelta(days=horizon_days)
     strategies = list(strategies) if strategies is not None else live_strategies(sorted(STRUCTURES))
     offsets_by_strategy = dict(decision_offsets or {})
+    memprobe.snapshot("score_calendar start")
 
     events = store.read_table(
         "earnings_events", columns=["event_id", "ticker", "event_date", "session"]
@@ -4967,6 +4973,7 @@ def score_calendar(
             if older is not None and pd.Timestamp(older).normalize() <= ceiling:
                 keys.add((ticker, pd.Timestamp(older).normalize()))
     index = load_chain_index(keys, progress_every=0) if keys else ChainIndex({})
+    memprobe.snapshot("score_calendar chain index loaded")
 
     #: Alternative strikes are offered as fractions of spot either side of ATM.
     offsets = [None] + [
@@ -5017,6 +5024,8 @@ def score_calendar(
                 if offset is None:
                     atm_spot = result.spot
                 rows.append(result.as_dict() | {"strike_offset": offset})
+        # i is zero-based and this runs after the event is processed, so i+1 is the processed count
+        memprobe.tick("score_calendar events", i + 1)
         if progress_every and i and i % progress_every == 0:
             elapsed = time.time() - started
             rate = i / elapsed if elapsed > 0 else 0.0
@@ -5030,6 +5039,7 @@ def score_calendar(
             )
     print(f"  [score] {len(rows):,} scores in {time.time()-started:.0f}s "
           f"(live_features cache: {len(engine._live_features_cache):,} entries)", flush=True)
+    memprobe.snapshot("score_calendar done")
     frame = pd.DataFrame(rows)
     return pd.concat([frame, dynamic_short_vol(frame)], ignore_index=True) \
         if len(frame) else frame
