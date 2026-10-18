@@ -53,6 +53,13 @@ def test_projection_keeps_requested_columns_and_values(monkeypatch):
     assert list(proj.columns) == cols
     pd.testing.assert_frame_equal(proj, full[cols])
 
+    source = _daily()
+    expected = source[
+        source["ticker"].isin(["AAA", "BBB"]) & source["year"].isin([2022, 2023])
+    ].sort_values("year", kind="stable")[cols].reset_index(drop=True)
+    assert set(proj["ticker"]) == {"AAA", "BBB"}
+    pd.testing.assert_frame_equal(proj, expected)
+
 
 def test_implied_t1_dataset_identical_with_projection(monkeypatch):
     _install_fake_store(monkeypatch, _daily())
@@ -90,3 +97,41 @@ def test_projection_lowers_peak_memory(monkeypatch):
             tracemalloc.stop()
 
     assert peak(columns=cols) < 0.9 * peak()
+
+
+def _dispatch_calls(monkeypatch, role, module_name):
+    import importlib
+
+    calls = []
+
+    def fake_subset(tickers, years=None, columns=None):
+        calls.append(columns)
+        return pd.DataFrame()
+
+    events = pd.DataFrame(
+        {
+            "ticker": ["AAA"],
+            "event_date": pd.to_datetime(["2023-05-04"]),
+            "session": ["AMC"],
+        }
+    )
+    module = importlib.import_module(f"engine.models.training.{module_name}")
+    monkeypatch.setattr(model_evidence, "_daily_subset", fake_subset)
+    monkeypatch.setattr(
+        "engine.models.training.train_all._events_with_session", lambda: events
+    )
+    monkeypatch.setattr(
+        module, "build_dataset", lambda *a, **k: pd.DataFrame({"x": [1.0]})
+    )
+    model_evidence._dataset_for(role, "STR-RUNUP", panel=None, daily=None, trades=None)
+    return calls
+
+
+def test_dataset_for_implied_t1_projects_columns(monkeypatch):
+    calls = _dispatch_calls(monkeypatch, "implied_t1", "implied_t1")
+    assert calls == [model_evidence._DAILY_STATE_READ]
+
+
+def test_dataset_for_runup_move_projects_columns(monkeypatch):
+    calls = _dispatch_calls(monkeypatch, "runup_move", "runup_move")
+    assert calls == [model_evidence._DAILY_STATE_READ]
