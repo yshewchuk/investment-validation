@@ -67,7 +67,7 @@ The exhaustive name-by-name list is `README.md`'s checker-enforced Public
 interface section; this names only the load-bearing entry points.
 
 `documents.reject_duplicate_keys(pairs)` is the public, pure stdlib JSON hook
-used by `loads_document` and `experiments.v2_runup_exits`; it returns an object
+used by `loads_document`, `experiments.v2_runup_exits` and `experiments.v2_magnitude_search_run`; it returns an object
 dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
 
 - **Snapshot commit** — `catalog.commit_snapshot`/`.record_failed_import`/
@@ -177,24 +177,6 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   `DATA_FAILURE_CODES` entry.
 - **Contract changes** — Recalculate data tables through the standard import
   and rebuild commands; stored identities are not migrated.
-- **Native feature panel producer (design, #876; not implemented)** — A batch
-  job publishes `feature_panel` as a dataset version of one snapshot lineage,
-  computed only from that snapshot's source tables with the `engine.v2.features`
-  math shared with `scan_panel_row`. Reads are bounded batches (ticker group,
-  one year partition), so peak memory depends on the batch, not the table.
-  Outputs stay private until every batch finishes, then publish once under a
-  content hash. The same snapshot, calendar hash and code give the same
-  version hash. No legacy file is read, copied or migrated; the table is
-  always rebuildable from the snapshot. Jobs bind snapshot ids, dataset
-  versions and the committed calendar receipt id and hash, not
-  `legacy_manifest.json` (native kinds stop accepting it). Design and slices:
-  `guides/native_panel_tier4_design.md`.
-
-  | Condition | Outcome |
-  | --- | --- |
-  | Snapshot id, table version, receipt or calendar hash differs from the binding | `IDENTITY_CONFLICT`, before any read |
-  | A batch fails | Job key terminal; nothing published; a new key re-runs |
-  | Reused key with different content | Refused |
 
 ## Inputs
 
@@ -389,6 +371,8 @@ pinned snapshots and calls `generic_incremental.commit_generic_table_candidate`
 (no `fence_check`) and `incremental_tables.revision_hash`/`GenericRevision`.
 `engine.v2.models.training` uses `errors`, `Repository`, `reference_catalog` and
 `computed_moves` for snapshot/receipt-pinned D14 datasets and calendar sessions.
+`experiments.v2_magnitude_search_run` consumes `repository.Repository`,
+`errors.DataError` and `documents.reject_duplicate_keys` for serial CLI admission.
 `tools/*`, `checks/*`, `tests/test_v2_data_*.py` exercise this package
 directly.
 

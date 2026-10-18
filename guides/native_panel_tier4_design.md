@@ -1,9 +1,9 @@
 # Native feature panel and Tier-4 coverage (design, #876)
 
 Design for removing the native nightly's dependency on the legacy panel and
-Tier-4 outputs. Contract text lives in `engine/v2/data/ARCHITECTURE.md`
-("Native feature panel producer") and `engine/v2/models/ARCHITECTURE.md`
-("Native Tier-4 values"); this file holds the map, the options and the slices.
+Tier-4 outputs. This file holds the map, the options and the slices; the
+component `ARCHITECTURE.md` contracts (`engine/v2/data`, `engine/v2/models`
+§2.4) are written by the slice that implements each producer, not before.
 Decisions by the user, 2026-10-18: (1a) native batch producer for the
 historical `feature_panel`; (2b) Tier-4 values derive from native release
 models, only a coverage table is stored, `tier4.py` is not ported; (3) the
@@ -28,7 +28,9 @@ pre-print block, outcome columns) and every Tier-4 column.
 
 ## 2. Native panel producer (decision 1a)
 
-A batch job reads the pinned snapshot's `daily_market` (ORATS state lives
+The batch job is owned by `engine.v2.ops` (a higher layer that may import
+`engine.v2.features` math, so the import direction is preserved; `engine.v2.data`
+only stores the published dataset version). It reads the pinned snapshot's `daily_market` (ORATS state lives
 here; there is no `orats` table), `earnings_events`, `computed_moves`
 (realised/implied history), `price_history` (adjusted-close run-up) and the
 calendar in bounded batches (ticker groups, one year
@@ -91,7 +93,8 @@ needs the user's confirmation before slice 3.
 | R | Panel producer / coverage producer |
 | --- | --- |
 | R1 verified input | Snapshot id, table versions and (coverage) release manifest and hashes verified before any read; mismatch `IDENTITY_CONFLICT`; an absent or ineligible release is not a producer failure: it records `no_eligible_release` coverage (section 4) |
-| R2 cache | No cache across snapshots, calendars or releases; coverage rows are keyed `(snapshot_id, calendar_hash, release_id)` |
+| R1 unusable input | A missing or unusable source table, column or row refuses `CONTRACT_MISMATCH` (registered data code); no dataset version is published. Distinct from `no_eligible_release` |
+| R2 cache | No cache across snapshots, calendars or releases. The coverage-run identity is `(snapshot_id, calendar_hash, candidate release set)`; the row key within a run is `(ticker, event_date, member)` |
 | R3 retry | A failed batch job is terminal for its key; a new key re-runs from the snapshot |
 | R4 transaction | Batch outputs private until all batches finish, then one hashed publish; no partial dataset version is visible |
 | R5 partial failure | Unpublished batch objects stay unused and are reclaimable by the owner of the store |
@@ -101,7 +104,11 @@ needs the user's confirmation before slice 3.
 (live pointer) for forward events, and for historical events also the retained
 never-promoted bootstrap releases (resolved by id, as `resolve_release` does).
 A member is eligible when its own training cutoff (not the release stamp) is
-not after the event's decision date. When none is, the nightly neither guesses nor falls back to legacy. One
+not after the event's decision date. Selection is deterministic: among
+eligible members the one with the latest own cutoff wins, ties broken by the
+greatest `release_id`; the candidate release set is pinned in the run identity
+(`resolve_release` only resolves a supplied id, it never chooses). When none is
+eligible, the nightly neither guesses nor falls back to legacy. One
 status, two consumers: the coverage `status` is `no_eligible_release` with a
 `reason` (`none_promoted`, `cutoff_after_decision`, `member_missing`). A
 historical event older than the earliest retained release is a null value
