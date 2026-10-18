@@ -39,6 +39,9 @@ def test_oversized_details_reduce_to_empty_details_capped_message_keeping_stage(
     text = catalog.dumps_failure(problem)
     out = catalog.load_json(Problem, text)
     assert not out.details
-    assert len(out.message) == 4096
+    assert out.message == "m" * 4096
     assert out.stage == "ingest"
+    assert out.code == "WORKER_FAILED"
+    assert out.category == problem.category
+    assert out.retryable == problem.retryable
     assert len(text.encode("utf-8")) <= catalog.MAX_JOB_FAILURE_BYTES
