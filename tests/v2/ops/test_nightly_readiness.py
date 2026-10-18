@@ -6,6 +6,7 @@ its shape breaks these tests instead of silently passing a hand-written fixture.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -153,3 +154,40 @@ def test_requested_date_comes_from_the_file_name_not_the_report_body(tmp_path):
     doc["requested_as_of"] = None
     path.write_text(json.dumps(doc))
     assert nrd.check_legacy_report(tmp_path, D).requested_as_of == "2026-10-02"
+
+
+def test_a_fifo_candidate_is_integrity_failed_without_blocking(tmp_path):
+    os.mkfifo(tmp_path / "nightly_2026-10-02.json")
+    with pytest.raises(OpsError) as exc:
+        nrd.check_legacy_report(tmp_path, D)
+    assert _code(exc) == "INTEGRITY_FAILED"
+
+
+def test_a_symlink_candidate_is_integrity_failed(tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _write(elsewhere, "2026-10-02")
+    os.symlink(elsewhere / "nightly_2026-10-02.json", tmp_path / "nightly_2026-10-02.json")
+    with pytest.raises(OpsError) as exc:
+        nrd.check_legacy_report(tmp_path, D)
+    assert _code(exc) == "INTEGRITY_FAILED"
+
+
+def test_a_directory_candidate_is_integrity_failed(tmp_path):
+    (tmp_path / "nightly_2026-10-02.json").mkdir()
+    with pytest.raises(OpsError) as exc:
+        nrd.check_legacy_report(tmp_path, D)
+    assert _code(exc) == "INTEGRITY_FAILED"
+
+
+def test_a_deeply_nested_candidate_is_integrity_failed(tmp_path):
+    (tmp_path / "nightly_2026-10-02.json").write_text("[" * 100000)
+    with pytest.raises(OpsError) as exc:
+        nrd.check_legacy_report(tmp_path, D)
+    assert _code(exc) == "INTEGRITY_FAILED"
+
+
+def test_a_missing_report_is_still_source_not_found(tmp_path):
+    with pytest.raises(OpsError) as exc:
+        nrd.check_legacy_report(tmp_path, D)
+    assert _code(exc) == "SOURCE_NOT_FOUND"

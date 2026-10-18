@@ -7,6 +7,8 @@ reads the legacy nightly's JSON run reports; there is no rebuild step and no reb
 from __future__ import annotations
 
 import json
+import os
+import stat
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -30,17 +32,32 @@ class LegacyReadiness:
 def _load(path: Path) -> dict | None:
     """The parsed report, ``None`` only when the file does not exist."""
     try:
-        with open(path, "rb") as fh:
-            raw = fh.read(MAX_REPORT_BYTES + 1)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except FileNotFoundError:
         return None
     except OSError as exc:
         raise fail("INTEGRITY_FAILED", "a legacy nightly report is unreadable") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise fail("INTEGRITY_FAILED", "a legacy nightly report is not a regular file")
+        chunks: list[bytes] = []
+        remaining = MAX_REPORT_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", "a legacy nightly report is unreadable") from exc
+    finally:
+        os.close(fd)
     if len(raw) > MAX_REPORT_BYTES:
         raise fail("INTEGRITY_FAILED", "a legacy nightly report is too large")
     try:
         doc = json.loads(raw)
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise fail("INTEGRITY_FAILED", "a legacy nightly report is unreadable") from exc
     session = doc.get("resolved_as_of") or doc.get("as_of") if isinstance(doc, dict) else None
     if not isinstance(session, str) or not isinstance(doc.get("steps"), dict):
