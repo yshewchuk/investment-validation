@@ -2,7 +2,6 @@
 import argparse
 import io
 import json
-import shutil
 import sqlite3
 import sys
 import tempfile
@@ -212,13 +211,16 @@ def main(argv=None):
             conn.close()
     with output:
         binary = getattr(sys.stdout, "buffer", None)
-        if binary is None:
-            shutil.copyfileobj(output, sys.stdout)
-            sys.stdout.flush()
-        else:
-            while chunk := output.read(65536):
-                binary.write(chunk.encode("utf-8"))
-            binary.flush()
+        destination = sys.stdout if binary is None else binary
+        while chunk := output.read(65536):
+            data = chunk if binary is None else chunk.encode("utf-8")
+            offset = 0
+            while offset < len(data):
+                written = destination.write(data[offset:])
+                if type(written) is not int or not 0 < written <= len(data) - offset:
+                    raise OSError("stdout write did not report valid progress")
+                offset += written
+        destination.flush()
     return status
 
 

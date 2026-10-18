@@ -572,6 +572,90 @@ def test_broken_binary_stdout_does_not_fall_back_or_emit_second_document(source,
     _closed(source)
 
 
+@pytest.mark.parametrize("binary", [False, True], ids=["text", "raw-binary"])
+@pytest.mark.parametrize("refused", [False, True], ids=["report", "refusal"])
+@pytest.mark.parametrize("outcome", ["success", "error", "zero", "none", "negative", "oversize", "boolean", "float"])
+def test_short_stdout_writes_finish_or_stop_at_first_failure(source, monkeypatch, binary, refused, outcome):
+    source.result = {"value": "é🧪" * 40000}
+    document, status = source.result, 0
+    if refused:
+        refusal = fail("RESOURCE_UNAVAILABLE", "safe refusal", details=source.result)
+        monkeypatch.setattr(cli, "collect_outer_results", _raising(refusal))
+        document, status = {"refused": to_document(refusal.problem)}, 2
+    expected = canonical_json(document) + "\n"
+    if binary:
+        expected = expected.encode("utf-8")
+    staged, render = [], cli._render
+    def track_render(*args, **kwargs):
+        stream = render(*args, **kwargs)
+        staged.append(stream)
+        return stream
+    monkeypatch.setattr(cli, "_render", track_render)
+    error = OSError(errno.ENOSPC, "synthetic partial stdout failure")
+
+    class ShortWrites:
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.attempts, self.accepted, self.flushes = [], 0, 0
+
+        def write(self, data):
+            assert len(staged) == 1 and not staged[0].closed
+            _closed(source)
+            # Every subsequent write must start at the first unaccepted byte/character.
+            assert data == expected[self.accepted:self.accepted + len(data)]
+            self.attempts.append(data)
+            if len(self.attempts) == 2 and outcome != "success":
+                if outcome == "error":
+                    raise error
+                return {"zero": 0, "none": None, "negative": -1, "oversize": len(data) + 1,
+                        "boolean": True, "float": 1.0}[outcome]
+            written = super().write(data[:4093])
+            self.accepted += written
+            return written
+
+        def flush(self):
+            self.flushes += 1
+            return super().flush()
+
+    class ShortBinary(ShortWrites, io.FileIO):
+        pass
+
+    class ShortText(ShortWrites, io.StringIO):
+        pass
+
+    path = source.root / "stdout.bin"
+    sink = ShortBinary(path, "w") if binary else ShortText()
+    output = (SimpleNamespace(buffer=sink,
+        write=_raising(AssertionError("binary output must not fall back to text")),
+        flush=_raising(AssertionError("flush the selected binary destination"))) if binary else sink)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(cli.sys, "stdout", output)
+            if outcome == "success":
+                assert cli.main(_args(source)) == status
+            else:
+                with pytest.raises(OSError) as caught:
+                    cli.main(_args(source))
+                if outcome == "error":
+                    assert caught.value is error
+                else:
+                    assert str(caught.value) == "stdout write did not report valid progress"
+        assert not sink.closed  # stdout is owned by the caller, even on failure
+        actual = path.read_bytes() if binary else sink.getvalue()
+        assert actual == (expected if outcome == "success" else expected[:4093])
+        assert sink.accepted == len(actual)
+        assert sink.flushes == (1 if outcome == "success" else 0)
+        assert len(sink.attempts[0]) >= 65536
+        if outcome == "success":
+            assert len(sink.attempts) > 2
+        else:
+            assert len(sink.attempts) == 2  # no retry, fallback, or second JSON document
+        assert len(staged) == 1 and staged[0].closed
+        _closed(source)
+    finally:
+        sink.close()
+
+
 @pytest.mark.parametrize("binary", [False, True], ids=["text", "binary"])
 @pytest.mark.parametrize("large", [False, True], ids=["small", "buffered-tail"])
 @pytest.mark.parametrize("refused", [False, True], ids=["report", "refusal"])
