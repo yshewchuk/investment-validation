@@ -454,10 +454,10 @@ def test_path_tests_change_is_not_an_add_only_registration(case):
 
 
 def test_identical_path_tests_keep_the_registration_valid(case):
-    same = {"engine/*": ["tests/test_always.py"]}
+    same = {"engine/*": ["tests/test_unrelated.py"]}
     result = selected(_with_path_tests(case, dict(same), dict(same)))
     assert isinstance(result, list) and result
-    assert "tests/test_always.py" in result and "tests/test_new.py" in result
+    assert "tests/test_unrelated.py" in result and "tests/test_new.py" in result
 
 
 def test_empty_path_tests_list_is_rejected(case):
