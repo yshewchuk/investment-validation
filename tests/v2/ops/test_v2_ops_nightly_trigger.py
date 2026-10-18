@@ -2565,17 +2565,19 @@ class FakeLegacyReady:
 
 
 def test_legacy_not_ready_records_a_receipt_and_never_plans_submits_or_serves(tmp_path):
-    ready = FakeLegacyReady(fail("SOURCE_NOT_FOUND", "no legacy nightly report"))
+    refusal = fail("SOURCE_NOT_FOUND", "no legacy nightly report")
+    expected_detail = "SOURCE_NOT_FOUND: no legacy nightly report"
+    ready = FakeLegacyReady(refusal)
     plan, submit, serve = FakePlan("plan_should_not_build"), FakeSubmit(), FakeServe()
     receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve,
                    legacy_ready_fn=ready)
     assert receipt.status == "legacy_not_ready"
-    assert receipt.detail.startswith("SOURCE_NOT_FOUND")
+    assert receipt.detail == expected_detail  # "<code>: <message>", exactly as fail() wrote it
     assert receipt.error_count == 0  # never counts toward the setup-error streak
     assert plan.calls == [] and submit.calls == [] and serve.calls == []
     stored = load_state(tmp_path, AS_OF)
     assert stored is not None and stored.status == "legacy_not_ready"
-    assert stored.detail == receipt.detail
+    assert stored.detail == expected_detail
 
     # A second tick with a ready fn re-probes, passes the check and submits.
     later = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve,
@@ -2587,15 +2589,68 @@ def test_legacy_not_ready_records_a_receipt_and_never_plans_submits_or_serves(tm
 
 @pytest.mark.parametrize("code", ["DEPENDENCY_FAILED", "SOURCE_NOT_FINAL", "INTEGRITY_FAILED"])
 def test_each_legacy_check_refusal_code_maps_to_legacy_not_ready(tmp_path, code):
-    ready = FakeLegacyReady(fail(code, "refused " + code))
+    message = "refused " + code
+    refusal = fail(code, message)
+    expected_detail = f"{code}: {message}"
+    ready = FakeLegacyReady(refusal)
     plan, submit, serve = FakePlan(), FakeSubmit(), FakeServe()
     receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve,
                    legacy_ready_fn=ready)
     assert receipt.status == "legacy_not_ready"
-    assert receipt.detail.startswith(code + ":")
+    assert receipt.detail == expected_detail
     assert plan.calls == [] and submit.calls == [] and serve.calls == []
     stored = load_state(tmp_path, AS_OF)
     assert stored is not None and stored.status == "legacy_not_ready"
+    assert stored.detail == expected_detail
+
+
+def test_a_legacy_refusal_message_longer_than_two_hundred_characters_is_truncated(tmp_path):
+    message = "m" * 240
+    refusal = fail("SOURCE_NOT_FOUND", message)
+    ready = FakeLegacyReady(refusal)
+    plan, submit, serve = FakePlan(), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve,
+                   legacy_ready_fn=ready)
+    assert receipt.status == "legacy_not_ready"
+    assert receipt.detail == "SOURCE_NOT_FOUND: " + message[:200]
+    stored = load_state(tmp_path, AS_OF)
+    assert stored is not None and stored.status == "legacy_not_ready"
+    assert stored.detail == "SOURCE_NOT_FOUND: " + message[:200]
+
+
+def test_a_legacy_refusal_keeps_a_non_zero_prior_snapshot_attempt(tmp_path):
+    write_state(tmp_path, TriggerReceipt(as_of=AS_OF, status="not_yet", detail="before the window",
+                                         snapshot_attempt=2))
+    ready = FakeLegacyReady(fail("SOURCE_NOT_FOUND", "no legacy nightly report"))
+    plan, submit, serve = FakePlan(), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve,
+                   legacy_ready_fn=ready)
+    assert receipt.status == "legacy_not_ready"
+    assert receipt.snapshot_attempt == 2  # the refusal carries the prior attempt unchanged
+    stored = load_state(tmp_path, AS_OF)
+    assert stored is not None and stored.status == "legacy_not_ready"
+    assert stored.snapshot_attempt == 2
+    assert plan.calls == [] and submit.calls == [] and serve.calls == []
+
+
+@pytest.mark.parametrize("status", ["error", "timed_out"])
+def test_a_resumable_pre_plan_state_skips_the_legacy_check_and_submits(tmp_path, status):
+    # A pre-plan resume (status resumable, no plan_ref yet) goes straight to
+    # plan/submit: the temporary #875 check is a fresh-tick gate only, so the
+    # injected seam must never be consulted on this path.
+    def never_consulted(root, as_of):
+        raise AssertionError("a resumable pre-plan resume consulted legacy_ready_fn")
+
+    write_state(tmp_path, TriggerReceipt(as_of=AS_OF, status=status, detail="pre-plan",
+                                         plan_ref=None, snapshot_attempt=1))
+    ensure = FakeEnsureSnapshot(readiness="ready", snapshot_id="snap_resume")
+    plan, submit, serve = FakePlan("plan_after_resume"), FakeSubmit(), FakeServe("completed")
+    receipt = _run(tmp_path, FakeClock(AFTER_DEADLINE), FakeProvider(True), plan, submit, serve,
+                   ensure_snapshot_fn=ensure, legacy_ready_fn=never_consulted)
+    assert receipt.status == "completed" and receipt.plan_ref == "plan_after_resume"
+    assert receipt.snapshot_attempt == 1
+    assert ensure.calls == [{"root": tmp_path, "as_of": AS_OF, "attempt": 1}]
+    assert plan.calls and submit.calls == [(AS_OF, "plan_after_resume")]
 
 
 def test_a_not_final_probe_skips_the_legacy_check_entirely(tmp_path):

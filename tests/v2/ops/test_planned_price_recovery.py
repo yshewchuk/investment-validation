@@ -225,7 +225,8 @@ def test_capture_lock_contention_resumes_without_spending_retry_budget(
             state.root, SESSION, tickers=("NEW",), context_tickers=("NEW",),
             clock=state.clock, provider=probe,
             ensure_snapshot_fn=ensure, submit_fn=lambda *args: submissions.append(args),
-            serve_fn=lambda *args: "completed")
+            serve_fn=lambda *args: "completed",
+            legacy_ready_fn=lambda root, as_of: None)
 
     monkeypatch.setattr(nightly_trigger, "_default_plan", plan)
     lock = SupervisorLock(state.root / "data" / "operations" / "supervisor.lock")
@@ -292,7 +293,8 @@ def test_completed_import_clears_timeout_budget_before_capture_lock_retry(
             clock=state.clock, provider=lambda *args: pytest.fail("a resume re-probed"),
             ensure_snapshot_fn=ensure,
             submit_fn=lambda *args: pytest.fail("a refused plan submitted"),
-            serve_fn=lambda *args: pytest.fail("a refused plan served"))
+            serve_fn=lambda *args: pytest.fail("a refused plan served"),
+            legacy_ready_fn=lambda root, as_of: None)
 
     monkeypatch.setattr(nightly_trigger, "_default_plan", refused_plan)
     lock = SupervisorLock(state.root / "data" / "operations" / "supervisor.lock")

@@ -17,6 +17,7 @@ __all__ = ["LegacyReadiness", "check_legacy_report"]
 
 REPORT_NAME = "nightly_{}.json"
 CANDIDATE_DAYS = 5  # requested dates D .. D+4
+MAX_REPORT_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -29,10 +30,17 @@ class LegacyReadiness:
 def _load(path: Path) -> dict | None:
     """The parsed report, ``None`` only when the file does not exist."""
     try:
-        doc = json.loads(path.read_text())
+        with open(path, "rb") as fh:
+            raw = fh.read(MAX_REPORT_BYTES + 1)
     except FileNotFoundError:
         return None
-    except (OSError, UnicodeDecodeError, ValueError) as exc:
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", "a legacy nightly report is unreadable") from exc
+    if len(raw) > MAX_REPORT_BYTES:
+        raise fail("INTEGRITY_FAILED", "a legacy nightly report is too large")
+    try:
+        doc = json.loads(raw)
+    except (UnicodeDecodeError, ValueError) as exc:
         raise fail("INTEGRITY_FAILED", "a legacy nightly report is unreadable") from exc
     session = doc.get("resolved_as_of") or doc.get("as_of") if isinstance(doc, dict) else None
     if not isinstance(session, str) or not isinstance(doc.get("steps"), dict):
