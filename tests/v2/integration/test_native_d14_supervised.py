@@ -23,6 +23,18 @@ from tools import phase5_d14_inputs
 
 REPO = Path(__file__).resolve().parents[3]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
+# Independent oracle from the five event months in the synthetic input fixture.
+FOLDS = ("m-2024-01", "m-2024-02", "m-2024-07", "m-2024-12", "m-2025-01")
+FOLD_FILES = ("COMPLETE.json", "label_availability_receipt.json", "membership_receipt.json")
+TRAINING_FILES = ("job.json", "summary.json", *(
+    f"folds/{fold}/{name}" for fold in FOLDS for name in FOLD_FILES))
+
+
+def expected_outputs():
+    return [{"name": "training_result", "path": "training_result.json", "schema": "training_job_result.v1.0"}, *[
+        {"name": "training/" + rel.replace("/", "__"), "path": "training/" + rel,
+         "schema": "training_job_output.v1.0"} for rel in sorted(TRAINING_FILES)]]
+
 
 
 def plan(pinned, role="implied_t1"):
@@ -40,8 +52,13 @@ def test_worker_and_standalone_cli_have_same_resume_identity(pinned, role, monke
     root = tmp_path / "worker"
     root.mkdir()
     parameters = plan(pinned, role)["parameters"]
-    training.run_training_worker(parameters, root)
+    result = training.run_training_worker(parameters, root)
+    assert result == {"completed_ids": ["training"], "no_work": False, "outputs": expected_outputs()}
+    assert json.loads((root / "training_result.json").read_text()) == {
+        "mode": "recipe", "recipe_id": f"{role}.tier4_monthly.v1",
+        "folds": dict.fromkeys(FOLDS, "skipped")}
     identity = json.loads((root / "training/job.json").read_text())
+    assert identity["folds"] == list(FOLDS)
     assert identity["input_identity"]["receipt_id"] == "r1"
     assert identity["input_identity"]["snapshot_id"] == pinned["snapshot"].snapshot_id
     args = ["--role", role, "--out", str(tmp_path / "cli")]
@@ -49,9 +66,13 @@ def test_worker_and_standalone_cli_have_same_resume_identity(pinned, role, monke
         args += ["--" + name.replace("_", "-"), str(value)]
     assert phase5_d14_inputs.main(args) == 0
     assert json.loads((tmp_path / "cli/job.json").read_text()) == identity
-    training.run_training_worker(parameters, root)
+    assert {p.relative_to(root / "training").as_posix() for p in (root / "training").rglob("*") if p.is_file()} == set(TRAINING_FILES)
+    for rel in TRAINING_FILES:
+        assert (root / "training" / rel).read_bytes() == (tmp_path / "cli" / rel).read_bytes()
+    assert training.run_training_worker(parameters, root) == result
     summary = json.loads((root / "training_result.json").read_text())
-    assert summary["folds"] and set(summary["folds"].values()) == {"resumed"}
+    assert summary == {"mode": "recipe", "recipe_id": f"{role}.tier4_monthly.v1",
+                       "folds": dict.fromkeys(FOLDS, "resumed")}
 
     other = commit_tables(pinned["conn"], pinned["clock"], pinned["records"], pinned["contracts"],
                           store=pinned["store"], scope="other", receipt_id="r2", attempt_id="att-2")
@@ -84,8 +105,26 @@ def test_supervisor_ignores_legacy_barrier_and_reverifies_each_submission(pinned
             "SELECT failure_json FROM jobs WHERE job_id=?", (first.job_id,)).fetchone()[0]
         assert conn.execute("SELECT COUNT(*) FROM store_leases").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] == 0
-        outputs = conn.execute("SELECT name FROM attempt_outputs").fetchall()
-        assert any(row[0] == "training/job.json" for row in outputs)
+        outputs = dict(conn.execute("SELECT name, artifact_id FROM attempt_outputs").fetchall())
+        assert set(outputs) == {entry["name"] for entry in expected_outputs()}
+        store = ArtifactStore(root)
+        published = {}
+        for entry in expected_outputs():
+            ref = artifact(conn, store, outputs[entry["name"]])
+            assert ref.schema_ref == entry["schema"]
+            published[entry["path"]] = json.loads(store.read_verified(ref))
+        assert published["training/job.json"]["folds"] == list(FOLDS)
+        assert published["training_result.json"] == {
+            "mode": "recipe", "recipe_id": "implied_t1.tier4_monthly.v1",
+            "folds": dict.fromkeys(FOLDS, "skipped")}
+        assert published["training/summary.json"] == {
+            "recipe_id": "implied_t1.tier4_monthly.v1",
+            "recipe_fingerprint": published["training/job.json"]["recipe_fingerprint"],
+            "folds": dict.fromkeys(FOLDS, "skipped")}
+        for fold in FOLDS:
+            for name in FOLD_FILES:
+                assert published[f"training/folds/{fold}/{name}"]["fold_id"] == fold
+            assert published[f"training/folds/{fold}/COMPLETE.json"]["status"] == "skipped"
 
         # Corrupt only the synthetic content-addressed calendar. A second job
         # must verify bytes again instead of restoring the first job's output.

@@ -241,7 +241,7 @@ def _rollback_plan_from_args(args):
 
 
 def _training_plan(args, root, conn, clock):
-    from engine.v2.ops.training import _native_pin_problems, training_plan
+    from engine.v2.ops.training import native_training_pin_problems, training_plan
 
     input_mode = getattr(args, "training_input_mode", "legacy")
     native = input_mode == "native_d14"
@@ -253,7 +253,7 @@ def _training_plan(args, root, conn, clock):
                           for field in ("catalog", "artifact_root", "snapshot_id", "receipt_id")):
         raise fail("INVALID_REQUEST", "native pins require --training-input-mode native_d14")
     if native:
-        problems = _native_pin_problems(
+        problems = native_training_pin_problems(
             (catalog_path, objects_root, getattr(args, "training_snapshot_id", ""),
              getattr(args, "training_receipt_id", "")), require_absolute=False)
         if problems:

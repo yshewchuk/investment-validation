@@ -232,8 +232,13 @@ def test_recipe_registry_bytes_change_worker_implementation_identity(tmp_path):
     _seed_base(tmp_path)
     for module in MODEL_PICKLE_MODULES:
         _write(tmp_path, module.replace(".", "/") + ".py", "")
+    first, second = '{"seed": 1}', '{"seed": 2}'
+    assert len(first) == len(second)
+    _write(tmp_path, "engine/models/registry.json", first)
     before = worker_source_manifest(tmp_path)
-    _write(tmp_path, "engine/models/registry.json", '{"models": []}')
+    _write(tmp_path, "engine/models/registry.json", second)
     after = worker_source_manifest(tmp_path)
+    assert before["engine/models/registry.json"] == "sha256:" + hashlib.sha256(first.encode()).hexdigest()
+    assert after["engine/models/registry.json"] == "sha256:" + hashlib.sha256(second.encode()).hexdigest()
     assert before["engine/models/registry.json"] != after["engine/models/registry.json"]
     assert {key for key in before if before[key] != after[key]} == {"engine/models/registry.json"}

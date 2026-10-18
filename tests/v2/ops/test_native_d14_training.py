@@ -110,7 +110,8 @@ def test_worker_forwards_verified_identity_without_legacy_reads(role, monkeypatc
         assert actual is dataset and out == tmp_path / "training"
         assert kwargs == {"plan_only": False, "input_identity": identity}
         calls.append("train")
-        return SimpleNamespace(outcomes=())
+        return SimpleNamespace(outcomes=(SimpleNamespace(fold_id="m-2024-01", status="fitted"),
+                                         SimpleNamespace(fold_id="m-2024-02", status="skipped")))
 
     monkeypatch.setattr("engine.v2.models.training.build_d14_dataset", build)
     monkeypatch.setattr(job, "run_training_job", run)
@@ -118,7 +119,11 @@ def test_worker_forwards_verified_identity_without_legacy_reads(role, monkeypatc
     result = training.run_training_worker(to_document(params(recipe=f"{role}:*:tier4_monthly")), tmp_path)
     assert calls == ["build", "train"]
     assert result["completed_ids"] == ["training"]
-    assert json.loads((tmp_path / "training_result.json").read_text())["recipe_id"] == f"{role}.tier4_monthly.v1"
+    assert json.loads((tmp_path / "training_result.json").read_text()) == {
+        "mode": "recipe", "recipe_id": f"{role}.tier4_monthly.v1",
+        "folds": {"m-2024-01": "fitted", "m-2024-02": "skipped"}}
+    assert result == {"completed_ids": ["training"], "no_work": False, "outputs": [
+        {"name": "training_result", "path": "training_result.json", "schema": "training_job_result.v1.0"}]}
 
 
 @pytest.mark.parametrize("native", (True, False))
@@ -154,7 +159,7 @@ def test_source_refusal_retains_data_code(monkeypatch, tmp_path):
     assert not (tmp_path / "training_result.json").exists()
 
 
-def test_lease_and_cache_exceptions_are_narrow():
+def test_lease_and_cache_exceptions_are_narrow(monkeypatch):
     registry = stages.registry()
     native = to_document(params())
     assert domains_of(registry, "training", native) == ()
@@ -165,6 +170,21 @@ def test_lease_and_cache_exceptions_are_narrow():
     claim = SimpleNamespace(spec=SimpleNamespace(kind="training", parameters=native))
     assert service._cache_allowed(claim) is False
     assert service._stage_legacy_inputs(claim, None) is False
+    service.conn = object()
+    claim.attempt_id = "legacy-attempt"
+    claim.spec.parameters = {}
+    seen = []
+
+    def complete(conn, attempt_id):
+        assert conn is service.conn and attempt_id == "legacy-attempt"
+        seen.append(attempt_id)
+        return True
+
+    monkeypatch.setattr("engine.v2.ops.supervisor.read_set_complete", complete)
+    assert service._cache_allowed(claim) is True
+    assert seen == ["legacy-attempt"]
+    monkeypatch.setattr("engine.v2.ops.supervisor.read_set_complete", lambda *_: False)
+    assert service._cache_allowed(claim) is False
 
 
 @pytest.mark.parametrize("source_flags, message", [
@@ -245,3 +265,17 @@ def test_cli_refuses_raw_invalid_pins_before_path_resolution(flag, value, monkey
     assert err.value.problem.message == "training plan is invalid"
     assert err.value.problem.details == {"problems": [PINS_REQUIRED]}
     assert err.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("changes", ({"catalog_path": 17}, {"mode": None}, {"unexpected": True}))
+def test_malformed_worker_document_refuses_before_dispatch(changes, monkeypatch, tmp_path):
+    monkeypatch.setattr(training, "_dispatch_mode", forbidden)
+    monkeypatch.setattr(job, "current_recipes", forbidden)
+    monkeypatch.setattr("engine.v2.models.training.build_d14_dataset", forbidden)
+    with pytest.raises(OpsError) as err:
+        training.run_training_worker({**to_document(params()), **changes}, tmp_path / "out")
+    assert err.value.problem.code == "INVALID_REQUEST"
+    assert err.value.problem.message == "malformed training parameters"
+    assert err.value.problem.details == {}
+    assert err.value.problem.retryable is False
+    assert not (tmp_path / "out").exists()
