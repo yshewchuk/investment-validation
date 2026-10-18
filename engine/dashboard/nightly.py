@@ -44,7 +44,7 @@ from typing import Iterable, Sequence
 import numpy as np
 import pandas as pd
 
-from engine import paths
+from engine import memprobe, paths
 from engine.data.throttle import QuotaExhausted
 from engine.score import LADDER_STEP
 
@@ -117,6 +117,7 @@ class NightlyReport:
             "elapsed_s": round(elapsed, 1),
             "at_s": round(now - started, 1),
         })
+        memprobe.snapshot(f"phase {step}")
         return elapsed
 
     def as_dict(self) -> dict:
