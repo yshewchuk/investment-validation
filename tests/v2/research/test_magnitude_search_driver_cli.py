@@ -12,7 +12,7 @@ import pytest
 
 from engine.v2.contracts import ArtifactRef
 from engine.v2.data.errors import DataError
-from engine.v2.foundation import ArtifactError, canonical_json, to_document
+from engine.v2.foundation import ArtifactError, DocumentError, canonical_json, to_document
 from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_records as records
 from experiments import v2_magnitude_search_run as cli
@@ -52,10 +52,17 @@ def source(tmp_path, monkeypatch):
                             registration=object(), repository=object(),
                             result={"z": [2, 1], "a": "synthetic é"})
 
+    connect = sqlite3.connect
+    def tracked_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        state.connections.append(connection)
+        return connection
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+
     def registration(connection, artifact_store, spec):
         assert artifact_store.root == store
         assert spec.hypothesis == "synthetic"
-        state.connections.append(connection)
+        assert connection is state.connections[-1]
         return state.registration
 
     def repository(connection, artifact_store):
@@ -97,6 +104,12 @@ def _refusal(code, message):
     return {"refused": to_document(fail(code, message).problem)}
 
 
+def _closed(source):
+    assert len(source.connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        source.connections[0].execute("SELECT 1")
+
+
 def _parser_error(capsys, message):
     captured = capsys.readouterr()
     assert not captured.out
@@ -128,8 +141,7 @@ def test_actions_use_public_adapters_and_emit_one_canonical_document(source, cap
         assert keywords["limits"] == LIMITS
     else:
         assert "limits" not in keywords
-    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
-        source.connections[0].execute("SELECT 1")
+    _closed(source)
     assert not list(source.root.rglob("*.csv"))
 
 
@@ -248,6 +260,42 @@ def test_cli_rejects_duplicate_keys_in_every_metadata_input_before_dispatch(sour
     assert not source.calls
 
 
+@pytest.mark.parametrize("action", ACTION_NAMES)
+@pytest.mark.parametrize("damage", ["missing_reference_field", "wrong_reference_type", "null_input_files"])
+def test_typed_metadata_conversion_refuses_before_catalog_open(source, capsys, action, damage):
+    name = "spec" if damage == "null_input_files" else "plan-ref"
+    document = dict(source.documents[name])
+    if damage == "missing_reference_field":
+        del document["artifact_id"]
+    elif damage == "wrong_reference_type":
+        document["byte_size"] = "private-invalid-size"
+    else:
+        document["input_files"] = None
+    # Prove the real converter, rather than JSON/file admission, reaches each handler.
+    with pytest.raises(TypeError if name == "spec" else DocumentError):
+        if name == "spec":
+            cli.experiment_spec_from_document(document)
+        else:
+            cli.from_document(ArtifactRef, document)
+    source.paths[name].write_text(json.dumps(document), encoding="utf-8")
+    before = source.catalog.read_bytes()
+    result, stderr = _invoke(source, capsys, action, status=2)
+    assert result == _refusal("INVALID_EXPERIMENT_SPEC", "search metadata could not be admitted")
+    assert not stderr and not source.calls and not source.connections
+    assert source.catalog.read_bytes() == before
+
+
+@pytest.mark.parametrize("action", ACTION_NAMES)
+def test_typed_spec_refusal_retains_its_details_before_catalog_open(source, capsys, action):
+    document = dict(source.documents["spec"])
+    del document["hypothesis"]
+    source.paths["spec"].write_text(json.dumps(document), encoding="utf-8")
+    result, stderr = _invoke(source, capsys, action, status=2)
+    assert result == {"refused": to_document(fail("INVALID_REQUEST",
+        "experiment specification is missing a required field", details={"field": "hypothesis"}).problem)}
+    assert not stderr and not source.calls and not source.connections
+
+
 @pytest.mark.parametrize("missing", ["catalog", "store", "metadata"])
 @pytest.mark.parametrize("action", ACTION_NAMES)
 def test_missing_inputs_are_not_created_and_private_paths_are_redacted(source, capsys, missing, action):
@@ -297,8 +345,11 @@ def test_collect_requires_its_exact_driver_seal_before_reading_results(
     for name, document in documents.items():
         paths[name] = case.catalog.parent / (name + ".json")
         paths[name].write_text(json.dumps(document), encoding="utf-8")
-    source = SimpleNamespace(paths=paths, catalog=case.catalog, store=case.store.root)
-    monkeypatch.setattr(cli, "read_native_registration", lambda *args: case.registration)
+    source = SimpleNamespace(paths=paths, catalog=case.catalog, store=case.store.root, connections=[])
+    def registration(connection, *args):
+        source.connections.append(connection)
+        return case.registration
+    monkeypatch.setattr(cli, "read_native_registration", registration)
     monkeypatch.setattr(cli, "Repository", lambda *args: None)
     monkeypatch.setattr(cli, "collect_outer_results", _raising(AssertionError("unadmitted collection")))
     before = snapshot(case)
@@ -306,36 +357,56 @@ def test_collect_requires_its_exact_driver_seal_before_reading_results(
     assert result == _refusal("EXPERIMENT_IDENTITY_CONFLICT", "search execution requires its exact driver seal")
     assert not stderr
     assert snapshot(case) == before
+    _closed(source)
 
 
 @pytest.mark.parametrize("exception", [OpsError, DataError])
-def test_typed_refusal_preserves_the_complete_problem(source, monkeypatch, capsys, exception):
+@pytest.mark.parametrize("action", ACTION_NAMES)
+def test_typed_refusal_preserves_the_complete_problem(source, monkeypatch, capsys, exception, action):
     problem = replace(fail("RESOURCE_UNAVAILABLE", "safe shared refusal", stage="admission",
                            details={"field": "feature_snapshot"}, retry_after_seconds=11,
                            dependency_refs=("sha256:dependency",)).problem,
                       trace_id="trace-id", diagnostic_ref="diagnostic-id")
-    monkeypatch.setattr(cli, "collect_outer_results", _raising(exception(problem)))
-    result, stderr = _invoke(source, capsys, status=2)
+    monkeypatch.setattr(cli, ACTION_NAMES[action], _raising(exception(problem)))
+    result, stderr = _invoke(source, capsys, action, status=2)
     assert result == {"refused": to_document(problem)}
     assert not stderr
+    _closed(source)
 
 
 @pytest.mark.parametrize("error", [OSError("private-disk-path"),
                                    sqlite3.OperationalError("private-table-name"),
                                    ArtifactError("UNSAFE_PATH", "private-artifact-path")])
-def test_untyped_infrastructure_failures_are_safely_redacted(source, monkeypatch, capsys, error):
-    monkeypatch.setattr(cli, "collect_outer_results", _raising(error))
-    result, stderr = _invoke(source, capsys, status=2)
+@pytest.mark.parametrize("action", ACTION_NAMES)
+def test_untyped_infrastructure_failures_are_safely_redacted(source, monkeypatch, capsys, error, action):
+    monkeypatch.setattr(cli, ACTION_NAMES[action], _raising(error))
+    result, stderr = _invoke(source, capsys, action, status=2)
     assert result == _refusal("RESOURCE_UNAVAILABLE", "search request could not be completed")
     assert "private" not in canonical_json(result) + stderr
+    assert not stderr
+    _closed(source)
 
 
-@pytest.mark.parametrize("exception", [TypeError, ValueError])
-def test_unexpected_programming_errors_are_not_silenced(source, monkeypatch, capsys, exception):
-    monkeypatch.setattr(cli, "collect_outer_results", _raising(exception("unexpected bug")))
-    with pytest.raises(exception, match="unexpected bug"):
-        cli.main(_args(source))
+@pytest.mark.parametrize("exception", [TypeError, ValueError, DocumentError, KeyboardInterrupt])
+@pytest.mark.parametrize("action", ACTION_NAMES)
+def test_unexpected_programming_errors_are_not_silenced(source, monkeypatch, capsys, exception, action):
+    error = DocumentError("BAD_TYPE", "$", "unexpected bug") if exception is DocumentError else exception("unexpected bug")
+    monkeypatch.setattr(cli, ACTION_NAMES[action], _raising(error))
+    with pytest.raises(exception, match="unexpected bug") as caught:
+        cli.main(_args(source, action))
+    assert caught.value is error
     assert not capsys.readouterr().out
+    _closed(source)
+
+
+@pytest.mark.parametrize("action", ACTION_NAMES)
+def test_registration_refusal_closes_catalog_before_dispatch(source, monkeypatch, capsys, action):
+    error = fail("EXPERIMENT_IDENTITY_CONFLICT", "synthetic registration mismatch")
+    monkeypatch.setattr(cli, "read_native_registration", _raising(error))
+    result, stderr = _invoke(source, capsys, action, status=2)
+    assert result == {"refused": to_document(error.problem)}
+    assert not stderr and not source.calls
+    _closed(source)
 
 
 def test_incidental_python_stdout_moves_to_stderr(source, monkeypatch, capsys):
@@ -371,6 +442,7 @@ def test_report_overflow_emits_one_refusal_and_no_partial_success(source, monkey
     assert result == _refusal("RESOURCE_LIMIT_EXCEEDED", "search report exceeds its stdout byte budget")
     assert "first_success_field" not in canonical_json(result) + stderr
     assert "partial must stay private" not in canonical_json(result) + stderr
+    _closed(source)
 
 
 def test_tempfile_allocation_failure_still_emits_redacted_refusal(source, monkeypatch, capsys):
@@ -378,6 +450,7 @@ def test_tempfile_allocation_failure_still_emits_redacted_refusal(source, monkey
     result, stderr = _invoke(source, capsys, status=2)
     assert result == _refusal("RESOURCE_UNAVAILABLE", "search request could not be completed")
     assert "private-scratch-path" not in canonical_json(result) + stderr
+    _closed(source)
 
 
 def test_tempfile_write_failure_discards_partial_report_and_closes_scratch(source, monkeypatch, capsys):
@@ -393,9 +466,21 @@ def test_tempfile_write_failure_discards_partial_report_and_closes_scratch(sourc
     assert result == _refusal("RESOURCE_UNAVAILABLE", "search request could not be completed")
     assert "private-full-disk-path" not in canonical_json(result) + stderr
     assert stream.closed
+    _closed(source)
+
+
+def test_refusal_staging_failure_still_closes_catalog(source, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "collect_outer_results", _raising(fail("RESOURCE_UNAVAILABLE", "safe refusal")))
+    monkeypatch.setattr(cli.io, "StringIO", _raising(MemoryError("no refusal buffer")))
+    with pytest.raises(MemoryError, match="no refusal buffer"):
+        cli.main(_args(source))
+    assert not capsys.readouterr().out
+    _closed(source)
 
 
 def test_broken_stdout_does_not_attempt_a_second_json_document(source, monkeypatch):
+    staged = io.StringIO()
+    monkeypatch.setattr(cli.tempfile, "TemporaryFile", lambda **kwargs: staged)
     class BrokenOutput:
         def __init__(self):
             self.writes = []
@@ -410,6 +495,8 @@ def test_broken_stdout_does_not_attempt_a_second_json_document(source, monkeypat
         with pytest.raises(BrokenPipeError, match="closed consumer"):
             cli.main(_args(source))
     assert output.writes == [canonical_json(source.result) + "\n"]
+    assert staged.closed
+    _closed(source)
 
 
 @pytest.mark.parametrize("encoding", ["latin-1", "utf-16"])
@@ -432,6 +519,8 @@ def test_binary_stdout_receives_exact_utf8_without_text_encoding_or_writes(sourc
 
 
 def test_broken_binary_stdout_does_not_fall_back_or_emit_second_document(source, monkeypatch):
+    staged = io.StringIO()
+    monkeypatch.setattr(cli.tempfile, "TemporaryFile", lambda **kwargs: staged)
     class BrokenBuffer:
         def __init__(self):
             self.writes = []
@@ -453,6 +542,8 @@ def test_broken_binary_stdout_does_not_fall_back_or_emit_second_document(source,
         with pytest.raises(BrokenPipeError, match="closed binary consumer"):
             cli.main(_args(source))
     assert output.buffer.writes == [(canonical_json(source.result) + "\n").encode("utf-8")]
+    assert staged.closed
+    _closed(source)
 
 
 @pytest.mark.parametrize("flag", RESOURCE_FLAGS)

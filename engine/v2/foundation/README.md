@@ -37,7 +37,7 @@ underscore convention, and an import of a name absent from this list fails
 
 | Name | What it is |
 |---|---|
-| `canonical_json`, `content_hash`, `CONTENT_HASH_PREFIX` | RFC 8785 canonical form and `sha256:` identity. Moved here from diagnosis unchanged; hashes pinned by `tests/v2/foundation/test_v2_ops_foundation.py`. |
+| `canonical_json`, `iter_canonical_json`, `content_hash`, `CONTENT_HASH_PREFIX` | RFC 8785 canonical form and `sha256:` identity. `iter_canonical_json(value, *, fragments=None)` yields the text chunks joined by `canonical_json`; callers own output I/O and byte limits. Hashes pinned by `tests/v2/foundation/test_v2_ops_foundation.py`. |
 | `tag_nonfinite`, `untag_nonfinite` | The `canonical_json`/`content_hash` non-finite normalization (contracts §2.1), exposed so a writer can put a legacy NaN/Infinity on disk as valid strict JSON and a reader can decode it back to a real float at its own read boundary — see `engine/v2/ops/legacy_adapter.py::_write_action`/`_action_render` and `engine/v2/ops/render_inputs.py::stage_model_evidence`. |
 | `from_document`, `to_document`, `parse_schema_version`, `DocumentError` | Strict dataclass ⇄ JSON decoding driven by annotations. Errors carry `code`, `path` and fixed `message`, never the offending value; constructor-relative paths acquire the nested/caller prefix, with the original error chained. |
 | `Clock`, `SystemClock`, `format_timestamp`, `parse_timestamp` | Injected wall/monotonic clocks, and the one timestamp wire form. |
@@ -48,7 +48,7 @@ underscore convention, and an import of a name absent from this list fails
 | `market_horizon.trading_days_before_print`, `market_horizon.CalendarCoverageError` | Pure pre-print session distance and its distinct insufficient-coverage refusal; no calendar fetch or gap filling. |
 | `experiment_holdouts.ExperimentHoldouts` | Shared deterministic, versioned random/rolling membership; no final-read authority. |
 
-<!-- public-interface: final_holdout, final_holdout.declaration_from_document, final_holdout.request_from_document, final_holdout.request_from_registration, canonical_json, content_hash, CONTENT_HASH_PREFIX, tag_nonfinite, untag_nonfinite, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, ArtifactStore, ArtifactError, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed, market_calendar, market_horizon, score_population, experiment_holdouts, experiment_holdouts.ExperimentHoldouts -->
+<!-- public-interface: final_holdout, final_holdout.declaration_from_document, final_holdout.request_from_document, final_holdout.request_from_registration, canonical_json, iter_canonical_json, content_hash, CONTENT_HASH_PREFIX, tag_nonfinite, untag_nonfinite, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, ArtifactStore, ArtifactError, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed, market_calendar, market_horizon, score_population, experiment_holdouts, experiment_holdouts.ExperimentHoldouts -->
 
 ## Consumers
 
