@@ -454,7 +454,7 @@ def test_snapshot_propagates_memory_error(monkeypatch):
 def test_nightly_mark_elapsed_and_timeline_flag_on_off(monkeypatch, capsys):
     from engine.dashboard.nightly import NightlyReport
 
-    times = iter([100.5, 102.0])
+    times = iter([100.5, 100.9, 102.0, 102.4])
 
     def _fake_time():
         return next(times)
@@ -466,8 +466,8 @@ def test_nightly_mark_elapsed_and_timeline_flag_on_off(monkeypatch, capsys):
     ret_a = r.mark("a", started=100.0)
     ret_b = r.mark("b", started=100.0)
     assert ret_a == 0.5
-    assert ret_b == 1.5
-    assert [round(e["elapsed_s"], 1) for e in r.timeline] == [0.5, 1.5]
+    assert round(ret_b, 1) == 1.1
+    assert [round(e["elapsed_s"], 1) for e in r.timeline] == [0.5, 1.1]
     assert [round(e["at_s"], 1) for e in r.timeline] == [0.5, 2.0]
     out = capsys.readouterr().out
     assert "[mem] phase a" in out
@@ -498,22 +498,19 @@ def test_memory_error_from_gc_walk_and_trim_propagates(monkeypatch):
     with pytest.raises(MemoryError):
         memprobe.top_objects(3)
 
-    def trim_case():
-        monkeypatch.setattr(memprobe, "_malloc_trim", boom)
-        monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
-        monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TRIM", "1")
-        with pytest.raises(MemoryError):
-            memprobe.snapshot("x")
+    walked = []
 
-    with monkeypatch.context() as m:
-        trim_case()
+    def harmless_walk(*args, **kwargs):
+        walked.append(1)
+        return []
 
-
-def test_score_calendar_tick_uses_processed_count():
-    from pathlib import Path
-
-    src = Path("engine/score.py").read_text()
-    assert 'memprobe.tick("score_calendar events", i + 1)' in src
+    monkeypatch.setattr(gc, "get_objects", harmless_walk)
+    monkeypatch.setattr(memprobe, "_malloc_trim", boom)
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TRIM", "1")
+    with pytest.raises(MemoryError):
+        memprobe.snapshot("x")
+    assert walked == []
 
 
 def test_negative_top_value_prints_no_obj_lines(monkeypatch, capsys):

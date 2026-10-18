@@ -118,6 +118,9 @@ class NightlyReport:
             "at_s": round(now - started, 1),
         })
         memprobe.snapshot(f"phase {step}")
+        if memprobe.enabled():
+            # Don't charge the probe's own gc walk to the next step.
+            self._marked_at = time.time()
         return elapsed
 
     def as_dict(self) -> dict:
