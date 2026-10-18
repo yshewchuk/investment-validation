@@ -363,17 +363,24 @@ releases (R2).
   never-promoted releases; coverage starts at the earliest
   retained eligible release. No value is invented for earlier events
   (confirming this default is an open decision in the design guide).
-- **No eligible release (#782).** The resolver never falls back to legacy:
-  status `no_eligible_release` with a `reason`; scoring of a forward event
-  refuses with `MODEL_NOT_READY` and names the reason in `details`; other
-  nightly jobs continue.
+- **Resolution.** Forward events use promoted releases; historical events also
+  use retained never-promoted bootstrap releases (by id). The resolver never
+  falls back to legacy.
+
+  | Condition | Outcome |
+  | --- | --- |
+  | Historical event, no member with cutoff not after the decision date | Status `no_eligible_release` with a `reason`; value null |
+  | Forward event, no such member (#782) | Scoring refuses `MODEL_NOT_READY`, `reason` in `details`; other nightly jobs continue |
+  | Release manifest or hash differs | Refused before any read |
+  | Coverage job fails | Key terminal; nothing published; a new key re-runs |
+
 - **Qualification.** Parity with legacy Tier-4 is not a goal; qualification
   checks causality, coverage by month, and rank/calibration consistency, as
   in `guides/native_panel_tier4_design.md`.
 - **R1-R6.** Release manifest and hashes verified before any read (R1); no
   cross-release cache (R2); a failed job key is terminal and a new key
   re-runs (R3); coverage publishes once under a hash, never partial (R4, R5);
-  the same snapshot and release give the same hash (R6).
+  the same snapshot, calendar hash, code and release give the same hash (R6).
 
 ## 3. Inputs
 

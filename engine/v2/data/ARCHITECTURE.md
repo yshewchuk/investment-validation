@@ -182,14 +182,19 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   computed only from that snapshot's source tables with the `engine.v2.features`
   math shared with `scan_panel_row`. Reads are bounded batches (ticker group,
   one year partition), so peak memory depends on the batch, not the table.
-  Inputs (snapshot id, table versions) are verified before reads
-  (`IDENTITY_CONFLICT` on mismatch); outputs stay private until every batch
-  finishes, then publish once under a content hash. A failed key is terminal;
-  the same snapshot and code give the same version hash. No legacy file is
-  read, copied or migrated; the table is always rebuildable from the snapshot.
-  Jobs bind snapshot ids, dataset versions and the committed calendar receipt
-  id and hash, not `legacy_manifest.json` (native kinds stop accepting it). Design and slices:
+  Outputs stay private until every batch finishes, then publish once under a
+  content hash. The same snapshot, calendar hash and code give the same
+  version hash. No legacy file is read, copied or migrated; the table is
+  always rebuildable from the snapshot. Jobs bind snapshot ids, dataset
+  versions and the committed calendar receipt id and hash, not
+  `legacy_manifest.json` (native kinds stop accepting it). Design and slices:
   `guides/native_panel_tier4_design.md`.
+
+  | Condition | Outcome |
+  | --- | --- |
+  | Snapshot id, table version, receipt or calendar hash differs from the binding | `IDENTITY_CONFLICT`, before any read |
+  | A batch fails | Job key terminal; nothing published; a new key re-runs |
+  | Reused key with different content | Refused |
 
 ## Inputs
 

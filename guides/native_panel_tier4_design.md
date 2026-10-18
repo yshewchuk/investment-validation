@@ -91,15 +91,17 @@ needs the user's confirmation before slice 3.
 | R | Panel producer / coverage producer |
 | --- | --- |
 | R1 verified input | Snapshot id, table versions and (coverage) release manifest and hashes verified before any read; mismatch `IDENTITY_CONFLICT`; an absent or ineligible release is not a producer failure: it records `no_eligible_release` coverage (section 4) |
-| R2 cache | No cache across snapshots or releases; coverage rows are keyed `(snapshot_id, release_id)` |
+| R2 cache | No cache across snapshots, calendars or releases; coverage rows are keyed `(snapshot_id, calendar_hash, release_id)` |
 | R3 retry | A failed batch job is terminal for its key; a new key re-runs from the snapshot |
 | R4 transaction | Batch outputs private until all batches finish, then one hashed publish; no partial dataset version is visible |
 | R5 partial failure | Unpublished batch objects stay unused and are reclaimable by the owner of the store |
-| R6 idempotency | Same snapshot, code version and release give the same dataset version hash; a reused key with other content refuses |
+| R6 idempotency | Same snapshot, calendar hash, code version and release give the same dataset version hash; a reused key with other content refuses |
 
-**No eligible release (#782).** When the release resolver finds no release
-that is promoted and whose `retrain_cutoff` is not after the session's
-decision date, the nightly neither guesses nor falls back to legacy. One
+**No eligible release (#782).** The resolver considers the promoted releases
+(live pointer) for forward events, and for historical events also the retained
+never-promoted bootstrap releases (resolved by id, as `resolve_release` does).
+A member is eligible when its own training cutoff (not the release stamp) is
+not after the event's decision date. When none is, the nightly neither guesses nor falls back to legacy. One
 status, two consumers: the coverage `status` is `no_eligible_release` with a
 `reason` (`none_promoted`, `cutoff_after_decision`, `member_missing`). A
 historical event older than the earliest retained release is a null value
@@ -115,8 +117,8 @@ whether today's 101 refusals are that case.
 
 Legacy Tier-4 is walk-forward fits of `tier4.py`; native values come from
 different models, so equality is not expected and not tested. Qualification
-instead checks: (1) causality: for sampled events the producing release's
-`retrain_cutoff <= decision date` and every training row is dated strictly
+instead checks: (1) causality: for sampled events the producing member's
+own training cutoff `<= decision date` and every training row is dated strictly
 before the exclusive cutoff (a row dated exactly at it is rejected); (2)
 coverage: share of the planned population with a non-null native value, by
 month; (3) agreement as rank correlation and calibration of bands against
