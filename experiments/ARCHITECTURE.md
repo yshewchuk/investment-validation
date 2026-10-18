@@ -713,4 +713,4 @@ Direct engine dependencies are contracts, data, foundation and ops.
 | Journal publication/transaction fails | Existing journal policy applies: failed transactions roll back their association, earlier evidence and unreferenced complete objects remain; no whole-run rollback or automatic retry. |
 | CLI typed `OpsError`/`DataError`; unexpected builtin failure | Preserve the complete typed `Problem` in one refusal document, exit 2; unexpected builtin errors propagate. An opened connection closes in either case. |
 | Output exceeds 64 MiB or temporary output storage fails | Discard partial buffered output and close scratch; emit `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Prior journal commits remain. |
-| Stdout fails after emission begins | Propagate the stream error without a second document or retry; downstream may have received a prefix. |
+| Stdout write or final flush fails after emission begins | Flush the selected binary/text destination before returning; propagate stream errors without a second document or retry, and close staging. Downstream may have received a prefix; stdout remains caller-owned. |

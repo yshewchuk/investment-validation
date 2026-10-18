@@ -1,5 +1,6 @@
 """Synthetic CLI admission, read-only collection and all-or-nothing JSON output."""
 # ruff: noqa: F811
+import errno
 import io
 import json
 import os
@@ -544,6 +545,71 @@ def test_broken_binary_stdout_does_not_fall_back_or_emit_second_document(source,
     assert output.buffer.writes == [(canonical_json(source.result) + "\n").encode("utf-8")]
     assert staged.closed
     _closed(source)
+
+
+@pytest.mark.parametrize("binary", [False, True], ids=["text", "binary"])
+@pytest.mark.parametrize("large", [False, True], ids=["small", "buffered-tail"])
+@pytest.mark.parametrize("refused", [False, True], ids=["report", "refusal"])
+@pytest.mark.parametrize("failure", [None, errno.EPIPE, errno.ENOSPC], ids=["success", "broken-pipe", "full-disk"])
+def test_buffered_stdout_finishes_or_fails_before_main_returns(source, monkeypatch, binary, large, refused, failure):
+    source.result = {"value": "é🧪" + ("x" * 65536 if large else "small")}
+    document, status = source.result, 0
+    if refused:
+        refusal = fail("RESOURCE_UNAVAILABLE", "safe refusal", details=source.result)
+        monkeypatch.setattr(cli, "collect_outer_results", _raising(refusal))
+        document, status = {"refused": to_document(refusal.problem)}, 2
+    expected = (canonical_json(document) + "\n").encode("utf-8")
+    staged, render = [], cli._render
+    def track_render(*args, **kwargs):
+        stream = render(*args, **kwargs)
+        staged.append(stream)
+        return stream
+    monkeypatch.setattr(cli, "_render", track_render)
+    error = OSError(failure, "synthetic output failure") if failure else None
+    emitting = True
+
+    class Sink(io.RawIOBase):
+        def __init__(self):
+            self.accepted, self.attempts = bytearray(), []
+        def writable(self):
+            return True
+        def write(self, data):
+            data = bytes(data)
+            if emitting:
+                assert len(staged) == 1
+                _closed(source)
+                self.attempts.append(data)
+                # Let any complete large prefix through; only the buffered tail fails.
+                if error and len(self.accepted) + len(data) == len(expected):
+                    raise error
+            self.accepted.extend(data)
+            return len(data)
+
+    sink = Sink()
+    buffered = io.BufferedWriter(sink, buffer_size=8192)
+    text = None if binary else io.TextIOWrapper(buffered, encoding="utf-8", newline="")
+    output = (SimpleNamespace(buffer=buffered,
+        write=_raising(AssertionError("binary output must not use text writes")),
+        flush=_raising(AssertionError("flush the selected binary destination"))) if binary
+        else SimpleNamespace(write=text.write, flush=text.flush))
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(cli.sys, "stdout", output)
+            if error:
+                with pytest.raises(OSError) as caught:
+                    cli.main(_args(source))
+                assert caught.value is error
+            else:
+                assert cli.main(_args(source)) == status
+        assert b"".join(sink.attempts) == expected  # no second document, retry or fallback
+        assert bytes(sink.accepted) == (b"".join(sink.attempts[:-1]) if error else expected)
+        assert not sink.closed and not buffered.closed  # the caller owns stdout
+        assert len(staged) == 1 and staged[0].closed
+        _closed(source)
+    finally:
+        # Drain only during test cleanup, after the assertions, without re-raising the simulated fault.
+        emitting = False
+        (text if text is not None else buffered).close()
 
 
 @pytest.mark.parametrize("flag", RESOURCE_FLAGS)
