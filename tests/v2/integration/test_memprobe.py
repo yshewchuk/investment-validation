@@ -48,7 +48,7 @@ def test_enabled_snapshot_prints_rss_line_and_watch_and_dataframe(monkeypatch, c
 
     class Holder:
         def __init__(self):
-            self.cache = {i: i for i in range(5000)}
+            self.cache = {i: "x" * 100 for i in range(5000)}
 
     holder = Holder()
     memprobe.watch("test.cache", holder, "cache")
@@ -64,7 +64,7 @@ def test_enabled_snapshot_prints_rss_line_and_watch_and_dataframe(monkeypatch, c
     out = capsys.readouterr().out
     assert "[mem] x rss=" in out
     assert "cache test.cache: 5000 entries" in out
-    assert re.search(r"cache test\.cache: 5000 entries ~[0-9.]+M", out)
+    assert re.search(r"cache test\.cache: 5000 entries ~(?!0\.0M)[0-9.]+M", out)
     assert "DataFrame" in out and "2000 x 3" in out
     assert re.search(r"obj [0-9.]+M DataFrame len=2000 x 3", out)
     assert df is not None
@@ -186,33 +186,59 @@ def test_trim_flag_off_never_calls_malloc_trim(monkeypatch, capsys):
 # --------------------------------------------------------------------------
 
 
-def test_estimate_size_dict_of_tuples_within_half_to_double(monkeypatch):
+def test_estimate_size_set_of_uniform_tuples_exact():
     import engine.memprobe as memprobe
 
-    data = {(i, i + 1): (i, i + 1) for i in range(10000)}
+    s = {(i + 10**6, i + 2 * 10**6) for i in range(20000)}
+    n = 20000
+    t0 = next(iter(s))
+    expected = sys.getsizeof(s) + n * (
+        sys.getsizeof(t0) + sys.getsizeof(t0[0]) + sys.getsizeof(t0[1])
+    )
+    estimate = memprobe.estimate_size(s)
+    assert 0.9 * expected <= estimate <= 1.1 * expected
 
-    def exact(o):
-        if isinstance(o, dict):
-            return sys.getsizeof(o) + sum(exact(k) + exact(v) for k, v in o.items())
-        if isinstance(o, (tuple, list)):
-            return sys.getsizeof(o) + sum(exact(x) for x in o)
-        if isinstance(o, set):
-            return sys.getsizeof(o) + sum(exact(x) for x in o)
-        return sys.getsizeof(o)
 
-    exact_total = exact(data)
+def test_estimate_size_list_of_uniform_int_lists_exact():
+    import engine.memprobe as memprobe
+
+    data = [[i + 10**6 for i in range(100)] for _ in range(1000)]
+    inner = data[0]
+    expected = sys.getsizeof(data) + 1000 * (
+        sys.getsizeof(inner) + 100 * sys.getsizeof(inner[0])
+    )
     estimate = memprobe.estimate_size(data)
-    assert 0.5 * exact_total <= estimate <= 2 * exact_total
+    assert 0.9 * expected <= estimate <= 1.1 * expected
+
+
+def test_estimate_size_dict_of_uniform_int_to_tuple_exact():
+    import engine.memprobe as memprobe
+
+    data = {i + 10**6: (i + 10**6, i + 2 * 10**6) for i in range(5000)}
+    n = 5000
+    k0, v0 = next(iter(data.items()))
+    expected = sys.getsizeof(data) + n * (
+        sys.getsizeof(k0) + sys.getsizeof(v0) + 2 * sys.getsizeof(v0[0])
+    )
+    estimate = memprobe.estimate_size(data)
+    assert 0.9 * expected <= estimate <= 1.1 * expected
 
 
 def test_estimate_size_never_raises_on_len_that_raises():
     import engine.memprobe as memprobe
 
-    class Bad:
+    class Bad(list):
         def __len__(self):
-            raise ValueError("nope")
+            raise ValueError
 
-    assert isinstance(memprobe.estimate_size(Bad()), int)
+    assert memprobe.estimate_size(Bad([1, 2, 3])) == 0
+
+    class Boom(list):
+        def __len__(self):
+            raise MemoryError
+
+    with pytest.raises(MemoryError):
+        memprobe.estimate_size(Boom([1]))
 
 
 def test_estimate_size_set_200k_under_one_second():
@@ -223,24 +249,22 @@ def test_estimate_size_set_200k_under_one_second():
     estimate = memprobe.estimate_size(big)
     elapsed = time.perf_counter() - started
     assert estimate > 0
+    assert estimate > 200_000 * 100
     assert elapsed < 1.0
 
 
-def test_estimate_size_series_of_1000_strings_exceeds_150k():
+def test_estimate_size_series_of_uniform_strings_within_bounds():
     pd = pytest.importorskip("pandas")
     pytest.importorskip("numpy")
     import engine.memprobe as memprobe
 
-    s = pd.Series(["x" * 200 for _ in range(1000)])
-    assert memprobe.estimate_size(s) > 150_000
-
-
-def test_estimate_size_nested_dict_of_lists_extrapolates():
-    import engine.memprobe as memprobe
-
-    data = {i: list(range(1000)) for i in range(50)}
-    estimate = memprobe.estimate_size(data)
-    assert estimate >= 0.5 * (50 * 1000 * 8)
+    s = pd.Series([f"{i:0200d}" for i in range(1000)])
+    s0 = s.iloc[0]
+    # estimator adds pointer-array bytes twice (memory_usage + getsizeof each)
+    expected = 1000 * (sys.getsizeof(s0) + 8) + sys.getsizeof(s.index)
+    expected *= 1.8
+    estimate = memprobe.estimate_size(s)
+    assert 0.9 * expected <= estimate <= 1.1 * expected
 
 
 # --------------------------------------------------------------------------
@@ -281,29 +305,71 @@ def test_snapshot_propagates_memory_error(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_nightly_mark_returns_elapsed_matching_timeline_flag_off(monkeypatch, capsys):
+def test_nightly_mark_elapsed_and_timeline_flag_on_off(monkeypatch, capsys):
     from engine.dashboard.nightly import NightlyReport
 
-    monkeypatch.delenv("INVESTING_PLAN_MEMPROFILE", raising=False)
-    r = NightlyReport(as_of="2026-01-01")
-    r.start(0.0)
-    time.sleep(0.05)
-    ret = r.mark("settle", started=0.0)
-    assert ret == pytest.approx(r.timeline[0]["elapsed_s"], abs=0.06)
-    out = capsys.readouterr().out
-    assert out == ""
-    assert r.timeline[0]["step"] == "settle"
+    times = iter([100.5, 102.0])
 
+    def _fake_time():
+        return next(times)
 
-def test_nightly_mark_on_prints_mem_phase_line(monkeypatch, capsys):
-    from engine.dashboard.nightly import NightlyReport
-
+    monkeypatch.setattr("engine.dashboard.nightly.time.time", _fake_time)
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
     r = NightlyReport(as_of="2026-01-01")
-    r.start(0.0)
-    time.sleep(0.05)
-    ret = r.mark("settle", started=0.0)
-    assert ret == pytest.approx(r.timeline[0]["elapsed_s"], abs=0.06)
+    r.start(100.0)
+    ret_a = r.mark("a", started=100.0)
+    ret_b = r.mark("b", started=100.0)
+    assert ret_a == 0.5
+    assert ret_b == 1.5
+    assert [round(e["elapsed_s"], 1) for e in r.timeline] == [0.5, 1.5]
+    assert [round(e["at_s"], 1) for e in r.timeline] == [0.5, 2.0]
     out = capsys.readouterr().out
-    assert "[mem] phase settle" in out
-    assert r.timeline[0]["step"] == "settle"
+    assert "[mem] phase a" in out
+    assert "phase b" in out
+
+    times = iter([100.5, 102.0])
+    monkeypatch.delenv("INVESTING_PLAN_MEMPROFILE", raising=False)
+    r = NightlyReport(as_of="2026-01-01")
+    r.start(100.0)
+    ret_a = r.mark("a", started=100.0)
+    ret_b = r.mark("b", started=100.0)
+    assert ret_a == 0.5
+    assert ret_b == 1.5
+    assert [round(e["elapsed_s"], 1) for e in r.timeline] == [0.5, 1.5]
+    assert [round(e["at_s"], 1) for e in r.timeline] == [0.5, 2.0]
+    out = capsys.readouterr().out
+    assert out == ""
+
+
+def test_watch_nested_float_dicts_reports_nonzero_size(monkeypatch, capsys):
+    import engine.memprobe as memprobe
+
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TOP", "1000000")
+
+    class Holder:
+        def __init__(self):
+            self.cache = {i: {"a": 1.0, "b": 2.0} for i in range(3000)}
+
+    holder = Holder()
+    memprobe.watch("test.nested", holder, "cache")
+    memprobe.snapshot("x")
+    out = capsys.readouterr().out
+    assert re.search(r"cache test\.nested: 3000 entries ~(?!0\.0M)[0-9.]+M", out)
+
+
+def test_disabled_path_never_walks_gc_objects(monkeypatch):
+    import engine.memprobe as memprobe
+
+    count = 0
+
+    def counting():
+        nonlocal count
+        count += 1
+        return []
+
+    monkeypatch.setattr(gc, "get_objects", counting)
+    monkeypatch.delenv("INVESTING_PLAN_MEMPROFILE", raising=False)
+    memprobe.snapshot("x")
+    memprobe.tick("x", 250)
+    assert count == 0
