@@ -158,6 +158,8 @@ from causal source rows. engine.v2.ops.cli imports the no-fit guard
 (not a v2 package, so not part of this graph) is the P5-1 inventory's CLI.
 `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_execution.py`
 consume `no_fit.forbid_fitting` before native trial claims and fixed-child fitting.
+`experiments/magnitude_search_outer.py` consumes the legacy/v2 no-fit guards
+before selected outer refit claims; completed evidence replay never fits.
 `tools/phase5_serving_folds.py` consumes the chooser policy/descriptor types
 and `semantic_release_hash`, plus `engine.v2.foundation` typed-document conversion,
 for offline fold metadata. `tools/phase5_prepare_release.py`

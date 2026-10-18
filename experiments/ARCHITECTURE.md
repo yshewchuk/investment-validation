@@ -221,7 +221,7 @@ both flag states publish/verify the same plan and never write a ledger.
 
 ## Recorded magnitude-search selection
 
-`magnitude_search_trials.SearchTrials` is library-only, with no CLI or production caller. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies are contracts, foundation, ops migrations/catalog/fingerprints/errors, and research stored-history/target reads. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. `magnitude_history_inputs.history_binding` and `magnitude_search_plan.read_search_plan` own native/plan admission; public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
+`magnitude_search_trials.SearchTrials` is library-only, with no CLI or production caller. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies include contracts, foundation, ops migrations/catalog/fingerprints/errors, research target reads and `magnitude_search_evidence`. That shared helper owns native admission through `magnitude_history_inputs.history_binding` and research stored-history/target reads; `magnitude_search_plan.read_search_plan` owns plan admission. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. Public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
 
 | Condition | Outcome |
 |---|---|
@@ -451,7 +451,7 @@ This manual CLI is separate from the admitted smoke worker; neither authorizes p
 | CLI purpose, mode and context | Both actions require an existing migrated catalog and seal, explicit source/holdout context, and exactly one smoke opt-in or ledger destination. Non-sweep purpose refuses `HOLDOUT_ACCESS_DENIED`; missing/conflicting mode refuses `INVALID_EXPERIMENT_SPEC`, both before CLI catalog/input access. `main(argv)` prints sorted index/refusal JSON: exit 0 for complete success, 2 for incomplete results or handled refusals; unexpected programming errors propagate. |
 | Collection/CLI dependency boundary | The collector consumes `v2_gate_sweep.submit_sweep`, native registration/outcomes, `gate_report.render_gate_report`, ops catalog transactions/bounded-text admission, registered artifacts, spec parsing, fingerprints, bounded native evidence readers/writers, job reads/`MAX_JOB_FAILURE_BYTES`/errors, contracts and foundation. `native_outcomes` consumes `ops.native_registration.read_native_evidence` and `native_evidence_json` for bounded publication/replay. The CLI consumes staged-input reading, ops catalog/job reads/errors, data `Repository`/errors and foundation artifacts; its only execution edge is to the collector. |
 | Immutable collection context and replay | The first canonical arm owns immutable `native_sweep_{mode}_intent` and `native_sweep_{mode}_index` references without replacing other registration evidence. The intent binds roster hash, installed collector-source closure, mode and normalized ledger address; its hash is the collection run ID. Drift under an existing mode refuses R6 with immutable-context recovery. Smoke/recorded identities are separate but use the same staged jobs. Exact replay compares immutable index/result bytes without fitting, job retry, duplicate recording or evidence replacement. Complete content-addressed objects may remain unreferenced after interrupted reservation. |
-| Unverifiable collector implementation | R6 (a declared `.py` file over `source_closure`'s 8 MiB per-file size bound is an unverifiable source and refuses `EXPERIMENT_IDENTITY_CONFLICT`); recognized propagated source-read I/O interruptions instead yield retryable `RESOURCE_UNAVAILABLE`. Before submission, admission requires the installed on-disk closure to match its import-time snapshot and both caller coordinator entries to match installed entries; a failed baseline or known installed drift refuses before further source reads. The installed-root exception in root architecture §5 permits source comparison only: no catalog/artifact/network effects or bytecode-attestation claim, and no caller-data path uses that root. Other worker sources remain governed by the seal. |
+| Unverifiable collector implementation | R6 (a declared `.py` file over `source_closure`'s 8 MiB per-file size bound is an unverifiable source and refuses `EXPERIMENT_IDENTITY_CONFLICT`); recognized propagated source-read I/O interruptions instead yield retryable `RESOURCE_UNAVAILABLE`. Before submission, admission requires the installed on-disk closure to match its import-time snapshot and both caller coordinator entries to match installed entries; a failed baseline or known installed drift refuses before further source reads. The collector's installed-root exception in root architecture §5 permits source comparison only: no catalog/artifact/network effects or bytecode-attestation claim, and no caller-data path uses that root. Other worker sources remain governed by the seal. |
 | Terminal output admissibility | Success requires the job's exact terminal attempt number/state/fence, its sole named canonical `native_gate_result` and exact registered identity/provenance, including the reference derived from verified bytes; outputs from other attempts cannot substitute. Cancellation/recovery may advance the job fence. After exact-attempt admission, a succeeded attempt’s sole `native_gate_result` output naming an absent artifact registration refuses `INTEGRITY_FAILED`. |
 | Generic worker failure or missing result | A dispatched child ending in generic `WORKER_FAILED` or with neither a result nor a typed refusal receives immutable coordinator R4 (`EXPERIMENT_VARIANT_FAILED`) in either mode, distinct from the original ops retry policy. In recorded mode its permanent CSV row is keyed by `(id, spec_hash)` with `stage=failed`, preventing a later `ran` row under that identity. The original ops problem/diagnostic reference remains in the index; worker records are not rewritten. |
 | Registered refusal | Apart from the explicit generic-worker R4 accounting above, preserve code, category and retryability. Native-supported R4/R5/feature refusals use existing outcomes; identity and typed infrastructure refusals remain indexed without fabricated scientific outcomes. |
@@ -623,3 +623,53 @@ There is no retry, fallback source, projected calendar or partial-success mode.
 | Entry selection, common coverage or pairing fails | `EXPERIMENT_VARIANT_FAILED`, current stage/counts; zero compared. |
 | Repository integrity or unresolved snapshot | Native code; stage/counts only after comparison admission starts. |
 | CLI filesystem or SQLite failure | `INPUT_CHANGED`, no stage/counts. |
+
+## Selected-candidate outer evaluation
+
+`magnitude_search_outer.execute_outer_fold` is library-only. It requires an existing
+frozen selection and completed native execution/terminal evidence for every inner
+trial before public `freeze`/`execute` replay. Missing or submitted-only evidence
+never launches inner work; permitted candidate failures retain sealed exclusions.
+Exact inner-RMSE ties remain candidate-ID ordered. A distinct immutable `outer-*`
+namespace binds the plan, selection, recipe, limits and installed outer/child sources.
+Only that fold's winner receives bounded horizon refits. Every fit marker commits
+before its child ACK; complete forecasts and successful accounting commit before
+outer targets open. Training is strictly prior to the outer fit boundary.
+
+`magnitude_search_evidence` shares native input admission, matrix identities,
+forecast coverage and target-receipt validation across inner and outer callers.
+SearchTrials wrappers preserve their existing error boundaries and Real/Integral
+submission semantics; outer wrappers require JSON-native numeric types. Target
+validation reconstructs the protected receipt from admitted physical preflight.
+Static imports include these helpers in recorder and outer source bindings.
+Completed replay verifies the complete evidence chain without native payloads or fitting.
+
+| Condition | Enforced outcome |
+|---|---|
+| Invalid outer year or limits | `INVALID_EXPERIMENT_SPEC`; no outer claim or payload access. Limit admission precedes journal/plan checks. |
+| Missing/older/newer or checksum-mismatched journal migrations | `INTEGRITY_FAILED` before plan/evidence/native reads; no implicit migration. |
+| Missing frozen selection, incomplete/submitted-only inner evidence, changed source/selection/input/result binding | `EXPERIMENT_IDENTITY_CONFLICT`; no missing inner execution or replacement. Prior journal associations remain unchanged. |
+| Either no-fit guard on a new outer call | Its original `RuntimeFitForbidden` propagates before affinity resolution/claim; completed replay never invokes either guard. |
+| Invalid child progress, completion or forecast coverage/types | `EXPERIMENT_IDENTITY_CONFLICT`; retain committed fit evidence, open no outer targets, publish no terminal. |
+| Selected estimator fails after one or more horizon starts | `EXPERIMENT_VARIANT_FAILED`; persist exact attempted/completed prefix and failed execution, with no forecasts or successful terminal. |
+| Shared native-input/target admission or resource failure, including late/missing outer targets | Preserve the owning typed refusal; retain the unfinished claim and any durable forecasts, with no partial successful result. No retry or replacement is authorized. |
+| Repeated unfinished outer claim | `EXPERIMENT_IDENTITY_CONFLICT` at create-only start; no refit, replacement or publication recovery. |
+| Artifact publication/read failure, 16 MiB journal cap, or raw SQLite failure | Existing journal policy applies: integrity conflicts, resource unavailability, `RESOURCE_LIMIT_EXCEEDED`, or unchanged raw SQLite error. Keep committed evidence/unreferenced complete objects; no retry or rollback of earlier records. |
+| Invalid replay evidence or target receipt | `EXPERIMENT_IDENTITY_CONFLICT`; no native payloads, fitting or new associations. |
+| Missing any outer terminal during collection | `EXPERIMENT_IDENTITY_CONFLICT` before any outer replay; no writes or missing-work launch. |
+| Metric computation refuses | `EXPERIMENT_VARIANT_FAILED` propagates; no successful terminal/report or candidate substitution. |
+
+`collect_outer_results` inventories all outer terminals/limits, admits native inner evidence once per call,
+then verifies every fold's source/evidence bindings through a replay-only internal path. It returns a deterministic
+read-only aggregate; no admission is cached across calls. Fold/horizon metrics retain complete forecast-target pairs;
+primary RMSE pools event/horizon errors rather than fold RMSEs. Equal complete
+horizon counts preserve equal event weights. The prospective recipe is always the
+latest outer fold's frozen INNER winner. Journals own source/fit/input evidence;
+returned result dictionaries carry their IDs and selected summaries, not all journal
+payloads. Collection does not persist a report artifact, export or ledger row.
+No holdout evaluation, final read, release or deployment authority is added.
+Research remains reconstructed, not observed point-in-time. Direct dependencies are
+the search plan/journal/trial/execution/evidence modules, contracts, foundation,
+ops migrations/fingerprints/errors, both no-fit guards, `engine.v2.research.magnitude_inputs.load_magnitude_targets`
+for outer label reads and `magnitude_report.magnitude_metrics` for fold/aggregate scoring.
+The evidence helper separately consumes native history admission and research stored-history/target APIs; no new scheduler, parser, estimator implementation or third-party dependency is needed.
