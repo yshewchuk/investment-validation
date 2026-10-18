@@ -341,6 +341,33 @@ Once per calendar month, inside the nightly, the chooser analog pool advances an
 
 Split list (code, in order; estimates in #822): 1 catalog `retrain_cutoff`, stage input contract, stage-time base and the §2.1 chooser line; 2 due-month decision and keys; 3 pool/chooser regeneration job with deadline; 4 monthly sidecar with admission probe; 5a champion/gate retrain kind and check fits; 5b acceptance wiring and non-regression check; 6 promotion and forward rollback; 7 parity release-id recording and marker.
 
+### 2.4 Native Tier-4 values (design, #876; not implemented)
+
+Tier-4 values derive from the Tier-4 members of a native model release; the
+legacy `tier4.py` producer is not ported. Only a `tier4_coverage` table is
+stored: one row per `(ticker, event_date)` with `release_id`, `model_id`,
+the release `retrain_cutoff` stamp and a status; values are computed at read
+time from the release and never cached across releases (R2).
+
+- **Causality.** A value may come only from a release whose exclusive
+  `retrain_cutoff` is not after the event's decision date (the
+  `fold_start <= as_of` guard). Events with no such release are
+  `no_eligible_release`: value null, the legacy "no forecast" meaning. History
+  before the first release exists only if an operator runs the §2.3 retrain at
+  past cutoffs and keeps those releases; coverage starts at the earliest
+  retained eligible release. No value is invented for earlier events
+  (confirming this default is an open decision in the design guide).
+- **No eligible release (#782).** The resolver never falls back to legacy:
+  status `MODEL_NOT_READY`, scoring refuses those events with that code and
+  names the failed release check in `details`, other nightly jobs continue.
+- **Qualification.** Parity with legacy Tier-4 is not a goal; qualification
+  checks causality, coverage by month, and rank/calibration consistency, as
+  in `guides/native_panel_tier4_design.md`.
+- **R1-R6.** Release manifest and hashes verified before any read (R1); no
+  cross-release cache (R2); a failed job key is terminal and a new key
+  re-runs (R3); coverage publishes once under a hash, never partial (R4, R5);
+  the same snapshot and release give the same hash (R6).
+
 ## 3. Inputs
 
 **Forward serving-fold contract.** Offline descriptor authoring is described

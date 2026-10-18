@@ -177,6 +177,19 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   `DATA_FAILURE_CODES` entry.
 - **Contract changes** — Recalculate data tables through the standard import
   and rebuild commands; stored identities are not migrated.
+- **Native feature panel producer (design, #876; not implemented)** — A batch
+  job publishes `feature_panel` as a dataset version of one snapshot lineage,
+  computed only from that snapshot's source tables with the `engine.v2.features`
+  math shared with `scan_panel_row`. Reads are bounded batches (ticker group,
+  one year partition), so peak memory depends on the batch, not the table.
+  Inputs (snapshot id, table versions) are verified before reads
+  (`IDENTITY_CONFLICT` on mismatch); outputs stay private until every batch
+  finishes, then publish once under a content hash. A failed key is terminal;
+  the same snapshot and code give the same version hash. No legacy file is
+  read, copied or migrated; the table is always rebuildable from the snapshot.
+  Jobs bind snapshot ids and dataset versions, not `legacy_manifest.json`
+  (native kinds stop accepting it). Design and slices:
+  `guides/native_panel_tier4_design.md`.
 
 ## Inputs
 
