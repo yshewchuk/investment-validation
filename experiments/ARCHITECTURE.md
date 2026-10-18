@@ -676,28 +676,14 @@ The evidence helper separately consumes native history admission and research st
 
 ## Serial search orchestration
 
-`v2_magnitude_search_run` composes public plan, journal, trial and outer APIs.
-Separate `seal`, `run` and read-only `collect` commands retain explicit ownership;
-run never migrates or seals implicitly. A distinct driver seal binds plan/ref and
-full driver source closure; atomic absence guards prevent blessing started library
-journals. Run and CLI collection require that exact binding, without changing the
-scientific report hash. The complete roster is checked for unfinished claims and
-premature selections before new work. Durable inner results reconcile first;
-completed outer results replay next, before any fresh serial fitting.
-Scientific scoring refusals continue only after public reconciliation verifies
-the durable refused terminal; shared/resource failures stop. Freeze precedes all
-selected outer evaluation, with zero fit retries and unchanged winner policy.
+`v2_magnitude_search_run` composes public plan, journal, trial and outer APIs. Separate `seal`, `run` and read-only `collect` commands retain explicit ownership; run never migrates or seals implicitly. A distinct driver seal binds plan/ref and full driver source closure; atomic absence guards prevent blessing started library journals. Run and CLI collection
+require that exact binding, without changing the scientific report hash. The complete roster is checked for unfinished claims and premature selections before new work. Durable inner results reconcile first; completed outer results replay next, before any fresh serial fitting. Scientific scoring refusals continue only after public reconciliation verifies the
+durable refused terminal; shared/resource failures stop. Freeze precedes all selected outer evaluation, with zero fit retries and unchanged winner policy.
 
-The CLI reuses the bounded staged-input reader, strict duplicate-key decoder,
-typed spec/reference admission and shared canonical JSON stream. A disposable
-temporary file enforces a complete 64 MiB UTF-8 output budget before stdout;
-oversized reports refuse without truncation. Collection preserves the existing
-outer report identity and uses a read-only SQLite connection. No persisted report
-framework, scheduler, ledger, final-read or release authority is introduced.
+The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. A disposable temporary file enforces a complete 64 MiB UTF-8 output budget before stdout; oversized reports refuse without truncation. Collection preserves the existing outer report identity and uses a read-only
+SQLite connection. No persisted report framework, scheduler, ledger, final-read or release authority is introduced.
 
-Each invocation revalidates bindings/evidence; there is no cross-call admission cache.
-The CLI calls `seal_search_run`/`run_search`; focused research tests also call these helpers.
-Direct engine dependencies are contracts, data, foundation and ops.
+Each invocation revalidates bindings/evidence; there is no cross-call admission cache. The CLI calls `seal_search_run`/`run_search`; focused research tests also call these helpers. Direct engine dependencies are contracts, data, foundation and ops.
 
 | Condition | Enforced outcome |
 |---|---|
