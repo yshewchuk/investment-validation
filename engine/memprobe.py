@@ -15,7 +15,8 @@ Flags (read at call time; truthy is ``1``/``true``/``yes``/``on``):
   a best-effort libc ``malloc_trim(0)`` before measuring, and log RSS before
   and after the trim so retained-by-Python separates from freed-but-held-by-glibc.
 - ``INVESTING_PLAN_MEMPROFILE_EVERY``: int, default 250; used by :func:`tick`.
-- ``INVESTING_PLAN_MEMPROFILE_TOP``: int, default 12; rows of largest objects.
+- ``INVESTING_PLAN_MEMPROFILE_TOP``: int, default 12; rows of largest objects
+  (negative values are clamped to 0 rows).
 
 Output lines are prefixed with two spaces then ``[mem]`` and go to stdout,
 flushed. Size estimates are sampled, not exact.
@@ -171,7 +172,9 @@ def _ensure_defaults() -> None:
 
 def _item_size(item: Any, sample: int) -> int:
     """Never materialise ``item``; extrapolate nested containers to full
-    length from a strided first-N sample of members (measured one level only)."""
+    length from a first-N sample of members for sets/dicts (allocation-free,
+    biased) or a strided sample for lists/tuples/Series (measured one level
+    only)."""
     try:
         base = sys.getsizeof(item)
     except MemoryError:
@@ -240,9 +243,10 @@ def _mean_item_size(items: list[Any], sample: int) -> int:
 
 
 def estimate_size(obj: Any, *, sample: int = 200) -> int:
-    """Approximate deep bytes without walking everything. Sampled, not exact.
-    Never raises, except MemoryError which propagates; returns 0 on any
-    other failure; does not check the enable flag."""
+    """Approximate deep bytes without walking everything. Sampled, not exact:
+    first-N sample for sets/dicts (allocation-free, biased), strided for
+    lists/tuples/Series. Never raises, except MemoryError which propagates;
+    returns 0 on any other failure; does not check the enable flag."""
     try:
         if type(obj).__name__ == "Series":
             total = int(obj.memory_usage(index=True, deep=False))
@@ -419,6 +423,7 @@ def snapshot(label: str, *, top: int | None = None) -> None:
                 del _registry[(key_name, owner_id)]
         seen_names: dict[str, int] = {}
         n = top if top is not None else _int_flag("INVESTING_PLAN_MEMPROFILE_TOP", _DEFAULT_TOP)
+        n = max(0, n)
         pre = rss_bytes()
         trimmed = False
         if trim_enabled():

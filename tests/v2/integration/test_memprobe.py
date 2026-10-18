@@ -463,12 +463,33 @@ def test_memory_error_from_gc_walk_and_trim_propagates(monkeypatch):
     with pytest.raises(MemoryError):
         memprobe.top_objects(3)
 
-    monkeypatch.undo()
-    monkeypatch.setattr(memprobe, "_malloc_trim", boom)
+    def trim_case():
+        monkeypatch.setattr(memprobe, "_malloc_trim", boom)
+        monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
+        monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TRIM", "1")
+        with pytest.raises(MemoryError):
+            memprobe.snapshot("x")
+
+    with monkeypatch.context() as m:
+        trim_case()
+
+
+def test_score_calendar_tick_uses_processed_count():
+    from pathlib import Path
+
+    src = Path("engine/score.py").read_text()
+    assert 'memprobe.tick("score_calendar events", i + 1)' in src
+
+
+def test_negative_top_value_prints_no_obj_lines(monkeypatch, capsys):
+    import engine.memprobe as memprobe
+
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
-    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TRIM", "1")
-    with pytest.raises(MemoryError):
-        memprobe.snapshot("x")
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TOP", "-1")
+    memprobe.snapshot("x")
+    out = capsys.readouterr().out
+    assert "[mem] x rss=" in out
+    assert "  obj " not in out
 
 
 def test_watch_nested_float_dicts_reports_nonzero_size(monkeypatch, capsys):

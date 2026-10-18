@@ -58,7 +58,8 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 `malloc_trim(0)` before measuring, logging RSS before/after. Hooks:
 `NightlyReport.mark`, `score_calendar`, `load_chain_index`, `Scorer` caches.
 Estimates are sampled, not exact. The native (`engine/v2`) nightly is NOT
-covered because `engine/v2` must not import legacy `engine` (layer rule).
+covered: `engine/v2` must not import legacy `engine` (layer rule); legacy
+adapters invoked from v2 run unprofiled.
 
 ## Inputs
 

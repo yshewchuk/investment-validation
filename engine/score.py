@@ -5024,7 +5024,8 @@ def score_calendar(
                 if offset is None:
                     atm_spot = result.spot
                 rows.append(result.as_dict() | {"strike_offset": offset})
-        memprobe.tick("score_calendar events", i)
+        # i is zero-based and this runs after the event is processed, so i+1 is the processed count
+        memprobe.tick("score_calendar events", i + 1)
         if progress_every and i and i % progress_every == 0:
             elapsed = time.time() - started
             rate = i / elapsed if elapsed > 0 else 0.0
