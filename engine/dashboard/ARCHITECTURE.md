@@ -59,7 +59,10 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 `NightlyReport.mark`, `score_calendar`, `load_chain_index`, `Scorer` caches.
 Estimates are sampled, not exact. The native (`engine/v2`) nightly is NOT
 covered: `engine/v2` must not import legacy `engine` (layer rule); legacy
-adapters invoked from v2 run unprofiled.
+adapters invoked from v2 run unprofiled. Each snapshot also logs RSS
+anon/file/shmem, the pyarrow pool (backend, allocated, max; `_TRIM` also
+calls `release_unused()`), the largest mappings, untracked numpy arrays
+found via their holders, and gc object counts by type.
 
 ## Inputs
 

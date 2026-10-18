@@ -9,6 +9,7 @@ import re
 import sys
 import time
 import types
+from pathlib import Path
 
 import pytest
 
@@ -423,7 +424,7 @@ def test_snapshot_swallows_top_objects_failure(monkeypatch, capsys):
 
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
 
-    def boom(n):
+    def boom(*args, **kwargs):
         raise ValueError("boom")
 
     monkeypatch.setattr(memprobe, "top_objects", boom)
@@ -438,7 +439,7 @@ def test_snapshot_propagates_memory_error(monkeypatch):
 
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
 
-    def boom(n):
+    def boom(*args, **kwargs):
         raise MemoryError()
 
     monkeypatch.setattr(memprobe, "top_objects", boom)
@@ -525,6 +526,128 @@ def test_negative_top_value_prints_no_obj_lines(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "[mem] x rss=" in out
     assert "  obj " not in out
+
+
+# --------------------------------------------------------------------------
+# rss breakdown / top mappings / type counts / hidden arrays / arrow
+# --------------------------------------------------------------------------
+
+
+def test_rss_breakdown_parts_sum_within_five_percent_of_rss():
+    if not Path("/proc/self/status").exists():
+        pytest.skip("no /proc/self/status")
+    try:
+        text = Path("/proc/self/status").read_text(encoding="utf-8")
+    except OSError:
+        pytest.skip("/proc/self/status unreadable")
+    if "RssAnon" not in text:
+        pytest.skip("RssAnon not reported")
+    import engine.memprobe as memprobe
+
+    parts = memprobe.rss_breakdown()
+    assert parts and parts["anon"] > 0 and parts["file"] > 0
+    total = parts["anon"] + parts["file"] + parts["shmem"]
+    rss = memprobe.rss_bytes()
+    assert rss > 0
+    assert abs(total - rss) <= 0.05 * rss
+
+
+def test_top_mappings_three_rows_sorted_descending():
+    import engine.memprobe as memprobe
+
+    if not Path("/proc/self/smaps").exists():
+        pytest.skip("no /proc/self/smaps")
+    rows = memprobe.top_mappings(3)
+    assert 1 <= len(rows) <= 3
+    assert all(rows[i][0] >= rows[i + 1][0] for i in range(len(rows) - 1))
+    assert rows[0][0] > 0
+
+
+def test_type_counts_controlled_objs_sorted_by_count_then_name():
+    import engine.memprobe as memprobe
+
+    objs = [1.0, 2.0, "a", ["x"]]
+    assert memprobe.type_counts(10, objs=objs) == [
+        (2, "float"),
+        (1, "list"),
+        (1, "str"),
+    ]
+
+
+def test_hidden_arrays_reports_large_held_array_only():
+    np = pytest.importorskip("numpy")
+    import engine.memprobe as memprobe
+
+    holder = {"a": np.zeros(500_000)}
+    small_holder = [np.arange(100)]
+    rows = memprobe.hidden_arrays(5, objs=[holder, small_holder])
+    assert len(rows) == 1
+    nbytes, desc = rows[0]
+    assert nbytes == 4_000_000
+    assert "shape=(500000,)" in desc
+    assert "held by dict" in desc
+
+
+def test_arrow_stats_reports_pool_and_none_without_pyarrow(monkeypatch):
+    pytest.importorskip("pyarrow")
+    import engine.memprobe as memprobe
+
+    t = __import__("pyarrow").array(range(5_000_000))
+    assert t is not None
+    stats = memprobe.arrow_stats()
+    assert stats is not None
+    assert isinstance(stats["backend"], str)
+    assert stats["allocated"] >= 30_000_000
+    monkeypatch.delitem(sys.modules, "pyarrow")
+    assert memprobe.arrow_stats() is None
+
+
+def test_arrow_release_false_when_pyarrow_not_loaded(monkeypatch):
+    pytest.importorskip("pyarrow")
+    import engine.memprobe as memprobe
+
+    monkeypatch.delitem(sys.modules, "pyarrow")
+    assert memprobe._arrow_release() is False
+
+
+def test_snapshot_prints_rss_breakdown_types_and_arrow(monkeypatch, capsys):
+    pytest.importorskip("pyarrow")
+    import engine.memprobe as memprobe
+
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
+    monkeypatch.delenv("INVESTING_PLAN_MEMPROFILE_TRIM", raising=False)
+    memprobe.snapshot("x")
+    out = capsys.readouterr().out
+    assert " rss anon=" in out
+    assert "  types " in out
+    assert " arrow backend=" in out
+
+
+def test_snapshot_arrow_release_only_with_trim_flag(monkeypatch, capsys):
+    pytest.importorskip("pyarrow")
+    import engine.memprobe as memprobe
+
+    called: list[bool] = []
+
+    def recorder():
+        called.append(True)
+        return True
+
+    monkeypatch.setattr(memprobe, "_arrow_release", recorder)
+    monkeypatch.setattr(memprobe, "_malloc_trim", lambda: True)
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TRIM", "1")
+    memprobe.snapshot("x")
+    arrow_line = next(l for l in capsys.readouterr().out.splitlines() if "arrow backend=" in l)
+    assert "release_unused=yes" in arrow_line
+    assert called == [True]
+
+    called.clear()
+    monkeypatch.delenv("INVESTING_PLAN_MEMPROFILE_TRIM", raising=False)
+    memprobe.snapshot("x")
+    arrow_line = next(l for l in capsys.readouterr().out.splitlines() if "arrow backend=" in l)
+    assert "release_unused" not in arrow_line
+    assert called == []
 
 
 def test_watch_nested_float_dicts_reports_nonzero_size(monkeypatch, capsys):
