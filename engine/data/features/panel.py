@@ -622,9 +622,10 @@ def _iter_daily_batches(columns, tickers, batch_size=None):
         frames = []
         for _year, frame in store.iter_table("daily_market", columns=columns):
             matched = frame[frame["ticker"].isin(batch)]
+            del frame
             if len(matched):
                 frames.append(matched)
-            del frame
+            del matched
         if not frames:
             yield store.empty_frame("daily_market")[list(columns)]
             continue

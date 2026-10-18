@@ -155,42 +155,59 @@ class TestBatchedOratsRead:
         assert len(calls) > 1
         assert set(batched.columns) > set(events.columns)
 
-        # Independent oracle: plain pandas over the raw fixture, no panel code.
-        # (BBB, 2024-08-01) anchors on the last ORATS-summary row strictly
-        # before the event date — that row's implied move, stamped in
-        # ``orats_asof``.
-        event_date = pd.Timestamp("2024-08-01")
-        prior = daily[
-            (daily["ticker"] == "BBB")
-            & daily["src_iv"].notna()
-            & (daily["date"] < event_date)
-        ].sort_values("date")
-        assert not prior.empty
-        last = prior.iloc[-1]
-        mask = (batched["ticker"] == "BBB") & (batched["date"] == event_date)
-        assert int(mask.sum()) == 1
-        np.testing.assert_array_equal(
-            batched.loc[mask, ORATS_FEATURES["implied_move"]].to_numpy(),
-            np.array([last["implied_move"]]),
-        )
-        np.testing.assert_array_equal(
-            batched.loc[mask, "orats_asof"].to_numpy(dtype="datetime64[ns]"),
-            np.array([last["date"].to_datetime64()], dtype="datetime64[ns]"),
-        )
+        # Independent oracle: plain pandas over the raw fixture, recomputed for
+        # ALL 12 events with no panel code involved. For each event, the IV
+        # answer is the last daily row of that ticker with ``src_iv`` notna and
+        # ``date`` strictly before the event; the mcap answer is the last row
+        # with a finite ``mcap_usd`` strictly before it. Batched is in the
+        # events' order, so match by position with ``iloc``.
+        events_ = _events()
+        for i in range(len(events_)):
+            row_ev = events_.iloc[i]
+            ticker = row_ev["ticker"]
+            event_date = row_ev["date"]
+            assert batched.iloc[i]["ticker"] == ticker
+            assert batched.iloc[i]["date"] == event_date
 
-        # No prior ORATS row at all: the absent ticker (both events) and EEE's
-        # event before its own coverage starts — NaN feature, NaT as-of.
-        for ticker, date in [
-            (ABSENT_TICKER, "2023-07-01"),
-            (ABSENT_TICKER, "2024-07-01"),
-            ("EEE", "2023-02-01"),
-        ]:
-            row = (batched["ticker"] == ticker) & (
-                batched["date"] == pd.Timestamp(date)
+            rows = daily[daily["ticker"] == ticker]
+            iv_prior = rows[rows["src_iv"].notna() & (rows["date"] < event_date)].sort_values(
+                "date"
             )
-            assert int(row.sum()) == 1
-            assert batched.loc[row, ORATS_FEATURES["implied_move"]].isna().all()
-            assert batched.loc[row, "orats_asof"].isna().all()
+            if iv_prior.empty:
+                assert batched.iloc[i][list(ORATS_FEATURES.values())].isna().all()
+                assert pd.isna(batched.iloc[i]["orats_asof"])
+            else:
+                last_iv = iv_prior.iloc[-1]
+                for source, column in ORATS_FEATURES.items():
+                    np.testing.assert_array_equal(
+                        np.array([batched.iloc[i][column]]),
+                        np.array([last_iv[source]]),
+                    )
+                np.testing.assert_array_equal(
+                    np.array([batched.iloc[i]["orats_asof"]], dtype="datetime64[ns]"),
+                    np.array([last_iv["date"].to_datetime64()], dtype="datetime64[ns]"),
+                )
+
+            mcap_rows = rows[np.isfinite(rows["mcap_usd"]) & (rows["date"] < event_date)]
+            mcap_rows = mcap_rows.sort_values("date")
+            if mcap_rows.empty:
+                assert pd.isna(batched.iloc[i]["mcap_usd"])
+                assert pd.isna(batched.iloc[i]["mcap_log"])
+                assert pd.isna(batched.iloc[i]["mcap_asof"])
+            else:
+                last_mcap = mcap_rows.iloc[-1]
+                np.testing.assert_array_equal(
+                    np.array([batched.iloc[i]["mcap_usd"]]),
+                    np.array([last_mcap["mcap_usd"]]),
+                )
+                np.testing.assert_array_equal(
+                    np.array([batched.iloc[i]["mcap_log"]]),
+                    np.array([last_mcap["mcap_log"]]),
+                )
+                np.testing.assert_array_equal(
+                    np.array([batched.iloc[i]["mcap_asof"]], dtype="datetime64[ns]"),
+                    np.array([last_mcap["date"].to_datetime64()], dtype="datetime64[ns]"),
+                )
 
 
 class TestBatchedPrePrintVolRead:
@@ -306,6 +323,26 @@ class TestIterDailyBatches:
 
         monkeypatch.setattr(panel.store, "iter_table", fake_iter_table)
 
+        # Spies: weak references to the objects the generator itself owns.
+        # ``concat`` sees the partition-derived frames; ``coerce`` sees the
+        # concatenated raw batch. Both must die once the batch is yielded.
+        real_concat = panel.pd.concat
+        real_coerce = panel.store.coerce
+        raw_refs: list = []
+
+        def spy_concat(objs, *args, **kwargs):
+            objs = list(objs)
+            for o in objs:
+                raw_refs.append(weakref.ref(o))
+            return real_concat(objs, *args, **kwargs)
+
+        def spy_coerce(frame, *args, **kwargs):
+            raw_refs.append(weakref.ref(frame))
+            return real_coerce(frame, *args, **kwargs)
+
+        monkeypatch.setattr(panel.pd, "concat", spy_concat)
+        monkeypatch.setattr(panel.store, "coerce", spy_coerce)
+
         gen = panel._iter_daily_batches(
             _ORATS_NEEDED, TICKERS, batch_size=BATCH_SIZE
         )
@@ -314,6 +351,8 @@ class TestIterDailyBatches:
         assert partition_refs, "no partitions were yielded"
         gc.collect()
         assert all(ref() is None for ref in partition_refs)
+        assert raw_refs, "no concat/coerce inputs were observed"
+        assert all(ref() is None for ref in raw_refs)
 
         # The yielded batch itself is the caller's alone: dropping it frees it
         # even though the generator is still suspended on that yield.
@@ -321,4 +360,4 @@ class TestIterDailyBatches:
         del first
         gc.collect()
         assert ref_first() is None
-        assert next(gen) is not None
+        assert isinstance(next(gen), pd.DataFrame)
