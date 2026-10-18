@@ -130,11 +130,72 @@ it verifies the native inner inventory once per call, then independently replays
 No admission is cached across calls. It never launches missing work or chooses a
 winner using outer results: `prospective_candidate_id` is the latest fold's inner
 selection. Collection returns a dictionary only; it does not persist an aggregate
-artifact, export or ledger row. Both APIs are library-only; no CLI, real-data
-execution, holdout/final
-access, ledger publication or release authority is implied.
+artifact, export or ledger row. The serial CLI below composes these APIs.
+No real-data execution, holdout/final access, ledger publication or release
+authority is implied.
 
 `magnitude_search_evidence` supplies shared fold input admission, matrix evidence,
 forecast normalization and target-receipt validation. Inner wrappers retain submitted
 Real/Integral support and their original refusal envelopes; outer wrappers enforce
 JSON-native numeric types. The static dependency is included in source seals.
+
+## Serial magnitude search driver
+
+`python -m experiments.v2_magnitude_search_run` accepts `seal`, `run` or `collect`.
+Every action requires `--spec SPEC.json --request REQUEST.json --plan-ref REF.json
+--catalog CATALOG --store-root STORE`. Supply the original registered v1.5 spec,
+the exact `magnitude_search_request.v1` request, and the `plan_ref` object returned
+by `v2_magnitude_search prepare` (not that command's entire output envelope).
+Inputs must be regular, nonsymlink-leaf JSON objects of at most 16 MiB; duplicate
+keys and nonfinite JSON constants refuse. The catalog and store must already exist.
+
+Run `seal` explicitly once after preparing the plan; identical seals are safe to
+repeat. It binds driver sources in a separate immutable journal slot before any
+trial or selection. An already sealed empty library journal is allowed; started
+library journals cannot acquire a driver binding retroactively. `run` requires
+that exact journal and additionally requires positive integer
+`--memory-bytes`, `--cpu-seconds` and `--wall-seconds`. These are per-child limits,
+not a reservation or total-search allowance. For example, after choosing limits
+appropriate for the machine and experiment:
+
+```bash
+common=(--spec SPEC.json --request REQUEST.json --plan-ref REF.json \
+        --catalog CATALOG --store-root STORE)
+python -m experiments.v2_magnitude_search_run seal "${common[@]}"
+python -m experiments.v2_magnitude_search_run run "${common[@]}" \
+    --memory-bytes "$MEMORY_BYTES" --cpu-seconds "$CPU_SECONDS" \
+    --wall-seconds "$WALL_SECONDS" > search-report.json
+python -m experiments.v2_magnitude_search_run collect "${common[@]}"
+```
+
+`run_search(conn, store, repository, registration, request, plan_ref, *, limits)`
+is the same orchestration API. It traverses outer folds, candidates and inner
+folds in sealed plan order, one child at a time; then freezes all inner selections,
+evaluates each selected outer winner, and collects every completed outer fold.
+Valid candidate failures are excluded by the sealed policy; all-candidate failure
+refuses. It never chooses a winner from outer scores.
+
+Repeating `run` reconciles publication only when the original native start and
+post-exit child result are both durable, using exactly the original limits.
+Unfinished inner claims without that result, unfinished outer claims, or premature
+selections refuse before fitting. All claimed inner results and completed outer
+results are verified before fresh fitting. No reset, claim takeover, fit retry,
+replacement candidate or source-binding migration is performed. The installation
+must match registration, plan and journal; install the complete implementation
+before registering/sealing, rather than reusing older source-bound evidence.
+
+`run` and `collect` exit 0 with one canonical `magnitude_search_outer_report.v1` JSON
+document, preserving its `result_id`, all fold predictions, metrics and provenance.
+The stdout budget is 64 MiB of UTF-8 including the newline: excess refuses with
+`RESOURCE_LIMIT_EXCEEDED` before any report bytes are printed, without truncation
+or undoing completed records. Output staging uses disposable temporary storage.
+Typed refusals exit 2 as `{"refused": <Problem>}` with original fields; ordinary
+filesystem/SQLite errors are redacted as `RESOURCE_UNAVAILABLE`. Parser errors
+exit 2 on stderr; incidental Python progress also goes to stderr.
+
+`collect` verifies the driver seal, opens the catalog read-only and never starts
+or repairs work. The existing report hash covers scientific results; the separate
+driver seal, whose hash `seal` returns as `driver_id`, supplies driver provenance.
+`seal_search_run(..., clock=...)` exposes the explicit seal as a library API.
+`seal` and `collect` reject resource flags. Optional `--no-ledger` is a no-op:
+all modes exclude ledger/outcome publication, final holdouts, releases and orders.
