@@ -191,7 +191,9 @@ document, preserving its `result_id`, all fold predictions, metrics and provenan
 The stdout budget is 64 MiB of UTF-8 including the newline: excess refuses with
 `RESOURCE_LIMIT_EXCEEDED` before any report bytes are printed, without truncation
 or undoing completed records. Output staging uses disposable temporary storage.
-Typed refusals exit 2 as `{"refused": <Problem>}` with original fields; ordinary
+The selected stdout stream is flushed before returning; write/flush errors propagate
+without a second document, and staging closes without closing caller-owned stdout.
+Typed refusals exit 2 as `{"refused": <Problem>}` with original fields; pre-emission
 filesystem/SQLite errors are redacted as `RESOURCE_UNAVAILABLE`. Parser errors
 exit 2 on stderr; incidental Python progress also goes to stderr.
 

@@ -214,9 +214,11 @@ def main(argv=None):
         binary = getattr(sys.stdout, "buffer", None)
         if binary is None:
             shutil.copyfileobj(output, sys.stdout)
+            sys.stdout.flush()
         else:
             while chunk := output.read(65536):
                 binary.write(chunk.encode("utf-8"))
+            binary.flush()
     return status
 
 
