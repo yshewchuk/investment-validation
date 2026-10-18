@@ -26,6 +26,7 @@ from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.research.magnitude_history_store import read_stored
+from experiments import magnitude_search_evidence as evidence
 from experiments import magnitude_search_trials as trials
 from experiments import native_registration as native
 from experiments.magnitude_search_plan import seal_search_plan
@@ -297,8 +298,8 @@ def test_native_history_binding_drift_refuses_exactly_before_readmission(case, m
     args = trial_cases(case)[0]
     started = case.recorder.start(*args)
     changed = {**case.source.registration.document["magnitude_history"], "unexpected_identity": "changed"}
-    monkeypatch.setattr(trials, "history_binding", lambda *a, **k: changed)
-    monkeypatch.setattr(trials, "preflight_magnitude_targets", lambda *a, **k: pytest.fail("preflight opened"))
+    monkeypatch.setattr(evidence, "history_binding", lambda *a, **k: changed)
+    monkeypatch.setattr(evidence, "preflight_magnitude_targets", lambda *a, **k: pytest.fail("preflight opened"))
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("validation opened"))
     with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"):
         case.recorder.record(*args, forecasts=trial_forecasts(case, args))

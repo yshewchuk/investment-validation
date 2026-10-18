@@ -221,7 +221,7 @@ both flag states publish/verify the same plan and never write a ledger.
 
 ## Recorded magnitude-search selection
 
-`magnitude_search_trials.SearchTrials` is library-only, with no CLI or production caller. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies are contracts, foundation, ops migrations/catalog/fingerprints/errors, and research stored-history/target reads. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. `magnitude_history_inputs.history_binding` and `magnitude_search_plan.read_search_plan` own native/plan admission; public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
+`magnitude_search_trials.SearchTrials` is library-only, with no CLI or production caller. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies include contracts, foundation, ops migrations/catalog/fingerprints/errors, research target reads and `magnitude_search_evidence`. That shared helper owns native admission through `magnitude_history_inputs.history_binding` and research stored-history/target reads; `magnitude_search_plan.read_search_plan` owns plan admission. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. Public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
 
 | Condition | Outcome |
 |---|---|
@@ -623,3 +623,53 @@ There is no retry, fallback source, projected calendar or partial-success mode.
 | Entry selection, common coverage or pairing fails | `EXPERIMENT_VARIANT_FAILED`, current stage/counts; zero compared. |
 | Repository integrity or unresolved snapshot | Native code; stage/counts only after comparison admission starts. |
 | CLI filesystem or SQLite failure | `INPUT_CHANGED`, no stage/counts. |
+
+## Selected-candidate outer evaluation
+
+`magnitude_search_outer.execute_outer_fold` is library-only. It requires an existing
+frozen selection and completed native execution/terminal evidence for every inner
+trial before public `freeze`/`execute` replay. Missing or submitted-only evidence
+never launches inner work; permitted candidate failures retain sealed exclusions.
+Exact inner-RMSE ties remain candidate-ID ordered. A distinct immutable `outer-*`
+namespace binds the plan, selection, recipe, limits and installed outer/child sources.
+Only that fold's winner receives bounded horizon refits. Every fit marker commits
+before its child ACK; complete forecasts and successful accounting commit before
+outer targets open. Training is strictly prior to the outer fit boundary.
+
+`magnitude_search_evidence` shares native input admission, matrix identities,
+forecast coverage and target-receipt validation across inner and outer callers.
+SearchTrials wrappers preserve their existing error boundaries and Real/Integral
+submission semantics; outer wrappers require JSON-native numeric types. Target
+validation reconstructs the protected receipt from admitted physical preflight.
+Static imports include these helpers in recorder and outer source bindings.
+Completed replay verifies the complete evidence chain without native payloads or fitting.
+
+| Condition | Enforced outcome |
+|---|---|
+| Invalid outer year or limits | `INVALID_EXPERIMENT_SPEC`; no outer claim or payload access. Limit admission precedes journal/plan checks. |
+| Missing/older/newer or checksum-mismatched journal migrations | `INTEGRITY_FAILED` before plan/evidence/native reads; no implicit migration. |
+| Missing frozen selection, incomplete/submitted-only inner evidence, changed source/selection/input/result binding | `EXPERIMENT_IDENTITY_CONFLICT`; no missing inner execution or replacement. Prior journal associations remain unchanged. |
+| Either no-fit guard on a new outer call | Its original `RuntimeFitForbidden` propagates before affinity resolution/claim; completed replay never invokes either guard. |
+| Invalid child progress, completion or forecast coverage/types | `EXPERIMENT_IDENTITY_CONFLICT`; retain committed fit evidence, open no outer targets, publish no terminal. |
+| Selected estimator fails after one or more horizon starts | `EXPERIMENT_VARIANT_FAILED`; persist exact attempted/completed prefix and failed execution, with no forecasts or successful terminal. |
+| Shared native-input/target admission or resource failure, including late/missing outer targets | Preserve the owning typed refusal; retain the unfinished claim and any durable forecasts, with no partial successful result. No retry or replacement is authorized. |
+| Repeated unfinished outer claim | `EXPERIMENT_IDENTITY_CONFLICT` at create-only start; no refit, replacement or publication recovery. |
+| Artifact publication/read failure, 16 MiB journal cap, or raw SQLite failure | Existing journal policy applies: integrity conflicts, resource unavailability, `RESOURCE_LIMIT_EXCEEDED`, or unchanged raw SQLite error. Keep committed evidence/unreferenced complete objects; no retry or rollback of earlier records. |
+| Invalid replay evidence or target receipt | `EXPERIMENT_IDENTITY_CONFLICT`; no native payloads, fitting or new associations. |
+| Missing any outer terminal during collection | `EXPERIMENT_IDENTITY_CONFLICT` before any outer replay; no writes or missing-work launch. |
+| Metric computation refuses | `EXPERIMENT_VARIANT_FAILED` propagates; no successful terminal/report or candidate substitution. |
+
+`collect_outer_results` inventories all outer terminals/limits, admits native inner evidence once per call,
+then verifies every fold's source/evidence bindings through a replay-only internal path. It returns a deterministic
+read-only aggregate; no admission is cached across calls. Fold/horizon metrics retain complete forecast-target pairs;
+primary RMSE pools event/horizon errors rather than fold RMSEs. Equal complete
+horizon counts preserve equal event weights. The prospective recipe is always the
+latest outer fold's frozen INNER winner. Journals own source/fit/input evidence;
+returned result dictionaries carry their IDs and selected summaries, not all journal
+payloads. Collection does not persist a report artifact, export or ledger row.
+No holdout evaluation, final read, release or deployment authority is added.
+Research remains reconstructed, not observed point-in-time. Direct dependencies are
+the search plan/journal/trial/execution/evidence modules, contracts, foundation,
+ops migrations/fingerprints/errors, both no-fit guards, `engine.v2.research.magnitude_inputs.load_magnitude_targets`
+for outer label reads and `magnitude_report.magnitude_metrics` for fold/aggregate scoring.
+The evidence helper separately consumes native history admission and research stored-history/target APIs; no new scheduler, parser, estimator implementation or third-party dependency is needed.

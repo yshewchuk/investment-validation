@@ -1,8 +1,6 @@
 """Immutable search recording, bounded native inner fits and forecast-based selection."""
 import json
-import math
 import sqlite3
-from numbers import Integral, Real
 from pathlib import Path
 
 from engine.models.no_fit import forbid_fitting as forbid_legacy_fitting
@@ -18,15 +16,14 @@ from engine.v2.models.no_fit import forbid_fitting
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.migrations import migrate, require_current
-from engine.v2.research.magnitude_history_store import read_stored
-from engine.v2.research.magnitude_inputs import (
-    load_magnitude_targets,
-    magnitude_recipe,
-    preflight_magnitude_targets,
-    qualify_magnitude_training_targets,
-)
-from experiments.magnitude_history_inputs import history_binding
+from engine.v2.research.magnitude_inputs import load_magnitude_targets
 from experiments.magnitude_report import magnitude_metrics
+from experiments.magnitude_search_evidence import (
+    admit_fold_inputs,
+    fit_evidence,
+    normalize_forecasts,
+    validate_targets,
+)
 from experiments.magnitude_search_execution import (
     execution_limits,
     run_fitted_trial,
@@ -111,21 +108,8 @@ class SearchTrials:
         return key, inner, candidate
 
     def _inputs(self, inner):
-        binding = self.registration.document
-        snapshot = from_document(SnapshotRef, binding["snapshot"])
-        month = binding["holdouts"]["holdout_as_of_month"]
-        history = history_binding(self.repository, snapshot, binding["magnitude_plan"],
-            binding["magnitude_history_request"], as_of_month=month, event_ids=binding["event_ids"])
-        if history != binding["magnitude_history"]:
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed")
-        participants = set(inner["training_candidate_event_ids"] + inner["evaluation_event_ids"])
-        preflight = preflight_magnitude_targets(self.repository, snapshot, as_of_month=month, event_ids=sorted(participants))
-        stored = read_stored(self.repository, from_document(SnapshotRef, history["feature_snapshot"]), history["context"])
-        train = qualify_magnitude_training_targets(self.repository, snapshot, as_of_month=month,
-            labels_before=inner["training_labels_before"], event_ids=inner["training_candidate_event_ids"])
-        return {"preflight": preflight, "stored_inputs_id": stored["inputs_id"], "training_inputs": dict(train.attrs),
-                "training": train[["event_id", "absolute_move_pct"]].to_dict("records"),
-                "features": [row for row in stored["rows"] if row["event_id"] in participants]}
+        return admit_fold_inputs(self.repository, self.registration.document, inner,
+            history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"))
 
     def start(self, outer_year, inner_year, candidate_id):
         """Claim once, then bind native inputs; interrupted starts cannot be restarted."""
@@ -273,22 +257,7 @@ class SearchTrials:
 
     @staticmethod
     def _fit_evidence(inputs, inner, plan, execution):
-        """Independently bind the child's matrices to the admitted cohort and recipe."""
-        indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
-        train = [row["event_id"] for row in inputs["training"]]
-        result = []
-        for horizon in plan["horizons"]:
-            documents = []
-            for events in (train, inner["evaluation_event_ids"]):
-                rows = [indexed[event, horizon] for event in events]
-                documents.append({"columns": execution["features"], "row_keys": [
-                    [row[name] for name in ("event_id", "context_id", "horizon_sessions")] for row in rows],
-                    "values": [[row[name] for name in execution["features"]] for row in rows]})
-            documents[0]["absolute_move_pct"] = [row["absolute_move_pct"] for row in inputs["training"]]
-            result.append({"horizon_sessions": horizon, "training_event_ids": train,
-                "evaluation_event_ids": inner["evaluation_event_ids"], "training_matrix_id": content_hash(documents[0]),
-                "prediction_matrix_id": content_hash(documents[1])})
-        return result
+        return fit_evidence(inputs, inner, plan, execution)
 
     def _executed(self, plan, outer_year, inner_year, candidate_id, attempt):
         _, terminal = self._terminal(plan, outer_year, inner_year, candidate_id)
@@ -314,24 +283,8 @@ class SearchTrials:
 
     @staticmethod
     def _forecasts(forecasts, inner, horizons):
-        expected = {(event, horizon) for event in inner["evaluation_event_ids"] for horizon in horizons}
         try:
-            if not isinstance(forecasts, list) or len(forecasts) != len(expected):
-                raise ValueError
-            found = {}
-            for row in forecasts:
-                if not isinstance(row, dict) or set(row) != {"event_id", "horizon_sessions", "predicted_absolute_move_pct"}:
-                    raise ValueError
-                horizon = row["horizon_sessions"]
-                value = row["predicted_absolute_move_pct"]
-                if (isinstance(horizon, bool) or not isinstance(horizon, Integral)
-                        or isinstance(value, bool) or not isinstance(value, Real) or value < 0):
-                    raise ValueError
-                pair, value = (row["event_id"], int(horizon)), float(value)
-                if pair not in expected or pair in found or not math.isfinite(value):
-                    raise ValueError
-                found[pair] = {"event_id": pair[0], "horizon_sessions": pair[1], "predicted_absolute_move_pct": value}
-            return json.loads(canonical_json([found[pair] for pair in sorted(expected)]))
+            return json.loads(canonical_json(normalize_forecasts(forecasts, inner, horizons)))
         except (ValueError, TypeError, OverflowError):
             raise fail("INVALID_EXPERIMENT_SPEC", "trial forecasts require complete finite event-horizon coverage") from None
 
@@ -408,28 +361,7 @@ class SearchTrials:
                 or set(validation) != {"inputs_id", "evaluation_inputs", "targets"}
                 or validation["inputs_id"] != admitted["inputs_id"]):
             raise ValueError
-        preflight = cohort["preflight"]
-        events = set(inner["evaluation_event_ids"])
-        consumed = [row for row in preflight["planned_inputs"] if row["event_id"] in events]
-        ordered = [row["event_id"] for row in consumed]
-        if len(ordered) != len(events) or set(ordered) != events:
-            raise ValueError
-        recipe = magnitude_recipe()
-        # Explicit-ID native reads refuse future or held-out events, never return exclusions.
-        receipt = {"schema_version": "research_magnitude_targets.v1",
-            **{name: preflight[name] for name in ("snapshot_id", "holdout_as_of_month", "random_membership_version",
-                "rolling_membership_version", "population_use", "purpose", "computed_moves_version")},
-            "labels_before": inner["evaluation_labels_before"], "target_recipe": recipe,
-            "target_recipe_id": content_hash(recipe), "consumed_inputs": consumed, "excluded_future_events": []}
-        if validation["evaluation_inputs"] != {**receipt, "inputs_id": content_hash(receipt), "holdout_exclusions": []}:
-            raise ValueError
-        if [row["event_id"] for row in validation["targets"]] != ordered:
-            raise ValueError
-        for row in validation["targets"]:
-            value = row["absolute_move_pct"]
-            if (set(row) != {"event_id", "absolute_move_pct"} or isinstance(value, bool)
-                    or not isinstance(value, Real) or value < 0 or not math.isfinite(value)):
-                raise ValueError
+        validate_targets(cohort["preflight"], inner, validation["evaluation_inputs"], validation["targets"])
 
     def _terminal(self, plan, outer_year, inner_year, candidate_id):
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)

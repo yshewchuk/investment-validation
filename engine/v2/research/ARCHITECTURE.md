@@ -565,10 +565,12 @@ chain index, the entry-selection seams above and exit walking for read-only comp
 `experiments/native_registration.py` consumes
 `experiment_population.load_population` and `magnitude_folds`' window/planner.
 `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`.
-`experiments/magnitude_search_trials.py` consumes `read_stored`, `preflight_magnitude_targets`,
-`qualify_magnitude_training_targets`, `load_magnitude_targets` and `magnitude_recipe`.
-That external caller owns legacy/v2 no-fit guards and delegates bounded inner fitting to
+`experiments/magnitude_search_evidence.py` consumes `read_stored`, `preflight_magnitude_targets`,
+`qualify_magnitude_training_targets` and `magnitude_recipe` for shared inner/outer admission.
+`experiments/magnitude_search_trials.py` directly consumes `load_magnitude_targets`,
+owns legacy/v2 no-fit guards and delegates bounded inner fitting to
 `experiments.magnitude_search_execution` (using ops executor thread constants); it performs no outer evaluation.
+`experiments/magnitude_search_outer.py` directly consumes `load_magnitude_targets` for selected outer folds.
 `experiments/magnitude_history_store.py` consumes the stored-history context, build and read APIs.
 Other consumers include `tools/v2_*.py` CLI leaves. `experiments/common_v2.py` reads
 trade, calendar, and chain inputs from pinned v2 data. The archived
