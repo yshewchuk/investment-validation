@@ -25,7 +25,10 @@ def main(argv=None):
     parser.add_argument("--purpose", default="sweep")
     parser.add_argument("--no-ledger", action="store_true")
     parser.add_argument("--ledger", type=Path)
+    parser.add_argument("--max-registration-bytes", type=int, default=native.MAX_NATIVE_EVIDENCE_BYTES)
     args = parser.parse_args(argv)
+    if not 0 < args.max_registration_bytes < 2**62:
+        parser.error("--max-registration-bytes must be a positive SQLite-safe byte budget")
     conn, store, registration, attempted = None, None, None, False
     try:
         if args.purpose != "sweep":
@@ -43,7 +46,8 @@ def main(argv=None):
             registration = native.register_native(conn, store, repository, spec, **binding)
             print(json.dumps({"registered": registration.variant_id}))
             return 0
-        registration = native.read_native_registration(conn, store, spec)
+        registration = native.read_native_registration(conn, store, spec,
+                                                       max_evidence_bytes=args.max_registration_bytes)
         if "final_read" in registration.document:
             raise fail("HOLDOUT_ACCESS_DENIED", "gate evaluation has no final-read authority")
         registration = native.require_native_registration(conn, store, repository, spec,
