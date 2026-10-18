@@ -2832,8 +2832,8 @@ def test_select_pr_tests_unreached_path_named_in_a_literal_selects_its_reader(
     selected = pilot.select_pr_tests(_SELECT_CFG, ["scripts/worker_x.py"],
                                      graph=graph, reasons=reasons)
     assert selected == ["tests/test_a.py"]
-    assert any(r.startswith("fail-safe set added")
-               and "scripts/worker_x.py is reached by tests" in r for r in reasons)
+    assert reasons == ["fail-safe set added (0 tests) because "
+                       "scripts/worker_x.py is reached by tests"]
 
 
 def test_select_pr_tests_literal_reader_adds_the_nonempty_failsafe_set(tmp_path, monkeypatch):
@@ -2876,6 +2876,39 @@ def test_select_pr_tests_non_python_asset_named_in_a_literal_selects_its_reader(
     assert pilot.select_pr_tests(_SELECT_CFG, ["data/gone.json"], graph=graph) is None
 
 
+def test_select_pr_tests_basename_only_literal_selects_the_reader(
+        tmp_path, monkeypatch):
+    tracked = _write_repo(tmp_path, {
+        "tests/test_a.py": 'X = "worker_y.py"\n',
+        "tests/test_b.py": "Y = 1\n",
+        "scripts/worker_y.py": "Z = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert pilot.select_pr_tests(_SELECT_CFG, ["scripts/worker_y.py"], graph=graph) == [
+        "tests/test_a.py"]
+
+
+def test_select_pr_tests_a_syntax_error_closure_file_counts_as_a_reader(
+        tmp_path, monkeypatch):
+    tracked = _write_repo(tmp_path, {
+        "tests/test_a.py": "X = 1\n",
+        "tests/test_b.py": "Y = 1\n",
+        "scripts/w.py": "Z = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+
+    def boom(source):
+        raise SyntaxError("x")
+
+    monkeypatch.setattr(pilot, "_string_literals", boom)
+    monkeypatch.setattr(pilot, "unresolved_import_files", lambda paths: set())
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["scripts/w.py"], graph=graph)
+    assert "tests/test_a.py" in selected
+    assert "tests/test_b.py" in selected
+
+
 def test_select_pr_tests_path_tests_non_matching_mapping_does_not_select(
         tmp_path, monkeypatch):
     cfg = {"pr_selection": {"inert": [], "inert_skip": [], "full_suite": [],
@@ -2884,14 +2917,33 @@ def test_select_pr_tests_path_tests_non_matching_mapping_does_not_select(
         "engine/x.py": "Y = 1\n",
         "tests/test_scan.py": "import os\n",
         "tests/test_a.py": "import engine.x\n",
+        "tests/test_other.py": "X = 1\n",
     })
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
     result = pilot.select_pr_tests(cfg, ["engine/x.py"], graph=graph)
-    assert "tests/test_scan.py" not in result
+    assert result == ["tests/test_a.py"]
 
 
-@pytest.mark.parametrize("bad", ["tests/test_scan.py", {"engine/*": "tests/test_scan.py"}, {"engine/*": []}, ["x"]])
+def test_select_pr_tests_stale_path_tests_target_selects_everything(
+        tmp_path, monkeypatch):
+    cfg = {"pr_selection": {"inert": [], "inert_skip": [], "full_suite": [],
+                            "path_tests": {"engine/*": ["tests/test_missing.py"]}}}
+    tracked = _write_repo(tmp_path, {
+        "engine/__init__.py": "",
+        "engine/x.py": "Y = 1\n",
+        "tests/test_a.py": "import engine.x\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    reasons: list[str] = []
+    result = pilot.select_pr_tests(cfg, ["engine/x.py"], graph=graph, reasons=reasons)
+    assert result is None
+    assert reasons == ["pr_selection.path_tests target tests/test_missing.py "
+                       "for engine/* is not a collected test; selecting the full test suite"]
+
+
+@pytest.mark.parametrize("bad", ["tests/test_scan.py", {"engine/*": "tests/test_scan.py"}, {"engine/*": []}, {"engine/*": [1]}, ["x"]])
 def test_select_pr_tests_malformed_path_tests_selects_everything(tmp_path, monkeypatch, bad):
     cfg = {"pr_selection": {"inert": [], "inert_skip": [], "full_suite": [], "path_tests": bad}}
     tracked = _write_repo(tmp_path, {"engine/x.py": "Y = 1\n", "tests/test_a.py": "import engine.x\n"})
@@ -2920,6 +2972,7 @@ def test_select_pr_tests_path_tests_never_bypass_the_unreached_fallback(tmp_path
 def test_select_pr_tests_an_oversized_closure_file_counts_as_a_reader(tmp_path, monkeypatch):
     tracked = _write_repo(tmp_path, {
         "tests/test_a.py": "X = 1\n# " + "x" * 1_100_000 + "\n",
+        "tests/test_b.py": "Y = 1\n",
         "scripts/w.py": "Z = 1\n",
     })
     monkeypatch.setattr(pilot, "REPO", tmp_path)
@@ -2932,7 +2985,8 @@ def test_select_pr_tests_an_oversized_closure_file_counts_as_a_reader(tmp_path, 
         return original_read_text(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", guard)
-    assert "tests/test_a.py" in pilot.select_pr_tests(_SELECT_CFG, ["scripts/w.py"], graph=graph)
+    assert pilot.select_pr_tests(_SELECT_CFG, ["scripts/w.py"], graph=graph) == [
+        "tests/test_a.py"]
 
 
 @pytest.mark.parametrize("selection, reasons_in, expected_out", [
@@ -2954,8 +3008,7 @@ def test_cmd_select_tests_prints_the_sentinel_files_count_and_reasons(
     assert pilot.cmd_select_tests({}, args) == 0
     captured = capsys.readouterr()
     assert captured.out == expected_out
-    for r in reasons_in:
-        assert f"[mutation_pilot] select-tests: {r}" in captured.err
+    assert captured.err == "".join(f"[mutation_pilot] select-tests: {r}\n" for r in reasons_in)
 
 
 def test_select_pr_tests_graph_build_failure_reason(tmp_path, monkeypatch):

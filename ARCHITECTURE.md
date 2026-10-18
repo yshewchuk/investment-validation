@@ -238,7 +238,9 @@ evidence. See the models and data component contracts.
     test file is a leaf (selects itself and its static importers, never the whole suite); the
     dynamic-import fail-safe set is added only when the diff touches a non-test file that a test
     imports or names in a string literal (an unreached non-doc path narrows only that way,
-    else `__ALL__`; `path_tests` mappings add tests but never bypass this);
+    else `__ALL__`; an unreadable, unparsable or over-1 MB closure file counts as a reader
+    conservatively, without a found literal; `path_tests` mappings add tests but never bypass
+    this, and a matched mapping naming an uncollected test selects `__ALL__`);
     resolved dependencies produce precise edges; a literal script launch to a non-root path is
     unresolved (resolvable root-level script and `-m` launches retain precise behavior; untracked
     `-m` targets and Python launches with a non-`None` `cwd` are unresolved); recognized

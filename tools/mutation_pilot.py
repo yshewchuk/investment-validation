@@ -2094,6 +2094,10 @@ def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = No
     for path in sorted(changed_set):
         for pat, listed in path_tests.items():
             if fnmatch.fnmatchcase(path, pat):
+                for t in listed:
+                    if t not in tests_set:
+                        note(f"pr_selection.path_tests target {t} for {pat} is not a collected test; selecting the full test suite")
+                        return None
                 selected |= {t for t in listed if t in tests_set}
         hit = {t for t in tests if path in closures[t]}
         selected |= hit
