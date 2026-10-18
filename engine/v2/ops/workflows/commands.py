@@ -240,6 +240,36 @@ def _rollback_plan_from_args(args):
     return rollback_plan(release_root=args.release_root)
 
 
+def _training_plan(args, root, conn, clock):
+    from engine.v2.ops.training import native_training_pin_problems, training_plan
+
+    input_mode = getattr(args, "training_input_mode", "legacy")
+    native = input_mode == "native_d14"
+    catalog_path = getattr(args, "training_catalog", "")
+    objects_root = getattr(args, "training_artifact_root", "")
+    if native and args.input_manifest:
+        raise fail("INVALID_REQUEST", "native_d14 must not name --input-manifest")
+    if not native and any(getattr(args, "training_" + field, "")
+                          for field in ("catalog", "artifact_root", "snapshot_id", "receipt_id")):
+        raise fail("INVALID_REQUEST", "native pins require --training-input-mode native_d14")
+    if native:
+        problems = native_training_pin_problems(
+            (catalog_path, objects_root, getattr(args, "training_snapshot_id", ""),
+             getattr(args, "training_receipt_id", "")), require_absolute=False)
+        if problems:
+            raise fail("INVALID_REQUEST", "training plan is invalid", details={"problems": problems})
+    return training_plan(
+        mode=args.training_mode, recipe=args.recipe or "", state=args.state or "",
+        alpha=args.alpha, cutoffs=tuple(args.cutoff), strategies=tuple(args.strategy),
+        pairs_path=args.pairs or "", ticker_chunk=args.ticker_chunk,
+        input_mode=input_mode,
+        catalog_path=str(Path(catalog_path).resolve()) if catalog_path else "",
+        objects_root=str(Path(objects_root).resolve()) if objects_root else "",
+        snapshot_id=getattr(args, "training_snapshot_id", ""),
+        receipt_id=getattr(args, "training_receipt_id", ""),
+        manifest_ref=None if native else _read_input_manifest_ref(args, root, conn, clock, nightly=False))
+
+
 def _plan_command(args, root, conn, clock):
     if args.kind == "nightly":
         tickers = _ticker_list(args.tickers)
@@ -259,12 +289,7 @@ def _plan_command(args, root, conn, clock):
                             refresh_mode=args.refresh_mode, refresh_plan=_read_refresh_plan(args),
                             catalog_path=_catalog_path(conn), objects_root=str(root))
     elif args.kind == "training":
-        from engine.v2.ops.training import training_plan
-        plan = training_plan(mode=args.training_mode, recipe=args.recipe or "",
-                             state=args.state or "", alpha=args.alpha,
-                             cutoffs=tuple(args.cutoff), strategies=tuple(args.strategy),
-                             pairs_path=args.pairs or "", ticker_chunk=args.ticker_chunk,
-                             manifest_ref=_read_input_manifest_ref(args, root, conn, clock, nightly=False))
+        plan = _training_plan(args, root, conn, clock)
     elif args.kind == "promote":
         from engine.v2.ops.training import promote_plan
         expected_previous = getattr(args, "expected_previous_release_id", None)

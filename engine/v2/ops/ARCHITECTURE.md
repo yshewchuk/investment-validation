@@ -35,7 +35,7 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
 - `serve` — starts the supervisor loop
 - `plan {nightly,experiment,training,promote,rollback}` — builds and saves a plan
   document; flags apply by kind: `training` takes `--training-mode`, `--recipe`,
-  `--state`, `--alpha`, `--cutoff`, `--strategy`, `--pairs`, `--ticker-chunk`;
+  `--state`, `--alpha`, `--cutoff`, `--strategy`, `--pairs`, `--ticker-chunk`; native monthly training additionally uses `--training-input-mode native_d14`, `--training-catalog`, `--training-artifact-root`, `--training-snapshot-id`, `--training-receipt-id`;
   `promote` takes `--release-root`, `--release-id` and `--expected-previous-release-id`;
   `rollback` takes `--release-root` and refuses `--release-id`. It pins the rollback target at plan time; only `NoPriorRelease` leaves the target unset. A submitted rollback with an incumbent but no pinned target is refused as typed `VALIDATION_FAILED` before pointer or history mutation. Other resolver errors become typed `VALIDATION_FAILED`.
 - `submit --plan --idempotency-key`
@@ -55,7 +55,7 @@ Internally: `nightly.py`'s `GRAPH`, `graph_order()`, `OPTIONAL`, `NO_JOB_STAGES`
 `build_legacy_job_requests`, `_stage_sequence` (see "Diagrams" below); `supervisor.Service`/`serve`; the
 coordinator-effect functions in `effects_graph.py`; `training.py`'s `training_job_kind`/`promote_job_kind` (registered in
 `stages.py::_core_kinds`, not in `supervisor._COORDINATOR_EFFECT_KINDS`), `training_plan`/`promote_plan`,
-`run_training_worker`/`run_promote_worker`; `state_stage.py` (`phase5_state_stage`); `BoardRequest`/`board_requests(as_of, horizon_days, tickers, events_table)`
+`run_training_worker`/`run_promote_worker`; `native_training_pin_problems((catalog, store, snapshot, receipt), require_absolute=True)` returns a problem list without I/O (CLI validates raw pins with `False` before path resolution); `state_stage.py` (`phase5_state_stage`); `BoardRequest`/`board_requests(as_of, horizon_days, tickers, events_table)`
 (`native_board_universe.py`) — `board_requests` emits one `BoardRequest` — the pure key `(ticker, strategy, event_date, session)` — per event ×
 native-covered strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
 `computed_moves_job_kind`/`forward_calendar_job_kind`, `CalendarMovesParameters`/`calendar_moves_parameter_problems`/
@@ -931,11 +931,9 @@ waits without submitting until its paired succeeded inputs are ready.
   parent).
 - `training`/`models_promote`/`models_rollback` are `_core_kinds()` jobs, not
   `supervisor._COORDINATOR_EFFECT_KINDS`; subprocesses do their writes (so does `phase5_state_stage`, registry-added, via `tools/phase5_state_stage_job.py`: models doc §2.2).
-  `run_training_worker` calls one of four `tools/phase5_training_job.py`
-  functions and writes `training_result.json`; `run_promote_worker` calls `deployment.promote`;
-  `run_rollback_worker` uses its plan-pinned incumbent and target, then writes
-  `pointer_state.json`. Recovery recognizes that exact prior swap without
-  moving the pointer again. None run in the nightly DAG; the pool sidecar (models doc §2.2.1) or operators submit with
+  `run_training_worker` uses the legacy tool by default; `input_mode="native_d14"` selects receipt-verified `build_d14_dataset` only for monthly `implied_t1`/`runup_move`, then passes `training_inputs` to the same resumable training job and writes `training_result.json`.
+  The worker code manifest includes the tracked `engine/models/registry.json` used for recipe feature order and seeds. Native plans require absolute `catalog_path`/`objects_root` and explicit `snapshot_id`/`receipt_id`; incomplete, mixed legacy or unsupported recipe bindings refuse before source reads. No mutable-head discovery, legacy staging/lease or cross-run cache reuse occurs. Source failures map to `INPUT_CHANGED` with `data_code`; training resume mismatch remains `CHECKPOINT_INCOMPATIBLE`. `run_promote_worker` calls `deployment.promote`;
+  `run_rollback_worker` uses its plan-pinned incumbent and target, then writes `pointer_state.json`. Recovery recognizes that exact prior swap without moving the pointer again. None run in the nightly DAG; the pool sidecar (models doc §2.2.1) or operators submit with
   `ops plan training|promote|rollback` + `ops submit`. Rollback uses principal
   `operator`, namespace `shadow` and the caller idempotency key like promote.
 - `board_requests`: a tuple of `BoardRequest`, ordered by
@@ -1163,6 +1161,8 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 
 | Condition | Outcome |
 |---|---|
+| incomplete, blank, NUL-containing or mixed native pins, unsupported native recipe/options, or non-absolute library source paths | non-retryable `INVALID_REQUEST` before source reads; CLI validates raw pins before resolving relative paths. Plan/worker admission retains the exact `problems` list. |
+| native source verification raises `DataError` | non-retryable `INPUT_CHANGED` (`native D14 inputs refused`); private worker diagnostics retain `data_code` through `diagnostic_ref`, never raw source paths. |
 | a training-tool refusal, or `deployment.DeploymentError` (including a superseded release hash, `ConcurrentPromote` (`CONCURRENT_PROMOTE`) for a missing/stale expected incumbent when the target is not already live, or `NoPriorRelease` when rollback history has no earlier incumbent) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED`; a stale rollback plan writes no successful output or pointer/history change |
 | no explicit `release_root` given AND `MODEL_RELEASE_ROOT` unset, or `ops plan promote` supplies a blank `--expected-previous-release-id` | `INVALID_REQUEST` at plan time; no empty `release_root` reaches the worker, and only an absent incumbent option means no guard |
 | a recipe job's `pairs_path` does not resolve beneath the attempt's own pinned legacy root | `INPUT_CHANGED` at execution, even after passing plan-time validation |

@@ -18,6 +18,17 @@ Replaces (§4.4): `new supervisor and catalog`, `dashboard/nightly.py becomes a 
 - The nightly job graph and its release boundary.
 - Explicit Massive acquisition via `python -m engine.v2.ops.massive_acquire` and daily/action snapshot or parent-bound refresh submission via `python -m engine.v2.ops.massive_snapshot`; [operator usage](stores/massive/README.md).
 
+## Native monthly training
+
+`ops plan training --training-mode recipe --recipe implied_t1:*:tier4_monthly`
+accepts `--training-input-mode native_d14` with all four explicit pins:
+`--training-catalog /absolute/catalog.sqlite`, `--training-artifact-root /absolute/store`,
+`--training-snapshot-id ID`, and `--training-receipt-id ID`. Use the returned plan
+with ordinary `ops submit`; `runup_move:*:tier4_monthly` uses the same contract.
+Planning validates without reading the source. The worker verifies immutable
+inputs on every attempt and binds their lineage into resume identity. No legacy
+manifest, mutable-head discovery, schedule or promotion is involved.
+
 ## Non-responsibilities
 
 - **Decide research conclusions** — `engine/v2/evaluation` does it instead.

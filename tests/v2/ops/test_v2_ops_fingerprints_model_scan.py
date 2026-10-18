@@ -161,8 +161,8 @@ def test_manifest_identical_with_and_without_a_data_dir(tmp_path):
 
     artifact_bytes = _dump_pickle_referencing(
         tmp_path, "data/models/thing.joblib", dotted_module="engine.models.ensemble")
-    _write_registry(tmp_path, model_id="thing_v1", artifact_relative="data/models/thing.joblib",
-                    artifact_bytes=artifact_bytes)
+    # Keep tracked recipe metadata fixed: only the data tree changes here.
+    assert artifact_bytes
     with_data = worker_source_manifest(tmp_path)
 
     assert without_data == with_data
@@ -226,3 +226,19 @@ def test_declared_set_covers_the_real_champion_artifacts_when_data_is_present():
         pytest.skip("no materialized data/models/ next to this box's source tree")
 
     verify_pinned_model_modules(live_root)  # exercises the same assertion
+
+
+def test_recipe_registry_bytes_change_worker_implementation_identity(tmp_path):
+    _seed_base(tmp_path)
+    for module in MODEL_PICKLE_MODULES:
+        _write(tmp_path, module.replace(".", "/") + ".py", "")
+    first, second = '{"seed": 1}', '{"seed": 2}'
+    assert len(first) == len(second)
+    _write(tmp_path, "engine/models/registry.json", first)
+    before = worker_source_manifest(tmp_path)
+    _write(tmp_path, "engine/models/registry.json", second)
+    after = worker_source_manifest(tmp_path)
+    assert before["engine/models/registry.json"] == "sha256:" + hashlib.sha256(first.encode()).hexdigest()
+    assert after["engine/models/registry.json"] == "sha256:" + hashlib.sha256(second.encode()).hexdigest()
+    assert before["engine/models/registry.json"] != after["engine/models/registry.json"]
+    assert {key for key in before if before[key] != after[key]} == {"engine/models/registry.json"}

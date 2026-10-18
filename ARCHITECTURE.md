@@ -739,6 +739,10 @@ change their arithmetic or imply that source receipt production is available.
   This contract adds a migration exception: `training.build_d14_dataset` for monthly
   `implied_t1`/`runup_move`: it retains imported `feature_panel` history
   with explicit snapshot/receipt/calendar/table-version lineage.
+  Operator-submitted `training` jobs opt into `input_mode="native_d14"` with
+  explicit catalog/store/snapshot/receipt pins for these monthly recipes.
+  Both native CLI and worker bind `training_inputs` into the training resume
+  identity; supervisor cross-run cache reuse is disabled for this path.
   This is compatibility history, not native historical production or proof of
   EOD availability/finality. Native scoring/capture's answer-free rule is unchanged.
 - **Missing input → typed refusal, never a silent default.** A missing or
