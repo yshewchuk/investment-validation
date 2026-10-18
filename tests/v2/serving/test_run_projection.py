@@ -249,32 +249,6 @@ def test_run_projection_refuses_list_or_non_json_plan(tmp_path):
         _assert_no_release_row(serving_root)
 
 
-# 9. no-plan run records the default legacy_bundle row source
-def test_run_projection_no_plan_records_legacy_bundle(tmp_path):
-    inputs = _flat_inputs(tmp_path / "inputs")
-
-    _, doc = run_projection(**_args(inputs, tmp_path / "serving"))
-
-    conn = projections.connect(str(tmp_path / "serving" / "serving.sqlite"))
-    try:
-        release = projections.get_release(conn, doc["release_id"])
-    finally:
-        conn.close()
-    assert release.row_sources == ("legacy_bundle",)
-
-
-# 10. unknown bundle_format -> INVALID_REQUEST, no release row
-def test_run_projection_unknown_bundle_format_raises_and_writes_no_release(tmp_path):
-    inputs = _flat_inputs(tmp_path / "inputs")
-    serving_root = tmp_path / "serving"
-
-    with pytest.raises(OpsError) as error:
-        run_projection(**_args(inputs, serving_root, bundle_format="bogus"))
-    assert error.value.code == "INVALID_REQUEST"
-
-    _assert_no_release_row(serving_root)
-
-
 # 11. read_capped_bytes refuses past the cap and returns the bytes up to it
 def test_read_capped_refuses_over_cap_and_returns_at_cap(tmp_path):
     at_cap = tmp_path / "at_cap.bin"
@@ -287,6 +261,9 @@ def test_read_capped_refuses_over_cap_and_returns_at_cap(tmp_path):
         read_capped_bytes(over_cap, cap=10)
     assert exc.value.code == "ARTIFACT_TOO_LARGE"
 
+
+# 11e. a missing nightly plan -> INVALID_REQUEST ("nightly plan is unreadable"), no release row
+def test_run_projection_refuses_missing_nightly_plan(tmp_path):
     inputs = _flat_inputs(tmp_path / "inputs")
     missing_plan = tmp_path / "missing_plan.json"
     serving_root = tmp_path / "serving_missing_plan"

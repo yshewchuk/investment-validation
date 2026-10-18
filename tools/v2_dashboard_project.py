@@ -121,19 +121,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+_MAX_PLAN_BYTES = 1048576
+
+
 def _read_plan(path: Path) -> dict:
     """Read the shadow nightly plan with a bounded read and object check.
 
-    The file is read through a 1 MiB cap so an oversized plan cannot exhaust
-    memory; anything over the cap, that cannot be read, that is not valid JSON,
-    or that is not a JSON object, is refused as ``INVALID_REQUEST``.
+    The file is read through the shared :func:`read_capped_bytes` helper with a
+    1 MiB cap so an oversized plan cannot exhaust memory; anything over the cap,
+    that cannot be read, that is not valid JSON, or that is not a JSON object,
+    is refused as ``INVALID_REQUEST``.
     """
     try:
-        with open(path, "rb") as fh:
-            raw = fh.read(1048577)
-        if len(raw) > 1048576:
-            raise fail("INVALID_REQUEST", "nightly plan exceeds 1 MiB")
+        raw = read_capped_bytes(path, cap=_MAX_PLAN_BYTES)
         plan = json.loads(raw)
+    except LegacyBundleError:
+        raise fail("INVALID_REQUEST", "nightly plan exceeds 1 MiB") from None
     except (OSError, RecursionError):
         raise fail("INVALID_REQUEST", "nightly plan is unreadable") from None
     except ValueError:

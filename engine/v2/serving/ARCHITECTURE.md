@@ -185,7 +185,8 @@ label the run it displays.
 | Report malformed or cannot be read safely | `NATIVE_PARITY_REPORT_MALFORMED` Problem (503); no data |
 | Selected catalog output missing or unreadable, or selected report schema invalid | `NATIVE_PARITY_REPORT_MALFORMED` Problem (503); no fallback to an older job |
 | Report `as_of` predates current release `resolved_as_of` | `stale` (200); all retained data still returned |
-| Current release cannot be resolved, including pointer read or SQLite operational failures | Report `available`; freshness indeterminate; serving-index integrity errors retain their normal propagation |
+| Current-release pointer absent or unresolvable, or a `sqlite3.OperationalError` re-opening the index or reading the release | Report `available`; freshness indeterminate |
+| The release resolver raises `SERVING_INDEX_UNREADABLE` | That Problem (503, retryable); serving-index integrity errors retain their normal propagation |
 | Detail `row_key` absent from the report | 404 Problem |
 | Cursor belongs to another report or detail filter | `CURSOR_MISMATCH` Problem (409) |
 | Cache/retry/transaction/partial write/idempotency | `no-store`, no ETag; no retries, jobs or writes; report-derived summary fields and detail items stay stable for the same report and query; freshness `status` may change with current-release resolution |
