@@ -61,6 +61,8 @@ def test_worker_and_standalone_cli_have_same_resume_identity(pinned, role, monke
     with pytest.raises(OpsError) as err:
         training.run_training_worker({**parameters, "receipt_id": "r2"}, root)
     assert err.value.problem.code == "CHECKPOINT_INCOMPATIBLE"
+    assert err.value.problem.message == "training receipt refused"
+    assert err.value.problem.retryable is False
     assert err.value.problem.details == {"issues": ["RESUME_MISMATCH"]}
     assert json.loads((root / "training/job.json").read_text()) == identity
 
@@ -97,6 +99,8 @@ def test_supervisor_ignores_legacy_barrier_and_reverifies_each_submission(pinned
         failure = json.loads(conn.execute("SELECT failure_json FROM jobs WHERE job_id=?",
                                           (second.job_id,)).fetchone()[0])
         assert failure["code"] == "INPUT_CHANGED"
+        assert failure["message"] == "native D14 inputs refused"
+        assert failure["details"] == {}
         assert failure["retryable"] is False
         store = ArtifactStore(root)
         details = json.loads(store.read_verified(artifact(conn, store, failure["diagnostic_ref"])))

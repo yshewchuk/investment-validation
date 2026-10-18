@@ -1,6 +1,6 @@
 {
   "schema_version": "phase2_coverage.v1.0",
-  "suite_version": "phase2_coverage_suite:b7295a7e36e9af849fc68fcac89f333f2d2651c3b5a11040b0a51d00085b1052",
+  "suite_version": "phase2_coverage_suite:41d5881061353297d37e06599adeec4ae5c3d1efe7ae89c92e259e123dc1d451",
   "test_files": [
     "tests/test_checks_phase2_corpus_parity.py",
     "tests/test_checks_phase2_fault_matrix.py",
@@ -28,7 +28,7 @@
     "tests/test_v2_data_tier4_coverage.py",
     "tests/test_v2_ops_decision_validation_order.py",
     "tests/test_v2_ops_fingerprints_code_assets.py",
-    "tests/test_v2_ops_fingerprints_model_scan.py",
+    "tests/v2/ops/test_v2_ops_fingerprints_model_scan.py",
     "tests/test_v2_ops_ledger_history_import.py",
     "tests/v2/ops/test_v2_ops_price_history.py",
     "tests/v2/integration/test_checks_phase2_parity.py",
@@ -2557,35 +2557,35 @@
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_fingerprints_model_scan.py::test_declared_model_modules_join_the_snapshot_without_any_data_dir",
+      "nodeid": "tests/v2/ops/test_v2_ops_fingerprints_model_scan.py::test_declared_model_modules_join_the_snapshot_without_any_data_dir",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_fingerprints_model_scan.py::test_declared_model_module_missing_from_source_tree_refuses_at_plan_time",
+      "nodeid": "tests/v2/ops/test_v2_ops_fingerprints_model_scan.py::test_declared_model_module_missing_from_source_tree_refuses_at_plan_time",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_fingerprints_model_scan.py::test_manifest_identical_with_and_without_a_data_dir",
+      "nodeid": "tests/v2/ops/test_v2_ops_fingerprints_model_scan.py::test_manifest_identical_with_and_without_a_data_dir",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_fingerprints_model_scan.py::test_verify_accepts_a_champion_artifact_inside_the_declared_set",
+      "nodeid": "tests/v2/ops/test_v2_ops_fingerprints_model_scan.py::test_verify_accepts_a_champion_artifact_inside_the_declared_set",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_fingerprints_model_scan.py::test_verify_refuses_a_champion_artifact_outside_the_declared_set",
+      "nodeid": "tests/v2/ops/test_v2_ops_fingerprints_model_scan.py::test_verify_refuses_a_champion_artifact_outside_the_declared_set",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_fingerprints_model_scan.py::test_verify_refuses_a_missing_pinned_artifact",
+      "nodeid": "tests/v2/ops/test_v2_ops_fingerprints_model_scan.py::test_verify_refuses_a_missing_pinned_artifact",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_fingerprints_model_scan.py::test_verify_refuses_a_missing_registry",
+      "nodeid": "tests/v2/ops/test_v2_ops_fingerprints_model_scan.py::test_verify_refuses_a_missing_registry",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_fingerprints_model_scan.py::test_declared_set_covers_the_real_champion_artifacts_when_data_is_present",
+      "nodeid": "tests/v2/ops/test_v2_ops_fingerprints_model_scan.py::test_declared_set_covers_the_real_champion_artifacts_when_data_is_present",
       "outcome": "passed"
     },
     {

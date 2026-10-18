@@ -113,9 +113,10 @@ Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
-`engine.v2.ops` imports `TrainingRefused` (to map a refused training receipt to a
-typed `OpsError`); no other v2 package
-imports this one, and none below layer 6 may. The real-data entry points are
+`engine.v2.ops` imports `build_d14_dataset` to construct explicitly pinned native
+D14 datasets for supervised recipe jobs, and `TrainingRefused` to map refused
+training receipts to typed `OpsError`s. No other v2 package imports this one,
+and none below layer 6 may. Standalone real-data entry points are
 `tools/phase5_training_job.py` and `tools/phase5_d14_inputs.py`, outside v2 packages.
 
 `experiments/magnitude_fitted.py` consumes `fit_magnitude_predictions` after native admission.
