@@ -1128,6 +1128,8 @@ class Service:
 
     def _cache_allowed(self, claim):
         """An undeclared or incomplete read set disables cross-run cache reuse (§9.2)."""
+        if claim.spec.kind == "training" and claim.spec.parameters.get("input_mode") == "native_d14":
+            return False
         if claim.spec.kind in {"native_gate_pricing", "native_gate_evaluation", "massive_acquisition", "massive_history_acquisition", "massive_daily_snapshot"}:
             return False
         if not any(mode == "read" for _, mode in self._store_domains(claim)):

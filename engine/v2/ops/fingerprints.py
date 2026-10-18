@@ -107,6 +107,8 @@ CODE_ASSET_FILES: tuple[str, ...] = (
     # The fixed evaluation child's registered runner is verified, not imported.
     "experiments/v2_gate.py",
     "engine/v2/data/legacy_annotations.json",
+    # Training recipes read the tracked feature/seed manifest relative to their code.
+    "engine/models/registry.json",
     # engine/models/training/chooser.py dynamically loads this file via
     # importlib.util.spec_from_file_location (not a static import, so the
     # AST closure above never sees it). It in turn loads

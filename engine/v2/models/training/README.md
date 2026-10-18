@@ -74,8 +74,13 @@ dependency through its snapshot-pinned history columns. It does not substitute
 the live panel-row population. The CLI,
 `python -m tools.phase5_d14_inputs --role implied_t1 --out OUT`, requires
 `--catalog`, `--artifact-root`, `--snapshot-id`, and `--receipt-id`; optional
-`--plan-only` writes receipts without fitting. Existing
-phase5 and supervised routes are separate entry points. The receipt must belong to that snapshot and pin its original
+`--plan-only` writes receipts without fitting. Supervised `ops plan training`
+can select the same builder with `--training-input-mode native_d14` and explicit
+`--training-catalog`, `--training-artifact-root`, `--training-snapshot-id`,
+`--training-receipt-id` pins, then `ops submit` uses the existing worker lifecycle.
+Only the two `*:tier4_monthly` recipes are admitted; no legacy manifest or pairs
+override may be mixed in. Both entry points record identical `training_inputs`.
+The receipt must belong to that snapshot and pin its original
 calendar. `run_training_job(input_identity=...)` records those source pins in
 the resume identity, alongside the unchanged dataset and recipe fingerprints.
 

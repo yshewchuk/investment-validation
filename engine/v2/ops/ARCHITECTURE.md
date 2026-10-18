@@ -35,7 +35,7 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
 - `serve` — starts the supervisor loop
 - `plan {nightly,experiment,training,promote,rollback}` — builds and saves a plan
   document; flags apply by kind: `training` takes `--training-mode`, `--recipe`,
-  `--state`, `--alpha`, `--cutoff`, `--strategy`, `--pairs`, `--ticker-chunk`;
+  `--state`, `--alpha`, `--cutoff`, `--strategy`, `--pairs`, `--ticker-chunk`; native monthly training additionally uses `--training-input-mode native_d14`, `--training-catalog`, `--training-artifact-root`, `--training-snapshot-id`, `--training-receipt-id`;
   `promote` takes `--release-root`, `--release-id` and `--expected-previous-release-id`;
   `rollback` takes `--release-root` and refuses `--release-id`. It pins the rollback target at plan time; only `NoPriorRelease` leaves the target unset. A submitted rollback with an incumbent but no pinned target is refused as typed `VALIDATION_FAILED` before pointer or history mutation. Other resolver errors become typed `VALIDATION_FAILED`.
 - `submit --plan --idempotency-key`
@@ -931,8 +931,8 @@ waits without submitting until its paired succeeded inputs are ready.
   parent).
 - `training`/`models_promote`/`models_rollback` are `_core_kinds()` jobs, not
   `supervisor._COORDINATOR_EFFECT_KINDS`; subprocesses do their writes (so does `phase5_state_stage`, registry-added, via `tools/phase5_state_stage_job.py`: models doc §2.2).
-  `run_training_worker` calls one of four `tools/phase5_training_job.py`
-  functions and writes `training_result.json`; `run_promote_worker` calls `deployment.promote`;
+  `run_training_worker` uses the legacy tool by default; `input_mode="native_d14"` selects receipt-verified `build_d14_dataset` only for monthly `implied_t1`/`runup_move`, then passes `training_inputs` to the same resumable training job and writes `training_result.json`.
+  The worker code manifest includes the tracked `engine/models/registry.json` used for recipe feature order and seeds. Native plans require absolute `catalog_path`/`objects_root` and explicit `snapshot_id`/`receipt_id`; incomplete, mixed legacy or unsupported recipe bindings refuse before source reads. No mutable-head discovery, legacy staging/lease or cross-run cache reuse occurs. Source failures map to `INPUT_CHANGED` with `data_code`; training resume mismatch remains `CHECKPOINT_INCOMPATIBLE`. `run_promote_worker` calls `deployment.promote`;
   `run_rollback_worker` uses its plan-pinned incumbent and target, then writes
   `pointer_state.json`. Recovery recognizes that exact prior swap without
   moving the pointer again. None run in the nightly DAG; the pool sidecar (models doc §2.2.1) or operators submit with

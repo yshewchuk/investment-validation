@@ -38,6 +38,8 @@ def domains_of(registry, kind_name, parameters=None):
     """
     if registry is None:
         return ()
+    if kind_name == "training" and (parameters or {}).get("input_mode") == "native_d14":
+        return ()
     if isinstance(parameters, dict) and parameters.get("input_mode") == "snapshot":
         return ()
     return registry.get(kind_name).store_domains

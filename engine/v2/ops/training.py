@@ -43,6 +43,11 @@ class TrainingParameters:
     #: blocked for submission (see :func:`training_plan`) rather than failing
     #: ``INPUT_CHANGED`` at launch.
     input_bindings: dict[str, str] | None = None
+    input_mode: str = "legacy"
+    catalog_path: str = ""
+    objects_root: str = ""
+    snapshot_id: str = ""
+    receipt_id: str = ""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -76,6 +81,9 @@ class RollbackParameters:
 
 
 def _recipe_problems(params) -> list[str]:
+    if params.input_mode == "native_d14":
+        return (["native_d14 recipe does not take state, alpha, cutoffs or strategies"]
+                if any((params.state, params.alpha is not None, params.cutoffs, params.strategies)) else [])
     from tools import phase5_training_job as job
 
     if not params.recipe:
@@ -170,12 +178,35 @@ def _shape_problems(params) -> list[str]:
     return problems
 
 
+def _native_input_problems(params) -> list[str]:
+    """Admit only a complete explicit source; this check performs no I/O."""
+    pins = (params.catalog_path, params.objects_root, params.snapshot_id, params.receipt_id)
+    if params.input_mode == "legacy":
+        return ["native pins require input_mode=native_d14"] if any(pins) else []
+    if params.input_mode != "native_d14":
+        return ["input_mode must be legacy or native_d14"]
+    problems = []
+    if params.mode != "recipe" or params.recipe not in (
+            "implied_t1:*:tier4_monthly", "runup_move:*:tier4_monthly"):
+        problems.append("native_d14 requires an implied_t1/runup_move monthly recipe")
+    if params.input_bindings or params.pairs_path:
+        problems.append("native_d14 must not mix legacy bindings or pairs_path")
+    if not all(isinstance(value, str) and value.strip() and "\x00" not in value for value in pins):
+        problems.append("native_d14 requires catalog_path, objects_root, snapshot_id and receipt_id")
+    elif not all(Path(value).is_absolute() for value in pins[:2]):
+        problems.append("native_d14 catalog_path and objects_root must be absolute")
+    return problems
+
+
 def training_parameter_problems(job, params) -> list[str]:
     """Pure validator for the ``training`` kind (no data or artifact reads)."""
     problems = []
     if params.expected_ids != ("training",):
         problems.append("expected_ids must be exactly ('training',)")
     problems.extend(_shape_problems(params))
+    input_problems = _native_input_problems(params)
+    if input_problems:
+        return problems + input_problems
     if params.mode not in MODES:
         problems.append("mode must be one of " + ", ".join(MODES))
         return problems
@@ -251,7 +282,8 @@ def rollback_job_kind() -> JobKind:
 
 
 def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategies=(),
-                  pairs_path="", ticker_chunk=1000, manifest_ref=None) -> dict:
+                  pairs_path="", ticker_chunk=1000, manifest_ref=None, input_mode="legacy",
+                  catalog_path="", objects_root="", snapshot_id="", receipt_id="") -> dict:
     """Build an operator-submitted ``training`` plan.
 
     ``manifest_ref`` is the pinned ``legacy_input_manifest.v1.0`` artifact the
@@ -259,7 +291,9 @@ def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategi
     ``legacy_manifest.json`` binding. Without it the job has no declared read
     set and the supervisor's launch-time ``_pin_read_set`` refuses
     ``INPUT_CHANGED``, so such a plan carries the same blocked prerequisites a
-    manifest-less nightly plan does and can never be submitted.
+    manifest-less nightly plan does and can never be submitted. Native D14
+    plans instead require all four explicit source pins; no legacy manifest is
+    read or staged. Source bytes are verified by the worker on every attempt.
     """
     from engine.v2.foundation import content_hash
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
@@ -268,7 +302,9 @@ def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategi
     params = TrainingParameters(
         expected_ids=("training",), mode=mode, recipe=recipe, state=state,
         alpha=alpha, cutoffs=tuple(cutoffs), strategies=tuple(strategies),
-        pairs_path=pairs_path, ticker_chunk=ticker_chunk,
+        pairs_path=pairs_path, ticker_chunk=ticker_chunk, input_mode=input_mode,
+        catalog_path=catalog_path, objects_root=objects_root,
+        snapshot_id=snapshot_id, receipt_id=receipt_id,
         input_bindings=({"legacy_manifest.json": manifest_ref} if manifest_ref else None))
     problems = training_parameter_problems(None, params)
     if problems:
@@ -278,7 +314,7 @@ def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategi
     return {"schema_version": "operations_plan.v1.0", "kind": "training", "mode": "shadow",
             "effects": ["staged"], "parameters": vars(params),
             "input_refs": [manifest_ref] if manifest_ref else [],
-            "blocked_prerequisites": [] if manifest_ref else [
+            "blocked_prerequisites": [] if manifest_ref or input_mode == "native_d14" else [
                 "frozen_legacy_input_manifest", "adapter_parity_receipt"],
             "spec_hash": content_hash(vars(params)),
             "implementation_ref": content_hash(worker_source_manifest(root3)),
@@ -419,15 +455,25 @@ def _pinned_pairs_path(root: Path, pairs_path: str) -> str | None:
 def _run_recipe(parameters, out_dir, root) -> dict:
     from tools import phase5_training_job as job
 
+    job._guard("tools.phase5_training_job._run_recipe:" + parameters["recipe"])
     try:
         recipe = job.current_recipes()[job._key(parameters["recipe"])]
     except (KeyError, ValueError):
         raise fail("VALIDATION_FAILED", "recipe is not a current training recipe") from None
-    job._guard("tools.phase5_training_job._run_recipe:" + recipe.recipe_id)
-    dataset = job.build_dataset(recipe, pairs_path=_pinned_pairs_path(root, parameters["pairs_path"]))
+    if parameters.get("input_mode", "legacy") == "native_d14":
+        from engine.v2.models.training import build_d14_dataset
+
+        dataset = build_d14_dataset(
+            recipe.key.role, catalog=parameters["catalog_path"],
+            artifact_root=parameters["objects_root"], snapshot_id=parameters["snapshot_id"],
+            receipt_id=parameters["receipt_id"])
+        identity = {"input_identity": dataset.attrs["training_inputs"]}
+    else:
+        dataset = job.build_dataset(recipe, pairs_path=_pinned_pairs_path(root, parameters["pairs_path"]))
+        identity = {}
     extra = ({"cutoffs": tuple(parameters["cutoffs"]), "alpha": parameters["alpha"]}
              if recipe.folds.kind == "request_cutoff" else {})
-    result = job.run_training_job(recipe, dataset, out_dir, plan_only=False, **extra)
+    result = job.run_training_job(recipe, dataset, out_dir, plan_only=False, **identity, **extra)
     return {"mode": "recipe", "recipe_id": recipe.recipe_id,
             "folds": {o.fold_id: o.status for o in result.outcomes}}
 
@@ -498,16 +544,30 @@ def run_training_worker(parameters, root) -> dict:
     a bare ``SystemExit`` would otherwise surface as an untyped
     ``WORKER_FAILED`` the operator cannot branch on.
     """
+    from engine.v2.data.errors import DataError
+    from engine.v2.foundation import DocumentError, from_document
     from engine.v2.models import RuntimeFitForbidden
     from engine.v2.models.training import TrainingRefused
     from tools import phase5_training_job as job
 
+    try:
+        params = from_document(TrainingParameters, parameters)
+    except DocumentError as exc:
+        raise fail("INVALID_REQUEST", "malformed training parameters") from exc
+    problems = _native_input_problems(params)
+    if params.input_mode == "native_d14":
+        problems = training_parameter_problems(None, params)
+    if problems:
+        raise fail("INVALID_REQUEST", "training inputs are invalid", details={"problems": problems})
     root = Path(root)
     out_dir = root / "training"
     try:
         summary = _dispatch_mode(job, parameters["mode"], parameters, out_dir, root)
     except SystemExit as exc:
         raise _tool_failure(exc) from exc
+    except DataError as exc:
+        raise fail("INPUT_CHANGED", "native D14 inputs refused",
+                   details={"data_code": exc.code}) from exc
     except TrainingRefused as exc:
         raise fail("CHECKPOINT_INCOMPATIBLE", "training receipt refused",
                    details={"issues": sorted({issue.code for issue in exc.issues})}) from exc

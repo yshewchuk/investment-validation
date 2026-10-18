@@ -211,6 +211,9 @@ def _add_operator_plan_arguments(plan):
     plan.add_argument("--training-mode",
                       choices=("recipe", "state", "board_analog", "trailing_cutoff"))
     plan.add_argument("--recipe", default="")
+    plan.add_argument("--training-input-mode", choices=("legacy", "native_d14"), default=argparse.SUPPRESS)
+    for name in ("catalog", "artifact-root", "snapshot-id", "receipt-id"):
+        plan.add_argument("--training-" + name, default=argparse.SUPPRESS)
     plan.add_argument("--state", default="")
     plan.add_argument("--alpha", type=float)
     plan.add_argument("--cutoff", action="append", default=[])
