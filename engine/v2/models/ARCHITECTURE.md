@@ -345,21 +345,26 @@ Split list (code, in order; estimates in #822): 1 catalog `retrain_cutoff`, stag
 
 Tier-4 values derive from the Tier-4 members of a native model release; the
 legacy `tier4.py` producer is not ported. Only a `tier4_coverage` table is
-stored: one row per `(ticker, event_date)` with `release_id`, `model_id`,
-the release `retrain_cutoff` stamp and a status; values are computed at read
-time from the release and never cached across releases (R2).
+stored: one row per `(ticker, event_date, member)` (member = size,
+implied_t1, runup_move, iv_crush) with that member's `release_id`,
+`model_id`, the release `retrain_cutoff` stamp and a `status`; values are
+computed at read time from the release, never persisted or cached across
+releases (R2).
 
 - **Causality.** A value may come only from a release whose exclusive
   `retrain_cutoff` is not after the event's decision date (the
   `fold_start <= as_of` guard). Events with no such release are
-  `no_eligible_release`: value null, the legacy "no forecast" meaning. History
+  `no_eligible_release`; for a historical event the value is null, the legacy
+  "no forecast" meaning (a forward event refuses, below). Cutoff is exclusive:
+  training rows dated at it are inadmissible. History
   before the first release exists only if an operator runs the §2.3 retrain at
   past cutoffs and keeps those releases; coverage starts at the earliest
   retained eligible release. No value is invented for earlier events
   (confirming this default is an open decision in the design guide).
 - **No eligible release (#782).** The resolver never falls back to legacy:
-  status `MODEL_NOT_READY`, scoring refuses those events with that code and
-  names the failed release check in `details`, other nightly jobs continue.
+  status `no_eligible_release` with a `reason`; scoring of a forward event
+  refuses with `MODEL_NOT_READY` and names the reason in `details`; other
+  nightly jobs continue.
 - **Qualification.** Parity with legacy Tier-4 is not a goal; qualification
   checks causality, coverage by month, and rank/calibration consistency, as
   in `guides/native_panel_tier4_design.md`.

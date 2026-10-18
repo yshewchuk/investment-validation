@@ -28,13 +28,17 @@ pre-print block, outcome columns) and every Tier-4 column.
 
 ## 2. Native panel producer (decision 1a)
 
-A batch job reads the pinned snapshot's `daily_market`, `earnings_events`,
-`orats` and calendar tables in bounded batches (ticker groups, one year
+A batch job reads the pinned snapshot's `daily_market` (ORATS state lives
+here; there is no `orats` table), `earnings_events`, `computed_moves`
+(realised/implied history), `price_history` (adjusted-close run-up) and the
+calendar in bounded batches (ticker groups, one year
 partition at a time; peak memory is a function of the batch, never of the
 table) and publishes `feature_panel` as a new dataset version of the same
 snapshot lineage. Row math is `panel_math`, `regime` and `runup_math` only;
 `scan_panel_row` and the batch share them, so a forward row equals the stored
-row for the same event by construction, and a test pins that equality.
+row for the same event and the same `decision_session` and `history_start`
+by construction; a test pins that equality at matching boundaries only (the
+same event scored at another decision session legitimately differs).
 Qualification compares the native table with the legacy table per column under
 the existing per-field numeric tolerance (parity bar B); a column that differs
 is reported, never emulated. Lost-data rule: the table is always rebuildable
@@ -44,11 +48,13 @@ from the snapshot's source tables; no migration of the legacy file.
 
 A "Tier-4 value" (`pred_abs_move`, bands, `im_t1`, `runup_move`, `iv_crush`)
 is the prediction of a Tier-4 member of a native model release for one event.
-The stored artifact is `tier4_coverage`: one row per `(ticker, event_date)`
-with the producing `release_id`, `model_id`, `retrain_cutoff` (stamp) and a
-status; values themselves are computed at read time from the release (R2:
-never cached across releases) or by an explicit materialization job whose
-output is hashed to the release.
+The only stored artifact is `tier4_coverage`: one row per
+`(ticker, event_date, member)`, `member` in {`size`, `implied_t1`,
+`runup_move`, `iv_crush`} (the four release feature roles), with that
+member's producing `release_id`, `model_id`, `retrain_cutoff` (stamp) and
+`status`, so partial availability is per member. Values are never persisted:
+they are computed at read time from the release (R2: never cached across
+releases).
 
 ### Causality (real choice; default chosen, flagged)
 
@@ -84,11 +90,15 @@ needs the user's confirmation before slice 3.
 
 **No eligible release (#782).** When the release resolver finds no release
 that is promoted and whose `retrain_cutoff` is not after the session's
-decision date, the nightly neither guesses nor falls back to legacy: the
-coverage row is `status=MODEL_NOT_READY`, `native_score_batch` refuses those
-events with the existing `MODEL_NOT_READY` code and names the release check
-that failed in `details`, and the parity report counts them as native
-refusals (a visible, not hidden, class). The nightly's other jobs continue.
+decision date, the nightly neither guesses nor falls back to legacy. One
+status, two consumers: the coverage `status` is `no_eligible_release` with a
+`reason` (`none_promoted`, `cutoff_after_decision`, `member_missing`). A
+historical event older than the earliest retained release is a null value
+(legacy "no forecast"; section 3, option A). A forward event of the scored
+session, whose release should exist, is a scoring refusal:
+`native_score_batch` refuses it with the existing `MODEL_NOT_READY` code,
+names the reason in `details`, and the parity report counts it as a native
+refusal (a visible, not hidden, class). The nightly's other jobs continue.
 A refusal is correct only when the release truly is absent; #782 tracks
 whether today's 101 refusals are that case.
 
@@ -97,7 +107,8 @@ whether today's 101 refusals are that case.
 Legacy Tier-4 is walk-forward fits of `tier4.py`; native values come from
 different models, so equality is not expected and not tested. Qualification
 instead checks: (1) causality: for sampled events the producing release's
-`retrain_cutoff <= decision date` and no training row postdates it; (2)
+`retrain_cutoff <= decision date` and every training row is dated strictly
+before the exclusive cutoff (a row dated exactly at it is rejected); (2)
 coverage: share of the planned population with a non-null native value, by
 month; (3) agreement as rank correlation and calibration of bands against
 realised moves, on events both systems cover, reported as consistency
@@ -117,15 +128,22 @@ version instead of the latest `finality`/`features` job.
 
 ## 7. Slices (one at a time, each add -> wire -> remove)
 
-1. This design and the contract text (docs only).
+Estimates are added lines (code / test / doc); each slice is its own PR.
+
+1. This design and the contract text (docs only): 0 / 0 / ~190.
 2. Native panel producer: batch job, shared-math equality test, bounded memory
-   test on a synthetic wide snapshot, publish as a dataset version (add).
-3. Tier-4 coverage table and resolver, with `MODEL_NOT_READY` semantics (add).
+   test on a synthetic wide snapshot, publish as a dataset version (add):
+   ~380 / ~300 / ~30.
+3. Tier-4 coverage table and resolver, per member, with the section 4
+   semantics (add): ~300 / ~250 / ~30.
 4. Wire scoring and training to the native tables and the coverage resolver;
-   the import stops copying the legacy files (wire).
-5. Replace `legacy_manifest.json` bindings for native job kinds (wire).
-6. Qualification report (section 5) in the nightly artifacts (add).
+   the import stops copying the legacy files (wire), split in two PRs
+   (scoring; training): ~350 / ~250 / ~40 each.
+5. Replace `legacy_manifest.json` bindings for native job kinds (wire),
+   split by job kind if over limit: ~380 / ~300 / ~40.
+6. Qualification report (section 5) in the nightly artifacts (add):
+   ~350 / ~250 / ~30.
 7. Remove `legacy_features`, legacy table import and serving-cache readers
-   after qualification passes (remove).
+   after qualification passes (remove): mostly deletions / ~50 / ~40.
 
 Open decision for the user: causality option A vs B (section 3).
