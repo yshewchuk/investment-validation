@@ -8,11 +8,11 @@ admission or an executable research population.
 from dataclasses import replace
 
 from engine.v2.foundation import canonical_json, content_hash
-from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_registration import MAX_NATIVE_EVIDENCE_BYTES
 from engine.v2.research.magnitude_folds import annual_fold
 from experiments import native_registration as native
 from tests.v2.ops.native_bounds_support import object_bytes
+from tests.v2.ops.test_native_registration_read_bounds import refuses
 from tests.v2.research import magnitude_trial_support as support
 
 
@@ -64,10 +64,10 @@ def test_large_history_binding_requires_finite_override_and_loads_unchanged(tmp_
             return read_verified(ref)
 
         monkeypatch.setattr(source.store, "read_verified", read_once)
-        with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        with refuses("native registration differs from its immutable binding"):
             native.read_native_registration(source.conn, source.store, spec)
         assert reads == []
-        with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
+        with refuses("native registration differs from its immutable binding"):
             native.read_native_registration(source.conn, source.store, spec, max_evidence_bytes=size - 1)
         assert reads == []
         loaded = native.read_native_registration(source.conn, source.store, spec, max_evidence_bytes=size)

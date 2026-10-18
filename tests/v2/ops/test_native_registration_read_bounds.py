@@ -23,11 +23,13 @@ def forbid(*args, **kwargs):
 
 
 @contextmanager
-def refuses(code="EXPERIMENT_IDENTITY_CONFLICT"):
+def refuses(message, code="EXPERIMENT_IDENTITY_CONFLICT"):
     with pytest.raises(OpsError) as captured:
         yield
+    assert type(captured.value) is OpsError
     assert captured.value.code == code
     assert captured.value.problem.retryable is False
+    assert captured.value.problem.message == message
 
 
 @contextmanager
@@ -93,7 +95,7 @@ def test_default_loader_caps_sql_transfer_and_utf8_before_json(tmp_path, monkeyp
             with monkeypatch.context() as patch:
                 patch.setattr(native.json, "loads", forbid)
                 patch.setattr(store, "read_verified", forbid)
-                with refuses():
+                with refuses("native evidence requires bounded JSON object text"):
                     native.read_native_registration(bounded, store, SPEC)
         else:
             assert native.read_native_registration(bounded, store, SPEC) == registration
@@ -132,7 +134,7 @@ def test_default_loader_admits_reference_size_before_artifact_read(tmp_path, mon
         monkeypatch.setattr(store, "publish_bytes", forbid)
         if extra:
             monkeypatch.setattr(store, "read_verified", forbid)
-            with refuses():
+            with refuses("native registration differs from its immutable binding"):
                 native.read_native_registration(conn, store, SPEC)
         else:
             assert native.read_native_registration(conn, store, SPEC) == registration
@@ -146,10 +148,12 @@ def test_explicit_larger_finite_budget_applies_to_both_read_boundaries(tmp_path,
         conn, store, registration, _, evidence = values
         if location == "catalog":
             save_evidence(conn, pad(evidence, size, "漢"))
-        with refuses():
+        message = ("native evidence requires bounded JSON object text" if location == "catalog"
+                   else "native registration differs from its immutable binding")
+        with refuses(message):
             native.read_native_registration(conn, store, SPEC)
         assert native.read_native_registration(conn, store, SPEC, max_evidence_bytes=size) == registration
-        with refuses():
+        with refuses(message):
             native.read_native_registration(conn, store, SPEC, max_evidence_bytes=size - 1)
 
 
@@ -169,7 +173,7 @@ def test_smallest_budget_reaches_sql_admission_instead_of_configuration_refusal(
         bounded = BoundedSqlRows(conn, max_bytes=2 if encoding.startswith("UTF-16") else 1,
                                  column="evidence_json", sql_fragment="FROM experiment_runs")
         monkeypatch.setattr(store, "read_verified", forbid)
-        with refuses():
+        with refuses("native evidence requires bounded JSON object text"):
             native.read_native_registration(bounded, store, SPEC, max_evidence_bytes=1)
         assert bounded.sizes == [None]
 
@@ -187,8 +191,23 @@ def test_invalid_catalog_evidence_is_typed_before_object_access(tmp_path, monkey
         conn.execute("UPDATE experiment_runs SET evidence_json=?", (payload,))
         before = catalog_rows(conn)
         monkeypatch.setattr(store, "read_verified", forbid)
-        with refuses():
+        with refuses("native evidence requires bounded JSON object text"):
             native.read_native_registration(conn, store, SPEC)
+        assert catalog_rows(conn) == before
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity", "1e999"])
+def test_canonical_catalog_expansion_refuses_before_object_access(tmp_path, monkeypatch, value):
+    with registered_catalog(tmp_path) as (conn, store, _, _, evidence):
+        payload = canonical_json(evidence)[:-1] + ',"padding":' + value + '}'
+        conn.execute("UPDATE experiment_runs SET evidence_json=?", (payload,))
+        before = catalog_rows(conn)
+        limit = len(payload.encode())
+        bounded = BoundedSqlRows(conn, max_bytes=limit, column="evidence_json", sql_fragment="FROM experiment_runs")
+        monkeypatch.setattr(store, "read_verified", forbid)
+        with refuses("native evidence exceeds its canonical object contract"):
+            native.read_native_registration(bounded, store, SPEC, max_evidence_bytes=limit)
+        assert bounded.sizes == [limit]
         assert catalog_rows(conn) == before
 
 
@@ -198,7 +217,7 @@ def test_invalid_utf8_is_transferred_as_bounded_bytes_and_refuses_before_decode(
         bounded = BoundedSqlRows(conn, max_bytes=CAP, column="evidence_json", sql_fragment="FROM experiment_runs")
         monkeypatch.setattr(native.json, "loads", forbid)
         monkeypatch.setattr(store, "read_verified", forbid)
-        with refuses():
+        with refuses("native evidence requires bounded JSON object text"):
             native.read_native_registration(bounded, store, SPEC)
         assert bounded.sizes == [1]
 
@@ -210,7 +229,7 @@ def test_malformed_registration_objects_refuse_without_rewrites(tmp_path, monkey
         save_evidence(conn, evidence)
         before, objects = catalog_rows(conn), object_bytes(store)
         monkeypatch.setattr(store, "publish_bytes", forbid)
-        with refuses():
+        with refuses("native registration differs from its immutable binding"):
             native.read_native_registration(conn, store, SPEC)
         assert catalog_rows(conn) == before and object_bytes(store) == objects
 
@@ -247,7 +266,9 @@ def test_loader_preserves_identity_checks_and_exact_refusal(tmp_path, monkeypatc
         monkeypatch.setattr(store, "publish_bytes", forbid)
         if damage in ("missing-reference", "bad-reference", "schema"):
             monkeypatch.setattr(store, "read_verified", forbid)
-        with refuses():
+        message = ("requested specification differs from registration" if damage == "spec"
+                   else "native registration differs from its immutable binding")
+        with refuses(message):
             native.read_native_registration(conn, store, spec)
         assert catalog_rows(conn) == before and object_bytes(store) == objects
 
@@ -257,7 +278,7 @@ def test_absent_reservation_stays_r1_and_never_opens_objects(tmp_path, monkeypat
         conn.execute("DELETE FROM experiment_runs")
         before = catalog_rows(conn)
         monkeypatch.setattr(store, "read_verified", forbid)
-        with refuses("INVALID_EXPERIMENT_SPEC"):
+        with refuses("native experiment has not been preregistered", "INVALID_EXPERIMENT_SPEC"):
             native.read_native_registration(conn, store, SPEC)
         assert catalog_rows(conn) == before
 
@@ -285,16 +306,23 @@ def test_foundation_artifact_failure_remains_identity_conflict(tmp_path, monkeyp
         def corrupt(*args):
             raise ArtifactError("INTEGRITY_FAILED", "synthetic corrupt object")
         monkeypatch.setattr(store, "read_verified", corrupt)
-        with refuses():
+        with refuses("native registration differs from its immutable binding"):
             native.read_native_registration(conn, store, SPEC)
 
 
-@pytest.mark.parametrize("damage", ["code", "retryability"])
-def test_refusal_oracle_rejects_wrong_envelopes_even_with_misleading_message(damage):
+@pytest.mark.parametrize("damage", ["code", "retryability", "empty-message", "constant-message", "subclass"])
+def test_refusal_oracle_rejects_changed_type_envelope_or_diagnostic(damage):
+    class DifferentOpsError(OpsError):
+        pass
+    message = "native registration differs from its immutable binding"
     error = fail("INVALID_EXPERIMENT_SPEC" if damage == "code" else "EXPERIMENT_IDENTITY_CONFLICT",
-                 "misleading EXPERIMENT_IDENTITY_CONFLICT message")
+                 message)
     if damage == "retryability":
         error = OpsError(replace(error.problem, retryable=True))
+    elif damage in ("empty-message", "constant-message"):
+        error = OpsError(replace(error.problem, message="" if damage == "empty-message" else "refused"))
+    elif damage == "subclass":
+        error = DifferentOpsError(error.problem)
     with pytest.raises(AssertionError):
-        with refuses():
+        with refuses(message):
             raise error
