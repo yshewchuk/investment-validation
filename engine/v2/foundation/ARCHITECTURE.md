@@ -6,6 +6,11 @@ Layer 0.5 in the root `/ARCHITECTURE.md`; owns pure session arithmetic ported fr
 
 ## Primary contracts and public interfaces
 
+`iter_canonical_json(value, *, fragments=None)` yields canonical text chunks;
+joining them gives `canonical_json` exactly, including its nonfinite normalization.
+It owns no output I/O or byte ceiling. `experiments.v2_magnitude_search_run`
+consumes it to stage and byte-bound a complete report before stdout emission.
+
 `market_calendar.build_calendar_sessions` projects sessions from observed source dates; `planned_exit_date` applies native strategy anchors. `CalendarEventKey` is structural so ops requests satisfy it without a foundation dependency on ops.
 
 `market_horizon.trading_days_before_print(calendar, *, entry_date, event_date,
