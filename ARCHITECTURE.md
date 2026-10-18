@@ -244,7 +244,8 @@ evidence. See the models and data component contracts.
     `-m` targets and Python launches with a non-`None` `cwd` are unresolved); recognized
     unresolved dependencies produce catch-all edges and may widen selection through the #155
     fail-safe test set, without necessarily selecting every test. `full_suite` paths, an unrecognized
-    path, a deleted file (never narrowed by a literal reader), a malformed `path_tests` table, or a
+    path, a deleted non-doc file (a literal reader never narrows it; a deleted doc still narrows by
+    the doc-reader rule), a malformed `path_tests` table, or a
     graph or scan failure returns the `__ALL__` sentinel and runs
     the full suite. If the selector command itself errors, the CLI exits nonzero without printing a
     selection; the workflow job fails before pytest rather than proceeding with a narrowed run.

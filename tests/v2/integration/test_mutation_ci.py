@@ -2805,12 +2805,12 @@ def test_select_pr_tests_path_tests_add_the_tree_scanner_to_a_reached_path(
         "engine/v2/x.py": "Y = 1\n",
         "tests/test_scan_tree.py": "import os\n",
         "tests/test_plain.py": "import engine.v2.x\n",
+        "tests/test_other.py": "X = 1\n",
     })
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
     result = pilot.select_pr_tests(cfg, ["engine/v2/x.py"], graph=graph)
-    assert result is not None
-    assert {"tests/test_scan_tree.py", "tests/test_plain.py"} <= set(result)
+    assert result == sorted({"tests/test_scan_tree.py", "tests/test_plain.py"})
 
 
 def test_shipped_toml_declares_the_engine_v2_tree_scanner_test():
@@ -2857,6 +2857,38 @@ def test_select_pr_tests_a_deleted_file_named_in_a_literal_still_selects_everyth
     reasons: list[str] = []
     assert pilot.select_pr_tests(_SELECT_CFG, ["scripts/gone.py"], graph=graph, reasons=reasons) is None
     assert reasons == ["scripts/gone.py is not in any test's import closure and is not a doc"]
+
+
+def test_select_pr_tests_non_python_asset_named_in_a_literal_selects_its_reader(
+        tmp_path, monkeypatch):
+    tracked = _write_repo(tmp_path, {
+        "tests/test_a.py": 'X = "data/table.json"\n',
+        "tests/test_b.py": "Y = 1\n",
+        "data/table.json": "{}\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph([p for p in tracked if p.endswith(".py")])
+    assert pilot.select_pr_tests(_SELECT_CFG, ["data/table.json"], graph=graph) == [
+        "tests/test_a.py"]
+    _write_repo(tmp_path, {"tests/test_c.py": 'Z = "data/gone.json"\n'})
+    tracked = sorted([*tracked, "tests/test_c.py"])
+    graph = pilot.build_import_graph([p for p in tracked if p.endswith(".py")])
+    assert pilot.select_pr_tests(_SELECT_CFG, ["data/gone.json"], graph=graph) is None
+
+
+def test_select_pr_tests_path_tests_non_matching_mapping_does_not_select(
+        tmp_path, monkeypatch):
+    cfg = {"pr_selection": {"inert": [], "inert_skip": [], "full_suite": [],
+                            "path_tests": {"docs/*": ["tests/test_scan.py"]}}}
+    tracked = _write_repo(tmp_path, {
+        "engine/x.py": "Y = 1\n",
+        "tests/test_scan.py": "import os\n",
+        "tests/test_a.py": "import engine.x\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    result = pilot.select_pr_tests(cfg, ["engine/x.py"], graph=graph)
+    assert "tests/test_scan.py" not in result
 
 
 @pytest.mark.parametrize("bad", ["tests/test_scan.py", {"engine/*": "tests/test_scan.py"}, {"engine/*": []}, ["x"]])

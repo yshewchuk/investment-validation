@@ -1865,6 +1865,15 @@ def _config_identity(cfg: dict) -> str:
     return json.dumps(cfg, sort_keys=True, allow_nan=False)
 
 
+def valid_path_tests(value) -> bool:
+    """A well-formed `pr_selection.path_tests`: a map of str glob to a
+    nonempty list of str test paths."""
+    return (isinstance(value, dict)
+            and all(isinstance(pat, str) and isinstance(listed, list) and listed
+                    and all(isinstance(t, str) for t in listed)
+                    for pat, listed in value.items()))
+
+
 def registration_tests(cfg: dict, base: dict | None, changed: set[str],
                        tracked: set[str]) -> set[str] | None:
     """Prove add-only registrations against a verified parsed base, else None.
@@ -1893,10 +1902,7 @@ def registration_tests(cfg: dict, base: dict | None, changed: set[str],
                         if type(value) not in ({int} if field == "max_children" else {int, float}):
                             return None
                     elif field == "path_tests":
-                        if not isinstance(value, dict) or not all(
-                                isinstance(pat, str) and isinstance(listed, list)
-                                and listed and all(isinstance(t, str) for t in listed)
-                                for pat, listed in value.items()):
+                        if not valid_path_tests(value):
                             return None
                     elif not isinstance(value, list) or not all(isinstance(p, str) for p in value):
                         return None
@@ -2000,8 +2006,11 @@ def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = No
     changed_modules; a docs-only diff no test reads returns [] too.
 
     Fan-out limits: the #155 fail-safe set (catch-all-edge or tainted
-    tests) is added when the diff touches a non-test python file that is
-    imported by, or named in a string literal of, a test; a
+    tests) is added when the diff touches a non-test file (python or an
+    existing non-python asset) imported by, or named in a string literal
+    of, a test; a deleted .py or deleted non-doc file never narrows through
+    a literal reader (deleted docs can still narrow via the doc-reader
+    rule); a
     collected test file is a leaf (selects itself and its static
     importers), and a doc path (`is_doc_changed_path`) selects only the
     tests whose closure names that doc (`_doc_reader_tests`). A diff of
@@ -2074,10 +2083,7 @@ def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = No
             failsafe.add(t)
     tests_set = set(tests)
     path_tests = cfg.get("pr_selection", {}).get("path_tests", {})
-    if not (isinstance(path_tests, dict)
-            and all(isinstance(p, str) and isinstance(v, list) and v
-                    and all(isinstance(t, str) for t in v)
-                    for p, v in path_tests.items())):
+    if not valid_path_tests(path_tests):
         note("pr_selection.path_tests is malformed; selecting the full test suite")
         return None
     selected: set[str] = set(cfg.get("pr_selection", {}).get("always_run", [])) & tests_set
@@ -2098,7 +2104,7 @@ def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = No
             failsafe_path = failsafe_path or path
         elif is_doc_changed_path(cfg, path):
             docs.append(path)
-        elif path in tracked_set and (readers := _path_reader_tests([path], tests, closures)):
+        elif (path in tracked_set or (not path.endswith(".py") and (REPO / path).is_file())) and (readers := _path_reader_tests([path], tests, closures)):
             # A test names this unreached path in a literal: select its readers
             # rather than falling back to the full suite.
             selected |= readers
