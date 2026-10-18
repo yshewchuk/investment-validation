@@ -236,7 +236,9 @@ evidence. See the models and data component contracts.
     closure holds a non-docstring string literal naming the doc (an unreadable or unparsable
     closure file also matches, conservatively); a collected
     test file is a leaf (selects itself and its static importers, never the whole suite); the
-    dynamic-import fail-safe set is added only when the diff touches a non-test Python file;
+    dynamic-import fail-safe set is added only when the diff touches a non-test file that a test
+    imports or names in a string literal (an unreached non-doc path narrows only that way,
+    else `__ALL__`; `path_tests` mappings add tests but never bypass this);
     resolved dependencies produce precise edges; a literal script launch to a non-root path is
     unresolved (resolvable root-level script and `-m` launches retain precise behavior; untracked
     `-m` targets and Python launches with a non-`None` `cwd` are unresolved); recognized

@@ -214,14 +214,15 @@ without printing a selection and the workflow job fails before pytest; it does
 not continue with a narrowed selection.
 
 The selection file ends with `#` comment lines (ignored by `tools/ci_shards.py`)
-and the same lines go to the plan log: the path and rule behind every
-`__ALL__` (a `full_suite` pattern, an unreached non-doc path, a failed scan),
-and the path that added the fail-safe set to a narrowed run. An unreached
-non-doc path narrows instead of forcing `__ALL__` only when a test's import
-closure names it in a string literal (file name, or dotted module for `.py`).
+and the reasons (not the count line) also go to the plan log on stderr: the path
+and rule behind every `__ALL__` (a `full_suite` pattern, an unreached non-doc
+path, a failed scan), and the path that added the fail-safe set to a narrowed
+run. An unreached non-doc path narrows instead of forcing `__ALL__` only when a
+test's import closure names it in a string literal (file name, or dotted module
+for `.py`); the fail-safe set is then added too.
 `[pr_selection.path_tests]` in `tools/mutation_pilot.toml` maps a path pattern to
 meta-tests that scan a tree by file walk (no import edge, #672); they are
-selected whenever a changed path matches.
+added whenever a changed path matches and never replace the checks above.
 
 ## Known thin spots
 

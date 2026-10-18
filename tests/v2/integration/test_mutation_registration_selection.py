@@ -58,6 +58,7 @@ def case(monkeypatch):
     graph["tests/test_new.py"] = {"engine/new.py"}
     graph["tests/test_importer.py"] = {"engine/new.py"}
     monkeypatch.setattr(pilot, "unresolved_import_files", lambda paths: set())
+    monkeypatch.setattr(pilot, "_path_reader_tests", lambda *a, **k: set())  # synthetic graph files are not on disk; an unreadable closure file would count as a literal reader
     return base, cfg, [CONFIG, "engine/new.py", "tests/test_new.py"], graph
 
 
@@ -296,10 +297,12 @@ def test_cli_threads_verified_base_and_keeps_missing_base_full(case, tmp_path, m
     monkeypatch.setattr(pilot, "build_import_graph", lambda: graph)
     args = SimpleNamespace(changed_files=str(path))
     assert pilot.cmd_select_tests(cfg, args) == 0
-    assert capsys.readouterr().out == "__ALL__\n"
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "__ALL__"
+    assert out.splitlines()[1].startswith("# ")
     monkeypatch.setattr(pilot, "registration_base_config", lambda sha, config, paths: base)
     assert pilot.cmd_select_tests(cfg, args) == 0
-    assert capsys.readouterr().out.splitlines() == selected(case)
+    assert [ln for ln in capsys.readouterr().out.splitlines() if not ln.startswith("#")] == selected(case)
 
 
 def test_workflow_passes_its_base_sha_and_new_test_is_registered():
@@ -433,3 +436,29 @@ def test_scanner_needs_a_python_change_under_its_prefix(case, extra):
     changed = [CONFIG, "tests/test_new.py", *extra]
     got = pilot.changed_modules(cfg, ["alpha", "beta", "scan"], changed, graph=graph, base_cfg=base)
     assert got == ["alpha"]
+
+
+def _with_path_tests(case, base_value, cfg_value):
+    base, cfg, changed, graph = case
+    if base_value is not None:
+        base["pr_selection"]["path_tests"] = base_value
+    if cfg_value is not None:
+        cfg["pr_selection"]["path_tests"] = cfg_value
+    return base, cfg, changed, graph
+
+
+def test_path_tests_change_is_not_an_add_only_registration(case):
+    base, cfg, changed, graph = _with_path_tests(
+        case, None, {"engine/*": ["tests/test_always.py"]})
+    assert pilot.registration_tests(cfg, base, set(changed), set(graph)) is None
+
+
+def test_identical_path_tests_keep_the_registration_valid(case):
+    same = {"engine/*": ["tests/test_always.py"]}
+    assert selected(_with_path_tests(case, dict(same), dict(same))) is not None
+
+
+def test_empty_path_tests_list_is_rejected(case):
+    empty = {"engine/*": []}
+    base, cfg, changed, graph = _with_path_tests(case, dict(empty), dict(empty))
+    assert pilot.registration_tests(cfg, base, set(changed), set(graph)) is None

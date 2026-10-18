@@ -1855,8 +1855,10 @@ _REGISTRATION_READERS = {
 _REGISTRATION_FIELDS = {
     "defaults": {"timeout_constant", "timeout_multiplier", "max_children",
                  "pytest_args", "deselect", "copy"},
-    "pr_selection": {"inert", "inert_skip", "full_suite", "always_run", "path_tests"},
+    "pr_selection": {"inert", "inert_skip", "full_suite", "always_run"},
 }
+_PR_SELECTION_FIELDS = frozenset(_REGISTRATION_FIELDS["pr_selection"])
+_PR_SELECTION_OPTIONAL = _PR_SELECTION_FIELDS | {"path_tests"}
 
 
 def _config_identity(cfg: dict) -> str:
@@ -1869,13 +1871,22 @@ def registration_tests(cfg: dict, base: dict | None, changed: set[str],
 
     Existing globs stay unchanged; a new literal cannot overlap any old entry.
     Every affected module needs nonempty old/new test expansions and tooling readers.
+    `pr_selection.path_tests` is optional on both sides, but when present it
+    must be a well-formed map of nonempty test lists and identical in base and
+    cfg: a path_tests edit is not an add-only registration.
     """
     try:
         for config in (base, cfg):
             if not isinstance(config, dict) or set(config) != {*_REGISTRATION_FIELDS, "modules"}:
                 return None
             for section, fields in _REGISTRATION_FIELDS.items():
-                if not isinstance(config[section], dict) or set(config[section]) != fields:
+                if not isinstance(config[section], dict):
+                    return None
+                allowed = (_PR_SELECTION_OPTIONAL if section == "pr_selection"
+                           else fields)
+                if not set(config[section]) <= allowed:
+                    return None
+                if section != "pr_selection" and set(config[section]) != fields:
                     return None
                 for field, value in config[section].items():
                     if section == "defaults" and field in {"timeout_constant", "timeout_multiplier", "max_children"}:
@@ -1884,7 +1895,7 @@ def registration_tests(cfg: dict, base: dict | None, changed: set[str],
                     elif field == "path_tests":
                         if not isinstance(value, dict) or not all(
                                 isinstance(pat, str) and isinstance(listed, list)
-                                and all(isinstance(t, str) for t in listed)
+                                and listed and all(isinstance(t, str) for t in listed)
                                 for pat, listed in value.items()):
                             return None
                     elif not isinstance(value, list) or not all(isinstance(p, str) for p in value):
@@ -1902,6 +1913,8 @@ def registration_tests(cfg: dict, base: dict | None, changed: set[str],
                             return None
                     elif not isinstance(value, str) or (field == "scans_tree" and not value):
                         return None
+        if base["pr_selection"].get("path_tests") != cfg["pr_selection"].get("path_tests"):
+            return None
         if list(base["modules"]) != list(cfg["modules"]):
             return None
         restored = {**cfg, "modules": {n: dict(m) for n, m in cfg["modules"].items()}}
@@ -1987,13 +2000,16 @@ def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = No
     changed_modules; a docs-only diff no test reads returns [] too.
 
     Fan-out limits: the #155 fail-safe set (catch-all-edge or tainted
-    tests) is added only when the diff touches a non-test python file; a
+    tests) is added when the diff touches a non-test python file that is
+    imported by, or named in a string literal of, a test; a
     collected test file is a leaf (selects itself and its static
     importers), and a doc path (`is_doc_changed_path`) selects only the
     tests whose closure names that doc (`_doc_reader_tests`). A diff of
     only those selects a narrow set. Configured `pr_selection.always_run`
     test paths are selected for every non-empty diff, including a test-only
-    diff.
+    diff. Configured `pr_selection.path_tests` entries only ADD their tests
+    to the selection: they never bypass the fail-safe/fallback chain above,
+    so a path they cover but no test reaches still selects the full suite.
 
     #155 (unresolved dynamic loading) handling: a test file that ITSELF
     carries a catch-all edge, as identified by `dynamic_files(graph)`, is
@@ -2064,11 +2080,9 @@ def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = No
     failsafe_path: str | None = None
     path_tests = cfg.get("pr_selection", {}).get("path_tests", {})
     for path in sorted(changed_set):
-        by_path_tests = False
         for pat, listed in path_tests.items():
             if fnmatch.fnmatchcase(path, pat):
                 selected |= {t for t in listed if t in tests_set}
-                by_path_tests = True
         hit = {t for t in tests if path in closures[t]}
         selected |= hit
         if path in tests_set:
@@ -2078,26 +2092,19 @@ def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = No
             failsafe_path = failsafe_path or path
         elif is_doc_changed_path(cfg, path):
             docs.append(path)
-        elif not by_path_tests and (readers := _path_reader_tests([path], tests, closures)):
+        elif readers := _path_reader_tests([path], tests, closures):
             # A test names this unreached path in a literal: select its readers
-            # rather than falling back to the full suite. A `path_tests` match
-            # already named its test above (it reads the path by walk, so it is
-            # the proof) -- skip the literal scan for that path only.
+            # rather than falling back to the full suite.
             selected |= readers
             needs_failsafe = True
             failsafe_path = failsafe_path or path
-        elif by_path_tests:
-            # path_tests named a test for this path (a tree-scanner meta-test,
-            # #672): it reads the path by walk, so it is the proof, not an
-            # import-closure miss. Fall through without selecting the full suite.
-            continue
         else:
             note(f"{path} is not in any test's import closure and is not a doc")
             return None
     if needs_failsafe:
         selected |= failsafe
         note(f"fail-safe set added ({len(failsafe)} tests) "
-             f"because {failsafe_path} is imported by tests")
+             f"because {failsafe_path} is reached by tests")
     if docs:
         selected |= _doc_reader_tests(docs, tests, closures)
     return sorted(selected)
@@ -2147,7 +2154,9 @@ def _path_reader_tests(paths: list[str], tests: list[str],
     set comes from `paths`: each path's basename, plus its dotted module name
     when it is a `.py` path (so `experiments/magnitude_search_worker.py` is
     named by `experiments.magnitude_search_worker`). An unreadable or
-    unparsable closure file counts as a match, never a silent skip."""
+    unparsable closure file counts as a match, never a silent skip, and so
+    does an oversized one: a file over 1_000_000 bytes counts as a match
+    without ever being read."""
     if names is None:
         names = set()
         for path in paths:
@@ -2158,9 +2167,12 @@ def _path_reader_tests(paths: list[str], tests: list[str],
 
     def names_a_file(rel: str) -> bool:
         if rel not in named:
+            named[rel] = True
             try:
-                src = (REPO / rel).read_text(encoding="utf-8")
-                named[rel] = any(n in lit for lit in _string_literals(src) for n in names)
+                if (REPO / rel).stat().st_size <= 1_000_000:
+                    src = (REPO / rel).read_text(encoding="utf-8")
+                    named[rel] = any(n in lit for lit in _string_literals(src)
+                                     for n in names)
             except (OSError, UnicodeDecodeError, SyntaxError):
                 named[rel] = True
         return named[rel]
@@ -2295,7 +2307,9 @@ def cmd_select_tests(cfg: dict, args) -> int:
     """Print __ALL__ (run the full test suite) or the selected pytest test
     file paths, one per line (possibly zero lines, never a trailing blank
     line), for the pull_request runs of the `plan` CI job (each shard then
-    narrows it to its own files)."""
+    narrows it to its own files). A narrowed selection ends with
+    ``# selected N test files`` and any ``#`` comment lines follow the file
+    lines; an empty selection prints only comments."""
     changed = read_changed_files(args.changed_files)
     base = (registration_base_config(getattr(args, "base_sha", ""), cfg, changed)
             if _REGISTRATION_CONFIG in changed else None)

@@ -2767,7 +2767,7 @@ def test_select_pr_tests_reports_a_reason_naming_the_full_suite_pattern(tmp_path
     selected = pilot.select_pr_tests(_SELECT_CFG, ["tools/foo.py"],
                                      graph=graph, reasons=reasons)
     assert selected is None
-    assert reasons and "tools/*" in reasons[0]
+    assert reasons == ["tools/foo.py matches full_suite pattern tools/*"]
 
 
 def test_select_pr_tests_reports_the_unreached_non_doc_reason(tmp_path, monkeypatch):
@@ -2795,25 +2795,117 @@ def test_select_pr_tests_always_run_does_not_accept_an_unreached_path(tmp_path, 
     assert pilot.select_pr_tests(cfg, ["some/unrelated/file.py"], graph=graph) is None
 
 
-def test_select_pr_tests_path_tests_select_a_tree_scanner_without_an_import_edge(
+def test_select_pr_tests_path_tests_add_the_tree_scanner_to_a_reached_path(
         tmp_path, monkeypatch):
     cfg = {"pr_selection": {"inert": [], "inert_skip": [], "full_suite": [],
                             "path_tests": {"engine/v2/*": ["tests/test_scan_tree.py"]}}}
     tracked = _write_repo(tmp_path, {
+        "engine/__init__.py": "",
+        "engine/v2/__init__.py": "",
         "engine/v2/x.py": "Y = 1\n",
         "tests/test_scan_tree.py": "import os\n",
-        "tests/test_plain.py": "X = 1\n",
+        "tests/test_plain.py": "import engine.v2.x\n",
     })
     monkeypatch.setattr(pilot, "REPO", tmp_path)
-    graph = pilot.build_import_graph(tracked)  # no edge names engine/v2/x.py
-    assert "tests/test_scan_tree.py" in pilot.pytest_test_files(set(tracked))
-    assert pilot.select_pr_tests(cfg, ["engine/v2/x.py"], graph=graph) == [
-        "tests/test_scan_tree.py"]
+    graph = pilot.build_import_graph(tracked)
+    result = pilot.select_pr_tests(cfg, ["engine/v2/x.py"], graph=graph)
+    assert result is not None
+    assert {"tests/test_scan_tree.py", "tests/test_plain.py"} <= set(result)
 
 
 def test_shipped_toml_declares_the_engine_v2_tree_scanner_test():
     assert pilot.load_config()["pr_selection"]["path_tests"] == {
         "engine/v2/*": ["tests/v2/foundation/test_v2_ops_foundation.py"]}
+
+
+@pytest.mark.parametrize("literal", ["scripts/worker_x.py", "scripts.worker_x"])
+def test_select_pr_tests_unreached_path_named_in_a_literal_selects_its_reader(
+        tmp_path, monkeypatch, literal):
+    tracked = _write_repo(tmp_path, {
+        "tests/test_a.py": f'X = "{literal}"\n',
+        "tests/test_b.py": "Y = 1\n",
+        "scripts/worker_x.py": "Z = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    reasons: list[str] = []
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["scripts/worker_x.py"],
+                                     graph=graph, reasons=reasons)
+    assert selected == ["tests/test_a.py"]
+    assert any(r.startswith("fail-safe set added")
+               and "scripts/worker_x.py is reached by tests" in r for r in reasons)
+
+
+def test_select_pr_tests_path_tests_never_bypass_the_unreached_fallback(tmp_path, monkeypatch):
+    cfg = {"pr_selection": {"inert": [], "inert_skip": [], "full_suite": [],
+                            "path_tests": {"engine/v2/*": ["tests/test_scan.py"]}}}
+    tracked = _write_repo(tmp_path, {
+        "engine/v2/new.py": "Y = 1\n",
+        "tests/test_scan.py": "import os\n",
+        "tests/test_b.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    reasons: list[str] = []
+    assert pilot.select_pr_tests(cfg, ["engine/v2/new.py"], graph=graph, reasons=reasons) is None
+    assert "not in any test's import closure" in reasons[-1]
+
+
+def test_select_pr_tests_an_oversized_closure_file_counts_as_a_reader(tmp_path, monkeypatch):
+    tracked = _write_repo(tmp_path, {
+        "tests/test_a.py": "X = 1\n# " + "x" * 1_100_000 + "\n",
+        "scripts/w.py": "Z = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "tests/test_a.py" in pilot.select_pr_tests(_SELECT_CFG, ["scripts/w.py"], graph=graph)
+
+
+@pytest.mark.parametrize("selection, reasons_in, expected_out", [
+    (None, ["why"], "__ALL__\n# why\n"),
+    (["tests/a.py"], ["note"], "tests/a.py\n# selected 1 test files\n# note\n"),
+    ([], [], "# selected 0 test files\n"),
+])
+def test_cmd_select_tests_prints_the_sentinel_files_count_and_reasons(
+        tmp_path, monkeypatch, capsys, selection, reasons_in, expected_out):
+    changed = tmp_path / "changed"
+    changed.write_bytes(b"tools/foo.py\0")
+
+    def fake(cfg, changed_files, *, base_cfg=None, reasons=None, **_):
+        reasons.extend(reasons_in)
+        return selection
+
+    monkeypatch.setattr(pilot, "select_pr_tests", fake)
+    args = types.SimpleNamespace(changed_files=str(changed), base_sha="")
+    assert pilot.cmd_select_tests({}, args) == 0
+    captured = capsys.readouterr()
+    assert captured.out == expected_out
+    for r in reasons_in:
+        assert f"[mutation_pilot] select-tests: {r}" in captured.err
+
+
+def test_select_pr_tests_graph_build_failure_reason(tmp_path, monkeypatch):
+    def boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(pilot, "build_import_graph", boom)
+    reasons: list[str] = []
+    assert pilot.select_pr_tests(_SELECT_CFG, ["engine/x.py"], reasons=reasons) is None
+    assert reasons == ["import graph build failed; selecting the full test suite"]
+
+
+def test_select_pr_tests_unresolved_scan_failure_reason(tmp_path, monkeypatch):
+    tracked = _write_repo(tmp_path, {"tests/test_a.py": "X = 1\n", "engine/x.py": "Y = 1\n"})
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+
+    def boom(paths):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(pilot, "unresolved_import_files", boom)
+    reasons: list[str] = []
+    assert pilot.select_pr_tests(_SELECT_CFG, ["engine/x.py"], graph=graph, reasons=reasons) is None
+    assert reasons == ["unresolved-import scan failed; selecting the full test suite"]
 
 
 def test_select_pr_tests_inert_path_selects_nothing(tmp_path, monkeypatch):
