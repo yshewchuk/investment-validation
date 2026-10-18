@@ -40,7 +40,7 @@ The owning modules expose these helpers to native experiment callers; no compati
 | `v2_gate_collect.run_sweep` | Collection inputs and a positive finite timeout observe submitted jobs until terminal/deadline, then collect. Returns the same index shape; never owns workers, retries jobs or stops the supervisor. Observer I/O/non-constraint SQLite failures are retryable `RESOURCE_UNAVAILABLE`; integrity constraints or malformed stored receipts refuse R6 (malformed stored job failures retain `INTEGRITY_FAILED`, while collection's explicit 1 MiB size ceiling refuses R6). Library/CLI timeout defaults are 3600 seconds. |
 | `v2_gate_collect.main` | CLI argument list selects collect/run. Non-sweep purpose refuses `HOLDOUT_ACCESS_DENIED`; missing/conflicting mode refuses `INVALID_EXPERIMENT_SPEC`, before opening inputs/catalog. Prints sorted index or typed refusal JSON: returns 0 for complete success, 2 for incomplete results/handled refusals; unexpected programming errors propagate. Requires an existing migrated catalog; missing/nonregular catalog admission refuses `INVALID_EXPERIMENT_SPEC`, other stat errors and raw SQLite failures reaching the CLI remain `RESOURCE_UNAVAILABLE` (the stat check is not race-proof). Rejected roster path/access or bounded-JSON admission refuses non-retryable `INVALID_EXPERIMENT_SPEC`; I/O outside that admission policy remains retryable `RESOURCE_UNAVAILABLE`. Detailed error classifications are covered by the collection boundary tests. Artifact/data refusals retain their original code. |
 
-`v2_gate`, `v2_prediction` and `v2_magnitude_search` expose `--max-registration-bytes`
+`v2_gate`, `v2_prediction`, `v2_magnitude_search` and `v2_magnitude_search_run` expose `--max-registration-bytes`
 (default 16777216) for this initial catalog/object load only. Larger magnitude
 populations may need an explicit larger finite budget; history registrations
 embed their temporal plan twice. The option neither changes saved identity nor
@@ -48,6 +48,8 @@ changes subsequent admission/outcome APIs' separate read policies.
 
 ## Consumers and authority
 
+`v2_magnitude_search_run` consumes `magnitude_search_plan.read_search_plan`, `magnitude_search_records.MIGRATIONS`/`OWNER`/`append_record`/`read_record`, `magnitude_search_trials.SearchTrials`, `magnitude_search_execution.validate_execution_limits`, and `magnitude_search_outer.execute_outer_fold`/`collect_outer_results` for source-sealed serial orchestration.
+Its CLI also consumes `native_registration.read_native_registration`/`valid_registration_read_budget`/`MAX_NATIVE_EVIDENCE_BYTES` and `native_gate_worker.read_native_staged_input`; direct engine dependencies are contracts, data, foundation and ops. The [driver section](#serial-magnitude-search-driver) defines the public seal/run helpers and each CLI action's authority.
 `v2_gate_sweep` uses registration preparation/lookup/reservation, the bounded reader and `gate_report.validate_gate_spec`.
 `native_sweep_collection` consumes `v2_gate_sweep.submit_sweep`, sealed registration, `native_outcomes`, `gate_report.render_gate_report`, ops transactions/bounded SQL-text helpers/registered artifacts/spec parsing/source closure/bounded native evidence readers and writers/job reads/`MAX_JOB_FAILURE_BYTES`/errors, contracts and foundation. `v2_gate_collect` consumes that collector, staged-input reading, ops catalog/job reads/errors, data `Repository`/errors and foundation artifacts.
 `v2_gate_sweep` consumes ops catalog/transactions, checkpoints, errors, spec parsing, fingerprints, migration/schema admission, stage registry and atomic submission; data supplies `Repository`/typed errors, contracts supply jobs/snapshots, and foundation supplies artifacts, clock and canonical serialization.
@@ -138,11 +140,76 @@ it verifies the native inner inventory once per call, then independently replays
 No admission is cached across calls. It never launches missing work or chooses a
 winner using outer results: `prospective_candidate_id` is the latest fold's inner
 selection. Collection returns a dictionary only; it does not persist an aggregate
-artifact, export or ledger row. Both APIs are library-only; no CLI, real-data
-execution, holdout/final
-access, ledger publication or release authority is implied.
+artifact, export or ledger row. The serial CLI below composes these APIs.
+No real-data execution, holdout/final access, ledger publication or release
+authority is implied.
 
 `magnitude_search_evidence` supplies shared fold input admission, matrix evidence,
 forecast normalization and target-receipt validation. Inner wrappers retain submitted
 Real/Integral support and their original refusal envelopes; outer wrappers enforce
 JSON-native numeric types. The static dependency is included in source seals.
+
+## Serial magnitude search driver
+
+`python -m experiments.v2_magnitude_search_run` accepts `seal`, `run` or `collect`.
+Every action requires `--spec SPEC.json --request REQUEST.json --plan-ref REF.json
+--catalog CATALOG --store-root STORE`. Supply the original registered v1.5 spec,
+the exact `magnitude_search_request.v1` request, and the `plan_ref` object returned
+by `v2_magnitude_search prepare` (not that command's entire output envelope).
+Inputs must be regular, nonsymlink-leaf JSON objects of at most 16 MiB; duplicate
+keys and nonfinite JSON constants refuse. The catalog and store must already exist.
+
+Run `seal` explicitly once after preparing the plan; identical seals are safe to
+repeat. It binds driver sources in a separate immutable journal slot before any
+trial or selection. An already sealed empty library journal is allowed; started
+library journals cannot acquire a driver binding retroactively. `run` requires
+that exact journal and additionally requires positive integer
+`--memory-bytes`, `--cpu-seconds` and `--wall-seconds`. These are per-child limits,
+not a reservation or total-search allowance. For example, after choosing limits
+appropriate for the machine and experiment:
+
+```bash
+common=(--spec SPEC.json --request REQUEST.json --plan-ref REF.json \
+        --catalog CATALOG --store-root STORE)
+python -m experiments.v2_magnitude_search_run seal "${common[@]}"
+python -m experiments.v2_magnitude_search_run run "${common[@]}" \
+    --memory-bytes "$MEMORY_BYTES" --cpu-seconds "$CPU_SECONDS" \
+    --wall-seconds "$WALL_SECONDS" > search-report.json
+python -m experiments.v2_magnitude_search_run collect "${common[@]}"
+```
+
+All three actions accept `--max-registration-bytes` (default 16777216); use an explicit larger finite budget for a larger saved registration. The shared loader validator requires an integer from 1 through `2**62 - 1` before storage access; this option changes only initial registration loading, not saved identity or later read policies.
+
+`run_search(conn, store, repository, registration, request, plan_ref, *, limits)`
+is the same orchestration API. It traverses outer folds, candidates and inner
+folds in sealed plan order, one child at a time; then freezes all inner selections,
+evaluates each selected outer winner, and collects every completed outer fold.
+Valid candidate failures are excluded by the sealed policy; all-candidate failure
+refuses. It never chooses a winner from outer scores.
+
+Repeating `run` reconciles publication only when the original native start and
+post-exit child result are both durable, using exactly the original limits.
+Unfinished inner claims without that result, unfinished outer claims, or premature
+selections refuse before fitting. All claimed inner results and completed outer
+results are verified before fresh fitting. No reset, claim takeover, fit retry,
+replacement candidate or source-binding migration is performed. The installation
+must match registration, plan and journal; install the complete implementation
+before registering/sealing, rather than reusing older source-bound evidence.
+
+`run` and `collect` exit 0 with one canonical `magnitude_search_outer_report.v1` JSON
+document, preserving its `result_id`, all fold predictions, metrics and provenance.
+The stdout budget is 64 MiB of UTF-8 including the newline: excess refuses with
+`RESOURCE_LIMIT_EXCEEDED` before any report bytes are printed, without truncation
+or undoing completed records. Output staging uses disposable temporary storage.
+The selected stdout stream consumes each chunk using reported progress, then flushes before returning.
+Zero/unavailable/invalid progress and write/flush errors propagate without a second document; staging closes without closing caller-owned stdout.
+Typed refusals exit 2 as `{"refused": <Problem>}` with original fields; pre-emission
+filesystem/SQLite errors are redacted as `RESOURCE_UNAVAILABLE`. Parser errors
+exit 2 on stderr; incidental Python progress also goes to stderr.
+
+`collect` verifies the driver seal, opens the catalog read-only and never starts
+or repairs work. The existing report hash covers scientific results; the separate
+driver seal, whose hash `seal` returns as `driver_id`, supplies driver provenance.
+`seal_search_run(..., clock=...)` exposes the explicit seal as a library API.
+`seal` and `collect` reject resource flags. Optional `--no-ledger` is a no-op:
+all modes exclude ledger/outcome publication, final holdouts, releases and orders.
