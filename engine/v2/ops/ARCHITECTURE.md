@@ -55,7 +55,7 @@ Internally: `nightly.py`'s `GRAPH`, `graph_order()`, `OPTIONAL`, `NO_JOB_STAGES`
 `build_legacy_job_requests`, `_stage_sequence` (see "Diagrams" below); `supervisor.Service`/`serve`; the
 coordinator-effect functions in `effects_graph.py`; `training.py`'s `training_job_kind`/`promote_job_kind` (registered in
 `stages.py::_core_kinds`, not in `supervisor._COORDINATOR_EFFECT_KINDS`), `training_plan`/`promote_plan`,
-`run_training_worker`/`run_promote_worker`; `state_stage.py` (`phase5_state_stage`); `BoardRequest`/`board_requests(as_of, horizon_days, tickers, events_table)`
+`run_training_worker`/`run_promote_worker`; `native_training_pin_problems((catalog, store, snapshot, receipt), require_absolute=True)` returns a problem list without I/O (CLI validates raw pins with `False` before path resolution); `state_stage.py` (`phase5_state_stage`); `BoardRequest`/`board_requests(as_of, horizon_days, tickers, events_table)`
 (`native_board_universe.py`) — `board_requests` emits one `BoardRequest` — the pure key `(ticker, strategy, event_date, session)` — per event ×
 native-covered strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
 `computed_moves_job_kind`/`forward_calendar_job_kind`, `CalendarMovesParameters`/`calendar_moves_parameter_problems`/

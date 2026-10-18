@@ -39,9 +39,9 @@ class TrainingParameters:
     #: _stage_inputs``): the supervisor's launch-time ``_pin_read_set`` copies
     #: the manifest's ``file_refs`` into ``staging/legacy`` so the dataset
     #: builders read the real panel/tier4 inputs through ``INVESTING_PLAN_ROOT``.
-    #: ``None`` on a plan whose operator named no manifest -- such a plan is
-    #: blocked for submission (see :func:`training_plan`) rather than failing
-    #: ``INPUT_CHANGED`` at launch.
+    #: ``None`` without a legacy manifest blocks legacy submission rather than
+    #: failing ``INPUT_CHANGED`` at launch. Native D14 plans deliberately keep
+    #: this ``None`` and are submit-ready when all four native source pins are valid.
     input_bindings: dict[str, str] | None = None
     input_mode: str = "legacy"
     catalog_path: str = ""
@@ -178,8 +178,13 @@ def _shape_problems(params) -> list[str]:
     return problems
 
 
-def _native_pin_problems(pins, *, require_absolute=True) -> list[str]:
-    """Validate raw pins before CLI path resolution or any source access."""
+def native_training_pin_problems(
+        pins: tuple[str, str, str, str], *, require_absolute: bool = True) -> list[str]:
+    """Return admission problems without I/O for catalog, store, snapshot, receipt pins.
+
+    CLI callers pass ``require_absolute=False`` before resolving valid relative paths;
+    library/worker admission requires absolute source paths by default.
+    """
     if not all(isinstance(value, str) and value.strip() and "\x00" not in value for value in pins):
         return ["native_d14 requires catalog_path, objects_root, snapshot_id and receipt_id"]
     if require_absolute and not all(Path(value).is_absolute() for value in pins[:2]):
@@ -200,7 +205,7 @@ def _native_input_problems(params) -> list[str]:
         problems.append("native_d14 requires an implied_t1/runup_move monthly recipe")
     if params.input_bindings or params.pairs_path:
         problems.append("native_d14 must not mix legacy bindings or pairs_path")
-    return problems + _native_pin_problems(pins)
+    return problems + native_training_pin_problems(pins)
 
 
 def training_parameter_problems(job, params) -> list[str]:
