@@ -15,6 +15,10 @@
 # ~3.8x parallel on a 4-core runner): ops ~1224, research ~902, checks ~474,
 # rest ~876. Rebalance by moving a pattern; keep every shard under ~15 minutes
 # of pytest wall time on CI.
+# On 2026-10-18 the remainder `research` shard still ran 8-16 min on main
+# (runs 39165980122..39169015848): the three magnitude_search outer/driver_native
+# files carry ~80 s module-scoped setups and 30-140 s calls, so they are the
+# research-c shard and the remainder is left with the cheap files.
 # Runner speed varies ~2x, so the subprocess-driven ops files and the
 # bounded-retention test (ops-sweep) and the integration tests (integration)
 # each get their own shard.
@@ -47,6 +51,14 @@ patterns = [
   "tests/v2/research/test_magnitude_history_store.py",
   "tests/v2/research/test_magnitude_search_trials.py",
   "tests/v2/research/test_magnitude_execution_registration.py",
+]
+
+[[shard]]
+name = "research-c"
+patterns = [
+  "tests/v2/research/test_magnitude_search_outer.py",
+  "tests/v2/research/test_magnitude_search_outer_integrity.py",
+  "tests/v2/research/test_magnitude_search_driver_native.py",
 ]
 
 [[shard]]

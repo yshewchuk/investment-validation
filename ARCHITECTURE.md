@@ -310,7 +310,7 @@ packages migrate. On `pull_request`, `tests.yml` runs it against the PR base SHA
 pytest and a nonzero result fails the `plan` job, and so the required `test` check; pushes to `main` keep the full-suite backstop.
 
 CI runs the suite as shards declared in `tests/shards.toml`. `tools/ci_shards.py matrix`
-prints the shard names (research is split into `research-a`, `research-b` and the
+prints the shard names (research is split into `research-a`, `research-b`, `research-c` and the
 remainder-glob `research`, balanced by measured per-file time) and `files SHARD [--selection FILE]` prints one shard's test files
 (first matching pattern wins; the last shard owns every file no pattern claims; a
 selection only narrows, and unknown paths are ignored). The loader refuses a bad
