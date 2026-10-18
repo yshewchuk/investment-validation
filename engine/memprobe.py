@@ -11,15 +11,21 @@ top.
 Flags (read at call time; truthy is ``1``/``true``/``yes``/``on``):
 
 - ``INVESTING_PLAN_MEMPROFILE``: enable snapshots.
-- ``INVESTING_PLAN_MEMPROFILE_TRIM``: under enable, run ``gc.collect()`` then
-  a best-effort libc ``malloc_trim(0)`` before measuring, and log RSS before
-  and after the trim so retained-by-Python separates from freed-but-held-by-glibc.
+- ``INVESTING_PLAN_MEMPROFILE_TRIM``: under enable, run ``gc.collect()``, then
+  release the pyarrow pool (``release_unused``) if pyarrow is already
+  imported, then a best-effort libc ``malloc_trim(0)`` before measuring, and
+  log RSS before and after the trim so the trim line shows bytes retained by
+  Python vs held by glibc or the pyarrow pool.
 - ``INVESTING_PLAN_MEMPROFILE_EVERY``: int, default 250; used by :func:`tick`.
 - ``INVESTING_PLAN_MEMPROFILE_TOP``: int, default 12; rows of largest objects
   (negative values are clamped to 0 rows).
 
 Output lines are prefixed with two spaces then ``[mem]`` and go to stdout,
-flushed. Size estimates are sampled, not exact.
+flushed. Size estimates are sampled, not exact. Optional probes are silently
+omitted when unavailable — pyarrow rows appear only when pyarrow is already
+imported, map/rss rows only when ``/proc/self/smaps`` and
+``/proc/self/status`` are readable; they never print a failure line. Only an
+unexpected exception in the snapshot body prints ``probe failed``.
 
 :func:`snapshot` and :func:`tick` never raise, except MemoryError which
 propagates; when disabled they return before any diagnostic work. The exported
@@ -59,6 +65,18 @@ _TRUTHY = {"1", "true", "yes", "on"}
 _DEFAULT_EVERY = 250
 _DEFAULT_TOP = 12
 _PREFIX = "  [mem] "
+#: kernel-owned file; budget keeps the probe cheap with very many mappings
+_MAX_SMAPS_LINES = 500_000
+
+
+def _row_limit(n: Any) -> int:
+    """Coerce a row-count request to a non-negative int; 0 on bad input."""
+    try:
+        return max(0, int(n))
+    except MemoryError:
+        raise
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 #: (name, owner-id | None) -> (weakref.ref(owner) | module-name string, attr)
 _registry: dict[tuple[str, int | None], tuple[Any, str]] = {}
@@ -141,13 +159,13 @@ def top_mappings(n: int = 5) -> list[tuple[int, str]]:
     """Largest ``/proc/self/smaps`` mappings by Rss as
     ``(bytes, "<path or [anon]> <addr-range>")``; ``[]`` if unreadable."""
     try:
-        n = max(0, int(n))
+        n = _row_limit(n)
         if n == 0:
             return []
         heap: list[tuple[int, str]] = []
         desc = ""
         with open("/proc/self/smaps", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
+            for line in itertools.islice(fh, _MAX_SMAPS_LINES):
                 parts = line.split()
                 if not parts:
                     continue
@@ -413,10 +431,7 @@ def top_objects(n: int, objs: Any = None) -> list[tuple[int, str]]:
     Deduplicates by id; ``n`` is coerced to a non-negative int at entry
     (non-numeric input → 0 rows); never raises except MemoryError; does not
     check the enable flag."""
-    try:
-        n = max(0, int(n))
-    except (TypeError, ValueError):
-        n = 0
+    n = _row_limit(n)
     seen: set[int] = set()
     candidates: list[tuple[int, str]] = []
     if objs is None:
@@ -503,10 +518,7 @@ def _describe(o: Any, name: str, is_df: bool) -> str:
 def type_counts(n: int = 10, objs: Any = None) -> list[tuple[int, str]]:
     """Top ``n`` ``type(o).__name__`` counts over ``objs`` (default
     ``gc.get_objects()``) as ``(count, name)``."""
-    try:
-        n = max(0, int(n))
-    except (TypeError, ValueError):
-        n = 0
+    n = _row_limit(n)
     if objs is None:
         try:
             objs = gc.get_objects()
@@ -527,10 +539,7 @@ def hidden_arrays(n: int = 5, objs: Any = None) -> list[tuple[int, str]]:
     """Standalone ndarrays (untracked by gc) found via dict/list/tuple
     holders; does not descend into DataFrames. Top ``n`` by nbytes as
     ``(bytes, description)``."""
-    try:
-        n = max(0, int(n))
-    except (TypeError, ValueError):
-        n = 0
+    n = _row_limit(n)
     if objs is None:
         try:
             objs = gc.get_objects()
@@ -592,7 +601,7 @@ def snapshot(label: str, *, top: int | None = None) -> None:
                 del _registry[(key_name, owner_id)]
         seen_names: dict[str, int] = {}
         n = top if top is not None else _int_flag("INVESTING_PLAN_MEMPROFILE_TOP", _DEFAULT_TOP)
-        n = max(0, n)
+        n = _row_limit(n)
         pre = rss_bytes()
         trimmed = False
         released = False
