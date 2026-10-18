@@ -303,7 +303,7 @@ of the newest nightly jobs, so a score older than that window is not found.
 | R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); an incumbent changed before staging starts a new cycle under new keys; once a candidate is staged, the staged id or the guarded promote refuses and the cycle stalls |
 | R4 transaction | phase N+1 is submitted only once every phase-N job has succeeded; a sidecar failure is caught and reported (deduped), never raised |
 | R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; before the pointer swap the prior release stays deployed, and a failure after the swap follows the §7.2 history rules |
-| R6 idempotency | phase keys and the candidate release id are stable per session, scoring manifest and prior release, so a rerun scored from a new manifest retrains; a deployed release already named so ends the cycle |
+| R6 idempotency | phase keys are stable per session, scoring manifest and prior release, so a rerun scored from a new manifest retrains; the candidate release id is `pools-{session}-{tag}` and does not include the prior release (an incumbent that changes after staging stalls on `ID_CONFLICT`, R3); a deployed release already named so ends the cycle |
 
 ### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
 

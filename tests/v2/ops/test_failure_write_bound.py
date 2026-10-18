@@ -29,3 +29,16 @@ def test_oversized_non_detail_fields_fall_back_to_minimal_failure():
     text = catalog.dumps_failure(p)
     assert len(text.encode("utf-8")) <= catalog.MAX_JOB_FAILURE_BYTES
     assert catalog.load_json(Problem, text).code == "WORKER_FAILED"
+
+
+def test_oversized_details_reduce_to_empty_details_capped_message_keeping_stage():
+    problem = dataclasses.replace(
+        make_problem("WORKER_FAILED", "m" * 10000, details={"blob": "y" * (2 * 1024 * 1024)}),
+        stage="ingest",
+    )
+    text = catalog.dumps_failure(problem)
+    out = catalog.load_json(Problem, text)
+    assert not out.details
+    assert len(out.message) == 4096
+    assert out.stage == "ingest"
+    assert len(text.encode("utf-8")) <= catalog.MAX_JOB_FAILURE_BYTES
