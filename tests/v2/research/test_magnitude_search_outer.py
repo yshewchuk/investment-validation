@@ -282,6 +282,7 @@ def forbid_work(monkeypatch):
         monkeypatch.setattr(module, "run_fitted_trial", forbidden)
         monkeypatch.setattr(module, "load_magnitude_targets", forbidden)
     monkeypatch.setattr(outer, "_inputs", forbidden)
+    monkeypatch.setattr(trials.SearchTrials, "_inputs", forbidden)
     monkeypatch.setattr(outer, "execution_limits", forbidden)
 
 

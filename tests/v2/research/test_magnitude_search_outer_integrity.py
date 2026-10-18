@@ -275,6 +275,7 @@ def test_collection_cannot_fit_if_terminal_disappears_after_inventory(outer_case
                 return None
         return result
     monkeypatch.setattr(outer, "read_record", read)
+    forbid_work(monkeypatch)
     forbidden = Mock(side_effect=AssertionError("replay-only collection entered a fit or publication path"))
     for name in ("forbid_fitting", "forbid_legacy_fitting", "execution_limits", "_inputs", "load_magnitude_targets",
                  "run_fitted_trial", "append_record"):
@@ -381,8 +382,7 @@ def test_valid_hash_outer_evidence_tampering_refuses_replay(outer_case, monkeypa
         run(case)
     assert slot(case, "terminal") is not None
     before = case.conn.total_changes
-    monkeypatch.setattr(outer, "run_fitted_trial", lambda *a: pytest.fail("tampered replay fitted"))
-    monkeypatch.setattr(outer, "load_magnitude_targets", lambda *a, **kw: pytest.fail("tampered replay opened labels"))
+    forbid_work(monkeypatch)
     with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
         run(case)
     assert case.conn.total_changes == before
