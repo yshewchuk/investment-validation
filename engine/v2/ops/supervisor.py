@@ -47,6 +47,7 @@ from engine.v2.ops.effects_graph import (
 )
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.executor_watchdog import is_alive, signal_owned
+from engine.v2.ops.failure_diagnostics import DiagnosticPublicationError, prepare_failure
 from engine.v2.ops.fingerprints import (
     environment_identity,
     snapshot_code,
@@ -1096,7 +1097,7 @@ class Service:
             # to recovery instead — reservations and the store lease held
             # until reconciliation, every lease-expiry check unchanged; only
             # WHERE the refusal is recorded changes.
-            self._commit_failure(claim, {"exit_code": None}, problem)
+            self._record_failure(claim, {"exit_code": None}, problem)
 
     def _stage_legacy_inputs(self, claim, launch):
         """Populate this attempt's legacy inputs before the worker launches.
@@ -1422,7 +1423,7 @@ class Service:
         except Exception as exc:
             problem = (exc.problem if isinstance(exc, OpsError)
                        else self._completion_problem(claim, exc))
-            self._commit_failure(claim, status, problem)
+            self._record_failure(claim, status, problem)
         finally:
             self._progress_state.pop(claim.attempt_id, None)
 
@@ -1567,12 +1568,21 @@ class Service:
             problem = dataclasses.replace(problem, diagnostic_ref=ref.artifact_id)
         return problem
 
+    def _record_failure(self, claim, status, problem):
+        """Keep a diagnostic storage refusal local to this launch/completion."""
+        try:
+            self._commit_failure(claim, status, problem)
+        except DiagnosticPublicationError as exc:
+            self._strand(claim, exc.problem)
+
     def _commit_failure(self, claim, status, problem):
         """Record the failure under the fence — only while the fence is still held (B)."""
-        outcome = Outcome(False, "verified_dead", status["exit_code"], problem)
         if fence_held(self.conn, claim.attempt_id, claim.fence, clock=self.clock):
+            problem, diagnostic = prepare_failure(problem, self.store)
+            outcome = Outcome(False, "verified_dead", status["exit_code"], problem)
             try:
-                commit_attempt(self.conn, claim.attempt_id, claim.fence, outcome, clock=self.clock)
+                commit_attempt(self.conn, claim.attempt_id, claim.fence, outcome, clock=self.clock,
+                               failure_artifact=diagnostic)
                 return
             except OpsError as exc:
                 if exc.code not in _FENCE_LOST_CODES:
@@ -1581,9 +1591,10 @@ class Service:
         self._strand(claim, problem)
 
     def _strand(self, claim, problem):
-        """Hand an attempt whose fence is gone to the existing recovery state machine.
+        """Leave an uncommittable attempt to the existing recovery state machine.
 
-        Nothing is committed under the stale fence. A job being cancelled
+        Nothing is committed under a stale fence or without its required diagnostic.
+        A still-live lease remains reserved until expiry. A job being cancelled
         completes its cancellation (the worker has already exited). Anything
         else is fenced off exactly as a lease expiry would do it
         (``recovery.expire_leases``: attempt ``recovery_pending``, job fence

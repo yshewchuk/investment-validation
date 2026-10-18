@@ -16,7 +16,7 @@ from engine.v2.foundation import (
     from_document,
     to_document,
 )
-from engine.v2.ops.catalog import transaction
+from engine.v2.ops.catalog import decode_bounded_text, sql_text_budget, transaction
 from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
@@ -114,10 +114,10 @@ def _mode(no_ledger, ledger_path):
         metadata = path.lstat()
     except FileNotFoundError:
         pass  # The ledger sink creates absent destinations and parent directories.
-    except OSError as exc:
-        if exc.errno not in (errno.ENOTDIR, errno.ELOOP, errno.ENAMETOOLONG):
-            raise
-        raise fail("INVALID_EXPERIMENT_SPEC", "sweep ledger destination must be a valid path") from None
+    except OSError as error:
+        if error.errno in {errno.ENOTDIR, errno.ELOOP, errno.ENAMETOOLONG}:
+            raise fail("INVALID_EXPERIMENT_SPEC", "sweep ledger destination must be a valid path") from None
+        raise
     else:
         if not stat.S_ISREG(metadata.st_mode):
             raise fail("INVALID_EXPERIMENT_SPEC", "sweep ledger destination must name a regular file")
@@ -157,8 +157,6 @@ def _bind(conn, store, anchor, key, document):
 
 
 def _check_policy(problem):
-    if problem.code == "WORKER_FAILED" and problem.code not in FAILURE_CODES:
-        return
     if (problem.code not in FAILURE_CODES
             or (problem.category, problem.retryable) != FAILURE_CODES[problem.code]):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep child refusal differs from its registered policy")
@@ -166,8 +164,7 @@ def _check_policy(problem):
 
 def _terminal(conn, store, job, registration):
     """Never use JobReceipt.output_refs: it unions outputs from old attempts."""
-    encoding = conn.execute("PRAGMA encoding").fetchone()[0]
-    limit = MAX_FAILURE_BYTES * (2 if encoding.startswith("UTF-16") else 1)
+    encoding, limit = sql_text_budget(conn, MAX_FAILURE_BYTES)
     attempt = conn.execute(
         "SELECT attempt_id, state, ended_at, fence, failure_json IS NOT NULL AS has_failure, "
         "CASE WHEN typeof(failure_json)='text' AND length(CAST(failure_json AS BLOB))<=? "
@@ -182,9 +179,7 @@ def _terminal(conn, store, job, registration):
     if attempt is not None and attempt["has_failure"]:
         payload = attempt["failure_json"]
         try:
-            if payload is None or len(payload.decode(encoding).encode("utf-8")) > MAX_FAILURE_BYTES:
-                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep attempt failure must be bounded text")
-            stored = from_document(Problem, json.loads(payload.decode(encoding)))
+            stored = from_document(Problem, json.loads(decode_bounded_text(payload, encoding, MAX_FAILURE_BYTES)))
         except (ValueError, RecursionError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep attempt failure cannot be decoded") from None
         problem = job.failure if job.failure is not None else stored
@@ -212,6 +207,7 @@ def _terminal(conn, store, job, registration):
         except (ValueError, RecursionError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep result cannot be decoded") from None
         if (not isinstance(result, dict) or ref.schema_ref != "native_gate_result.v1.0" or canonical != payload
+                or ref != artifact_reference(payload, ref.schema_ref)
                 or result.get("schema_version") != ref.schema_ref or type(result.get("attempted_variants")) is not int
                 or result.get("attempted_variants") != 1 or result.get("variant_id") != registration.variant_id
                 or result.get("run_id") != registration.run_id
@@ -220,15 +216,8 @@ def _terminal(conn, store, job, registration):
     elif outputs:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "failed sweep attempt has successful output")
     if result is None:
-        if problem is None:
+        if problem is None or problem.code == "WORKER_FAILED":
             problem = fail("EXPERIMENT_VARIANT_FAILED", "sweep child produced no scientific result").problem
-        elif problem.code == "WORKER_FAILED":
-            if problem.code in FAILURE_CODES and (problem.category, problem.retryable) != FAILURE_CODES[problem.code]:
-                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep child refusal differs from its registered policy")
-            problem = fail("EXPERIMENT_VARIANT_FAILED", "sweep child produced no scientific result").problem
-        elif (problem.code not in FAILURE_CODES
-              or (problem.category, problem.retryable) != FAILURE_CODES[problem.code]):
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "sweep child refusal differs from its registered policy")
     elif problem is not None:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "successful sweep child has a refusal")
     return attempt, result, problem, worker_problem
@@ -248,7 +237,10 @@ def collect_sweep(conn, store, repository, document, *, code_root, as_of_month,
         raise fail("INVALID_EXPERIMENT_SPEC", "sweep collection requires an idle catalog connection")
     implementation = _implementation(code_root)
     jobs = submit_sweep(conn, store, repository, document, code_root=code_root,
-                       as_of_month=as_of_month, scope=scope, event_ids=event_ids, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
+                       as_of_month=as_of_month, scope=scope, event_ids=event_ids,
+                       max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES,
+                       receipt_decode_failure_code="EXPERIMENT_IDENTITY_CONFLICT",
+                       max_failure_bytes=MAX_JOB_FAILURE_BYTES)
     sealed = native.decode_native_gate_sweep(native.read_native_gate_sweep(
         conn, document["variants"][0]["experiment_id"]))
     registrations = [native.NativeRegistration(item["run_id"], canonical_json(item["binding"]).encode())
@@ -260,10 +252,8 @@ def collect_sweep(conn, store, repository, document, *, code_root, as_of_month,
     _bind(conn, store, registrations[0], key + "_intent", intent)
     arms, all_terminal = [], True
     for job, registration, spec_document in zip(jobs, registrations, sealed["request"]["variants"], strict=True):
-        try:
-            job = get_job(conn, job.job_id)
-        except (ValueError, RecursionError):
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored sweep job receipt cannot be decoded") from None
+        job = get_job(conn, job.job_id, receipt_decode_failure_code="EXPERIMENT_IDENTITY_CONFLICT",
+                      max_failure_bytes=MAX_JOB_FAILURE_BYTES)
         arm = {"variant_id": registration.variant_id, "arm_id": spec_document["primary_arm_id"],
                "job_id": job.job_id, "attempted_variants": int(job.attempt_count > 0),
                "state": job.state, "attempt_id": None, "problem": None, "worker_problem": None, "report_ref": None,
