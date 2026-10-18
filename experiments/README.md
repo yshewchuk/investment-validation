@@ -125,7 +125,9 @@ there is no retry, replacement candidate or recovery API in this slice.
 
 `collect_outer_results(conn, store, repository, registration, request, plan_ref)`
 requires all outer folds complete and returns their verified results plus pooled
-and per-horizon event-error metrics. It never launches missing work or chooses a
+and per-horizon event-error metrics. After inventorying every outer terminal and limit,
+it verifies the native inner inventory once per call, then independently replays each fold.
+No admission is cached across calls. It never launches missing work or chooses a
 winner using outer results: `prospective_candidate_id` is the latest fold's inner
 selection. Collection returns a dictionary only; it does not persist an aggregate
 artifact, export or ledger row. Both APIs are library-only; no CLI, real-data

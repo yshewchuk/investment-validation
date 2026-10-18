@@ -128,12 +128,17 @@ def execute_outer_fold(conn, store, repository, registration, request, plan_ref,
         fold = next(item["outer"] for item in plan["folds"] if item["outer"]["year"] == outer_year)
     except StopIteration:
         raise fail("INVALID_EXPERIMENT_SPEC", "outer fold is outside the sealed search plan") from None
-    binding = registration.document
-    fold = {**fold, "evaluation_labels_before": binding["magnitude_execution"]["evaluation_labels_before"]}
     def read(slot):
         return read_record(conn, store, registration.run_id, slot)
     trials = SearchTrials(conn, store, repository, registration, request, plan_ref)
     selection = _native_selection(trials, plan, read)
+    return _execute_admitted(conn, store, repository, registration, plan, fold, selection, limits)
+
+
+def _execute_admitted(conn, store, repository, registration, plan, fold, selection, limits, *, replay_only=False):
+    """Bind each fold independently after this call's complete native admission."""
+    binding, outer_year = registration.document, fold["year"]
+    fold = {**fold, "evaluation_labels_before": binding["magnitude_execution"]["evaluation_labels_before"]}
     chosen = next(item["selected_candidate_id"] for item in selection["selections"] if item["outer_year"] == outer_year)
     candidate = next(item for item in plan["candidates"] if item["candidate_id"] == chosen)
     try:
@@ -146,11 +151,11 @@ def execute_outer_fold(conn, store, repository, registration, request, plan_ref,
         "selection_id": content_hash(selection), "candidate": candidate, "limits": dict(limits),
         "outer_sources": sources, "prospective_candidate_id": selection["prospective_candidate_id"]}
     def saved(slot):
-        return read("outer-" + slot + ":" + key)
+        return read_record(conn, store, registration.run_id, "outer-" + slot + ":" + key)
     def append(slot, body):
         return append_record(conn, store, registration.run_id, "outer-" + slot + ":" + key, body, replay=False)
     execution = {**binding["magnitude_execution"], "fit_recipe": candidate["recipe"]}
-    if saved("terminal") is not None:
+    if replay_only or saved("terminal") is not None:
         return _replay(saved, started, fold, plan, execution)
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
@@ -211,9 +216,13 @@ def collect_outer_results(conn, store, repository, registration, request, plan_r
             validate_execution_limits(started["limits"])
         except (KeyError, OpsError):
             raise _conflict() from None
-        pending.append((year, started["limits"]))
-    folds = [execute_outer_fold(conn, store, repository, registration, request, plan_ref, year, limits=limits)
-             for year, limits in pending]
+        pending.append((item["outer"], started["limits"]))
+    def read(slot):
+        return read_record(conn, store, registration.run_id, slot)
+    trials = SearchTrials(conn, store, repository, registration, request, plan_ref)
+    selection = _native_selection(trials, plan, read)
+    folds = [_execute_admitted(conn, store, repository, registration, plan, fold, selection, limits, replay_only=True)
+             for fold, limits in pending]
     predictions = [{**row, "outer_year": fold["outer_year"]} for fold in folds for row in fold["predictions"]]
     result = {"schema_version": "magnitude_search_outer_report.v1", "plan_id": plan["plan_id"],
         "folds": folds, "predictions": predictions, "metrics": magnitude_metrics(predictions),

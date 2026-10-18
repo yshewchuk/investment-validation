@@ -202,6 +202,8 @@ and the history admission bridge uses `errors.fail`.
 The trials caller uses legacy/v2 no-fit guards and `experiments.magnitude_search_execution`;
 that fixed-child supervisor consumes `executor.THREAD_VARIABLES` and `errors.fail`, not the ops job/retry lifecycle.
 `experiments/magnitude_search_worker.py` consumes `errors.OpsError` to distinguish estimator-local failures; `experiments/magnitude_fitted.py` consumes `errors.OpsError`/`fail` for strict propagation and legacy failure mapping.
+`experiments/magnitude_search_outer.py` consumes `migrations.require_current`,
+`fingerprints.source_closure` and `errors.OpsError`/`fail` for selected outer evaluation.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
 `native.input_decoding._load_native_score_inputs`. The dashboard projection
@@ -503,6 +505,3 @@ check is never green). The green-path command is:
 python3 checks/v2_coverage_ratchet.py --profile phase1 --measure --output /tmp/coverage.json
 python3 checks/rearchitecture_phase1_gate.py --coverage /tmp/coverage.json
 ```
-
-`experiments/magnitude_search_outer.py` consumes `migrations.require_current`,
-`fingerprints.source_closure` and `errors.OpsError`/`fail` for selected outer evaluation.

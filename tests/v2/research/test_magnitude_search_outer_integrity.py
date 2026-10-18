@@ -186,8 +186,12 @@ def test_missing_or_submitted_only_native_evidence_cannot_launch(outer_case, mon
 
 @pytest.mark.parametrize("missing", ["execution", "terminal"])
 @pytest.mark.parametrize("axis", ["fold", "candidate", "inner"])
-def test_later_missing_native_evidence_precedes_all_replays(outer_case, monkeypatch, missing, axis):
+@pytest.mark.parametrize("operation", ["execute", "collect"])
+def test_later_missing_native_evidence_precedes_all_replays(outer_case, monkeypatch, missing, axis, operation):
     case = outer_case
+    if operation == "collect":
+        run(case)
+        run(case, "2025")
     fold = case.plan["folds"][-1 if axis in ("fold", "inner") else 0]
     candidate = case.plan["candidates"][-1 if axis == "candidate" else 0]
     inner = fold["inner"][-1 if axis == "inner" else 0]
@@ -206,13 +210,80 @@ def test_later_missing_native_evidence_precedes_all_replays(outer_case, monkeypa
     forbidden = Mock(side_effect=AssertionError("incomplete native inventory crossed its admission boundary"))
     for name in ("freeze", "execute"):
         monkeypatch.setattr(trials.SearchTrials, name, forbidden)
-    for name in ("_inputs", "run_fitted_trial", "load_magnitude_targets", "append_record"):
+    for name in ("_execute_admitted", "_replay", "_inputs", "run_fitted_trial", "load_magnitude_targets", "append_record"):
         monkeypatch.setattr(outer, name, forbidden)
     monkeypatch.setattr(ArtifactStore, "publish_bytes", forbidden)
     before = case.conn.total_changes, list(case.conn.iterdump())
     with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", "outer evaluation requires completed native inner trials"):
-        run(case)
+        (collect if operation == "collect" else run)(case)
     assert hidden == [absent]
+    forbidden.assert_not_called()
+    assert (case.conn.total_changes, list(case.conn.iterdump())) == before
+
+
+@pytest.mark.parametrize("mutation", ["start_sources", "fit_started", "terminal_metrics"])
+def test_collection_rechecks_later_fold_sources_and_evidence(outer_case, monkeypatch, mutation):
+    case = outer_case
+    run(case)
+    original = outer.append_record
+    second_key = content_hash([case.plan["plan_id"], "2025"])
+    def append(conn, store, run_id, name, body, **kwargs):
+        if name.endswith(second_key):
+            body = copy.deepcopy(body)
+            if mutation == "start_sources" and name.startswith("outer-start:"):
+                body["outer_sources"] = {}
+            if mutation == "fit_started" and name.startswith("outer-fit-started:"):
+                body["prediction_matrix_id"] = "wrong"
+            if mutation == "terminal_metrics" and name.startswith("outer-terminal:"):
+                body["metrics"]["rmse"] += 1
+                body["result_id"] = content_hash({k: v for k, v in body.items() if k != "result_id"})
+        return original(conn, store, run_id, name, body, **kwargs)
+    monkeypatch.setattr(outer, "append_record", append)
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+        run(case, "2025")
+    assert all(slot(case, "terminal", year) is not None for year in ("2024", "2025"))
+    replay, seen = outer._replay, []
+    def replayed(read, started, fold, plan, execution):
+        seen.append(fold["year"])
+        return replay(read, started, fold, plan, execution)
+    monkeypatch.setattr(outer, "_replay", replayed)
+    forbid_work(monkeypatch)
+    forbidden = Mock(side_effect=AssertionError("corrupt collection published evidence"))
+    monkeypatch.setattr(outer, "append_record", forbidden)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", forbidden)
+    before = case.conn.total_changes, list(case.conn.iterdump())
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+        collect(case)
+    assert seen == ["2024", "2025"]
+    forbidden.assert_not_called()
+    assert (case.conn.total_changes, list(case.conn.iterdump())) == before
+
+
+def test_collection_cannot_fit_if_terminal_disappears_after_inventory(outer_case, monkeypatch):
+    case = outer_case
+    run(case)
+    run(case, "2025")
+    original = outer.read_record
+    second_terminal = "outer-terminal:" + content_hash([case.plan["plan_id"], "2025"])
+    reads = []
+    def read(conn, store, run_id, name):
+        result = original(conn, store, run_id, name)
+        if name == second_terminal:
+            assert isinstance(result, dict)
+            reads.append(name)
+            if len(reads) > 1:
+                return None
+        return result
+    monkeypatch.setattr(outer, "read_record", read)
+    forbidden = Mock(side_effect=AssertionError("replay-only collection entered a fit or publication path"))
+    for name in ("forbid_fitting", "forbid_legacy_fitting", "execution_limits", "_inputs", "load_magnitude_targets",
+                 "run_fitted_trial", "append_record"):
+        monkeypatch.setattr(outer, name, forbidden)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", forbidden)
+    before = case.conn.total_changes, list(case.conn.iterdump())
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+        collect(case)
+    assert len(reads) == 2
     forbidden.assert_not_called()
     assert (case.conn.total_changes, list(case.conn.iterdump())) == before
 
@@ -359,7 +430,8 @@ def test_collect_admits_every_stored_limit_before_any_replay(outer_case, monkeyp
     assert all(slot(case, "terminal", year) is not None for year in ("2024", "2025"))
     before = case.conn.total_changes, journal_slots(case)
     replay = Mock(side_effect=AssertionError("collection replayed a fold before admitting all stored limits"))
-    monkeypatch.setattr(outer, "execute_outer_fold", replay)
+    for name in ("execute_outer_fold", "_execute_admitted", "_native_selection", "_replay"):
+        monkeypatch.setattr(outer, name, replay)
     monkeypatch.setattr(ArtifactStore, "publish_bytes", replay)
     with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
         collect(case)

@@ -317,7 +317,8 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
     before = case.conn.total_changes, journal_slots(case)
     public_replay = Mock(side_effect=AssertionError("incomplete collect attempted public outer replay"))
     with monkeypatch.context() as patch:
-        patch.setattr(outer, "execute_outer_fold", public_replay)
+        for name in ("execute_outer_fold", "_execute_admitted", "_native_selection", "_replay"):
+            patch.setattr(outer, name, public_replay)
         with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", "outer report requires every completed outer fold"):
             collect(case)
     public_replay.assert_not_called()
@@ -326,10 +327,35 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
     second = run(case, "2025")
     expected_predictions = [{**row, "outer_year": year} for year, result in (("2024", first), ("2025", second))
                             for row in assert_fold_oracle(case, result, year)]
+    trace = []
+    freeze, execute, replay = trials.SearchTrials.freeze, trials.SearchTrials.execute, outer._replay
+    def frozen(self):
+        trace.append(("freeze",))
+        return freeze(self)
+    def executed(self, *args, **kwargs):
+        trace.append(("inner", *args))
+        assert kwargs == {"limits": LIMITS}
+        return execute(self, *args, **kwargs)
+    def replayed(read, started, fold, plan, execution):
+        trace.append(("outer", fold["year"]))
+        return replay(read, started, fold, plan, execution)
+    monkeypatch.setattr(trials.SearchTrials, "freeze", frozen)
+    monkeypatch.setattr(trials.SearchTrials, "execute", executed)
+    monkeypatch.setattr(outer, "_replay", replayed)
+    spies = {name: Mock(wraps=getattr(outer, name)) for name in
+             ("read_search_plan", "_native_selection", "source_closure")}
+    for name, spy in spies.items():
+        monkeypatch.setattr(outer, name, spy)
     forbid_work(monkeypatch)
     before = case.conn.total_changes, journal_slots(case)
     with no_fit_guard(), legacy_guard():
         report = collect(case)
+        assert collect(case) == report
+    expected_trace = [("freeze",)] + [("inner", *args) for args in trial_cases(case)] + [
+        ("outer", "2024"), ("outer", "2025")]
+    assert trace == expected_trace * 2
+    assert {name: spy.call_count for name, spy in spies.items()} == {
+        "read_search_plan": 2, "_native_selection": 2, "source_closure": 4}
     expected = {"schema_version": "magnitude_search_outer_report.v1", "plan_id": case.plan["plan_id"],
         "folds": [first, second], "predictions": expected_predictions, "metrics": independent_metrics(expected_predictions),
         "event_count": 10, "forecast_count": 30,
@@ -362,7 +388,8 @@ def test_collect_refuses_later_committed_start_without_terminal_before_any_repla
     assert slot(case, "validation", "2025") is None
     before = case.conn.total_changes, list(case.conn.iterdump())
     forbidden = Mock(side_effect=AssertionError("incomplete collection attempted replay or publication"))
-    for name in ("execute_outer_fold", "_replay", "_inputs", "load_magnitude_targets", "run_fitted_trial", "append_record"):
+    for name in ("execute_outer_fold", "_execute_admitted", "_native_selection", "_replay", "_inputs",
+                 "load_magnitude_targets", "run_fitted_trial", "append_record"):
         monkeypatch.setattr(outer, name, forbidden)
     monkeypatch.setattr(ArtifactStore, "publish_bytes", forbidden)
     with no_fit_guard(), legacy_guard(), outer_problem(

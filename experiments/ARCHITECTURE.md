@@ -659,8 +659,9 @@ Completed replay verifies the complete evidence chain without native payloads or
 | Missing any outer terminal during collection | `EXPERIMENT_IDENTITY_CONFLICT` before any outer replay; no writes or missing-work launch. |
 | Metric computation refuses | `EXPERIMENT_VARIANT_FAILED` propagates; no successful terminal/report or candidate substitution. |
 
-`collect_outer_results` verifies every completed outer fold and returns a deterministic
-read-only aggregate. Fold/horizon metrics retain complete forecast-target pairs;
+`collect_outer_results` inventories all outer terminals/limits, admits native inner evidence once per call,
+then verifies every fold's source/evidence bindings through a replay-only internal path. It returns a deterministic
+read-only aggregate; no admission is cached across calls. Fold/horizon metrics retain complete forecast-target pairs;
 primary RMSE pools event/horizon errors rather than fold RMSEs. Equal complete
 horizon counts preserve equal event weights. The prospective recipe is always the
 latest outer fold's frozen INNER winner. Journals own source/fit/input evidence;
