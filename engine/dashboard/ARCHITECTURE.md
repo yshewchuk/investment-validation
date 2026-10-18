@@ -50,6 +50,17 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   not cover there), `secret_scan`, `access_probe`: the publication path
   and its own pre-publish secret scan of the rendered bundle.
 
+### Memory diagnostics (opt-in)
+
+`engine/memprobe.py` — four env flags (`INVESTING_PLAN_MEMPROFILE`, `_TRIM`,
+`_EVERY` default 250, `_TOP` default 12). Off = no output and no gc walk; on,
+`[mem]` lines go to stdout. `_TRIM` runs `gc.collect()` then libc
+`malloc_trim(0)` before measuring, logging RSS before/after. Hooks:
+`NightlyReport.mark`, `score_calendar`, `load_chain_index`, `Scorer` caches.
+Estimates are sampled, not exact. The native (`engine/v2`) nightly is NOT
+covered because `engine/v2` must not import legacy `engine` (layer rule); a
+v2-side copy is a follow-up.
+
 ## Inputs
 
 Tier-1/2 fetch data (via the quota-guarded fetch wrapper), the shared

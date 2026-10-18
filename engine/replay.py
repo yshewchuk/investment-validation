@@ -32,6 +32,7 @@ from typing import Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from engine import memprobe
 from engine.calendar import TradingCalendar, trading_calendar
 from engine.data import store
 from engine.fills import MIN_MEANINGFUL_COST, FillModel
@@ -326,6 +327,7 @@ def load_chain_index(
     wanted = {(str(t), pd.Timestamp(d).normalize()) for t, d in keys}
     if not wanted:
         return ChainIndex({})
+    memprobe.snapshot("load_chain_index start")
     if years is None:
         years = sorted({d.year for _, d in wanted})
 
@@ -349,6 +351,7 @@ def load_chain_index(
                 f"{time.time() - started:.0f}s"
             )
     _log(f"chain index: {len(groups):,} of {len(wanted):,} requested keys present")
+    memprobe.snapshot("load_chain_index done")
     return ChainIndex(groups)
 
 
