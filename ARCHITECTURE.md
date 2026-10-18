@@ -236,13 +236,19 @@ evidence. See the models and data component contracts.
     closure holds a non-docstring string literal naming the doc (an unreadable or unparsable
     closure file also matches, conservatively); a collected
     test file is a leaf (selects itself and its static importers, never the whole suite); the
-    dynamic-import fail-safe set is added only when the diff touches a non-test Python file;
+    dynamic-import fail-safe set is added only when the diff touches a non-test file that a test
+    imports or names in a string literal (an unreached non-doc path narrows only that way,
+    else `__ALL__`; an unreadable, unparsable or over-1 MB closure file counts as a reader
+    conservatively, without a found literal; `path_tests` mappings add tests but never bypass
+    this, and a matched mapping naming an uncollected test selects `__ALL__`);
     resolved dependencies produce precise edges; a literal script launch to a non-root path is
     unresolved (resolvable root-level script and `-m` launches retain precise behavior; untracked
     `-m` targets and Python launches with a non-`None` `cwd` are unresolved); recognized
     unresolved dependencies produce catch-all edges and may widen selection through the #155
     fail-safe test set, without necessarily selecting every test. `full_suite` paths, an unrecognized
-    path, a deleted test file, or a graph or scan failure returns the `__ALL__` sentinel and runs
+    path, a deleted non-doc file (a literal reader never narrows it; a deleted doc still narrows by
+    the doc-reader rule), a malformed `path_tests` table, or a
+    graph or scan failure returns the `__ALL__` sentinel and runs
     the full suite. If the selector command itself errors, the CLI exits nonzero without printing a
     selection; the workflow job fails before pytest rather than proceeding with a narrowed run.
     The full-suite allowlist includes the operator-tool namespace, with one guarded

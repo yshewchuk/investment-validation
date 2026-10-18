@@ -302,3 +302,13 @@ def test_selection_all_empty_and_subset(tmp_path, capsys):
     assert capsys.readouterr().out == picked[0] + "\n"
     assert ci_shards.main(["files", last, "--selection", str(sel)]) == 0
     assert capsys.readouterr().out == picked[1] + "\n"
+
+
+def test_read_selection_ignores_comment_lines(tmp_path):
+    sel = tmp_path / "sel.txt"
+    sel.write_text("__ALL__\n# why\n")
+    assert ci_shards.read_selection(sel) is None
+    sel.write_text("a.py\n# note\n")
+    assert ci_shards.read_selection(sel) == ["a.py"]
+    sel.write_text("# c\n__ALL__\n")
+    assert ci_shards.read_selection(sel) is None
