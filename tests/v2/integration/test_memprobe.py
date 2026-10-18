@@ -355,6 +355,23 @@ def test_estimate_size_arrow_string_series_not_double_counted():
     assert memprobe.estimate_size(series) <= 1.2 * shallow
 
 
+def test_nested_dataframe_member_uses_shallow_size_estimator():
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("numpy")
+    import engine.memprobe as memprobe
+
+    df = pd.DataFrame({f"c{i}": [float(x) for x in range(1000)] for i in range(5)})
+    assert df.shape == (1000, 5)
+    shallow = int(df.memory_usage(index=True, deep=False).sum())
+    assert memprobe.estimate_size(df) > 0
+    holder = {"only": df}
+    estimate = memprobe.estimate_size(holder)
+    assert 0.9 * (sys.getsizeof(holder) + shallow) <= estimate <= 1.1 * (
+        sys.getsizeof(holder) + shallow
+    )
+    assert 0.9 * shallow <= memprobe._one_level(df) <= 1.1 * shallow
+
+
 # --------------------------------------------------------------------------
 # top_objects
 # --------------------------------------------------------------------------
@@ -377,6 +394,23 @@ def test_top_objects_sorted_descending_and_honours_limit(monkeypatch):
     assert [r[1] for r in top2] == ["list len=20000", "list len=5000"]
 
     assert memprobe.top_objects(1)[0][0] >= 20000 * 8
+
+
+def test_top_objects_n_normalised_at_boundary(monkeypatch):
+    import engine.memprobe as memprobe
+
+    one = list(range(1000))
+    two = list(range(5000))
+    three = list(range(20000))
+    monkeypatch.setattr(
+        memprobe.gc, "get_objects", lambda *a, **k: [one, two, three]
+    )
+
+    assert memprobe.top_objects(-1) == []
+    assert memprobe.top_objects("x") == []
+    res = memprobe.top_objects(2)
+    assert len(res) == 2
+    assert [r[1] for r in res] == ["list len=20000", "list len=5000"]
 
 
 # --------------------------------------------------------------------------
@@ -460,6 +494,7 @@ def test_memory_error_from_gc_walk_and_trim_propagates(monkeypatch):
         raise MemoryError()
 
     monkeypatch.setattr(gc, "get_objects", boom)
+    monkeypatch.setattr(gc, "collect", lambda *args, **kwargs: 0)
     with pytest.raises(MemoryError):
         memprobe.top_objects(3)
 

@@ -175,6 +175,8 @@ def _item_size(item: Any, sample: int) -> int:
     length from a first-N sample of members for sets/dicts (allocation-free,
     biased) or a strided sample for lists/tuples/Series (measured one level
     only)."""
+    if type(item).__name__ in {"DataFrame", "Series"}:
+        return estimate_size(item)
     try:
         base = sys.getsizeof(item)
     except MemoryError:
@@ -210,6 +212,8 @@ def _item_size(item: Any, sample: int) -> int:
 
 
 def _one_level(m: Any) -> int:
+    if type(m).__name__ in {"DataFrame", "Series"}:
+        return estimate_size(m)
     try:
         return sys.getsizeof(m)
     except MemoryError:
@@ -256,7 +260,7 @@ def estimate_size(obj: Any, *, sample: int = 200) -> int:
                     step = max(1, n // sample)
                     sample_vals = list(obj.iloc[::step])[:sample]
                     mean = (
-                        sum(sys.getsizeof(v) for v in sample_vals) / len(sample_vals)
+                        sum(_one_level(v) for v in sample_vals) / len(sample_vals)
                         if sample_vals
                         else 0
                     )
@@ -275,7 +279,7 @@ def estimate_size(obj: Any, *, sample: int = 200) -> int:
                             step = max(1, n // sample)
                             sample_vals = list(series.iloc[::step])[:sample]
                             mean = (
-                                sum(sys.getsizeof(v) for v in sample_vals)
+                                sum(_one_level(v) for v in sample_vals)
                                 / len(sample_vals)
                                 if sample_vals
                                 else 0
@@ -319,7 +323,12 @@ def top_objects(n: int) -> list[tuple[int, str]]:
     Standalone numpy arrays are NOT reported because ``gc.get_objects()``
     only returns gc-tracked objects; arrays are seen only through
     DataFrame/Series sizes or containers holding them. Deduplicates by id;
-    never raises except MemoryError; does not check the enable flag."""
+    ``n`` is coerced to a non-negative int at entry (non-numeric input → 0
+    rows); never raises except MemoryError; does not check the enable flag."""
+    try:
+        n = max(0, int(n))
+    except (TypeError, ValueError):
+        n = 0
     seen: set[int] = set()
     candidates: list[tuple[int, str]] = []
     try:
