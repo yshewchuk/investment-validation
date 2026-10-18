@@ -38,6 +38,13 @@ import numpy as np
 import pandas as pd
 
 from engine import paths
+from engine.features import DAILY_STATE_FIELDS
+
+#: The ``daily_market`` columns the implied_t1 and runup_move evidence builds
+#: read: their own ticker/date keys, the IV-presence flag ``daily_state_frame``
+#: filters on, and every ``DAILY_STATE_FIELDS`` source. The gate branch needs
+#: the full row, so it reads with no projection (``columns=None``).
+_DAILY_STATE_READ = ("ticker", "date", "src_iv", *DAILY_STATE_FIELDS.keys())
 
 #: Mirrors ``engine.dashboard.publish.SECRET_PATTERNS``' literal ``/root/``
 #: check: any exception text embedded in a reason string must never carry an
@@ -297,19 +304,21 @@ def _replay_trades() -> pd.DataFrame:
     return out
 
 
-def _daily_subset(tickers, years=None) -> pd.DataFrame:
+def _daily_subset(tickers, years=None, columns=None) -> pd.DataFrame:
     """``daily_market`` for a bounded set of tickers, one partition at a time.
 
     ``store.read_table("daily_market")`` is 8.9M rows and peaked at 6.9 GB on a
     7 GB box — it OOM-killed this build twice before the first statistic was
     computed. Streaming per year and keeping only the tickers a model actually
-    needs is the difference between "does not run" and a few hundred MB.
+    needs is the difference between "does not run" and a few hundred MB. A
+    ``columns`` projection bounds each partition's width too; ``None`` reads
+    every column, which the gate branch still needs.
     """
     from engine.data import store
 
     wanted = set(tickers)
     kept = []
-    for _, frame in store.iter_table("daily_market", years=years):
+    for _, frame in store.iter_table("daily_market", years=years, columns=columns):
         chunk = frame[frame["ticker"].isin(wanted)]
         if len(chunk):
             kept.append(chunk)
@@ -414,7 +423,9 @@ def _dataset_for(role: str, strategy: str, *, panel, daily, trades, features=())
             sampled = {"events": MAX_EVENTS, "of": int(len(events)), "seed": SAMPLE_SEED}
             events = events.sample(MAX_EVENTS, random_state=SAMPLE_SEED)
         years = sorted(pd.to_datetime(events["event_date"]).dt.year.unique().tolist())
-        daily = _daily_subset(events["ticker"].unique(), years=years)
+        daily = _daily_subset(
+            events["ticker"].unique(), years=years, columns=_DAILY_STATE_READ
+        )
         data = implied_t1.build_dataset(events, panel=panel, daily=daily)
         if sampled is not None:
             data.attrs["sampled_events"] = sampled
@@ -429,7 +440,9 @@ def _dataset_for(role: str, strategy: str, *, panel, daily, trades, features=())
             sampled = {"events": MAX_EVENTS, "of": int(len(events)), "seed": SAMPLE_SEED}
             events = events.sample(MAX_EVENTS, random_state=SAMPLE_SEED)
         years = sorted(pd.to_datetime(events["event_date"]).dt.year.unique().tolist())
-        daily = _daily_subset(events["ticker"].unique(), years=years)
+        daily = _daily_subset(
+            events["ticker"].unique(), years=years, columns=_DAILY_STATE_READ
+        )
         data = runup_move.build_dataset(events, panel=panel, daily=daily)
         if sampled is not None:
             data.attrs["sampled_events"] = sampled
