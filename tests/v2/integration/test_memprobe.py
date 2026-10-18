@@ -332,12 +332,17 @@ def test_top_objects_sorted_descending_and_honours_limit():
     sizes = [memprobe.estimate_size(obj) for obj in (small, medium, big)]
     assert sizes == sorted(sizes)
 
-    res = memprobe.top_objects(2)
-    assert len(res) == 2
-    assert res[0][0] >= res[1][0]
-    assert sizes[2] in [entry[0] for entry in res]
+    res = memprobe.top_objects(1_000_000)
+    res_bytes = [b for b, _ in res]
+    assert res_bytes == sorted(res_bytes, reverse=True)
+
+    top2 = [b for b, _ in memprobe.top_objects(2)]
+    assert len(top2) == 2
+    assert top2 == res_bytes[:2]
     assert len(memprobe.top_objects(1)) == 1
-    assert memprobe.top_objects(1)[0][0] == res[0][0]
+
+    for i in range(len(sizes)):
+        assert sizes[i] in res_bytes
 
 
 # --------------------------------------------------------------------------
