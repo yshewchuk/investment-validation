@@ -5,7 +5,6 @@ import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from engine.v2.contracts import ArtifactRef
 from engine.v2.contracts.data import SnapshotRef
 from engine.v2.data.errors import DataError
 from engine.v2.foundation import (
@@ -13,7 +12,6 @@ from engine.v2.foundation import (
     artifact_reference,
     canonical_json,
     content_hash,
-    from_document,
     safe_relative_path,
     to_document,
 )
@@ -30,6 +28,7 @@ from engine.v2.ops.experiments import (
 )
 from engine.v2.ops.fingerprints import environment_identity, source_closure
 from engine.v2.ops.native_registration import (
+    MAX_NATIVE_EVIDENCE_BYTES,
     magnitude_execution_document,
     magnitude_fitted_execution_document,
     magnitude_history_execution_document,
@@ -328,17 +327,22 @@ def prepare_final_holdout_request(conn, store, registration):
         raise fail("INVALID_EXPERIMENT_SPEC", "invalid final-read registration metadata") from None
 
 
-def read_native_registration(conn, store, spec):
-    """Load the stable reservation before validating the current execution request."""
+def valid_registration_read_budget(value):
+    """Share strict integer admission with CLI parsers without I/O or coercion."""
+    return type(value) is int and 0 < value < 2**62
+
+
+def read_native_registration(conn, store, spec, *, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES):
+    """Load a bounded stable reservation before current-request validation."""
+    if not valid_registration_read_budget(max_evidence_bytes):
+        raise fail("INVALID_EXPERIMENT_SPEC", "registration read requires a positive SQLite-safe byte budget")
     key = content_hash({"experiment_id": spec.experiment_id, "arm": spec.primary_arm_id})
     run_id = "native_" + key.removeprefix("sha256:")
-    row = conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?", (run_id,)).fetchone()
-    if row is None:
+    binding = verified_registration_bytes(conn, store, run_id, max_evidence_bytes=max_evidence_bytes)
+    if binding is None:
         raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
     try:
-        ref = from_document(ArtifactRef, json.loads(row[0])["native_registration"])
-        registration = NativeRegistration(run_id, store.read_verified(ref))
-        verify_native_registration(conn, store, registration)
+        registration = NativeRegistration(run_id, binding)
         if registration.document["spec_hash"] != spec.spec_hash:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "requested specification differs from registration")
         return registration

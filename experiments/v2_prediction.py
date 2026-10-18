@@ -32,7 +32,10 @@ def main(argv=None):
     parser.add_argument("--magnitude-model", choices=("pooled_mean", "history_mean", "history_ridge", "history_hgb"))
     parser.add_argument("--magnitude-feature-snapshot-id")
     parser.add_argument("--magnitude-history-start")
+    parser.add_argument("--max-registration-bytes", type=int, default=native.MAX_NATIVE_EVIDENCE_BYTES)
     args = parser.parse_args(argv)
+    if not native.valid_registration_read_budget(args.max_registration_bytes):
+        parser.error("--max-registration-bytes must be a positive SQLite-safe byte budget")
     magnitude = args.target == "absolute_move"
     clocks = (args.magnitude_training_start, args.magnitude_labels_before)
     if (magnitude and not all(clocks)) or (not magnitude and any(clock is not None for clock in clocks)):
@@ -65,7 +68,8 @@ def main(argv=None):
             registration = native.register_native(conn, store, repository, spec, **binding)
             print(json.dumps({"registered": registration.variant_id}))
             return 0
-        registration = native.read_native_registration(conn, store, spec)
+        registration = native.read_native_registration(conn, store, spec,
+                                                       max_evidence_bytes=args.max_registration_bytes)
         if magnitude:
             registration, _ = admit_magnitude_inputs(conn, store, repository, spec, **binding)
         else:
