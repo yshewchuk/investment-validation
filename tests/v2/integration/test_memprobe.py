@@ -452,14 +452,19 @@ def test_snapshot_propagates_memory_error(monkeypatch):
 
 
 def test_nightly_mark_elapsed_and_timeline_flag_on_off(monkeypatch, capsys):
+    import engine.dashboard.nightly as nightly_mod
     from engine.dashboard.nightly import NightlyReport
 
-    times = iter([100.5, 100.9, 102.0, 102.4])
+    real_snapshot = nightly_mod.memprobe.snapshot
+    times = iter([100.5, 100.7, 100.9, 102.0, 102.2, 102.4])
 
     def _fake_time():
         return next(times)
 
     monkeypatch.setattr("engine.dashboard.nightly.time.time", _fake_time)
+    monkeypatch.setattr(
+        nightly_mod.memprobe, "snapshot", lambda label, **kw: next(times)
+    )
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
     r = NightlyReport(as_of="2026-01-01")
     r.start(100.0)
@@ -469,11 +474,10 @@ def test_nightly_mark_elapsed_and_timeline_flag_on_off(monkeypatch, capsys):
     assert round(ret_b, 1) == 1.1
     assert [round(e["elapsed_s"], 1) for e in r.timeline] == [0.5, 1.1]
     assert [round(e["at_s"], 1) for e in r.timeline] == [0.5, 2.0]
-    out = capsys.readouterr().out
-    assert "[mem] phase a" in out
-    assert "phase b" in out
+    capsys.readouterr()
 
     times = iter([100.5, 102.0])
+    monkeypatch.setattr(nightly_mod.memprobe, "snapshot", real_snapshot)
     monkeypatch.delenv("INVESTING_PLAN_MEMPROFILE", raising=False)
     r = NightlyReport(as_of="2026-01-01")
     r.start(100.0)

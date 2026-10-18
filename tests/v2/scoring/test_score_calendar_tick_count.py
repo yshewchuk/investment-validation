@@ -9,7 +9,7 @@ import engine.score as score_mod
 def test_score_calendar_tick_receives_processed_counts(monkeypatch):
     events = pd.DataFrame(
         [
-            {"event_id": n, "ticker": f"T{n}",
+            {"event_id": 100 + n, "ticker": f"T{n}",
              "event_date": pd.Timestamp("2026-10-22"), "session": "AMC"}
             for n in range(1, 4)
         ]
