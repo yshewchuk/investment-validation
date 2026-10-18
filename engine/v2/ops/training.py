@@ -178,6 +178,15 @@ def _shape_problems(params) -> list[str]:
     return problems
 
 
+def _native_pin_problems(pins, *, require_absolute=True) -> list[str]:
+    """Validate raw pins before CLI path resolution or any source access."""
+    if not all(isinstance(value, str) and value.strip() and "\x00" not in value for value in pins):
+        return ["native_d14 requires catalog_path, objects_root, snapshot_id and receipt_id"]
+    if require_absolute and not all(Path(value).is_absolute() for value in pins[:2]):
+        return ["native_d14 catalog_path and objects_root must be absolute"]
+    return []
+
+
 def _native_input_problems(params) -> list[str]:
     """Admit only a complete explicit source; this check performs no I/O."""
     pins = (params.catalog_path, params.objects_root, params.snapshot_id, params.receipt_id)
@@ -191,11 +200,7 @@ def _native_input_problems(params) -> list[str]:
         problems.append("native_d14 requires an implied_t1/runup_move monthly recipe")
     if params.input_bindings or params.pairs_path:
         problems.append("native_d14 must not mix legacy bindings or pairs_path")
-    if not all(isinstance(value, str) and value.strip() and "\x00" not in value for value in pins):
-        problems.append("native_d14 requires catalog_path, objects_root, snapshot_id and receipt_id")
-    elif not all(Path(value).is_absolute() for value in pins[:2]):
-        problems.append("native_d14 catalog_path and objects_root must be absolute")
-    return problems
+    return problems + _native_pin_problems(pins)
 
 
 def training_parameter_problems(job, params) -> list[str]:

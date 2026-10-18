@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -27,29 +28,43 @@ def params(**changes):
         "recipe": "implied_t1:*:tier4_monthly", **PINS, **changes})
 
 
+PINS_REQUIRED = "native_d14 requires catalog_path, objects_root, snapshot_id and receipt_id"
+MONTHLY_REQUIRED = "native_d14 requires an implied_t1/runup_move monthly recipe"
+NO_LEGACY = "native_d14 must not mix legacy bindings or pairs_path"
+NO_RECIPE_OPTIONS = "native_d14 recipe does not take state, alpha, cutoffs or strategies"
+
 INVALID = [
-    *[{field: value} for field in ("catalog_path", "objects_root", "snapshot_id", "receipt_id")
+    *[({field: value}, PINS_REQUIRED)
+      for field in ("catalog_path", "objects_root", "snapshot_id", "receipt_id")
       for value in ("", " ", "bad\x00pin")],
-    {"catalog_path": "relative/catalog"}, {"objects_root": "relative/store"},
-    {"input_mode": "legacy"}, {"input_mode": "snapshot"},
-    {"mode": "state", "state": "paired_residual_pool"},
-    {"recipe": "implied_t1:*:champion"}, {"recipe": "size:*:tier4_monthly"},
-    {"recipe": "runup_move:STR-RUNUP:tier4_monthly"},
-    {"alpha": 0.5}, {"cutoffs": ("2024-01-01",)}, {"state": "paired_residual_pool"},
-    {"strategies": ("STR-RUNUP",)}, {"pairs_path": "pairs.parquet"}, {"input_bindings": {"legacy_manifest.json": "artifact"}},
+    *[({field: "relative/source"}, "native_d14 catalog_path and objects_root must be absolute")
+      for field in ("catalog_path", "objects_root")],
+    ({"input_mode": "legacy"}, "native pins require input_mode=native_d14"),
+    ({"input_mode": "snapshot"}, "input_mode must be legacy or native_d14"),
+    ({"mode": "state", "state": "paired_residual_pool"}, MONTHLY_REQUIRED),
+    *[({"recipe": recipe}, MONTHLY_REQUIRED) for recipe in (
+        "implied_t1:*:champion", "size:*:tier4_monthly", "runup_move:STR-RUNUP:tier4_monthly")],
+    *[(changes, NO_RECIPE_OPTIONS) for changes in (
+        {"alpha": 0.5}, {"cutoffs": ("2024-01-01",)}, {"state": "paired_residual_pool"},
+        {"strategies": ("STR-RUNUP",)})],
+    ({"pairs_path": "pairs.parquet"}, NO_LEGACY),
+    ({"input_bindings": {"legacy_manifest.json": "artifact"}}, NO_LEGACY),
 ]
 
 
-@pytest.mark.parametrize("changes", INVALID)
-def test_invalid_sources_refuse_before_reads(changes, monkeypatch, tmp_path):
+@pytest.mark.parametrize("changes, reason", INVALID)
+def test_invalid_sources_refuse_before_reads(changes, reason, monkeypatch, tmp_path):
     monkeypatch.setattr("engine.v2.models.training.build_d14_dataset", forbidden)
     monkeypatch.setattr(job, "build_dataset", forbidden)
     monkeypatch.setattr(job, "current_recipes", forbidden)
     parameters = params(**changes)
-    assert training.training_parameter_problems(None, parameters)
+    assert training.training_parameter_problems(None, parameters) == [reason]
     with pytest.raises(OpsError) as err:
         training.run_training_worker(to_document(parameters), tmp_path / "out")
     assert err.value.problem.code == "INVALID_REQUEST"
+    assert err.value.problem.message == "training inputs are invalid"
+    assert err.value.problem.details == {"problems": [reason]}
+    assert err.value.problem.retryable is False
     assert not (tmp_path / "out").exists()
 
 
@@ -65,6 +80,8 @@ def test_native_plan_has_no_legacy_prerequisites_or_bindings(monkeypatch):
         training.training_plan(mode="recipe", recipe="implied_t1:*:tier4_monthly",
                                **PINS, manifest_ref="legacy-artifact")
     assert err.value.problem.code == "INVALID_REQUEST"
+    assert err.value.problem.message == "training plan is invalid"
+    assert err.value.problem.details == {"problems": [NO_LEGACY]}
 
 
 @pytest.mark.parametrize("field", tuple(PINS)[1:])
@@ -116,6 +133,10 @@ def test_both_no_fit_guards_precede_native_reads(native, monkeypatch, tmp_path):
         training.run_training_worker(to_document(params()), tmp_path)
     if native:
         assert err.value.problem.code == "VALIDATION_FAILED"
+        assert err.value.problem.message == "runtime fitting is forbidden during a training job"
+        assert err.value.problem.details == {}
+    else:
+        assert str(err.value) == "no-fit guard active: tools.phase5_training_job._run_recipe:implied_t1:*:tier4_monthly"
     assert not (tmp_path / "training").exists()
 
 
@@ -126,6 +147,8 @@ def test_source_refusal_retains_data_code(monkeypatch, tmp_path):
     with pytest.raises(OpsError) as err:
         training.run_training_worker(to_document(params()), tmp_path)
     assert err.value.problem.code == "INPUT_CHANGED"
+    assert err.value.problem.message == "native D14 inputs refused"
+    assert err.value.problem.retryable is False
     assert err.value.problem.details == {"data_code": "IDENTITY_CONFLICT"}
     assert "private source path" not in str(err.value)
     assert not (tmp_path / "training_result.json").exists()
@@ -144,19 +167,24 @@ def test_lease_and_cache_exceptions_are_narrow():
     assert service._stage_legacy_inputs(claim, None) is False
 
 
-@pytest.mark.parametrize("source_flags", (["--training-input-mode", "native_d14"],
-                                          ["--training-snapshot-id", "snapshot-1"]))
-def test_cli_rejects_mixed_manifest_before_read(monkeypatch, source_flags):
+@pytest.mark.parametrize("source_flags, message", [
+    (["--training-input-mode", "native_d14"], "native_d14 must not name --input-manifest"),
+    (["--training-snapshot-id", "snapshot-1"], "native pins require --training-input-mode native_d14"),
+])
+def test_cli_rejects_mixed_manifest_before_read(monkeypatch, source_flags, message):
     monkeypatch.setattr(commands, "_read_input_manifest_ref", forbidden)
     args = cli.parser().parse_args(["plan", "training", *source_flags,
                                     "--input-manifest", "/missing"])
     with pytest.raises(OpsError) as err:
         commands._plan_command(args, None, None, None)
     assert err.value.problem.code == "INVALID_REQUEST"
+    assert err.value.problem.message == message
+    assert err.value.problem.details == {}
 
 
 def test_cli_preserves_all_pins_without_source_reads(monkeypatch, tmp_path):
     monkeypatch.setattr(commands, "_read_input_manifest_ref", forbidden)
+    monkeypatch.chdir(tmp_path)
     args = cli.parser().parse_args([
         "plan", "training", "--training-mode", "recipe", "--recipe", "runup_move:*:tier4_monthly",
         "--training-input-mode", "native_d14", "--training-catalog", "relative/catalog.sqlite",
@@ -164,8 +192,8 @@ def test_cli_preserves_all_pins_without_source_reads(monkeypatch, tmp_path):
         "--training-receipt-id", "r1"])
     plan = commands._training_plan(args, tmp_path, None, None)
     actual = plan["parameters"]
-    assert actual["catalog_path"].endswith("/relative/catalog.sqlite")
-    assert actual["objects_root"].endswith("/relative/store")
+    assert actual["catalog_path"] == str(tmp_path / "relative/catalog.sqlite")
+    assert actual["objects_root"] == str(tmp_path / "relative/store")
     assert actual["snapshot_id"] == "s1" and actual["receipt_id"] == "r1"
     assert actual["recipe"] == "runup_move:*:tier4_monthly"
 
@@ -196,3 +224,24 @@ def test_cli_native_plan_and_submit_stay_queued_without_source_reads(monkeypatch
         assert conn.execute("SELECT state FROM jobs WHERE job_id=?", (receipt["job_id"],)).fetchone()[0] == "queued"
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("flag", ("catalog", "artifact-root", "snapshot-id", "receipt-id"))
+@pytest.mark.parametrize("value", ("", " ", "\t\n", "bad\x00pin"))
+def test_cli_refuses_raw_invalid_pins_before_path_resolution(flag, value, monkeypatch):
+    flags = {"catalog": "relative/catalog", "artifact-root": "relative/store",
+             "snapshot-id": "snapshot-1", "receipt-id": "receipt-1"}
+    flags[flag] = value
+    args = cli.parser().parse_args([
+        "plan", "training", "--training-mode", "recipe", "--recipe", "implied_t1:*:tier4_monthly",
+        "--training-input-mode", "native_d14",
+        *[part for name, raw in flags.items() for part in ("--training-" + name, raw)]])
+    monkeypatch.setattr(Path, "resolve", forbidden)
+    monkeypatch.setattr(commands, "_read_input_manifest_ref", forbidden)
+    monkeypatch.setattr(job, "current_recipes", forbidden)
+    with pytest.raises(OpsError) as err:
+        commands._training_plan(args, None, None, None)
+    assert err.value.problem.code == "INVALID_REQUEST"
+    assert err.value.problem.message == "training plan is invalid"
+    assert err.value.problem.details == {"problems": [PINS_REQUIRED]}
+    assert err.value.problem.retryable is False

@@ -1160,16 +1160,16 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 | idempotency key | session-only, never `scope_hash`-qualified — this job's target set is the whole scoreable universe, independent of which watchlist's `"score"` job happened to trigger the tick |
 
 ### Training / deployment (`training.py`, `deployment.py`)
-
 | Condition | Outcome |
 |---|---|
+| incomplete, blank, NUL-containing or mixed native pins, unsupported native recipe/options, or non-absolute library source paths | non-retryable `INVALID_REQUEST` before source reads; CLI validates raw pins before resolving relative paths. Plan/worker admission retains the exact `problems` list. |
+| native source verification raises `DataError` | non-retryable `INPUT_CHANGED` (`native D14 inputs refused`); private worker diagnostics retain `data_code` through `diagnostic_ref`, never raw source paths. |
 | a training-tool refusal, or `deployment.DeploymentError` (including a superseded release hash, `ConcurrentPromote` (`CONCURRENT_PROMOTE`) for a missing/stale expected incumbent when the target is not already live, or `NoPriorRelease` when rollback history has no earlier incumbent) | mapped to a typed `OpsError` (`CHECKPOINT_INCOMPATIBLE`/`VALIDATION_FAILED`), never a bare `WORKER_FAILED`; a stale rollback plan writes no successful output or pointer/history change |
 | no explicit `release_root` given AND `MODEL_RELEASE_ROOT` unset, or `ops plan promote` supplies a blank `--expected-previous-release-id` | `INVALID_REQUEST` at plan time; no empty `release_root` reaches the worker, and only an absent incumbent option means no guard |
 | a recipe job's `pairs_path` does not resolve beneath the attempt's own pinned legacy root | `INPUT_CHANGED` at execution, even after passing plan-time validation |
 | any `models_promote`, `models_rollback` or `phase5_state_stage` (failure rows: models doc 2.2) claim | serialized globally by one write lease on the deployment pointer; resubmission with the same namespace and idempotency key returns the existing job |
 
 ### `native_score_batch.py`
-
 Batch-level (raises, no per-row attempt): malformed binding/events, duplicate event identities, unresolvable release or, when `gate_policy` is absent or empty, a gate `threshold` member that fails `scoring/ARCHITECTURE.md`'s `resolve_gate_policy` (`ModelNotReady`, once per worker, no fallback), request-hash collision, invalid worker identity fields, a supplied `feature_names` that is not a list/tuple (`null`/omitted means empty), or malformed `events.json`/`producer_refusals.json`. Invalid timestamp wire values raise `ValueError` during decoding.
 Quote bounds are validated during decoding and in `_checked_batch_arguments`, including direct assembly callers: only `null` or non-negative integers are accepted. Booleans, floats, strings, and negatives raise `ValueError`, mapped to nonretryable `VALIDATION_FAILED` before scoring or output writes; invalid bounds are malformed batch inputs, not row refusals.
 This classification does not apply to every shape error: a missing `events.json` item `key` raises `KeyError` and
