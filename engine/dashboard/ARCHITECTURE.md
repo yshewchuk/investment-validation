@@ -60,8 +60,8 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 Estimates are sampled, not exact: `estimate_size` averages a bounded sample
 (200 items; first-N for sets/dicts, strided for lists/Series; a Series or
 object column may still materialise up to ~2x the sample while striding). A
-`MemoryError` propagates into the run; any other probe failure yields 0 and
-never raises. `NightlyReport.mark` restarts its step clock after the probe, so
+`MemoryError` propagates into the run; `estimate_size` returns 0 on any other
+failure, while `snapshot` prints a probe-failure diagnostic and returns `None`. `NightlyReport.mark` restarts its step clock after the probe, so
 profiling time is not charged to the next step. The native (`engine/v2`) nightly is NOT
 covered: `engine/v2` must not import legacy `engine` (layer rule); legacy
 adapters invoked from v2 run unprofiled.
