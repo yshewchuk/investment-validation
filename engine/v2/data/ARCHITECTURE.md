@@ -187,8 +187,8 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   finishes, then publish once under a content hash. A failed key is terminal;
   the same snapshot and code give the same version hash. No legacy file is
   read, copied or migrated; the table is always rebuildable from the snapshot.
-  Jobs bind snapshot ids and dataset versions, not `legacy_manifest.json`
-  (native kinds stop accepting it). Design and slices:
+  Jobs bind snapshot ids, dataset versions and the committed calendar receipt
+  id and hash, not `legacy_manifest.json` (native kinds stop accepting it). Design and slices:
   `guides/native_panel_tier4_design.md`.
 
 ## Inputs

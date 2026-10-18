@@ -37,8 +37,11 @@ table) and publishes `feature_panel` as a new dataset version of the same
 snapshot lineage. Row math is `panel_math`, `regime` and `runup_math` only;
 `scan_panel_row` and the batch share them, so a forward row equals the stored
 row for the same event and the same `decision_session` and `history_start`
-by construction; a test pins that equality at matching boundaries only (the
-same event scored at another decision session legitimately differs).
+on the common causal feature projection (the columns `scan_panel_row`
+returns); a test pins equality on that projection only. Outcome and pre-print
+columns (`move`, `abs_move`, `or_iv30`, `pre_iv30`) exist only in the stored
+table and carry no forward guarantee; another decision session legitimately
+differs.
 Qualification compares the native table with the legacy table per column under
 the existing per-field numeric tolerance (parity bar B); a column that differs
 is reported, never emulated. Lost-data rule: the table is always rebuildable
@@ -59,16 +62,22 @@ releases).
 ### Causality (real choice; default chosen, flagged)
 
 A historical event's value may come only from a release whose
-`retrain_cutoff` (exclusive, `M_end + 1 day`, models §2.3) is not after the
-event's decision date, matching the existing `fold_start <= as_of` guard.
+member cutoff is not after the event's decision date. The member cutoff is
+the producing model's own training cutoff (exclusive, `M_end + 1 day`):
+a carried member keeps its prior cutoff (models §2.3), so it is read from the
+member, not from the release-level `sources.retrain_cutoff`, and a pool-only
+release does not re-stamp an unchanged model, matching the existing `fold_start <= as_of` guard.
 Options for history before the first eligible release:
 
 - **A (default in this design): no invented history.** Events without an
   eligible release are `no_eligible_release` and their values are null, the
   legacy "no forecast" meaning, which consumers already handle. A backfill is
-  an explicit operator job that runs the §2.3 monthly retrain at past
-  cutoffs and keeps those releases; coverage then extends back to the
-  earliest retained release. Start date = earliest retained eligible release.
+  an explicit operator bootstrap job, separate from the monotonic §2.3
+  monthly path (which only advances past the base release's cutoff). It fits
+  each historical cutoff from an empty base into its own retained,
+  never-promoted release; those releases are read only by the coverage
+  resolver. Its contract is a slice 3 deliverable. Coverage then extends back
+  to the earliest retained release. Start date = earliest retained eligible release.
 - **B: mandatory per-cutoff backfill** of every month back to the first
   training month. Equivalent to re-implementing legacy monthly OOS folds; the
   user rejected that port in 2b, and it is heavy.
@@ -81,7 +90,7 @@ needs the user's confirmation before slice 3.
 
 | R | Panel producer / coverage producer |
 | --- | --- |
-| R1 verified input | Snapshot id, table versions and (coverage) release manifest and hashes verified before any read; mismatch `IDENTITY_CONFLICT`; release not promoted/eligible `MODEL_NOT_READY` |
+| R1 verified input | Snapshot id, table versions and (coverage) release manifest and hashes verified before any read; mismatch `IDENTITY_CONFLICT`; an absent or ineligible release is not a producer failure: it records `no_eligible_release` coverage (section 4) |
 | R2 cache | No cache across snapshots or releases; coverage rows are keyed `(snapshot_id, release_id)` |
 | R3 retry | A failed batch job is terminal for its key; a new key re-runs from the snapshot |
 | R4 transaction | Batch outputs private until all batches finish, then one hashed publish; no partial dataset version is visible |
@@ -121,7 +130,10 @@ when the rows' other inputs match.
 Jobs bind `{snapshot_id, table_versions}` (and, for model-dependent jobs,
 the release id) instead of a `legacy_manifest.json` artifact. The read-set
 pinning that `_pin_read_set` does for legacy files becomes verification of
-those ids against the catalog. Legacy-only job kinds (`legacy_*`) keep their
+those ids against the catalog. The trading-calendar pin is kept: the
+binding also carries the committed calendar import receipt id and calendar
+hash (as the D14 inputs do, models §2), because snapshot ids alone do not
+identify calendar bytes. Legacy-only job kinds (`legacy_*`) keep their
 manifest until they are removed; native kinds stop accepting it. The model
 training cutoff keys on the latest succeeded snapshot-bound `feature_panel`
 version instead of the latest `finality`/`features` job.
