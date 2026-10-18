@@ -1,8 +1,8 @@
 """Legacy-nightly readiness for a session (slice 3 of #564).
 
-Contract in ``engine/v2/ops/ARCHITECTURE.md`` ("Nightly legacy readiness"). A leaf: not yet
-called by ``nightly_trigger``. It only reads the legacy nightly's JSON run reports; there is
-no rebuild step and no rebuild fallback.
+Contract in ``engine/v2/ops/ARCHITECTURE.md`` ("Nightly legacy readiness"). Called by
+``nightly_trigger`` as a temporary legacy-completion check (#875; removed with #876). It only
+reads the legacy nightly's JSON run reports; there is no rebuild step and no rebuild fallback.
 """
 from __future__ import annotations
 
