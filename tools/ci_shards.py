@@ -14,7 +14,8 @@ GitHub Actions ``fromJSON`` matrix. ``files`` prints SHARD's test files, one
 per line. With ``--selection FILE`` (the PR test-selection list from
 ``tools/mutation_pilot.py select-tests``) it prints only the selected files
 that SHARD owns: ``__ALL__`` as first line selects every file, an empty file
-selects none. An empty result prints nothing and exits 0 (the shard skips).
+selects none. Comment lines (``#``) are ignored. An empty result prints
+nothing and exits 0 (the shard skips).
 """
 from __future__ import annotations
 
@@ -100,8 +101,13 @@ def assign(files: list[str], shards: list[Shard]) -> dict[str, list[str]]:
 
 
 def read_selection(path: Path) -> list[str] | None:
-    """The selected files, or None when the selection is ``__ALL__``."""
+    """The selected files, or None when the selection is ``__ALL__``.
+
+    Lines starting with ``#`` are comments and are ignored before the
+    ``__ALL__``-first-line rule is applied (``cmd_select_tests`` appends
+    reason comments after the file lines)."""
     lines = [ln.strip() for ln in path.read_text().splitlines() if ln.strip()]
+    lines = [ln for ln in lines if not ln.startswith("#")]
     if lines and lines[0] == ALL:
         return None
     return lines

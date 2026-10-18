@@ -108,6 +108,11 @@ always_run = [
     "tests/v2/integration/test_test_selection.py",
 ]
 
+# Meta-tests that scan a tree by file walk (no import edge, #672): selected
+# whenever a changed path matches the pattern. fnmatch, `*` matches `/`.
+[pr_selection.path_tests]
+"engine/v2/*" = ["tests/v2/foundation/test_v2_ops_foundation.py"]
+
 [defaults]
 # Per-mutant timeout. mutmut sets an RLIMIT_CPU of
 #   ceil((est_test_seconds + timeout_constant) * timeout_multiplier * 2)
