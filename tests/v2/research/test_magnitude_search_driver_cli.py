@@ -262,6 +262,28 @@ def test_cli_rejects_duplicate_keys_in_every_metadata_input_before_dispatch(sour
 
 
 @pytest.mark.parametrize("action", ACTION_NAMES)
+@pytest.mark.parametrize("name", ["spec", "request", "plan-ref"])
+def test_excessively_nested_metadata_refuses_before_catalog_open(source, capsys, action, name):
+    depth = 2 * sys.getrecursionlimit()
+    payload = b'{"nested":' + b"[" * depth + b"0" + b"]" * depth + b"}"
+    assert len(payload) < METADATA_LIMIT
+    # Prove real JSON decoding reaches the recursion handler, not a shallow syntax refusal.
+    with pytest.raises(RecursionError):
+        json.loads(payload)
+    path = source.paths[name]
+    path.write_bytes(payload)
+    with pytest.raises(OpsError) as caught:
+        cli._read_document(path)
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC",
+        "search requires valid JSON object metadata").problem
+    before = source.catalog.read_bytes()
+    result, stderr = _invoke(source, capsys, action, status=2)
+    assert result == _refusal("INVALID_EXPERIMENT_SPEC", "search requires valid JSON object metadata")
+    assert not stderr and not source.calls and not source.connections
+    assert source.catalog.read_bytes() == before
+
+
+@pytest.mark.parametrize("action", ACTION_NAMES)
 @pytest.mark.parametrize("damage", ["missing_reference_field", "wrong_reference_type", "null_input_files"])
 def test_typed_metadata_conversion_refuses_before_catalog_open(source, capsys, action, damage):
     name = "spec" if damage == "null_input_files" else "plan-ref"
