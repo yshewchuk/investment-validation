@@ -813,3 +813,6 @@ flowchart LR
     MRR --> RBERR["ModelNotReady('release_root', ...)"]
     MRR --> PPERR["OpsError INVALID_REQUEST"]
 ```
+
+`experiments/magnitude_search_outer.py` consumes the legacy/v2 no-fit guards
+before selected outer refit claims; completed evidence replay never fits.
