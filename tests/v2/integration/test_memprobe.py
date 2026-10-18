@@ -181,6 +181,47 @@ def test_trim_flag_off_never_calls_malloc_trim(monkeypatch, capsys):
     assert calls == []
 
 
+def test_trim_reports_rss_before_and_after(monkeypatch, capsys):
+    import engine.memprobe as memprobe
+
+    seen: list[int] = []
+
+    def fake_rss():
+        seen.append(1)
+        return 3 * 2**30 if len(seen) == 1 else 2 * 2**30
+
+    monkeypatch.setattr(memprobe, "rss_bytes", fake_rss)
+    monkeypatch.setattr(memprobe, "peak_rss_bytes", lambda: 4 * 2**30)
+    monkeypatch.setattr(memprobe, "_malloc_trim", lambda: None)
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TRIM", "1")
+    memprobe.snapshot("x")
+    out = capsys.readouterr().out
+    assert len(seen) >= 2
+    head = out.splitlines()[0]
+    assert "rss=2.00G" in head
+    assert "peak=4.00G" in head
+    assert "trimmed from 3.00G" in head
+
+
+def test_trim_flag_off_never_collects_and_never_trims(monkeypatch, capsys):
+    import engine.memprobe as memprobe
+
+    collects: list[int] = []
+    monkeypatch.setattr(gc, "collect", lambda *a, **k: collects.append(1) or 0)
+    monkeypatch.setattr(memprobe, "rss_bytes", lambda: 3 * 2**30)
+    monkeypatch.setattr(memprobe, "peak_rss_bytes", lambda: 4 * 2**30)
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
+    monkeypatch.delenv("INVESTING_PLAN_MEMPROFILE_TRIM", raising=False)
+    collects.clear()
+    memprobe.snapshot("x")
+    out = capsys.readouterr().out
+    assert collects == []
+    head = out.splitlines()[0].strip()
+    assert head.startswith("[mem]")
+    assert "trimmed" not in out
+
+
 # --------------------------------------------------------------------------
 # estimate_size
 # --------------------------------------------------------------------------
@@ -259,12 +300,44 @@ def test_estimate_size_series_of_uniform_strings_within_bounds():
     import engine.memprobe as memprobe
 
     s = pd.Series([f"{i:0200d}" for i in range(1000)])
-    s0 = s.iloc[0]
-    # estimator adds pointer-array bytes twice (memory_usage + getsizeof each)
-    expected = 1000 * (sys.getsizeof(s0) + 8) + sys.getsizeof(s.index)
-    expected *= 1.8
+    shallow = int(s.memory_usage(index=True, deep=False))
+    deep = int(s.memory_usage(index=True, deep=True))
     estimate = memprobe.estimate_size(s)
-    assert 0.9 * expected <= estimate <= 1.1 * expected
+    # object-dtype series: pointer array plus shared element bytes, once
+    assert 0.9 * shallow <= estimate <= 1.1 * max(deep, shallow)
+
+
+def test_estimate_size_arrow_string_series_not_double_counted():
+    pytest.importorskip("pyarrow")
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("numpy")
+    import engine.memprobe as memprobe
+
+    series = pd.Series(["x" * 200] * 1000, dtype="string[pyarrow]")
+    shallow = int(series.memory_usage(index=True, deep=False))
+    assert memprobe.estimate_size(series) <= 1.2 * shallow
+
+
+# --------------------------------------------------------------------------
+# top_objects
+# --------------------------------------------------------------------------
+
+
+def test_top_objects_sorted_descending_and_honours_limit():
+    import engine.memprobe as memprobe
+
+    small = list(range(1000))
+    medium = list(range(5000))
+    big = list(range(20000))
+    sizes = [memprobe.estimate_size(obj) for obj in (small, medium, big)]
+    assert sizes == sorted(sizes)
+
+    res = memprobe.top_objects(2)
+    assert len(res) == 2
+    assert res[0][0] >= res[1][0]
+    assert sizes[2] in [entry[0] for entry in res]
+    assert len(memprobe.top_objects(1)) == 1
+    assert memprobe.top_objects(1)[0][0] == res[0][0]
 
 
 # --------------------------------------------------------------------------
@@ -341,6 +414,24 @@ def test_nightly_mark_elapsed_and_timeline_flag_on_off(monkeypatch, capsys):
     assert out == ""
 
 
+def test_memory_error_from_gc_walk_and_trim_propagates(monkeypatch):
+    import engine.memprobe as memprobe
+
+    def boom(*args, **kwargs):
+        raise MemoryError()
+
+    monkeypatch.setattr(gc, "get_objects", boom)
+    with pytest.raises(MemoryError):
+        memprobe.top_objects(3)
+
+    monkeypatch.undo()
+    monkeypatch.setattr(memprobe, "_malloc_trim", boom)
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TRIM", "1")
+    with pytest.raises(MemoryError):
+        memprobe.snapshot("x")
+
+
 def test_watch_nested_float_dicts_reports_nonzero_size(monkeypatch, capsys):
     import engine.memprobe as memprobe
 
@@ -373,3 +464,41 @@ def test_disabled_path_never_walks_gc_objects(monkeypatch):
     memprobe.snapshot("x")
     memprobe.tick("x", 250)
     assert count == 0
+
+
+def test_disabled_watch_leaves_no_dead_weakrefs_in_registry(monkeypatch):
+    import engine.memprobe as memprobe
+
+    monkeypatch.delenv("INVESTING_PLAN_MEMPROFILE", raising=False)
+
+    class Tmp:
+        def __init__(self, i: int):
+            self.bucket = [i]
+
+    for i in range(50):
+        tmp = Tmp(i)
+        memprobe.watch(f"tmp.dead.{i}", tmp, "bucket")
+        del tmp
+    gc.collect()
+
+    keeper = Tmp(50)
+    memprobe.watch("tmp.alive", keeper, "bucket")
+
+    reg = memprobe._registry
+    assert isinstance(reg, dict)
+    assert len(reg) <= 10
+    for name, entry in reg.items():
+        if isinstance(name, str) and entry is None and name.startswith("tmp.dead"):
+            raise AssertionError(f"dead watch retained: {name}")
+        if isinstance(entry, tuple) and entry[0] is None:
+            raise AssertionError(f"dead owner weakref retained: {name}")
+        if isinstance(entry, str):
+            assert entry in (name, "bucket")
+        elif entry is not None:
+            owners = [part for part in entry if not isinstance(part, str)]
+            if owners:
+                assert all(owner() is not None for owner in owners), (
+                    f"dead owner in entry: {entry!r}"
+                )
+    assert keeper.bucket == [50]
+    assert keeper.bucket == [50]

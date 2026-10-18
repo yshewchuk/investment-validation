@@ -193,9 +193,15 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 - **Idempotency** — re-running re-reads, re-renders, re-publishes; the
   ledger refuses a duplicate `row_id` write rather than silently
   overwriting or double-counting it.
-- **Memory diagnostics** — a probe failure prints
-  `[mem] <label> probe failed: <ExcType>: <repr>` and the run continues;
-  MemoryError propagates; disabled = no output, no gc walk, no other effect.
+- **Memory diagnostics** — condition → outcome (the `_EVERY`/`_TOP` sampling
+  note above still applies):
+
+  | Condition | Outcome |
+  | --- | --- |
+  | Probe disabled (flag unset) | Snapshot/tick returns before any work; no output, no gc walk |
+  | Ordinary probe failure (any non-`MemoryError` exception, including a broken stdout) | Prints `[mem] <label> probe failed: <ExcType>: <repr>` when stdout works; the run continues |
+  | `MemoryError` anywhere in a probe | Propagates to the caller (nightly `MemoryError` handling unchanged) |
+  | Trim flag set but libc lacks `malloc_trim` | Trim skipped; RSS lines still printed |
 
 ## Invariants
 

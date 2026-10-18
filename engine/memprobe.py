@@ -141,14 +141,18 @@ def watch(name: str, owner: Any, attr: str) -> None:
     ``sys.modules`` at sample time (never imported). Keyed by
     ``(name, id(owner))`` for objects so multiple live Scorers each keep their
     own watch; module-string watches key by ``(name, None)``. Registering the
-    same ``(name, owner)`` twice replaces. Cheap and side-effect-free; does
+    same ``(name, owner)`` twice replaces. Dead weakref entries are dropped
+    first so stale owners do not accumulate. Cheap and side-effect-free; does
     not check the enable flag; never keeps the owner alive."""
+    import weakref
+
+    for key, (target, _a) in list(_registry.items()):
+        if isinstance(target, weakref.ref) and target() is None:
+            del _registry[key]
     if isinstance(owner, str):
         _registry[(name, None)] = (owner, attr)
         return
     try:
-        import weakref
-
         _registry[(name, id(owner))] = (weakref.ref(owner), attr)
     except MemoryError:
         raise
@@ -242,7 +246,7 @@ def estimate_size(obj: Any, *, sample: int = 200) -> int:
     try:
         if type(obj).__name__ == "Series":
             total = int(obj.memory_usage(index=True, deep=False))
-            if getattr(obj.dtype, "kind", "") == "O":
+            if obj.dtype == object:
                 n = len(obj)
                 if n:
                     step = max(1, n // sample)
@@ -405,7 +409,7 @@ def snapshot(label: str, *, top: int | None = None) -> None:
             if isinstance(target, str):
                 continue
             try:
-                if target is None or target() is None:
+                if target() is None:
                     del _registry[(key_name, owner_id)]
             except MemoryError:
                 raise
@@ -433,7 +437,7 @@ def snapshot(label: str, *, top: int | None = None) -> None:
                     continue
                 display = key_name
             else:
-                owner = target() if target is not None else None
+                owner = target()
                 if owner is None:
                     continue
                 try:
@@ -466,7 +470,10 @@ def snapshot(label: str, *, top: int | None = None) -> None:
     except MemoryError:
         raise
     except Exception as exc:
-        print(f"{_PREFIX}{label} probe failed: {type(exc).__name__}: {exc!r}", flush=True)
+        try:
+            print(f"{_PREFIX}{label} probe failed: {type(exc).__name__}: {exc!r}", flush=True)
+        except OSError:
+            pass
 
 
 def tick(label: str, i: int) -> None:
@@ -474,6 +481,14 @@ def tick(label: str, i: int) -> None:
     returns immediately if not enabled."""
     if not enabled():
         return
-    every = _int_flag("INVESTING_PLAN_MEMPROFILE_EVERY", _DEFAULT_EVERY)
-    if every > 0 and i > 0 and i % every == 0:
-        snapshot(f"{label} {i:,}")
+    try:
+        every = _int_flag("INVESTING_PLAN_MEMPROFILE_EVERY", _DEFAULT_EVERY)
+        if every > 0 and i > 0 and i % every == 0:
+            snapshot(f"{label} {i:,}")
+    except MemoryError:
+        raise
+    except Exception as exc:
+        try:
+            print(f"{_PREFIX}{label} probe failed: {type(exc).__name__}: {exc!r}", flush=True)
+        except OSError:
+            pass
