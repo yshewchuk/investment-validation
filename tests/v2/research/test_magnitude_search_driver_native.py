@@ -9,8 +9,9 @@ import pytest
 
 from engine.models.no_fit import no_fit_guard as legacy_guard
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import content_hash, to_document
 from engine.v2.models.no_fit import no_fit_guard
+from engine.v2.ops.errors import fail
 from experiments import magnitude_search_execution as execution
 from experiments import magnitude_search_outer as outer
 from experiments import magnitude_search_trials as trials
@@ -93,5 +94,6 @@ def test_fresh_registered_native_driver_executes_and_replays_read_only(source, t
     with no_fit_guard(), legacy_guard():
         for action in (["run", *common, *limits], ["collect", *common]):
             assert driver.main(action) == 2
-            assert json.loads(capsys.readouterr().out)["refused"]["code"] == "EXPERIMENT_IDENTITY_CONFLICT"
+            assert json.loads(capsys.readouterr().out) == {"refused": to_document(fail(
+                "EXPERIMENT_IDENTITY_CONFLICT", "search execution requires its exact driver seal").problem)}
     assert catalog_rows(source.conn) == before

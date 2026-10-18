@@ -764,8 +764,9 @@ change their arithmetic or imply that source receipt production is available.
   pattern to avoid, not to copy, when adding a sibling tool.
   Exceptions: `experiments.native_sweep_collection`, `experiments.v2_prediction`,
   `experiments.magnitude_history_store` and the search source seals in
-  `experiments.magnitude_search_plan`, `experiments.magnitude_search_trials` and
-  `experiments.magnitude_search_outer` derive installed roots from `__file__`
+  `experiments.magnitude_search_plan`, `experiments.magnitude_search_trials`,
+  `experiments.magnitude_search_outer` and `experiments.v2_magnitude_search_run`
+  derive installed roots from `__file__`
   solely to fingerprint/compare on-disk source snapshots.
   `experiments.magnitude_search_execution` uses that root only to launch its
   fixed installed child. Caller data, catalog, store and snapshot paths still

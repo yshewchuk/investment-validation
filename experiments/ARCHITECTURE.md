@@ -694,3 +694,23 @@ temporary file enforces a complete 64 MiB UTF-8 output budget before stdout;
 oversized reports refuse without truncation. Collection preserves the existing
 outer report identity and uses a read-only SQLite connection. No persisted report
 framework, scheduler, ledger, final-read or release authority is introduced.
+
+Each invocation revalidates bindings/evidence; there is no cross-call admission cache.
+The CLI calls `seal_search_run`/`run_search`; focused research tests also call these helpers.
+Direct engine dependencies are contracts, data, foundation and ops.
+
+| Condition | Enforced outcome |
+|---|---|
+| Invalid CLI flags/resource arguments or embedded-NUL paths | Parser exit 2 with stderr and no stdout or work; direct `run_search` limit admission instead refuses `INVALID_EXPERIMENT_SPEC` before journal access. |
+| Missing metadata, catalog or store; raw artifact, filesystem or SQLite failure | CLI emits sanitized `RESOURCE_UNAVAILABLE`, exit 2; absent inputs are not created. |
+| Malformed/duplicate-key JSON, nonobject metadata, invalid typed reference, or nonregular/symlink/oversized metadata file | `INVALID_EXPERIMENT_SPEC` before dispatch; no partial result. Metadata reads are capped at 16 MiB per file. |
+| Run/collect with missing or incompatible journal migrations | Driver admission refuses `INTEGRITY_FAILED` before search-plan/evidence access; no implicit migration. |
+| Missing/different driver seal or changed installed source/plan binding | `EXPERIMENT_IDENTITY_CONFLICT`; no fitting or binding replacement. An unbound started journal cannot acquire a driver seal. |
+| First seal, exact seal replay or concurrent phase publication | Seal uses the existing journal migrations and immutable append; phase absence is checked in the association transaction. Exact replay is read-only; a lost absence race refuses without a driver association. |
+| Unfinished/orphan inner or outer claim, or selection before fresh inner work | `EXPERIMENT_IDENTITY_CONFLICT` before fresh fits; no claim reset or fit retry. |
+| Durable inner result or completed outer terminal | Verify/reconcile all claimed inner results and replay completed outer folds before fresh fits; finish only missing inner publication, never refit or replace evidence. |
+| Candidate scoring refusal; shared/resource failure; no eligible candidate | Continue only after public reconciliation verifies the durable refused terminal; other failures stop. No eligible candidate refuses `EXPERIMENT_VARIANT_FAILED` before new outer work. |
+| Journal publication/transaction fails | Existing journal policy applies: failed transactions roll back their association, earlier evidence and unreferenced complete objects remain; no whole-run rollback or automatic retry. |
+| CLI typed `OpsError`/`DataError`; unexpected builtin failure | Preserve the complete typed `Problem` in one refusal document, exit 2; unexpected builtin errors propagate. An opened connection closes in either case. |
+| Output exceeds 64 MiB or temporary output storage fails | Discard partial buffered output and close scratch; emit `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Prior journal commits remain. |
+| Stdout fails after emission begins | Propagate the stream error without a second document or retry; downstream may have received a prefix. |
