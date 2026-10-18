@@ -446,6 +446,7 @@ def test_incidental_python_stdout_moves_to_stderr(source, monkeypatch, capsys):
 
 @pytest.mark.parametrize("scratch", [False, True])
 def test_render_budget_counts_utf8_and_final_newline_inclusively(monkeypatch, scratch):
+    assert cli.MAX_REPORT_BYTES == 64 * 1024 * 1024
     document = {"value": "é🧪"}
     expected = canonical_json(document) + "\n"
     budget = len(expected.encode("utf-8"))
@@ -460,6 +461,7 @@ def test_render_budget_counts_utf8_and_final_newline_inclusively(monkeypatch, sc
 
 
 def test_report_overflow_emits_one_refusal_and_no_partial_success(source, monkeypatch, capsys):
+    assert cli.MAX_REPORT_BYTES == 64 * 1024 * 1024
     monkeypatch.setattr(cli, "MAX_REPORT_BYTES", 1024)
     source.result = {"first_success_field": "partial must stay private", "padding": "é" * 1024}
     result, stderr = _invoke(source, capsys, status=2)
