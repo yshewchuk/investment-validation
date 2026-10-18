@@ -89,6 +89,18 @@ def independent_metrics(rows):
             "rmse": pytest.approx(math.sqrt(math.fsum(error ** 2 for error in errors) / len(errors)))}
 
 
+def physical_inputs(case, events):
+    """Read fixture object identities without consulting any admitted receipt."""
+    records = {(record.partition_key, record.time_min): record for record in
+               case.recorder.repository.fragment_records(case.snapshot, "computed_moves")}
+    result = []
+    for event in events:
+        record = records[tuple(event.split(":")[:2])]
+        result.append({"event_id": event, "fragment_id": record.fragment_id,
+            "object_id": record.object_ref.object_id, "content_hash": record.object_ref.content_hash})
+    return result
+
+
 def expected_training_receipt(case, year):
     """Pin fixture membership and physical identities without journal or qualifier output."""
     days = ["2022-06-02", "2022-12-22", "2022-12-23", "2023-01-03", "2023-06-02"]
@@ -96,13 +108,6 @@ def expected_training_receipt(case, year):
         days += ["2024-06-12", "2024-06-17"]
     events = sorted([history_event(day, ticker=ticker) for day in days for ticker in ("SYNTH_A", "SYNTH_B")],
                     key=lambda event: (event["event_date"], event["event_id"]))
-    records = {(record.partition_key, record.time_min): record for record in
-               case.recorder.repository.fragment_records(case.snapshot, "computed_moves")}
-    physical = []
-    for event in events:
-        record = records[event["ticker"], event["event_date"].date().isoformat()]
-        physical.append({"event_id": event["event_id"], "fragment_id": record.fragment_id,
-            "object_id": record.object_ref.object_id, "content_hash": record.object_ref.content_hash})
     keys = [event["event_id"] for event in events]
     identity = {"schema_version": "research_magnitude_training_targets.v1",
         "snapshot_id": case.snapshot.snapshot_id, "holdout_as_of_month": "2026-01",
@@ -111,8 +116,35 @@ def expected_training_receipt(case, year):
         "computed_moves_version": case.snapshot.table_versions["computed_moves"].dataset_version_id,
         "labels_before": {"2024": "2024-01-01", "2025": "2024-12-27"}[year],
         "target_recipe": TARGET_RECIPE, "target_recipe_id": content_hash(TARGET_RECIPE),
-        "candidate_event_ids": keys, "qualified_event_ids": keys, "read_inputs": physical, "omitted_labels": []}
+        "candidate_event_ids": keys, "qualified_event_ids": keys,
+        "read_inputs": physical_inputs(case, keys), "omitted_labels": []}
     return {**identity, "inputs_id": content_hash(identity), "holdout_exclusions": []}
+
+
+def expected_input_receipts(case, year):
+    """Build complete input/validation documents from fixture truth and native metadata."""
+    training = expected_training_receipt(case, year)
+    common = {name: training[name] for name in ("snapshot_id", "holdout_as_of_month",
+        "random_membership_version", "rolling_membership_version", "population_use", "purpose",
+        "computed_moves_version")}
+    evaluation = sorted([event for event in known_targets() if event.split(":")[1][:4] == year],
+                        key=lambda event: (event.split(":")[1], event))
+    participants = sorted(set(training["candidate_event_ids"] + evaluation),
+                          key=lambda event: (event.split(":")[1], event))
+    preflight = {"schema_version": "research_magnitude_preflight.v1", **common,
+        "event_ids": participants, "planned_inputs": physical_inputs(case, participants)}
+    labels = {"schema_version": "research_magnitude_targets.v1", **common,
+        "labels_before": "2025-02-01", "target_recipe": TARGET_RECIPE,
+        "target_recipe_id": content_hash(TARGET_RECIPE), "consumed_inputs": physical_inputs(case, evaluation),
+        "excluded_future_events": []}
+    inputs = {"preflight": {**preflight, "preflight_id": content_hash(preflight)},
+        "stored_inputs_id": case.native_inputs["inputs_id"], "training_inputs": training,
+        "training": [{"event_id": event, "absolute_move_pct": known_targets()[event]}
+                     for event in training["qualified_event_ids"]],
+        "features": [row for row in case.native_inputs["rows"] if row["event_id"] in participants]}
+    validation = {"evaluation_inputs": {**labels, "inputs_id": content_hash(labels), "holdout_exclusions": []},
+        "targets": [{"event_id": event, "absolute_move_pct": known_targets()[event]} for event in evaluation]}
+    return inputs, validation
 
 
 def assert_fold_oracle(case, result, year):
@@ -134,19 +166,17 @@ def assert_fold_oracle(case, result, year):
         "limits": LIMITS, "outer_sources": started["outer_sources"],
         "prospective_candidate_id": case.selected["prospective_candidate_id"]}
     assert canonical_json(started) == canonical_json(expected_start)
-    inputs, execution, validation = (slot(case, name, year) for name in ("inputs", "execution", "validation"))
+    inputs, validation = expected_input_receipts(case, year)
+    assert canonical_json(slot(case, "inputs", year)) == canonical_json(inputs)
+    assert slot(case, "validation", year) == validation
+    execution = slot(case, "execution", year)
     assert execution["fits"] == expected_fits(case, year)
-    assert {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]} == targets
-    training_inputs = expected_training_receipt(case, year)
-    assert inputs["training_inputs"] == training_inputs
-    assert validation["evaluation_inputs"]["labels_before"] == "2025-02-01"
-    assert validation["evaluation_inputs"]["purpose"] == "selection"
     assert case.plan["horizons"] == HORIZONS
     expected = {"schema_version": "magnitude_search_outer_result.v1",
         "outer_id": content_hash([case.plan["plan_id"], year]), "plan_id": case.plan["plan_id"],
         "outer_year": year, "candidate": candidate, "selection_id": content_hash(case.selected),
         "inputs_id": content_hash(inputs), "execution_id": content_hash(execution),
-        "validation_id": content_hash(validation), "training_inputs": training_inputs,
+        "validation_id": content_hash(validation), "training_inputs": inputs["training_inputs"],
         "evaluation_inputs": validation["evaluation_inputs"], "fit_attempt_count": 3,
         "event_count": {"2024": 8, "2025": 2}[year], "forecast_count": {"2024": 24, "2025": 6}[year],
         "predictions": expected_predictions, "metrics": independent_metrics(expected_predictions),
@@ -179,13 +209,10 @@ def native_matrices(case, year="2024"):
 
 def expected_fits(case, year="2024"):
     """Pin journal inputs and fit identities to independently read native evidence."""
-    inputs = slot(case, "inputs", year)
+    inputs, _ = expected_input_receipts(case, year)
+    assert canonical_json(slot(case, "inputs", year)) == canonical_json(inputs)
     fold = next(item["outer"] for item in case.plan["folds"] if item["outer"]["year"] == year)
     train = fold["training_candidate_event_ids"]
-    participants = set(train + fold["evaluation_event_ids"])
-    assert inputs["stored_inputs_id"] == case.native_inputs["inputs_id"]
-    assert canonical_json(inputs["features"]) == canonical_json([
-        row for row in case.native_inputs["rows"] if row["event_id"] in participants])
     assert inputs["training"] == [{"event_id": event, "absolute_move_pct": known_targets()[event]} for event in train]
     result = []
     for horizon, matrices in zip(HORIZONS, native_matrices(case, year)):
@@ -315,6 +342,34 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
                                                           if key != "result_id"})}
     assert report["metrics"]["rmse"] != pytest.approx((first["metrics"]["rmse"] + second["metrics"]["rmse"]) / 2)
     assert (case.conn.total_changes, journal_slots(case)) == before
+
+
+@pytest.mark.parametrize("stage", ["input", "labels"])
+def test_collect_refuses_later_committed_start_without_terminal_before_any_replay(outer_case, monkeypatch, stage):
+    case = outer_case
+    run(case)
+    interruption = Mock(side_effect=fail("RESOURCE_UNAVAILABLE", "synthetic outer interruption"))
+    with monkeypatch.context() as patch:
+        patch.setattr(outer, "_inputs" if stage == "input" else "load_magnitude_targets", interruption)
+        with outer_problem("RESOURCE_UNAVAILABLE", "synthetic outer interruption", category="resource", retryable=True):
+            run(case, "2025")
+    interruption.assert_called_once()
+    assert slot(case, "terminal", "2024") is not None
+    assert slot(case, "start", "2025") is not None
+    assert slot(case, "terminal", "2025") is None
+    for name in ("inputs", "forecasts", "execution"):
+        assert (slot(case, name, "2025") is not None) == (stage == "labels")
+    assert slot(case, "validation", "2025") is None
+    before = case.conn.total_changes, list(case.conn.iterdump())
+    forbidden = Mock(side_effect=AssertionError("incomplete collection attempted replay or publication"))
+    for name in ("execute_outer_fold", "_replay", "_inputs", "load_magnitude_targets", "run_fitted_trial", "append_record"):
+        monkeypatch.setattr(outer, name, forbidden)
+    monkeypatch.setattr(ArtifactStore, "publish_bytes", forbidden)
+    with no_fit_guard(), legacy_guard(), outer_problem(
+            "EXPERIMENT_IDENTITY_CONFLICT", "outer report requires every completed outer fold"):
+        collect(case)
+    forbidden.assert_not_called()
+    assert (case.conn.total_changes, list(case.conn.iterdump())) == before
 
 
 @pytest.mark.parametrize("guard, exception", [(no_fit_guard, RuntimeFitForbidden), (legacy_guard, LegacyRuntimeFitForbidden)])
