@@ -28,7 +28,7 @@ from engine.v2.ops.submission import get_job
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import FakeClock
 from tests.v2.ops.native_bounds_support import catalog_rows, object_bytes
-from tests.v2.ops.test_receipt_failure_bounds import coordinator_failure, coordinator_inputs
+from tests.v2.ops.test_receipt_failure_bounds import coordinator_failure, coordinator_inputs, exact_problem_bytes
 from tools.v2_ops_fixtures import POLICY, REGISTRY, enqueue_claim, request, sample
 
 CAP = 1024 * 1024
@@ -104,6 +104,39 @@ def test_small_and_exact_bound_problems_keep_identical_canonical_bytes(size):
     assert summary is original and artifact is None
     assert catalog.dumps_failure(summary) == payload
     assert catalog.MAX_JOB_FAILURE_BYTES == CAP
+
+
+@pytest.mark.parametrize("entrypoint", ["prepare", "storeless"])
+@pytest.mark.parametrize("fill", ["x", "漢"], ids=["ascii", "multibyte"])
+@pytest.mark.parametrize("excess", [0, 1], ids=["last-admitted-byte", "first-refused-byte"])
+def test_failure_writer_exact_byte_boundaries(tmp_path, entrypoint, fill, excess):
+    original, payload = exact_problem_bytes(CAP + excess, fill=fill)
+    assert catalog.dumps(original) == payload
+    store = ArtifactStore(tmp_path)
+    if entrypoint == "prepare":
+        summary, ref = failure_diagnostics.prepare_failure(original, store)
+        if excess:
+            assert_summary(original, summary, ref)
+            assert ref == artifact_reference(payload.encode("utf-8"), "problem.v1.0")
+            assert store.read_verified(ref) == payload.encode("utf-8")
+            assert len(object_bytes(store)) == 1
+        else:
+            assert summary is original and ref is None
+            assert catalog.dumps_failure(summary) == payload
+            assert object_bytes(store) == {}
+    else:
+        if excess:
+            with pytest.raises(OpsError) as captured:
+                catalog.dumps_failure(original)
+            assert captured.value.code == "RESOURCE_LIMIT_EXCEEDED"
+            assert captured.value.problem.retryable is False
+            assert captured.value.problem.message == "failure requires a diagnostic artifact before persistence"
+            assert isinstance(captured.value.__cause__, OpsError)
+            assert captured.value.__cause__.problem is original
+        else:
+            assert catalog.dumps_failure(original) == payload
+        assert object_bytes(store) == {}
+    assert catalog.dumps(original) == payload
 
 
 @pytest.mark.parametrize("field", [

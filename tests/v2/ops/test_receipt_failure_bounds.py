@@ -19,11 +19,31 @@ from engine.v2.ops.recovery import begin_epoch
 from engine.v2.ops.scheduler import Supervisor
 from engine.v2.ops.schema import MIGRATIONS, OWNER
 from tests.ops_support import FakeClock
-from tests.v2.ops.native_bounds_support import BoundedSqlRows
+from tests.v2.ops.native_bounds_support import BoundedSqlRows, catalog_rows
 from tools.v2_ops_fixtures import POLICY, REGISTRY, enqueue_claim, request
 
 CAP = 1024 * 1024
 DEFAULT_CAP = 8 * CAP
+
+
+def exact_problem_bytes(size, *, fill="x"):
+    """Independent stdlib JSON oracle for this plain, integer-only Problem document."""
+    document = {
+        "code": "RESOURCE_UNAVAILABLE", "category": "resource", "retryable": True,
+        "message": "boundary failure", "stage": "stage", "trace_id": "trace",
+        "dependency_refs": ["job_a"], "retry_after_seconds": 19,
+        "diagnostic_ref": "art_existing", "details": {"padding": ""},
+        "schema_version": "problem.v1.0",
+    }
+    options = dict(sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    remaining = size - len(json.dumps(document, **options).encode("utf-8"))
+    assert remaining >= 0
+    count, tail = divmod(remaining, len(fill.encode("utf-8")))
+    document["details"]["padding"] = fill * count + "x" * tail
+    payload = json.dumps(document, **options)
+    assert len(payload.encode("utf-8")) == size
+    problem = Problem(**{**document, "dependency_refs": tuple(document["dependency_refs"])})
+    return problem, payload
 
 
 def coordinator_inputs():
@@ -115,6 +135,52 @@ def read_receipt(case, conn, reader, **options):
         return submission.get_job(conn, case.job_id, **options)
     return submission.submit_graph(conn, REGISTRY, POLICY, [request()],
                                    clock=case.clock, **options)[0]
+
+
+@pytest.mark.parametrize("reader", ["get-job", "submit-graph-replay"])
+@pytest.mark.parametrize("budget,options", [
+    (CAP, {"max_failure_bytes": CAP, "receipt_decode_failure_code": "EXPERIMENT_IDENTITY_CONFLICT"}),
+    (DEFAULT_CAP, {}), (DEFAULT_CAP, {"max_failure_bytes": None}),
+    (9 * CAP, {"max_failure_bytes": 9 * CAP}),
+], ids=["explicit-1MiB-R6", "default-omitted", "default-none", "explicit-9MiB"])
+@pytest.mark.parametrize("encoding", ["UTF-8", "UTF-16le"])
+@pytest.mark.parametrize("fill", ["x", "漢"], ids=["ascii", "multibyte"])
+@pytest.mark.parametrize("excess", [0, 1], ids=["last-admitted-byte", "first-refused-byte"])
+def test_receipt_exact_byte_boundaries(monkeypatch, reader, budget, options, encoding, fill, excess):
+    problem, payload = exact_problem_bytes(budget + excess, fill=fill)
+    assert dumps(problem) == payload
+    with historical_failure(problem, encoding=encoding) as case:
+        assert case.payload == payload
+        before = catalog_rows(case.conn)
+        sql_budget = budget * (2 if encoding == "UTF-16le" else 1)
+        stored_bytes = len(payload.encode(encoding))
+        bounded = BoundedSqlRows(case.conn, max_bytes=sql_budget, column="failure_json",
+                                 sql_fragment="end as failure_json from jobs")
+        assert bounded.encoding == encoding
+        original_load, decoded = submission.load_json, []
+
+        def guarded_load(cls, value):
+            if cls is Problem:
+                decoded.append(value)
+                assert not excess, "the first over-budget byte reached Problem decoding"
+            return original_load(cls, value)
+
+        monkeypatch.setattr(submission, "load_json", guarded_load)
+        if excess:
+            with pytest.raises(OpsError) as captured:
+                read_receipt(case, bounded, reader, **options)
+            assert captured.value.code == options.get("receipt_decode_failure_code", "RESOURCE_LIMIT_EXCEEDED")
+            assert captured.value.problem.retryable is False
+            assert captured.value.problem.message == "stored job failure exceeds its byte bound"
+            assert decoded == []
+        else:
+            receipt = read_receipt(case, bounded, reader, **options)
+            assert receipt.job_id == case.job_id and receipt.state == "failed"
+            assert receipt.failure == problem and decoded == [payload]
+        # UTF-16 multibyte text fits the SQL allowance even at UTF-8 budget+1;
+        # its first excess byte must still refuse before JSON decoding.
+        assert bounded.sizes == [stored_bytes if stored_bytes <= sql_budget else None]
+        assert catalog_rows(case.conn) == before and not case.conn.in_transaction
 
 
 @pytest.mark.parametrize("reader", ["get-job", "submit-graph-replay"])
