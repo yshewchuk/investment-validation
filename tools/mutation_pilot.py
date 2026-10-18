@@ -2073,12 +2073,18 @@ def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = No
         if t in dyn or tainted:
             failsafe.add(t)
     tests_set = set(tests)
+    path_tests = cfg.get("pr_selection", {}).get("path_tests", {})
+    if not (isinstance(path_tests, dict)
+            and all(isinstance(p, str) and isinstance(v, list) and v
+                    and all(isinstance(t, str) for t in v)
+                    for p, v in path_tests.items())):
+        note("pr_selection.path_tests is malformed; selecting the full test suite")
+        return None
     selected: set[str] = set(cfg.get("pr_selection", {}).get("always_run", [])) & tests_set
     selected |= registrations
     docs: list[str] = []
     needs_failsafe = False
     failsafe_path: str | None = None
-    path_tests = cfg.get("pr_selection", {}).get("path_tests", {})
     for path in sorted(changed_set):
         for pat, listed in path_tests.items():
             if fnmatch.fnmatchcase(path, pat):
@@ -2092,7 +2098,7 @@ def select_pr_tests(cfg: dict, changed: list[str], *, base_cfg: dict | None = No
             failsafe_path = failsafe_path or path
         elif is_doc_changed_path(cfg, path):
             docs.append(path)
-        elif readers := _path_reader_tests([path], tests, closures):
+        elif path in tracked_set and (readers := _path_reader_tests([path], tests, closures)):
             # A test names this unreached path in a literal: select its readers
             # rather than falling back to the full suite.
             selected |= readers

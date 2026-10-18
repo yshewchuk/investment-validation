@@ -299,7 +299,7 @@ def test_cli_threads_verified_base_and_keeps_missing_base_full(case, tmp_path, m
     assert pilot.cmd_select_tests(cfg, args) == 0
     out = capsys.readouterr().out
     assert out.splitlines()[0] == "__ALL__"
-    assert out.splitlines()[1].startswith("# ")
+    assert out.splitlines()[1] == "# tools/mutation_pilot.toml change is not an add-only registration"
     monkeypatch.setattr(pilot, "registration_base_config", lambda sha, config, paths: base)
     assert pilot.cmd_select_tests(cfg, args) == 0
     assert [ln for ln in capsys.readouterr().out.splitlines() if not ln.startswith("#")] == selected(case)
@@ -455,7 +455,9 @@ def test_path_tests_change_is_not_an_add_only_registration(case):
 
 def test_identical_path_tests_keep_the_registration_valid(case):
     same = {"engine/*": ["tests/test_always.py"]}
-    assert selected(_with_path_tests(case, dict(same), dict(same))) is not None
+    result = selected(_with_path_tests(case, dict(same), dict(same)))
+    assert isinstance(result, list) and result
+    assert "tests/test_always.py" in result and "tests/test_new.py" in result
 
 
 def test_empty_path_tests_list_is_rejected(case):

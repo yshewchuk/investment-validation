@@ -2836,6 +2836,40 @@ def test_select_pr_tests_unreached_path_named_in_a_literal_selects_its_reader(
                and "scripts/worker_x.py is reached by tests" in r for r in reasons)
 
 
+def test_select_pr_tests_literal_reader_adds_the_nonempty_failsafe_set(tmp_path, monkeypatch):
+    tracked = _write_repo(tmp_path, {
+        "tests/test_a.py": 'X = "scripts/worker_x.py"\n',
+        "tests/test_dyn.py": "import importlib\nimportlib.import_module(__name__ + 'x')\n",
+        "scripts/worker_x.py": "Z = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    reasons: list[str] = []
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["scripts/worker_x.py"], graph=graph, reasons=reasons)
+    assert selected == ["tests/test_a.py", "tests/test_dyn.py"]
+    assert reasons == ["fail-safe set added (1 tests) because scripts/worker_x.py is reached by tests"]
+
+
+def test_select_pr_tests_a_deleted_file_named_in_a_literal_still_selects_everything(tmp_path, monkeypatch):
+    tracked = _write_repo(tmp_path, {"tests/test_a.py": 'X = "scripts/gone.py"\n'})
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    reasons: list[str] = []
+    assert pilot.select_pr_tests(_SELECT_CFG, ["scripts/gone.py"], graph=graph, reasons=reasons) is None
+    assert reasons == ["scripts/gone.py is not in any test's import closure and is not a doc"]
+
+
+@pytest.mark.parametrize("bad", ["tests/test_scan.py", {"engine/*": "tests/test_scan.py"}, {"engine/*": []}, ["x"]])
+def test_select_pr_tests_malformed_path_tests_selects_everything(tmp_path, monkeypatch, bad):
+    cfg = {"pr_selection": {"inert": [], "inert_skip": [], "full_suite": [], "path_tests": bad}}
+    tracked = _write_repo(tmp_path, {"engine/x.py": "Y = 1\n", "tests/test_a.py": "import engine.x\n"})
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    reasons: list[str] = []
+    assert pilot.select_pr_tests(cfg, ["engine/x.py"], graph=graph, reasons=reasons) is None
+    assert reasons == ["pr_selection.path_tests is malformed; selecting the full test suite"]
+
+
 def test_select_pr_tests_path_tests_never_bypass_the_unreached_fallback(tmp_path, monkeypatch):
     cfg = {"pr_selection": {"inert": [], "inert_skip": [], "full_suite": [],
                             "path_tests": {"engine/v2/*": ["tests/test_scan.py"]}}}
@@ -2858,6 +2892,14 @@ def test_select_pr_tests_an_oversized_closure_file_counts_as_a_reader(tmp_path, 
     })
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
+    monkeypatch.setattr(pilot, "unresolved_import_files", lambda paths: set())
+    original_read_text = Path.read_text
+
+    def guard(self, *args, **kwargs):
+        assert self.name != "test_a.py", "oversized file must never be read"
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guard)
     assert "tests/test_a.py" in pilot.select_pr_tests(_SELECT_CFG, ["scripts/w.py"], graph=graph)
 
 
