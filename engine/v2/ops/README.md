@@ -218,6 +218,8 @@ that fixed-child supervisor consumes `executor.THREAD_VARIABLES` and `errors.fai
 `experiments/magnitude_search_worker.py` consumes `errors.OpsError` to distinguish estimator-local failures; `experiments/magnitude_fitted.py` consumes `errors.OpsError`/`fail` for strict propagation and legacy failure mapping.
 `experiments/magnitude_search_outer.py` consumes `migrations.require_current`,
 `fingerprints.source_closure` and `errors.OpsError`/`fail` for selected outer evaluation.
+`experiments/v2_magnitude_search_run.py` consumes those same interfaces plus
+`catalog.connect` and `experiments.experiment_spec_from_document` for serial CLI admission.
 
 Within ops, `cli.rescore_command` and `worker._dispatch_adhoc_rescore` call
 `native.input_decoding._load_native_score_inputs`. The dashboard projection

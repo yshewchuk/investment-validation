@@ -21,11 +21,11 @@ storage exceptions propagate. This bounds transferred/serialized bytes, not
 SQLite internals or decoded-object overhead. It loads v1.0–v1.5 without rewriting
 saved bindings; current-source admission still requires a matching closure.
 Larger legitimate registrations can supply `max_evidence_bytes`, also exposed as
-`--max-registration-bytes` by the gate, prediction and search-plan CLIs; magnitude
+`--max-registration-bytes` by the gate, prediction, search-plan and serial-search CLIs; magnitude
 history binds its temporal plan twice, so 16 MiB is not a universal population bound.
 The pure `valid_registration_read_budget` predicate admits only built-in integer
 budgets in `[1, 2**62 - 1]`, leaving SQLite headroom for UTF-16. The loader and all
-three CLI parsers share it; None never disables this loader's bounds. Later
+four CLI parsers share it; None never disables this loader's bounds. Later
 admission/outcome APIs keep their existing policies. Execution under changed
 bound sources requires fresh preregistration; old seals are never migrated.
 
@@ -242,7 +242,7 @@ both flag states publish/verify the same plan and never write a ledger.
 
 ## Recorded magnitude-search selection
 
-`magnitude_search_trials.SearchTrials` is library-only, with no CLI or production caller. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies include contracts, foundation, ops migrations/catalog/fingerprints/errors, research target reads and `magnitude_search_evidence`. That shared helper owns native admission through `magnitude_history_inputs.history_binding` and research stored-history/target reads; `magnitude_search_plan.read_search_plan` owns plan admission. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. Public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
+`magnitude_search_trials.SearchTrials` exposes the journal API composed by the serial CLI. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies include contracts, foundation, ops migrations/catalog/fingerprints/errors, research target reads and `magnitude_search_evidence`. That shared helper owns native admission through `magnitude_history_inputs.history_binding` and research stored-history/target reads; `magnitude_search_plan.read_search_plan` owns plan admission. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. Public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
 
 | Condition | Outcome |
 |---|---|
@@ -562,7 +562,7 @@ immutable completion prevents a second terminal CSV row; prior reports stay unch
 
 ## Bounded inner-trial execution
 
-`SearchTrials.execute(outer_year, inner_year, candidate_id, limits=...)` is a library-only
+`SearchTrials.execute(outer_year, inner_year, candidate_id, limits=...)` is a public
 native caller of the existing recorder and `magnitude_fitted.fitted_forecasts`.
 It consumes one declared candidate and inner fold; it does not run outer evaluation,
 reclaim starts, change the selection policy, write a ledger or grant final-read authority.
@@ -647,7 +647,7 @@ There is no retry, fallback source, projected calendar or partial-success mode.
 
 ## Selected-candidate outer evaluation
 
-`magnitude_search_outer.execute_outer_fold` is library-only. It requires an existing
+`magnitude_search_outer.execute_outer_fold` is a selected-fold runner. It requires an existing
 frozen selection and completed native execution/terminal evidence for every inner
 trial before public `freeze`/`execute` replay. Missing or submitted-only evidence
 never launches inner work; permitted candidate failures retain sealed exclusions.
@@ -694,3 +694,30 @@ the search plan/journal/trial/execution/evidence modules, contracts, foundation,
 ops migrations/fingerprints/errors, both no-fit guards, `engine.v2.research.magnitude_inputs.load_magnitude_targets`
 for outer label reads and `magnitude_report.magnitude_metrics` for fold/aggregate scoring.
 The evidence helper separately consumes native history admission and research stored-history/target APIs; no new scheduler, parser, estimator implementation or third-party dependency is needed.
+
+## Serial search orchestration
+
+`v2_magnitude_search_run` composes public plan, journal, trial and outer APIs. Separate `seal`, `run` and read-only `collect` commands retain explicit ownership; run never migrates or seals implicitly. A distinct driver seal binds plan/ref and full driver source closure; atomic absence guards prevent blessing started library journals. Run and CLI collection
+require that exact binding, without changing the scientific report hash. The complete roster is checked for unfinished claims and premature selections before new work. Durable inner results reconcile first; completed outer results replay next, before any fresh serial fitting. Scientific scoring refusals continue only after public reconciliation verifies the
+durable refused terminal; shared/resource failures stop. Freeze precedes all selected outer evaluation, with zero fit retries and unchanged winner policy.
+
+The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. A disposable temporary file enforces a complete 64 MiB UTF-8 output budget before stdout; oversized reports refuse without truncation. Collection preserves the existing outer report identity and uses a read-only
+SQLite connection. No persisted report framework, scheduler, ledger, final-read or release authority is introduced.
+
+Each invocation revalidates bindings/evidence; there is no cross-call admission cache. The CLI calls `seal_search_run`/`run_search`; focused research tests also call these helpers. Direct engine dependencies are contracts, data, foundation and ops.
+
+| Condition | Enforced outcome |
+|---|---|
+| Invalid CLI flags/resource arguments, registration-read budget or embedded-NUL paths | Parser exit 2 with stderr and no stdout or storage. All actions share the loader's pure budget validator; `--max-registration-bytes` defaults to 16 MiB and affects only initial registration loading. Direct `run_search` limit admission instead refuses `INVALID_EXPERIMENT_SPEC` before journal access. |
+| Missing metadata, catalog or store; raw artifact, filesystem or SQLite failure | CLI emits sanitized `RESOURCE_UNAVAILABLE`, exit 2; absent inputs are not created. |
+| Malformed/duplicate-key JSON, nonobject metadata, invalid typed reference, or nonregular/symlink/oversized metadata file | `INVALID_EXPERIMENT_SPEC` before dispatch; no partial result. Metadata reads are capped at 16 MiB per file. |
+| Run/collect with missing or incompatible journal migrations | Driver admission refuses `INTEGRITY_FAILED` before search-plan/evidence access; no implicit migration. |
+| Missing/different driver seal or changed installed source/plan binding | `EXPERIMENT_IDENTITY_CONFLICT`; no fitting or binding replacement. An unbound started journal cannot acquire a driver seal. |
+| First seal, exact seal replay or concurrent phase publication | Seal uses the existing journal migrations and immutable append; phase absence is checked in the association transaction. Exact replay is read-only; a lost absence race refuses without a driver association. |
+| Unfinished/orphan inner or outer claim, or selection before fresh inner work | `EXPERIMENT_IDENTITY_CONFLICT` before fresh fits; no claim reset or fit retry. |
+| Durable inner result or completed outer terminal | Verify/reconcile all claimed inner results and replay completed outer folds before fresh fits; finish only missing inner publication, never refit or replace evidence. |
+| Candidate scoring refusal; shared/resource failure; no eligible candidate | Continue only after public reconciliation verifies the durable refused terminal; other failures stop. No eligible candidate refuses `EXPERIMENT_VARIANT_FAILED` before new outer work. |
+| Journal publication/transaction fails | Existing journal policy applies: failed transactions roll back their association, earlier evidence and unreferenced complete objects remain; no whole-run rollback or automatic retry. |
+| CLI typed `OpsError`/`DataError`; unexpected builtin failure | Preserve the complete typed `Problem` in one refusal document, exit 2; unexpected builtin errors propagate. An opened connection closes in either case. |
+| Output exceeds 64 MiB or temporary output storage fails | Discard partial buffered output and close scratch; emit `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Prior journal commits remain. |
+| Short stdout write; zero/unavailable/invalid progress; write or final flush failure | Consume each chunk using reported progress, then flush the selected binary/text destination before returning. Invalid progress raises `OSError`; original stream errors propagate without a second document or failed-write retry. Close staging; downstream may have received a prefix and stdout remains caller-owned. |

@@ -458,6 +458,7 @@ Only a tracked path absent from the worktree reads as empty.
 
 ## 4. Production entrypoints and the job graph
 
+- **Serial magnitude search — `python -m experiments.v2_magnitude_search_run seal|run|collect`.** Explicit driver sealing, serial inner/selected-outer execution and read-only collection compose the existing search APIs; no supervisor, fit retries or ledger publication. See the [driver contract](experiments/ARCHITECTURE.md#serial-search-orchestration).
 - **Gate sweep staging — `python -m experiments.v2_gate_sweep register|submit --no-ledger`.** Explicit operator registration/submission; `ops serve` runs independent evaluation children. The staging commands do not collect scientific results or complete a sweep index; see the [sweep contract](experiments/ARCHITECTURE.md#sealed-gate-sweep-submission).
 - **Gate sweep collection — `python -m experiments.v2_gate_collect collect|run`.** Explicit observer/coordinator publication over those exact jobs; records or smoke-collects according to the [collection contract](experiments/ARCHITECTURE.md#scientific-gate-sweep-collection). Collection selects fixed 1 MiB/R6 receipt admission through submission; shared receipt-read defaults are owned by [ops](engine/v2/ops/ARCHITECTURE.md).
 - **Massive cache planning — `python -m tools.v2_massive_plan`.** Standalone read-only operator inventory; no acquisition or nightly-job submission. See the [ops contract](engine/v2/ops/ARCHITECTURE.md#massive-basic-planning).
@@ -774,8 +775,9 @@ change their arithmetic or imply that source receipt production is available.
   pattern to avoid, not to copy, when adding a sibling tool.
   Exceptions: `experiments.native_sweep_collection`, `experiments.v2_prediction`,
   `experiments.magnitude_history_store` and the search source seals in
-  `experiments.magnitude_search_plan`, `experiments.magnitude_search_trials` and
-  `experiments.magnitude_search_outer` derive installed roots from `__file__`
+  `experiments.magnitude_search_plan`, `experiments.magnitude_search_trials`,
+  `experiments.magnitude_search_outer` and `experiments.v2_magnitude_search_run`
+  derive installed roots from `__file__`
   solely to fingerprint/compare on-disk source snapshots.
   `experiments.magnitude_search_execution` uses that root only to launch its
   fixed installed child. Caller data, catalog, store and snapshot paths still
