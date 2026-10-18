@@ -27,7 +27,7 @@ def main(argv=None):
     parser.add_argument("--ledger", type=Path)
     parser.add_argument("--max-registration-bytes", type=int, default=native.MAX_NATIVE_EVIDENCE_BYTES)
     args = parser.parse_args(argv)
-    if not 0 < args.max_registration_bytes < 2**62:
+    if not native.valid_registration_read_budget(args.max_registration_bytes):
         parser.error("--max-registration-bytes must be a positive SQLite-safe byte budget")
     conn, store, registration, attempted = None, None, None, False
     try:

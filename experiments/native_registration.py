@@ -327,9 +327,14 @@ def prepare_final_holdout_request(conn, store, registration):
         raise fail("INVALID_EXPERIMENT_SPEC", "invalid final-read registration metadata") from None
 
 
+def valid_registration_read_budget(value):
+    """Share strict integer admission with CLI parsers without I/O or coercion."""
+    return type(value) is int and 0 < value < 2**62
+
+
 def read_native_registration(conn, store, spec, *, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES):
     """Load a bounded stable reservation before current-request validation."""
-    if type(max_evidence_bytes) is not int or not 0 < max_evidence_bytes < 2**62:
+    if not valid_registration_read_budget(max_evidence_bytes):
         raise fail("INVALID_EXPERIMENT_SPEC", "registration read requires a positive SQLite-safe byte budget")
     key = content_hash({"experiment_id": spec.experiment_id, "arm": spec.primary_arm_id})
     run_id = "native_" + key.removeprefix("sha256:")

@@ -19,7 +19,11 @@ from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments.magnitude_search_plan import read_search_plan, seal_search_plan
-from experiments.native_registration import MAX_NATIVE_EVIDENCE_BYTES, read_native_registration
+from experiments.native_registration import (
+    MAX_NATIVE_EVIDENCE_BYTES,
+    read_native_registration,
+    valid_registration_read_budget,
+)
 
 MAX_METADATA_BYTES = 1024 * 1024
 
@@ -64,7 +68,7 @@ def main(argv=None):
     parser.add_argument("--no-ledger", action="store_true", help="accepted no-op; planning never writes a ledger")
     parser.add_argument("--max-registration-bytes", type=int, default=MAX_NATIVE_EVIDENCE_BYTES)
     args = parser.parse_args(argv)
-    if not 0 < args.max_registration_bytes < 2**62:
+    if not valid_registration_read_budget(args.max_registration_bytes):
         parser.error("--max-registration-bytes must be a positive SQLite-safe byte budget")
     if (args.action == "verify") != (args.plan_ref is not None):
         parser.error("verify requires --plan-ref in addition to --request; prepare accepts no --plan-ref")

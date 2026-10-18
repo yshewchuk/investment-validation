@@ -23,11 +23,11 @@ saved bindings; current-source admission still requires a matching closure.
 Larger legitimate registrations can supply `max_evidence_bytes`, also exposed as
 `--max-registration-bytes` by the gate, prediction and search-plan CLIs; magnitude
 history binds its temporal plan twice, so 16 MiB is not a universal population bound.
-Only integer budgets in `[1, 2**62 - 1]` are valid (R1 before I/O otherwise), leaving
-SQLite headroom for UTF-16; None never disables this loader's bounds. Later
-admission/outcome APIs keep their existing policies.
-This reader change changes sealed runner closures, requiring fresh preregistration
-for execution under changed sources; it never silently migrates an old seal.
+The pure `valid_registration_read_budget` predicate admits only built-in integer
+budgets in `[1, 2**62 - 1]`, leaving SQLite headroom for UTF-16. The loader and all
+three CLI parsers share it; None never disables this loader's bounds. Later
+admission/outcome APIs keep their existing policies. Execution under changed
+bound sources requires fresh preregistration; old seals are never migrated.
 
 Registration publishes canonical bytes through `ArtifactStore`, then reserves
 the existing primary `hypotheses`/`experiment_runs` records in one catalog
@@ -201,6 +201,10 @@ Registration/replay never fit. Native smoke/recorded publication remains unchang
 | Current scope head cannot be resolved | `SNAPSHOT_UNRESOLVED`; no fallback. |
 | Invalid context or explicitly excluded/unknown event | Shared `HOLDOUT_ACCESS_DENIED`; no outcome read. |
 | Admission has no native registration | `INVALID_EXPERIMENT_SPEC`; no implicit registration. |
+| Loader budget is not a built-in integer in `[1, 2**62 - 1]` | `INVALID_EXPERIMENT_SPEC` before catalog/store access; booleans and None are invalid. |
+| Any registration-reading CLI receives an invalid `--max-registration-bytes` | Argument-parser error exits 2 before catalog/store access; noninteger text uses argparse's integer-conversion diagnostic, out-of-range integers use the positive SQLite-safe budget diagnostic. |
+| Stored loader evidence exceeds its UTF-8/canonical budget, has malformed text/JSON, or references an oversized/invalid registration object | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; SQL transfer and reference-size admission precede decoding/object reads, respectively. No writes. |
+| Loader encounters raw `OSError` or `sqlite3.Error` | Original exception propagates unchanged; no rewrite, implicit registration or retry. |
 | Existing key has changed code, environment, plan, snapshot, population or context, or corrupt stored evidence | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; existing catalog and artifact bytes stay unchanged. |
 | Publication or catalog commit fails | No partial registration is admitted; a complete unreferenced artifact may remain. No automatic retry. |
 

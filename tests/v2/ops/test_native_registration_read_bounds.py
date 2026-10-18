@@ -62,6 +62,20 @@ def save_evidence(conn, evidence):
     conn.execute("UPDATE experiment_runs SET evidence_json=?", (canonical_json(evidence),))
 
 
+@pytest.mark.parametrize("value, admitted", [
+    (1, True), (CAP, True), (2**62 - 1, True), (0, False), (-1, False),
+    (2**62, False), (None, False), (True, False), (False, False), (1.0, False), ("1", False),
+])
+def test_public_budget_predicate_returns_exact_bool_without_coercion(value, admitted):
+    assert native.valid_registration_read_budget(value) is admitted
+
+
+def test_public_budget_predicate_rejects_integer_subclasses():
+    class IntegerSubclass(int):
+        pass
+    assert native.valid_registration_read_budget(IntegerSubclass(1)) is False
+
+
 @pytest.mark.parametrize("encoding", ["UTF-8", "UTF-16le", "UTF-16be"])
 @pytest.mark.parametrize("character", ["x", "漢"])
 @pytest.mark.parametrize("extra", [0, 1])
@@ -141,9 +155,23 @@ def test_explicit_larger_finite_budget_applies_to_both_read_boundaries(tmp_path,
 
 @pytest.mark.parametrize("budget", [None, True, False, 0, -1, 1.0, float("inf"), float("nan"), "1024", 2**62, 2**100])
 def test_invalid_budget_refuses_before_any_catalog_or_object_access(budget):
-    with refuses("INVALID_EXPERIMENT_SPEC"):
+    with pytest.raises(OpsError) as captured:
         native.read_native_registration(SimpleNamespace(execute=forbid), SimpleNamespace(read_verified=forbid),
                                         None, max_evidence_bytes=budget)
+    assert type(captured.value) is OpsError
+    assert captured.value.code == "INVALID_EXPERIMENT_SPEC" and captured.value.problem.retryable is False
+    assert captured.value.problem.message == "registration read requires a positive SQLite-safe byte budget"
+
+
+@pytest.mark.parametrize("encoding", ["UTF-8", "UTF-16le", "UTF-16be"])
+def test_smallest_budget_reaches_sql_admission_instead_of_configuration_refusal(tmp_path, monkeypatch, encoding):
+    with registered_catalog(tmp_path, encoding=encoding) as (conn, store, _, _, _):
+        bounded = BoundedSqlRows(conn, max_bytes=2 if encoding.startswith("UTF-16") else 1,
+                                 column="evidence_json", sql_fragment="FROM experiment_runs")
+        monkeypatch.setattr(store, "read_verified", forbid)
+        with refuses():
+            native.read_native_registration(bounded, store, SPEC, max_evidence_bytes=1)
+        assert bounded.sizes == [None]
 
 
 @pytest.mark.parametrize("encoding", ["UTF-8", "UTF-16le", "UTF-16be"])

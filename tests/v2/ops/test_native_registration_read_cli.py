@@ -25,7 +25,7 @@ def arguments(cli, tmp_path):
 
 
 @pytest.mark.parametrize("cli", CLIS, ids=lambda cli: cli.__name__.rsplit(".", 1)[-1])
-@pytest.mark.parametrize("budget", [None, CAP + 1, 2**62 - 1])
+@pytest.mark.parametrize("budget", [None, 1, CAP + 1, 2**62 - 1])
 def test_cli_forwards_default_or_explicit_finite_budget_and_closes(tmp_path, monkeypatch, capsys, cli, budget):
     conn, store, spec = object(), object(), object()
     closed, calls = [], []
@@ -63,9 +63,18 @@ def test_cli_forwards_default_or_explicit_finite_budget_and_closes(tmp_path, mon
 def test_cli_rejects_invalid_budget_before_catalog_or_store(tmp_path, monkeypatch, capsys, cli, budget):
     def forbid(*args, **kwargs):
         pytest.fail("invalid registration budget reached storage")
+    args = arguments(cli, tmp_path) + ["--max-registration-bytes", budget]
     monkeypatch.setattr(cli, "connect", forbid)
     monkeypatch.setattr(cli if cli is v2_magnitude_search else cli.foundation, "ArtifactStore", forbid)
+    monkeypatch.setattr(cli.Path, "read_text", forbid)
+    if cli is v2_magnitude_search:
+        monkeypatch.setattr(cli, "_read_document", forbid)
+        monkeypatch.setattr(cli.Path, "is_dir", forbid)
     with pytest.raises(SystemExit) as captured:
-        cli.main(arguments(cli, tmp_path) + ["--max-registration-bytes", budget])
-    assert captured.value.code == 2
-    assert "--max-registration-bytes" in capsys.readouterr().err
+        cli.main(args)
+    assert type(captured.value) is SystemExit and captured.value.code == 2
+    diagnostic = capsys.readouterr().err.splitlines()[-1].split(": error: ", 1)[-1]
+    if budget in ("1.5", "inf", "None"):
+        assert diagnostic == f"argument --max-registration-bytes: invalid int value: {budget!r}"
+    else:
+        assert diagnostic == "--max-registration-bytes must be a positive SQLite-safe byte budget"
