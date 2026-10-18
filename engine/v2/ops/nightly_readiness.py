@@ -1,12 +1,14 @@
 """Legacy-nightly readiness for a session (slice 3 of #564).
 
-Contract in ``engine/v2/ops/ARCHITECTURE.md`` ("Nightly legacy readiness"). A leaf: not yet
-called by ``nightly_trigger``. It only reads the legacy nightly's JSON run reports; there is
-no rebuild step and no rebuild fallback.
+Contract in ``engine/v2/ops/ARCHITECTURE.md`` ("Nightly legacy readiness"). Called by
+``nightly_trigger`` as a temporary legacy-completion check (#875; removed with #876). It only
+reads the legacy nightly's JSON run reports; there is no rebuild step and no rebuild fallback.
 """
 from __future__ import annotations
 
 import json
+import os
+import stat
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -17,6 +19,7 @@ __all__ = ["LegacyReadiness", "check_legacy_report"]
 
 REPORT_NAME = "nightly_{}.json"
 CANDIDATE_DAYS = 5  # requested dates D .. D+4
+MAX_REPORT_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -29,10 +32,32 @@ class LegacyReadiness:
 def _load(path: Path) -> dict | None:
     """The parsed report, ``None`` only when the file does not exist."""
     try:
-        doc = json.loads(path.read_text())
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except FileNotFoundError:
         return None
-    except (OSError, UnicodeDecodeError, ValueError) as exc:
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", "a legacy nightly report is unreadable") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise fail("INTEGRITY_FAILED", "a legacy nightly report is not a regular file")
+        chunks: list[bytes] = []
+        remaining = MAX_REPORT_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", "a legacy nightly report is unreadable") from exc
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_REPORT_BYTES:
+        raise fail("INTEGRITY_FAILED", "a legacy nightly report is too large")
+    try:
+        doc = json.loads(raw)
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise fail("INTEGRITY_FAILED", "a legacy nightly report is unreadable") from exc
     session = doc.get("resolved_as_of") or doc.get("as_of") if isinstance(doc, dict) else None
     if not isinstance(session, str) or not isinstance(doc.get("steps"), dict):

@@ -27,7 +27,9 @@ writing anything.
 
 Everything decision-shaped is pure logic plus injected seams -- the finality
 provider, the plan call, the (idempotent) submit call and the serve driver --
-so tests exercise every branch without a network or a catalog. The state file
+so tests exercise every branch without a network or a catalog. A temporary
+legacy-completion check (#875, removed with #876) also gates submission after a
+final probe. The state file
 (``reports/phase6/nightly_trigger/<as_of>.json``) is the idempotency record:
 ``submitting`` is written with the plan_ref BEFORE submit is called, so a crash
 between submit and the state write resubmits that same plan_ref on the next
@@ -93,7 +95,7 @@ _UNSET = object()
 
 STATUSES = ("submitted", "not_yet", "snapshot_not_yet", "missed", "already_submitted",
             "busy_legacy", "error", "submitting", "completed", "failed", "failed_setup", "idle",
-            "timed_out", "busy_supervisor")
+            "timed_out", "busy_supervisor", "legacy_not_ready")
 #: A terminal as-of never probes, never writes and never submits again.
 TERMINAL_STATUSES = frozenset({"already_submitted", "completed", "failed", "missed",
                                "failed_setup"})
@@ -120,6 +122,11 @@ PlanCallable = Callable[..., str]
 SubmitCallable = Callable[..., object]
 ServeCallable = Callable[..., str]
 EnsureSnapshotCallable = Callable[..., "tuple[str, str | None]"]
+LegacyReadyFn = Callable[[Path, str], object]
+#: The four ``check_legacy_report`` refusal codes a ``legacy_not_ready`` receipt
+#: records instead of propagating; any other exception runs its ordinary path.
+_LEGACY_NOT_READY_CODES = frozenset({"SOURCE_NOT_FOUND", "DEPENDENCY_FAILED",
+                                     "SOURCE_NOT_FINAL", "INTEGRITY_FAILED"})
 #: ``_drive_jobs_to_terminal``'s three-way outcome, shared by ``_default_serve``
 #: and ``_ensure_shadow_snapshot``'s snapshot-import drive (Cutover PR-7b).
 ServeOutcome = Literal["timed_out", "completed", "failed"]
@@ -412,6 +419,16 @@ def _failure(root: Path, clock, as_of: str, plan_ref: str | None,
                                   snapshot_attempt=resolved_snapshot_attempt))
 
 
+def _default_legacy_ready(root: Path, as_of: str) -> object:
+    """The temporary #875 seam: ``check_legacy_report`` over ``<root>/reports``.
+
+    Temporary -- removed together with the check in #876.
+    """
+    from engine.v2.ops.nightly_readiness import check_legacy_report
+
+    return check_legacy_report(Path(root) / "reports", as_of)
+
+
 def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
                 context_tickers: Iterable[str] = (),
                 deadline_et: str = DEFAULT_DEADLINE_ET,
@@ -421,6 +438,7 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
                 submit_fn: SubmitCallable | None = None,
                 serve_fn: ServeCallable | None = None,
                 ensure_snapshot_fn: EnsureSnapshotCallable | None = None,
+                legacy_ready_fn: LegacyReadyFn | None = None,
                 full_run: bool = True) -> TriggerReceipt:
     """The whole tick: terminal -> resume -> lock -> window -> probe -> submit -> serve.
 
@@ -434,9 +452,10 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
     generalizing round 4's "timed_out"-only version, Cutover PR-7b-2).
 
     ``tickers``/``context_tickers`` are the plan watchlist and historical evidence universe; when empty, ``_prepare_default_plan`` derives them from the validated override or, absent that, from the shadow snapshot; explicit tickers set the universe while a present override is still validated. ``plan_fn``,
-    ``submit_fn``, ``serve_fn``, ``ensure_snapshot_fn`` and ``provider`` are
-    injected seams; the production defaults are the real in-process
-    plan/submit/serve and the native ORATS probe.
+    ``submit_fn``, ``serve_fn``, ``ensure_snapshot_fn``, ``legacy_ready_fn``
+    and ``provider`` are injected seams; the production defaults are the real
+    in-process plan/submit/serve, the temporary legacy-completion check and
+    the native ORATS probe.
     """
     clock = clock or SystemClock()
     root = Path(root)
@@ -468,6 +487,8 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
             # tickers/context_tickers are forwarded too (gate-round-6 fix): a pre-plan
             # resume's plan_fn call needs the caller's ACTUAL selection, not an empty
             # one -- harmless for a plan_ref-set resume, where plan_fn is never called.
+            # legacy_ready_fn is NOT forwarded: a resume skips the temporary
+            # legacy-completion check (#875) by design (ARCHITECTURE.md R3).
             return _submit_plan(root, as_of, tickers=tickers, context_tickers=context_tickers,
                                 clock=clock, plan_fn=plan_fn, submit_fn=submit_fn,
                                 serve_fn=serve_fn,
@@ -477,12 +498,13 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
                        deadline_et=deadline_et, window_start_et=window_start_et,
                        provider=provider, clock=clock, plan_fn=plan_fn, submit_fn=submit_fn,
                        serve_fn=serve_fn, ensure_snapshot_fn=ensure_snapshot_fn,
+                       legacy_ready_fn=legacy_ready_fn,
                        full_run=full_run, prior=prior)
 
 
 def _decide(root: Path, as_of: str, *, tickers, context_tickers, deadline_et, window_start_et,
-            provider, clock, plan_fn, submit_fn, serve_fn, ensure_snapshot_fn, full_run,
-            prior: TriggerReceipt | None) -> TriggerReceipt:
+            provider, clock, plan_fn, submit_fn, serve_fn, ensure_snapshot_fn, legacy_ready_fn,
+            full_run, prior: TriggerReceipt | None) -> TriggerReceipt:
     opened, deadline = _window(as_of, window_start_et, deadline_et)
     now_et = clock.now().astimezone(ET)
     prior_snapshot_attempt = prior.snapshot_attempt if prior is not None else 0
@@ -497,6 +519,16 @@ def _decide(root: Path, as_of: str, *, tickers, context_tickers, deadline_et, wi
     if not is_final:
         return _record(root, _receipt(clock, as_of, "not_yet", detail,
                                       snapshot_attempt=prior_snapshot_attempt))
+    legacy_ready = legacy_ready_fn if legacy_ready_fn is not None else _default_legacy_ready
+    try:
+        legacy_ready(root, as_of)
+    except OpsError as exc:
+        if exc.code not in _LEGACY_NOT_READY_CODES:
+            raise
+        message = str(exc.problem.message)[:200]
+        return _record(root, _receipt(
+            clock, as_of, "legacy_not_ready", f"{exc.code}: {message}",
+            snapshot_attempt=prior_snapshot_attempt))
     return _submit_plan(root, as_of, tickers=tickers, context_tickers=context_tickers,
                         clock=clock, plan_fn=plan_fn, submit_fn=submit_fn, serve_fn=serve_fn,
                         ensure_snapshot_fn=ensure_snapshot_fn,

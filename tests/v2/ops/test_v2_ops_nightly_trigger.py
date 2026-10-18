@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.ops import nightly_trigger  # noqa: E402
-from engine.v2.ops.errors import OpsError, fail  # noqa: E402
+from engine.v2.ops.errors import OpsError, fail, make_problem  # noqa: E402
 from engine.v2.ops.nightly_trigger import (  # noqa: E402
     TriggerReceipt,
     default_as_of,
@@ -149,13 +149,29 @@ def _lock_held(root) -> bool:
         return False
 
 
+def _always_legacy_ready(root, as_of):
+    """A permanently-ready stand-in for the temporary #875 check: no real
+    reports directory is ever read on this module's ordinary paths."""
+    return None
+
+
+@pytest.fixture(autouse=True)
+def _stub_default_legacy_ready(monkeypatch):
+    """Nightly-trigger tests never read a real reports/ directory, so the
+    production default seam stays stubbed ready unless a test re-stubs it
+    (the seam test below resets it back to the real function itself)."""
+    monkeypatch.setattr(nightly_trigger, "_default_legacy_ready", _always_legacy_ready)
+
+
 def _run(root, clock, provider, plan, submit, serve, *, as_of=AS_OF,
-         tickers=("AAA", "BBB"), context_tickers=None, ensure_snapshot_fn=None, **overrides):
+         tickers=("AAA", "BBB"), context_tickers=None, ensure_snapshot_fn=None,
+         legacy_ready_fn=_always_legacy_ready, **overrides):
     kwargs = dict(tickers=tickers,
                   context_tickers=tickers if context_tickers is None else context_tickers,
                   deadline_et="06:00", window_start_et="00:00",
                   provider=provider, clock=clock, plan_fn=plan, submit_fn=submit,
-                  serve_fn=serve, ensure_snapshot_fn=ensure_snapshot_fn or FakeEnsureSnapshot())
+                  serve_fn=serve, ensure_snapshot_fn=ensure_snapshot_fn or FakeEnsureSnapshot(),
+                  legacy_ready_fn=legacy_ready_fn)
     kwargs.update(overrides)
     return run_trigger(root, as_of, **kwargs)
 
@@ -2527,3 +2543,178 @@ def test_read_bounded_bytes_opens_nonblocking_nofollow_and_always_closes_the_des
         assert flags & commands.os.O_NOFOLLOW
     assert sorted(opened) == sorted(closed)
     assert len(opened) >= 3
+
+
+# --------------------------------------------------------------------------
+# 21. #875: the temporary legacy-completion check before submission
+# --------------------------------------------------------------------------
+
+
+class FakeLegacyReady:
+    """The injected ``legacy_ready_fn`` seam: fixed outcome, records every call."""
+
+    def __init__(self, error=None):
+        self.error = error
+        self.calls = []
+
+    def __call__(self, root, as_of):
+        self.calls.append((Path(root), as_of))
+        if self.error is not None:
+            raise self.error
+        return None
+
+
+def test_legacy_not_ready_records_a_receipt_and_never_plans_submits_or_serves(tmp_path):
+    refusal = fail("SOURCE_NOT_FOUND", "no legacy nightly report")
+    expected_detail = "SOURCE_NOT_FOUND: no legacy nightly report"
+    ready = FakeLegacyReady(refusal)
+    plan, submit, serve = FakePlan("plan_should_not_build"), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve,
+                   legacy_ready_fn=ready)
+    assert receipt.status == "legacy_not_ready"
+    assert receipt.detail == expected_detail  # "<code>: <message>", exactly as fail() wrote it
+    assert receipt.error_count == 0  # never counts toward the setup-error streak
+    assert plan.calls == [] and submit.calls == [] and serve.calls == []
+    stored = load_state(tmp_path, AS_OF)
+    assert stored is not None and stored.status == "legacy_not_ready"
+    assert stored.detail == expected_detail
+
+    # A second tick with a ready fn re-probes, passes the check and submits.
+    later = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve,
+                 legacy_ready_fn=FakeLegacyReady())
+    assert later.status == "completed" and later.plan_ref == "plan_should_not_build"
+    assert ready.calls == [(tmp_path, AS_OF)]  # the refusing tick called it exactly once
+    assert submit.calls == [(AS_OF, "plan_should_not_build")]
+
+
+@pytest.mark.parametrize("code", ["DEPENDENCY_FAILED", "SOURCE_NOT_FINAL", "INTEGRITY_FAILED"])
+def test_each_legacy_check_refusal_code_maps_to_legacy_not_ready(tmp_path, code):
+    message = "refused " + code
+    refusal = fail(code, message)
+    expected_detail = f"{code}: {message}"
+    ready = FakeLegacyReady(refusal)
+    plan, submit, serve = FakePlan(), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve,
+                   legacy_ready_fn=ready)
+    assert receipt.status == "legacy_not_ready"
+    assert receipt.detail == expected_detail
+    assert plan.calls == [] and submit.calls == [] and serve.calls == []
+    stored = load_state(tmp_path, AS_OF)
+    assert stored is not None and stored.status == "legacy_not_ready"
+    assert stored.detail == expected_detail
+
+
+def test_a_legacy_refusal_message_longer_than_two_hundred_characters_is_truncated(tmp_path):
+    message = "m" * 240
+    refusal = fail("SOURCE_NOT_FOUND", message)
+    ready = FakeLegacyReady(refusal)
+    plan, submit, serve = FakePlan(), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve,
+                   legacy_ready_fn=ready)
+    assert receipt.status == "legacy_not_ready"
+    assert receipt.detail == "SOURCE_NOT_FOUND: " + message[:200]
+    stored = load_state(tmp_path, AS_OF)
+    assert stored is not None and stored.status == "legacy_not_ready"
+    assert stored.detail == "SOURCE_NOT_FOUND: " + message[:200]
+
+
+def test_a_legacy_refusal_keeps_a_non_zero_prior_snapshot_attempt(tmp_path):
+    write_state(tmp_path, TriggerReceipt(as_of=AS_OF, status="not_yet", detail="before the window",
+                                         snapshot_attempt=2))
+    ready = FakeLegacyReady(fail("SOURCE_NOT_FOUND", "no legacy nightly report"))
+    plan, submit, serve = FakePlan(), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve,
+                   legacy_ready_fn=ready)
+    assert receipt.status == "legacy_not_ready"
+    assert receipt.snapshot_attempt == 2  # the refusal carries the prior attempt unchanged
+    stored = load_state(tmp_path, AS_OF)
+    assert stored is not None and stored.status == "legacy_not_ready"
+    assert stored.snapshot_attempt == 2
+    assert plan.calls == [] and submit.calls == [] and serve.calls == []
+
+
+@pytest.mark.parametrize("status", ["error", "timed_out"])
+def test_a_resumable_pre_plan_state_skips_the_legacy_check_and_submits(tmp_path, status):
+    # A pre-plan resume (status resumable, no plan_ref yet) goes straight to
+    # plan/submit: the temporary #875 check is a fresh-tick gate only, so the
+    # injected seam must never be consulted on this path.
+    def never_consulted(root, as_of):
+        raise AssertionError("a resumable pre-plan resume consulted legacy_ready_fn")
+
+    write_state(tmp_path, TriggerReceipt(as_of=AS_OF, status=status, detail="pre-plan",
+                                         plan_ref=None, snapshot_attempt=1))
+    ensure = FakeEnsureSnapshot(readiness="ready", snapshot_id="snap_resume")
+    plan, submit, serve = FakePlan("plan_after_resume"), FakeSubmit(), FakeServe("completed")
+    receipt = _run(tmp_path, FakeClock(AFTER_DEADLINE), FakeProvider(True), plan, submit, serve,
+                   ensure_snapshot_fn=ensure, legacy_ready_fn=never_consulted)
+    assert receipt.status == "completed" and receipt.plan_ref == "plan_after_resume"
+    assert receipt.snapshot_attempt == 1
+    assert ensure.calls == [{"root": tmp_path, "as_of": AS_OF, "attempt": 1}]
+    assert plan.calls and submit.calls == [(AS_OF, "plan_after_resume")]
+
+
+def test_a_not_final_probe_skips_the_legacy_check_entirely(tmp_path):
+    ready = FakeLegacyReady(RuntimeError("must not be consulted"))
+    plan, submit, serve = FakePlan(), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(False), plan, submit, serve,
+                   legacy_ready_fn=ready)
+    assert receipt.status == "not_yet" and receipt.detail == "not final"
+    assert ready.calls == []
+    assert plan.calls == [] and submit.calls == [] and serve.calls == []
+
+
+@pytest.mark.parametrize("error", [
+    OpsError(make_problem("INVALID_REQUEST", "the legacy report argument is unusable")),
+    RuntimeError("unreadable reports directory"),
+])
+def test_any_other_exception_from_the_check_propagates_unchanged(tmp_path, error):
+    plan, submit, serve = FakePlan(), FakeSubmit(), FakeServe()
+    with pytest.raises(type(error)) as raised:
+        _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve,
+             legacy_ready_fn=FakeLegacyReady(error))
+    assert raised.value is error  # no legacy_not_ready receipt is written
+    assert load_state(tmp_path, AS_OF) is None
+    assert plan.calls == [] and submit.calls == [] and serve.calls == []
+
+
+def test_resuming_a_recorded_plan_ref_skips_the_legacy_check(tmp_path):
+    ready = FakeLegacyReady(fail("SOURCE_NOT_FOUND", "must be skipped on a resume"))
+    write_state(tmp_path, TriggerReceipt(as_of=AS_OF, status="submitted", detail="crash",
+                                         checked_at="2026-09-26T06:00:00Z", plan_ref="plan_R"))
+    plan, submit, serve = FakePlan(), FakeSubmit(), FakeServe("completed")
+    receipt = _run(tmp_path, FakeClock(AFTER_DEADLINE), FakeProvider(True), plan, submit, serve,
+                   legacy_ready_fn=ready)
+    assert receipt.status == "completed" and receipt.plan_ref == "plan_R"
+    assert ready.calls == []  # the resume path never consults legacy_ready_fn
+    assert submit.calls == [(AS_OF, "plan_R")]
+
+
+def test_the_default_seam_reads_the_real_reports_directory(tmp_path, monkeypatch):
+    # The production default: undo every patch the autouse fixture installed
+    # (restoring the real _default_legacy_ready), then drive run_trigger
+    # against a real tmp reports/ tree.
+    monkeypatch.undo()
+    monkeypatch.setattr(nightly_trigger, "SystemClock", lambda: FakeClock(IN_WINDOW))
+
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True)
+    (reports / f"nightly_{AS_OF}.json").write_text(json.dumps({
+        "as_of": AS_OF, "requested_as_of": AS_OF, "resolved_as_of": AS_OF,
+        "steps": {"tiers": {}},
+        "finality": {"is_final": True, "date": AS_OF},
+    }))
+    provider, plan = FakeProvider(True), FakePlan("plan_default_seam")
+    submit, serve = FakeSubmit(), FakeServe("completed")
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), provider, plan, submit, serve,
+                   legacy_ready_fn=None)  # the production default, real report present
+    assert receipt.status == "completed" and receipt.plan_ref == "plan_default_seam"
+    assert submit.calls == [(AS_OF, "plan_default_seam")]
+
+    # A root with no reports/ directory at all: SOURCE_NOT_FOUND -> legacy_not_ready.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    later = _run(empty, FakeClock(IN_WINDOW), FakeProvider(True), FakePlan(), FakeSubmit(),
+                 FakeServe(), legacy_ready_fn=None)
+    assert later.status == "legacy_not_ready"
+    assert later.detail.startswith("SOURCE_NOT_FOUND")
+    assert not state_path(empty, AS_OF).with_name(AS_OF + ".json.tmp").exists()
