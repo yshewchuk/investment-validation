@@ -395,12 +395,12 @@ def test_compare_identical_checks_only_stamps_and_counts_once_per_side(tmp_path)
 
     ok = tmp_path / "ok.parquet"
     _write(ok, _stamped([_H1, _H2, _H1, _H1, _H1, _H1]))
-    assert compare_identical("tier4", ok) == dict(IDENTICAL, mismatches=[])
+    assert compare_identical("tier4", ok) == {"verdict": "match", "mismatches": [], "max_abs_diff": 0.0, "max_rel_diff": 0.0, "n_columns_differing": 0}
     bad = tmp_path / "bad.parquet"
     _write(bad, _stamped([_H1, "bad", "bad", _H1, _H1, _H1]))
     assert compare_identical("tier4", bad)["mismatches"] == [
         {"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 4}]
-    assert compare_identical("panel", ok) == dict(IDENTICAL, mismatches=[])
+    assert compare_identical("panel", ok) == {"verdict": "match", "mismatches": [], "max_abs_diff": 0.0, "max_rel_diff": 0.0, "n_columns_differing": 0}
 
 
 @pytest.mark.parametrize("stamps,verdict", [([_H1, _H2, _H1, _H1, _H1, _H1], "match"),
@@ -409,6 +409,12 @@ def test_byte_identical_tier4_goes_through_the_stamp_check_in_the_features_actio
         tmp_path, monkeypatch, stamps, verdict):
     from engine import paths as paths_module
     from engine.data import rebuild
+    import engine.v2.ops.features_compare as fc
+
+    def no_full_compare(*args, **kwargs):
+        raise AssertionError("byte-identical tables must not take the full compare path")
+
+    monkeypatch.setattr(fc, "compare_tables", no_full_compare)
 
     st, mat = tmp_path / "st", tmp_path / "mat"
     for root in (st, mat):
@@ -422,7 +428,7 @@ def test_byte_identical_tier4_goes_through_the_stamp_check_in_the_features_actio
     _action_features({}, st, cross_check={"materialization_root": str(mat)})
     receipt = json.loads((st / "features.json").read_text())
     assert receipt["verdict"] == verdict
-    assert receipt["tables"]["panel"] == dict(IDENTICAL, mismatches=[])
+    assert receipt["tables"]["panel"] == {"verdict": "match", "mismatches": [], "max_abs_diff": 0.0, "max_rel_diff": 0.0, "n_columns_differing": 0}
     if verdict == "mismatch":
         assert receipt["tables"]["tier4"]["mismatches"] == [
             {"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 2}]
@@ -443,3 +449,19 @@ def test_compare_identical_reads_only_the_stamp_column(tmp_path, monkeypatch):
     monkeypatch.setattr(fc.pd, "read_parquet", spy)
     assert fc.compare_identical("tier4", path)["verdict"] == "match"
     assert seen == [["tier3_snapshot"]]
+
+
+def test_compare_identical_refuses_a_table_over_the_row_cap_without_decoding(tmp_path, monkeypatch):
+    import engine.v2.ops.features_compare as fc
+
+    path = tmp_path / "t.parquet"
+    _write(path, _stamped([_H1] * 6))
+    monkeypatch.setattr(fc, "STAMP_MAX_ROWS", 5)
+
+    def no_decode(*args, **kwargs):
+        raise AssertionError("must not decode")
+
+    monkeypatch.setattr(fc.pd, "read_parquet", no_decode)
+    out = fc.compare_identical("tier4", path)
+    assert out["verdict"] == "mismatch"
+    assert out["mismatches"] == [{"reason": "stamp_rows_over_cap", "n_rows": 6}]

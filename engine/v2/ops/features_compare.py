@@ -14,6 +14,9 @@ MAX_REPORTED_COLUMNS = 5
 # because an incremental tier4 build legitimately keeps carried rows at an older panel hash.
 PROVENANCE_COLUMNS = {"tier4": ("tier3_snapshot",)}
 _SHA256_RE = r"[0-9a-f]{64}"
+# Row cap on the stamp-column decode of a byte-identical table (about 25x today's tier4 rows);
+# a larger table is refused rather than decoded.
+STAMP_MAX_ROWS = 5_000_000
 TABLE_KEYS = {"panel": ("ticker", "date"), "tier4": ("ticker", "event_date")}
 IDENTICAL = {"verdict": "match", "max_abs_diff": 0.0, "max_rel_diff": 0.0,
              "n_columns_differing": 0, "mismatches": []}
@@ -62,7 +65,11 @@ def compare_identical(name, path) -> dict:
     must still be well formed. Reads only the stamp columns (never the whole table)."""
     import pyarrow.parquet as pq
 
-    present = set(pq.read_schema(path).names)
+    meta = pq.ParquetFile(path)
+    present = set(meta.schema_arrow.names)
+    if PROVENANCE_COLUMNS.get(name) and meta.metadata.num_rows > STAMP_MAX_ROWS:
+        return dict(IDENTICAL, verdict="mismatch", mismatches=[
+            {"reason": "stamp_rows_over_cap", "n_rows": meta.metadata.num_rows}])
     out = []
     for c in [c for c in PROVENANCE_COLUMNS.get(name, ()) if c in present]:
         # the pair is one file, so count each bad row once per side, as compare_tables does
