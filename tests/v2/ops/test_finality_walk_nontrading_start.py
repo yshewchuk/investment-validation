@@ -80,3 +80,38 @@ def test_walk_snaps_nontrading_start(impl, requested, final_day, expected, monke
     # The first session tested is the snap target, never one session earlier.
     assert seen[0] == _last_trading_day(requested)
     assert all(calendar.is_trading_day(s) for s in seen)
+
+
+def _resolve(impl, monkeypatch, requested, final_days, seen, **kw):
+    calendar = _Calendar()
+    if impl == "legacy":
+        from engine.data import finality as module
+        _patch(monkeypatch, module, final_days, seen)
+        return module.resolve_final_session(requested, ["A"], calendar=calendar, **kw)
+    from engine.v2.ops import finality as module
+    _patch(monkeypatch, module, final_days, seen)
+    return module._native_resolve_final_session(
+        requested, ["A"], calendar=calendar, reads=object(), **kw)
+
+
+@pytest.mark.parametrize("impl", ["legacy", "native"])
+def test_nontrading_request_falls_back_past_nonfinal_snap(impl, monkeypatch):
+    final_days = {pd.Timestamp("2026-10-15").normalize()}
+    seen = []
+
+    result = _resolve(impl, monkeypatch, "2026-10-18", final_days, seen)
+
+    assert result.date == "2026-10-15"
+    assert result.is_final is True
+    assert seen == [pd.Timestamp("2026-10-16"), pd.Timestamp("2026-10-15")]
+
+
+@pytest.mark.parametrize("impl", ["legacy", "native"])
+def test_walk_budget_after_snap(impl, monkeypatch):
+    seen = []
+
+    with pytest.raises(RuntimeError):
+        _resolve(impl, monkeypatch, "2026-10-18", set(), seen, max_sessions=3)
+
+    assert seen == [pd.Timestamp("2026-10-16"), pd.Timestamp("2026-10-15"),
+                    pd.Timestamp("2026-10-14")]
