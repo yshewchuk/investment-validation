@@ -128,13 +128,25 @@ def _row(ticker: str, event_date: str, *, realized, implied, available_as_of_dat
     return row
 
 
+def _validate_daily(daily: pd.DataFrame) -> None:
+    """The ``daily`` frame contract: ``date``, ``implied_move`` and ``src_iv`` present.
+
+    The ONE place that refusal and its wording live, called by both builders:
+    ``build_rows`` reaches it through :func:`_implied_by_event`, while
+    ``build_event_rows`` calls it BEFORE any branch, so a ticker-level refusal
+    (``ticker_too_few_events``/``no_price_history``) cannot mask a malformed
+    frame, empty or not.
+    """
+    if not {"date", "implied_move", "src_iv"} <= set(daily.columns):
+        raise fail("CONTRACT_MISMATCH", "daily_market frame lacks date, implied_move or src_iv")
+
+
 def _implied_by_event(dates: list[str], daily: pd.DataFrame) -> list[float | None]:
     """Implied move per event date: the last row strictly before it whose ``src_iv`` is
     non-null (``AsofSeries``, ``on_missing="null"``); an anchor whose ``implied_move`` is
     null or non-finite yields None and never falls back to an older row."""
     rows = []
-    if not {"date", "implied_move", "src_iv"} <= set(daily.columns):
-        raise fail("CONTRACT_MISMATCH", "daily_market frame lacks date, implied_move or src_iv")
+    _validate_daily(daily)
     if len(daily):
         days = pd.to_datetime(daily["date"]).dt.strftime("%Y-%m-%d")
         for day, im, src in zip(days, daily["implied_move"], daily["src_iv"]):
@@ -227,7 +239,10 @@ def _validate_inputs(events: pd.DataFrame, sd, sc, min_scoreable: int) -> None:
 
     Both v5 entry points call it before any work, so a malformed frame or bar
     refuses outright instead of half-building rows (phase-2 guide §11: every
-    refusal is one registered code, never a bare exception).
+    refusal is one registered code, never a bare exception). ``src_orats`` must
+    hold a real ``bool``/``np.bool_`` per row -- ``None``/``pd.NA``/``NaN``/
+    text are not a confirmation verdict; ``session`` values are per-event data,
+    not the contract, and are read but never validated here.
     """
     if (isinstance(min_scoreable, (bool, np.bool_))
             or not isinstance(min_scoreable, (int, np.integer)) or min_scoreable < 0):
@@ -236,6 +251,8 @@ def _validate_inputs(events: pd.DataFrame, sd, sc, min_scoreable: int) -> None:
     if missing:
         raise fail("CONTRACT_MISMATCH",
                    "events lacks required columns: " + ", ".join(missing))
+    if any(not isinstance(value, (bool, np.bool_)) for value in events["src_orats"]):
+        raise fail("CONTRACT_MISMATCH", "events src_orats must hold a real bool per row")
     if len(sd) != len(sc):
         raise fail("CONTRACT_MISMATCH", "price series sd and sc differ in length")
 
@@ -264,40 +281,54 @@ def _collapse_same_date(events: pd.DataFrame) -> pd.DataFrame:
 
 
 def _classify(events: pd.DataFrame, sd, sc, *, min_scoreable: int) -> list[str | None]:
-    """The reason list of an ALREADY validated, ALREADY collapsed frame."""
+    """The reason list of an ALREADY validated, ALREADY collapsed frame.
+
+    A confirmed event no price window brackets earns ``no_price_window`` HERE,
+    when the ticker still clears both bars -- so the classification alone is the
+    source of that reason and no caller re-derives it from a built row.
+    """
     reasons = _event_reasons(events)
     if not len(reasons):
         return []
     if not len(sd):
         return ["no_price_history"] * len(reasons)
     confirmed = computable = 0
-    for event, reason in zip(events.itertuples(), reasons):
-        if reason is None:
-            confirmed += 1
-            computable += _session_move_indexed(
-                sd, sc, event.event_date.to_datetime64(), event.session) is not None
+    classified = list(reasons)
+    for position, event in enumerate(events.itertuples()):
+        if reasons[position] is not None:
+            continue
+        confirmed += 1
+        if _session_move_indexed(sd, sc, event.event_date.to_datetime64(),
+                                 event.session) is None:
+            classified[position] = "no_price_window"
+        else:
+            computable += 1
     if confirmed < min_scoreable or _below_admission(computable):
         return ["ticker_too_few_events"] * len(reasons)
-    return reasons
+    return classified
 
 
 def classify_event_reasons(events: pd.DataFrame, sd, sc, *,
                            min_scoreable: int = MIN_SCOREABLE) -> list[str | None]:
     """The ``not_computed_reason`` of every considered event of one ticker (issue #966).
 
-    ``None`` means the event is CONFIRMED (``src_orats`` and a session) and this
-    ticker clears both bars, so its move is computed. The per-event refusals are
-    ``not_orats`` (no ORATS confirmation, e.g. a ``forward_claim`` phantom) and
-    ``no_session`` (confirmed, session null). The ticker-level reasons override
-    every event of the ticker: ``no_price_history`` when ``sd`` holds no closes
-    (checked first -- with no closes nothing is computable, so "too few" would
-    be the wrong story), else ``ticker_too_few_events`` when fewer than
-    ``min_scoreable`` events are confirmed or fewer than ``ADMISSION_EVENTS``
-    compute. Same-date rows collapse first -- the confirmed one wins, else the
-    first in input order -- exactly as :func:`build_event_rows` collapses them,
-    so the two always agree; ``[]`` only for an empty ``events``. Pure, no I/O
-    and no clock, so the capture path can classify a ticker without building
-    its rows.
+    ``None`` means the event is CONFIRMED (``src_orats`` and a session), this
+    ticker clears both bars, and a price window brackets the event, so its move
+    is computed. A CONFIRMED event with no such window is ``no_price_window``
+    even on a ticker that clears both bars: this list, not a built row, is the
+    source of that reason, so :func:`build_event_rows` writes exactly what
+    comes back here and a caller of either sees the same verdict. The per-event
+    refusals are ``not_orats`` (no ORATS confirmation, e.g. a
+    ``forward_claim`` phantom) and ``no_session`` (confirmed, session null).
+    The ticker-level reasons override every event of the ticker:
+    ``no_price_history`` when ``sd`` holds no closes (checked first -- with no
+    closes nothing is computable, so "too few" would be the wrong story), else
+    ``ticker_too_few_events`` when fewer than ``min_scoreable`` events are
+    confirmed or fewer than ``ADMISSION_EVENTS`` compute. Same-date rows
+    collapse first -- the confirmed one wins, else the first in input order --
+    exactly as :func:`build_event_rows` collapses them, so the two always
+    agree; ``[]`` only for an empty ``events``. Pure, no I/O and no clock, so
+    the capture path can classify a ticker without building its rows.
     """
     _validate_inputs(events, sd, sc, min_scoreable)
     if not len(events):
@@ -313,19 +344,24 @@ def build_event_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFr
     ``[]`` only for an empty ``events``; every non-empty list yields one row per
     DISTINCT event date, so ``(ticker, event_date)`` is unique. ``events`` is the
     ticker's ordered ``earnings_events`` slice (columns ``event_date``,
-    ``session``, ``src_orats``); what v4 dropped is now a row. Same-date rows
-    collapse first (the confirmed one wins, else the first in input order), so
-    ``build_rows`` never sees a duplicate date. A CONFIRMED event gets exactly
-    the :func:`build_rows` row over the confirmed-only frame -- ``event_ordinal``
-    counts earlier confirmed events -- plus ``not_computed_reason``: null on a
-    computed outcome, ``no_price_window`` on the v4 skip. An unconfirmed event,
-    and every event under a ticker-level reason, gets the no-outcome shape (null
-    moves, ``admitted`` false, ``skipped`` true, ``n_prior_implied`` 0) with
+    ``session``, ``src_orats``); what v4 dropped is now a row. The ``daily``
+    frame is validated up front, before any branch, so a ticker-level refusal
+    cannot hide a malformed frame. Same-date rows collapse first (the confirmed
+    one wins, else the first in input order), so ``build_rows`` never sees a
+    duplicate date. A CONFIRMED event gets exactly the :func:`build_rows` row
+    over the confirmed-only frame -- ``event_ordinal`` counts earlier confirmed
+    events -- plus ``not_computed_reason`` taken STRAIGHT from the
+    classification: null on a computed outcome (``skipped`` false),
+    ``no_price_window`` where the classification found no price window (that
+    row is ``skipped`` true). An unconfirmed event, and every event under a
+    ticker-level reason, gets the no-outcome shape (null moves, ``admitted``
+    false, ``skipped`` true, ``n_prior_implied`` 0) with
     ``classify_event_reasons``' reason and the count of earlier confirmed events
     as its ordinal. A phantom therefore never shifts a neighbour's ordinal or
     prior mean.
     """
     _validate_inputs(events, sd, sc, min_scoreable)
+    _validate_daily(daily)
     if not len(events):
         return []
     events = _collapse_same_date(events)
@@ -348,7 +384,7 @@ def build_event_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFr
         if ticker_reason is None and is_confirmed:
             row = computed[taken]
             taken += 1
-            row["not_computed_reason"] = "no_price_window" if row["skipped"] else None
+            row["not_computed_reason"] = reasons[position]
         else:
             row = _row(ticker, pd.Timestamp(event.event_date).strftime("%Y-%m-%d"),
                        realized=None, implied=None, available_as_of_date=None,

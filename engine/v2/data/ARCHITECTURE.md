@@ -398,10 +398,11 @@ imports `event_history` from this same package (no new cross-component dependenc
 Contract `computed_moves.v5` / `5.0.0` (`COMPUTED_MOVES_V5_CONTRACT`) and the pure
 `build_event_rows` / `classify_event_reasons` sit beside v4, which stays pinned and
 readable (no migration, dual read or backfill; the standard capture rewrites
-partitions). The writer, not a reader, decides which events computed moves omits and records that
-decision on the event's own row, so every event the writer considers has exactly one
-single-row fragment and the research isolation guard is unchanged: a candidate with
-no fragment is still a refusal. Nothing is written to `earnings_events`.
+partitions). In a v5 dataset version the builder, not a reader, decides which events
+computed moves omits and records that decision on the event's own row, so every
+considered event has exactly one single-row fragment and the research isolation guard
+is unchanged: a candidate with no fragment is still a refusal. Nothing is written to
+`earnings_events`. The ops store's committed contract is documented in the ops doc.
 - New column `not_computed_reason` string nullable. Null exactly when the row is a
   computed outcome (`skipped` false). Non-null exactly when `skipped` is true and
   `realized_move_pct` and `available_as_of_date` are null. Closed set:
@@ -429,6 +430,7 @@ no fragment is still a refusal. Nothing is written to `earnings_events`.
 | a ticker with no earnings events | no rows |
 | same-ticker same-date `earnings_events` rows | one row; a confirmed row wins over an unconfirmed one, else the first in input order |
 | an empty event list | no rows |
+| `min_scoreable` not a non-negative int, an event frame lacking `event_date`/`session`/`src_orats`, a non-bool `src_orats`, `sd`/`sc` of different lengths, or a `daily` frame lacking `date`/`implied_move`/`src_iv` | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
 
 **`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
 no clock. A feature declares its parameters; none is hard-coded in the module.

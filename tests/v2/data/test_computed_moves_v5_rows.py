@@ -148,6 +148,56 @@ def test_one_row_per_considered_event():
         list(range(5)) + [5, 5] + list(range(5, len(_CONFIRMED))))
 
 
+#: The date a CONFIRMED event can carry with no price window bracketing it:
+#: Friday 2023-12-29, three days before ``_BDAYS[0]``'s close, so there is no
+#: earlier close to measure against. Confirmed like any other event, but not
+#: computable -- and the classification, not a built row, must say so.
+_EARLY = _BDAYS[0] - pd.Timedelta(days=3)
+
+#: The exact reason list of the mixed frame below, position by position: the
+#: early confirmed event has no window, the next five and the last eleven of
+#: ``_CONFIRMED`` compute, the Saturday phantom is not ORATS and the Sunday
+#: event has no session.
+_MIXED_REASONS = (["no_price_window"] + [None] * 5 + ["not_orats", "no_session"]
+                  + [None] * 11)
+
+
+def _mixed_events():
+    """One frame with every non-ticker-level reason, in date order."""
+    return _events(*[(_EARLY, "BMO", True), *_CONFIRMED[:5],
+                     (_BETWEEN, "BMO", False), (_BETWEEN + pd.Timedelta(days=1), None, True),
+                     *_CONFIRMED[5:]])
+
+
+def test_classify_event_reasons_returns_the_exact_reason_list():
+    assert classify_event_reasons(_mixed_events(), _SD, _SC) == _MIXED_REASONS
+    assert [row["not_computed_reason"] for row in _build(_mixed_events())] == _MIXED_REASONS
+
+
+def test_classify_event_reasons_returns_the_ticker_level_lists():
+    assert classify_event_reasons(_events(*_CONFIRMED[:3]), _SD, _SC) == (
+        ["ticker_too_few_events"] * 3)
+    assert classify_event_reasons(_events(*_CONFIRMED), np.array([], dtype="datetime64[ns]"),
+                                  np.array([])) == (["no_price_history"] * len(_CONFIRMED))
+
+
+def test_the_no_price_window_row_is_skipped_and_carries_that_reason():
+    considered = [(_EARLY, "BMO", True), *_CONFIRMED]
+    events = _events(*considered)
+    rows = _build(events)
+    v4 = build_rows("AAPL", events, _SD, _SC, _DAILY, **_KW)
+
+    window = rows[0]
+    assert window["event_date"] == "2023-12-29"
+    assert window["not_computed_reason"] == "no_price_window"
+    assert window["skipped"] is True
+    assert window["realized_move_pct"] is None
+    assert window["available_as_of_date"] is None
+    assert window == {**v4[0], "not_computed_reason": "no_price_window"}
+    assert [row["not_computed_reason"] for row in rows[1:]] == [None] * len(_CONFIRMED)
+    assert [row["skipped"] for row in rows[1:]] == [False] * len(_CONFIRMED)
+
+
 # --------------------------------------------------------------------------
 # same-date collapse, the min_scoreable bar, hand-computed values, the contract
 # --------------------------------------------------------------------------
@@ -268,6 +318,17 @@ def test_v5_contract_is_v4_plus_not_computed_reason():
     added = v5.columns[-1]
     assert added.physical_type == "string"
     assert added.nullable is True
+    assert added.null_policy == (
+        "null exactly when the row is a computed outcome (skipped false); non-null "
+        "exactly when skipped is true and realized_move_pct and "
+        "available_as_of_date are null. Closed reason set: not_orats (no ORATS "
+        "confirmation, e.g. a forward_claim phantom), no_session (ORATS-confirmed "
+        "but session null), no_price_window (the v4 skipped case: a missing close "
+        "on either side or a P->Q window wider than MAX_GAP_CALENDAR_DAYS), "
+        "no_price_history (the ticker has no daily_market rows or usable closes), "
+        "ticker_too_few_events (fewer than MIN_SCOREABLE ORATS-confirmed sessioned "
+        "events, or fewer than ADMISSION_EVENTS computable ones); the last two are "
+        "ticker-level and apply to every row of that ticker.")
     assert v5.primary_key == v4.primary_key == ("ticker", "event_date")
     assert v5.partition_columns == v4.partition_columns == ("ticker",)
     identity = ("contract_id", "definition_hash", "semantic_version", "columns")
@@ -300,3 +361,30 @@ def test_missing_event_columns_or_a_price_length_mismatch_refuse():
     with pytest.raises(DataError) as caught:
         build_event_rows("AAPL", _events(*_CONFIRMED[:3]), _SD, _SC[:5], _DAILY, **_KW)
     assert caught.value.code == "CONTRACT_MISMATCH"
+
+
+def test_a_malformed_daily_frame_refuses_even_a_ticker_level_refusal():
+    # checked BEFORE branching: the ticker-level reason below cannot mask it,
+    # and an empty frame missing the columns is malformed all the same
+    for bad_daily in (_DAILY.drop(columns="src_iv"), pd.DataFrame()):
+        with pytest.raises(DataError) as caught:
+            build_event_rows("AAPL", _events(*_CONFIRMED[:3]), _SD, _SC, bad_daily, **_KW)
+        assert caught.value.code == "CONTRACT_MISMATCH"
+        assert caught.value.problem.message == (
+            "daily_market frame lacks date, implied_move or src_iv")
+
+
+@pytest.mark.parametrize("bad", [None, pd.NA, float("nan")])
+def test_non_bool_src_orats_is_contract_mismatch(bad):
+    events = _events(*_CONFIRMED[:3])
+    events["src_orats"] = pd.Series([bad, True, True], dtype="object")
+    calls = (
+        lambda: classify_event_reasons(events, _SD, _SC),
+        lambda: build_event_rows("AAPL", events, _SD, _SC, _DAILY, **_KW),
+    )
+
+    for call in calls:
+        with pytest.raises(DataError) as caught:
+            call()
+        assert caught.value.code == "CONTRACT_MISMATCH"
+        assert caught.value.problem.message == "events src_orats must hold a real bool per row"
