@@ -47,8 +47,9 @@ underscore convention, and an import of a name absent from this list fails
 | `score_population.population_key`, `score_population.population_difference` | Shared legacy score population identity and planned-versus-observed rule for ops and serving. |
 | `market_horizon.trading_days_before_print`, `market_horizon.CalendarCoverageError` | Pure pre-print session distance and its distinct insufficient-coverage refusal; no calendar fetch or gap filling. |
 | `experiment_holdouts.ExperimentHoldouts` | Shared deterministic, versioned random/rolling membership; no final-read authority. |
+| `experiment_exits.valid_exit_recipe`, `experiment_exits.valid_threshold_units` | Pure, closed exit declaration/unit admission shared by planning, walking and the RUNUP request. |
 
-<!-- public-interface: final_holdout, final_holdout.declaration_from_document, final_holdout.request_from_document, final_holdout.request_from_registration, canonical_json, iter_canonical_json, content_hash, CONTENT_HASH_PREFIX, tag_nonfinite, untag_nonfinite, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, ArtifactStore, ArtifactError, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed, market_calendar, market_horizon, score_population, experiment_holdouts, experiment_holdouts.ExperimentHoldouts -->
+<!-- public-interface: experiment_exits, experiment_exits.valid_exit_recipe, experiment_exits.valid_threshold_units, final_holdout, final_holdout.declaration_from_document, final_holdout.request_from_document, final_holdout.request_from_registration, canonical_json, iter_canonical_json, content_hash, CONTENT_HASH_PREFIX, tag_nonfinite, untag_nonfinite, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, ArtifactStore, ArtifactError, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed, market_calendar, market_horizon, score_population, experiment_holdouts, experiment_holdouts.ExperimentHoldouts -->
 
 ## Consumers
 
@@ -62,7 +63,7 @@ failure rather than a stale sentence.
   corpus, receipts and baseline hash through the one implementation.
 
 - engine/v2/data — `DocumentError`, `from_document`, `parse_timestamp` for the strict document checks `engine.v2.foundation.typed` cannot express from annotations alone.
-- engine/v2/ops — content identity, safe artifact storage, typed decoding and clocks.
+- engine/v2/ops — content identity, safe artifact storage, typed decoding, clocks and `experiment_exits.valid_exit_recipe` plan admission.
 - engine/v2/ledger — canonical append-only payloads and durable export paths.
 - engine/v2/serving — safe immutable release paths and health timestamps.
 - engine/v2/models — `canonical_json`/`content_hash` (P5-4) to identify and
@@ -71,7 +72,8 @@ failure rather than a stale sentence.
   `format_timestamp` for staged-release manifests and the atomic deployment
   pointer (P5-5).
 - engine/v2/models/training — `content_hash` for recipe fingerprints and receipt hashes.
-- engine/v2/research — research tools and replay reading pinned snapshots (Phase 6 slices 6-7).
+- engine/v2/research — research tools and replay reading pinned snapshots (Phase 6 slices 6-7); `experiment_exits.valid_exit_recipe` for exit walking.
+- `experiments/runup_exit_report.py` — `content_hash`/`to_document` and `experiment_exits.valid_threshold_units` for RUNUP request admission.
 - `experiments/v2_magnitude_search_run.py` — `ArtifactStore`/`ArtifactError`, `DocumentError`, `SystemClock`, `content_hash`, `from_document`/`to_document` and `iter_canonical_json` for driver binding, metadata admission and bounded output.
 
 <!-- consumers: engine.v2.diagnosis, engine.v2.data, engine.v2.ops, engine.v2.ledger, engine.v2.serving, engine.v2.features, engine.v2.registry, engine.v2.scoring, engine.v2.models, engine.v2.models.training, engine.v2.research, engine.v2.parity -->

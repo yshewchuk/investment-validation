@@ -318,7 +318,16 @@ economics with `price_source="option_chains"` and explicit numeric `fill` in
 the existing alpha ladder's range. It supports `exit={kind: "fixed_day",
 trading_days: N}` and `exit={kind: "target_stop", trading_days: N,
 target_pnl: T, stop_pnl: S}`; N is a positive integer, T is finite and positive,
-and S is finite and negative. The immutable resolved economics and canonical
+and S is finite and negative. Declaration admission is shared with ops through
+`foundation.experiment_exits.valid_exit_recipe`. Target/stop recipes may declare `threshold_units`:
+`quote_price_times_quantity` (also the omitted-field behavior) or
+`entry_debit_fraction`. Fractions multiply each position's positive net opening
+debit, priced once at the declared alpha, before walking its daily closing marks.
+This basis includes spread but excludes fees, commissions and contract multipliers;
+it is not gross premium or a portfolio return. Zero/credit entry or converted
+thresholds that overflow or underflow to zero refuse the whole call. Fractions
+are signed ratios, never percentage-point inputs; no clipping or normalization.
+The immutable resolved economics and canonical
 plan identity retain every recipe field, so changing a threshold changes the
 consumed plan identity. The walker aggregates net position P&L from each day's
 held-leg quotes in the pinned `option_chains` snapshot and uses the pinned
@@ -345,6 +354,7 @@ write files or blend mark-based P&L with fill-validated results.
 | Missing required leg mark or mark past held-leg expiry | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. Failure details identify the trade and failing session. |
 | Unusable quote reaching pricing | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
 | Insufficient calendar coverage | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
+| Invalid fractional debit basis or converted threshold | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, with entry trade/session context and no partial tuple. |
 
 Other repository refusals propagate.
 No cache, retry, transaction or write: identical inputs return identical results.
@@ -522,7 +532,7 @@ contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`,
 `ObjectRef`, `TableContractRef`, `ColumnContract`, `TableContract`),
 `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
 `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`,
-`content_hash`, `to_document`, `market_calendar`, plus
+`content_hash`, `to_document`, `market_calendar`, `experiment_exits.valid_exit_recipe`, plus
 `final_holdout.request_from_document` and `typed.to_document` for `_final_population`) — the package's own
 lower-layer dependencies, consistent with the generic "may import anything
 at a lower layer" rule (`only_imports` is unset for this package in

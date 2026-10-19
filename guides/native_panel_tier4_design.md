@@ -35,7 +35,9 @@ here; there is no `orats` table), `earnings_events`, `computed_moves`
 (realised/implied history), `price_history` (adjusted-close run-up) and the
 calendar in bounded batches (ticker groups, one year
 partition at a time; peak memory is a function of the batch, never of the
-table) and publishes `feature_panel` as a new dataset version of the same
+table; slice 2 sets a hard rows-and-bytes cap per group or partition, splits an
+oversized one into sub-batches instead of loading it whole, and its memory test
+covers that case) and publishes `feature_panel` as a new dataset version of the same
 snapshot lineage. Row math is `panel_math`, `regime` and `runup_math` only;
 `scan_panel_row` and the batch share them, so a forward row equals the stored
 row for the same event and the same `decision_session` and `history_start`
@@ -67,7 +69,10 @@ A historical event's value may come only from a release whose
 member cutoff is not after the event's decision date. The member cutoff is
 the producing model's own training cutoff (exclusive, `M_end + 1 day`):
 a carried member keeps its prior cutoff (models §2.3), so it is read from the
-member, not from the release-level `sources.retrain_cutoff`, and a pool-only
+member, not from the release-level `sources.retrain_cutoff`. `ArtifactMember` /
+`ModelBinding` expose no such field today and `resolve_release` only resolves
+a supplied id, so slice 3 must define the authoritative cutoff field and how
+the pinned candidate release set supplies it before the resolver is built. A pool-only
 release does not re-stamp an unchanged model, matching the existing `fold_start <= as_of` guard.
 Options for history before the first eligible release:
 
@@ -117,8 +122,10 @@ session, whose release should exist, is a scoring refusal:
 `native_score_batch` refuses it with the existing `MODEL_NOT_READY` code,
 names the reason in `details`, and the parity report counts it as a native
 refusal (a visible, not hidden, class). The nightly's other jobs continue.
-A refusal is correct only when the release truly is absent; #782 tracks
-whether today's 101 refusals are that case.
+Per the rule above, a forward event of the scored session is correctly
+refused whenever no member is eligible, not only when the release is absent
+(historical events stay null, section 3); #782 tracks which of today's 101
+refusals fall under that rule.
 
 ## 5. Qualification replaces parity
 
