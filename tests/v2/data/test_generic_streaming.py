@@ -11,7 +11,7 @@ memory.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pyarrow.parquet as pq
 import pytest
@@ -246,6 +246,8 @@ def test_batch_size_does_not_change_identity(tmp_path):
          "a streamed row has a value incompatible with its column type"),
         ("mixed_key_type", [_row(0), dict(_row(1), ticker=123)],
          "a streamed row has a value incompatible with its column type"),
+        ("none_row", [None], "a streamed row must be a mapping"),
+        ("list_row", [[1, 2]], "a streamed row must be a mapping"),
     ),
 )
 def test_bad_rows_refused_leave_nothing(tmp_path, label, bad_rows, message):
@@ -265,6 +267,70 @@ def test_bad_rows_refused_leave_nothing(tmp_path, label, bad_rows, message):
             match=r"^INPUT_CHANGED: the streaming writer is no longer open") as terminal:
         writer.append_rows([_row(9)])
     assert terminal.value.code == "INPUT_CHANGED"
+
+
+def test_non_sequence_batch_refused(tmp_path):
+    conn, clock, store = _setup(tmp_path)
+    contract = _whole_contract()
+    parent = _parent(conn, store, clock, contract, _row(-1))
+
+    writer = generic_streaming.StreamingTableWriter(
+        store, parent, TABLE, "attempt-nonseq", _coverage(contract))
+    with pytest.raises(
+            DataError,
+            match=r"^CONTRACT_MISMATCH: streamed rows must be a sequence") as exc:
+        writer.append_rows(None)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert _staging_entries(store, "attempt-nonseq") == []
+    with pytest.raises(
+            DataError,
+            match=r"^INPUT_CHANGED: the streaming writer is no longer open") as terminal:
+        writer.append_rows([_row(9)])
+    assert terminal.value.code == "INPUT_CHANGED"
+
+
+def test_staging_oserror_propagates(tmp_path, monkeypatch):
+    conn, clock, store = _setup(tmp_path)
+    contract = _whole_contract()
+    parent = _parent(conn, store, clock, contract, _row(-1))
+
+    def boom(self):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(generic_streaming.StreamingTableWriter, "_write_row_group", boom)
+
+    writer = generic_streaming.StreamingTableWriter(
+        store, parent, TABLE, "attempt-oserror", _coverage(contract))
+    writer.append_rows(_rows(1))
+    with pytest.raises(OSError, match="disk full"):
+        writer.finish()
+    assert _staging_entries(store, "attempt-oserror") == []
+    assert _head_snapshot(conn) == parent.snapshot.snapshot_id
+
+
+def test_temporal_value_mismatch_refused(tmp_path):
+    conn, clock, store = _setup(tmp_path)
+    columns = (
+        ColumnContract(name="ticker", physical_type="string", nullable=False),
+        ColumnContract(name="date", physical_type="string", nullable=False),
+        ColumnContract(name="ts", physical_type="timestamp[us]", nullable=False),
+    )
+    contract = _make_contract("ctr_ts", columns,
+                              primary_key=("ticker", "date"), partition_columns=())
+    parent = _parent_with_prior(
+        conn, store, clock, contract,
+        [{"ticker": "AAA", "date": "2025-01-01", "ts": datetime(2025, 1, 1)}], "__whole__")
+
+    writer = generic_streaming.StreamingTableWriter(
+        store, parent, TABLE, "attempt-ts", _coverage(contract))
+    with pytest.raises(
+            DataError,
+            match=r"^CONTRACT_MISMATCH: a streamed row has a value incompatible with its column type"
+    ) as exc:
+        writer.append_rows([{"ticker": "AAA", "date": "2025-01-02", "ts": "2025-01-01"}])
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert _staging_entries(store, "attempt-ts") == []
+    assert _head_snapshot(conn) == parent.snapshot.snapshot_id
 
 
 def test_zero_rows_refused(tmp_path):

@@ -168,7 +168,7 @@ Estimates are added lines (code / test / doc); each slice is its own PR.
 1. This design and the contract text (docs only): 0 / 0 / ~190.
 2. Native panel producer (add), split at design time (user decision B,
    2026-10-19: output is bounded too, so `engine/v2/data` gains a streaming
-   partition writer; the generic candidate path takes the whole incoming set):
+   whole-table writer; the generic candidate path takes the whole incoming set):
    - 2a. Streaming whole-table writer in `engine/v2/data`
      (`generic_streaming.py`), unit and memory tests: ~200 / ~200 / ~50.
    - 2b. Batch producer in `engine.v2.ops` on that writer, shared-math equality

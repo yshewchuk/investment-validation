@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime
 from typing import Any
 
 import pyarrow as pa
@@ -52,6 +53,10 @@ def _value_matches(physical_type: str, value: Any) -> bool:
         return isinstance(value, int) and not isinstance(value, bool)
     if physical_type == "bool":
         return isinstance(value, bool)
+    if physical_type in ("timestamp[ns]", "timestamp[us]"):
+        return isinstance(value, datetime)
+    if physical_type == "date32":
+        return isinstance(value, date) and not isinstance(value, datetime)
     return True
 
 
@@ -107,6 +112,10 @@ class StreamingTableWriter:
 
     def append_rows(self, rows: Sequence[Mapping]) -> None:
         self._ensure_open()
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+            self._fail()
+            raise errors.fail("CONTRACT_MISMATCH",
+                              "streamed rows must be a sequence of row mappings")
         try:
             for row in rows:
                 self._accept(row)
@@ -152,6 +161,8 @@ class StreamingTableWriter:
             raise errors.fail("INPUT_CHANGED", "the streaming writer is no longer open")
 
     def _accept(self, row: Mapping) -> None:
+        if not isinstance(row, Mapping):
+            raise errors.fail("CONTRACT_MISMATCH", "a streamed row must be a mapping")
         tables.validate_columns(self._contract, row)
         for column in self._contract.columns:
             value = row.get(column.name)
