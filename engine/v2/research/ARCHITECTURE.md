@@ -532,7 +532,7 @@ contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`,
 `ObjectRef`, `TableContractRef`, `ColumnContract`, `TableContract`),
 `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
 `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`,
-`content_hash`, `to_document`, `market_calendar`, plus
+`content_hash`, `to_document`, `market_calendar`, `experiment_exits.valid_exit_recipe`, plus
 `final_holdout.request_from_document` and `typed.to_document` for `_final_population`) — the package's own
 lower-layer dependencies, consistent with the generic "may import anything
 at a lower layer" rule (`only_imports` is unset for this package in

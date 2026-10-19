@@ -485,17 +485,18 @@ def test_regular_symlink_request_retains_supported_file_behavior(tmp_path):
     assert cli._request(link) == request()
 
 
-def fractional_request():
+def fractional_request(target=0.5, stop=-0.5):
     return {**request(), "threshold_units": "entry_debit_fraction",
-            "arms": [{"arm_id": "ratio", "target_pnl": 0.5, "stop_pnl": -0.5}]}
+            "arms": [{"arm_id": "ratio", "target_pnl": target, "stop_pnl": stop}]}
 
 
-def test_fractional_multi_event_comparison_uses_each_premium(source):
+@pytest.mark.parametrize("target,stop", [(0.5, -0.5), (0.625, -0.25)])
+def test_fractional_multi_event_comparison_uses_each_premium(source, target, stop):
     second_id = "MISSING_2024-05-02"
     events = event_rows() + [{**event_rows()[0], "ticker": "SECOND", "event_id": second_id}]
     rows = chain_rows() + [{**row, "ticker": "SECOND", "bid": row["bid"] * 3,
                            "ask": row["ask"] * 3} for row in chain_rows()]
-    document = fractional_request()
+    document = fractional_request(target, stop)
     document["event_ids"].append(second_id)
     snapshot = commit(source, rows, events=events)
     report = run(source, snapshot=snapshot, document=document)
@@ -515,7 +516,8 @@ def test_fractional_multi_event_comparison_uses_each_premium(source):
             assert row["exit_date"] == "2024-04-16"
             assert row["reason"] == "target"
             assert row["thresholds"] == {"units": comparison.UNITS, "entry_debit": 6.0 * scale,
-                                          "target_pnl": 3.0 * scale, "stop_pnl": -3.0 * scale}
+                                          "target_pnl": target * 6.0 * scale,
+                                          "stop_pnl": stop * 6.0 * scale}
         else:
             assert "thresholds" not in row
             assert row["exit_date"] == "2024-05-02"

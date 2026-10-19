@@ -1,5 +1,4 @@
 """Declared fixed-day and target/stop exits over held contracts; no publication."""
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from math import isfinite
@@ -134,9 +133,8 @@ def walk_fixed_day(repository, snapshot, positions, *, economic_params):
     try:
         recipe = economic_params["exit"]
         alpha = economic_params["fill"]
-        if (not isinstance(recipe, Mapping) or set(recipe) != {"kind", "trading_days"}
-                or recipe["kind"] != "fixed_day" or type(recipe["trading_days"]) is not int
-                or recipe["trading_days"] <= 0 or type(alpha) not in (int, float)):
+        if (not valid_exit_recipe(recipe) or recipe["kind"] != "fixed_day"
+                or type(alpha) not in (int, float)):
             raise ValueError("invalid fixed-day economics")
         fill = FillModel(alpha)
     except (KeyError, TypeError, ValueError, OverflowError):

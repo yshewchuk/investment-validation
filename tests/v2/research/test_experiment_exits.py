@@ -564,6 +564,27 @@ def test_fraction_equality_and_ambiguous_stop(source, mode, bid, ask, reason, pn
     assert result.exit_fill_alpha == exit_alpha
 
 
+def test_fraction_stop_waits_for_full_converted_loss(source):
+    rows = _rows()
+    for row in rows:
+        if row["right"] == "C":
+            mark = {DATES[0]: 2.0, DATES[1]: 1.25, DATES[2]: 1.0, DATES[3]: 0.5}[
+                row["obs_date"].date().isoformat()]
+            row.update(bid=mark, ask=mark)
+    position = replace(_position(), legs=(_position().legs[0],))
+    result = _fraction_walk(source, rows=rows, position=position, alpha=0.5)
+    # Two calls cost 4: day one's -1.5 crosses a halved -1 stop, but
+    # the declared -0.5 fraction converts to -2 and first crosses on day two.
+    assert result.entry_cost == 4.0
+    assert result.exit_date == DATES[2]
+    assert result.visited_dates == DATES[:3]
+    assert result.exit_value == 2.0
+    assert result.pnl == -2.0
+    assert result.reason == "stop"
+    assert result.ambiguous_exit is False
+    assert result.fill_alpha == result.exit_fill_alpha == 0.5
+
+
 @pytest.mark.parametrize("basis", ["credit", "zero"])
 def test_fraction_refuses_credit_or_zero_debit_with_entry_context(source, basis):
     position = replace(_position(), legs=(replace(_position().legs[0], side="sell"),))

@@ -73,6 +73,11 @@ The shared typed-document decoder reports `UNSUPPORTED_VERSION` before `UNKNOWN_
 | Constructor `DocumentError` path beginning with `$` at nested/custom prefix | Prefix the path, including already-qualified `$` paths; preserve code/message and original cause |
 | Root constructor error or constructor path not beginning with `$` | Retain path |
 
+| Exit-admission condition | Outcome |
+|---|---|
+| `valid_exit_recipe`: non-mapping, unknown/missing fields or kind, boolean/nonpositive/non-integer horizon, invalid units, or boolean/nonfinite/unrepresentable/wrong-sign/non-numeric thresholds | Return `False`; no coercion, mutation, I/O or retries. The caller supplies its typed refusal envelope. |
+| `valid_threshold_units`: anything other than `quote_price_times_quantity` or `entry_debit_fraction` | Return `False`; no default or normalization of an explicit value. |
+
 `score_population.population_key` preserves the `ticker|strategy|event_date` identity;
 `population_difference` returns sorted missing and unplanned keys for ops scoring
 and the serving bridge. An extra `DYN-SV` key is allowed only when its exact
