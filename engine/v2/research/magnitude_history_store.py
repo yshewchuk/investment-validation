@@ -166,17 +166,18 @@ def materialize(repository, snapshot, context):
                         for c in CONTRACT.columns])
     ordered = sorted(context["temporal_plan"]["events"], key=lambda e: e["event_id"])
     progress = Progress("history events", len(ordered))
-    for event in ordered:
-        progress.tick()
-        sink = pa.BufferOutputStream()
-        rows = _event_rows(repository, snapshot, context, event, prepared)
-        pq.write_table(pa.Table.from_pylist(rows, schema=schema), sink)
-        published = store.publish_bytes(sink.getvalue().to_pybytes(), schema_ref="parquet_fragment.v1")
-        obj = ObjectRef(kind="parquet_fragment", object_id=published.artifact_id,
-                        content_hash=published.content_hash, byte_size=published.byte_size)
-        inspection = objects.inspect_fragment(store, obj, CONTRACT, ref, context["context_id"])
-        records.append(manifests.fragment_record(inspection, ref, input_receipt_refs=(),
-                                                import_request_hash=context["context_id"]))
+    with stage("history materialize"):
+        for event in ordered:
+            sink = pa.BufferOutputStream()
+            rows = _event_rows(repository, snapshot, context, event, prepared)
+            pq.write_table(pa.Table.from_pylist(rows, schema=schema), sink)
+            published = store.publish_bytes(sink.getvalue().to_pybytes(), schema_ref="parquet_fragment.v1")
+            obj = ObjectRef(kind="parquet_fragment", object_id=published.artifact_id,
+                            content_hash=published.content_hash, byte_size=published.byte_size)
+            inspection = objects.inspect_fragment(store, obj, CONTRACT, ref, context["context_id"])
+            records.append(manifests.fragment_record(inspection, ref, input_receipt_refs=(),
+                                                    import_request_hash=context["context_id"]))
+            progress.tick()
     partition_hash = objects.partition_logical_hash(store, [r.object_ref for r in records],
                                                     CONTRACT, ref, context["context_id"])
     manifest = manifests.dataset_manifest(ref, records, knowledge_mode="reconstructed",

@@ -29,7 +29,9 @@ def test_progress_cadence_is_bounded_by_interval_not_items():
         clock.now += 1.0
         progress.tick()
     assert len(lines) == 33  # one per 30 s of the 1000 s pass, never one per item
-    assert "[x] 30/1,000, 30s elapsed, 1.00/s, ETA 970s" in lines[0]
+    for number, line in enumerate(lines, start=1):
+        done = number * 30
+        assert line.startswith(f"  [x] {done:,}/1,000, {done}s elapsed, 1.00/s, ETA {1000 - done}s, peak RSS ")
 
 
 def test_progress_is_silent_for_short_passes_and_honours_min_items():
@@ -50,20 +52,35 @@ def test_stage_logs_start_done_and_failure_and_reraises():
     clock, lines = Clock(), []
     with _progress.stage("a", clock=clock, emit=lines.append):
         clock.now += 3
-    assert lines == ["  [a] start", "  [a] done in 3s"]
+    assert len(lines) == 2 and lines[0].startswith("  [a] start, peak RSS ")
+    assert lines[1].startswith("  [a] done in 3s, peak RSS ")
     lines.clear()
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="^boom$"):
         with _progress.stage("b", clock=clock, emit=lines.append):
             raise RuntimeError("boom")
-    assert lines == ["  [b] start", "  [b] failed after 0s"]
+    assert lines[0].startswith("  [b] start") and lines[1].startswith("  [b] failed after 0s")
+
+
+def test_quiet_stage_prints_only_when_slow():
+    clock, lines = Clock(), []
+    with _progress.stage("q", quiet_under=5.0, clock=clock, emit=lines.append):
+        clock.now += 4
+    assert lines == []
+    with _progress.stage("q", quiet_under=5.0, clock=clock, emit=lines.append):
+        clock.now += 6
+    assert len(lines) == 1 and lines[0].startswith("  [q] done in 6s")
 
 
 def test_emit_failure_never_breaks_a_pass(monkeypatch):
+    attempts = []
+
     def broken(*args, **kwargs):
+        attempts.append(args)
         raise OSError("closed")
     monkeypatch.setattr("builtins.print", broken)
     with _progress.stage("c"):
-        pass
+        result = 7
+    assert result == 7 and len(attempts) == 2  # start and done were both attempted
 
 
 def _source(tmp_path):
@@ -100,9 +117,10 @@ def test_pinned_build_is_output_identical_cheaper_and_logs_only_to_stderr(tmp_pa
             conn.close()
     assert results["pinned"][1] == results["plain"][1]
     assert results["pinned"][2] == results["plain"][2]
+    assert results["plain"][2] and any(row["n_prior"] > 0 for row in results["plain"][2])
     assert results["pinned"][0] < results["plain"][0] / 2
     for _, _, _, captured in results.values():
         assert captured.out == ""
-        for line in ("[load_population] start", "[load_population] done", "[history preflight] done",
-                     "[history prepare] done"):
+        for line in ("[history preflight] start", "[history preflight] done", "[history prepare] done",
+                     "[history materialize] start", "[history materialize] done"):
             assert line in captured.err

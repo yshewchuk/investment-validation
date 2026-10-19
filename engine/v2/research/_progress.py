@@ -23,17 +23,34 @@ def _emit(line: str) -> None:
         return
 
 
+def _rss() -> str:
+    """Peak RSS suffix for stage/progress lines; empty when unavailable."""
+    try:
+        import resource
+        return f", peak RSS {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.0f} MB"
+    except Exception:
+        return ""
+
+
 @contextmanager
-def stage(name, *, clock=time.monotonic, emit=_emit):
-    """Log ``start`` and ``done in Ns`` (or ``failed after Ns``) around a stage."""
+def stage(name, *, quiet_under=0.0, clock=time.monotonic, emit=_emit):
+    """Log ``start`` and ``done in Ns`` (or ``failed after Ns``) with peak RSS around a stage.
+
+    With ``quiet_under`` > 0 the start line is omitted and the end line is printed only
+    when the stage took at least that many seconds, so short calls stay silent."""
     started = clock()
-    emit(f"  [{name}] start")
+    if not quiet_under:
+        emit(f"  [{name}] start{_rss()}")
     try:
         yield
     except BaseException:
-        emit(f"  [{name}] failed after {clock() - started:.0f}s")
+        elapsed = clock() - started
+        if not quiet_under or elapsed >= quiet_under:
+            emit(f"  [{name}] failed after {elapsed:.0f}s{_rss()}")
         raise
-    emit(f"  [{name}] done in {clock() - started:.0f}s")
+    elapsed = clock() - started
+    if not quiet_under or elapsed >= quiet_under:
+        emit(f"  [{name}] done in {elapsed:.0f}s{_rss()}")
 
 
 class Progress:
@@ -60,4 +77,4 @@ class Progress:
         self._last, self._last_done = now, self.done
         self.lines += 1
         self._emit(f"  [{self.name}] {self.done:,}/{self.total:,}, {elapsed:.0f}s elapsed, "
-                   f"{rate:.2f}/s, ETA {eta:.0f}s")
+                   f"{rate:.2f}/s, ETA {eta:.0f}s{_rss()}")

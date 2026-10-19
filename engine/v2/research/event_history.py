@@ -105,7 +105,6 @@ def _plans(repository, snapshot, candidates, contract):
     plans = []
     progress = Progress("plan history candidates", len(candidates))
     for event in candidates.itertuples(index=False):
-        progress.tick()
         keys, interval = _target_filters(event)
         day = event.event_date.date().isoformat()
         population = query_planner.plan_scan_population(
@@ -121,6 +120,7 @@ def _plans(repository, snapshot, candidates, contract):
         request = _target_query(repository, snapshot, contract, event,
                                 population_bound=population.row_count)
         plans.append((event, request, record))
+        progress.tick()
     return plans
 
 
