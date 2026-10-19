@@ -207,7 +207,10 @@ reviews:
         with a legacy row already occupying the same key space (e.g. a
         ledger "ran" row keyed `(experiment_id, stage)` that a legacy run
         already wrote) — /ARCHITECTURE.md §6.
-    - path: "{engine,experiments,tools}/**"
+
+        Same progress-logging check as for engine/** (AGENTS.md
+        "Conventions"): rate by consequence, not as an automatic blocker.
+    - path: "engine/**"
       instructions: |
         Long-running code must log progress (AGENTS.md "Conventions").
         For new or changed code that loops over events, tickers, rows or
@@ -220,6 +223,10 @@ reviews:
         Rate by consequence, not as an automatic blocker: a multi-hour job
         with no progress output is a real finding; a two-second loop with
         none is not worth a comment.
+    - path: "tools/**"
+      instructions: |
+        Same progress-logging check as for engine/** (AGENTS.md
+        "Conventions"): rate by consequence, not as an automatic blocker.
     - path: "**/*.py"
       instructions: |
         Wrap standard tools; do not hand-roll standard formats
