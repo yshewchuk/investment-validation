@@ -11,13 +11,25 @@ def test_experiment_repository_calls_pin_snapshots():
     offenders: list[str] = []
     seen = 0
     for path in sorted((ROOT / "experiments").rglob("*.py")):
-        tree = ast.parse(path.read_text(), filename=str(path))
+        assert not path.is_symlink()
+        assert path.stat().st_size <= 1_000_000
+        tree = ast.parse(path.read_bytes(), filename=str(path))
         rel = path.relative_to(ROOT)
+        names: set[str] = {"Repository"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name == "Repository" and alias.asname:
+                        names.add(alias.asname)
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    if alias.asname and alias.name.endswith("Repository"):
+                        names.add(alias.asname)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             if isinstance(node.func, ast.Name):
-                is_repository = node.func.id == "Repository"
+                is_repository = node.func.id in names
             elif isinstance(node.func, ast.Attribute):
                 is_repository = node.func.attr == "Repository"
             else:
