@@ -356,21 +356,49 @@ def _tier4_pair(tmp_path, rebuilt, pinned):
 
 
 def test_carried_stamp_rows_with_older_valid_hash_match(tmp_path):
-    out = _tier4_pair(tmp_path, _stamped([_H1] * 6), _stamped([_H2, _H2, _H2, _H1, _H1, _H1]))
-    assert out["verdict"] == "match"
+    out = _tier4_pair(tmp_path, _stamped(["0123456789abcdef" * 4] * 6),
+                      _stamped([_H2, _H2, _H2, _H1, _H1, _H1]))
+    assert out == {"verdict": "match", "mismatches": [], "max_abs_diff": 0.0,
+                   "max_rel_diff": 0.0, "n_columns_differing": 0}
 
 
 def test_numeric_difference_still_fails_next_to_a_carried_stamp(tmp_path):
-    pinned = _stamped([_H2] * 6)
     rebuilt = _stamped([_H1] * 6)
     rebuilt.loc[2, "pred_abs_move"] += 1.0
+    out = _tier4_pair(tmp_path, rebuilt, _stamped([_H2] * 6))
+    assert out["verdict"] == "mismatch"
+    assert out["n_columns_differing"] == 1
+    assert out["max_abs_diff"] == pytest.approx(1.0)
+    assert [(m["reason"], m["column"], m["n_rows"]) for m in out["mismatches"]] == [
+        ("float_beyond_tolerance", "pred_abs_move", 1)]
+
+
+@pytest.mark.parametrize("side", ["rebuilt", "pinned"])
+@pytest.mark.parametrize("bad", [None, "not-a-hash", "A" * 64, "a" * 63])
+def test_invalid_or_null_stamp_fails_on_either_side(tmp_path, side, bad):
+    good = _stamped([_H1] * 6)
+    broken = _stamped([_H1, bad, _H1, bad, _H1, _H1])
+    rebuilt, pinned = (broken, good) if side == "rebuilt" else (good, broken)
     out = _tier4_pair(tmp_path, rebuilt, pinned)
     assert out["verdict"] == "mismatch"
-    assert out["mismatches"][0]["reason"] == "float_beyond_tolerance"
+    assert out["mismatches"] == [{"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 2}]
 
 
-@pytest.mark.parametrize("bad", [None, "not-a-hash", "A" * 64, "a" * 63])
-def test_invalid_or_null_pinned_stamp_fails(tmp_path, bad):
-    out = _tier4_pair(tmp_path, _stamped([_H1] * 6), _stamped([_H1, _H1, bad, _H1, _H1, _H1]))
+def test_byte_identical_tier4_with_a_bad_stamp_is_still_refused(tmp_path, monkeypatch):
+    from engine.data import store
+    from engine.v2.ops.legacy_adapter import _compare_to_pinned
+
+    root = tmp_path / "mat"
+    path = root / "data" / "features" / "tier4_forecasts.parquet"
+    _write(path, _stamped([_H1, "bad", _H1, _H1, _H1, _H1]))
+    panel = root / "data" / "features" / "panel.parquet"
+    _write(panel, _frame())
+    import engine.paths as paths_module
+    monkeypatch.setattr(paths_module, "ROOT", root)
+    monkeypatch.setattr(paths_module, "PANEL", panel)
+    monkeypatch.setattr(paths_module, "TIER4", path)
+    hashes = {"panel_sha256": store.file_sha256(panel), "tier4_sha256": store.file_sha256(path)}
+    out = _compare_to_pinned(root, hashes)
     assert out["verdict"] == "mismatch"
-    assert out["mismatches"][0] == {"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 1}
+    assert out["tables"]["tier4"]["mismatches"][0]["reason"] == "provenance_stamp"
+    assert out["tables"]["panel"]["verdict"] == "match"

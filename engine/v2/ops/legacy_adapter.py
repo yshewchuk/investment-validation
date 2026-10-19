@@ -636,7 +636,10 @@ def _compare_to_pinned(materialization_root, hashes):
     for name, rebuilt in (("panel", paths.PANEL), ("tier4", paths.TIER4)):
         pinned_path = root / rebuilt.relative_to(paths.ROOT)
         pinned[name] = store.file_sha256(pinned_path) if pinned_path.is_file() else None
-        if hashes[f"{name}_sha256"] is not None and hashes[f"{name}_sha256"] == pinned[name]:
+        # Byte-identical tables skip the comparison, except tables with provenance-stamp
+        # columns: those stamps must still be validated for form.
+        if (hashes[f"{name}_sha256"] is not None and hashes[f"{name}_sha256"] == pinned[name]
+                and name not in fc.PROVENANCE_COLUMNS):
             tables[name] = dict(fc.IDENTICAL, mismatches=[])
         else:
             tables[name] = fc.compare_tables(name, rebuilt, pinned_path)
