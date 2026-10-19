@@ -188,15 +188,28 @@ def materialize(repository, snapshot, context):
     return result.snapshot_ref
 
 
-def _scan_iter(repository, snapshot, context, columns, count):
-    """Same predicate and bounds, yielding rows batch by batch."""
-    request = DataQuery(snapshot_id=snapshot.snapshot_id,
-        table_contract_ref=snapshot.table_versions[TABLE].table_contract_ref, columns=tuple(columns),
-        key_filter=(KeyPredicate(column="context_id", operator="eq", values=(context["context_id"],)),),
-        order_by=CONTRACT.primary_key,
-        max_batch_rows=min(CONTRACT.maximum_batch_rows, count), max_result_rows=count)
-    for batch in repository.scan(request, table_name=TABLE):
-        yield from batch.to_pylist()
+_SCAN_CHUNK_EVENTS = 1024
+
+
+def _scan_iter(repository, snapshot, context, columns, expected):
+    """Yield rows in primary-key order, scanning at most `_SCAN_CHUNK_EVENTS` events at a time.
+
+    `expected` is the ordered list of (event, cutoff) pairs from `_preflight_features`; each chunk's
+    row bound is its expected row count, so the manifest-derived coverage guard is kept per chunk."""
+    starts = [i for i in range(len(expected)) if i == 0 or expected[i][0]["event_id"] != expected[i - 1][0]["event_id"]]
+    for first in range(0, len(starts), _SCAN_CHUNK_EVENTS):
+        begin = starts[first]
+        stop = starts[first + _SCAN_CHUNK_EVENTS] if first + _SCAN_CHUNK_EVENTS < len(starts) else len(expected)
+        chunk = expected[begin:stop]
+        events = tuple(dict.fromkeys(event["event_id"] for event, _ in chunk))
+        request = DataQuery(snapshot_id=snapshot.snapshot_id,
+            table_contract_ref=snapshot.table_versions[TABLE].table_contract_ref, columns=tuple(columns),
+            key_filter=(KeyPredicate(column="context_id", operator="eq", values=(context["context_id"],)),
+                        KeyPredicate(column="event_id", operator="in", values=events)),
+            order_by=CONTRACT.primary_key,
+            max_batch_rows=min(CONTRACT.maximum_batch_rows, len(chunk)), max_result_rows=len(chunk))
+        for batch in repository.scan(request, table_name=TABLE):
+            yield from batch.to_pylist()
 
 
 def _lineage(history, context, event, cutoff):
@@ -271,7 +284,7 @@ def _validate_features(row, count):
 def _admit_metadata(repository, snapshot, context, expected):
     """Pass 1: admit every row's metadata; keep only a compact per-row pin."""
     admitted = []
-    for row in _scan_iter(repository, snapshot, context, METADATA, len(expected)):
+    for row in _scan_iter(repository, snapshot, context, METADATA, expected):
         if len(admitted) == len(expected):
             raise errors.fail("CONTRACT_MISMATCH", "stored history row coverage differs")
         event, cutoff = expected[len(admitted)]
@@ -283,14 +296,14 @@ def _admit_metadata(repository, snapshot, context, expected):
     return admitted
 
 
-def _stream_features(repository, snapshot, context, admitted, keep):
+def _stream_features(repository, snapshot, context, expected, admitted, keep):
     """Pass 2: validate full rows against pass 1 while hashing them; keep full or narrowed rows."""
     narrow = ("event_id", "context_id", "horizon_sessions", *FEATURES)
     digest = hashlib.sha256()
     digest.update(('{"context":' + canonical_json(context) + ',"feature_snapshot":'
                    + canonical_json(to_document(snapshot)) + ',"rows":[').encode())
     rows, seen = [], 0
-    for row in _scan_iter(repository, snapshot, context, (*METADATA, *FEATURES), len(admitted)):
+    for row in _scan_iter(repository, snapshot, context, (*METADATA, *FEATURES), expected):
         if seen == len(admitted):
             raise errors.fail("CONTRACT_MISMATCH", "stored history row count changed")
         light, history_digest, count = admitted[seen]
@@ -323,5 +336,5 @@ def read_stored(repository, snapshot, context, event_ids=None):
     expected = _preflight_features(repository, snapshot, context)
     admitted = _admit_metadata(repository, snapshot, context, expected)
     keep = None if event_ids is None else frozenset(event_ids)
-    rows, inputs_id = _stream_features(repository, snapshot, context, admitted, keep)
+    rows, inputs_id = _stream_features(repository, snapshot, context, expected, admitted, keep)
     return {"context": context, "feature_snapshot": to_document(snapshot), "rows": rows, "inputs_id": inputs_id}

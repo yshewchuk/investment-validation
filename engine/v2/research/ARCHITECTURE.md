@@ -628,13 +628,12 @@ derivation and native registration. `experiments/magnitude_history_report.py` co
 the existing `read_stored` plus magnitude target preflight/load/qualification APIs.
 Neither consumer modifies the build closure, stored artifact identity or final-read authority.
 
-`read_stored(repository, snapshot, context, event_ids=None)` admits every stored row exactly as before
-(receipt, contract, event isolation, lineage, metadata, feature missingness) and returns the same
-`inputs_id`. With `event_ids=None` it returns all full rows. With a collection of event IDs it streams
-the two scans in lockstep, retains only a digest of each row's `history_json`, and returns only the rows
-of those events narrowed to `event_id`, `context_id`, `horizon_sessions` and the feature columns (no
-`history_json` or other metadata), so peak memory is bounded by the batch size and the requested rows.
-Any admission failure refuses the same code as the full read; nothing is cached across calls.
+| Condition | Outcome of `read_stored(repository, snapshot, context, event_ids=None)` |
+|---|---|
+| `event_ids=None` | Every stored row is admitted and returned in full, as before. |
+| `event_ids` is a collection | Every stored row is still admitted (receipt, contract, isolation, lineage, metadata, feature missingness, including events not requested); only those events' rows are returned, narrowed to `event_id`, `context_id`, `horizon_sessions` and the feature columns. `inputs_id` equals the full read's. |
+| Memory | Metadata is admitted first (pass 1, keeping a per-row digest of `history_json`), then features are streamed (pass 2); the passes run consecutively. Each pass scans 1,024 events at a time because the scan primes one stream per event fragment, so retained decoded history is bounded by one chunk, not the universe. The per-row pins from pass 1 still grow with row count. |
+| Any admission failure | Same refusal code as the full read; nothing is cached across calls. |
 
 ## External systems and libraries
 

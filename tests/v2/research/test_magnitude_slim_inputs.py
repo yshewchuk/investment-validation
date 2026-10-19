@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.data.errors import DataError
+from engine.v2.data.repository import Repository
 from engine.v2.foundation import content_hash
 from engine.v2.research import magnitude_history_store as stored
 from engine.v2.research.magnitude_history_table import FEATURES
@@ -62,6 +63,74 @@ def test_event_filtered_read_matches_full_read(source):
     assert empty["rows"] == [] and empty["inputs_id"] == full["inputs_id"]
 
 
+def test_filtered_read_validates_features_of_excluded_events(source, monkeypatch):
+    original = stored._event_rows
+
+    def malformed(*args):
+        rows = original(*args)
+        if rows[0]["event_date"] == "2024-06-17":
+            rows[-1]["n_prior"] = 99
+        return rows
+
+    monkeypatch.setattr(stored, "_event_rows", malformed)
+    _, output = build_history(source)
+    ctx = entry.context(source.repository, source.snapshot, **HISTORY_REQUEST)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        stored.read_stored(source.repository, output, ctx, event_ids=[source.events[0]["event_id"]])
+
+
+def test_filtered_read_detects_second_pass_metadata_drift(source, monkeypatch):
+    _, output = build_history(source)
+    scan = stored._scan_iter
+
+    def changed(repository, snapshot, context, columns, expected):
+        rows = list(scan(repository, snapshot, context, columns, expected))
+        if set(columns) & set(FEATURES):
+            rows[-1]["cutoff_id"] = "changed"
+        return iter(rows)
+
+    monkeypatch.setattr(stored, "_scan_iter", changed)
+    ctx = entry.context(source.repository, source.snapshot, **HISTORY_REQUEST)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        stored.read_stored(source.repository, output, ctx,
+                            event_ids=[source.events[0]["event_id"]])
+
+
+def test_chunked_scan_matches_single_chunk(source, monkeypatch):
+    _, output = build_history(source)
+    ctx = entry.context(source.repository, source.snapshot, **HISTORY_REQUEST)
+    baseline = stored.read_stored(source.repository, output, ctx)
+    monkeypatch.setattr(stored, "_SCAN_CHUNK_EVENTS", 1)
+    calls = []
+    scan = Repository.scan
+
+    def counted(repository, request, *, table_name):
+        calls.append(1)
+        yield from scan(repository, request, table_name=table_name)
+
+    monkeypatch.setattr(Repository, "scan", counted)
+    chunked = stored.read_stored(source.repository, output, ctx)
+    assert chunked == baseline
+    event_count = len({row["event_id"] for row in baseline["rows"]})
+    assert len(calls) == 2 * event_count
+
+
+def test_fit_payload_keeps_only_read_columns():
+    from experiments.magnitude_search_execution import fit_payload
+    inputs = {"features": [{"event_id": "e", "context_id": "c", "horizon_sessions": 1, "f1": 1.0,
+                             "history_json": "x" * 100000, "event_date": "d"}],
+              "training": [{"event_id": "e", "absolute_move_pct": 1.0}]}
+    inner, plan, execution = {"train": ["e"]}, {"horizons": [1, 3]}, {"features": ["f1"], "fit_recipe": {"model": "x"}}
+    payload = fit_payload(inputs, inner, plan, execution)
+    decoded = json.loads(payload)
+    assert decoded["inputs"]["features"] == [{"event_id": "e", "context_id": "c", "horizon_sessions": 1, "f1": 1.0}]
+    assert decoded["inputs"]["training"] == inputs["training"]
+    assert decoded["inner"] == inner
+    assert decoded["plan"] == {"horizons": [1, 3]}
+    assert decoded["execution"] == execution
+    assert len(payload) < 2000
+
+
 def test_full_read_inputs_id_is_content_hash_of_identity(source):
     _, output = build_history(source)
     ctx = entry.context(source.repository, source.snapshot, **HISTORY_REQUEST)
@@ -85,14 +154,3 @@ def test_filtered_read_still_refuses_tampered_metadata(source, monkeypatch):
     ctx = entry.context(source.repository, source.snapshot, **HISTORY_REQUEST)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         stored.read_stored(source.repository, output, ctx, event_ids=[source.events[0]["event_id"]])
-
-
-def test_fit_payload_keeps_only_read_columns():
-    from experiments.magnitude_search_execution import fit_payload
-    inputs = {"features": [{"event_id": "e", "context_id": "c", "horizon_sessions": 1, "f1": 1.0,
-                             "history_json": "x" * 100000, "event_date": "d"}],
-              "training": [{"event_id": "e", "absolute_move_pct": 1.0}]}
-    payload = fit_payload(inputs, {}, {"horizons": [1]}, {"features": ["f1"]})
-    decoded = json.loads(payload)
-    assert decoded["inputs"]["features"] == [{"event_id": "e", "context_id": "c", "horizon_sessions": 1, "f1": 1.0}]
-    assert len(payload) < 2000
