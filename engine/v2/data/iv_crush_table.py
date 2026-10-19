@@ -24,16 +24,12 @@ def _contract():
                                        "adjacent daily rows span at most five calendar days; "
                                        "finite positive pre-IV and finite post-IV, no post-positive filter"),
         ColumnContract(name="available_as_of_date", physical_type="string", nullable=True,
-            null_policy="null exactly when skipped; unavailable labels cannot enter training",
             observation_time_semantics="post_date plus one calendar day; modeled day-clock floor, "
                                        "not evidence of source publication or finality"),
         ColumnContract(name="skipped", physical_type="bool", nullable=False),
-        ColumnContract(name="skip_reason", physical_type="string", nullable=True,
-                       null_policy="null exactly when not skipped"),
-        ColumnContract(name="source_id", physical_type="string", nullable=False,
-                       null_policy="caller-declared identity, not verified by the pure builder"),
-        ColumnContract(name="input_hash", physical_type="string", nullable=False,
-                       null_policy="canonical hash of the supplied typed event/daily projections"),
+        ColumnContract(name="skip_reason", physical_type="string", nullable=True),
+        ColumnContract(name="source_id", physical_type="string", nullable=False),
+        ColumnContract(name="input_hash", physical_type="string", nullable=False),
     )
     contract = TableContract(contract_id=IV_CRUSH_TABLE_NAME + ".v1", table_name=IV_CRUSH_TABLE_NAME,
         semantic_version="1.0.0", definition_hash="sha256:" + "0" * 64, columns=columns,
@@ -42,8 +38,11 @@ def _contract():
         orderable_columns=("ticker", "event_date"), observation_time_column="event_date",
         publication_time_column=None, receipt_time_column=None,
         finality_semantics="no finality or actual publication evidence; reconstructed targets only",
-        provenance_semantics="input_hash binds supplied projections; source_id is unverified caller metadata",
-        coverage_semantics="one row per supplied event, skipped rows included; no completeness inference",
+        provenance_semantics="input_hash is the canonical hash of the supplied typed event/daily projections; "
+                             "source_id is caller-declared identity, unverified by the pure builder",
+        coverage_semantics="one row per supplied event, skipped rows included; no completeness inference; "
+                           "crush_pct_iv30 and available_as_of_date are null exactly when skipped; "
+                           "skip_reason is null exactly when not skipped",
         schema_evolution_policy="new contract identity for any semantic change", maximum_batch_rows=10000)
     return replace(contract, definition_hash=manifests.table_contract_hash(contract))
 

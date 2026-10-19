@@ -111,11 +111,11 @@ def test_clock_and_provenance_claims_remain_distinct():
         "available_as_of_date": (
             "post_date plus one calendar day; modeled day-clock floor, "
             "not evidence of source publication or finality",
-            "null exactly when skipped; unavailable labels cannot enter training"),
+            None),
         "skipped": (None, None),
-        "skip_reason": (None, "null exactly when not skipped"),
-        "source_id": (None, "caller-declared identity, not verified by the pure builder"),
-        "input_hash": (None, "canonical hash of the supplied typed event/daily projections"),
+        "skip_reason": (None, None),
+        "source_id": (None, None),
+        "input_hash": (None, None),
     }
     assert contract.publication_time_column is None
     assert contract.receipt_time_column is None
@@ -123,7 +123,10 @@ def test_clock_and_provenance_claims_remain_distinct():
     assert contract.finality_semantics == (
         "no finality or actual publication evidence; reconstructed targets only")
     assert contract.provenance_semantics == (
-        "input_hash binds supplied projections; source_id is unverified caller metadata")
+        "input_hash is the canonical hash of the supplied typed event/daily projections; "
+        "source_id is caller-declared identity, unverified by the pure builder")
     assert contract.coverage_semantics == (
-        "one row per supplied event, skipped rows included; no completeness inference")
+        "one row per supplied event, skipped rows included; no completeness inference; "
+        "crush_pct_iv30 and available_as_of_date are null exactly when skipped; "
+        "skip_reason is null exactly when not skipped")
     assert contract.schema_evolution_policy == "new contract identity for any semantic change"
