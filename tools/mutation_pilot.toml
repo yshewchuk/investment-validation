@@ -335,7 +335,7 @@ tests = [
     "tests/test_v2_data_commit.py",
     "tests/test_v2_data_events_chains.py",
     "tests/test_v2_data_generic_incremental.py",
-    "tests/test_v2_data_import.py",
+    "tests/v2/data/test_v2_data_import.py",
     "tests/test_v2_data_incremental_persistence.py",
     "tests/test_v2_data_legacy_adapter.py",
     "tests/test_v2_data_manifests.py",
@@ -346,6 +346,7 @@ tests = [
     "tests/test_v2_data_repository.py",
     "tests/test_v2_data_roundtrip.py",
     "tests/v2/data/test_read_counters.py",
+    "tests/v2/data/test_repository_disjoint_scan.py",
     "tests/v2/ops/test_nightly_chain_batch.py",
     "tests/v2/ops/test_v2_ops_price_history.py",
     "tests/v2/serving/test_v2_serving_api.py",
@@ -364,6 +365,8 @@ mutate = [
     "engine/v2/data/event_revisions.py",
 ]
 tests = [
+    "tests/v2/data/test_repository_disjoint_scan.py",
+    "tests/v2/ops/test_nightly_chain_batch.py",
     "tests/v2/data/test_string_date_intervals.py",
     "tests/test_v2_data_eod_inventory.py",
     "tests/test_v2_data_event_revisions.py",
@@ -373,7 +376,7 @@ tests = [
     "tests/test_v2_data_objects.py",
     "tests/test_v2_data_partitions.py",
     "tests/test_v2_data_query.py",
-    "tests/test_v2_data_rebuild_rollback.py",
+    "tests/v2/data/test_rebuild_rollback.py",
 ]
 
 [modules.data_incremental]
@@ -428,11 +431,12 @@ mutate = [
     "engine/v2/data/price_*.py",
 ]
 tests = [
+    "tests/v2/integration/test_checks_phase2_evidence_build.py",
     "tests/v2/data/test_legacy_reader_lifetime.py",
     "tests/test_v2_data_legacy_adapter.py",
-    "tests/test_v2_data_legacy_materialization.py",
+    "tests/v2/data/test_legacy_materialization.py",
     "tests/v2/data/test_price_downloads.py",
-    "tests/test_v2_data_reference_inputs.py",
+    "tests/v2/data/test_v2_data_reference_inputs.py",
     "tests/test_v2_data_tier4_coverage.py",
     "tests/v2/ops/test_v2_ops_price_history.py",
     "tests/v2/ops/test_v2_ops_tier4_coverage.py",
@@ -707,7 +711,7 @@ tests = [
     "tests/test_v2_ops_health.py",
     "tests/v2/research/test_experiment_exits.py",
     "tests/v2/ops/test_legacy_defects.py",
-    "tests/test_v2_ops_legacy_workflows.py",
+    "tests/v2/ops/test_v2_ops_legacy_workflows.py",
     "tests/test_v2_ops_outcome_session_backfill_wiring.py",
     "tests/test_v2_ops_recovery_ownership.py",
     "tests/v2/ops/test_v2_ops_runner_onboarding.py",
@@ -991,7 +995,7 @@ tests = [
     "tests/v2/ops/test_v2_ops_engineering_history.py",
     "tests/v2/ops/test_v2_ops_finality.py",
     "tests/v2/ops/test_legacy_defects.py",
-    "tests/test_v2_ops_legacy_workflows.py",
+    "tests/v2/ops/test_v2_ops_legacy_workflows.py",
     "tests/v2/ops/test_v2_ops_parity.py",
     "tests/v2/ops/test_v2_ops_render_parity.py",
     "tests/v2/ops/test_v2_ops_resolved_session.py",
@@ -1129,7 +1133,7 @@ tests = [
     "tests/test_v2_ops_unit_receipts.py",
     "tests/v2/ops/test_v2_ops_calendar_moves_jobs.py",
     "tests/v2/ops/test_legacy_defects.py",
-    "tests/test_v2_ops_legacy_workflows.py",
+    "tests/v2/ops/test_v2_ops_legacy_workflows.py",
     # tests/v2/ops/test_v2_ops_nightly_trigger.py (phase 6 slice 12): same untracked
     # file caveat as the mutate list above; listed literally since it moved.
     "tests/test_v2_ops_nightly*.py",
@@ -1162,8 +1166,8 @@ mutate = [
 tests = [
     "tests/v2/ops/test_planned_price_refresh.py",
     "tests/v2/ops/test_planned_price_recovery.py",
-    "tests/test_v2_data_legacy_materialization.py",
-    "tests/test_v2_data_rebuild_rollback.py",
+    "tests/v2/data/test_legacy_materialization.py",
+    "tests/v2/data/test_rebuild_rollback.py",
     "tests/test_v2_data_repository.py",
     "tests/v2/ops/test_v2_ops_generation_binding_lineage.py",
     "tests/v2/ops/test_v2_ops_price_history.py",
@@ -1199,6 +1203,8 @@ tests = [
     "tests/v2/research/test_magnitude_inputs.py",
     "tests/v2/research/test_magnitude_features.py",
     "tests/v2/research/test_magnitude_history_store.py",
+    "tests/v2/research/test_magnitude_history_projection.py",
+    "tests/v2/research/test_magnitude_search_payload.py",
     "tests/v2/research/test_magnitude_folds.py",
     "tests/v2/research/test_magnitude_registration.py",
     "tests/v2/research/test_magnitude_execution_registration.py",

@@ -29,6 +29,7 @@ from engine.v2.research.magnitude_history_store import read_stored
 from experiments import magnitude_search_outer as outer
 from experiments import magnitude_search_trials as trials
 from experiments.magnitude_search_plan import seal_search_plan
+from tests.v2.models.training.test_magnitude_estimators import FEATURES
 from tests.v2.research.magnitude_trial_support import (
     ROOT,
     history_event,
@@ -141,7 +142,8 @@ def expected_input_receipts(case, year):
         "stored_inputs_id": case.native_inputs["inputs_id"], "training_inputs": training,
         "training": [{"event_id": event, "absolute_move_pct": known_targets()[event]}
                      for event in training["qualified_event_ids"]],
-        "features": [row for row in case.native_inputs["rows"] if row["event_id"] in participants]}
+        "features": [{name: row[name] for name in ("event_id", "context_id", "horizon_sessions", *FEATURES)}
+                     for row in case.native_inputs["rows"] if row["event_id"] in participants]}
     validation = {"evaluation_inputs": {**labels, "inputs_id": content_hash(labels), "holdout_exclusions": []},
         "targets": [{"event_id": event, "absolute_move_pct": known_targets()[event]} for event in evaluation]}
     return inputs, validation

@@ -11,7 +11,7 @@ commit together.
 path", task brief D16 note) writes a minimal but type-correct synthetic
 Parquet tree matching every REAL ``build_legacy_mapping()`` contract exactly
 — never real business data, never a real legacy rebuild. It is reused by
-``tests/test_v2_data_rebuild_rollback.py``.
+``tests/v2/data/test_rebuild_rollback.py``.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import ArtifactRef  # noqa: E402

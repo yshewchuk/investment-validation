@@ -51,7 +51,7 @@ _SEC_REF = contract_ref_for(_SEC)
 #: ``PRICE_SERIES_MATERIALIZATION_CEILING`` constant (SEND-BACK 2026-09-14
 #: item 2: materialization is no longer maximal-ceiling by default; the real
 #: per-job cutoff now lives on ``LegacyMaterializationRequest.
-#: observation_ceiling``, see ``tests/test_v2_data_legacy_materialization.py``).
+#: observation_ceiling``, see ``tests/v2/data/test_legacy_materialization.py``).
 _FAR_FUTURE_CEILING = "9999-12-31T23:59:59.000000Z"
 
 
@@ -871,7 +871,7 @@ def test_pin_snapshot_inputs_can_resolve_the_new_generation(tmp_path):
 
 @pytest.mark.skip(reason="full legacy_adapter.materialize fixture (every "
                          "LEGACY_SCORE_READ_PLAN_V1 table + pinned legacy SNAPSHOT/registry "
-                         "refs) belongs to tests/test_v2_data_legacy_materialization.py's own "
+                         "refs) belongs to tests/v2/data/test_legacy_materialization.py's own "
                          "existing end-to-end fixture; this file only proves get_price_series/"
                          "materialize_price_series's own contract (see "
                          "test_v2_data_price_downloads.py's get_price_series tests and "

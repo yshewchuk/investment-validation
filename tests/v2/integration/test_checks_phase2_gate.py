@@ -1011,7 +1011,7 @@ def test_real_repo_smoke_matches_registry_against_the_real_tree():
     existing = [t for t in all_test_paths if (root / t).is_file()]
     missing_files = sorted(t for t in all_test_paths if not (root / t).is_file())
     # Task 6a (P2-6): D13 (synthetic) and the adapter half of D14 now have a
-    # real test file (tests/test_v2_data_legacy_materialization.py), so no
+    # real test file (tests/v2/data/test_legacy_materialization.py), so no
     # registered test file is missing any more. Any file going missing is
     # registry/tree drift this test must catch, so the set is asserted
     # exactly, not just "non-empty is fine".

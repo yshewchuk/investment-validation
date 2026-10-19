@@ -126,7 +126,7 @@ never a real peak, only what happened to be sampled every 30s by
 ``bounded_run``'s watchdog (4.26 GiB, per a prior shadow-closeout attempt) --
 a real incident (``job_caaed30eb5d1745ce87ed22a55dbc2e3``) already hit
 ``RESOURCE_LIMIT_EXCEEDED`` at a watchdog-observed 4.38 GiB against that same
-4 GiB reservation (see ``tests/test_v2_data_reference_inputs.py``'s
+4 GiB reservation (see ``tests/v2/data/test_v2_data_reference_inputs.py``'s
 ``test_absent_model_evidence_cache_is_not_refused`` docstring). This pass
 re-measured with 1-1.5s PSS sampling (fine enough to catch a spike a 30s
 poll would miss) across FIVE real ``engine.dashboard.model_evidence --force``
@@ -383,7 +383,7 @@ DEFAULT_POLICY = ResourcePolicy(
         # and never materializing a whole table or year partition in memory
         # at once. There is no legacy scorer or panel model load on this
         # path. Measurement basis: the full synthetic
-        # tests/test_v2_data_legacy_materialization.py suite (41 tests,
+        # tests/v2/data/test_legacy_materialization.py suite (41 tests,
         # exercising every scan/copy path against small fixtures) peaked at
         # 293 MiB RSS for the whole pytest process under
         # ``/usr/bin/time -v`` on 2026-09-14; static reading of every scan

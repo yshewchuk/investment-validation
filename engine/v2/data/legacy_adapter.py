@@ -173,7 +173,7 @@ def legacy_tier4_serving_header(path, *, expected_sha256_hex: str, max_bytes: in
 # task). All four sit beside a constant that is imported here (or, for
 # ``pnl_sim_history.parquet``, are typed verbatim — ``HISTORY_PATH`` is
 # already the exact root-relative POSIX string, not a ``Path`` built from an
-# imported root), and a tier-0 test in ``tests/test_v2_data_reference_inputs.py``
+# imported root), and a tier-0 test in ``tests/v2/data/test_v2_data_reference_inputs.py``
 # pins each one to its real legacy constant.
 
 

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts.data import KeyPredicate, ObjectRef, TimeInterval  # noqa: E402
@@ -1308,9 +1308,12 @@ def oversized_case(tmp_path, table_name="daily_market"):
     rows = DM_ROWS[("2020", "AAA")] if table_name == "daily_market" else CHAIN_ROWS["2020"]
     table = table_from_rows(contract, rows)
     # Only manifest metadata is large: planning must never open these bytes.
+    key = tuple(rows[0][name].isoformat(timespec="microseconds")
+                if isinstance(rows[0][name], datetime) else rows[0][name]
+                for name in contract.primary_key)
     record = hand_built_record(
         store, contract, contract_ref_for(contract), table, partition_key="2020",
-        row_count=ROW_COUNT, primary_key_min=("AAA",), primary_key_max=("AAA",),
+        row_count=ROW_COUNT, primary_key_min=key, primary_key_max=key,
         time_min="2020-01-01", time_max="2020-12-31")
     snapshot = commit_tables(conn, clock, {table_name: [record]}, {table_name: contract})
     repo = Repository(conn, store)
@@ -1343,12 +1346,20 @@ def test_whole_copy_keeps_exact_query_provenance_and_public_cap(tmp_path):
     assert repo.explain_dependencies(query, table_name="daily_market") == plan
 
     widened = dataclasses.replace(query, max_result_rows=ROW_COUNT + 1)
-    with pytest.raises(DataError, match="QUERY_NOT_BOUNDED"):
-        repo.explain_dependencies(widened, table_name="daily_market")
-    with pytest.raises(DataError, match="QUERY_NOT_BOUNDED"):
-        next(repo.scan(widened, table_name="daily_market"))
-    with pytest.raises(DataError, match="MANIFEST_CORRUPT"):
+    for read in (lambda: repo.explain_dependencies(widened, table_name="daily_market"),
+                 lambda: next(repo.scan(widened, table_name="daily_market"))):
+        with pytest.raises(DataError) as refused:
+            read()
+        assert refused.value.code == "QUERY_NOT_BOUNDED"
+        assert refused.value.problem.message == "max_result_rows exceeds the pinned population bound"
+        assert refused.value.problem.details == {
+            "max_result_rows": ROW_COUNT + 1, "population_bound": ROW_COUNT}
+    with pytest.raises(DataError) as corrupt:
         next(repo.scan(query, table_name="daily_market"))
+    assert corrupt.value.code == "MANIFEST_CORRUPT"
+    assert corrupt.value.problem.message == "parquet footer row count does not match the manifest"
+    assert corrupt.value.problem.details == {
+        "fragment_id": repo.fragment_records(snapshot, "daily_market")[0].fragment_id}
     conn.close()
 
 
