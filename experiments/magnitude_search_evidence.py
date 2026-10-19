@@ -4,7 +4,7 @@ from numbers import Integral, Real
 
 from engine.v2.contracts import SnapshotRef
 from engine.v2.foundation import canonical_json, content_hash, from_document
-from engine.v2.research.magnitude_history_store import read_stored
+from engine.v2.research.magnitude_history_store import read_stored_for_events
 from engine.v2.research.magnitude_inputs import (
     magnitude_recipe,
     preflight_magnitude_targets,
@@ -24,12 +24,13 @@ def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json
         raise history_failure
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     preflight = preflight_magnitude_targets(repository, snapshot, as_of_month=month, event_ids=sorted(participants))
-    stored = read_stored(repository, from_document(SnapshotRef, history["feature_snapshot"]), history["context"])
+    stored = read_stored_for_events(repository, from_document(SnapshotRef, history["feature_snapshot"]),
+        history["context"], event_ids=participants, columns=binding["magnitude_execution"]["features"])
     train = qualify_magnitude_training_targets(repository, snapshot, as_of_month=month,
         labels_before=fold["training_labels_before"], event_ids=fold["training_candidate_event_ids"])
     return {"preflight": preflight, "stored_inputs_id": stored["inputs_id"], "training_inputs": dict(train.attrs),
             "training": train[["event_id", "absolute_move_pct"]].to_dict("records"),
-            "features": [row for row in stored["rows"] if row["event_id"] in participants]}
+            "features": stored["rows"]}
 
 
 def fit_evidence(inputs, fold, plan, execution):

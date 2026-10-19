@@ -36,7 +36,7 @@ from engine.v2.ops.generation_binding import accepted_generation_refs, refuse_ge
 from engine.v2.ops.scheduler import Claim  # noqa: E402
 from engine.v2.ops.stages import BARRIER_ONLY_REASONS  # noqa: E402
 from engine.v2.ops.supervisor import Service  # noqa: E402
-from tests.test_v2_data_legacy_materialization import CALENDAR_PATH, DIRECT_SCOPE, EVIDENCE_SCOPE  # noqa: E402
+from tests.v2.data.test_legacy_materialization import CALENDAR_PATH, DIRECT_SCOPE, EVIDENCE_SCOPE  # noqa: E402
 from tests.v2.ops.test_v2_ops_snapshot_stages import MANIFEST, SESSION, Case, case  # noqa: E402,F401
 
 EXPECTED_POPULATION = {"earnings_events": 2, "daily_market": 3, "trades": 2,

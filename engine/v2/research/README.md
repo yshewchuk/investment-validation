@@ -56,6 +56,8 @@ write path.
 
 `magnitude_history_inputs.admit_stored` verifies stored-feature receipt, contract and
 complete physical isolation using metadata only, without deriving a producer context.
+It and both stored readers share `magnitude_history_store.preflight_stored`, which
+returns ordered event/cutoff pairs after the same metadata-only admission.
 
 `magnitude_history_store` owns build-time native history materialization and its
 stored-only reader; `experiments.magnitude_history_store` provides the explicit
@@ -149,7 +151,7 @@ The manual no-ledger `experiments.v2_gate_variant` CLI consumes
 `experiments.gate_report` combines protected historical features, pinned
 calendar plans and fresh per-arm pricing for exploratory fold reports.
 
-<!-- public-interface: replay.clean_chain_rows, _pricing.MIN_MEANINGFUL_COST, _pricing.ChainSnapshot, _pricing.FillModel, _pricing.StructureError, _pricing.price_structure, signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ReplayResult, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label, experiment_exits.PositionLeg, experiment_exits.EnteredPosition, experiment_exits.ExitDecision, experiment_exits.walk_fixed_day, experiment_exits.walk_exit, experiment_exits.exit_report_frame, experiment_population.load_population, prediction_inputs.load_prediction_targets, event_history.load_event_history, magnitude_inputs.magnitude_recipe, magnitude_inputs.forecast_cutoff, magnitude_inputs.load_magnitude_targets, magnitude_inputs.preflight_magnitude_targets, magnitude_inputs.qualify_magnitude_training_targets, magnitude_features.load_magnitude_history, magnitude_folds.plan_magnitude_folds, magnitude_folds.magnitude_window, magnitude_folds.annual_fold, magnitude_history_store.build_context, magnitude_history_store.materialize, magnitude_history_store.read_stored, magnitude_history_inputs.admit_stored -->
+<!-- public-interface: replay.clean_chain_rows, _pricing.MIN_MEANINGFUL_COST, _pricing.ChainSnapshot, _pricing.FillModel, _pricing.StructureError, _pricing.price_structure, signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ReplayResult, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label, experiment_exits.PositionLeg, experiment_exits.EnteredPosition, experiment_exits.ExitDecision, experiment_exits.walk_fixed_day, experiment_exits.walk_exit, experiment_exits.exit_report_frame, experiment_population.load_population, prediction_inputs.load_prediction_targets, event_history.load_event_history, magnitude_inputs.magnitude_recipe, magnitude_inputs.forecast_cutoff, magnitude_inputs.load_magnitude_targets, magnitude_inputs.preflight_magnitude_targets, magnitude_inputs.qualify_magnitude_training_targets, magnitude_features.load_magnitude_history, magnitude_folds.plan_magnitude_folds, magnitude_folds.magnitude_window, magnitude_folds.annual_fold, magnitude_history_store.build_context, magnitude_history_store.materialize, magnitude_history_store.read_stored, magnitude_history_store.preflight_stored, magnitude_history_store.read_stored_for_events, magnitude_history_inputs.admit_stored -->
 
 ## Consumers
 
@@ -194,6 +196,10 @@ directly consume `load_magnitude_targets` for recorded inner and selected outer 
 and `qualify_magnitude_training_targets` for the admitted mean baseline.
 `experiments/magnitude_history_store.py` consumes `build_context`, `materialize`
 and `read_stored` from `magnitude_history_store` for explicit stored-feature build/read.
+`experiments.magnitude_search_evidence` uses `read_stored_for_events` to validate/hash
+every full stored row while retaining only requested events and numeric columns.
+Its `inputs_id` remains the full-envelope identity; projected rows are not that envelope.
+Metadata precedes all numeric decoding, including unselected rows; no outcomes open.
 `experiments/magnitude_history_inputs.py` consumes `magnitude_history_inputs.admit_stored`;
 `experiments/magnitude_history_report.py` consumes `magnitude_history_store.read_stored`
 and the same magnitude target APIs as the baseline.

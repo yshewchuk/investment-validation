@@ -26,11 +26,7 @@ def _window(history_start, decision_session):
 
 
 def _canonical_interval(record):
-    """Index only bounds whose pruning cannot hide an earlier planner error."""
-    if record.primary_key_min is not None and not all(
-            isinstance(key, (tuple, list)) and key and isinstance(key[0], str)
-            for key in (record.primary_key_min, record.primary_key_max)):
-        return None
+    """Index only time bounds with the planner's canonical calendar ordering."""
     lo, hi = record.time_min, record.time_max
     try:
         if (not all(isinstance(value, str) and value[:4] >= "1000"
@@ -74,10 +70,17 @@ def _point_entries(node, day):
         yield from by_start
 
 
-def _record_index(records):
-    """One metadata pass; uncertain bounds retain their conservative fallback."""
-    partitions = {}
+def _record_index(records, contract=COMPUTED_MOVES_CONTRACT):
+    """One metadata pass; invalid keys survive even partition/time pruning."""
+    partitions, invalid = {}, []
     for ordinal, record in enumerate(records):
+        try:
+            query_planner.fragment_key_bounds(record, contract)
+        except errors.DataError:
+            # Defer refusal to the planner: query validation and earlier
+            # membership failures must still win in their original order.
+            invalid.append((ordinal, record))
+            continue
         entries, fallback, all_records = partitions.setdefault(record.partition_key, ([], [], []))
         all_records.append((ordinal, record))
         bounds = _canonical_interval(record)
@@ -85,22 +88,25 @@ def _record_index(records):
             fallback.append((ordinal, record))
         else:
             entries.append((*bounds, ordinal, record))
-    return {key: (_interval_node(sorted(entries, key=lambda entry: entry[0])), fallback, all_records)
-            for key, (entries, fallback, all_records) in partitions.items()}
+    return ({key: (_interval_node(sorted(entries, key=lambda entry: entry[0])), fallback, all_records)
+             for key, (entries, fallback, all_records) in partitions.items()}, invalid)
 
 
 def _indexed_records(index, ticker, day):
     """Restore manifest order before the unchanged planner validates survivors."""
-    node, fallback, all_records = index.get(ticker, (None, (), ()))
+    partitions, invalid = index
+    node, fallback, all_records = partitions.get(ticker, (None, (), ()))
     if day[:4] < "1000":  # Platform timestamp normalization may not zero-pad these years.
-        return [record for _, record in all_records]
-    selected = [*fallback, *((ordinal, record) for _, _, ordinal, record in _point_entries(node, day))]
+        selected = [*invalid, *all_records]
+    else:
+        selected = [*invalid, *fallback,
+                    *((ordinal, record) for _, _, ordinal, record in _point_entries(node, day))]
     return [record for _, record in sorted(selected, key=lambda entry: entry[0])]
 
 
 def _plans(repository, snapshot, candidates, contract):
     """Shared history/target guard: prove all object membership before any opens."""
-    index = _record_index(repository.fragment_records(snapshot, "computed_moves"))
+    index = _record_index(repository.fragment_records(snapshot, "computed_moves"), contract)
     plans = []
     for event in candidates.itertuples(index=False):
         keys, interval = _target_filters(event)

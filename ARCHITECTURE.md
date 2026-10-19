@@ -492,7 +492,7 @@ Only a tracked path absent from the worktree reads as empty.
   order from it, and `build_nightly_plan` stamps that order into every
   plan's `"order"` field. The only function that walks the *whole* graph
   inline, including `native_parity`, is `run_shadow_nightly` — it has no
-  production caller, only `tests/test_v2_ops_legacy_workflows.py` and
+  production caller, only `tests/v2/ops/test_v2_ops_legacy_workflows.py` and
   `tests/v2/ops/test_native_shadow_render.py` call it. Production job
   **submission** (`build_legacy_job_requests`) does not walk `GRAPH` at
   all: its only production caller, `cli.py`, always passes

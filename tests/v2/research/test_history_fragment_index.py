@@ -64,6 +64,46 @@ def _ids(population):
     return [record.fragment_id for record in population.records]
 
 
+def _assert_refusal_paths(committed, monkeypatch, records, expected, *, key_filter=None):
+    """Literal error oracle across full/indexed planning and public readers."""
+    repository, snapshot, _ = committed
+    keys, interval = _event_query()
+    if key_filter is not None:
+        keys = key_filter
+    # Index construction must not raise before query validation or an earlier
+    # record's membership error. Poison every outcome open on all scan paths.
+    opened = poison_outcomes(monkeypatch, repository, snapshot, (), all_outcomes=True)
+    index = event_history._record_index(records)
+    indexed = event_history._indexed_records(index, TICKER, DAY)
+    monkeypatch.setattr(repository, "_table_records",
+                        lambda *_args: (COMPUTED_MOVES_CONTRACT, records))
+    monkeypatch.setattr(repository, "fragment_records", lambda *_args: records)
+    request = DataQuery(snapshot_id=snapshot.snapshot_id,
+        table_contract_ref=snapshot.table_versions["computed_moves"].table_contract_ref,
+        columns=("event_date",), key_filter=keys, time_interval=interval,
+        order_by=("ticker", "event_date"), max_batch_rows=1, max_result_rows=1)
+    actions = {
+        "full": lambda: query_planner.plan_scan_population(COMPUTED_MOVES_CONTRACT,
+            records, key_filter=keys, time_interval=interval),
+        "indexed": lambda: query_planner.plan_scan_population(COMPUTED_MOVES_CONTRACT,
+            indexed, key_filter=keys, time_interval=interval),
+        "bound": lambda: repository.scan_population_bound(snapshot.snapshot_id,
+            table_name="computed_moves", table_contract_ref=request.table_contract_ref,
+            key_filter=keys, time_interval=interval),
+        "explain": lambda: repository.explain_dependencies(request, table_name="computed_moves"),
+        "scan": lambda: list(repository.scan(request, table_name="computed_moves")),
+    }
+    if key_filter is None:
+        candidates = pd.DataFrame([history_event(DAY)])
+        actions["history"] = lambda: event_history._plans(
+            repository, snapshot, candidates, COMPUTED_MOVES_CONTRACT)
+    for name, action in actions.items():
+        with pytest.raises(DataError) as failure:
+            action()
+        assert failure.value.problem == expected, name
+    assert opened == []
+
+
 def test_native_two_issuer_index_preserves_exact_admitted_membership_without_outcome_reads(
         tmp_path, monkeypatch):
     first, second = "2023-01-02", DAY
@@ -150,7 +190,7 @@ def test_large_point_corpus_is_enumerated_once_and_planner_sees_one_record_per_t
     records = records[::2][::-1] + records[1::2]
     candidates = pd.DataFrame({"event_id": [f"candidate-{i}" for i in range(0, len(days), 17)],
         "ticker": TICKER, "event_date": days[::17]}).iloc[::-1]
-    enumerations, yielded, calls = [], [], []
+    enumerations, yielded, calls, admitted = [], [], [], []
 
     def metadata(received_snapshot, table_name):
         assert received_snapshot is snapshot and table_name == "computed_moves"
@@ -161,6 +201,11 @@ def test_large_point_corpus_is_enumerated_once_and_planner_sees_one_record_per_t
             yield record
 
     original = query_planner.plan_scan_population
+    original_bounds = query_planner.fragment_key_bounds
+
+    def admit(record, contract):
+        admitted.append(record.fragment_id)
+        return original_bounds(record, contract)
 
     def plan(contract, selected, **kwargs):
         selected = tuple(selected)
@@ -174,11 +219,13 @@ def test_large_point_corpus_is_enumerated_once_and_planner_sees_one_record_per_t
     monkeypatch.setattr(repository, "fragment_records", metadata)
     monkeypatch.setattr(repository, "scan_population_bound", no_second_lookup)
     monkeypatch.setattr(query_planner, "plan_scan_population", plan)
+    monkeypatch.setattr(query_planner, "fragment_key_bounds", admit)
     plans = event_history._plans(repository, snapshot, candidates, COMPUTED_MOVES_CONTRACT)
     expected = [f"point-{i}" for i in reversed(range(0, len(days), 17))]
     assert enumerations == ["computed_moves"]
     assert yielded == [record.fragment_id for record in records]
     assert calls == expected == [record.fragment_id for _, _, record in plans]
+    assert admitted == [record.fragment_id for record in records] + expected
     assert [event.event_id for event, _, _ in plans] == candidates.event_id.tolist()
     for event, request, _ in plans:
         keys, interval = _target_filters(event)
@@ -264,16 +311,51 @@ def test_years_below_1000_follow_planner_timestamp_normalization(committed, day)
 
 @pytest.mark.parametrize("field, value", [
     ("primary_key_min", (7, DAY)), ("primary_key_min", (False, DAY)),
-    ("primary_key_min", (None, DAY)), ("primary_key_min", ({}, DAY)),
+    ("primary_key_min", ({}, DAY)),
     ("primary_key_max", (7, DAY)), ("primary_key_max", (False, DAY)),
 ])
 def test_unsafe_leading_key_errors_are_not_hidden_by_nonoverlapping_time_bounds(
-        committed, field, value):
+        committed, monkeypatch, field, value):
     _, _, base = committed
     record = _record(base, "unsafe-key", "2024-01-01", "2024-01-01", **{field: value})
-    assert event_history._canonical_interval(record) is None
-    assert _equivalent([record]) == fail("CONTRACT_MISMATCH",
-        "key_filter values are incompatible with fragment key bounds").problem
+    _assert_refusal_paths(committed, monkeypatch, [record], fail("MANIFEST_CORRUPT",
+        "fragment primary-key bounds are invalid", details={"fragment_id": "unsafe-key"}).problem)
+
+
+@pytest.mark.parametrize("lo, hi", [
+    ((), (TICKER, DAY)), (("AAA",), ("AAA",)),
+    ((TICKER, DAY), (TICKER,)), ((TICKER, DAY, "extra"), (TICKER, DAY)),
+    (None, (TICKER, DAY)), ((TICKER, DAY), None),
+    (TICKER, (TICKER, DAY)), ((TICKER, DAY), TICKER),
+    ((TICKER, 7), (TICKER, DAY)), ((TICKER, DAY), (TICKER, False)),
+    ((TICKER, {}), (TICKER, DAY)), ((None, 7), (TICKER, DAY)),
+    (("ZZZ", DAY), ("AAA", DAY)), ((TICKER, "2024-01-01"), (TICKER, DAY)),
+])
+@pytest.mark.parametrize("placement", ["matching", "off-day", "off-partition"])
+def test_full_key_admission_precedes_every_history_index_prune(
+        committed, monkeypatch, lo, hi, placement):
+    _, _, base = committed
+    day = "2024-01-01" if placement == "off-day" else DAY
+    partition = "OTHER" if placement == "off-partition" else TICKER
+    bad = _record(base, "bad-bound", day, day, partition_key=partition,
+                  primary_key_min=lo, primary_key_max=hi)
+    _assert_refusal_paths(committed, monkeypatch, [_record(base, "valid"), bad],
+        fail("MANIFEST_CORRUPT", "fragment primary-key bounds are invalid",
+             details={"fragment_id": "bad-bound"}).problem)
+
+
+@pytest.mark.parametrize("lo, hi", [
+    (None, None), ((None, DAY), (TICKER, DAY)),
+    ((TICKER, None), (TICKER, DAY)), ((TICKER, DAY), (None, DAY)),
+    ((TICKER, DAY), (TICKER, None)),
+])
+@pytest.mark.parametrize("day, expected", [(DAY, ["null-key"]), ("2024-01-01", [])])
+def test_null_key_bounds_remain_conservative_without_defeating_valid_time_pruning(
+        committed, lo, hi, day, expected):
+    _, _, base = committed
+    record = _record(base, "null-key", primary_key_min=lo, primary_key_max=hi)
+    population = _equivalent([record], day=day)
+    assert _ids(population) == expected and population.row_count == len(expected)
 
 
 def test_wrong_primary_key_day_does_not_prune_overlapping_time_bounds(committed):
@@ -304,21 +386,49 @@ def test_bad_row_counts_preserve_first_manifest_failure_and_details(
 
 
 @pytest.mark.parametrize("key_first", [False, True])
-def test_membership_failures_precede_row_count_validation_in_original_order(committed, key_first):
+@pytest.mark.parametrize("partition", [TICKER, "OTHER"])
+def test_membership_failures_precede_row_count_validation_in_original_order(
+        committed, monkeypatch, key_first, partition):
     _, _, base = committed
     bad_time = _record(base, "bad-time", "bad", DAY)
-    bad_key = _record(base, "bad-key", "2024-01-01", "2024-01-01", primary_key_min=(7, DAY))
+    bad_key = _record(base, "bad-key", "2024-01-01", "2024-01-01",
+                      partition_key=partition, primary_key_min=(7, DAY))
     failures = [bad_key, bad_time] if key_first else [bad_time, bad_key]
     records = [_record(base, "bad-count", row_count=-1), *failures]
-    message = ("key_filter values are incompatible with fragment key bounds" if key_first
-        else "a time bound is not a parseable date or timestamp")
-    assert _equivalent(records) == fail("CONTRACT_MISMATCH", message).problem
+    expected = (fail("MANIFEST_CORRUPT", "fragment primary-key bounds are invalid",
+                     details={"fragment_id": "bad-key"}) if key_first else
+                fail("CONTRACT_MISMATCH", "a time bound is not a parseable date or timestamp"))
+    _assert_refusal_paths(committed, monkeypatch, records, expected.problem)
 
 
-def test_irrelevant_malformed_metadata_and_future_min_preserve_short_circuit(committed):
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("day", [DAY, "0001-01-01"])
+def test_global_invalid_key_fallback_keeps_first_manifest_error_details(committed, reverse, day):
     _, _, base = committed
+    records = [_record(base, "other-partition", partition_key="OTHER", primary_key_min=()),
+        _record(base, "off-day", "2024-01-01", "2024-01-01", primary_key_max=(TICKER,))]
+    if reverse:
+        records.reverse()
+    index = event_history._record_index(records)
+    assert event_history._indexed_records(index, TICKER, day) == records
+    assert _equivalent(records, day=day) == fail("MANIFEST_CORRUPT",
+        "fragment primary-key bounds are invalid",
+        details={"fragment_id": "off-day" if reverse else "other-partition"}).problem
+
+
+def test_query_validation_precedes_deferred_global_key_failure(committed, monkeypatch):
+    _, _, base = committed
+    records = [_record(base, "bad-key", partition_key="OTHER", primary_key_min=())]
+    keys = (KeyPredicate(column="unknown", operator="eq", values=(TICKER,)),)
+    _assert_refusal_paths(committed, monkeypatch, records,
+        fail("CONTRACT_MISMATCH", "'unknown' is not a filterable column").problem,
+        key_filter=keys)
+
+
+def test_irrelevant_malformed_metadata_and_future_min_preserve_short_circuit(committed, monkeypatch):
+    repository, snapshot, base = committed
     records = [_record(base, "other-partition", "bad", "bad", partition_key="OTHER",
-            primary_key_min=(7, DAY), row_count=None),
+            primary_key_min=("OTHER", DAY), primary_key_max=("OTHER", DAY), row_count=None),
         _record(base, "future-min", "2024-01-01", "bad", row_count=None),
         _record(base, "other-leading-key", "bad", "bad", primary_key_min=("ZZZ", DAY),
             primary_key_max=("ZZZ", DAY), row_count=None),
@@ -326,6 +436,23 @@ def test_irrelevant_malformed_metadata_and_future_min_preserve_short_circuit(com
     population = _equivalent(records)
     assert _ids(population) == ["matching"]
     assert population.row_count == 1
+    monkeypatch.setattr(repository, "_table_records",
+                        lambda *_args: (COMPUTED_MOVES_CONTRACT, records))
+    monkeypatch.setattr(repository, "fragment_records", lambda *_args: records)
+    plans = event_history._plans(repository, snapshot,
+                                pd.DataFrame([history_event(DAY)]), COMPUTED_MOVES_CONTRACT)
+    (_, request, selected), = plans
+    assert selected == records[-1]
+    assert repository.scan_population_bound(snapshot.snapshot_id, table_name="computed_moves",
+        table_contract_ref=request.table_contract_ref, key_filter=request.key_filter,
+        time_interval=request.time_interval) == 1
+    explained = repository.explain_dependencies(request, table_name="computed_moves")
+    assert [(item.fragment_ref.fragment_id, item.estimated_rows)
+            for item in explained.dependencies] == [("matching", 1)]
+    assert [row for batch in repository.scan(request, table_name="computed_moves")
+            for row in batch.to_pylist()] == [{"event_date": DAY, "realized_move_pct": 2.0,
+                "available_as_of_date": "2023-03-04", "skipped": False}]
+    assert repository.read_counters.snapshot()["computed_moves"]["fragments_opened"] == 1
 
 
 def test_late_competing_native_range_refuses_before_opening_earlier_safe_object(tmp_path, monkeypatch):

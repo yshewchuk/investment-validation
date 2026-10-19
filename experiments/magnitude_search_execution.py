@@ -34,6 +34,18 @@ def execution_limits(limits):
     return {**limits, "cpu_id": cpu}
 
 
+def _fit_inputs(inputs, inner, plan, execution):
+    """Project admitted history to precisely the ordered inputs the child consumes."""
+    training = [{name: row[name] for name in ("event_id", "absolute_move_pct")}
+                for row in inputs["training"]]
+    events = {row["event_id"] for row in training} | set(inner.get("evaluation_event_ids", ()))
+    horizons = set(plan["horizons"])
+    columns = ("event_id", "context_id", "horizon_sessions", *execution.get("features", ()))
+    features = [{name: row[name] for name in columns} for row in inputs["features"]
+                if row["event_id"] in events and row["horizon_sessions"] in horizons]
+    return {"features": features, "training": training}
+
+
 def run_fitted_trial(inputs, inner, plan, execution, limits, progress):
     """Run only the installed fit child; commit every progress marker before its ACK."""
     # CPython's Linux affinity API rejects CPU indices at or above INT_MAX.
@@ -43,7 +55,7 @@ def run_fitted_trial(inputs, inner, plan, execution, limits, progress):
     validate_execution_limits({name: value for name, value in limits.items() if name != "cpu_id"})
     forbid_fitting("run_fitted_trial")
     forbid_legacy_fitting("run_fitted_trial")
-    payload = canonical_json({"inputs": {name: inputs[name] for name in ("features", "training")},
+    payload = canonical_json({"inputs": _fit_inputs(inputs, inner, plan, execution),
                               "inner": inner, "plan": {"horizons": plan["horizons"]},
                               "execution": execution}).encode()
     if len(payload) > MAX_BYTES:

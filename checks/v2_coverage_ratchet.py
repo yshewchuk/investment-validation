@@ -100,6 +100,16 @@ Bumped to v14: the fingerprint-model scan moved to tests/v2/ops/. Baseline
 paths and phase-2 node IDs follow the move; package coverage counts and
 source hashes remain historical, not a fresh measurement.
 
+Bumped to v15: legacy-materialization and rebuild/rollback tests moved to
+``tests/v2/data/``. Their recorded baseline paths and the suite version
+follow the move; package counts and source hashes remain historical, not
+a fresh measurement. Phase 2 records the same path-only relocation.
+
+Bumped to v16: snapshot-import, reference-input and legacy-workflow tests
+follow their current documentation links into ``tests/v2/``. Their recorded
+paths change without changing coverage counts or source hashes. Phase 2
+also relocates the corpus-parity test and its historical node IDs.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
@@ -193,11 +203,13 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v14"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v16"
 
 
 # Baseline tests whose file was renamed (not just moved) after the baseline was written.
 PHASE1_RENAMED = {
+    "tests/test_v2_data_legacy_materialization.py": "tests/v2/data/test_legacy_materialization.py",
+    "tests/test_v2_data_rebuild_rollback.py": "tests/v2/data/test_rebuild_rollback.py",
     "tests/test_v2_ops_experiment_reports.py": "tests/v2/ops/test_experiment_reports.py",
     "tests/test_v2_ops_legacy_defects.py": "tests/v2/ops/test_legacy_defects.py",
     "tests/test_v2_ops_nightly_raw_rows.py": "tests/v2/ops/test_nightly_raw_rows.py",
