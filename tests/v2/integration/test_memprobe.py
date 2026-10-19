@@ -190,21 +190,41 @@ def test_trim_reports_trimmed_only_when_trim_returns_true(monkeypatch, capsys):
 
         return fake
 
+    def no_pyarrow_release():
+        monkeypatch.setattr(memprobe, "arrow_stats", lambda: None)
+        monkeypatch.setattr(memprobe, "_arrow_release", lambda: False)
+
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TRIM", "1")
     monkeypatch.setattr(memprobe, "peak_rss_bytes", lambda: 4 * 2**30)
 
+    no_pyarrow_release()
     monkeypatch.setattr(memprobe, "rss_bytes", rss_seq([3 * 2**30, 2 * 2**30]))
     monkeypatch.setattr(memprobe, "_malloc_trim", lambda: False)
     memprobe.snapshot("x")
     head = capsys.readouterr().out.splitlines()[0]
     assert "trimmed from" not in head
 
+    no_pyarrow_release()
     monkeypatch.setattr(memprobe, "rss_bytes", rss_seq([3 * 2**30, 2 * 2**30]))
     monkeypatch.setattr(memprobe, "_malloc_trim", lambda: True)
     memprobe.snapshot("x")
     head = capsys.readouterr().out.splitlines()[0]
     assert "trimmed from" in head
+
+    monkeypatch.setattr(memprobe, "rss_bytes", rss_seq([3 * 2**30, 2 * 2**30]))
+    monkeypatch.setattr(memprobe, "_arrow_release", lambda: True)
+    monkeypatch.setattr(memprobe, "_malloc_trim", lambda: False)
+    memprobe.snapshot("x")
+    head = capsys.readouterr().out.splitlines()[0]
+    assert "trimmed from" in head
+
+    no_pyarrow_release()
+    monkeypatch.setattr(memprobe, "rss_bytes", rss_seq([3 * 2**30, 2 * 2**30]))
+    monkeypatch.setattr(memprobe, "_malloc_trim", lambda: False)
+    memprobe.snapshot("x")
+    head = capsys.readouterr().out.splitlines()[0]
+    assert "trimmed from" not in head
 
 
 def test_trim_flag_off_never_calls_malloc_trim(monkeypatch, capsys):
@@ -589,6 +609,13 @@ def test_type_counts_twelve_types_returns_top_three_by_count_then_name():
         (7, "float"),
         (5, "str"),
         (4, "list"),
+    ]
+    tie_objs = [None, None, 0, 0, b"x", b"x", [1]]
+    assert memprobe.type_counts(10, tie_objs) == [
+        (2, "NoneType"),
+        (2, "bytes"),
+        (2, "int"),
+        (1, "list"),
     ]
 
 

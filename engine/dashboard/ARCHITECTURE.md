@@ -56,11 +56,15 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 `_EVERY` default 250, `_TOP` default 12). Off = no output and no gc walk; on,
 `[mem]` lines go to stdout. `_TRIM` runs `gc.collect()`, releases the pyarrow
 pool (`release_unused`) when pyarrow is already imported, then libc
-`malloc_trim(0)` before measuring, logging RSS before/after. Optional probes
+`malloc_trim(0)` before measuring; the before/after RSS pair (`rss=` plus the
+`[trimmed from X]` suffix on the head line) is printed only under `_TRIM` and
+only when the pyarrow release or malloc_trim actually ran — without them a
+single RSS value is printed. Optional probes
 are silently omitted when unavailable (pyarrow rows only if pyarrow is
 already imported; map/rss rows only if `/proc/self/smaps` and
 `/proc/self/status` are readable) and never print a failure line; only an
-unexpected exception in the snapshot body prints `probe failed`. Hooks:
+unexpected exception in the snapshot body prints `probe failed` — but the
+before/after RSS pair obeys the `_TRIM` rule above. Hooks:
 `NightlyReport.mark`, `score_calendar`, `load_chain_index`, `Scorer` caches.
 Estimates are sampled, not exact. The native (`engine/v2`) nightly is NOT
 covered: `engine/v2` must not import legacy `engine` (layer rule); legacy

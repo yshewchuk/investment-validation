@@ -13,9 +13,13 @@ Flags (read at call time; truthy is ``1``/``true``/``yes``/``on``):
 - ``INVESTING_PLAN_MEMPROFILE``: enable snapshots.
 - ``INVESTING_PLAN_MEMPROFILE_TRIM``: under enable, run ``gc.collect()``, then
   release the pyarrow pool (``release_unused``) if pyarrow is already
-  imported, then a best-effort libc ``malloc_trim(0)`` before measuring, and
-  log RSS before and after the trim so the trim line shows bytes retained by
-  Python vs held by glibc or the pyarrow pool.
+  imported, then a best-effort libc ``malloc_trim(0)`` before measuring. The
+  snapshot head then carries a ``[trimmed from X]`` suffix with the RSS read
+  before gc.collect/release when either the pyarrow release or malloc_trim
+  ran; the before/after RSS pair is printed only under this flag and only
+  when one of those two actually ran. Without them a single RSS value is
+  printed, so the line shows bytes retained by Python vs held by glibc or the
+  pyarrow pool.
 - ``INVESTING_PLAN_MEMPROFILE_EVERY``: int, default 250; used by :func:`tick`.
 - ``INVESTING_PLAN_MEMPROFILE_TOP``: int, default 12; rows of largest objects
   (negative values are clamped to 0 rows).
@@ -517,7 +521,8 @@ def _describe(o: Any, name: str, is_df: bool) -> str:
 
 def type_counts(n: int = 10, objs: Any = None) -> list[tuple[int, str]]:
     """Top ``n`` ``type(o).__name__`` counts over ``objs`` (default
-    ``gc.get_objects()``) as ``(count, name)``."""
+    ``gc.get_objects()``) as ``(count, name)``, ordered by count descending
+    with ties broken by name ascending."""
     n = _row_limit(n)
     if objs is None:
         try:
@@ -608,7 +613,8 @@ def snapshot(label: str, *, top: int | None = None) -> None:
         if trim_enabled():
             gc.collect()
             released = _arrow_release()
-            trimmed = bool(_malloc_trim())
+            trim_ok = bool(_malloc_trim())
+            trimmed = bool(released) or trim_ok
         post = rss_bytes()
         peak = peak_rss_bytes()
         head = f"{_PREFIX}{label} rss={_fmt(post)} peak={_fmt(peak)}"
