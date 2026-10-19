@@ -213,7 +213,8 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   | --- | --- |
   | Probe disabled (flag unset) | Snapshot/tick returns before any work; no output, no gc walk |
   | pyarrow not imported | No arrow row; no pool release |
-  | `/proc/self/smaps` or `/proc/self/status` unreadable | No map/rss rows |
+  | `/proc/self/smaps` unreadable | No map rows |
+  | `/proc/self/status` unreadable | No rss anon/file/shmem row; the head line shows `rss=0.00G peak=0.00G` |
   | Ordinary probe failure (any non-`MemoryError` exception, including a broken stdout) | Prints `[mem] <label> probe failed: <ExcType>: <repr>` when stdout works; the run continues |
   | `MemoryError` anywhere in a probe | Propagates to the caller (nightly `MemoryError` handling unchanged) |
   | Trim flag set but libc lacks `malloc_trim` | `malloc_trim` skipped, but the pyarrow pool release still runs; RSS lines still printed |

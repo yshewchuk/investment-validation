@@ -709,9 +709,14 @@ def test_snapshot_prints_rss_breakdown_types_and_arrow(monkeypatch, capsys):
 
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
     monkeypatch.delenv("INVESTING_PLAN_MEMPROFILE_TRIM", raising=False)
+    rss = memprobe.rss_breakdown()
+    monkeypatch.setattr(memprobe, "rss_breakdown", lambda: rss)
     memprobe.snapshot("x")
     out = capsys.readouterr().out
-    assert " rss anon=" in out
+    if rss:
+        assert " rss anon=" in out
+    else:
+        assert " rss anon=" not in out
     types_line = next(line for line in out.splitlines() if "  types " in line)
     pairs = [p for p in types_line.split("  types ", 1)[1].split(", ") if "=" in p]
     assert pairs

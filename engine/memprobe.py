@@ -27,9 +27,10 @@ Flags (read at call time; truthy is ``1``/``true``/``yes``/``on``):
 Output lines are prefixed with two spaces then ``[mem]`` and go to stdout,
 flushed. Size estimates are sampled, not exact. Optional probes are silently
 omitted when unavailable — pyarrow rows appear only when pyarrow is already
-imported, map/rss rows only when ``/proc/self/smaps`` and
-``/proc/self/status`` are readable; they never print a failure line. Only an
-unexpected exception in the snapshot body prints ``probe failed``.
+imported, map rows only when ``/proc/self/smaps`` is readable, and the rss
+anon/file/shmem row only when ``/proc/self/status`` is readable (otherwise the
+head line shows ``rss=0.00G peak=0.00G``); they never print a failure line.
+Only an unexpected exception in the snapshot body prints ``probe failed``.
 
 :func:`snapshot` and :func:`tick` never raise, except MemoryError which
 propagates; when disabled they return before any diagnostic work. The exported
