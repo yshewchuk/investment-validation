@@ -60,8 +60,7 @@ def _patch(monkeypatch):
             "as_of": kw["as_of"],
             "age": kw["quote_max_age_sessions"],
         })
-        t = events["ticker"].iloc[0]
-        return {(t, pd.Timestamp("2026-01-05"))}
+        return {(t, pd.Timestamp("2026-01-05")) for t in events["ticker"]}
 
     def fake_load(keys, **kw):
         calls["loaded"].append(set(keys))
@@ -79,7 +78,7 @@ def test_ladder_loads_one_index_and_shares_it(monkeypatch):
         _board([None, None, None]), scorer=scorer, alt_strikes=2, as_of=AS_OF,
     )
     assert len(calls["loaded"]) == 1
-    assert calls["loaded"][0] == {("T0", AS_OF)}
+    assert calls["loaded"][0] == {("T0", AS_OF), ("T1", AS_OF), ("T2", AS_OF)}
     assert len(rows) == 3 * 4
     assert len(scorer.indexes) == 12
     assert all(ix is sentinel for ix in scorer.indexes)
@@ -108,6 +107,7 @@ def test_ladder_groups_keys_by_strategy_and_offset(monkeypatch):
     assert by_offset[None] == [("T0", EVENT, "AMC")]
     assert sorted(by_offset[1]) == [("T1", EVENT, "AMC"), ("T2", EVENT, "AMC")]
     assert len(calls["loaded"]) == 1
+    assert calls["loaded"][0] == {("T0", AS_OF), ("T1", AS_OF), ("T2", AS_OF)}
 
 
 def test_board_chain_keys_adds_newest_and_older_fallback_chains(monkeypatch):
