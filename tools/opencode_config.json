@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "openrouter/xiaomi/mimo-v2.6-flash",
+  "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
   "permission": {
     "bash": {
       "*": "deny",
@@ -74,6 +74,12 @@
           }
         },
         "xiaomi/mimo-v2.6-flash": {
+          "limit": {
+            "context": 160000,
+            "output": 32000
+          }
+        },
+        "deepseek/deepseek-v4.1-flash-1017": {
           "limit": {
             "context": 160000,
             "output": 32000
