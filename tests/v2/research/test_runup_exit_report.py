@@ -499,8 +499,13 @@ def test_fractional_multi_event_comparison_uses_each_premium(source):
     document["event_ids"].append(second_id)
     snapshot = commit(source, rows, events=events)
     report = run(source, snapshot=snapshot, document=document)
-    assert report["counts"]["compared_count"] == 2
+    assert report["counts"] == {"requested_count": 2, "admitted_count": 2,
+                                "selected_count": 2, "compared_count": 2, "arm_count": 2}
     assert report["binding"]["request"]["threshold_units"] == "entry_debit_fraction"
+    assert len(report["rows"]) == 4
+    assert {(row["trade_id"], row["arm_id"]) for row in report["rows"]} == {
+        (EVENT_ID, "fixed_day"), (EVENT_ID, "ratio"),
+        (second_id, "fixed_day"), (second_id, "ratio")}
     for row in report["rows"]:
         scale = 3 if row["trade_id"] == second_id else 1
         assert row["entry_cost"] == 6.0 * scale
@@ -538,8 +543,12 @@ def test_fractional_comparison_still_requires_full_common_coverage(source):
     rows = [row for row in chain_rows() if row["obs_date"] != DATES[12]]
     with pytest.raises(DataError) as caught:
         run(source, rows=rows, document=fractional_request())
-    assert caught.value.problem.details["stage"] == "common_horizon_coverage"
-    assert caught.value.problem.details["compared_count"] == 0
+    assert_refusal(caught.value, "EXPERIMENT_VARIANT_FAILED", "internal")
+    assert caught.value.problem.message == "required daily position mark unavailable"
+    assert caught.value.problem.details == {
+        "requested_count": 1, "admitted_count": 1, "selected_count": 1,
+        "compared_count": 0, "arm_count": 2, "stage": "common_horizon_coverage",
+        "trade_id": EVENT_ID, "session": DATES[12].date().isoformat()}
 
 
 def test_fractional_threshold_overflow_refuses_without_partial_metrics(source):
@@ -547,20 +556,44 @@ def test_fractional_threshold_overflow_refuses_without_partial_metrics(source):
     document["arms"][0]["target_pnl"] = 1e308
     with pytest.raises(DataError) as caught:
         run(source, document=document)
-    assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
-    assert caught.value.problem.details["stage"] == "exit_comparison"
-    assert caught.value.problem.details["compared_count"] == 0
+    assert_refusal(caught.value, "EXPERIMENT_VARIANT_FAILED", "internal")
+    assert caught.value.problem.message == "entry-debit exit thresholds unavailable"
+    assert caught.value.problem.details == {
+        "requested_count": 1, "admitted_count": 1, "selected_count": 1,
+        "compared_count": 0, "arm_count": 2, "stage": "exit_comparison",
+        "trade_id": EVENT_ID, "session": DATES[0].date().isoformat()}
 
 
 @pytest.mark.parametrize("units", [None, "percent", [], {}, True])
-def test_invalid_fraction_units_refuse_before_reads(units):
-    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
+def test_invalid_fraction_units_refuse_before_reads(units, tmp_path, capsys):
+    document = {**fractional_request(), "threshold_units": units}
+    with pytest.raises(OpsError) as caught:
         comparison.compare_runup_exits(None, None, as_of_month="2025-01",
-                                       document={**fractional_request(), "threshold_units": units})
+                                       document=document)
+    assert_refusal(caught.value, "INVALID_EXPERIMENT_SPEC", "validation")
+    assert caught.value.problem.message == "invalid RUNUP comparison request"
+    assert caught.value.problem.details == {}
+
+    path = tmp_path / "request.json"
+    path.write_text(json.dumps(document))
+    with pytest.raises(OpsError) as caught:
+        cli._request(path)
+    assert_refusal(caught.value, "INVALID_EXPERIMENT_SPEC", "validation")
+    assert caught.value.problem.message == "invalid RUNUP comparison request"
+    assert caught.value.problem.details == {}
+    assert cli.main(["--catalog", str(tmp_path / "absent.sqlite"), "--store-root", str(tmp_path / "store"),
+                     "--snapshot-id", "missing", "--as-of-month", "2025-01", "--request", str(path)]) == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "refused", "refused": "INVALID_EXPERIMENT_SPEC", "details": {}}
+    assert not (tmp_path / "absent.sqlite").exists()
+    assert not (tmp_path / "store").exists()
 
 
 def test_fraction_request_refuses_event_specific_thresholds_before_reads():
     document = fractional_request()
     document["arms"][0]["event_thresholds"] = {EVENT_ID: 0.5}
-    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
+    with pytest.raises(OpsError) as caught:
         comparison.compare_runup_exits(None, None, as_of_month="2025-01", document=document)
+    assert_refusal(caught.value, "INVALID_EXPERIMENT_SPEC", "validation")
+    assert caught.value.problem.message == "invalid RUNUP comparison request"
+    assert caught.value.problem.details == {}

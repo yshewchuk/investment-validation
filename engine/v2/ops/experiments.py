@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Callable
 
 from engine.v2.foundation import content_hash
+from engine.v2.foundation.experiment_exits import valid_exit_recipe
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import (
@@ -307,39 +308,12 @@ def _finite_number(value) -> bool:
         return False
 
 
-def _valid_declared_exit(recipe) -> bool:
-    """The strict shape of a declared exit recipe the resolver will execute.
-
-    ``fixed_day`` keeps its 7a key set; ``target_stop`` has four required keys
-    and optional explicit threshold units, with a positive integer horizon,
-    finite positive target and finite negative stop. Every
-    other key set, kind, boolean, nonfinite value and wrong sign is refused.
-    """
-    if not isinstance(recipe, Mapping):
-        return False
-    days = recipe.get("trading_days")
-    if type(days) is not int or days <= 0:
-        return False
-    kind = recipe.get("kind")
-    if kind == "fixed_day":
-        return set(recipe) == {"kind", "trading_days"}
-    if kind == "target_stop":
-        required = {"kind", "trading_days", "target_pnl", "stop_pnl"}
-        if (set(recipe) not in (required, required | {"threshold_units"})
-                or recipe.get("threshold_units", "quote_price_times_quantity") not in
-                ("quote_price_times_quantity", "entry_debit_fraction")):
-            return False
-        return (_finite_number(recipe["target_pnl"]) and recipe["target_pnl"] > 0
-                and _finite_number(recipe["stop_pnl"]) and recipe["stop_pnl"] < 0)
-    return False
-
-
 def _validate_declared_exit(spec: ExperimentSpec) -> None:
     if "exit" not in spec.economic_params:
         return
     recipe = spec.economic_params["exit"]
     alpha = spec.economic_params.get("fill")
-    if (not _valid_declared_exit(recipe) or not _finite_number(alpha)
+    if (not valid_exit_recipe(recipe) or not _finite_number(alpha)
             or not 0 <= alpha <= 1 or spec.price_source != "option_chains"):
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "invalid fixed-day or target/stop exit economics or mark source")

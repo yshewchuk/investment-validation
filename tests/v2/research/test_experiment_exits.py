@@ -510,19 +510,35 @@ def _fraction_walk(source, *, recipe=None, rows=None, position=None, alpha=0.25)
     return result
 
 
+def _assert_fraction_refusal(error, *, code, category, message, details):
+    assert error.code == error.problem.code == code
+    assert error.problem.category == category
+    assert error.problem.message == message
+    assert error.problem.retryable is False
+    assert error.problem.details == details
+
+
 @pytest.mark.parametrize("price_scale,quantity_scale", [(1, 1), (3, 1), (1, 4), (3, 4)])
 def test_fraction_thresholds_scale_by_each_net_entry_debit(source, price_scale, quantity_scale):
+    rows = _rows()
+    for row in rows:
+        if row["right"] == "C" and row["obs_date"] == pd.Timestamp(DATES[2]):
+            row.update(bid=3.8, ask=4.2)
     rows = [{**row, "bid": row["bid"] * price_scale, "ask": row["ask"] * price_scale}
-            for row in _rows()]
+            for row in rows]
     position = replace(_position(), legs=tuple(replace(leg, qty=leg.qty * quantity_scale)
                                                for leg in _position().legs))
     result = _fraction_walk(source, rows=rows, position=position)
     scale = price_scale * quantity_scale
-    assert result.entry_cost == pytest.approx(3.5 * scale)  # Net, not gross long premium.
-    assert result.pnl == pytest.approx(2.4 * scale)
+    # Day 2 crosses half the 3.5 net debit but not half the 4.6 gross long premium.
+    assert result.entry_cost == pytest.approx(3.5 * scale)
+    assert result.exit_value == pytest.approx(5.5 * scale)
+    assert result.pnl == pytest.approx(2.0 * scale)
+    assert 0.5 * result.entry_cost <= result.pnl < 0.5 * 4.6 * scale
     assert result.exit_date == DATES[2]
     assert result.reason == "target"
     assert result.ambiguous_exit is False
+    assert result.fill_alpha == result.exit_fill_alpha == 0.25
 
 
 @pytest.mark.parametrize("mode,bid,ask,reason,pnl,ambiguous,exit_alpha", [
@@ -558,9 +574,10 @@ def test_fraction_refuses_credit_or_zero_debit_with_entry_context(source, basis)
             row.update(bid=2.0, ask=2.0)
     with pytest.raises(DataError) as caught:
         _fraction_walk(source, position=position, rows=rows)
-    assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
-    assert caught.value.problem.message == "entry-debit exit thresholds unavailable"
-    assert caught.value.problem.details == {"trade_id": "trade-a", "session": DATES[0]}
+    _assert_fraction_refusal(
+        caught.value, code="EXPERIMENT_VARIANT_FAILED", category="internal",
+        message="entry-debit exit thresholds unavailable",
+        details={"trade_id": "trade-a", "session": DATES[0]})
 
 
 @pytest.mark.parametrize("target,stop,price_scale", [(1e308, -0.5, 1), (0.5, -1e308, 1),
@@ -569,17 +586,27 @@ def test_fraction_refuses_credit_or_zero_debit_with_entry_context(source, basis)
 def test_fraction_refuses_conversion_overflow_or_underflow(source, target, stop, price_scale):
     rows = [{**row, "bid": row["bid"] * price_scale, "ask": row["ask"] * price_scale}
             for row in _rows()]
-    with pytest.raises(DataError, match="entry-debit exit thresholds unavailable"):
+    with pytest.raises(DataError) as caught:
         _fraction_walk(source, recipe=_fraction_recipe(target, stop), rows=rows)
+    _assert_fraction_refusal(
+        caught.value, code="EXPERIMENT_VARIANT_FAILED", category="internal",
+        message="entry-debit exit thresholds unavailable",
+        details={"trade_id": "trade-a", "session": DATES[0]})
 
 
 @pytest.mark.parametrize("units", [None, "", "percent", "entry_credit_fraction", [], {}, True])
 def test_invalid_threshold_units_refuse_before_repository_access(units):
     recipe = {**_fraction_recipe(), "threshold_units": units}
-    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
+    with pytest.raises(OpsError) as caught:
         resolve_experiment_plan(_exit_spec(recipe))
-    with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
+    _assert_fraction_refusal(
+        caught.value, code="INVALID_EXPERIMENT_SPEC", category="validation",
+        message="invalid fixed-day or target/stop exit economics or mark source", details={})
+    with pytest.raises(DataError) as caught:
         walk_exit(None, None, (), economic_params={"exit": recipe, "fill": 0.25})
+    _assert_fraction_refusal(
+        caught.value, code="EXPERIMENT_VARIANT_FAILED", category="internal",
+        message="invalid exit economics", details={})
 
 
 def test_units_are_identity_bound_and_absolute_behavior_is_unchanged(source):
@@ -603,8 +630,12 @@ def test_units_are_identity_bound_and_absolute_behavior_is_unchanged(source):
 
 def test_fraction_missing_mark_still_refuses(source):
     rows = [row for row in _rows() if row["obs_date"] != pd.Timestamp(DATES[1])]
-    with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED"):
+    with pytest.raises(DataError) as caught:
         _fraction_walk(source, rows=rows)
+    _assert_fraction_refusal(
+        caught.value, code="EXPERIMENT_VARIANT_FAILED", category="internal",
+        message="required daily position mark unavailable",
+        details={"trade_id": "trade-a", "session": DATES[1]})
 
 
 @pytest.mark.parametrize("alpha,cost,day,pnl", [(0.0, 3.8, 3, 3.3), (0.5, 3.2, 2, 3.0),

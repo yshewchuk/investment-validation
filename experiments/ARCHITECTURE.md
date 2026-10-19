@@ -628,8 +628,8 @@ when an arm would have exited before the missing mark. No survivor subset return
 
 Every arm retains those exact contracts, quantities, entry dates and fill alpha.
 Daily crossing, equality and conservative ambiguous-stop behavior belong to
-`experiment_exits.walk_exit`; ambiguous stops use alpha zero at exit. Values are
-quote price × quantity: spread is modeled, commissions/fees and the option
+`experiment_exits.walk_exit`; ambiguous stops use alpha zero at exit. Monetary
+outputs are quote price × quantity: spread is modeled, commissions/fees and the option
 contract multiplier are absent. These are daily mark-based hypothetical results,
 not intraday execution, stop-price fills, realized returns or an optimized strategy.
 

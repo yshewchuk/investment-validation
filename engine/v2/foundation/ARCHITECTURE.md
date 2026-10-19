@@ -34,6 +34,13 @@ Invalid as-of month raises `ValueError`; research converts it to its typed refus
 `final_holdout` strictly decodes immutable declaration/request contracts and projects verified registration metadata into a request, without I/O or authority. It validates exact schema, content-addressed references, hashes, identities and shared month/membership versions; invalid metadata raises `ValueError`/`DocumentError` for caller translation.
 `experiments.native_registration` uses these pure helpers; catalog registration verification stays with its existing owner. Request identity is the existing experiment ID; recipe/model/completeness references come from the sealed registration, not preparation-time overrides.
 
+`experiment_exits.valid_exit_recipe` owns the closed fixed-day/target-stop
+declaration predicate shared by ops planning and research walking;
+`valid_threshold_units` also admits the RUNUP request's unit vocabulary.
+Malformed shapes, horizons, units or signed finite-number thresholds return
+`False`, without mutation, I/O, coercion or retries. Callers retain their typed
+refusal envelopes; fill/source admission and position pricing stay with them.
+
 ## Inputs
 
 The factory accepts observed ISO session days and an event-through day. Exit planning accepts a structural event key and a `CalendarSessions` value.

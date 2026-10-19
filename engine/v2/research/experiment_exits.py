@@ -7,6 +7,7 @@ from math import isfinite
 import pandas as pd
 
 from engine.v2.data.errors import fail
+from engine.v2.foundation.experiment_exits import valid_exit_recipe
 from engine.v2.research._chains import load_chain_index
 from engine.v2.research._pricing import FillModel, trading_calendar_from_snapshot
 
@@ -145,37 +146,14 @@ def walk_fixed_day(repository, snapshot, positions, *, economic_params):
                  for p in positions)
 
 
-def _validate_target_stop(recipe):
-    required = {"kind", "trading_days", "target_pnl", "stop_pnl"}
-    if (set(recipe) not in (required, required | {"threshold_units"})
-            or recipe.get("threshold_units", "quote_price_times_quantity") not in
-            ("quote_price_times_quantity", "entry_debit_fraction")):
-        raise ValueError("invalid target/stop recipe")
-    for name, sign in (("target_pnl", 1), ("stop_pnl", -1)):
-        value = recipe[name]
-        if type(value) not in (int, float) or not isfinite(value) or sign * value <= 0:
-            raise ValueError("invalid target/stop threshold")
-
-
 def _exit_recipe(economic_params):
     """The one declared exit recipe and its already-validated alpha."""
     recipe = economic_params["exit"]
     alpha = economic_params["fill"]
     if type(alpha) not in (int, float) or not isfinite(alpha) or not 0 <= alpha <= 1:
         raise ValueError("invalid fill economics")
-    if not isinstance(recipe, Mapping):
+    if not valid_exit_recipe(recipe):
         raise ValueError("invalid exit recipe")
-    days = recipe.get("trading_days")
-    if type(days) is not int or days <= 0:
-        raise ValueError("invalid trading horizon")
-    kind = recipe.get("kind")
-    if kind == "fixed_day":
-        if set(recipe) != {"kind", "trading_days"}:
-            raise ValueError("invalid fixed-day recipe")
-    elif kind == "target_stop":
-        _validate_target_stop(recipe)
-    else:
-        raise ValueError("unknown exit kind")
     return recipe
 
 

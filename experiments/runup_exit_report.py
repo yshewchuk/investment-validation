@@ -7,6 +7,7 @@ from pathlib import Path
 
 from engine.v2.data.errors import DataError
 from engine.v2.foundation import content_hash, to_document
+from engine.v2.foundation.experiment_exits import valid_threshold_units
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import environment_identity, source_closure
 from engine.v2.research._chains import load_chain_index
@@ -43,7 +44,7 @@ def validate_request(document):
                 or any(not isinstance(i, str) or not i.strip() for i in ids)
                 or len(set(ids)) != len(ids)
                 or not _number(document["fill_alpha"], 0, 1)
-                or document["threshold_units"] not in (UNITS, "entry_debit_fraction")
+                or not valid_threshold_units(document["threshold_units"])
                 or not isinstance(arms, list) or not 1 <= len(arms) <= 8):
             raise ValueError
         normalized, names = [], {"fixed_day"}

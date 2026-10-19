@@ -318,7 +318,8 @@ economics with `price_source="option_chains"` and explicit numeric `fill` in
 the existing alpha ladder's range. It supports `exit={kind: "fixed_day",
 trading_days: N}` and `exit={kind: "target_stop", trading_days: N,
 target_pnl: T, stop_pnl: S}`; N is a positive integer, T is finite and positive,
-and S is finite and negative. Target/stop recipes may declare `threshold_units`:
+and S is finite and negative. Declaration admission is shared with ops through
+`foundation.experiment_exits.valid_exit_recipe`. Target/stop recipes may declare `threshold_units`:
 `quote_price_times_quantity` (also the omitted-field behavior) or
 `entry_debit_fraction`. Fractions multiply each position's positive net opening
 debit, priced once at the declared alpha, before walking its daily closing marks.
