@@ -251,6 +251,9 @@ def resolve_final_session(
         "daily_market": _coverage_frame("daily_market", "date", stamp),
         "option_chains": _coverage_frame("option_chains", "obs_date", stamp),
     }
+    # shift snaps a non-trading date to the prior session, so the first step must not also subtract one.
+    if not calendar.is_trading_day(stamp):
+        stamp = calendar.shift(stamp, 0)
     for _ in range(max_sessions):
         if calendar.is_trading_day(stamp):
             result = session_finality(stamp, tickers, frames=frames)
