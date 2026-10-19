@@ -670,6 +670,17 @@ validation reconstructs the protected receipt from admitted physical preflight.
 Static imports include these helpers in recorder and outer source bindings.
 Completed replay verifies the complete evidence chain without native payloads or fitting.
 
+Fresh inner/outer admission streams complete validation, retaining only fold participants'
+primary keys and registered numeric features. Full stored `inputs_id`, matrices and fits are preserved.
+Slim cohort documents have their own honest content hashes: their journal/result IDs
+are not the old full-row hashes. Changed producer/recorder closures require fresh build contexts and seals; old sealed
+runs fail closed, and no historical receipt or artifact is rewritten. The fit transport
+independently projects qualified training/evaluation rows and selected horizons/columns.
+Parent, child and journal retain their 16 MiB limits. Projection removes lineage
+amplification; sufficiently large numeric folds still refuse, so full-universe capacity
+requires a separately reviewed bounded artifact/batching protocol. No scale is inferred
+from event counts; scientific selection and cutoff rules are unchanged.
+
 | Condition | Enforced outcome |
 |---|---|
 | Invalid outer year or limits | `INVALID_EXPERIMENT_SPEC`; no outer claim or payload access. Limit admission precedes journal/plan checks. |

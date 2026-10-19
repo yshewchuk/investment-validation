@@ -31,6 +31,13 @@ Non-responsibilities: never computes a trading verdict (`engine/v2/scoring`)
 or promotes a champion (`engine/v2/models/training`); never decides *what* to
 fetch or *when* to run a job (`engine/v2/ops`, a caller, owns that).
 
+Repository scans merge one transitively overlapping full-primary-key range group at
+a time. Disjoint inspected fragment ranges therefore keep one active fragment stream;
+unknown bounds retain the full merge fallback. Bounds use the same typed key ordering
+as decoded rows. Malformed bounds or returned keys outside their declared range refuse
+`MANIFEST_CORRUPT`; object verification, footer counts, strict global order and result
+limits remain mandatory. Batches are provisional until the scan is fully exhausted.
+
 ## Primary contracts and public interfaces
 
 **IV-crush target construction.** `iv_crush.build_rows` is a pure, bounded,

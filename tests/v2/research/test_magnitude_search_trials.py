@@ -148,10 +148,19 @@ def test_shared_training_cohort_and_forecasts_committed_before_validation(case, 
     assert one["inputs"]["training"] == [
         {"event_id": event_id, "absolute_move_pct": 2.0} for event_id in training_ids]
     stored = read_stored(case.source.repository, case.source.feature_snapshot, case.source.build["context"])
-    expected_features = [row for row in stored["rows"] if row["event_id"] in participant_ids]
+    columns = ("event_id", "context_id", "horizon_sessions",
+               *case.source.registration.document["magnitude_execution"]["features"])
+    expected_features = [{name: row[name] for name in columns}
+                         for row in stored["rows"] if row["event_id"] in participant_ids]
     assert len(expected_features) == 18 < len(stored["rows"])
     assert one["inputs"]["features"] == expected_features
     assert one["inputs"]["stored_inputs_id"] == stored["inputs_id"]
+    full_cohort = {**one["inputs"], "features": [
+        row for row in stored["rows"] if row["event_id"] in participant_ids]}
+    assert _hash(one["inputs"]) != _hash(full_cohort), "projected cohorts need their own content identity"
+    admitted = case.recorder._read("inputs:" + one["trial_id"])
+    assert admitted["inputs_id"] == _hash(one["inputs"])
+    assert case.recorder._read("cohort:" + admitted["cohort"]) == one["inputs"]
     original = trials.load_magnitude_targets
     def labels(*a, **kw):
         committed = case.recorder._read("forecasts:" + one["trial_id"])
@@ -195,6 +204,24 @@ def test_empty_outer_folds_refuse_freeze_before_native_payloads_or_selection(cas
         recorder.freeze()
     assert trial_slots(case) == before
     assert all(slot != "selection" for slot, _ in before)
+
+
+@pytest.mark.parametrize("path", ["engine/v2/data/repository.py",
+    "engine/v2/research/magnitude_history_store.py", "experiments/magnitude_search_execution.py"])
+def test_changed_scaling_source_refuses_existing_seal_before_claim_or_inputs(case, monkeypatch, path):
+    original = trials.source_closure
+
+    def changed(*args, **kwargs):
+        sources = original(*args, **kwargs)
+        assert path in sources
+        return {**sources, path: "sha256:" + "0" * 64}
+
+    before = trial_slots(case)
+    monkeypatch.setattr(trials, "source_closure", changed)
+    monkeypatch.setattr(case.recorder, "_inputs", lambda *args: pytest.fail("changed seal opened inputs"))
+    with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search recording requires its exact sealed plan"):
+        case.recorder.start(*trial_cases(case)[0])
+    assert trial_slots(case) == before
 
 
 def test_failure_excludes_entire_candidate_and_redacts_diagnostics(case):

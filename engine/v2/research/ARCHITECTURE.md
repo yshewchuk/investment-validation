@@ -575,7 +575,7 @@ chain index, the entry-selection seams above and exit walking for read-only comp
 `experiments/native_registration.py` consumes
 `experiment_population.load_population` and `magnitude_folds`' window/planner.
 `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`.
-`experiments/magnitude_search_evidence.py` consumes `read_stored`, `preflight_magnitude_targets`,
+`experiments/magnitude_search_evidence.py` consumes `read_stored_for_events`, `preflight_magnitude_targets`,
 `qualify_magnitude_training_targets` and `magnitude_recipe` for shared inner/outer admission.
 `experiments/magnitude_search_trials.py` directly consumes `load_magnitude_targets`,
 owns legacy/v2 no-fit guards and delegates bounded inner fitting to
@@ -627,6 +627,18 @@ It does not derive or authenticate a context; the unlayered caller owns supporte
 derivation and native registration. `experiments/magnitude_history_report.py` consumes
 the existing `read_stored` plus magnitude target preflight/load/qualification APIs.
 Neither consumer modifies the build closure, stored artifact identity or final-read authority.
+
+`magnitude_history_store.read_stored_for_events` is the projected search reader.
+It repeats complete receipt/isolation checks and two whole-source scans on every call:
+all metadata first, then all features, including events and columns not retained.
+Per-row metadata digests/counts detect drift between scans; canonical full rows feed
+the exact original `read_stored` envelope hash. Returned `inputs_id` therefore names
+the complete source envelope, not the returned projected rows. Selected rows retain
+only primary-key identity and requested numeric features, without lineage strings.
+Three-row scan batches and sequential disjoint-fragment reads bound live lineage
+to event-sized batches; context, manifest, row digests/counts and selected slim rows still scale
+with their cardinalities. There is no fixed overall byte cap or cross-call cache.
+The original full-row `read_stored` API and its returned envelope remain unchanged.
 
 ## External systems and libraries
 

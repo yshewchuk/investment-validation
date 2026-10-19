@@ -53,17 +53,12 @@ Judgement calls (task brief decision 1, P2-4):
   ``data_snapshot_heads``, so such a value is simply an unknown
   ``snapshot_id`` and already gets ``SNAPSHOT_NOT_FOUND`` from the existing
   code below.
-* fragments are read in ``manifests.py``'s own membership order (ascending
-  ``partition_key``, and — per the ``data_version_fragments`` ``ordinal``
-  column — ascending within a partition too, whatever a partition's fragment
-  count) and merged into one global order via a streaming ``heapq.merge`` on
-  each row's full primary key, not a sort of the whole result: this is
-  correct whether a logical partition holds one fragment or several, and it
-  is what makes §8.2 step 7's "process fragments in manifest key-range
-  order; never sort an unbounded result in memory" hold even when a query's
-  primary key does not happen to be partition-aligned (e.g. a table
-  partitioned by year but keyed leading-column by ticker). The merge only
-  ever buffers one pending row per still-open fragment.
+* manifest-proven disjoint full-primary-key ranges are streamed in key order,
+  one overlapping range group at a time. ``heapq.merge`` still handles every
+  group (or all fragments when bounds are unknown), including tables whose
+  partition order differs from primary-key order. Only fragment metadata is
+  sorted, never result rows. Each active fragment retains a decoded batch,
+  so disjoint fragments must not all be primed by one global merge.
 * the merged stream's own strictly-increasing, unique order is verified end
   to end (across fragment boundaries, not only within one) before each row
   is even appended to a pending batch — the literal implementation of §8.2
@@ -385,21 +380,91 @@ class Repository:
 
     def _execute_scan(self, contract: TableContract, records: list[FragmentRecord],
                       query: DataQuery):
+        # Validate before pruning, which also indexes these bounds. Incomplete
+        # or malformed metadata must not become a raw comparison/index error.
+        bounds = {r.fragment_id: self._fragment_key_bounds(r, contract) for r in records}
         population = query_mod.plan_scan_population(
             contract, records, key_filter=query.key_filter, time_interval=query.time_interval)
         self._check_population_bound(query, population)
         needed = tuple(dict.fromkeys((*query.columns, *contract.primary_key, *self._hidden_columns(query))))
         batch_cap = min(query.max_batch_rows, contract.maximum_batch_rows)
-        streams = [self._fragment_rows(r, contract, needed, query, batch_cap)
-                   for r in population.records]
-        merged = heapq.merge(*streams, key=lambda item: item[0])
+        merged = self._grouped_fragment_rows(
+            population.records, bounds, contract, needed, query, batch_cap)
         try:
             yield from self._yield_batches(merged, contract, query, batch_cap)
         finally:
-            for stream in streams:
-                stream.close()
+            merged.close()
         if query.deadline is not None:
             self._check_deadline(query.deadline)
+
+    def _fragment_key_bounds(self, record: FragmentRecord, contract: TableContract):
+        lo, hi = record.primary_key_min, record.primary_key_max
+        if lo is None and hi is None:
+            return None
+        try:
+            bounds = tuple(self._normalized_key_bound(bound, contract) for bound in (lo, hi))
+            if bounds[0] > bounds[1]:
+                raise ValueError("reversed bounds")
+        except (TypeError, ValueError, KeyError, OverflowError, errors.DataError):
+            raise errors.fail("MANIFEST_CORRUPT", "fragment primary-key bounds are invalid",
+                              details={"fragment_id": record.fragment_id}) from None
+        return bounds
+
+    def _normalized_key_bound(self, bound, contract: TableContract) -> tuple:
+        if not isinstance(bound, (tuple, list)) or len(bound) != len(contract.primary_key):
+            raise ValueError("invalid bound arity")
+        physical = {column.name: column.physical_type for column in contract.columns}
+        scalar_types = {"string": (str,), "int64": (int,), "bool": (bool,),
+                        "float64": (int, float)}
+        row = {}
+        for name, value in zip(contract.primary_key, bound):
+            kind = physical[name]
+            allowed = (str,) if kind.startswith("timestamp") else scalar_types[kind]
+            if type(value) not in allowed:
+                raise ValueError("invalid bound scalar")
+            if isinstance(value, float) and (value != value or value in (float("inf"), -float("inf"))):
+                raise ValueError("nonfinite bound scalar")
+            row[name] = query_mod._parsed_bound(value) if kind.startswith("timestamp") else value
+        return query_mod.order_key(row, contract)
+
+    def _fragment_groups(self, records, bounds):
+        """Only metadata is sorted; missing bounds conservatively overlap all."""
+        if any(bounds[record.fragment_id] is None for record in records):
+            yield records
+            return
+        ordered = sorted(records, key=lambda record: bounds[record.fragment_id][0])
+        group, upper = [], None
+        for record in ordered:
+            lo, hi = bounds[record.fragment_id]
+            if group and lo > upper:
+                yield group
+                group, upper = [], None
+            group.append(record)
+            upper = hi if upper is None else max(upper, hi)
+        if group:
+            yield group
+
+    def _grouped_fragment_rows(self, records, bounds, contract, needed, query, batch_cap):
+        for group in self._fragment_groups(records, bounds):
+            streams = [self._range_checked_rows(
+                record, bounds[record.fragment_id], contract, needed, query, batch_cap)
+                for record in group]
+            try:
+                yield from heapq.merge(*streams, key=lambda item: item[0])
+            finally:
+                for stream in streams:
+                    stream.close()
+
+    def _range_checked_rows(self, record, bounds, contract, needed, query, batch_cap):
+        stream = self._fragment_rows(record, contract, needed, query, batch_cap)
+        try:
+            for key, row in stream:
+                if bounds is not None and not bounds[0] <= key <= bounds[1]:
+                    raise errors.fail("MANIFEST_CORRUPT", "scan key is outside fragment bounds",
+                                      details={"fragment_id": record.fragment_id})
+                yield key, row
+        finally:
+            stream.close()
 
     def _hidden_columns(self, query: DataQuery) -> tuple:
         """Every ``key_filter``/``time_interval`` column ``query.columns``
