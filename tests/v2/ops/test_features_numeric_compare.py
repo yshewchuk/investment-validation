@@ -374,7 +374,7 @@ def test_numeric_difference_still_fails_next_to_a_carried_stamp(tmp_path):
 
 
 @pytest.mark.parametrize("side", ["rebuilt", "pinned"])
-@pytest.mark.parametrize("bad", [None, "not-a-hash", "A" * 64, "a" * 63])
+@pytest.mark.parametrize("bad", [None, "not-a-hash", "A" * 64, "a" * 63, "a" * 64 + "x"])
 def test_invalid_or_null_stamp_fails_on_either_side(tmp_path, side, bad):
     good = _stamped([_H1] * 6)
     broken = _stamped([_H1, bad, _H1, bad, _H1, _H1])
@@ -402,3 +402,33 @@ def test_byte_identical_tier4_with_a_bad_stamp_is_still_refused(tmp_path, monkey
     assert out["verdict"] == "mismatch"
     assert out["tables"]["tier4"]["mismatches"][0]["reason"] == "provenance_stamp"
     assert out["tables"]["panel"]["verdict"] == "match"
+
+
+def test_invalid_stamps_on_both_sides_are_summed(tmp_path):
+    out = _tier4_pair(tmp_path, _stamped([_H1, "bad", _H1, _H1, _H1, _H1]),
+                      _stamped([_H1, "bad", "bad", _H1, _H1, _H1]))
+    assert out["mismatches"] == [{"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 3}]
+
+
+def test_byte_identical_tier4_with_valid_stamps_matches_and_bad_count_is_exact(tmp_path, monkeypatch):
+    from engine.data import store
+    from engine.v2.ops.legacy_adapter import _compare_to_pinned
+    import engine.paths as paths_module
+
+    root = tmp_path / "mat"
+    panel = root / "data" / "features" / "panel.parquet"
+    path = root / "data" / "features" / "tier4_forecasts.parquet"
+    _write(panel, _frame())
+    monkeypatch.setattr(paths_module, "ROOT", root)
+    monkeypatch.setattr(paths_module, "PANEL", panel)
+    monkeypatch.setattr(paths_module, "TIER4", path)
+
+    def run(stamps):
+        _write(path, _stamped(stamps))
+        return _compare_to_pinned(root, {"panel_sha256": store.file_sha256(panel),
+                                         "tier4_sha256": store.file_sha256(path)})
+
+    assert run([_H1, _H2, _H1, _H1, _H1, _H1])["verdict"] == "match"
+    bad = run([_H1, "bad", "bad", _H1, _H1, _H1])
+    assert bad["tables"]["tier4"]["mismatches"] == [
+        {"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 4}]
