@@ -30,3 +30,7 @@
 - Before the first push of a PR that edits an `ARCHITECTURE.md`, run `python3 tools/oc_check.py tests/test_architecture_doc_budgets.py`.
 - To update a PR description, write a Markdown file and run `gh pr edit <n> --body-file <file>`. Do not use an inline script that writes files.
 - New tests go in `tests/v2/<package>/` (package names from `checks/layer_map.py`) or `tests/v2/integration/`, never the root `tests/` folder. A PR that edits a root-level test should move it and lower `checks/test_layout_budget.txt` by exactly the number of files moved. Before pushing, run `python3 checks/test_layout_budget.py --base-ref origin/main`; PR CI enforces it.
+
+## Conventions
+
+- Progress logging: new or changed long-running code (loops over events, tickers, rows or files; jobs, CLIs and nightly steps expected to run more than about a minute) logs to stderr at a bounded cadence, never per item: stage start and end with elapsed time; periodic done/total, rate and ETA (style of the nightly scorer's `[score] N/M events, ... ETA`); main control decisions (branch taken, items skipped or refused and why, batch sizes); RSS at stage boundaries. stdout stays for machine-readable results. The merge gate checks this (probe P19), rated by consequence.

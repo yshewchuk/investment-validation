@@ -207,6 +207,19 @@ reviews:
         with a legacy row already occupying the same key space (e.g. a
         ledger "ran" row keyed `(experiment_id, stage)` that a legacy run
         already wrote) — /ARCHITECTURE.md §6.
+    - path: "{engine,experiments,tools}/**"
+      instructions: |
+        Long-running code must log progress (AGENTS.md "Conventions").
+        For new or changed code that loops over events, tickers, rows or
+        files, or is a job, CLI or nightly step expected to run more than
+        about a minute, check for stderr logging at a bounded cadence
+        (never per item): stage start/end with elapsed time; periodic
+        done/total, rate and ETA; main control decisions (branch taken,
+        items skipped or refused and why, batch sizes); RSS at stage
+        boundaries. stdout stays for machine-readable results.
+        Rate by consequence, not as an automatic blocker: a multi-hour job
+        with no progress output is a real finding; a two-second loop with
+        none is not worth a comment.
     - path: "**/*.py"
       instructions: |
         Wrap standard tools; do not hand-roll standard formats
