@@ -13,7 +13,10 @@ from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments.native_gate_worker import read_native_staged_input
-from experiments.native_registration import MAX_NATIVE_EVIDENCE_BYTES, valid_registration_read_budget
+from experiments.native_registration import (
+    MAX_NATIVE_EVIDENCE_BYTES,
+    valid_registration_read_budget,
+)
 from experiments.registered_runup import comparison_request, register_runup, run_runup
 
 
