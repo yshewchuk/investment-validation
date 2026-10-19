@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
-from typing import Any
+from typing import Any, get_args
 
 import pyarrow as pa
 from pyarrow import parquet as pq
@@ -48,7 +48,8 @@ def _value_matches(physical_type: str, value: Any) -> bool:
     if physical_type == "string":
         return isinstance(value, str)
     if physical_type == "float64":
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and value - value == 0)
     if physical_type == "int64":
         return isinstance(value, int) and not isinstance(value, bool)
     if physical_type == "bool":
@@ -67,6 +68,12 @@ class StreamingTableWriter:
                  table_name: str, attempt_id: str, coverage: CompletedCoverage, *,
                  knowledge_mode: manifests.KnowledgeMode = "reconstructed",
                  availability_evidence_refs: Sequence[str] = ()) -> None:
+        if knowledge_mode not in get_args(manifests.KnowledgeMode):
+            raise errors.fail("CONTRACT_MISMATCH", "unknown knowledge_mode")
+        if not isinstance(availability_evidence_refs, (list, tuple)) or not all(
+                isinstance(item, str) for item in availability_evidence_refs):
+            raise errors.fail("CONTRACT_MISMATCH",
+                              "availability_evidence_refs must be a sequence of strings")
         if coverage.state != "complete":
             raise errors.fail("INPUT_CHANGED", "incomplete coverage cannot build a candidate")
         contract = incremental.table_contract(parent, table_name)
@@ -178,6 +185,10 @@ class StreamingTableWriter:
             if not _value_matches(column.physical_type, value):
                 raise errors.fail("CONTRACT_MISMATCH",
                                   "a streamed row has a value incompatible with its column type")
+        for name in self._contract.primary_key:
+            if row.get(name) is None:
+                raise errors.fail("CONTRACT_MISMATCH",
+                                  "a streamed row omits a primary-key value")
         key = tuple(incremental.sort_value(row[name])
                     for name in self._contract.primary_key)
         if self._previous_key is not None:

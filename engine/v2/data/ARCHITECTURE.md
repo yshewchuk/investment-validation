@@ -334,18 +334,18 @@ commits.
 - *Order and validity:* each accepted row is copied (later caller mutation cannot
   change it) and must satisfy the contract: known columns only, every column present
   unless nullable, no null in a non-nullable column, and a value of the column's
-  physical type. Rows must arrive in strictly increasing primary-key order across
-  and within batches (the caller orders its batches). Shape, nulls, types and key
-  order are checked at `append_rows`; Arrow conversion at the row-group write. Any
-  violation or unconvertible value refuses `CONTRACT_MISMATCH`, never repaired. A
-  staging-file I/O failure propagates as an `OSError` after cleanup. `append_rows`
-  after `finish`/`abort`/failure refuses `INPUT_CHANGED`.
+  physical type (a float64 value must be finite; a missing nullable value is `None`);
+  primary-key values must be present. Rows arrive in strictly increasing primary-key
+  order across and within batches (the caller orders batches). Shape, nulls, types
+  and key order are checked at `append_rows`, Arrow conversion at the row-group
+  write, `knowledge_mode` and evidence refs at construction. Any violation or
+  unconvertible value refuses `CONTRACT_MISMATCH`, never repaired. A staging-file
+  I/O failure propagates as an `OSError` after cleanup. `append_rows` after
+  `finish`/`abort`/failure refuses `INPUT_CHANGED`.
 - *Memory:* one pending buffer of at most `ROW_GROUP_ROWS` (50,000) rows plus the
-  caller's batch, and 65,536-row inspection batches at `finish`. Rows go to the
-  attempt's staging directory as row groups of exactly `ROW_GROUP_ROWS` (the last
-  shorter), so the content hash depends only on the rows, never on batch size. The
-  staged file is streamed into the store (`publish_candidate`, bounded to its size)
-  and inspected without materialising the table.
+  caller's batch, and 65,536-row inspection batches at `finish`. Row groups are
+  exactly `ROW_GROUP_ROWS` (the last shorter), so the hash depends only on the
+  rows; the staged file is streamed into the store and inspected unmaterialised.
 - *Failure semantics:*
 
   | R | Rule |

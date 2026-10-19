@@ -111,7 +111,8 @@ def _rows(count):
 
 
 def _parent_with_prior(conn, store, clock, contract, prior_rows, partition, *,
-                       availability_evidence_refs=()):
+                       availability_evidence_refs=(),
+                       knowledge_mode="reconstructed"):
     ref = _ref(contract)
     published = store.publish_bytes(generic_incremental._parquet_bytes(contract, prior_rows),
                                     schema_ref="parquet_fragment.v1.0")
@@ -122,7 +123,7 @@ def _parent_with_prior(conn, store, clock, contract, prior_rows, partition, *,
         inspection, ref, input_receipt_refs=("r",),
         import_request_hash=content_hash({"seed": contract.table_name}))
     manifest = manifests.dataset_manifest(
-        ref, (record,), knowledge_mode="reconstructed",
+        ref, (record,), knowledge_mode=knowledge_mode,
         coverage_receipt_refs=("r",),
         availability_evidence_refs=availability_evidence_refs)
     snapshot = manifests.snapshot_ref(
@@ -245,6 +246,10 @@ def test_batch_size_does_not_change_identity(tmp_path):
         ("null_non_nullable", [dict(_row(0), date=None)],
          "a streamed row omits a required column value"),
         ("wrong_type_float", [dict(_row(0), value="not-a-float")],
+         "a streamed row has a value incompatible with its column type"),
+        ("nan_float", [dict(_row(0), value=float("nan"))],
+         "a streamed row has a value incompatible with its column type"),
+        ("inf_float", [dict(_row(0), value=float("inf"))],
          "a streamed row has a value incompatible with its column type"),
         ("mixed_key_type", [_row(0), dict(_row(1), ticker=123)],
          "a streamed row has a value incompatible with its column type"),
@@ -586,6 +591,27 @@ def test_explicit_provenance_applied(tmp_path):
         parent.table_manifests[TABLE].dataset_version_ref.dataset_version_id)
 
 
+@pytest.mark.parametrize(
+    ("label", "kwargs", "message"),
+    (
+        ("bad_knowledge_mode", {"knowledge_mode": "bogus"}, "unknown knowledge_mode"),
+        ("bad_evidence_refs", {"availability_evidence_refs": "abc"},
+         "availability_evidence_refs must be a sequence of strings"),
+    ),
+)
+def test_invalid_provenance_refused(tmp_path, label, kwargs, message):
+    conn, clock, store = _setup(tmp_path)
+    contract = _whole_contract()
+    parent = _parent(conn, store, clock, contract, _row(-1))
+
+    with pytest.raises(DataError, match=r"^CONTRACT_MISMATCH: " + message) as exc:
+        generic_streaming.StreamingTableWriter(
+            store, parent, TABLE, "attempt-" + label, _coverage(contract), **kwargs)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert _staging_entries(store, "attempt-" + label) == []
+    assert _head_snapshot(conn) == parent.snapshot.snapshot_id
+
+
 def _date_row(i, *, asof):
     return {"ticker": "AAA", "date": (_EPOCH + timedelta(days=i)).isoformat(),
             "asof": asof}
@@ -621,7 +647,8 @@ def test_replaces_prior_all_partition(tmp_path):
     contract = _whole_contract()
     prior = [dict(_row(i), ticker="ZZZ") for i in range(4)]
     parent = _parent_with_prior(conn, store, clock, contract, prior, "all",
-                                availability_evidence_refs=("prior-availability",))
+                                availability_evidence_refs=("prior-availability",),
+                                knowledge_mode="attested_stable")
     rows = _rows(6)
     coverage = _coverage(contract)
 
@@ -706,7 +733,7 @@ def test_context_manager_exception_aborts(tmp_path):
     contract = _whole_contract()
     parent = _parent(conn, store, clock, contract, _row(-1))
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="boom"):
         with generic_streaming.StreamingTableWriter(
                 store, parent, TABLE, "attempt-ctx-exc", _coverage(contract)) as writer:
             writer.append_rows(_rows(2))
