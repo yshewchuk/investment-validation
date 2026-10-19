@@ -518,3 +518,27 @@ def test_compare_identical_byte_cap_boundary_and_exact_size(tmp_path, monkeypatc
     monkeypatch.setattr(fc, "STAMP_MAX_BYTES", size - 1)
     assert fc.compare_identical("tier4", path)["mismatches"] == [
         {"reason": "stamp_bytes_over_cap", "column": "tier3_snapshot", "n_bytes": size}]
+
+
+def test_compare_identical_tier4_without_a_stamp_column_matches(tmp_path):
+    from engine.v2.ops.features_compare import compare_identical
+
+    path = tmp_path / "t.parquet"
+    _write(path, _frame())          # no tier3_snapshot column
+    assert compare_identical("tier4", path) == {
+        "verdict": "match", "mismatches": [], "max_abs_diff": 0.0, "max_rel_diff": 0.0,
+        "n_columns_differing": 0}
+
+
+@pytest.mark.parametrize("side", ["rebuilt", "pinned"])
+def test_compare_tables_refuses_an_over_cap_stamp_column_on_either_side(tmp_path, monkeypatch, side):
+    import engine.v2.ops.features_compare as fc
+
+    big, small = _stamped([_H1] * 6), _stamped([_H1] * 3)
+    rebuilt, pinned = (big, small) if side == "rebuilt" else (small, big)
+    _write(tmp_path / "r.parquet", rebuilt)
+    _write(tmp_path / "p.parquet", pinned)
+    monkeypatch.setattr(fc, "STAMP_MAX_ROWS", 5)
+    out = fc.compare_tables("tier4", tmp_path / "r.parquet", tmp_path / "p.parquet")
+    assert out["verdict"] == "mismatch"
+    assert out["mismatches"] == [{"reason": "stamp_rows_over_cap", "n_rows": 6, "side": side}]

@@ -76,14 +76,29 @@ def _stamp_cap_refusal(parquet_file, columns):
     return None
 
 
-def compare_identical(name, path) -> dict:
-    """Result for a byte-identical pair of tables: nothing to diff, but provenance stamps
-    must still be well formed. Reads only the stamp columns (never the whole table)."""
+def _footer_refusal(name, path):
+    """``(stamp_columns_present, cap_refusal_or_None)`` for one table file, from the parquet footer alone."""
     import pyarrow.parquet as pq
 
     meta = pq.ParquetFile(path)
     cols = [c for c in PROVENANCE_COLUMNS.get(name, ()) if c in set(meta.schema_arrow.names)]
-    refusal = _stamp_cap_refusal(meta, cols)
+    return cols, _stamp_cap_refusal(meta, cols)
+
+
+def _cap_refusals(name, paths):
+    """Cap refusal entries (tagged with the side) for every table file whose stamp column is too large."""
+    found = []
+    for side, path in paths:
+        refusal = _footer_refusal(name, path)[1]
+        if refusal:
+            found.append(dict(refusal, side=side))
+    return found
+
+
+def compare_identical(name, path) -> dict:
+    """Result for a byte-identical pair of tables: nothing to diff, but provenance stamps
+    must still be well formed. Reads only the stamp columns (never the whole table)."""
+    cols, refusal = _footer_refusal(name, path)
     if refusal:
         return dict(IDENTICAL, verdict="mismatch", mismatches=[refusal])
     out = []
@@ -106,13 +121,22 @@ def _stamp_mismatches(name, rebuilt, pinned):
     return out, rebuilt.drop(columns=stamps, errors="ignore"), pinned.drop(columns=stamps, errors="ignore")
 
 
+def _precheck(name, rebuilt_path, pinned_path):
+    """Structural result when a table is missing or a stamp column is over its cap; else None."""
+    if not rebuilt_path.exists() or not pinned_path.exists():
+        return _structural([{"reason": "table_missing", "rebuilt": rebuilt_path.exists(),
+                             "pinned": pinned_path.exists()}])
+    capped = _cap_refusals(name, (("rebuilt", rebuilt_path), ("pinned", pinned_path)))
+    return _structural(capped) if capped else None
+
+
 def compare_tables(name, rebuilt_path, pinned_path) -> dict:
     """Compare two tables of the same contract; never raises for a data
     difference, and every value in the result is json-safe (never a cell value)."""
     rebuilt_path, pinned_path = Path(rebuilt_path), Path(pinned_path)
-    if not rebuilt_path.exists() or not pinned_path.exists():
-        return _structural([{"reason": "table_missing", "rebuilt": rebuilt_path.exists(),
-                             "pinned": pinned_path.exists()}])
+    early = _precheck(name, rebuilt_path, pinned_path)
+    if early is not None:
+        return early
     rebuilt = pd.read_parquet(rebuilt_path)
     pinned = pd.read_parquet(pinned_path)
     schema = _schema_entry(rebuilt, pinned)
