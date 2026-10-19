@@ -12,6 +12,7 @@ from engine.v2.data import catalog, errors, manifests, objects, query
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.foundation import SystemClock, canonical_json, content_hash, to_document
 from engine.v2.research import event_history
+from engine.v2.research._progress import Progress, stage
 from engine.v2.research._snapshot import artifact_store, catalog_connection
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.magnitude_features import _feature_recipe
@@ -114,7 +115,8 @@ def _preflight_source(repository, snapshot, context):
 
 def _prepare_history(repository, snapshot, context):
     """Lazily decode at most one row per admitted candidate; no cross-build cache."""
-    population, plans = _preflight_source(repository, snapshot, context)
+    with stage("history preflight"):
+        population, plans = _preflight_source(repository, snapshot, context)
     decoded, by_ticker = {}, {}
     for event, request, record in plans:
         by_ticker.setdefault(event.ticker, []).append((event, request, record))
@@ -156,12 +158,16 @@ def materialize(repository, snapshot, context):
     if existing is not None:
         read_stored(repository, existing, context)
         return existing
-    prepared = _prepare_history(repository, snapshot, context)
+    with stage("history prepare"):
+        prepared = _prepare_history(repository, snapshot, context)
     store, records = artifact_store(repository), []
     ref = TableContractRef(contract_id=CONTRACT.contract_id, definition_hash=CONTRACT.definition_hash)
     schema = pa.schema([pa.field(c.name, query.arrow_type_for(c.physical_type), nullable=c.nullable)
                         for c in CONTRACT.columns])
-    for event in sorted(context["temporal_plan"]["events"], key=lambda e: e["event_id"]):
+    ordered = sorted(context["temporal_plan"]["events"], key=lambda e: e["event_id"])
+    progress = Progress("history events", len(ordered))
+    for event in ordered:
+        progress.tick()
         sink = pa.BufferOutputStream()
         rows = _event_rows(repository, snapshot, context, event, prepared)
         pq.write_table(pa.Table.from_pylist(rows, schema=schema), sink)

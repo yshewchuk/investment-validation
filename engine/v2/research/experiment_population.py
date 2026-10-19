@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from engine.v2.contracts.data import SnapshotRef
 from engine.v2.data import errors
+from engine.v2.research import _progress
 from engine.v2.research._scan import read_table
 from engine.v2.research.experiment_trades import _exclude_holdouts, _holdout_context
 
@@ -17,6 +18,19 @@ def _canonical_events(repository, snapshot):
 
 def load_population(repository, snapshot, *, as_of_month, purpose="selection",
                     event_ids=None):
+    """Read canonical metadata only; explicit excluded IDs refuse the whole read.
+
+    A full-universe read (no ``event_ids``) logs start/end with elapsed time on stderr."""
+    args = (repository, snapshot)
+    kwargs = dict(as_of_month=as_of_month, purpose=purpose, event_ids=event_ids)
+    if event_ids is not None:
+        return _load_population(*args, **kwargs)
+    with _progress.stage("load_population"):
+        return _load_population(*args, **kwargs)
+
+
+def _load_population(repository, snapshot, *, as_of_month, purpose="selection",
+                     event_ids=None):
     """Read canonical metadata only; explicit excluded IDs refuse the whole read."""
     if (not isinstance(snapshot, SnapshotRef) or not isinstance(snapshot.snapshot_id, str)
             or not snapshot.snapshot_id.strip()):
