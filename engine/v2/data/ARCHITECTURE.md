@@ -302,7 +302,7 @@ additive route to a table's new dataset version for producers whose output must
 not be held in memory. `StreamingTableWriter(store, parent, table_name, attempt_id,
 coverage)` accepts rows in batches and `finish()` returns a
 `GenericTableCandidate` that the unchanged `commit_generic_table_candidate`
-commits. `build_generic_table_candidate` and its three callers are untouched.
+commits.
 - *Scope:* a whole-table contract only (`partition_columns == ()`); any other
   contract refuses `UNSUPPORTED_CONTRACT`. The result is one fragment that
   REPLACES the whole table: every partition the parent holds for the table (an
@@ -339,7 +339,7 @@ commits. `build_generic_table_candidate` and its three callers are untouched.
   | R2 | No cache; each writer owns one uniquely named staging file |
   | R3 | Any failure makes the writer terminal (`failed`); a new attempt starts over |
   | R4 | Nothing is visible to the catalog until the one `commit_generic_table_candidate` |
-  | R5 | A failure, `abort()` or `__exit__` on an open writer removes the staging file; a crash leaves reclaimable staging, and a published-but-uncommitted object stays unreferenced |
+  | R5 | A failure, `abort()` or `__exit__` on an open writer removes the staging file; a crash leaves the staging file in the attempt's staging directory (reclaimed by the attempt-staging policy, not by this writer), and a published-but-uncommitted object stays unreferenced |
   | R6 | The same ordered rows, contract, parent snapshot and coverage id give the same object and dataset version hash; other rows give another |
 
   Zero rows at `finish` refuse `CONTRACT_MISMATCH` (an empty table is not

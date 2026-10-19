@@ -72,7 +72,7 @@ class StreamingTableWriter:
         if prior_manifest is None:
             raise errors.fail("CONTRACT_MISMATCH", "parent snapshot has no requested table")
         coverage_ref = getattr(coverage, "table_contract_ref", None)
-        if coverage_ref is not None and (
+        if coverage_ref is None or (
                 coverage_ref != prior_manifest.dataset_version_ref.table_contract_ref):
             raise errors.fail("CONTRACT_MISMATCH",
                               "the streaming coverage is for a different table")

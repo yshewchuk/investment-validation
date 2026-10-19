@@ -35,7 +35,7 @@ from engine.v2.data import incremental as daily_incremental
 from engine.v2.data.catalog import commit_snapshot
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactStore, content_hash
+from engine.v2.foundation import ArtifactStore, content_hash, to_document
 from tests.ops_support import catalog
 
 TABLE = "whole_panel"
@@ -552,6 +552,7 @@ def test_changeset_identity(tmp_path):
     assert changeset.coverage_receipt_refs == (coverage.coverage_id,)
     assert (changeset.base_dataset_version_ref.dataset_version_id
             != changeset.result_dataset_version_ref.dataset_version_id)
+    assert candidate.changeset_hash == content_hash(to_document(candidate.changeset))
 
     committed = generic_incremental.commit_generic_table_candidate(
         conn, store, candidate, scope="streaming",
@@ -572,6 +573,7 @@ def test_changeset_identity_varies_with_rows(tmp_path):
     parent = _parent(conn, store, clock, contract, _row(-1))
 
     seen = {}
+    hashes = {}
     for count in (3, 7):
         writer = generic_streaming.StreamingTableWriter(
             store, parent, TABLE, "attempt-count-%d" % count, _coverage(contract))
@@ -579,8 +581,16 @@ def test_changeset_identity_varies_with_rows(tmp_path):
         candidate = writer.finish()
         assert candidate.changeset.normalized_payloads == count
         seen[count] = candidate.changeset.changeset_id
+        hashes[count] = candidate.changeset_hash
 
     assert seen[3] != seen[7]
+
+    writer = generic_streaming.StreamingTableWriter(
+        store, parent, TABLE, "attempt-same-size", _coverage(contract))
+    writer.append_rows([dict(r, value=r["value"] + 0.5) for r in _rows(3)])
+    same_size = writer.finish()
+    assert same_size.changeset.changeset_id != seen[3]
+    assert same_size.changeset_hash != hashes[3]
 
 
 def test_replaces_prior_all_partition(tmp_path):
@@ -703,11 +713,12 @@ def test_conversion_failure_refused(tmp_path):
 
     writer = generic_streaming.StreamingTableWriter(
         store, parent, TABLE, "attempt-conv", _coverage(contract))
+    writer.append_rows([_date_row(1, asof=2**70)])
     with pytest.raises(
             DataError,
-            match=r"^CONTRACT_MISMATCH: a streamed row has a value incompatible with its column type"
+            match=r"^CONTRACT_MISMATCH: a staged row group does not satisfy the table contract"
     ) as exc:
-        writer.append_rows([_date_row(1, asof="not-a-date")])
+        writer.finish()
     assert exc.value.code == "CONTRACT_MISMATCH"
     assert _staging_entries(store, "attempt-conv") == []
     assert _head_snapshot(conn) == parent.snapshot.snapshot_id
