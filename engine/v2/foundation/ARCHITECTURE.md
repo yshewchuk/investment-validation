@@ -30,7 +30,7 @@ are ambiguous rather than released into selection.
 Classification retains both labels for overlap and labels invalid identity/date
 inputs `ambiguous`; no holdout read or authorization API is supplied.
 Invalid as-of month raises `ValueError`; research converts it to its typed refusal.
-`experiment_holdouts.calendar_date` performs no normalization or I/O.
+`experiment_holdouts.calendar_date` coerces no noncanonical value and performs no I/O.
 
 | Calendar-day input | Outcome |
 |---|---|
