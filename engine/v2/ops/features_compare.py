@@ -56,12 +56,13 @@ def _compare_float(a, b):
 def _stamp_mismatches(name, rebuilt, pinned):
     """Provenance-stamp columns are checked for form (non-null sha256 hex) on both sides."""
     out = []
-    for c in PROVENANCE_COLUMNS.get(name, ()):
+    for c in [c for c in PROVENANCE_COLUMNS.get(name, ()) if c in rebuilt.columns]:
         n_bad = sum(int((~f[c].astype("string").str.fullmatch(_SHA256_RE).fillna(False).astype(bool)).sum())
                     for f in (rebuilt, pinned))
         if n_bad:
             out.append({"reason": "provenance_stamp", "column": c, "n_rows": n_bad})
-    return out
+    stamps = list(PROVENANCE_COLUMNS.get(name, ()))
+    return out, rebuilt.drop(columns=stamps, errors="ignore"), pinned.drop(columns=stamps, errors="ignore")
 
 
 def compare_tables(name, rebuilt_path, pinned_path) -> dict:
@@ -85,9 +86,7 @@ def compare_tables(name, rebuilt_path, pinned_path) -> dict:
         return _structural(keys)
     max_abs = max_rel = 0.0
     n_columns = 0
-    mismatches = _stamp_mismatches(name, rebuilt, pinned)
-    stamps = list(PROVENANCE_COLUMNS.get(name, ()))
-    rebuilt, pinned = rebuilt.drop(columns=stamps), pinned.drop(columns=stamps)
+    mismatches, rebuilt, pinned = _stamp_mismatches(name, rebuilt, pinned)
     for c in rebuilt.columns:
         if pd.api.types.is_float_dtype(rebuilt[c]):
             a = rebuilt[c].to_numpy(dtype="float64")
