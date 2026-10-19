@@ -166,7 +166,8 @@ version instead of the latest `finality`/`features` job.
 Estimates are added lines (code / test / doc); each slice is its own PR.
 
 1. This design and the contract text (docs only): 0 / 0 / ~190.
-2. Native panel producer: batch job, shared-math equality test, bounded memory
+2. Native panel producer: batch job, shared-math equality test, sub-batch
+   boundary test (capped vs uncapped output), bounded memory
    test on a synthetic wide snapshot, publish as a dataset version (add):
    ~380 / ~300 / ~30.
 3. Tier-4 coverage table and resolver, per member, with the section 4
