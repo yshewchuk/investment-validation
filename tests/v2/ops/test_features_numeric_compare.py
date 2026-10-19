@@ -426,3 +426,20 @@ def test_byte_identical_tier4_goes_through_the_stamp_check_in_the_features_actio
     if verdict == "mismatch":
         assert receipt["tables"]["tier4"]["mismatches"] == [
             {"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 2}]
+
+
+def test_compare_identical_reads_only_the_stamp_column(tmp_path, monkeypatch):
+    import engine.v2.ops.features_compare as fc
+
+    path = tmp_path / "t.parquet"
+    _write(path, _stamped([_H1] * 6))
+    seen = []
+    real = fc.pd.read_parquet
+
+    def spy(p, *args, **kwargs):
+        seen.append(kwargs.get("columns"))
+        return real(p, *args, **kwargs)
+
+    monkeypatch.setattr(fc.pd, "read_parquet", spy)
+    assert fc.compare_identical("tier4", path)["verdict"] == "match"
+    assert seen == [["tier3_snapshot"]]
