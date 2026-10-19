@@ -88,6 +88,43 @@ conversions refuse. Absolute requests retain their existing report shape. P&L al
 uses quote-price × quantity; bid/ask spread is modeled but commissions, fees and ×100 are not. Daily marks
 cannot establish intraday stop execution or a trading advantage.
 
+### Registered single-candidate RUNUP comparison
+
+`python -m experiments.v2_runup_study register` seals one candidate before any
+market-data read; `run` re-admits that seal, evaluates or replays, and publishes
+immutable no-ledger JSON evidence. Both require `--spec SPEC.json --catalog CATALOG
+--store-root STORE --snapshot-id SNAPSHOT --scope SCOPE --as-of-month YYYY-MM`
+and repeatable `--event-id ID`. The catalog must already exist; no implicit migration
+or current-head substitution is performed. Original spec and exact arguments are
+required for replay, even after the scope head moves. The installed source closure
+and numerical environment must still match; changed code needs a new registration.
+
+Use the native `ExperimentSpec` document with runner `experiments/v2_runup_study.py`,
+a nonblank hypothesis, exactly one named primary arm, seed 0, empty folds and no
+input files. Economics are exactly `fill` and `exit`; exit requires `kind: target_stop`,
+`trading_days: 14`, explicit `threshold_units` and signed `target_pnl`/`stop_pnl`.
+The cohort and thresholds are caller choices. The fixed-day control is implicit
+in this runner's contract, not a second attempted variant. No fitting is performed.
+
+`registered_runup.comparison_request` validates without I/O; `register_runup` and
+`run_runup` accept catalog/store/repository/spec plus explicit `snapshot` (SnapshotRef),
+`scope`, `as_of_month` and `event_ids`. Registration reads canonical event metadata
+only. Run rechecks the entire binding before outcome access; terminal replay reads
+metadata/evidence but no market payloads. Missing common-horizon marks fail the whole
+candidate, with no successful report or survivor subset. Supported scientific failures
+become immutable terminals; resource interruptions leave publication resumable.
+
+The CLI emits one JSON document and exits 0 on success, 2 on refusal. Run returns
+`variant_id`, `run_id`, `replayed`, `outcome`, `receipt` and `receipt_ref`;
+`receipt.report_ref` identifies canonical comparison JSON in the artifact store.
+Its existing exploratory report schema/mode stays unchanged; the enclosing native
+registration/outcome establishes the registered execution. No `REPORT.md` export or
+CSV ledger is written. `--max-evidence-bytes` defaults to 16 MiB for registration and
+outcome JSON admission, not market scans or report size; spec files are capped at 16 MiB.
+This is reconstructed-history selection evidence, with the daily-mark economics above.
+It does not establish OOS validation, as-known prices, threshold-search completeness
+or release authority. Multi-arm selection and actual study design remain separate.
+
 ## Scientific sweep collection
 
 After sealing a roster, `python -m experiments.v2_gate_collect run` accepts the

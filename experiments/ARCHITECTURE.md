@@ -650,6 +650,44 @@ There is no retry, fallback source, projected calendar or partial-success mode.
 | Repository integrity or unresolved snapshot | Native code; stage/counts only after comparison admission starts. |
 | CLI filesystem or SQLite failure | `INPUT_CHANGED`, no stage/counts. |
 
+### Registered RUNUP execution
+
+`v2_runup_study` composes `registered_runup` with existing native v1.0 registration/outcome
+protocols; focused synthetic research tests are its other caller. Dependencies are
+contracts/data/foundation/ops, `threadpoolctl`, the bounded staged-input reader and
+`runup_exit_report`; no scheduler or schema is added. One explicit target/stop candidate
+is compared with fixed-day 14 on the complete explicit cohort; seed zero/empty folds reject unsupported fitting declarations.
+The caller must supply an exact committed SnapshotRef; preparation never resolves
+a scope head. Metadata-only registration seals spec hash, plan, snapshot, cohort,
+holdout month/versions, source closure and single-thread numerical policy. Source
+identity describes on-disk files, not loaded-bytecode attestation. The original spec
+is needed for replay because the seal retains its hash rather than hypothesis text.
+
+Run validates the exact request and intact registration before accessing any outcome
+slot. Metadata-only re-preparation remains required on terminal replay, while market
+payloads and comparison execution are skipped. An unrelated scope-head move is safe;
+changed source/environment, pin, scope, cohort or month cannot reuse the seal.
+The comparison runs under `threadpool_limits(1)`; its unchanged inner report records
+its own environment identity without a thread policy. The outer registration owns
+that policy and runner identity. Canonical comparison JSON is stored directly as the
+native report artifact, returned by reference without Markdown export; inner mode/hash remains intact.
+
+The candidate plus control is one planned/attempted variant. Only a call reaching
+comparison can publish its supported scientific failure terminal. No ledger path is
+accepted; outcome/completion use the existing no-ledger slot. This seals reconstructed
+selection evidence, not OOS, as-known data, a complete search or release permission.
+Whole-cohort coverage and daily-mark units remain the exploratory comparison contract above.
+
+| Condition | Enforced outcome |
+|---|---|
+| Invalid policy/cohort/spec JSON or missing registration | `INVALID_EXPERIMENT_SPEC` before comparison; no terminal association. |
+| Non-v1.0/final-read seal | `HOLDOUT_ACCESS_DENIED` before outcome access. |
+| Changed request/source/environment or corrupt seal | `EXPERIMENT_IDENTITY_CONFLICT`; no outcome-slot access or replacement. |
+| Registration population/holdout refusal | Native typed failure; no reservation or attempted variant. |
+| Admitted comparison emits a supported scientific failure | Immutable failed/refused terminal, attempted count one, no report or partial cohort. Other typed failures propagate without a terminal. |
+| Resource/publication interruption | No synthesized scientific failure. A durable intent resumes without market reads; before intent exists, an exact retry may repeat the deterministic comparison. |
+| Malformed/oversized stored evidence or conflicting terminal | Existing native integrity refusal; no evidence replacement. The 16 MiB default bounds JSON evidence, not report/market bytes. |
+
 ## Selected-candidate outer evaluation
 
 `magnitude_search_outer.execute_outer_fold` is a selected-fold runner. It requires an existing
