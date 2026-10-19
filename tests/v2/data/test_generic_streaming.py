@@ -110,7 +110,8 @@ def _rows(count):
     return [_row(i) for i in range(count)]
 
 
-def _parent_with_prior(conn, store, clock, contract, prior_rows, partition):
+def _parent_with_prior(conn, store, clock, contract, prior_rows, partition, *,
+                       availability_evidence_refs=()):
     ref = _ref(contract)
     published = store.publish_bytes(generic_incremental._parquet_bytes(contract, prior_rows),
                                     schema_ref="parquet_fragment.v1.0")
@@ -122,7 +123,8 @@ def _parent_with_prior(conn, store, clock, contract, prior_rows, partition):
         import_request_hash=content_hash({"seed": contract.table_name}))
     manifest = manifests.dataset_manifest(
         ref, (record,), knowledge_mode="reconstructed",
-        coverage_receipt_refs=("r",), availability_evidence_refs=())
+        coverage_receipt_refs=("r",),
+        availability_evidence_refs=availability_evidence_refs)
     snapshot = manifests.snapshot_ref(
         {contract.table_name: manifest}, calendar_version="cal.v1",
         source_priority_version="frozen", finality_receipt_refs=("r",))
@@ -549,6 +551,7 @@ def test_changeset_identity(tmp_path):
     assert changeset.normalized_payloads == len(rows)
     assert candidate.rewritten_partitions == 1
     assert changeset.changes == ()
+    assert candidate.changeset.dependency_disposition == "conservative_full"
     assert changeset.coverage_receipt_refs == (coverage.coverage_id,)
     assert (changeset.base_dataset_version_ref.dataset_version_id
             != changeset.result_dataset_version_ref.dataset_version_id)
@@ -561,6 +564,26 @@ def test_changeset_identity(tmp_path):
     resolved = Repository(conn).resolve_full(committed.resulting_head_snapshot_id)
     assert (resolved.table_manifests[TABLE].dataset_version_ref
             == changeset.result_dataset_version_ref)
+
+
+def test_explicit_provenance_applied(tmp_path):
+    conn, clock, store = _setup(tmp_path)
+    contract = _whole_contract()
+    parent = _parent(conn, store, clock, contract, _row(-1))
+    coverage = _coverage(contract)
+
+    writer = generic_streaming.StreamingTableWriter(
+        store, parent, TABLE, "attempt-provenance", coverage,
+        knowledge_mode="attested_stable", availability_evidence_refs=("ev-1",))
+    writer.append_rows(_rows(2))
+    candidate = writer.finish()
+
+    manifest = candidate.table_manifest
+    assert manifest.knowledge_mode == "attested_stable"
+    assert manifest.availability_evidence_refs == ("ev-1",)
+    assert manifest.coverage_receipt_refs == (coverage.coverage_id,)
+    assert manifest.parent_dataset_version_id == (
+        parent.table_manifests[TABLE].dataset_version_ref.dataset_version_id)
 
 
 def _date_row(i, *, asof):
@@ -597,14 +620,21 @@ def test_replaces_prior_all_partition(tmp_path):
     conn, clock, store = _setup(tmp_path)
     contract = _whole_contract()
     prior = [dict(_row(i), ticker="ZZZ") for i in range(4)]
-    parent = _parent_with_prior(conn, store, clock, contract, prior, "all")
+    parent = _parent_with_prior(conn, store, clock, contract, prior, "all",
+                                availability_evidence_refs=("prior-availability",))
     rows = _rows(6)
+    coverage = _coverage(contract)
 
     writer = generic_streaming.StreamingTableWriter(
-        store, parent, TABLE, "attempt-all", _coverage(contract))
+        store, parent, TABLE, "attempt-all", coverage)
     writer.append_rows(rows)
     candidate = writer.finish()
 
+    assert candidate.table_manifest.coverage_receipt_refs == (coverage.coverage_id,)
+    assert candidate.table_manifest.availability_evidence_refs == ()
+    assert candidate.table_manifest.knowledge_mode == "reconstructed"
+    assert (candidate.table_manifest.parent_dataset_version_id
+            == parent.table_manifests[TABLE].dataset_version_ref.dataset_version_id)
     assert candidate.changeset.changed_partitions == ("all",)
     assert candidate.changeset.rewritten_partitions == 1
     assert candidate.rewritten_partitions == 1
@@ -625,14 +655,21 @@ def test_replaces_prior_whole_partition(tmp_path):
     conn, clock, store = _setup(tmp_path)
     contract = _whole_contract()
     prior = [dict(_row(i), ticker="ZZZ") for i in range(4)]
-    parent = _parent_with_prior(conn, store, clock, contract, prior, "__whole__")
+    parent = _parent_with_prior(conn, store, clock, contract, prior, "__whole__",
+                                availability_evidence_refs=("prior-availability",))
     rows = _rows(6)
+    coverage = _coverage(contract)
 
     writer = generic_streaming.StreamingTableWriter(
-        store, parent, TABLE, "attempt-whole", _coverage(contract))
+        store, parent, TABLE, "attempt-whole", coverage)
     writer.append_rows(rows)
     candidate = writer.finish()
 
+    assert candidate.table_manifest.coverage_receipt_refs == (coverage.coverage_id,)
+    assert candidate.table_manifest.availability_evidence_refs == ()
+    assert candidate.table_manifest.knowledge_mode == "reconstructed"
+    assert (candidate.table_manifest.parent_dataset_version_id
+            == parent.table_manifests[TABLE].dataset_version_ref.dataset_version_id)
     assert candidate.changeset.changed_partitions == ("__whole__",)
     committed = generic_incremental.commit_generic_table_candidate(
         conn, store, candidate, scope="streaming",

@@ -64,7 +64,9 @@ class StreamingTableWriter:
     """Stage one whole-table parquet fragment from a sequence of row batches."""
 
     def __init__(self, store: ArtifactStore, parent: manifests.ResolvedSnapshot,
-                 table_name: str, attempt_id: str, coverage: CompletedCoverage) -> None:
+                 table_name: str, attempt_id: str, coverage: CompletedCoverage, *,
+                 knowledge_mode: manifests.KnowledgeMode = "reconstructed",
+                 availability_evidence_refs: Sequence[str] = ()) -> None:
         if coverage.state != "complete":
             raise errors.fail("INPUT_CHANGED", "incomplete coverage cannot build a candidate")
         contract = incremental.table_contract(parent, table_name)
@@ -86,6 +88,8 @@ class StreamingTableWriter:
         self._coverage = coverage
         self._contract = contract
         self._prior_manifest = prior_manifest
+        self._knowledge_mode = knowledge_mode
+        self._availability_evidence_refs = tuple(availability_evidence_refs)
         self._schema = _arrow_schema(contract)
         self._buffer: list[Mapping[str, Any]] = []
         self._previous_key: tuple | None = None
@@ -235,8 +239,11 @@ class StreamingTableWriter:
         merge = tables.GenericMerge(
             rows=(), retained_revisions=(), incoming_revisions=(), winners=(),
             changes=(), changed_partitions=changed_partitions)
-        manifest = incremental.replace_manifest(
-            prior_manifest, ref, prior_records, new_records, merge, coverage)
+        manifest = manifests.dataset_manifest(
+            ref, new_records, knowledge_mode=self._knowledge_mode,
+            coverage_receipt_refs=(coverage.coverage_id,),
+            availability_evidence_refs=self._availability_evidence_refs,
+            parent_dataset_version_id=prior_manifest.dataset_version_ref.dataset_version_id)
         table_manifests = dict(parent.table_manifests)
         table_manifests[self._table_name] = manifest
         snapshot = manifests.snapshot_ref(
@@ -295,5 +302,6 @@ def _whole_changeset(snapshot, prior, result, ref, coverage, row_count,
         acquisition_receipt_refs=coverage.acquisition_receipt_refs,
         coverage_receipt_refs=(coverage.coverage_id,), changes=(),
         changed_partitions=changed_partitions, dependency_impacts=(),
-        unknown_dependencies=(), dependency_disposition="exact", outcome="changed",
+        unknown_dependencies=(), dependency_disposition="conservative_full",
+        outcome="changed",
         normalized_payloads=row_count, rewritten_partitions=len(changed_partitions))
