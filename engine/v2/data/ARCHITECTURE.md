@@ -33,6 +33,36 @@ fetch or *when* to run a job (`engine/v2/ops`, a caller, owns that).
 
 ## Primary contracts and public interfaces
 
+**IV-crush target construction.** `iv_crush.build_rows` is a pure, bounded,
+single-ticker builder for `iv_crush_table.IV_CRUSH_CONTRACT`
+(`iv_crush_targets.v1`). It consumes caller-supplied event date/session and
+daily date/IV30 projections, never a panel forecast or a store. Canonical dates
+and unique event/daily dates are mandatory; unordered inputs sort deterministically.
+Invalid identities, malformed row shapes and duplicate dates refuse the batch.
+Absent/unknown sessions retain an explicit skipped row. AMC selects the last
+daily row on/before the event; BMO selects the last strictly before it. Post is
+the immediately following row, including when its IV is missing. No search for
+a later valid IV, forward fill, inferred holiday session or warm-up filter occurs.
+The existing target is signed `100*(post_iv30/pre_iv30-1)`, a relative percentage
+change, not a vol-point difference. The compatibility rule requires finite IVs,
+positive pre-IV and a gap of at most five calendar days; finite zero/negative
+post-IV is retained as in the existing recipe, without endorsing its quality.
+Missing anchors, invalid IVs, excessive gaps or nonfinite results keep a null
+target and availability with a skip reason. Finite anchor values/dates remain
+diagnostic, including on skipped pairs; no skip becomes a zero target.
+For a computable label, `available_as_of_date` is post-close date plus one
+calendar day, the native computed-moves day-clock convention. It is a modeled
+availability floor, not evidence of actual source publication or finality.
+Training/research consumers must separately admit holdouts and enforce their
+label clock; existing training recipes' tolerance is not changed here.
+`input_hash` binds the actual typed projections (including invalid IV scalars),
+while `source_id` is only a caller declaration, never verified provenance.
+The builder neither reads/writes files nor registers/publishes a snapshot;
+physical event isolation, source verification, feature reconstruction and
+registered evaluation remain separate slices. There is no production caller.
+Operational row caps refuse `RESULT_LIMIT_EXCEEDED`; malformed input refuses
+redacted `CONTRACT_MISMATCH`. No cache, retries, transactions or partial output.
+
 **Massive reconstruction.** `massive_daily` owns `massive_daily.v1`; `massive_actions`
 owns `massive_splits.v1` and `massive_dividends.v1`, with original page provenance.
 It never changes `price_history.v3` or imports ops/provider code. Each

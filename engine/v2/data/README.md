@@ -35,6 +35,8 @@ candidate-row bound for one pinned snapshot and selection without opening bytes.
 
 | Module | Names |
 |---|---|
+| `iv_crush` | `build_rows`, `MAX_GAP_DAYS` — pure bounded single-ticker signed IV30 targets with pre/post anchors, next-day modeled availability, explicit skips and input hashes. No source verification, store access or experiment admission. |
+| `iv_crush_table` | `IV_CRUSH_CONTRACT`, `IV_CRUSH_TABLE_NAME` — native `iv_crush_targets.v1` definition; explicit skipped rows and caller-declared source identity, with no publication/finality claim. |
 | `massive_daily` | `CONTRACT`, `TABLE`, `NORMALIZER`, `normalize_rows`, `build_candidate` — strict explicit-basis daily OHLCV reconstruction from verified pinned pages; native immutable fragment/manifest construction, with atomic publication owned by ops. |
 | `massive_actions` | `CONTRACTS`, `NORMALIZER`, `normalize_rows` — provider-reported split/dividend reconstruction with original page provenance. |
 | `massive_refresh` | `build_candidate` — bounded parent-bound interval replacement, preserving unrelated native membership. |
