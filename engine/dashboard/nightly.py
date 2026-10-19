@@ -1157,6 +1157,30 @@ def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> li
         for sign in (-1.0, 1.0)
     ]
     rows: list[dict] = []
+
+    from engine.score import ChainIndex, board_chain_keys, load_chain_index
+
+    keys: set = set()
+    if len(live):
+        offset_of = live["structure_spec"].map(
+            lambda spec: (spec or {}).get("decision_offset") if isinstance(spec, dict) or spec is None else None
+        ) if "structure_spec" in live.columns else pd.Series([None] * len(live), index=live.index)
+        age_bound = (
+            5 if "quote_max_age_sessions" in live.columns
+            and live["quote_max_age_sessions"].notna().any() else None
+        )
+        for (strategy, decision_offset), group in live.assign(_do=offset_of).groupby(
+            ["strategy", "_do"], dropna=False
+        ):
+            decision_offset = None if pd.isna(decision_offset) else int(decision_offset)
+            events = group[["ticker", "event_date", "session"]].drop_duplicates()
+            keys |= board_chain_keys(
+                events, [str(strategy)], {str(strategy): decision_offset},
+                calendar=scorer.calendar, as_of=as_of,
+                quote_max_age_sessions=age_bound,
+            )
+    index = load_chain_index(keys, progress_every=0) if keys else ChainIndex({})
+
     for record in live.to_dict(orient="records"):
         spot = record.get("spot")
         if spot is None or not np.isfinite(float(spot)):
@@ -1193,12 +1217,13 @@ def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> li
                 chain_as_of=as_of,
             )
             try:
-                result = scorer.score(request)
+                result = scorer.score(request, chain_index=index)
             except UNSCORABLE as exc:
                 result = unscorable_result(
                     request, as_of=as_of, snapshot=scorer.snapshot, exc=exc
                 )
             rows.append(result.as_dict() | {"strike_offset": offset})
+    del index
     return rows
 
 

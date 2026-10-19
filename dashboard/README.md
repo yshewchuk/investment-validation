@@ -386,7 +386,7 @@ is not proof of publicness and is allowed (and recorded).
 
 ## Checks and the report
 
-    python3 -m pytest tests/test_dashboard.py -q          # units
+    python3 -m pytest tests/v2/dashboard/test_dashboard.py -q          # units
     python3 checks/phase3_checks.py --json reports/phase3_checks.json
     python3 checks/phase3_report.py --checks-json reports/phase3_checks.json
 

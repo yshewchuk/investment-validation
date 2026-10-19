@@ -234,7 +234,7 @@ def pytest_runtest_teardown(item, nextitem):
 #   which reliably crashed a worker (`[gwN] node down: Not properly
 #   terminated`) and then hung xdist's crashed-worker replacement --
 #   `python3 -m pytest -q -n auto --dist loadgroup tests/test_calendar.py
-#   tests/test_features.py tests/test_dashboard.py` never returned in 22+
+#   tests/test_features.py tests/v2/dashboard/test_dashboard.py` never returned in 22+
 #   minutes (vs ~100s serial) before being killed. Bisected file-by-file:
 #   test_calendar.py and test_dashboard.py are each independently
 #   parallel-safe; only test_features.py reproduces it, and only at 2+

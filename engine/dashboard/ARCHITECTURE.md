@@ -100,7 +100,8 @@ inside function bodies):
 - Top-level: `engine.paths` (all four of `model_evidence.py`/`nightly.py`/
   `publish.py`/`render.py`), `engine.data.throttle` (quota guard, also
   lazy in `nightly.py`), `engine.score` (`LADDER_STEP` and others, also
-  lazy in several functions), `engine.jsonio` (`json_safe`), `engine.features` (`model_evidence.py`:
+  lazy in several functions; `strike_ladder` builds ONE chain index via
+  `board_chain_keys`/`load_chain_index` and passes it to every `score()`), `engine.jsonio` (`json_safe`), `engine.features` (`model_evidence.py`:
   `DAILY_STATE_FIELDS`, for the projected `daily_market` read; other uses lazy),
   `engine.memprobe` (`nightly.py`, also provided to `engine.score` and
   `engine.replay`, which are outside this package).
