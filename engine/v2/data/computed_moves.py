@@ -13,6 +13,16 @@ calendar day, YYYY-MM-DD -- null exactly when ``realized_move_pct`` is null:
 a skipped event is not available to any decision). A skip must be visible,
 not just counted (EXP-117 DEFINITION.md R3's materiality rule).
 
+``build_event_rows`` (``computed_moves.v5``, issue #966) is the same math over
+EVERY considered event: a CONFIRMED one (``src_orats`` and a session) gets
+exactly its v4 row plus ``not_computed_reason`` (null, or ``no_price_window``
+for a v4 skip), and the events v4 dropped -- a non-ORATS phantom, a missing
+session -- plus the two ticker-level refusals are stored as skipped,
+no-outcome rows carrying their reason rather than vanishing. Counting stays on
+confirmed events, so a phantom never shifts a real event's ordinal or prior
+mean. ``classify_event_reasons`` holds that reason rule on its own so the
+capture path can reuse it.
+
 Layer 1 of ``system_rearchitecture.md`` §4.1: no ``engine.v2.ops`` and no
 legacy ``engine.*`` imports -- this module is pure numpy/pandas math, the same
 rule ``price_history_table.py`` states for its own layer.
@@ -31,8 +41,10 @@ __all__ = [
     "MAX_GAP_CALENDAR_DAYS",
     "MIN_SCOREABLE",
     "NativeTradingCalendar",
+    "build_event_rows",
     "build_rows",
     "build_ticker",
+    "classify_event_reasons",
     "native_trading_calendar",
     "projected_trading_days",
     "session_move",
@@ -75,10 +87,16 @@ def session_move(sd, sc, t, session) -> float | None:
     return result[0] if result is not None else None
 
 
+#: Absent ``not_computed_reason``: a ``computed_moves.v4`` row carries no such key,
+#: so the v5 column appears only where a caller asks for it (issue #966).
+_ABSENT = object()
+
+
 def _row(ticker: str, event_date: str, *, realized, implied, available_as_of_date,
          ordinal: int, admitted: bool, mean_prior, n_prior: int, skipped: bool,
-         computed_at: str, source_hash: str, capture_id: str) -> dict:
-    return {
+         computed_at: str, source_hash: str, capture_id: str,
+         not_computed_reason=_ABSENT) -> dict:
+    row = {
         "ticker": ticker,
         "event_date": event_date,
         "realized_move_pct": realized,
@@ -93,6 +111,9 @@ def _row(ticker: str, event_date: str, *, realized, implied, available_as_of_dat
         "source_hash": source_hash,
         "capture_id": capture_id,
     }
+    if not_computed_reason is not _ABSENT:
+        row["not_computed_reason"] = not_computed_reason
+    return row
 
 
 def _implied_by_event(dates: list[str], daily: pd.DataFrame) -> list[float | None]:
@@ -158,6 +179,106 @@ def build_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFrame, *
 #: The legacy name of the same builder, kept so a reader of the moved code
 #: finds the function it was moved from (spec s4b Change 2).
 build_ticker = build_rows
+
+
+# --------------------------------------------------------------------------
+# computed_moves.v5: one row per considered event, with a reason (issue #966)
+# --------------------------------------------------------------------------
+
+#: The two reasons that apply to EVERY event of a ticker, whatever the event itself.
+_TICKER_LEVEL = ("no_price_history", "ticker_too_few_events")
+
+
+def _event_reasons(events: pd.DataFrame) -> list[str | None]:
+    """The per-event reason before any ticker-level override: ``None`` = confirmed.
+
+    The ONE definition of confirmed (``src_orats`` and a session) and of the two
+    per-event refusals, so counting and row building can never disagree.
+    """
+    reasons: list[str | None] = []
+    for src_orats, session in zip(events["src_orats"], events["session"]):
+        if not bool(src_orats):
+            reasons.append("not_orats")
+        elif pd.isna(session):
+            reasons.append("no_session")
+        else:
+            reasons.append(None)
+    return reasons
+
+
+def classify_event_reasons(events: pd.DataFrame, sd, sc, *,
+                           min_scoreable: int = MIN_SCOREABLE) -> list[str | None]:
+    """The ``not_computed_reason`` of every considered event of one ticker (issue #966).
+
+    ``None`` means the event is CONFIRMED (``src_orats`` and a session) and this
+    ticker clears both bars, so its move is computed. The per-event refusals are
+    ``not_orats`` (no ORATS confirmation, e.g. a ``forward_claim`` phantom) and
+    ``no_session`` (confirmed, session null). The ticker-level reasons override
+    every event of the ticker: ``no_price_history`` when ``sd`` holds no closes
+    (checked first -- with no closes nothing is computable, so "too few" would
+    be the wrong story), else ``ticker_too_few_events`` when fewer than
+    ``min_scoreable`` events are confirmed or fewer than ``ADMISSION_EVENTS``
+    compute. Pure, no I/O and no clock, so the capture path can classify a
+    ticker without building its rows.
+    """
+    reasons = _event_reasons(events)
+    if not len(sd):
+        return ["no_price_history"] * len(reasons)
+    confirmed = computable = 0
+    for event, reason in zip(events.itertuples(), reasons):
+        if reason is None:
+            confirmed += 1
+            computable += _session_move_indexed(
+                sd, sc, event.event_date.to_datetime64(), event.session) is not None
+    if confirmed < min_scoreable or computable < ADMISSION_EVENTS:
+        return ["ticker_too_few_events"] * len(reasons)
+    return reasons
+
+
+def build_event_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFrame, *,
+                     computed_at: str, source_hash: str, capture_id: str,
+                     min_scoreable: int = MIN_SCOREABLE) -> list[dict]:
+    """One ``computed_moves.v5`` row dict per considered event of ``events`` -- never ``[]``.
+
+    ``events`` is the ticker's ordered ``earnings_events`` slice (columns
+    ``event_date``, ``session``, ``src_orats``); what v4 dropped is now a row.
+    A CONFIRMED event gets exactly the :func:`build_rows` row over the
+    confirmed-only frame -- ``event_ordinal`` counts earlier confirmed events --
+    plus ``not_computed_reason``: null on a computed outcome, ``no_price_window``
+    on the v4 skip. An unconfirmed event, and every event under a ticker-level
+    reason, gets the no-outcome shape (null moves, ``admitted`` false,
+    ``skipped`` true, ``n_prior_implied`` 0) with ``classify_event_reasons``'
+    reason and the count of earlier confirmed events as its ordinal. A phantom
+    therefore never shifts a neighbour's ordinal or prior mean.
+    """
+    reasons = classify_event_reasons(events, sd, sc, min_scoreable=min_scoreable)
+    per_event = _event_reasons(events)
+    ticker_reason = reasons[0] if reasons and reasons[0] in _TICKER_LEVEL else None
+    computed: list[dict] = []
+    if ticker_reason is None:
+        frame = events.iloc[[i for i, reason in enumerate(per_event) if reason is None]]
+        computed = build_rows(ticker, frame, sd, sc, daily, computed_at=computed_at,
+                              source_hash=source_hash, capture_id=capture_id)
+
+    rows: list[dict] = []
+    ordinal = taken = 0
+    for position, event in enumerate(events.itertuples()):
+        is_confirmed = per_event[position] is None
+        row_ordinal = ordinal
+        if is_confirmed:
+            ordinal += 1
+        if ticker_reason is None and is_confirmed:
+            row = computed[taken]
+            taken += 1
+            row["not_computed_reason"] = "no_price_window" if row["skipped"] else None
+        else:
+            row = _row(ticker, pd.Timestamp(event.event_date).strftime("%Y-%m-%d"),
+                       realized=None, implied=None, available_as_of_date=None,
+                       ordinal=row_ordinal, admitted=False, mean_prior=None, n_prior=0,
+                       skipped=True, computed_at=computed_at, source_hash=source_hash,
+                       capture_id=capture_id, not_computed_reason=reasons[position])
+        rows.append(row)
+    return rows
 
 
 # --------------------------------------------------------------------------

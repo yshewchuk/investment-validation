@@ -394,6 +394,43 @@ partition, or produces no v4 rows at all; v3 records are never carried.
 `computed_at` and `retrieved_at` never order or filter anything here. The builder
 imports `event_history` from this same package (no new cross-component dependency).
 
+**`computed_moves.v5` — one row per considered event, with a reason (issue #966).**
+Contract `computed_moves.v5` / `5.0.0` (`COMPUTED_MOVES_V5_CONTRACT`) and the pure
+`build_event_rows` / `classify_event_reasons` are added beside v4; the store still
+writes v4 until a later wiring change makes v5 the committed contract (v4 stays
+pinned and readable; no migration, dual read or backfill, the standard capture
+rewrites partitions). The
+writer, not a reader, decides which events computed moves omits and records that
+decision on the event's own row, so every event the writer considers has exactly one
+single-row fragment and the research isolation guard is unchanged: a candidate with
+no fragment is still a refusal. Nothing is written to `earnings_events`.
+- New column `not_computed_reason` string nullable. Null exactly when the row is a
+  computed outcome (`skipped` false). Non-null exactly when `skipped` is true and
+  `realized_move_pct` and `available_as_of_date` are null. Closed set:
+  `not_orats` (no ORATS confirmation, e.g. a `forward_claim` phantom), `no_session`
+  (confirmed, session null), `no_price_window` (the v4 skipped case: missing close or
+  a P→Q gap over `MAX_GAP_CALENDAR_DAYS`), `no_price_history` (ticker has no
+  `daily_market` rows or closes), `ticker_too_few_events` (fewer than `MIN_SCOREABLE`
+  past ORATS-confirmed sessioned events, or fewer than `ADMISSION_EVENTS` computable
+  ones). Ticker-level reasons apply to every event of that ticker.
+- Considered events: every `earnings_events` row of a ticker dated before `as_of`.
+  The v4 omissions (non-ORATS event, ticker below the bars, ticker without prices)
+  become rows; the whole-ticker empty return is gone.
+- Counting stays on confirmed events: `event_ordinal` counts earlier ORATS-confirmed
+  sessioned events; on a row whose reason is `not_orats`, `no_session` or ticker-level,
+  `admitted` is false, `implied_move_pct` and `mean_prior_or_implied` are null and
+  `n_prior_implied` is 0. `no_price_window` rows keep v4 semantics. A phantom never
+  shifts a real event's ordinal or prior mean.
+- Readers must not treat a row as a scoreable event unless `not_computed_reason` is
+  null or `no_price_window`; each history feature decides explicitly how every reason
+  counts (consumer change, separate PR).
+
+| Condition | Outcome |
+|---|---|
+| a considered event | exactly one row, `(ticker, event_date)` unique |
+| a ticker with no earnings events | no rows |
+| same-ticker same-date `earnings_events` rows | one row; the reason follows the confirmed row |
+
 **`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
 no clock. A feature declares its parameters; none is hard-coded in the module.
 - `event_sequence(event_dates, warmup=, first_known=)` takes one ticker's FULL

@@ -13,6 +13,12 @@ The pull this table replaces is ``engine.data.pulls.computed_moves``; the pure
 row-building math lives in :mod:`engine.v2.data.computed_moves` and the
 capture/store path in :mod:`engine.v2.ops.computed_moves_store`.
 
+``computed_moves.v5`` (issue #966) is the same table one major version on: its
+columns are v4's plus ``not_computed_reason`` (see the module docstring in
+:mod:`engine.v2.data.computed_moves` and ``ARCHITECTURE.md``). v4 stays pinned
+and readable; the two contracts share every field but ``contract_id``,
+``semantic_version`` and ``columns``.
+
 Layout: ``ticker, event_date, realized_move_pct, available_as_of_date,
 implied_move_pct, event_ordinal, admitted, mean_prior_or_implied,
 n_prior_implied, skipped, computed_at, source_hash,
@@ -34,7 +40,11 @@ from engine.v2.contracts.data import ColumnContract, TableContract
 
 from . import manifests
 
-__all__ = ["COMPUTED_MOVES_CONTRACT", "COMPUTED_MOVES_TABLE_NAME"]
+__all__ = [
+    "COMPUTED_MOVES_CONTRACT",
+    "COMPUTED_MOVES_TABLE_NAME",
+    "COMPUTED_MOVES_V5_CONTRACT",
+]
 
 COMPUTED_MOVES_TABLE_NAME = "computed_moves"
 
@@ -102,13 +112,31 @@ _COLUMNS = (
                                "came from; never null"),
 )
 
+_NOT_COMPUTED_REASON_COLUMN = ColumnContract(
+    name="not_computed_reason", physical_type="string", nullable=True,
+    null_policy="null exactly when the row is a computed outcome (skipped false); non-null "
+                "exactly when skipped is true and realized_move_pct and "
+                "available_as_of_date are null. Closed reason set: not_orats (no ORATS "
+                "confirmation, e.g. a forward_claim phantom), no_session (ORATS-confirmed "
+                "but session null), no_price_window (the v4 skipped case: a missing close "
+                "on either side or a P->Q window wider than MAX_GAP_CALENDAR_DAYS), "
+                "no_price_history (the ticker has no daily_market rows or usable closes), "
+                "ticker_too_few_events (fewer than MIN_SCOREABLE ORATS-confirmed sessioned "
+                "events, or fewer than ADMISSION_EVENTS computable ones); the last two are "
+                "ticker-level and apply to every row of that ticker.",
+)
 
-def _build() -> TableContract:
-    fields = dict(
-        contract_id="computed_moves.v4",
+#: v4's columns plus ``not_computed_reason`` (issue #966); never a copy-paste.
+_V5_COLUMNS = (*_COLUMNS, _NOT_COMPUTED_REASON_COLUMN)
+
+
+def _fields(*, contract_id: str, semantic_version: str, columns) -> dict:
+    """Every ``TableContract`` field but the identity and the column set."""
+    return dict(
+        contract_id=contract_id,
         table_name=COMPUTED_MOVES_TABLE_NAME,
-        semantic_version="4.0.0",
-        columns=_COLUMNS,
+        semantic_version=semantic_version,
+        columns=columns,
         primary_key=("ticker", "event_date"),
         duplicate_policy="none_by_construction -- one row per (ticker, event_date)",
         foreign_keys=(),
@@ -131,9 +159,24 @@ def _build() -> TableContract:
         maximum_batch_rows=65536,
         legacy_mapping_ref=None,
     )
+
+
+def _build() -> TableContract:
+    fields = _fields(contract_id="computed_moves.v4", semantic_version="4.0.0",
+                     columns=_COLUMNS)
+    placeholder = TableContract(definition_hash="sha256:" + "0" * 64, **fields)
+    return TableContract(definition_hash=manifests.table_contract_hash(placeholder), **fields)
+
+
+def _build_v5() -> TableContract:
+    fields = _fields(contract_id="computed_moves.v5", semantic_version="5.0.0",
+                     columns=_V5_COLUMNS)
     placeholder = TableContract(definition_hash="sha256:" + "0" * 64, **fields)
     return TableContract(definition_hash=manifests.table_contract_hash(placeholder), **fields)
 
 
 #: Built once at import time -- pure, deterministic, no I/O.
 COMPUTED_MOVES_CONTRACT: TableContract = _build()
+
+#: The v5 contract (issue #966): v4's columns plus ``not_computed_reason``.
+COMPUTED_MOVES_V5_CONTRACT: TableContract = _build_v5()
