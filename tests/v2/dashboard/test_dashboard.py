@@ -754,8 +754,9 @@ class TestNightlyPieces:
         )
         assert nightly._date_change_flag(previous, current, as_of=AS_OF) is None
 
-    def test_strike_ladder_only_prices_gate_passers(self):
+    def test_strike_ladder_only_prices_gate_passers(self, monkeypatch):
         """The expensive rows go where someone might act, not everywhere."""
+        monkeypatch.setattr("engine.score.board_chain_keys", lambda *a, **k: set())
         from engine.dashboard import nightly
 
         board = pd.DataFrame([
@@ -767,6 +768,7 @@ class TestNightlyPieces:
 
         class Recorder:
             snapshot = "snap-test"
+            calendar = None
 
             def score(self, request, chain_index=None):
                 asked.append((request.ticker, request.strike))
@@ -777,7 +779,7 @@ class TestNightlyPieces:
         assert sorted(round(s, 4) for _, s in asked) == [97.5, 102.5]
         assert [r["strike_offset"] for r in rows] == [-0.025, 0.025]
 
-    def test_strike_ladder_refuses_a_strategy_with_no_legs(self):
+    def test_strike_ladder_refuses_a_strategy_with_no_legs(self, monkeypatch):
         """DYN-SV picks a structure; it is not one, so it cannot be re-struck.
 
         Laddering it asked the engine to resolve a name with no ``STRUCTURES``
@@ -785,6 +787,7 @@ class TestNightlyPieces:
         row_id. A ladder row means "the same structure at another strike", so
         the strategy has to BE a structure.
         """
+        monkeypatch.setattr("engine.score.board_chain_keys", lambda *a, **k: set())
         from engine.dashboard import nightly
         from engine.score import DYNAMIC_STRATEGY
 
@@ -797,6 +800,7 @@ class TestNightlyPieces:
 
         class Recorder:
             snapshot = "snap-test"
+            calendar = None
 
             def score(self, request, chain_index=None):
                 asked.append(request.strategy)
@@ -818,13 +822,15 @@ class TestNightlyPieces:
 
         assert nightly.strike_ladder(board, scorer=Boom(), alt_strikes=0, as_of=AS_OF) == []
 
-    def test_strike_ladder_keeps_unpriceable_rows_as_placeholders(self):
+    def test_strike_ladder_keeps_unpriceable_rows_as_placeholders(self, monkeypatch):
+        monkeypatch.setattr("engine.score.board_chain_keys", lambda *a, **k: set())
         from engine.dashboard import nightly
 
         board = pd.DataFrame([_result(gate_pass=True).as_dict() | {"strike_offset": None}])
 
         class NoChain:
             snapshot = "snap-test"
+            calendar = None
 
             def score(self, request, chain_index=None):
                 raise KeyError("no chain at that strike")
@@ -1993,7 +1999,7 @@ class TestBackfillNights:
         """A second default scorer reloads all daily market history and OOMs."""
         from pathlib import Path
 
-        src = (Path(__file__).resolve().parents[1] / "engine" / "dashboard"
+        src = (Path(__file__).resolve().parents[3] / "engine" / "dashboard"
                / "nightly.py").read_text()
         block = src[src.index("# -- 4b. honest backfill"):]
         block = block[:block.index("# -- flags that need scores")]
@@ -2076,7 +2082,7 @@ class TestTheOrderTicket:
         """
         from pathlib import Path
 
-        js = (Path(__file__).resolve().parents[1] / "engine" / "dashboard"
+        js = (Path(__file__).resolve().parents[3] / "engine" / "dashboard"
               / "static" / "assets" / "app.js").read_text()
         assert "function renderOrderTicket" in js
         assert "renderOrderTicket(r)" in js, "defined but never called"
@@ -2109,7 +2115,7 @@ class TestTheNightlyRebuildsTheTiers:
         and harder to notice."""
         from pathlib import Path
 
-        src = (Path(__file__).resolve().parents[1] / "engine" / "dashboard"
+        src = (Path(__file__).resolve().parents[3] / "engine" / "dashboard"
                / "nightly.py").read_text()
         block = src[src.index("# -- 2b. Tier 3 and Tier 4"):]
         block = block[:block.index("# -- earnings-date changes")]
