@@ -18,7 +18,7 @@ import pandas as pd
 
 from engine.v2.contracts.data import DataQuery, KeyPredicate, SnapshotRef, TimeInterval
 from engine.v2.data import errors, time_formats
-from engine.v2.research._progress import Progress
+from engine.v2.research.progress import Progress
 
 __all__ = ["DEFAULT_SCOPE", "next_representable", "read_table", "resolve_snapshot"]
 

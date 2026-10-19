@@ -18,16 +18,17 @@ def _target_filters(event):
     return keys, interval
 
 
-def _target_query(repository, snapshot, contract, event, *, population_bound=None):
+def _target_query(repository, snapshot, contract, event, *, population_bound=None,
+                  columns=("event_date", "realized_move_pct", "available_as_of_date", "skipped")):
     """The shared exact ticker/day query; predicates alone do not isolate bytes."""
-    version = snapshot.table_versions["computed_moves"]
+    version = snapshot.table_versions[contract.table_name]
     keys, interval = _target_filters(event)
     bound = population_bound
     if bound is None:
-        bound = repository.scan_population_bound(snapshot.snapshot_id, table_name="computed_moves",
+        bound = repository.scan_population_bound(snapshot.snapshot_id, table_name=contract.table_name,
             table_contract_ref=version.table_contract_ref, key_filter=keys, time_interval=interval)
     return DataQuery(snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
-        columns=("event_date", "realized_move_pct", "available_as_of_date", "skipped"), key_filter=keys,
+        columns=columns, key_filter=keys,
         time_interval=interval, order_by=contract.primary_key,
         max_batch_rows=min(contract.maximum_batch_rows, max(1, min(bound, 2))),
         max_result_rows=min(bound, 2))
