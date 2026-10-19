@@ -7,6 +7,7 @@ from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.features.panel_math import history_features
 from engine.v2.foundation import content_hash
 from engine.v2.foundation.experiment_holdouts import _calendar_date
+from engine.v2.research._progress import Progress
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.prediction_inputs import _parse_target, _target_filters, _target_query
 
@@ -108,6 +109,7 @@ def _plans(repository, snapshot, candidates, contract):
     """Shared history/target guard: prove all object membership before any opens."""
     index = _record_index(repository.fragment_records(snapshot, "computed_moves"), contract)
     plans = []
+    progress = Progress("plan history candidates", len(candidates))
     for event in candidates.itertuples(index=False):
         keys, interval = _target_filters(event)
         day = event.event_date.date().isoformat()
@@ -124,6 +126,7 @@ def _plans(repository, snapshot, candidates, contract):
         request = _target_query(repository, snapshot, contract, event,
                                 population_bound=population.row_count)
         plans.append((event, request, record))
+        progress.tick()
     return plans
 
 

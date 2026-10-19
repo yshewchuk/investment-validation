@@ -21,6 +21,7 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.research import event_history
+from engine.v2.research._progress import Progress, stage
 from engine.v2.research._snapshot import artifact_store, catalog_connection
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.magnitude_features import _feature_recipe
@@ -123,7 +124,8 @@ def _preflight_source(repository, snapshot, context):
 
 def _prepare_history(repository, snapshot, context):
     """Lazily decode at most one row per admitted candidate; no cross-build cache."""
-    population, plans = _preflight_source(repository, snapshot, context)
+    with stage("history preflight"):
+        population, plans = _preflight_source(repository, snapshot, context)
     decoded, by_ticker = {}, {}
     for event, request, record in plans:
         by_ticker.setdefault(event.ticker, []).append((event, request, record))
@@ -165,21 +167,26 @@ def materialize(repository, snapshot, context):
     if existing is not None:
         read_stored(repository, existing, context)
         return existing
-    prepared = _prepare_history(repository, snapshot, context)
+    with stage("history prepare"):
+        prepared = _prepare_history(repository, snapshot, context)
     store, records = artifact_store(repository), []
     ref = TableContractRef(contract_id=CONTRACT.contract_id, definition_hash=CONTRACT.definition_hash)
     schema = pa.schema([pa.field(c.name, query.arrow_type_for(c.physical_type), nullable=c.nullable)
                         for c in CONTRACT.columns])
-    for event in sorted(context["temporal_plan"]["events"], key=lambda e: e["event_id"]):
-        sink = pa.BufferOutputStream()
-        rows = _event_rows(repository, snapshot, context, event, prepared)
-        pq.write_table(pa.Table.from_pylist(rows, schema=schema), sink)
-        published = store.publish_bytes(sink.getvalue().to_pybytes(), schema_ref="parquet_fragment.v1")
-        obj = ObjectRef(kind="parquet_fragment", object_id=published.artifact_id,
-                        content_hash=published.content_hash, byte_size=published.byte_size)
-        inspection = objects.inspect_fragment(store, obj, CONTRACT, ref, context["context_id"])
-        records.append(manifests.fragment_record(inspection, ref, input_receipt_refs=(),
-                                                import_request_hash=context["context_id"]))
+    ordered = sorted(context["temporal_plan"]["events"], key=lambda e: e["event_id"])
+    progress = Progress("history events", len(ordered))
+    with stage("history materialize"):
+        for event in ordered:
+            sink = pa.BufferOutputStream()
+            rows = _event_rows(repository, snapshot, context, event, prepared)
+            pq.write_table(pa.Table.from_pylist(rows, schema=schema), sink)
+            published = store.publish_bytes(sink.getvalue().to_pybytes(), schema_ref="parquet_fragment.v1")
+            obj = ObjectRef(kind="parquet_fragment", object_id=published.artifact_id,
+                            content_hash=published.content_hash, byte_size=published.byte_size)
+            inspection = objects.inspect_fragment(store, obj, CONTRACT, ref, context["context_id"])
+            records.append(manifests.fragment_record(inspection, ref, input_receipt_refs=(),
+                                                    import_request_hash=context["context_id"]))
+            progress.tick()
     partition_hash = objects.partition_logical_hash(store, [r.object_ref for r in records],
                                                     CONTRACT, ref, context["context_id"])
     manifest = manifests.dataset_manifest(ref, records, knowledge_mode="reconstructed",

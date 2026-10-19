@@ -39,7 +39,8 @@ def _execute(args):
     """Close the native catalog before returning a complete CLI result."""
     conn = open_catalog(args.catalog, clock=SystemClock())
     try:
-        repository = Repository(conn, ArtifactStore(args.store_root))
+        # Pinned: decode each table's catalog fragment membership once, not on every scan (#953).
+        repository = Repository(conn, ArtifactStore(args.store_root), pin_snapshots=True)
         snapshot = repository.resolve(args.source_snapshot_id)
         request = dict(as_of_month=args.as_of_month, evaluation_years=args.evaluation_years,
                        training_start=args.training_start, history_start=args.history_start, event_ids=args.event_id)
