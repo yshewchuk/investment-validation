@@ -1,5 +1,4 @@
 """Declared fixed-day and target/stop exits over held contracts; no publication."""
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from math import isfinite
@@ -7,6 +6,7 @@ from math import isfinite
 import pandas as pd
 
 from engine.v2.data.errors import fail
+from engine.v2.foundation.experiment_exits import valid_exit_recipe
 from engine.v2.research._chains import load_chain_index
 from engine.v2.research._pricing import FillModel, trading_calendar_from_snapshot
 
@@ -133,9 +133,8 @@ def walk_fixed_day(repository, snapshot, positions, *, economic_params):
     try:
         recipe = economic_params["exit"]
         alpha = economic_params["fill"]
-        if (not isinstance(recipe, Mapping) or set(recipe) != {"kind", "trading_days"}
-                or recipe["kind"] != "fixed_day" or type(recipe["trading_days"]) is not int
-                or recipe["trading_days"] <= 0 or type(alpha) not in (int, float)):
+        if (not valid_exit_recipe(recipe) or recipe["kind"] != "fixed_day"
+                or type(alpha) not in (int, float)):
             raise ValueError("invalid fixed-day economics")
         fill = FillModel(alpha)
     except (KeyError, TypeError, ValueError, OverflowError):
@@ -151,25 +150,8 @@ def _exit_recipe(economic_params):
     alpha = economic_params["fill"]
     if type(alpha) not in (int, float) or not isfinite(alpha) or not 0 <= alpha <= 1:
         raise ValueError("invalid fill economics")
-    if not isinstance(recipe, Mapping):
+    if not valid_exit_recipe(recipe):
         raise ValueError("invalid exit recipe")
-    days = recipe.get("trading_days")
-    if type(days) is not int or days <= 0:
-        raise ValueError("invalid trading horizon")
-    kind = recipe.get("kind")
-    if kind == "fixed_day":
-        if set(recipe) != {"kind", "trading_days"}:
-            raise ValueError("invalid fixed-day recipe")
-    elif kind == "target_stop":
-        if set(recipe) != {"kind", "trading_days", "target_pnl", "stop_pnl"}:
-            raise ValueError("invalid target/stop recipe")
-        for name, sign in (("target_pnl", 1), ("stop_pnl", -1)):
-            value = recipe[name]
-            if (type(value) not in (int, float) or not isfinite(value)
-                    or sign * value <= 0):
-                raise ValueError("invalid target/stop threshold")
-    else:
-        raise ValueError("unknown exit kind")
     return recipe
 
 
@@ -231,7 +213,8 @@ def _held_decision(position, index, dates, opening, fill, target, stop, snapshot
         raise _SessionError(session) from None
 
 
-def _walk_target_stop(repository, snapshot, position, calendar, days, fill, target, stop):
+def _walk_target_stop(repository, snapshot, position, calendar, days, fill, target, stop,
+                      threshold_units):
     if not isinstance(position, EnteredPosition):
         raise fail("EXPERIMENT_VARIANT_FAILED", "entered position record is malformed")
     session = position.entry_date
@@ -244,6 +227,12 @@ def _walk_target_stop(repository, snapshot, position, calendar, days, fill, targ
         index = load_chain_index(repository, snapshot, [(position.ticker, d) for d in dates])
         opening = _cash_flow(position, index.get(position.ticker, dates[0]), fill,
                              closing=False)
+        if threshold_units == "entry_debit_fraction":
+            target, stop = target * -opening, stop * -opening
+            if (opening >= 0 or not isfinite(target) or not isfinite(stop)
+                    or target <= 0 or stop >= 0):
+                raise fail("EXPERIMENT_VARIANT_FAILED", "entry-debit exit thresholds unavailable",
+                           details={"trade_id": position.trade_id, "session": session})
         decision = _held_decision(position, index, dates, opening, fill, target, stop,
                                   snapshot.snapshot_id)
         if not isfinite(decision.pnl):
@@ -261,6 +250,9 @@ def _walk_target_stop(repository, snapshot, position, calendar, days, fill, targ
 def walk_exit(repository, snapshot, positions, *, economic_params):
     """Walk the declared fixed-day or target/stop exit over one pinned snapshot.
 
+    Target/stop units default to quote price times quantity. Explicit
+    ``entry_debit_fraction`` scales signed ratios by the positive net opening
+    debit at declared alpha, without fees, commissions or contract multipliers.
     Both recipes aggregate each observed day's net held-position P&L with the
     pinned ``option_chains`` quotes and the existing alpha ladder. A target or
     stop exits on its first crossing at that day's declared-alpha mark; when a
@@ -281,7 +273,8 @@ def walk_exit(repository, snapshot, positions, *, economic_params):
     calendar = trading_calendar_from_snapshot(repository, snapshot, extend_days=0)
     return tuple(_walk_target_stop(repository, snapshot, p, calendar,
                                    recipe["trading_days"], fill,
-                                   float(recipe["target_pnl"]), float(recipe["stop_pnl"]))
+                                   float(recipe["target_pnl"]), float(recipe["stop_pnl"]),
+                                   recipe.get("threshold_units", "quote_price_times_quantity"))
                  for p in positions)
 
 
