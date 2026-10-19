@@ -222,6 +222,8 @@ uses this installed repository root; the supplied anchor must match that install
 This metadata-only CLI accepts `--no-ledger` as a no-op for runner compatibility;
 both flag states publish/verify the same plan and never write a ledger.
 
+Every experiment CLI or helper that reads one fixed snapshot builds its `Repository` with `pin_snapshots=True` (#975), so per-partition scans reuse one decode of the table's fragment membership; the cache is per instance and keyed by immutable ids, so output is identical. `tests/v2/research/test_experiment_repository_pinning.py` fails on any unpinned `Repository(` under `experiments/`.
+
 | Condition | Enforced outcome |
 |---|---|
 | Request shape | `magnitude_search_request.v1`: explicit `inner_years`, `space`, `max_candidates`, `max_fits`; Ridge `alpha` and/or HGB `learning_rate`, `max_iter`, `max_leaf_nodes`, `min_samples_leaf`, `l2_regularization` axes. |

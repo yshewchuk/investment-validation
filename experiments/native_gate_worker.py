@@ -147,7 +147,7 @@ def run(parameters, root):
             binding = registration.document
             pricing = True
             result = price_variant(
-                Repository(conn, store), from_document(SnapshotRef, binding["snapshot"]), spec,
+                Repository(conn, store, pin_snapshots=True), from_document(SnapshotRef, binding["snapshot"]), spec,
                 strategy=spec.economic_params["strategy"], as_of_month=binding["holdouts"]["holdout_as_of_month"],
                 event_ids=binding["event_ids"])
             inputs = asdict(result.stage_inputs)

@@ -112,7 +112,8 @@ def main(argv=None) -> int:
                                      uri=True, isolation_level=None)
         connection.row_factory = sqlite3.Row
         try:
-            repository = Repository(connection, ArtifactStore(args.store_root))
+            repository = Repository(connection, ArtifactStore(args.store_root),
+                                   pin_snapshots=True)
             snapshot = repository.resolve_pinned(args.scope)
             result = price_variant(repository, snapshot, spec, strategy=args.strategy,
                                    as_of_month=args.as_of_month)

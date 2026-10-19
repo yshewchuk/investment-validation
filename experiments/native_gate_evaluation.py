@@ -35,7 +35,7 @@ def run(parameters, root):
             store = ArtifactStore(parameters["objects_root"])
             spec, registration = admit_native_gate_inputs(parameters, root, conn, store, runner=RUNNER)
             evaluating = True
-            result = gate_result(Repository(conn, store), registration, spec)
+            result = gate_result(Repository(conn, store, pin_snapshots=True), registration, spec)
         finally:
             conn.close()
         evaluating = False
