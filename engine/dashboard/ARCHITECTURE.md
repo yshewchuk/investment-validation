@@ -54,8 +54,17 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 
 `engine/memprobe.py` — four env flags (`INVESTING_PLAN_MEMPROFILE`, `_TRIM`,
 `_EVERY` default 250, `_TOP` default 12). Off = no output and no gc walk; on,
-`[mem]` lines go to stdout. `_TRIM` runs `gc.collect()` then libc
-`malloc_trim(0)` before measuring, logging RSS before/after. Hooks:
+`[mem]` lines go to stdout. `_TRIM` runs `gc.collect()`, releases the pyarrow
+pool (`release_unused`) when pyarrow is already imported, then libc
+`malloc_trim(0)` before measuring; the before/after RSS pair (`rss=` plus the
+`[trimmed from X]` suffix on the head line) is printed only under `_TRIM` and
+only when the pyarrow release or malloc_trim actually ran — without them a
+single RSS value is printed. Optional probes
+are silently omitted when unavailable (pyarrow rows only if pyarrow is
+already imported; map/rss rows only if `/proc/self/smaps` and
+`/proc/self/status` are readable) and never print a failure line; only an
+unexpected exception in the snapshot body prints `probe failed` — but the
+before/after RSS pair obeys the `_TRIM` rule above. Hooks:
 `NightlyReport.mark`, `score_calendar`, `load_chain_index`, `Scorer` caches.
 Estimates are sampled, not exact: `estimate_size` averages a bounded sample
 (200 items; first-N for sets/dicts, strided for lists/Series; a Series or
@@ -64,7 +73,10 @@ object column may still materialise up to ~2x the sample while striding). A
 failure, while `snapshot` prints a probe-failure diagnostic and returns `None`. `NightlyReport.mark` restarts its step clock after the probe, so
 profiling time is not charged to the next step. The native (`engine/v2`) nightly is NOT
 covered: `engine/v2` must not import legacy `engine` (layer rule); legacy
-adapters invoked from v2 run unprofiled.
+adapters invoked from v2 run unprofiled. Each snapshot also logs RSS
+anon/file/shmem, the pyarrow pool (backend, allocated, max; `_TRIM` also
+calls `release_unused()`), the largest mappings, untracked numpy arrays
+found via their holders, and gc object counts by type.
 
 ## Inputs
 
@@ -205,9 +217,12 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   | Condition | Outcome |
   | --- | --- |
   | Probe disabled (flag unset) | Snapshot/tick returns before any work; no output, no gc walk |
+  | pyarrow not imported | No arrow row; no pool release |
+  | `/proc/self/smaps` unreadable | No map rows |
+  | `/proc/self/status` unreadable | No rss anon/file/shmem row; the head line shows `rss=0.00G peak=0.00G` |
   | Ordinary probe failure (any non-`MemoryError` exception, including a broken stdout) | Prints `[mem] <label> probe failed: <ExcType>: <repr>` when stdout works; the run continues |
   | `MemoryError` anywhere in a probe | Propagates to the caller (nightly `MemoryError` handling unchanged) |
-  | Trim flag set but libc lacks `malloc_trim` | Trim skipped; RSS lines still printed |
+  | Trim flag set but libc lacks `malloc_trim` | `malloc_trim` skipped, but the pyarrow pool release still runs; RSS lines still printed |
 
 ## Invariants
 
