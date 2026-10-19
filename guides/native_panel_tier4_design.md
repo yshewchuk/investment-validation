@@ -37,7 +37,11 @@ calendar in bounded batches (ticker groups, one year
 partition at a time; peak memory is a function of the batch, never of the
 table; slice 2 sets a hard rows-and-bytes cap per group or partition, splits an
 oversized one into sub-batches instead of loading it whole, and its memory test
-covers that case) and publishes `feature_panel` as a new dataset version of the same
+covers that case). Rolling and history features (`panel_math`, `regime`,
+`runup_math`) stay continuous across sub-batch boundaries by reading an overlap
+of prior history (at least the longest lookback) or by carrying explicit state
+into the next sub-batch; only the overlap rows are not emitted twice. A
+boundary test compares capped output with an uncapped reference and publishes `feature_panel` as a new dataset version of the same
 snapshot lineage. Row math is `panel_math`, `regime` and `runup_math` only;
 `scan_panel_row` and the batch share them, so a forward row equals the stored
 row for the same event and the same `decision_session` and `history_start`
