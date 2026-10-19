@@ -122,9 +122,10 @@ session, whose release should exist, is a scoring refusal:
 `native_score_batch` refuses it with the existing `MODEL_NOT_READY` code,
 names the reason in `details`, and the parity report counts it as a native
 refusal (a visible, not hidden, class). The nightly's other jobs continue.
-Per the rule above, a refusal is correct whenever no member is eligible, not
-only when the release is absent; #782 tracks which of today's 101 refusals
-fall under that rule.
+Per the rule above, a forward event of the scored session is correctly
+refused whenever no member is eligible, not only when the release is absent
+(historical events stay null, section 3); #782 tracks which of today's 101
+refusals fall under that rule.
 
 ## 5. Qualification replaces parity
 
