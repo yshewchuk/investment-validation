@@ -24,6 +24,9 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 - `nightly.py` — the orchestrator; run as the legacy nightly entrypoint
   (root doc §4). Public helpers for the Tier-4 gap repair:
   `repair_tier4_gap`, `repair_tier4_gap_if_needed`, `mark_tiers_degraded`.
+  `strike_ladder` builds one chain index from `board_chain_keys` for the
+  gate-passing rows and passes it to every `score` call (output unchanged;
+  selfcheck still re-scores without an index).
 - `render.py` — `build_meta`, `build_health`, `build_strategies`,
   `compact_row`, `row_digest`, `freshness_summary`, `quota_state`,
   `size_model_mae_from_ledger`, `payoff_curve`: the board's row/meta/health

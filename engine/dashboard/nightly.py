@@ -1122,7 +1122,9 @@ def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> li
 
     Scoring the ladder only for gate passers puts the grid exactly where someone
     might act on it, at a few percent of the cost. Rows carry ``strike_offset``
-    so the self-check reconstructs the same request that produced them.
+    so the self-check reconstructs the same request that produced them. One
+    chain index is built for the whole ladder: the per-row load re-read whole
+    year partitions and was the ladder's peak memory.
     """
     if alt_strikes <= 0 or not len(board):
         return []
@@ -1148,6 +1150,21 @@ def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> li
     # sharing a row_id.
     live = live[live["strategy"].isin(set(STRUCTURES))]
     live = live[~live["strategy"].isin(set(FORECAST_SIZED))]
+
+    from engine.replay import load_chain_index, ChainIndex
+    from engine.score import board_chain_keys
+
+    events = live[["ticker", "event_date", "session"]].drop_duplicates().copy()
+    events["event_date"] = pd.to_datetime(events["event_date"])
+    quote_ages = live["quote_max_age_sessions"].dropna()
+    quote_max_age = max(int(v) for v in quote_ages) if len(quote_ages) else None
+    keys = board_chain_keys(
+        events, sorted(live["strategy"].unique()), {},
+        calendar=scorer.calendar, as_of=as_of,
+        quote_max_age_sessions=quote_max_age,
+    )
+    index = load_chain_index(keys, progress_every=0) if keys else ChainIndex({})
+
     offsets = [
         step * sign
         for step in (STRIKE_STEP * k for k in range(1, alt_strikes + 1))
@@ -1190,7 +1207,7 @@ def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> li
                 chain_as_of=as_of,
             )
             try:
-                result = scorer.score(request)
+                result = scorer.score(request, chain_index=index)
             except UNSCORABLE as exc:
                 result = unscorable_result(
                     request, as_of=as_of, snapshot=scorer.snapshot, exc=exc
