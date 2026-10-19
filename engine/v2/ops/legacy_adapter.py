@@ -636,8 +636,9 @@ def _compare_to_pinned(materialization_root, hashes):
     for name, rebuilt in (("panel", paths.PANEL), ("tier4", paths.TIER4)):
         pinned_path = root / rebuilt.relative_to(paths.ROOT)
         pinned[name] = store.file_sha256(pinned_path) if pinned_path.is_file() else None
+        # Byte-identical tables skip the diff; provenance stamps are still validated (stamp columns only).
         if hashes[f"{name}_sha256"] is not None and hashes[f"{name}_sha256"] == pinned[name]:
-            tables[name] = dict(fc.IDENTICAL, mismatches=[])
+            tables[name] = fc.compare_identical(name, pinned_path)
         else:
             tables[name] = fc.compare_tables(name, rebuilt, pinned_path)
     verdict = "match" if all(t["verdict"] == "match" for t in tables.values()) else "mismatch"
