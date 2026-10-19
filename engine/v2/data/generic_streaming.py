@@ -32,22 +32,11 @@ __all__ = ["ROW_GROUP_ROWS", "StreamingTableWriter"]
 #: Rows per parquet row group; the bytes therefore depend only on the rows.
 ROW_GROUP_ROWS = 50_000
 
-#: Same arrow type map as ``generic_incremental._parquet_bytes``.
-_ARROW_TYPES = {
-    "string": pa.string(),
-    "float64": pa.float64(),
-    "int64": pa.int64(),
-    "bool": pa.bool_(),
-    "timestamp[ns]": pa.timestamp("ns"),
-    "timestamp[us]": pa.timestamp("us"),
-    "date32": pa.date32(),
-}
-
 
 def _arrow_schema(contract: TableContract) -> pa.Schema:
     fields = []
     for column in contract.columns:
-        arrow_type = _ARROW_TYPES.get(column.physical_type)
+        arrow_type = incremental.ARROW_TYPES.get(column.physical_type)
         if arrow_type is None:
             raise errors.fail("UNSUPPORTED_CONTRACT", "table physical type is unsupported")
         fields.append(pa.field(column.name, arrow_type))
@@ -77,6 +66,11 @@ class StreamingTableWriter:
         prior_manifest = parent.table_manifests.get(table_name)
         if prior_manifest is None:
             raise errors.fail("CONTRACT_MISMATCH", "parent snapshot has no requested table")
+        coverage_ref = getattr(coverage, "table_contract_ref", None)
+        if coverage_ref is not None and (
+                coverage_ref != prior_manifest.dataset_version_ref.table_contract_ref):
+            raise errors.fail("CONTRACT_MISMATCH",
+                              "the streaming coverage is for a different table")
         if contract.partition_columns != ():
             raise errors.fail("UNSUPPORTED_CONTRACT",
                               "the streaming writer supports whole-table contracts only")
@@ -99,6 +93,9 @@ class StreamingTableWriter:
         try:
             self._writer = pq.ParquetWriter(str(self._path), self._schema)
         except errors.DataError:
+            self._remove_staging()
+            raise
+        except OSError:
             self._remove_staging()
             raise
         except Exception:
@@ -190,7 +187,7 @@ class StreamingTableWriter:
         try:
             table = pa.Table.from_arrays(
                 [pa.array([row.get(column.name) for row in self._buffer],
-                          type=_ARROW_TYPES[column.physical_type])
+                          type=incremental.ARROW_TYPES[column.physical_type])
                  for column in self._contract.columns],
                 schema=self._schema)
             self._writer.write_table(table, row_group_size=len(self._buffer))
@@ -207,23 +204,26 @@ class StreamingTableWriter:
         prior_manifest = self._prior_manifest
         prior_records = incremental.table_records(parent, prior_manifest)
         ref = prior_manifest.dataset_version_ref.table_contract_ref
+        prior_keys = {item.partition_key for item in prior_records}
+        new_key = next(iter(prior_keys)) if len(prior_keys) == 1 else "__whole__"
+        changed_partitions = tuple(sorted(prior_keys | {new_key}))
         published = self._store.publish_candidate(
             self._attempt_id, self._rel, schema_ref="parquet_fragment.v1.0",
             max_bytes=self._path.stat().st_size)
         obj = ObjectRef(kind="parquet_fragment", object_id=published.artifact_id,
                         content_hash=published.content_hash, byte_size=published.byte_size)
-        inspection = objects.inspect_fragment(self._store, obj, contract, ref, "__whole__")
+        inspection = objects.inspect_fragment(self._store, obj, contract, ref, new_key)
         record = manifests.fragment_record(
             inspection, ref,
             input_receipt_refs=coverage.acquisition_receipt_refs,
             import_request_hash=content_hash({
-                "table": contract.table_name, "partition": "__whole__",
+                "table": contract.table_name, "partition": new_key,
                 "coverage": coverage.coverage_id}))
         self._remove_staging()
         new_records = (record,)
         merge = tables.GenericMerge(
             rows=(), retained_revisions=(), incoming_revisions=(), winners=(),
-            changes=(), changed_partitions=("__whole__",))
+            changes=(), changed_partitions=changed_partitions)
         manifest = incremental.replace_manifest(
             prior_manifest, ref, prior_records, new_records, merge, coverage)
         table_manifests = dict(parent.table_manifests)
@@ -238,13 +238,15 @@ class StreamingTableWriter:
         objects_by_id = {item.object_id: item for item in parent.objects}
         objects_by_id[obj.object_id] = obj
         changeset = _whole_changeset(
-            snapshot, prior_manifest, manifest, ref, coverage, self._row_count)
+            snapshot, prior_manifest, manifest, ref, coverage, self._row_count,
+            changed_partitions)
         return incremental.GenericTableCandidate(
             parent=parent, table_name=self._table_name, contract=contract, merge=merge,
             coverage=coverage, table_manifest=manifest, snapshot=snapshot,
             contracts=parent.contracts, objects=tuple(objects_by_id.values()),
             records=records, changeset=changeset,
-            changeset_hash=content_hash(to_document(changeset)), rewritten_partitions=1)
+            changeset_hash=content_hash(to_document(changeset)),
+            rewritten_partitions=len(changed_partitions))
 
     def _fail(self) -> None:
         if self._state != "open":
@@ -271,7 +273,8 @@ class StreamingTableWriter:
                 pass
 
 
-def _whole_changeset(snapshot, prior, result, ref, coverage, row_count) -> ChangeSet:
+def _whole_changeset(snapshot, prior, result, ref, coverage, row_count,
+                     changed_partitions) -> ChangeSet:
     ident = {"snapshot": snapshot.snapshot_id, "table": ref.contract_id, "changes": []}
     change_id = "changeset_" + content_hash(ident).removeprefix(CONTENT_HASH_PREFIX)[:32]
     return ChangeSet(
@@ -280,6 +283,6 @@ def _whole_changeset(snapshot, prior, result, ref, coverage, row_count) -> Chang
         result_dataset_version_ref=result.dataset_version_ref,
         acquisition_receipt_refs=coverage.acquisition_receipt_refs,
         coverage_receipt_refs=(coverage.coverage_id,), changes=(),
-        changed_partitions=("__whole__",), dependency_impacts=(),
+        changed_partitions=changed_partitions, dependency_impacts=(),
         unknown_dependencies=(), dependency_disposition="exact", outcome="changed",
-        normalized_payloads=row_count, rewritten_partitions=1)
+        normalized_payloads=row_count, rewritten_partitions=len(changed_partitions))

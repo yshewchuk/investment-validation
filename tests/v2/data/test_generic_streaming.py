@@ -110,10 +110,9 @@ def _rows(count):
     return [_row(i) for i in range(count)]
 
 
-def _parent(conn, store, clock, contract, seed_row):
+def _parent_with_prior(conn, store, clock, contract, prior_rows, partition):
     ref = _ref(contract)
-    partition = generic_incremental._partition(contract, seed_row)
-    published = store.publish_bytes(generic_incremental._parquet_bytes(contract, (seed_row,)),
+    published = store.publish_bytes(generic_incremental._parquet_bytes(contract, prior_rows),
                                     schema_ref="parquet_fragment.v1.0")
     obj = ObjectRef(kind="parquet_fragment", object_id=published.artifact_id,
                     content_hash=published.content_hash, byte_size=published.byte_size)
@@ -134,6 +133,12 @@ def _parent(conn, store, clock, contract, seed_row):
         receipt_id="base", attempt_id="base", fence=1,
         fence_check=lambda _conn: None, clock=clock, store=store)
     return Repository(conn).resolve_full(snapshot.snapshot_id)
+
+
+def _parent(conn, store, clock, contract, seed_row):
+    return _parent_with_prior(
+        conn, store, clock, contract, (seed_row,),
+        generic_incremental._partition(contract, seed_row))
 
 
 def _table_rows(resolved, store, contract):
@@ -227,29 +232,37 @@ def test_batch_size_does_not_change_identity(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("label", "bad_rows"),
+    ("label", "bad_rows", "message"),
     (
-        ("out_of_order", [_row(2), _row(1)]),
-        ("duplicate_key", [_row(3), _row(3)]),
-        ("unknown_column", [dict(_row(0), bogus=1)]),
-        ("null_non_nullable", [dict(_row(0), date=None)]),
-        ("wrong_type_float", [dict(_row(0), value="not-a-float")]),
-        ("mixed_key_type", [_row(0), dict(_row(1), ticker=123)]),
+        ("out_of_order", [_row(2), _row(1)],
+         "streamed rows are not in strictly increasing primary-key order"),
+        ("duplicate_key", [_row(3), _row(3)],
+         "streamed rows are not in strictly increasing primary-key order"),
+        ("unknown_column", [dict(_row(0), bogus=1)],
+         "table row does not satisfy contract columns"),
+        ("null_non_nullable", [dict(_row(0), date=None)],
+         "a streamed row omits a required column value"),
+        ("wrong_type_float", [dict(_row(0), value="not-a-float")],
+         "a streamed row has a value incompatible with its column type"),
+        ("mixed_key_type", [_row(0), dict(_row(1), ticker=123)],
+         "a streamed row has a value incompatible with its column type"),
     ),
 )
-def test_bad_rows_refused_leave_nothing(tmp_path, label, bad_rows):
+def test_bad_rows_refused_leave_nothing(tmp_path, label, bad_rows, message):
     conn, clock, store = _setup(tmp_path)
     contract = _whole_contract()
     parent = _parent(conn, store, clock, contract, _row(-1))
 
     writer = generic_streaming.StreamingTableWriter(
         store, parent, TABLE, "attempt-" + label, _coverage(contract))
-    with pytest.raises(DataError) as exc:
+    with pytest.raises(DataError, match=r"^CONTRACT_MISMATCH: " + message) as exc:
         writer.append_rows(bad_rows)
     assert exc.value.code == "CONTRACT_MISMATCH"
     assert _staging_entries(store, "attempt-" + label) == []
     assert _head_snapshot(conn) == parent.snapshot.snapshot_id
-    with pytest.raises(DataError) as terminal:
+    with pytest.raises(
+            DataError,
+            match=r"^INPUT_CHANGED: the streaming writer is no longer open") as terminal:
         writer.append_rows([_row(9)])
     assert terminal.value.code == "INPUT_CHANGED"
 
@@ -261,12 +274,17 @@ def test_zero_rows_refused(tmp_path):
 
     writer = generic_streaming.StreamingTableWriter(
         store, parent, TABLE, "attempt-zero", _coverage(contract))
-    with pytest.raises(DataError) as exc:
+    with pytest.raises(
+            DataError,
+            match=r"^CONTRACT_MISMATCH: a streaming table writer cannot finish with no rows"
+    ) as exc:
         writer.finish()
     assert exc.value.code == "CONTRACT_MISMATCH"
     assert _staging_entries(store, "attempt-zero") == []
     assert _head_snapshot(conn) == parent.snapshot.snapshot_id
-    with pytest.raises(DataError) as terminal:
+    with pytest.raises(
+            DataError,
+            match=r"^INPUT_CHANGED: the streaming writer is no longer open") as terminal:
         writer.finish()
     assert terminal.value.code == "INPUT_CHANGED"
 
@@ -277,7 +295,10 @@ def test_non_whole_table_contract_refused(tmp_path):
     parent = _parent(conn, store, clock, contract,
                      dict(_row(0), year=2025))
 
-    with pytest.raises(DataError) as exc:
+    with pytest.raises(
+            DataError,
+            match=r"^UNSUPPORTED_CONTRACT: the streaming writer supports whole-table contracts only"
+    ) as exc:
         generic_streaming.StreamingTableWriter(
             store, parent, TABLE, "attempt-part", _coverage(contract))
     assert exc.value.code == "UNSUPPORTED_CONTRACT"
@@ -290,7 +311,9 @@ def test_incomplete_coverage_refused(tmp_path):
     contract = _whole_contract()
     parent = _parent(conn, store, clock, contract, _row(-1))
 
-    with pytest.raises(DataError) as exc:
+    with pytest.raises(
+            DataError,
+            match=r"^INPUT_CHANGED: incomplete coverage cannot build a candidate") as exc:
         generic_streaming.StreamingTableWriter(
             store, parent, TABLE, "attempt-partial", _coverage(contract, state="partial"))
     assert exc.value.code == "INPUT_CHANGED"
@@ -308,7 +331,9 @@ def test_append_after_finish_refused(tmp_path):
     writer.append_rows(_rows(2))
     writer.finish()
     for action in (lambda: writer.append_rows([_row(5)]), writer.finish):
-        with pytest.raises(DataError) as exc:
+        with pytest.raises(
+                DataError,
+                match=r"^INPUT_CHANGED: the streaming writer is no longer open") as exc:
             action()
         assert exc.value.code == "INPUT_CHANGED"
 
@@ -327,7 +352,9 @@ def test_abort_removes_staging_and_refuses_append(tmp_path):
     writer.abort()
     assert _staging_entries(store, "attempt-abort") == []
     for action in (lambda: writer.append_rows([_row(5)]), writer.finish):
-        with pytest.raises(DataError) as exc:
+        with pytest.raises(
+                DataError,
+                match=r"^INPUT_CHANGED: the streaming writer is no longer open") as exc:
             action()
         assert exc.value.code == "INPUT_CHANGED"
 
@@ -369,7 +396,10 @@ def test_cross_batch_order_refused(tmp_path):
     writer = generic_streaming.StreamingTableWriter(
         store, parent, TABLE, "attempt-cross-batch", _coverage(contract))
     writer.append_rows(_rows(3))
-    with pytest.raises(DataError) as exc:
+    with pytest.raises(
+            DataError,
+            match=r"^CONTRACT_MISMATCH: streamed rows are not in strictly increasing "
+                  r"primary-key order") as exc:
         writer.append_rows([_row(2)])
     assert exc.value.code == "CONTRACT_MISMATCH"
     assert _staging_entries(store, "attempt-cross-batch") == []
@@ -423,14 +453,15 @@ def test_row_groups_fixed_size_and_batch_independent(tmp_path, monkeypatch):
             candidate = writer.finish()
             identities[label].add(
                 (_fragment_hash(candidate), _dataset_version(candidate)))
-            metadata = pq.ParquetFile(
-                objects.verify_object_path(store, _published_object(candidate))).metadata
+            path = objects.verify_object_path(store, _published_object(candidate))
+            metadata = pq.ParquetFile(path).metadata
             sizes = [metadata.row_group(i).num_rows
                      for i in range(metadata.num_row_groups)]
             expected = [group_rows] * (len(rows) // group_rows)
             if len(rows) % group_rows:
                 expected.append(len(rows) % group_rows)
             assert sizes == expected
+            assert pq.read_table(path).to_pylist() == [dict(row) for row in rows]
         assert len(identities[label]) == 1
 
 
@@ -463,3 +494,154 @@ def test_changeset_identity(tmp_path):
     resolved = Repository(conn).resolve_full(committed.resulting_head_snapshot_id)
     assert (resolved.table_manifests[TABLE].dataset_version_ref
             == changeset.result_dataset_version_ref)
+
+
+def _date_row(i, *, asof):
+    return {"ticker": "AAA", "date": (_EPOCH + timedelta(days=i)).isoformat(),
+            "asof": asof}
+
+def test_changeset_identity_varies_with_rows(tmp_path):
+    conn, clock, store = _setup(tmp_path)
+    contract = _whole_contract()
+    parent = _parent(conn, store, clock, contract, _row(-1))
+
+    seen = {}
+    for count in (3, 7):
+        writer = generic_streaming.StreamingTableWriter(
+            store, parent, TABLE, "attempt-count-%d" % count, _coverage(contract))
+        writer.append_rows(_rows(count))
+        candidate = writer.finish()
+        assert candidate.changeset.normalized_payloads == count
+        seen[count] = candidate.changeset.changeset_id
+
+    assert seen[3] != seen[7]
+
+
+def test_replaces_prior_all_partition(tmp_path):
+    conn, clock, store = _setup(tmp_path)
+    contract = _whole_contract()
+    prior = [dict(_row(i), ticker="ZZZ") for i in range(4)]
+    parent = _parent_with_prior(conn, store, clock, contract, prior, "all")
+    rows = _rows(6)
+
+    writer = generic_streaming.StreamingTableWriter(
+        store, parent, TABLE, "attempt-all", _coverage(contract))
+    writer.append_rows(rows)
+    candidate = writer.finish()
+
+    assert candidate.changeset.changed_partitions == ("all",)
+    assert candidate.changeset.rewritten_partitions == 1
+    assert candidate.rewritten_partitions == 1
+
+    committed = generic_incremental.commit_generic_table_candidate(
+        conn, store, candidate, scope="streaming",
+        expected_head_snapshot_id=parent.snapshot.snapshot_id, expected_head_generation=1,
+        clock=clock)
+    resolved = Repository(conn).resolve_full(committed.resulting_head_snapshot_id)
+    manifest = resolved.table_manifests[TABLE]
+    assert len(manifest.fragment_refs) == 1
+    ids = {item.fragment_id for item in manifest.fragment_refs}
+    assert [item.partition_key for item in resolved.records if item.fragment_id in ids] == ["all"]
+    assert _table_rows(resolved, store, contract) == tuple(rows)
+
+
+def test_replaces_prior_whole_partition(tmp_path):
+    conn, clock, store = _setup(tmp_path)
+    contract = _whole_contract()
+    prior = [dict(_row(i), ticker="ZZZ") for i in range(4)]
+    parent = _parent_with_prior(conn, store, clock, contract, prior, "__whole__")
+    rows = _rows(6)
+
+    writer = generic_streaming.StreamingTableWriter(
+        store, parent, TABLE, "attempt-whole", _coverage(contract))
+    writer.append_rows(rows)
+    candidate = writer.finish()
+
+    assert candidate.changeset.changed_partitions == ("__whole__",)
+    committed = generic_incremental.commit_generic_table_candidate(
+        conn, store, candidate, scope="streaming",
+        expected_head_snapshot_id=parent.snapshot.snapshot_id, expected_head_generation=1,
+        clock=clock)
+    resolved = Repository(conn).resolve_full(committed.resulting_head_snapshot_id)
+    manifest = resolved.table_manifests[TABLE]
+    assert len(manifest.fragment_refs) == 1
+    ids = {item.fragment_id for item in manifest.fragment_refs}
+    assert [item.partition_key for item in resolved.records if item.fragment_id in ids] == ["__whole__"]
+    assert _table_rows(resolved, store, contract) == tuple(rows)
+
+
+def test_coverage_for_another_table_refused(tmp_path):
+    conn, clock, store = _setup(tmp_path)
+    contract = _whole_contract()
+    parent = _parent(conn, store, clock, contract, _row(-1))
+    other = _make_contract("ctr_other", _WHOLE_COLUMNS,
+                           primary_key=("ticker", "date"), partition_columns=())
+
+    with pytest.raises(
+            DataError,
+            match=r"^CONTRACT_MISMATCH: the streaming coverage is for a different table"
+    ) as exc:
+        generic_streaming.StreamingTableWriter(
+            store, parent, TABLE, "attempt-cov", _coverage(other))
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert _staging_entries(store, "attempt-cov") == []
+    assert _head_snapshot(conn) == parent.snapshot.snapshot_id
+
+
+def test_context_manager_exception_aborts(tmp_path):
+    conn, clock, store = _setup(tmp_path)
+    contract = _whole_contract()
+    parent = _parent(conn, store, clock, contract, _row(-1))
+
+    with pytest.raises(RuntimeError):
+        with generic_streaming.StreamingTableWriter(
+                store, parent, TABLE, "attempt-ctx-exc", _coverage(contract)) as writer:
+            writer.append_rows(_rows(2))
+            raise RuntimeError("boom")
+    assert _staging_entries(store, "attempt-ctx-exc") == []
+    assert _head_snapshot(conn) == parent.snapshot.snapshot_id
+    with pytest.raises(
+            DataError,
+            match=r"^INPUT_CHANGED: the streaming writer is no longer open"):
+        writer.append_rows([_row(5)])
+
+
+def test_context_manager_clean_exit_aborts(tmp_path):
+    conn, clock, store = _setup(tmp_path)
+    contract = _whole_contract()
+    parent = _parent(conn, store, clock, contract, _row(-1))
+
+    with generic_streaming.StreamingTableWriter(
+            store, parent, TABLE, "attempt-ctx-clean", _coverage(contract)) as writer:
+        writer.append_rows(_rows(2))
+    assert _staging_entries(store, "attempt-ctx-clean") == []
+    assert _head_snapshot(conn) == parent.snapshot.snapshot_id
+    with pytest.raises(
+            DataError,
+            match=r"^INPUT_CHANGED: the streaming writer is no longer open"):
+        writer.append_rows([_row(5)])
+
+
+def test_conversion_failure_refused(tmp_path):
+    conn, clock, store = _setup(tmp_path)
+    columns = (
+        ColumnContract(name="ticker", physical_type="string", nullable=False),
+        ColumnContract(name="date", physical_type="string", nullable=False),
+        ColumnContract(name="asof", physical_type="int64", nullable=False),
+    )
+    contract = _make_contract("ctr_date", columns,
+                              primary_key=("ticker", "date"), partition_columns=())
+    parent = _parent_with_prior(
+        conn, store, clock, contract,
+        [_date_row(0, asof=1)], "__whole__")
+
+    writer = generic_streaming.StreamingTableWriter(
+        store, parent, TABLE, "attempt-conv", _coverage(contract))
+    with pytest.raises(
+            DataError,
+            match=r"^CONTRACT_MISMATCH: a streamed row has a value incompatible with its column type"
+    ) as exc:
+        writer.append_rows([_date_row(1, asof="not-a-date")])
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert _staging_entries(store, "attempt-conv") == []
+    assert _head_snapshot(conn) == parent.snapshot.snapshot_id

@@ -15,7 +15,8 @@ identity chain (`objects.py`, `manifests.py`); atomic snapshot commit with
 idempotent inserts and a compare-and-swap head (`catalog.py`); the
 incremental-refresh merge policy shared by every EOD table family
 (`incremental_tables.py`, `incremental.py` for `daily_market`,
-`generic_incremental.py` for any registered `TableContract`); bounded,
+`generic_incremental.py` for any registered `TableContract`,
+`generic_streaming.py` for a whole-table result too large to hold); bounded,
 exact reads over a committed snapshot (`repository.py`, `query.py`,
 `events.py`, `chains.py`, `price_history_query.py`); the one legacy-touching
 seam (`legacy_adapter.py`) and what is built on it read-only (table
@@ -302,19 +303,27 @@ not be held in memory. `StreamingTableWriter(store, parent, table_name, attempt_
 coverage)` accepts rows in batches and `finish()` returns a
 `GenericTableCandidate` that the unchanged `commit_generic_table_candidate`
 commits. `build_generic_table_candidate` and its three callers are untouched.
-- *Scope:* a whole-table contract only (`partition_columns == ()`, one `__whole__`
-  fragment); any other contract refuses `UNSUPPORTED_CONTRACT`. The result
-  replaces the whole table (no prior rows are read, no per-row revisions or
-  `RowChange`s are recorded; the changeset is `changed` for the one partition with
-  `normalized_payloads` = row count).
+- *Scope:* a whole-table contract only (`partition_columns == ()`); any other
+  contract refuses `UNSUPPORTED_CONTRACT`. The result is one fragment that
+  REPLACES the whole table: every partition the parent holds for the table (an
+  imported table's single partition is `all`, a generic one `__whole__`) is
+  removed, and the new fragment takes the parent's partition key when all prior
+  fragments share one, else `__whole__`. No prior rows are read, no per-row
+  revisions or `RowChange`s are recorded; the changeset is `changed` for the
+  replaced and new partitions with `normalized_payloads` = row count.
+- *Coverage:* the coverage's table must be the writer's table, else
+  `CONTRACT_MISMATCH`.
 - *Order and validity:* each accepted row is copied (later caller mutation cannot
   change it) and must satisfy the contract: known columns only, every column present
   unless nullable, no null in a non-nullable column, and a value of the column's
   physical type. Rows must arrive in strictly increasing primary-key order across
-  and within batches (the caller orders its batches). A violation, a duplicate key,
-  a bad column or a value that cannot be converted refuses `CONTRACT_MISMATCH`,
-  never repaired. `append_rows` after `finish`/`abort`/failure refuses
-  `INPUT_CHANGED`.
+  and within batches (the caller orders its batches). Row shape, nulls, value
+  types and key order are checked at `append_rows`; conversion to Arrow at the
+  row-group write (during `append_rows` or `finish`). A violation, a duplicate
+  key, a bad column or a value that cannot be converted refuses
+  `CONTRACT_MISMATCH`, never repaired. A staging-file I/O failure propagates as
+  an `OSError` after cleanup. `append_rows` after `finish`/`abort`/failure
+  refuses `INPUT_CHANGED`.
 - *Memory:* one pending buffer of at most `ROW_GROUP_ROWS` (50,000) rows plus the
   caller's batch, and the inspection batches (65,536 rows) at `finish`. Rows are written as parquet row groups of exactly
   `ROW_GROUP_ROWS` (the last one shorter) to a file in the attempt's staging
@@ -335,10 +344,6 @@ commits. `build_generic_table_candidate` and its three callers are untouched.
 
   Zero rows at `finish` refuse `CONTRACT_MISMATCH` (an empty table is not
   published silently).
-
-**`feature_panel` and the writer.** `feature_panel` (primary key `(ticker, date)`,
-52 columns, no partition columns; 201,274 rows, 54 MB parquet today) fits the
-writer's scope unchanged: no new columns or provenance column.
 
 **Original panel COPY identity.** Offline size-fold authoring uses `Repository`
 and the existing object verifier to bind the named committed snapshot's
