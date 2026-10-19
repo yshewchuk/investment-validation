@@ -42,12 +42,16 @@ def _prepare(repository, spec, request, *, snapshot, scope, as_of_month, expecte
         event_ids=request["event_ids"], expected=expected)
 
 
-def register_runup(conn, store, repository, spec, *, snapshot, scope, as_of_month, event_ids):
+def register_runup(conn, store, repository, spec, *, snapshot, scope, as_of_month, event_ids,
+                   max_evidence_bytes=native.MAX_NATIVE_EVIDENCE_BYTES):
     """Seal explicit pin and complete eligible cohort using event metadata only."""
+    if not native.valid_registration_read_budget(max_evidence_bytes):
+        raise fail("INVALID_EXPERIMENT_SPEC", "registration read requires a positive SQLite-safe byte budget")
     request = comparison_request(spec, event_ids)
     registration, normalized = _prepare(repository, spec, request, snapshot=snapshot,
                                         scope=scope, as_of_month=as_of_month)
-    return native.reserve_native_registration(conn, store, registration, normalized)
+    return native.reserve_native_registration(conn, store, registration, normalized,
+                                              max_evidence_bytes=max_evidence_bytes)
 
 
 def run_runup(conn, store, repository, spec, *, snapshot, scope, as_of_month, event_ids,

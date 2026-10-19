@@ -38,6 +38,7 @@ def main(argv=None):
     for name in ("spec", "catalog", "store-root", "snapshot-id", "scope", "as-of-month"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--event-id", action="append", required=True)
+    parser.add_argument("--no-ledger", action="store_true", help="accepted no-op; this runner never writes a ledger")
     parser.add_argument("--max-evidence-bytes", type=int, default=MAX_NATIVE_EVIDENCE_BYTES)
     args = parser.parse_args(argv)
     if not valid_registration_read_budget(args.max_evidence_bytes):
@@ -53,7 +54,8 @@ def main(argv=None):
                        as_of_month=args.as_of_month, event_ids=args.event_id)
         with redirect_stdout(sys.stderr):
             if args.action == "register":
-                registration = register_runup(conn, store, repository, spec, **binding)
+                registration = register_runup(conn, store, repository, spec, **binding,
+                                             max_evidence_bytes=args.max_evidence_bytes)
                 result = {"registered": registration.variant_id, "run_id": registration.run_id}
             else:
                 result = run_runup(conn, store, repository, spec, **binding,

@@ -25,7 +25,7 @@ Larger legitimate registrations can supply `max_evidence_bytes`, also exposed as
 history binds its temporal plan twice, so 16 MiB is not a universal population bound.
 The pure `valid_registration_read_budget` predicate admits only built-in integer
 budgets in `[1, 2**62 - 1]`, leaving SQLite headroom for UTF-16. The loader and all
-four CLI parsers share it; None never disables this loader's bounds. Later
+five CLI parsers (including RUNUP's evidence-budget flag) share it; None never disables this loader's bounds. Later
 admission/outcome APIs keep their existing policies. Execution under changed
 bound sources requires fresh preregistration; old seals are never migrated.
 
@@ -674,7 +674,7 @@ native report artifact, returned by reference without Markdown export; inner mod
 
 The candidate plus control is one planned/attempted variant. Only a call reaching
 comparison can publish its supported scientific failure terminal. No ledger path is
-accepted; outcome/completion use the existing no-ledger slot. This seals reconstructed
+accepted; `--no-ledger` is an optional no-op and outcome/completion use the existing no-ledger slot. This seals reconstructed
 selection evidence, not OOS, as-known data, a complete search or release permission.
 Whole-cohort coverage and daily-mark units remain the exploratory comparison contract above.
 
@@ -686,7 +686,7 @@ Whole-cohort coverage and daily-mark units remain the exploratory comparison con
 | Registration population/holdout refusal | Native typed failure; no reservation or attempted variant. |
 | Admitted comparison emits a supported scientific failure | Immutable failed/refused terminal, attempted count one, no report or partial cohort. Other typed failures propagate without a terminal. |
 | Resource/publication interruption | No synthesized scientific failure. A durable intent resumes without market reads; before intent exists, an exact retry may repeat the deterministic comparison. |
-| Malformed/oversized stored evidence or conflicting terminal | Existing native integrity refusal; no evidence replacement. The 16 MiB default bounds JSON evidence, not report/market bytes. |
+| Malformed/oversized stored evidence or conflicting terminal | Existing native integrity refusal; no evidence replacement. Both register/run enforce the 16 MiB default or explicit JSON budget. Reservation preflights binding/catalog bytes before publication and bounds both stored-evidence checks; report/market bytes retain their own policies. |
 
 ## Selected-candidate outer evaluation
 

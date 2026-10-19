@@ -74,6 +74,7 @@ failure rather than a stale sentence.
 - engine/v2/models/training — `content_hash` for recipe fingerprints and receipt hashes.
 - engine/v2/research — research tools and replay reading pinned snapshots (Phase 6 slices 6-7); `experiment_exits.valid_exit_recipe` for exit walking.
 - `experiments/runup_exit_report.py` — `content_hash`/`to_document` and `experiment_exits.valid_threshold_units` for RUNUP request admission.
+- `experiments/registered_runup.py` and `experiments/v2_runup_study.py` — canonical report/output JSON and artifact-store construction/typed failures for registered RUNUP execution.
 - `experiments/v2_magnitude_search_run.py` — `ArtifactStore`/`ArtifactError`, `DocumentError`, `SystemClock`, `content_hash`, `from_document`/`to_document` and `iter_canonical_json` for driver binding, metadata admission and bounded output.
 
 <!-- consumers: engine.v2.diagnosis, engine.v2.data, engine.v2.ops, engine.v2.ledger, engine.v2.serving, engine.v2.features, engine.v2.registry, engine.v2.scoring, engine.v2.models, engine.v2.models.training, engine.v2.research, engine.v2.parity -->

@@ -33,6 +33,7 @@ from engine.v2.ops.native_registration import (
     magnitude_fitted_execution_document,
     magnitude_history_execution_document,
     magnitude_history_request,
+    native_evidence_json,
     validate_magnitude_fitted_execution,
     validate_magnitude_history_execution,
     verified_registration_bytes,
@@ -266,16 +267,28 @@ def _require_sweep_binding(conn, registration, spec):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native reservation differs from sealed sweep") from None
 
 
-def reserve_native_registration(conn, store, registration, spec):
-    """Reserve a prepared binding, including an explicitly pinned sweep arm."""
-    _require_sweep_binding(conn, registration, spec)
-    if native_registration_exists(conn, store, registration):
+def reserve_native_registration(conn, store, registration, spec, *, max_evidence_bytes=None):
+    """Reserve prepared bytes; an optional bound covers new and stored evidence."""
+    if max_evidence_bytes is None:
+        _require_sweep_binding(conn, registration, spec)
+    else:
+        if not valid_registration_read_budget(max_evidence_bytes):
+            raise fail("INVALID_EXPERIMENT_SPEC", "registration read requires a positive SQLite-safe byte budget")
+        if len(registration.binding_json) > max_evidence_bytes:
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration exceeds its UTF-8 byte budget")
+    ref = artifact_reference(registration.binding_json, registration.document["schema_version"])
+    evidence = {"native_registration": to_document(ref),
+                "variant_id": registration.variant_id, "planned_variants": 1}
+    payload = (json.dumps(evidence, sort_keys=True) if max_evidence_bytes is None else
+               native_evidence_json(evidence, max_bytes=max_evidence_bytes))
+    if max_evidence_bytes is not None:
+        _require_sweep_binding(conn, registration, spec)
+    if native_registration_exists(conn, store, registration, max_evidence_bytes=max_evidence_bytes):
         return registration
-    ref = store.publish_bytes(registration.binding_json,
-                              schema_ref=registration.document["schema_version"])
+    store.publish_bytes(registration.binding_json, schema_ref=ref.schema_ref)
     with transaction(conn):
         _require_sweep_binding(conn, registration, spec)
-        if native_registration_exists(conn, store, registration):
+        if native_registration_exists(conn, store, registration, max_evidence_bytes=max_evidence_bytes):
             return registration
         if conn.execute("SELECT 1 FROM hypotheses WHERE spec_hash=?", (spec.spec_hash,)).fetchone():
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native specification is already reserved")
@@ -283,10 +296,8 @@ def reserve_native_registration(conn, store, registration, spec):
             conn, spec, registration.variant_id, mode="primary", run_id=registration.run_id)
         if not created or run_id != registration.run_id:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration key is already reserved")
-        evidence = {"native_registration": to_document(ref),
-                    "variant_id": registration.variant_id, "planned_variants": 1}
         conn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",
-                     (json.dumps(evidence, sort_keys=True), run_id))
+                     (payload, run_id))
     return registration
 
 
