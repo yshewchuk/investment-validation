@@ -1,5 +1,6 @@
 """RUNUP registration propagates the shared finite SQL/artifact evidence bound."""
 import json
+from importlib.metadata import version
 
 import pytest
 
@@ -14,6 +15,16 @@ from tests.v2.ops.test_native_registration_read_bounds import SPEC, pad, refuses
 from tests.v2.research import test_registered_runup as support
 from tests.v2.research.magnitude_trial_support import TrackingRepository
 from tests.v2.research.test_runup_exit_report import EVENT_ID, commit
+
+
+def test_thread_policy_dependency_is_exactly_pinned_in_generated_environment_lock():
+    from tools import baseline_export as exporter
+
+    pin = f"threadpoolctl=={version('threadpoolctl')}"
+    assert pin in (study.ROOT / "requirements.txt").read_text().splitlines()
+    lock = exporter.environment_lock()  # Source/import metadata only; no baseline/corpus capture.
+    assert lock["payload"]["packages"]["threadpoolctl"] == version("threadpoolctl")
+    assert pin in exporter.requirements_txt(lock).splitlines()
 
 
 @pytest.fixture

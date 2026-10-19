@@ -680,12 +680,12 @@ Whole-cohort coverage and daily-mark units remain the exploratory comparison con
 
 | Condition | Enforced outcome |
 |---|---|
-| Invalid policy/cohort/spec JSON or missing registration | `INVALID_EXPERIMENT_SPEC` before comparison; no terminal association. Post-parser results are one JSON document, exit 0 on success or 2 on refusal (including replayed scientific failure); argparse errors exit 2 with stderr diagnostics and empty stdout. |
+| Invalid policy/cohort/spec JSON, missing/non-directory spec or catalog path, nonregular catalog, or missing registration | `INVALID_EXPERIMENT_SPEC` before comparison; no terminal association. Post-parser results are one JSON document, exit 0 on success or 2 on refusal (including replayed scientific failure); argparse errors exit 2 with stderr diagnostics and empty stdout. |
 | Non-v1.0/final-read seal | `HOLDOUT_ACCESS_DENIED` before outcome access. |
 | Changed request/source/environment or corrupt seal | `EXPERIMENT_IDENTITY_CONFLICT`; no outcome-slot access or replacement. |
 | Registration population/holdout refusal | Native typed failure; no reservation or attempted variant. |
 | Admitted comparison emits a supported scientific failure | Immutable failed/refused terminal, attempted count one, no report or partial cohort. Other typed failures propagate without a terminal. |
-| Resource/publication interruption | No synthesized scientific failure. A durable intent resumes without market reads; before intent exists, an exact retry may repeat the deterministic comparison. |
+| Resource/publication interruption | Later snapshot/artifact/repository filesystem or SQLite failures remain `RESOURCE_UNAVAILABLE`; no synthesized scientific failure. A durable intent resumes without market reads; before intent exists, an exact retry may repeat the deterministic comparison. |
 | Malformed/oversized stored evidence or conflicting terminal | Existing native integrity refusal; no evidence replacement. Both register/run enforce the 16 MiB default or explicit JSON budget. Reservation preflights binding/catalog bytes before publication and bounds both stored-evidence checks; report/market bytes retain their own policies. |
 
 ## Selected-candidate outer evaluation

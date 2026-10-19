@@ -1,6 +1,7 @@
 """Registration/recording boundaries over committed synthetic daily chains."""
 import json
 import os
+import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from types import SimpleNamespace
@@ -27,6 +28,7 @@ from experiments import registered_runup as study
 from experiments import runup_exit_report as comparison
 from experiments import v2_runup_study as cli
 from tests.data_scan_support import catalog_and_store
+from tests.v2.ops.native_bounds_support import catalog_rows, object_bytes
 from tests.v2.research.magnitude_trial_support import TrackingRepository
 from tests.v2.research.test_runup_exit_report import DATES, EVENT_ID, chain_rows, commit, event_rows
 
@@ -639,13 +641,88 @@ def test_cli_spec_reads_inclusive_limit_with_bounded_growth_check(tmp_path, monk
     assert reads == [16_777_217]
 
 
-def test_cli_valid_spec_requires_existing_catalog(tmp_path, capsys):
-    path = tmp_path / "spec.json"
-    path.write_text(canonical_json(vars(specification())))
-    args = ["register", "--spec", str(path), "--catalog", str(tmp_path / "missing"),
-            "--store-root", str(tmp_path / "store"), "--snapshot-id", "missing", "--scope", "shadow",
-            "--as-of-month", "2025-01", "--event-id", EVENT_ID]
-    assert cli.main(args) == 2
+@pytest.mark.parametrize("action", ["register", "run"])
+@pytest.mark.parametrize("target,kind", [
+    ("spec", "missing"), ("spec", "notadir"), ("catalog", "missing"),
+    ("catalog", "notadir"), ("catalog", "directory"), ("catalog", "fifo"),
+])
+def test_cli_bad_input_paths_are_invalid_before_effects(source, tmp_path, capsys, monkeypatch, action, target, kind):
+    args = cli_arguments(source, tmp_path)
+    bad = tmp_path / "bad-path"
+    if kind == "notadir":
+        bad.write_text("ordinary file")
+        bad = bad / "child"
+    elif kind == "directory":
+        bad.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(bad)
+    args[args.index("--" + target) + 1] = str(bad)
+    before = catalog_rows(source[0]), object_bytes(source[2])
+    monkeypatch.setattr(cli, "connect", forbid)
+    monkeypatch.setattr(cli, "ArtifactStore", forbid)
+    with pytest.raises(OpsError) as caught:
+        (cli._spec if target == "spec" else cli._catalog)(str(bad))
+    assert_refusal(caught.value, "INVALID_EXPERIMENT_SPEC",
+        "RUNUP requires an existing spec file" if target == "spec" else
+        "RUNUP requires an existing regular catalog file")
+    assert cli.main([action, *args]) == 2
+    assert json.loads(capsys.readouterr().out) == {"refused": "INVALID_EXPERIMENT_SPEC", "details": {}}
+    assert (catalog_rows(source[0]), object_bytes(source[2])) == before
+    if kind == "missing":
+        assert not bad.exists()
+
+
+@pytest.mark.parametrize("action", ["register", "run"])
+@pytest.mark.parametrize("point,error_type", [
+    ("spec", PermissionError), ("catalog_stat", PermissionError),
+    ("catalog_open", sqlite3.OperationalError), ("catalog_open", FileNotFoundError),
+])
+def test_cli_admission_operational_errors_remain_resource_failures(source, tmp_path, capsys, monkeypatch,
+                                                                   action, point, error_type):
+    args = cli_arguments(source, tmp_path)
+    catalog = args[args.index("--catalog") + 1]
+    before = catalog_rows(source[0]), object_bytes(source[2])
+
+    seen = []
+    def interrupted(*args, **kwargs):
+        seen.append(point)
+        raise error_type("synthetic admission interruption")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cli, "ArtifactStore", forbid)
+        if point == "catalog_stat":
+            original_stat = cli.Path.stat
+            def stat(path, *args, **kwargs):
+                return interrupted() if str(path) == catalog else original_stat(path, *args, **kwargs)
+            patch.setattr(cli.Path, "stat", stat)
+        else:
+            patch.setattr(cli, "read_native_staged_input" if point == "spec" else "connect", interrupted)
+        assert cli.main([action, *args]) == 2
     assert json.loads(capsys.readouterr().out) == {"refused": "RESOURCE_UNAVAILABLE"}
-    assert not (tmp_path / "missing").exists()
-    assert not (tmp_path / "store").exists()
+    assert seen == [point]
+    assert (catalog_rows(source[0]), object_bytes(source[2])) == before
+
+
+@pytest.mark.parametrize("action", ["register", "run"])
+@pytest.mark.parametrize("point", ["snapshot", "artifact", "repository"])
+@pytest.mark.parametrize("error_type", [FileNotFoundError, NotADirectoryError])
+def test_cli_downstream_missing_paths_remain_resource_failures(source, tmp_path, capsys, monkeypatch,
+                                                               action, point, error_type):
+    invoke(source, study.register_runup)  # Re-registration also verifies the existing artifact.
+    args = cli_arguments(source, tmp_path)
+    before = catalog_rows(source[0]), object_bytes(source[2])
+
+    seen = []
+    def interrupted(*args, **kwargs):
+        seen.append(point)
+        raise error_type("synthetic downstream missing path")
+
+    target, method = {"snapshot": (cli.Repository, "resolve"),
+                      "artifact": (cli.ArtifactStore, "read_verified"),
+                      "repository": (cli.Repository, "scan")}[point]
+    with monkeypatch.context() as patch:
+        patch.setattr(target, method, interrupted)
+        assert cli.main([action, *args]) == 2
+    assert json.loads(capsys.readouterr().out) == {"refused": "RESOURCE_UNAVAILABLE"}
+    assert seen == [point]
+    assert (catalog_rows(source[0]), object_bytes(source[2])) == before

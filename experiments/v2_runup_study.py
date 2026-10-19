@@ -2,8 +2,10 @@
 import argparse
 import json
 import sqlite3
+import stat
 import sys
 from contextlib import redirect_stdout
+from pathlib import Path
 
 from engine.v2.data.documents import reject_duplicate_keys
 from engine.v2.data.errors import DataError
@@ -21,15 +23,27 @@ from experiments.registered_runup import comparison_request, register_runup, run
 
 
 def _spec(path):
-    data = read_native_staged_input(path)
     try:
+        data = read_native_staged_input(path)
         return experiment_spec_from_document(json.loads(data, object_pairs_hook=reject_duplicate_keys))
+    except (FileNotFoundError, NotADirectoryError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "RUNUP requires an existing spec file") from None
     except (ValueError, TypeError, UnicodeError, RecursionError):
         raise fail("INVALID_EXPERIMENT_SPEC", "RUNUP requires bounded valid JSON specification") from None
     except OpsError as error:
         if error.code != "INVALID_REQUEST":
             raise
         raise fail("INVALID_EXPERIMENT_SPEC", "RUNUP specification is incomplete") from None
+
+
+def _catalog(path):
+    try:
+        metadata = Path(path).stat()
+    except (FileNotFoundError, NotADirectoryError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "RUNUP requires an existing regular catalog file") from None
+    if not stat.S_ISREG(metadata.st_mode):
+        raise fail("INVALID_EXPERIMENT_SPEC", "RUNUP requires an existing regular catalog file")
+    return connect(path, must_exist=True)
 
 
 def main(argv=None):
@@ -47,7 +61,7 @@ def main(argv=None):
     try:
         spec = _spec(args.spec)
         comparison_request(spec, args.event_id)
-        conn = connect(args.catalog, must_exist=True)
+        conn = _catalog(args.catalog)
         store = ArtifactStore(args.store_root)
         repository = Repository(conn, store)
         binding = dict(snapshot=repository.resolve(args.snapshot_id), scope=args.scope,
