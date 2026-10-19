@@ -151,9 +151,10 @@ events in `[history_start, min(target day, decision_session))`.
 
 Every candidate query is planned before any outcome scan, using the same
 fragment planner as Repository. Preflight indexes fragment metadata once by
-partition and canonical time intervals; unsafe leading-key or time bounds stay
-in a conservative fallback. Selected records retain manifest order and pass the
-unchanged planner. Each planned bound is reused for query construction.
+partition and canonical time intervals after shared full-key bound admission.
+Malformed keys remain in a global fallback; uncertain times stay partition-local.
+Selected records retain manifest order and planner refusal precedence, including
+malformed keys outside the selected issuer/day. Each bound is reused for query construction.
 Its entire surviving membership must be one
 inspected singleton with the exact ticker/day key, partition and time bounds.
 The resolved committed catalog/manifest identity is the metadata trust anchor;
@@ -531,7 +532,7 @@ This bounds retained unmatched rows, not total process RSS.
 contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`,
 `ObjectRef`, `TableContractRef`, `ColumnContract`, `TableContract`),
 `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
-`engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`,
+`engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`, `iter_canonical_json`,
 `content_hash`, `to_document`, `market_calendar`, `experiment_exits.valid_exit_recipe`, plus
 `final_holdout.request_from_document` and `typed.to_document` for `_final_population`) — the package's own
 lower-layer dependencies, consistent with the generic "may import anything

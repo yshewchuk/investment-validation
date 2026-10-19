@@ -223,6 +223,7 @@ def test_false_disjoint_bound_refuses_out_of_range_row(storage, monkeypatch):
         list(_scan(repository, query))
     assert error.value.code == "MANIFEST_CORRUPT"
     assert error.value.problem.message == "scan key is outside fragment bounds"
+    assert error.value.problem.details == {"fragment_id": records[0].fragment_id}
     assert state["active"] == 0 and state["maximum"] == 1
     assert state["opened"] == [records[0].fragment_id]
 

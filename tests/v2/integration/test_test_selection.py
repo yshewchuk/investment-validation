@@ -8,6 +8,7 @@ unmapped-path and unsafe-path failure, and a cache regression. Ratchet: R1-R6.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -173,6 +174,49 @@ def test_phase1_baseline_inventory_matches_active_suite():
     assert resolved <= set(phase1_suite(ROOT))
 
 
+@pytest.mark.parametrize("phase, expected_version", [
+    (1, "phase1_coverage_suite.v15"),
+    (2, "phase2_coverage_suite:bdb9a12191eaa8089e77c38c3de9bb63eab176f28b4f5899db6631e32b258b1f"),
+])
+def test_materialization_moves_refresh_both_coverage_inventories(phase, expected_version):
+    from checks import v2_coverage_ratchet as coverage
+
+    baseline = json.loads((ROOT / f"checks/v2_coverage_ratchet_phase{phase}_baseline.json").read_text())
+    active = coverage.phase1_suite() if phase == 1 else coverage.phase2_suite()
+    assert baseline["suite_version"] == expected_version
+    for name in ("legacy_materialization", "rebuild_rollback"):
+        old, new = f"tests/test_v2_data_{name}.py", f"tests/v2/data/test_{name}.py"
+        assert new in baseline["test_files"] and new in active
+        assert old not in baseline["test_files"] and old not in active
+    if phase == 1:
+        assert coverage.PHASE1_SUITE_VERSION == expected_version
+    else:
+        # Independent identity oracle: do not call the production hash helper.
+        digest = hashlib.sha256("\0".join(sorted(baseline["test_files"])).encode()).hexdigest()
+        assert expected_version == "phase2_coverage_suite:" + digest
+
+
+@pytest.mark.parametrize("phase, old_version, original_digest", [
+    (1, "phase1_coverage_suite.v14",
+     "6869954b1b13ff8966faf36e3c4e4fbeced38498f3733865194fcea69a1ffe8d"),
+    (2, "phase2_coverage_suite:41d5881061353297d37e06599adeec4ae5c3d1efe7ae89c92e259e123dc1d451",
+     "a8f009eb0687b65b502d6b9e4f2e0b9e4677073c66487d23dd7ef8184a1c3205"),
+])
+def test_materialization_moves_preserve_historical_coverage(phase, old_version, original_digest):
+    """Reverse only the relocations and compare the entire historical artifact.
+
+    Literal digests pin the pre-move baselines at 9d754db3, including package
+    counts, percentages, source hashes, serial mode and every Phase 2 outcome.
+    """
+    raw = (ROOT / f"checks/v2_coverage_ratchet_phase{phase}_baseline.json").read_text()
+    for name in ("legacy_materialization", "rebuild_rollback"):
+        raw = raw.replace(f"tests/v2/data/test_{name}.py", f"tests/test_v2_data_{name}.py")
+    restored = json.loads(raw)
+    restored["suite_version"] = old_version
+    canonical = json.dumps(restored, sort_keys=True, separators=(",", ":")).encode()
+    assert hashlib.sha256(canonical).hexdigest() == original_digest
+
+
 def test_phase1_measurement_identity_is_checked_on_measurement_evidence():
     """Current-source identity applies to measurement evidence, not the baseline."""
     from checks.layer_map import PACKAGES
@@ -252,7 +296,8 @@ def test_phase1_suite_raises_for_a_missing_extra_test(tmp_path):
 
 
 def test_phase1_suite_resolves_every_real_baseline_test():
-    from checks.v2_coverage_ratchet import ROOT as RATCHET_ROOT, phase1_suite
+    from checks.v2_coverage_ratchet import ROOT as RATCHET_ROOT
+    from checks.v2_coverage_ratchet import phase1_suite
 
     suite = phase1_suite()
     assert suite == sorted(set(suite))

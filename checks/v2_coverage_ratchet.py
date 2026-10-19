@@ -100,6 +100,11 @@ Bumped to v14: the fingerprint-model scan moved to tests/v2/ops/. Baseline
 paths and phase-2 node IDs follow the move; package coverage counts and
 source hashes remain historical, not a fresh measurement.
 
+Bumped to v15: legacy-materialization and rebuild/rollback tests moved to
+``tests/v2/data/``. Their recorded baseline paths and the suite version
+follow the move; package counts and source hashes remain historical, not
+a fresh measurement. Phase 2 records the same path-only relocation.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
@@ -193,7 +198,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v14"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v15"
 
 
 # Baseline tests whose file was renamed (not just moved) after the baseline was written.

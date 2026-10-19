@@ -72,7 +72,7 @@ failure rather than a stale sentence.
   `format_timestamp` for staged-release manifests and the atomic deployment
   pointer (P5-5).
 - engine/v2/models/training — `content_hash` for recipe fingerprints and receipt hashes.
-- engine/v2/research — research tools and replay reading pinned snapshots (Phase 6 slices 6-7); `experiment_exits.valid_exit_recipe` for exit walking.
+- engine/v2/research — research tools and replay reading pinned snapshots (Phase 6 slices 6-7); `experiment_exits.valid_exit_recipe` for exit walking; `iter_canonical_json` for streaming complete stored-history identities.
 - `experiments/runup_exit_report.py` — `content_hash`/`to_document` and `experiment_exits.valid_threshold_units` for RUNUP request admission.
 - `experiments/v2_magnitude_search_run.py` — `ArtifactStore`/`ArtifactError`, `DocumentError`, `SystemClock`, `content_hash`, `from_document`/`to_document` and `iter_canonical_json` for driver binding, metadata admission and bounded output.
 
