@@ -34,6 +34,13 @@ Invalid as-of month raises `ValueError`; research converts it to its typed refus
 `final_holdout` strictly decodes immutable declaration/request contracts and projects verified registration metadata into a request, without I/O or authority. It validates exact schema, content-addressed references, hashes, identities and shared month/membership versions; invalid metadata raises `ValueError`/`DocumentError` for caller translation.
 `experiments.native_registration` uses these pure helpers; catalog registration verification stays with its existing owner. Request identity is the existing experiment ID; recipe/model/completeness references come from the sealed registration, not preparation-time overrides.
 
+`experiment_exits.valid_exit_recipe` owns the closed fixed-day/target-stop
+declaration predicate shared by ops planning and research walking;
+`valid_threshold_units` also admits the RUNUP request's unit vocabulary.
+Malformed shapes, horizons, units or signed finite-number thresholds return
+`False`, without mutation, I/O, coercion or retries. Callers retain their typed
+refusal envelopes; fill/source admission and position pricing stay with them.
+
 ## Inputs
 
 The factory accepts observed ISO session days and an event-through day. Exit planning accepts a structural event key and a `CalendarSessions` value.
@@ -65,6 +72,11 @@ The shared typed-document decoder reports `UNSUPPORTED_VERSION` before `UNKNOWN_
 |---|---|
 | Constructor `DocumentError` path beginning with `$` at nested/custom prefix | Prefix the path, including already-qualified `$` paths; preserve code/message and original cause |
 | Root constructor error or constructor path not beginning with `$` | Retain path |
+
+| Exit-admission condition | Outcome |
+|---|---|
+| `valid_exit_recipe`: non-mapping, unknown/missing fields or kind, boolean/nonpositive/non-integer horizon, invalid units, or boolean/nonfinite/unrepresentable/wrong-sign/non-numeric thresholds | Return `False`; no coercion, mutation, I/O or retries. The caller supplies its typed refusal envelope. |
+| `valid_threshold_units`: anything other than `quote_price_times_quantity` or `entry_debit_fraction` | Return `False`; no default or normalization of an explicit value. |
 
 `score_population.population_key` preserves the `ticker|strategy|event_date` identity;
 `population_difference` returns sorted missing and unplanned keys for ops scoring

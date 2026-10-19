@@ -607,7 +607,12 @@ compare a declared target/stop roster with the existing STR-RUNUP fixed-day cont
 They use the merged native population, calendar, entry selector and exit walker;
 there is no scheduler, model fitting, threshold search or production caller.
 The closed request requires explicit unique event IDs, one fill alpha, explicit
-`quote_price_times_quantity` threshold units and one to eight named target/stop arms.
+`quote_price_times_quantity` or `entry_debit_fraction` threshold units and one to
+eight named target/stop arms. Fractions are signed ratios of each position's positive
+net opening debit at the declared alpha, including spread but excluding fees,
+commissions and contract multipliers. No per-event thresholds, clipping or conversion
+from percentage points is performed. Fractional reports additionally expose each
+arm's effective quote-unit thresholds and entry-debit basis; P&L retains quote units.
 The CLI requires an exact snapshot ID and holdout as-of month; its JSON input
 must be a regular file bounded to 1 MiB. Admission precedes any quote read.
 `--no-ledger` is an accepted no-op; both CLI modes are equally read-only.
@@ -623,8 +628,8 @@ when an arm would have exited before the missing mark. No survivor subset return
 
 Every arm retains those exact contracts, quantities, entry dates and fill alpha.
 Daily crossing, equality and conservative ambiguous-stop behavior belong to
-`experiment_exits.walk_exit`; ambiguous stops use alpha zero at exit. Values are
-quote price × quantity: spread is modeled, commissions/fees and the option
+`experiment_exits.walk_exit`; ambiguous stops use alpha zero at exit. Monetary
+outputs are quote price × quantity: spread is modeled, commissions/fees and the option
 contract multiplier are absent. These are daily mark-based hypothetical results,
 not intraday execution, stop-price fills, realized returns or an optimized strategy.
 
@@ -641,7 +646,7 @@ There is no retry, fallback source, projected calendar or partial-success mode.
 | --- | --- |
 | Malformed/duplicate-key, nonregular, oversized or invalid request | `INVALID_EXPERIMENT_SPEC` before repository access; no stage/counts. |
 | Holdout exclusion or invalid admission context | `HOLDOUT_ACCESS_DENIED`, population stage/counts. |
-| Entry selection, common coverage or pairing fails | `EXPERIMENT_VARIANT_FAILED`, current stage/counts; zero compared. |
+| Entry selection, common coverage, fractional debit/conversion or pairing fails | `EXPERIMENT_VARIANT_FAILED`, current stage/counts; zero compared. |
 | Repository integrity or unresolved snapshot | Native code; stage/counts only after comparison admission starts. |
 | CLI filesystem or SQLite failure | `INPUT_CHANGED`, no stage/counts. |
 

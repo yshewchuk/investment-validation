@@ -7,6 +7,7 @@ from pathlib import Path
 
 from engine.v2.data.errors import DataError
 from engine.v2.foundation import content_hash, to_document
+from engine.v2.foundation.experiment_exits import valid_threshold_units
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import environment_identity, source_closure
 from engine.v2.research._chains import load_chain_index
@@ -43,7 +44,7 @@ def validate_request(document):
                 or any(not isinstance(i, str) or not i.strip() for i in ids)
                 or len(set(ids)) != len(ids)
                 or not _number(document["fill_alpha"], 0, 1)
-                or document["threshold_units"] != UNITS
+                or not valid_threshold_units(document["threshold_units"])
                 or not isinstance(arms, list) or not 1 <= len(arms) <= 8):
             raise ValueError
         normalized, names = [], {"fixed_day"}
@@ -60,7 +61,8 @@ def validate_request(document):
                                "target_pnl": float(arm["target_pnl"]),
                                "stop_pnl": float(arm["stop_pnl"])})
         return {"event_ids": sorted(ids), "fill_alpha": float(document["fill_alpha"]),
-                "threshold_units": UNITS, "arms": sorted(normalized, key=lambda a: a["arm_id"])}
+                "threshold_units": document["threshold_units"],
+                "arms": sorted(normalized, key=lambda a: a["arm_id"])}
     except (ValueError, TypeError, OverflowError):
         raise fail("INVALID_EXPERIMENT_SPEC", "invalid RUNUP comparison request") from None
 
@@ -124,7 +126,7 @@ def _binding(snapshot, events, request, positions, structure, as_of_month):
     }
 
 
-def _paired_rows(arm_id, decisions, baseline):
+def _paired_rows(arm_id, decisions, baseline, *, fractional_arm=None):
     rows = []
     if tuple(d.trade_id for d in decisions) != tuple(d.trade_id for d in baseline):
         raise fail("EXPERIMENT_VARIANT_FAILED", "comparison population changed")
@@ -135,6 +137,11 @@ def _paired_rows(arm_id, decisions, baseline):
         rows.append({**asdict(decision), "arm_id": arm_id,
                      "fixed_day_pnl": control.pnl, "pnl_difference": delta,
                      "fixed_day_exit_date": control.exit_date, "pnl_units": UNITS})
+        if fractional_arm is not None:
+            rows[-1]["thresholds"] = {
+                "units": UNITS, "entry_debit": decision.entry_cost,
+                "target_pnl": fractional_arm["target_pnl"] * decision.entry_cost,
+                "stop_pnl": fractional_arm["stop_pnl"] * decision.entry_cost}
     return rows
 
 
@@ -142,8 +149,9 @@ def compare_runup_exits(repository, snapshot, *, as_of_month, document):
     """Return the complete paired report or refuse; never compare survivors.
 
     Fixed-day walks every held leg/session (not only endpoints), so its complete
-    success is required before any early-exit arm can run. All values retain the
-    existing quote-price-times-quantity units; no contract-dollar conversion.
+    success is required before any early-exit arm can run. P&L retains the
+    existing quote-price-times-quantity units; fractional thresholds are ratios
+    of net opening debit, never contract-dollar conversion or portfolio returns.
     """
     request = validate_request(document)
     counts = {"requested_count": len(request["event_ids"]), "admitted_count": 0,
@@ -166,9 +174,13 @@ def compare_runup_exits(repository, snapshot, *, as_of_month, document):
         for arm in request["arms"]:
             recipe = {key: value for key, value in arm.items() if key != "arm_id"}
             recipe.update(kind="target_stop", trading_days=HORIZON)
+            fractional = request["threshold_units"] == "entry_debit_fraction"
+            if fractional:
+                recipe["threshold_units"] = request["threshold_units"]
             decisions = walk_exit(repository, snapshot, positions,
                                   economic_params={"fill": request["fill_alpha"], "exit": recipe})
-            rows.extend(_paired_rows(arm["arm_id"], decisions, baseline))
+            rows.extend(_paired_rows(arm["arm_id"], decisions, baseline,
+                                     fractional_arm=arm if fractional else None))
         stage = "report_identity"
         binding = _binding(snapshot, events, request, positions, structure, as_of_month)
         counts["compared_count"] = len(positions)

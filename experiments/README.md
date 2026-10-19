@@ -71,7 +71,7 @@ and exits 0 on success, 2 on refusal. It writes no catalog, ledger or report fil
 `--no-ledger` is optional and has no effect; the request must be a regular file.
 
 The closed request has `event_ids` (nonempty unique strings), `fill_alpha` (0–1),
-`threshold_units` (exactly `quote_price_times_quantity`) and `arms` (1–8 objects).
+`threshold_units` (`quote_price_times_quantity` or `entry_debit_fraction`) and `arms` (1–8 objects).
 Each arm has exactly `arm_id`, positive `target_pnl` and negative `stop_pnl`;
 `fixed_day` is reserved for the control. IDs and arm names must be unique.
 The existing STR-RUNUP D−14 entry and pre-print exit are fixed; this tool does not
@@ -80,9 +80,12 @@ choose a cohort or search thresholds. All events need all held-leg daily marks.
 `runup_exit_report.compare_runup_exits(repository, snapshot, *, as_of_month,
 document)` exposes the same read-only comparison. Reports include every arm's
 entry cost, exit proceeds, mark-based P&L and paired difference from fixed-day,
-with contracts, exit reason, ambiguity and reproducibility pins. Thresholds and
-P&L are quote-price × quantity units, not percentages or contract dollars;
-bid/ask spread is modeled but commissions, fees and ×100 are not. Daily marks
+with contracts, exit reason, ambiguity and reproducibility pins. Fractional thresholds
+are signed ratios of each position's positive net opening debit at declared alpha,
+not gross premium, percentage points or portfolio returns. They are converted once;
+reports include that basis and effective thresholds. Zero/credit entries and unusable
+conversions refuse. Absolute requests retain their existing report shape. P&L always
+uses quote-price × quantity; bid/ask spread is modeled but commissions, fees and ×100 are not. Daily marks
 cannot establish intraday stop execution or a trading advantage.
 
 ## Scientific sweep collection

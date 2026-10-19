@@ -102,7 +102,11 @@ execution-variant string `replay()` itself uses.
 `experiment_exits.walk_exit` consumes `EnteredPosition`/`PositionLeg` contracts
 plus resolved fixed-day or target/stop economics and returns `ExitDecision`
 values from one pinned snapshot. Target/stop thresholds are net mark-based
-position P&L; if one day's alpha 0/1 aggregate position mark range spans both
+position P&L. Optional `exit.threshold_units` accepts `quote_price_times_quantity`
+(the omitted-field behavior) or `entry_debit_fraction`; the latter scales signed
+ratios by each position's positive net opening debit at declared alpha, excluding
+commissions, fees and contract multipliers. Zero/credit debit and nonfinite or
+zero converted thresholds refuse. If one day's alpha 0/1 aggregate mark range spans both
 thresholds, the stop is selected, marked ambiguous, and priced at the worst
 alpha (0.0) so its result cannot be better than the stop. `exit_report_frame`
 projects decisions into per-trade `exit_reason`/`exit_day` columns with P&L

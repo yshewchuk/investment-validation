@@ -493,3 +493,200 @@ def test_report_frame_empty_is_stable():
     frame = exit_report_frame(())
     assert list(frame.columns) == list(REPORT_FIELDS)
     assert len(frame) == 0
+
+
+def _fraction_recipe(target=0.5, stop=-0.5):
+    return {"kind": "target_stop", "trading_days": 3, "target_pnl": target,
+            "stop_pnl": stop, "threshold_units": "entry_debit_fraction"}
+
+
+def _fraction_walk(source, *, recipe=None, rows=None, position=None, alpha=0.25):
+    conn, clock, store = source
+    snapshot = _snapshot(conn, clock, store, _rows() if rows is None else rows)
+    plan = resolve_experiment_plan(_exit_spec(_fraction_recipe() if recipe is None else recipe, alpha))
+    result, = walk_exit(Repository(conn, store), snapshot,
+                        (_position() if position is None else position,),
+                        economic_params=plan.economic_params)
+    return result
+
+
+def _assert_fraction_refusal(error, *, code, category, message, details):
+    assert error.code == error.problem.code == code
+    assert error.problem.category == category
+    assert error.problem.message == message
+    assert error.problem.retryable is False
+    assert error.problem.details == details
+
+
+@pytest.mark.parametrize("price_scale,quantity_scale", [(1, 1), (3, 1), (1, 4), (3, 4)])
+def test_fraction_thresholds_scale_by_each_net_entry_debit(source, price_scale, quantity_scale):
+    rows = _rows()
+    for row in rows:
+        if row["right"] == "C" and row["obs_date"] == pd.Timestamp(DATES[2]):
+            row.update(bid=3.8, ask=4.2)
+    rows = [{**row, "bid": row["bid"] * price_scale, "ask": row["ask"] * price_scale}
+            for row in rows]
+    position = replace(_position(), legs=tuple(replace(leg, qty=leg.qty * quantity_scale)
+                                               for leg in _position().legs))
+    result = _fraction_walk(source, rows=rows, position=position)
+    scale = price_scale * quantity_scale
+    # Day 2 crosses half the 3.5 net debit but not half the 4.6 gross long premium.
+    assert result.entry_cost == pytest.approx(3.5 * scale)
+    assert result.exit_value == pytest.approx(5.5 * scale)
+    assert result.pnl == pytest.approx(2.0 * scale)
+    assert 0.5 * result.entry_cost <= result.pnl < 0.5 * 4.6 * scale
+    assert result.exit_date == DATES[2]
+    assert result.reason == "target"
+    assert result.ambiguous_exit is False
+    assert result.fill_alpha == result.exit_fill_alpha == 0.25
+
+
+@pytest.mark.parametrize("mode,bid,ask,reason,pnl,ambiguous,exit_alpha", [
+    ("target", 3.0, 3.0, "target", 2.0, False, 0.5),
+    ("stop", 1.0, 1.0, "stop", -2.0, False, 0.5),
+    ("ambiguous", 0.0, 5.0, "stop", -4.0, True, 0.0),
+])
+def test_fraction_equality_and_ambiguous_stop(source, mode, bid, ask, reason, pnl,
+                                            ambiguous, exit_alpha):
+    rows = _rows()
+    for row in rows:
+        if row["right"] == "C":
+            row.update(bid=2.0, ask=2.0)
+            if row["obs_date"] == pd.Timestamp(DATES[1]):
+                row.update(bid=bid, ask=ask)
+    position = replace(_position(), legs=(_position().legs[0],))
+    result = _fraction_walk(source, rows=rows, position=position, alpha=0.5)
+    assert result.entry_cost == 4.0
+    assert result.exit_date == DATES[1]
+    assert result.reason == reason
+    assert result.pnl == pnl
+    assert result.ambiguous_exit is ambiguous
+    assert result.exit_fill_alpha == exit_alpha
+
+
+def test_fraction_stop_waits_for_full_converted_loss(source):
+    rows = _rows()
+    for row in rows:
+        if row["right"] == "C":
+            mark = {DATES[0]: 2.0, DATES[1]: 1.25, DATES[2]: 1.0, DATES[3]: 0.5}[
+                row["obs_date"].date().isoformat()]
+            row.update(bid=mark, ask=mark)
+    position = replace(_position(), legs=(_position().legs[0],))
+    result = _fraction_walk(source, rows=rows, position=position, alpha=0.5)
+    # Two calls cost 4: day one's -1.5 crosses a halved -1 stop, but
+    # the declared -0.5 fraction converts to -2 and first crosses on day two.
+    assert result.entry_cost == 4.0
+    assert result.exit_date == DATES[2]
+    assert result.visited_dates == DATES[:3]
+    assert result.exit_value == 2.0
+    assert result.pnl == -2.0
+    assert result.reason == "stop"
+    assert result.ambiguous_exit is False
+    assert result.fill_alpha == result.exit_fill_alpha == 0.5
+
+
+@pytest.mark.parametrize("basis", ["credit", "zero"])
+def test_fraction_refuses_credit_or_zero_debit_with_entry_context(source, basis):
+    position = replace(_position(), legs=(replace(_position().legs[0], side="sell"),))
+    rows = _rows()
+    if basis == "zero":
+        position = replace(_position(), legs=(replace(_position().legs[0], qty=1), _position().legs[1]))
+        for row in rows:
+            row.update(bid=2.0, ask=2.0)
+    with pytest.raises(DataError) as caught:
+        _fraction_walk(source, position=position, rows=rows)
+    _assert_fraction_refusal(
+        caught.value, code="EXPERIMENT_VARIANT_FAILED", category="internal",
+        message="entry-debit exit thresholds unavailable",
+        details={"trade_id": "trade-a", "session": DATES[0]})
+
+
+@pytest.mark.parametrize("target,stop,price_scale", [(1e308, -0.5, 1), (0.5, -1e308, 1),
+                                                      (1e-300, -0.5, 1e-100),
+                                                      (0.5, -1e-300, 1e-100)])
+def test_fraction_refuses_conversion_overflow_or_underflow(source, target, stop, price_scale):
+    rows = [{**row, "bid": row["bid"] * price_scale, "ask": row["ask"] * price_scale}
+            for row in _rows()]
+    with pytest.raises(DataError) as caught:
+        _fraction_walk(source, recipe=_fraction_recipe(target, stop), rows=rows)
+    _assert_fraction_refusal(
+        caught.value, code="EXPERIMENT_VARIANT_FAILED", category="internal",
+        message="entry-debit exit thresholds unavailable",
+        details={"trade_id": "trade-a", "session": DATES[0]})
+
+
+@pytest.mark.parametrize("units", [None, "", "percent", "entry_credit_fraction", [], {}, True])
+def test_invalid_threshold_units_refuse_before_repository_access(units):
+    recipe = {**_fraction_recipe(), "threshold_units": units}
+    with pytest.raises(OpsError) as caught:
+        resolve_experiment_plan(_exit_spec(recipe))
+    _assert_fraction_refusal(
+        caught.value, code="INVALID_EXPERIMENT_SPEC", category="validation",
+        message="invalid fixed-day or target/stop exit economics or mark source", details={})
+    with pytest.raises(DataError) as caught:
+        walk_exit(None, None, (), economic_params={"exit": recipe, "fill": 0.25})
+    _assert_fraction_refusal(
+        caught.value, code="EXPERIMENT_VARIANT_FAILED", category="internal",
+        message="invalid exit economics", details={})
+
+
+def test_units_are_identity_bound_and_absolute_behavior_is_unchanged(source):
+    conn, clock, store = source
+    snapshot = _snapshot(conn, clock, store, _rows())
+    repository = Repository(conn, store)
+    recipe = {"kind": "target_stop", "trading_days": 3, "target_pnl": 2, "stop_pnl": -1}
+    plans = [resolve_experiment_plan(_exit_spec(value)) for value in (
+        recipe, {**recipe, "threshold_units": "quote_price_times_quantity"},
+        {**recipe, "threshold_units": "entry_debit_fraction"})]
+    results = [walk_exit(repository, snapshot, (_position(),), economic_params=p.economic_params)
+               for p in plans]
+    assert results[0] == results[1]
+    assert results[0][0].reason == "target"
+    assert results[2][0].reason == "fixed_day"  # 2 is a ratio, never normalized to 2%.
+    assert len({plan.json_bytes() for plan in plans}) == 3
+    assert "threshold_units" not in plans[0].economic_params["exit"]
+    with pytest.raises(TypeError):
+        plans[2].economic_params["exit"]["threshold_units"] = "percent"
+
+
+def test_fraction_missing_mark_still_refuses(source):
+    rows = [row for row in _rows() if row["obs_date"] != pd.Timestamp(DATES[1])]
+    with pytest.raises(DataError) as caught:
+        _fraction_walk(source, rows=rows)
+    _assert_fraction_refusal(
+        caught.value, code="EXPERIMENT_VARIANT_FAILED", category="internal",
+        message="required daily position mark unavailable",
+        details={"trade_id": "trade-a", "session": DATES[1]})
+
+
+@pytest.mark.parametrize("alpha,cost,day,pnl", [(0.0, 3.8, 3, 3.3), (0.5, 3.2, 2, 3.0),
+                                                (1.0, 2.6, 1, 2.7)])
+def test_fraction_basis_uses_declared_entry_fill(source, alpha, cost, day, pnl):
+    result = _fraction_walk(source, alpha=alpha)
+    assert result.entry_cost == pytest.approx(cost)
+    assert result.exit_date == DATES[day]
+    assert result.reason == "target"
+    assert result.pnl == pytest.approx(pnl)
+    assert result.fill_alpha == result.exit_fill_alpha == alpha
+
+
+@pytest.mark.parametrize("basis,cost,pnl,reason", [("credit", -4.2, -2.4, "stop"),
+                                                  ("zero", 0.0, 0.0, "fixed_day")])
+def test_absolute_units_still_accept_credit_and_zero_debit(source, basis, cost, pnl, reason):
+    position = replace(_position(), legs=(replace(_position().legs[0], side="sell"),))
+    rows = _rows()
+    if basis == "zero":
+        position = replace(_position(), legs=(replace(_position().legs[0], qty=1), _position().legs[1]))
+        for row in rows:
+            row.update(bid=2.0, ask=2.0)
+    conn, clock, store = source
+    snapshot = _snapshot(conn, clock, store, rows)
+    recipe = {"kind": "target_stop", "trading_days": 3, "target_pnl": 2, "stop_pnl": -1}
+    results = [walk_exit(Repository(conn, store), snapshot, (position,),
+                         economic_params=resolve_experiment_plan(_exit_spec(value)).economic_params)
+               for value in (recipe, {**recipe, "threshold_units": "quote_price_times_quantity"})]
+    assert results[0] == results[1]
+    result, = results[0]
+    assert result.entry_cost == pytest.approx(cost)
+    assert result.pnl == pytest.approx(pnl)
+    assert result.reason == reason
