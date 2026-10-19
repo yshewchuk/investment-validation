@@ -36,7 +36,7 @@ def execution_limits(limits):
 
 def fit_payload(inputs, inner, plan, execution):
     """Canonical child payload: only the row values the fit and its matrix digests read."""
-    keep = ("event_id", "context_id", "horizon_sessions", *execution.get("features", ()))
+    keep = ("event_id", "context_id", "horizon_sessions", *(execution or {}).get("features", ()))
     features = [{name: row[name] for name in keep} for row in inputs["features"]]
     return canonical_json({"inputs": {"features": features, "training": inputs["training"]},
                            "inner": inner, "plan": {"horizons": plan["horizons"]},

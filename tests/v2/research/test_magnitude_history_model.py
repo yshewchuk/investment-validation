@@ -660,7 +660,7 @@ def test_direct_reporter_rederives_self_rehashed_calendar_context_before_payload
     before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     poison_outcomes(monkeypatch, source.repository, source.snapshot, (), all_outcomes=True)
     monkeypatch.setattr(model, "read_stored", support.forbid_access)
-    monkeypatch.setattr(stored, "_scan", support.forbid_access)
+    monkeypatch.setattr(stored, "_scan_iter", support.forbid_access)
     with support.refuses(OpsError, "EXPERIMENT_IDENTITY_CONFLICT"):
         model.prediction_result(source.repository, invalid)
     assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
