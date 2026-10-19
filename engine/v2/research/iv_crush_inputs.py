@@ -84,6 +84,7 @@ def _anchors(row, day):
     """Enforce the native session/gap rule without claiming quoted-row adjacency."""
     pre, post = calendar_date(row["pre_date"]), calendar_date(row["post_date"])
     if (not 0 < (post - pre).days <= 5
+            or row["session"] not in ("AMC", "BMO")
             or (row["session"] == "AMC" and not pre <= day < post)
             or (row["session"] == "BMO" and not pre < day <= post)):
         raise ValueError

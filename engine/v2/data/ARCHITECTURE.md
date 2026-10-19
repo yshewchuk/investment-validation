@@ -44,8 +44,8 @@ footer counts, strict global order and result limits remain mandatory; batches a
 `Repository.scan(..., max_object_bytes=None)` preserves path-based reads by default.
 With a cap, `objects.read_verified_bytes` hashes bounded immutable bytes without cache
 reuse; PyArrow checks all row-group uncompressed sizes before decoding. Thrift limits
-are capped at INT32_MAX even for larger Python integers. Buffers close on completion,
-errors or generator closure; existing row/integrity checks remain.
+are capped at the library's 32-bit maximum even for larger Python integers. Buffers
+close on completion, errors or generator closure; existing row/integrity checks remain.
 
 | Byte-read condition | Outcome |
 |---|---|
