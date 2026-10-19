@@ -345,9 +345,9 @@ def test_inspected_year_one_timestamp_bounds_remain_readable(
     assert [(item.fragment_ref.fragment_id, item.estimated_rows) for item in plan.dependencies] == [
         (original.fragment_id, 2)]
     matcher = data_query.compile_row_matcher(_contract("timestamp[us]"), query)
-    assert matcher({"key": datetime(1, 1, 1)})
-    assert matcher({"key": datetime(1, 1, 2)})
-    assert not matcher({"key": datetime(1, 1, 3)})
+    assert matcher({"key": datetime(1, 1, 1)}) is True
+    assert matcher({"key": datetime(1, 1, 2)}) is True
+    assert matcher({"key": datetime(1, 1, 3)}) is False
     state = _track_streams(monkeypatch)
     assert [row for batch in _scan(repository, query) for row in batch.to_pylist()] == [
         {"key": datetime(1, 1, 1), "sequence": 0, "payload": "p000/0"},
