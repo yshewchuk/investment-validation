@@ -338,3 +338,39 @@ def test_features_stage_is_a_cross_check_stage_and_launches_as_finality_check():
     assert launch_mode(legacy_spec) == "legacy"
 
     assert "features" in nightly.CROSS_CHECK_STAGES
+
+
+_H1, _H2 = "a" * 64, "b" * 64
+
+
+def _stamped(stamps):
+    df = _frame(len(stamps))
+    df["tier3_snapshot"] = pd.Series(stamps, dtype="string")
+    return df
+
+
+def _tier4_pair(tmp_path, rebuilt, pinned):
+    _write(tmp_path / "r.parquet", rebuilt)
+    _write(tmp_path / "p.parquet", pinned)
+    return compare_tables("tier4", tmp_path / "r.parquet", tmp_path / "p.parquet")
+
+
+def test_carried_stamp_rows_with_older_valid_hash_match(tmp_path):
+    out = _tier4_pair(tmp_path, _stamped([_H1] * 6), _stamped([_H2, _H2, _H2, _H1, _H1, _H1]))
+    assert out["verdict"] == "match"
+
+
+def test_numeric_difference_still_fails_next_to_a_carried_stamp(tmp_path):
+    pinned = _stamped([_H2] * 6)
+    rebuilt = _stamped([_H1] * 6)
+    rebuilt.loc[2, "pred_abs_move"] += 1.0
+    out = _tier4_pair(tmp_path, rebuilt, pinned)
+    assert out["verdict"] == "mismatch"
+    assert out["mismatches"][0]["reason"] == "float_beyond_tolerance"
+
+
+@pytest.mark.parametrize("bad", [None, "not-a-hash", "A" * 64, "a" * 63])
+def test_invalid_or_null_pinned_stamp_fails(tmp_path, bad):
+    out = _tier4_pair(tmp_path, _stamped([_H1] * 6), _stamped([_H1, _H1, bad, _H1, _H1, _H1]))
+    assert out["verdict"] == "mismatch"
+    assert out["mismatches"][0] == {"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 1}

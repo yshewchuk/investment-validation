@@ -10,6 +10,10 @@ COMPARISON_ID = "numeric.v1"
 FEATURES_RTOL = 1e-9
 FEATURES_ATOL = 1e-12
 MAX_REPORTED_COLUMNS = 5
+# Per-row provenance stamps: checked for form (non-null sha256 hex), never value-compared,
+# because an incremental tier4 build legitimately keeps carried rows at an older panel hash.
+PROVENANCE_COLUMNS = {"tier4": ("tier3_snapshot",)}
+_SHA256_RE = r"[0-9a-f]{64}"
 TABLE_KEYS = {"panel": ("ticker", "date"), "tier4": ("ticker", "event_date")}
 IDENTICAL = {"verdict": "match", "max_abs_diff": 0.0, "max_rel_diff": 0.0,
              "n_columns_differing": 0, "mismatches": []}
@@ -49,6 +53,17 @@ def _compare_float(a, b):
     return n_pattern, n_bad, max_abs, max_rel
 
 
+def _stamp_mismatches(name, rebuilt, pinned):
+    """Provenance-stamp columns are checked for form (non-null sha256 hex) on both sides."""
+    out = []
+    for c in PROVENANCE_COLUMNS.get(name, ()):
+        n_bad = sum(int((~f[c].astype("string").str.fullmatch(_SHA256_RE).fillna(False).astype(bool)).sum())
+                    for f in (rebuilt, pinned))
+        if n_bad:
+            out.append({"reason": "provenance_stamp", "column": c, "n_rows": n_bad})
+    return out
+
+
 def compare_tables(name, rebuilt_path, pinned_path) -> dict:
     """Compare two tables of the same contract; never raises for a data
     difference, and every value in the result is json-safe (never a cell value)."""
@@ -70,7 +85,9 @@ def compare_tables(name, rebuilt_path, pinned_path) -> dict:
         return _structural(keys)
     max_abs = max_rel = 0.0
     n_columns = 0
-    mismatches = []
+    mismatches = _stamp_mismatches(name, rebuilt, pinned)
+    stamps = list(PROVENANCE_COLUMNS.get(name, ()))
+    rebuilt, pinned = rebuilt.drop(columns=stamps), pinned.drop(columns=stamps)
     for c in rebuilt.columns:
         if pd.api.types.is_float_dtype(rebuilt[c]):
             a = rebuilt[c].to_numpy(dtype="float64")
