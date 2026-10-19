@@ -23,6 +23,12 @@ def _projection(value, snapshot, context, *, columns=("n_prior", "mean_prior_abs
         event_ids=[context["temporal_plan"]["events"][0]["event_id"]], columns=columns)
 
 
+def _assert_fresh_bounded_scans(value, columns):
+    assert [(table, request.columns, request.max_batch_rows, request.max_result_rows)
+            for table, request in value.repository.scans] == [
+        (TABLE, projection, 3, 12) for projection in columns]
+
+
 @pytest.mark.parametrize("reader", ["full", "projection", "admission"])
 @pytest.mark.parametrize("change,code,message", [
     ("receipt", "IDENTITY_CONFLICT", "history build receipt differs from its context"),
@@ -120,14 +126,18 @@ def test_projection_globally_admits_metadata_before_numbers_in_bounded_batches(s
     assert len(result["rows"]) == 3 and metadata_rows == checked_features
 
 
+@pytest.mark.parametrize("prior_success", [False, True])
 @pytest.mark.parametrize("field,value", [
     ("cutoff_id", "wrong"), ("source_session_ceiling", "2099-01-01"),
     ("history_status", "empty"), ("history_json", "{}"), ("event_date", "1900-01-01"),
 ])
-def test_unselected_metadata_corruption_refuses_before_any_feature_scan(source, monkeypatch, field, value):  # noqa: F811
+def test_each_read_revalidates_unselected_metadata_before_feature_scan(source, monkeypatch, field, value, prior_success):  # noqa: F811
     build, snapshot = build_history(source)
     context = build["context"]
     selected = context["temporal_plan"]["events"][0]["event_id"]
+    if prior_success:
+        assert len(_projection(source, snapshot, context)["rows"]) == 3
+    source.repository.scans.clear()
     original, changed = stored._stream_rows, []
 
     def corrupt(repository, snapshot, context, columns, count):
@@ -144,18 +154,23 @@ def test_unselected_metadata_corruption_refuses_before_any_feature_scan(source, 
     assert caught.value.problem == errors.fail(
         "CONTRACT_MISMATCH", "stored history metadata differs from its context").problem
     assert changed == [1]
+    _assert_fresh_bounded_scans(source, [METADATA])
 
 
+@pytest.mark.parametrize("prior_success", [False, True])
 @pytest.mark.parametrize("field,value,message", [
     ("n_prior", 999, "stored history count differs"),
     ("mean_prior_move", float("nan"), "stored history feature or missingness is invalid"),
     ("mean_prior_abs_move", -1, "stored history feature or missingness is invalid"),
     ("ema12_prior_abs_move", 0, "stored history feature or missingness is invalid"),
 ])
-def test_unselected_unprojected_feature_corruption_still_refuses(source, monkeypatch, field, value, message):  # noqa: F811
+def test_each_read_revalidates_unselected_unprojected_features(source, monkeypatch, field, value, message, prior_success):  # noqa: F811
     build, snapshot = build_history(source)
     context = build["context"]
     selected = context["temporal_plan"]["events"][0]["event_id"]
+    if prior_success:
+        assert len(_projection(source, snapshot, context, columns=("n_prior",))["rows"]) == 3
+    source.repository.scans.clear()
     original, changed = stored._stream_rows, []
 
     def corrupt(repository, snapshot, context, columns, count):
@@ -170,6 +185,28 @@ def test_unselected_unprojected_feature_corruption_still_refuses(source, monkeyp
         _projection(source, snapshot, context, columns=("n_prior",))
     assert caught.value.problem == errors.fail("CONTRACT_MISMATCH", message).problem
     assert changed == [1]
+    _assert_fresh_bounded_scans(source, [METADATA, (*METADATA, *FEATURES)])
+
+
+def test_second_read_reverifies_unselected_stored_object_bytes(source):  # noqa: F811
+    build, snapshot = build_history(source)
+    context = build["context"]
+    selected = context["temporal_plan"]["events"][0]["event_id"]
+    record = next(record for record in source.repository.fragment_records(snapshot, TABLE)
+                  if record.primary_key_min[0] != selected)
+    path = objects.verify_object_path(source.store, record.object_ref)
+    assert len(_projection(source, snapshot, context)["rows"]) == 3
+    source.repository.scans.clear()
+    # Corrupt only this synthetic fixture's unselected object after a successful
+    # read. Keep the same Repository, snapshot, context and projection request.
+    payload = path.read_bytes()
+    path.chmod(0o600)
+    path.write_bytes(bytes([payload[0] ^ 1]) + payload[1:])
+    with pytest.raises(DataError) as caught:
+        _projection(source, snapshot, context)
+    assert caught.value.problem == errors.fail(
+        "OBJECT_CORRUPT", "published object bytes do not match its recorded hash").problem
+    _assert_fresh_bounded_scans(source, [METADATA])
 
 
 @pytest.mark.parametrize("pass_number,change,message", [
@@ -226,9 +263,12 @@ def test_empty_projection_still_hashes_and_validates_every_row(source):  # noqa:
     assert result["rows"] == [] and result["inputs_id"] == full["inputs_id"]
 
 
+@pytest.mark.parametrize("prior_success", [False, True])
 @pytest.mark.parametrize("boundary", ["_metadata", "_validate_features", "_stream_identity"])
-def test_refused_projection_closes_fragment_streams_even_with_retained_traceback(source, monkeypatch, boundary):  # noqa: F811
+def test_refused_projection_closes_fragment_streams_even_with_retained_traceback(source, monkeypatch, boundary, prior_success):  # noqa: F811
     build, snapshot = build_history(source)
+    if prior_success:
+        assert len(_projection(source, snapshot, build["context"])["rows"]) == 3
     original = Repository._fragment_rows
     active = []
 

@@ -632,15 +632,14 @@ the existing `read_stored` plus magnitude target preflight/load/qualification AP
 Neither consumer modifies the build closure, stored artifact identity or final-read authority.
 
 `magnitude_history_store.read_stored_for_events` is the projected search reader.
-It repeats complete receipt/isolation checks and two whole-source scans on every call:
-all metadata first, then all features, including events and columns not retained.
-Per-row metadata digests/counts detect drift between scans; canonical full rows feed
-the exact original `read_stored` envelope hash. Returned `inputs_id` therefore names
-the complete source envelope, not the returned projected rows. Selected rows retain
-only primary-key identity and requested numeric features, without lineage strings.
-Three-row scan batches and sequential disjoint-fragment reads bound live lineage
-to event-sized batches; context, manifest, row digests/counts and selected slim rows still scale
-with their cardinalities. There is no fixed overall byte cap or cross-call cache.
+Every call revalidates the complete receipt, isolation, metadata and feature content,
+including events and columns not retained. Complete metadata admission precedes
+numeric validation; corruption or inconsistent source content refuses the read.
+Returned `inputs_id` names the exact original `read_stored` full-source envelope,
+not the projection. Selected rows contain only primary-key identity and requested
+numeric features, without lineage strings. Full-snapshot lineage is not retained;
+memory still scales with metadata and selected rows, with no fixed overall byte cap.
+A prior successful read never substitutes for fresh validation.
 The original full-row `read_stored` API and its returned envelope remain unchanged.
 
 ## External systems and libraries

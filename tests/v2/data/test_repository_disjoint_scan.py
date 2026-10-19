@@ -305,26 +305,33 @@ def test_timestamp_leading_key_endpoint_filters_keep_literal_membership_and_rows
     assert state == {"active": 0, "maximum": 1, "opened": [records[1].fragment_id]}
 
 
-@pytest.mark.parametrize("unpadded_platform", [False, True])
-def test_inspected_year_one_timestamp_bounds_remain_readable(storage, monkeypatch, unpadded_platform):
+@pytest.mark.parametrize("unpadded_platform, padded_metadata", [(False, True), (True, False), (True, True)])
+@pytest.mark.parametrize("values", [
+    ("0001-01-01", "0001-01-02"),
+    ("0001-01-01T00:00:00.000000", "0001-01-02T00:00:00.000000"),
+    ("0001-01-01T01:00:00+01:00", "0001-01-02T01:00:00+01:00"),
+])
+def test_inspected_year_one_timestamp_bounds_remain_readable(
+        storage, monkeypatch, unpadded_platform, padded_metadata, values):
+    original_inspector_format = objects._format_naive_timestamp
+    monkeypatch.setattr(objects, "_format_naive_timestamp", lambda micros:
+                        original_inspector_format(micros).zfill(26) if padded_metadata else
+                        original_inspector_format(micros).lstrip("0"))
     if unpadded_platform:
         # Reproduce platforms whose %Y writes year 1 as "1", even on Python
         # versions that always pad it. Keep the real publication/inspection path.
-        original_inspector_format = objects._format_naive_timestamp
         original_row_format = data_query.time_formats.format_naive_timestamp
-        monkeypatch.setattr(objects, "_format_naive_timestamp",
-                            lambda micros: original_inspector_format(micros).lstrip("0"))
         monkeypatch.setattr(data_query.time_formats, "format_naive_timestamp",
                             lambda value: original_row_format(value).lstrip("0"))
     repository, query, records, _expected = _build(storage, [
         [(datetime(1, 1, 1), 0), (datetime(1, 1, 2), 0)],
     ], physical="timestamp[us]")
     query = replace(query, key_filter=(KeyPredicate(
-        column="key", operator="in", values=("0001-01-01", "0001-01-02")),))
-    # strftime's year padding differs by platform; use the existing inspector's
-    # actual wire spelling without rewriting any persisted fragment identity.
+        column="key", operator="in", values=values),))
+    # Keep both inspector spellings readable, including padded metadata read
+    # on an unpadded platform, without rewriting persisted fragment identities.
     original = records[0]
-    year = "1" if unpadded_platform else datetime(1, 1, 1).strftime("%Y")
+    year = "0001" if padded_metadata else "1"
     assert original.primary_key_min == (f"{year}-01-01T00:00:00.000000", 0)
     assert original.primary_key_max == (f"{year}-01-02T00:00:00.000000", 0)
     population = data_query.plan_scan_population(
@@ -337,6 +344,10 @@ def test_inspected_year_one_timestamp_bounds_remain_readable(storage, monkeypatc
     plan = repository.explain_dependencies(query, table_name="disjoint_scan")
     assert [(item.fragment_ref.fragment_id, item.estimated_rows) for item in plan.dependencies] == [
         (original.fragment_id, 2)]
+    matcher = data_query.compile_row_matcher(_contract("timestamp[us]"), query)
+    assert matcher({"key": datetime(1, 1, 1)})
+    assert matcher({"key": datetime(1, 1, 2)})
+    assert not matcher({"key": datetime(1, 1, 3)})
     state = _track_streams(monkeypatch)
     assert [row for batch in _scan(repository, query) for row in batch.to_pylist()] == [
         {"key": datetime(1, 1, 1), "sequence": 0, "payload": "p000/0"},

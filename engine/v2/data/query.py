@@ -606,10 +606,9 @@ def _normalize_bound(value: str) -> str:
     always literally the same shape:
 
     * a bare ``YYYY-MM-DD`` date is midnight of that date;
-    * a naive timestamp (already exactly the wire form) is taken as UTC,
-      unchanged -- this is the fast, byte-identical path every current
-      caller (recorded fragment bounds, ``legacy_materialization``'s bare
-      dates and naive timestamps) takes;
+    * a naive timestamp is taken as UTC, unchanged for years 1000 onward;
+      earlier years use the shared formatter's platform-specific padding,
+      just like stored row keys and normalized fragment key bounds;
     * a timezone-aware timestamp (``Z``, ``+00:00``, or any other offset)
       is converted to UTC before being dropped to the naive wire form.
 
@@ -619,6 +618,6 @@ def _normalize_bound(value: str) -> str:
     excluded by another. An unparseable bound refuses typed rather than
     being compared as a raw, mismatched string.
     """
-    if time_formats.is_naive_timestamp(value):
+    if time_formats.is_naive_timestamp(value) and not value.startswith("0"):
         return value
     return time_formats.format_naive_timestamp(parse_time_bound(value))
