@@ -1,4 +1,6 @@
 """IV-crush contract remains typed, deterministic and honest about its clocks."""
+import hashlib
+import json
 from dataclasses import replace
 
 import pyarrow as pa
@@ -55,20 +57,73 @@ def test_native_arrow_schema_accepts_signed_and_skipped_rows():
                                for c in contract.columns])
     assert actual_schema == schema
     assert len(rows) == 2
-    expected_values = [("TEST", "2024-01-05", "AMC", "2024-01-05", "2024-01-08",
-                        50.0, 30.0, -40.0, "2024-01-09", False, None, "synthetic"),
-                       ("TEST", "2024-01-08", None, None, None, None, None, None,
-                        None, True, "missing_session", "synthetic")]
+    # This ASCII/integer fixture has identical compact sorted JSON and canonical
+    # bytes, so the expected digest needs no production hash/projection helper.
+    expected_projection = {
+        "schema_version": "iv_crush_inputs.v1",
+        "ticker": "TEST",
+        "events": [{"event_date": "2024-01-05", "session": "AMC"},
+                   {"event_date": "2024-01-08", "session": None}],
+        "daily": [{"date": "2024-01-05", "iv30": 50},
+                  {"date": "2024-01-08", "iv30": 30}],
+    }
+    expected_hash = "sha256:" + hashlib.sha256(
+        json.dumps(expected_projection, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+    expected_rows = [
+        {"ticker": "TEST", "event_date": "2024-01-05", "session": "AMC",
+         "pre_date": "2024-01-05", "post_date": "2024-01-08",
+         "pre_iv30": 50.0, "post_iv30": 30.0, "crush_pct_iv30": -40.0,
+         "available_as_of_date": "2024-01-09", "skipped": False,
+         "skip_reason": None, "source_id": "synthetic", "input_hash": expected_hash},
+        {"ticker": "TEST", "event_date": "2024-01-08", "session": None,
+         "pre_date": None, "post_date": None, "pre_iv30": None, "post_iv30": None,
+         "crush_pct_iv30": None, "available_as_of_date": None, "skipped": True,
+         "skip_reason": "missing_session", "source_id": "synthetic", "input_hash": expected_hash},
+    ]
+    assert rows == expected_rows
+    assert rows[0]["skipped"] is False
+    assert rows[1]["skipped"] is True
     persisted = pa.Table.from_pylist(rows, schema=schema).to_pylist()
-    assert [tuple(row[name] for name, _, _ in EXPECTED_FIELDS[:-1]) for row in persisted] == expected_values
+    assert persisted == expected_rows
+    assert persisted[0]["skipped"] is False
+    assert persisted[1]["skipped"] is True
     assert persisted == rows
 
 
 def test_clock_and_provenance_claims_remain_distinct():
-    columns = {c.name: c for c in IV_CRUSH_CONTRACT.columns}
-    assert "relative" in columns["crush_pct_iv30"].observation_time_semantics
-    assert "one calendar day" in columns["available_as_of_date"].observation_time_semantics
-    assert "not evidence" in columns["available_as_of_date"].observation_time_semantics
-    assert IV_CRUSH_CONTRACT.publication_time_column is None
-    assert IV_CRUSH_CONTRACT.receipt_time_column is None
-    assert "unverified" in IV_CRUSH_CONTRACT.provenance_semantics
+    contract = IV_CRUSH_CONTRACT
+    assert {c.name: (c.observation_time_semantics, c.null_policy) for c in contract.columns} == {
+        "ticker": (None, None),
+        "event_date": (None, None),
+        "session": (None, None),
+        "pre_date": ("selected quoted close date, YYYY-MM-DD; no publication claim", None),
+        "post_date": ("selected quoted close date, YYYY-MM-DD; no publication claim", None),
+        "pre_iv30": (
+            None, "missing/nonfinite anchor; finite values retained even on skipped pairs"),
+        "post_iv30": (
+            None, "missing/nonfinite anchor; finite values retained even on skipped pairs"),
+        "crush_pct_iv30": (
+            "signed relative IV30 change: 100*(post_iv30/pre_iv30-1); "
+            "adjacent daily rows span at most five calendar days; "
+            "finite positive pre-IV and finite post-IV, no post-positive filter",
+            "null exactly when skipped; never imputed or floored"),
+        "available_as_of_date": (
+            "post_date plus one calendar day; modeled day-clock floor, "
+            "not evidence of source publication or finality",
+            "null exactly when skipped; unavailable labels cannot enter training"),
+        "skipped": (None, None),
+        "skip_reason": (None, "null exactly when not skipped"),
+        "source_id": (None, "caller-declared identity, not verified by the pure builder"),
+        "input_hash": (None, "canonical hash of the supplied typed event/daily projections"),
+    }
+    assert contract.publication_time_column is None
+    assert contract.receipt_time_column is None
+    assert contract.duplicate_policy == "duplicate event dates refuse"
+    assert contract.finality_semantics == (
+        "no finality or actual publication evidence; reconstructed targets only")
+    assert contract.provenance_semantics == (
+        "input_hash binds supplied projections; source_id is unverified caller metadata")
+    assert contract.coverage_semantics == (
+        "one row per supplied event, skipped rows included; no completeness inference")
+    assert contract.schema_evolution_policy == "new contract identity for any semantic change"

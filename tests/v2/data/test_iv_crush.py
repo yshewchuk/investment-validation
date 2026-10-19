@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import math
+from datetime import date, timedelta
 
 import pandas as pd
 import pytest
@@ -28,12 +29,21 @@ def assert_refusal(error, code="CONTRACT_MISMATCH"):
 
 def assert_skip(row, reason, *, session="AMC", pre=None, post=None, pre_iv=None, post_iv=None):
     assert row["ticker"] == "TEST" and row["event_date"] == "2024-01-05"
-    assert (row["skipped"], row["skip_reason"], row["session"]) == (True, reason, session)
+    assert row["skipped"] is True
+    assert (row["skip_reason"], row["session"]) == (reason, session)
     assert row["crush_pct_iv30"] is None and row["available_as_of_date"] is None
     assert (row["pre_date"], row["post_date"], row["pre_iv30"], row["post_iv30"]) == (
         pre, post, pre_iv, post_iv)
     assert row["source_id"] == "synthetic-source"
     assert row["input_hash"].startswith("sha256:") and len(row["input_hash"]) == 71
+
+
+def one_row(rows, *, event_date="2024-01-05"):
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["ticker"], row["event_date"]) == ("TEST", event_date)
+    assert type(row["skipped"]) is bool
+    return row
 
 
 def build(events=None, daily=None, **kwargs):
@@ -51,7 +61,7 @@ def build(events=None, daily=None, **kwargs):
     ("BMO", "2024-01-04", "2024-01-05", 25.0, "2024-01-06"),
 ])
 def test_explicit_anchors_and_signed_relative_change(session, pre, post, value, available):
-    row = build(events=[{"event_date": "2024-01-05", "session": session}])[0]
+    row = one_row(build(events=[{"event_date": "2024-01-05", "session": session}]))
     assert (row["pre_date"], row["post_date"]) == (pre, post)
     assert row["crush_pct_iv30"] == pytest.approx(value)
     assert row["available_as_of_date"] == available
@@ -62,16 +72,16 @@ def test_explicit_anchors_and_signed_relative_change(session, pre, post, value, 
 
 @pytest.mark.parametrize("after,expected", [(0.0, -100.0), (-5.0, -110.0), (75.0, 50.0)])
 def test_nonpositive_post_and_positive_change_preserve_existing_target(after, expected):
-    row = build(daily=[{"date": "2024-01-05", "iv30": 50.0},
-                       {"date": "2024-01-08", "iv30": after}])[0]
+    row = one_row(build(daily=[{"date": "2024-01-05", "iv30": 50.0},
+                               {"date": "2024-01-08", "iv30": after}]))
     assert row["crush_pct_iv30"] == pytest.approx(expected)
-    assert not row["skipped"]  # Deliberately no new post-positive filter or clipping.
+    assert row["skipped"] is False and row["skip_reason"] is None
 
 
 @pytest.mark.parametrize("post,reason", [("2024-01-10", None), ("2024-01-11", "gap_exceeds_limit")])
 def test_five_day_weekend_holiday_gap_boundary(post, reason):
-    row = build(daily=[{"date": "2024-01-05", "iv30": 50.0},
-                       {"date": post, "iv30": 40.0}])[0]
+    row = one_row(build(daily=[{"date": "2024-01-05", "iv30": 50.0},
+                               {"date": post, "iv30": 40.0}]))
     assert row["skip_reason"] == reason
     assert row["post_date"] == post
     assert row["pre_iv30"] == 50.0 and row["post_iv30"] == 40.0
@@ -87,9 +97,9 @@ def test_five_day_weekend_holiday_gap_boundary(post, reason):
 
 @pytest.mark.parametrize("value", [None, 0, -1, float("nan"), float("inf"), -float("inf"), True, "50"])
 def test_invalid_pre_never_becomes_zero_label_or_fallback(value):
-    row = build(daily=[{"date": "2024-01-04", "iv30": 70.0},
+    row = one_row(build(daily=[{"date": "2024-01-04", "iv30": 70.0},
                        {"date": "2024-01-05", "iv30": value},
-                       {"date": "2024-01-08", "iv30": 30.0}])[0]
+                       {"date": "2024-01-08", "iv30": 30.0}]))
     assert row["skip_reason"] == "invalid_pre_iv30"
     assert row["pre_date"] == "2024-01-05"
     assert row["crush_pct_iv30"] is None and row["available_as_of_date"] is None
@@ -100,18 +110,34 @@ def test_invalid_pre_never_becomes_zero_label_or_fallback(value):
 
 @pytest.mark.parametrize("value", [None, float("nan"), float("inf"), False, "30"])
 def test_invalid_post_does_not_search_later_valid_quote(value):
-    row = build(daily=[{"date": "2024-01-05", "iv30": 50.0},
+    row = one_row(build(daily=[{"date": "2024-01-05", "iv30": 50.0},
                        {"date": "2024-01-08", "iv30": value},
-                       {"date": "2024-01-09", "iv30": 30.0}])[0]
+                       {"date": "2024-01-09", "iv30": 30.0}]))
     assert row["skip_reason"] == "invalid_post_iv30"
     assert row["post_date"] == "2024-01-08"
     assert row["crush_pct_iv30"] is None and row["available_as_of_date"] is None
     assert_skip(row, "invalid_post_iv30", pre="2024-01-05", post="2024-01-08", pre_iv=50)
 
 
+@pytest.mark.parametrize("which", ["pre", "post"])
+@pytest.mark.parametrize("value", [10**400, -(10**400)], ids=["positive-overflow", "negative-overflow"])
+def test_overflowing_integer_iv_retains_skip_instead_of_refusing_batch(which, value):
+    events = [{"event_date": "2024-01-05", "session": "AMC"}]
+    daily = [{"date": "2024-01-05", "iv30": 50}, {"date": "2024-01-08", "iv30": 30}]
+    daily[0 if which == "pre" else 1]["iv30"] = value
+    row = one_row(build(events, daily))
+    assert_skip(row, f"invalid_{which}_iv30", pre="2024-01-05", post="2024-01-08",
+                pre_iv=None if which == "pre" else 50,
+                post_iv=None if which == "post" else 30)
+    projection = {"schema_version": "iv_crush_inputs.v1", "ticker": "TEST",
+                  "events": events, "daily": daily}
+    assert row["input_hash"] == "sha256:" + hashlib.sha256(json.dumps(
+        projection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def test_nonfinite_ratio_is_explicit_skip():
-    row = build(daily=[{"date": "2024-01-05", "iv30": 1e-300},
-                       {"date": "2024-01-08", "iv30": 1e300}])[0]
+    row = one_row(build(daily=[{"date": "2024-01-05", "iv30": 1e-300},
+                               {"date": "2024-01-08", "iv30": 1e300}]))
     assert row["skip_reason"] == "nonfinite_target"
     assert row["available_as_of_date"] is None
     assert_skip(row, "nonfinite_target", pre="2024-01-05", post="2024-01-08",
@@ -137,7 +163,7 @@ def test_missing_anchors_retain_event(daily, reason):
 @pytest.mark.parametrize("session,reason", [(None, "missing_session"), ("UNK", "unknown_session"),
                                            ("amc", "unknown_session"), (False, "unknown_session")])
 def test_unknown_session_is_not_silently_bmo(session, reason):
-    row = build(events=[{"event_date": "2024-01-05", "session": session}])[0]
+    row = one_row(build(events=[{"event_date": "2024-01-05", "session": session}]))
     assert row["session"] is None and row["skip_reason"] == reason
     assert row["pre_date"] is None and row["post_date"] is None
     assert_skip(row, reason, session=None)
@@ -172,7 +198,7 @@ def test_row_bounds_do_not_truncate_silently():
     with pytest.raises(DataError) as exc:
         build(max_rows=2)
     assert_refusal(exc.value, "RESULT_LIMIT_EXCEEDED")
-    assert len(build(max_rows=3)) == 1
+    one_row(build(max_rows=3))
     assert build(events=[]) == []
 
 
@@ -183,11 +209,51 @@ def test_event_row_cap_refuses_before_a_partial_result():
     assert_refusal(exc.value, "RESULT_LIMIT_EXCEEDED")
 
 
+@pytest.mark.parametrize("which", ["events", "daily"])
+def test_default_row_cap_admits_10000_and_refuses_10001_for_each_projection(which):
+    days = [(date(2000, 1, 1) + timedelta(days=i)).isoformat() for i in range(10001)]
+    events = [{"event_date": days[0], "session": "AMC"}]
+    daily = []
+    if which == "events":
+        events = [{"event_date": day, "session": "AMC"} for day in days[:10000]]
+        extra = {"event_date": days[10000], "session": "AMC"}
+    else:
+        daily = [{"date": day, "iv30": 50} for day in days[:10000]]
+        extra = {"date": days[10000], "iv30": 50}
+    args = dict(ticker="TEST", events=events, daily=daily, source_id="synthetic-source")
+    projection = {"schema_version": "iv_crush_inputs.v1", "ticker": "TEST",
+                  "events": events, "daily": daily}
+    expected_hash = "sha256:" + hashlib.sha256(json.dumps(
+        projection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    rows = build_rows(**args)  # Deliberately omit max_rows, independent of the table maximum.
+    if which == "events":
+        assert len(rows) == 10000
+        expected = [{"ticker": "TEST", "event_date": day, "session": "AMC",
+                     "pre_date": None, "post_date": None, "pre_iv30": None, "post_iv30": None,
+                     "crush_pct_iv30": None, "available_as_of_date": None, "skipped": True,
+                     "skip_reason": "missing_pre", "source_id": "synthetic-source",
+                     "input_hash": expected_hash} for day in days[:10000]]
+        assert rows == expected
+        assert all(row["skipped"] is True for row in rows)
+    else:
+        row = one_row(rows, event_date="2000-01-01")
+        assert row == {"ticker": "TEST", "event_date": "2000-01-01", "session": "AMC",
+                       "pre_date": "2000-01-01", "post_date": "2000-01-02", "pre_iv30": 50,
+                       "post_iv30": 50, "crush_pct_iv30": 0, "available_as_of_date": "2000-01-03",
+                       "skipped": False, "skip_reason": None, "source_id": "synthetic-source",
+                       "input_hash": expected_hash}
+        assert row["skipped"] is False
+    args[which].append(extra)
+    with pytest.raises(DataError) as exc:
+        build_rows(**args)
+    assert_refusal(exc.value, "RESULT_LIMIT_EXCEEDED")
+
+
 @pytest.mark.parametrize("session", ["AMC", "BMO"])
 def test_missing_event_day_uses_supplied_adjacent_rows(session):
-    row = build(events=[{"event_date": "2024-01-06", "session": session}],
+    row = one_row(build(events=[{"event_date": "2024-01-06", "session": session}],
                 daily=[{"date": "2024-01-05", "iv30": 50},
-                       {"date": "2024-01-08", "iv30": 30}])[0]
+                       {"date": "2024-01-08", "iv30": 30}]), event_date="2024-01-06")
     assert (row["pre_date"], row["post_date"], row["crush_pct_iv30"]) == (
         "2024-01-05", "2024-01-08", -40.0)
 
@@ -196,8 +262,8 @@ def test_invalid_scalars_remain_distinguishable_in_input_hash():
     hashes = set()
     for value, encoded in ((None, None), (float("nan"), {"__nonfinite__": "nan"}),
                            (float("inf"), {"__nonfinite__": "inf"}), ("bad", "bad"), (False, False)):
-        row = build(daily=[{"date": "2024-01-05", "iv30": value},
-                           {"date": "2024-01-08", "iv30": 30}])[0]
+        row = one_row(build(daily=[{"date": "2024-01-05", "iv30": value},
+                                   {"date": "2024-01-08", "iv30": 30}]))
         expected = {"schema_version": "iv_crush_inputs.v1", "ticker": "TEST",
                     "events": [{"event_date": "2024-01-05", "session": "AMC"}],
                     "daily": [{"date": "2024-01-05", "iv30": encoded},
@@ -212,21 +278,38 @@ def test_invalid_scalars_remain_distinguishable_in_input_hash():
 def test_deterministic_projection_identity_and_no_mutation():
     events = [{"event_date": "2024-01-05", "session": "AMC"},
               {"event_date": "2024-01-08", "session": "BMO"}]
-    daily = [{"date": "2024-01-05", "iv30": 50.0}, {"date": "2024-01-08", "iv30": 30.0}]
+    daily = [{"date": "2024-01-05", "iv30": 50}, {"date": "2024-01-08", "iv30": 30}]
     original = copy.deepcopy((events, daily))
+    projection = {"schema_version": "iv_crush_inputs.v1", "ticker": "TEST",
+                  "events": events, "daily": daily}
+    expected_hash = "sha256:" + hashlib.sha256(json.dumps(
+        projection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    base = {"ticker": "TEST", "pre_date": "2024-01-05", "post_date": "2024-01-08",
+            "pre_iv30": 50, "post_iv30": 30, "crush_pct_iv30": -40,
+            "available_as_of_date": "2024-01-09", "skipped": False, "skip_reason": None,
+            "source_id": "synthetic-source", "input_hash": expected_hash}
+    expected = [{**base, "event_date": "2024-01-05", "session": "AMC"},
+                {**base, "event_date": "2024-01-08", "session": "BMO"}]
     first = build(events, daily)
-    assert build(list(reversed(events)), list(reversed(daily))) == first
+    reordered = build(list(reversed(events)), list(reversed(daily)))
+    assert len(first) == len(reordered) == 2
+    assert first == expected and reordered == expected
+    assert all(row["skipped"] is False for row in first + reordered)
     assert (events, daily) == original
-    assert len({r["input_hash"] for r in first}) == 1
-    daily[1]["iv30"] = 31.0
-    assert build(events, daily)[0]["input_hash"] != first[0]["input_hash"]
-    assert first[0]["source_id"] == "synthetic-source"
+    daily[1]["iv30"] = 31
+    changed_hash = "sha256:" + hashlib.sha256(json.dumps(
+        projection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    changed = build(events, daily)
+    assert len(changed) == 2 and changed_hash != expected_hash
+    assert changed == [{**row, "post_iv30": 31, "crush_pct_iv30": -38, "input_hash": changed_hash}
+                       for row in expected]
+    assert all(row["skipped"] is False for row in changed)
 
 
 def test_same_relative_target_for_different_iv_scale():
     for scale in (0.01, 1, 100):
-        row = build(daily=[{"date": "2024-01-05", "iv30": scale * 50},
-                           {"date": "2024-01-08", "iv30": scale * 30}])[0]
+        row = one_row(build(daily=[{"date": "2024-01-05", "iv30": scale * 50},
+                                   {"date": "2024-01-08", "iv30": scale * 30}]))
         assert row["crush_pct_iv30"] == pytest.approx(-40)
 
 
@@ -277,7 +360,7 @@ def test_projection_string_length_boundary(field):
     daily = [{"date": "2024-01-05", "iv30": 50}, {"date": "2024-01-08", "iv30": 30}]
     selected = events[0] if field == "session" else daily[0]
     selected[field] = "x" * 256
-    row = build(events, daily)[0]
+    row = one_row(build(events, daily))
     assert row["skip_reason"] == ("unknown_session" if field == "session" else "invalid_pre_iv30")
     selected[field] += "x"
     with pytest.raises(DataError) as exc:
@@ -291,6 +374,8 @@ def test_text_and_row_caps_accept_exact_boundary():
     daily = [{"date": "2024-01-05", "iv30": 50}, {"date": "2024-01-08", "iv30": 30}]
     rows = build_rows("T" * 256, events, daily, source_id="s" * 256, max_rows=2)
     assert len(rows) == 2
+    assert [row["event_date"] for row in rows] == ["2024-01-05", "2024-01-08"]
+    assert all(row["skipped"] is False and row["skip_reason"] is None for row in rows)
     assert [(r["ticker"], r["source_id"], r["crush_pct_iv30"]) for r in rows] == [
         ("T" * 256, "s" * 256, -40.0)] * 2
 
@@ -358,7 +443,9 @@ def test_independent_projection_hash_and_complete_multievent_rows():
          "post_date": None, "pre_iv30": None, "post_iv30": None, "crush_pct_iv30": None,
          "available_as_of_date": None, "skipped": True, "skip_reason": "missing_session"},
     ]
-    assert build(list(reversed(events)), list(reversed(daily))) == expected
+    actual = build(list(reversed(events)), list(reversed(daily)))
+    assert actual == expected
+    assert all(row["skipped"] is wanted["skipped"] for row, wanted in zip(actual, expected, strict=True))
     # Verify each semantic input dimension rather than only daily IV values.
     for changed in ("ticker", "event_date", "session", "daily_date", "iv30"):
         altered = copy.deepcopy(expected_input)
@@ -372,6 +459,10 @@ def test_independent_projection_hash_and_complete_multievent_rows():
         changed_hash = "sha256:" + hashlib.sha256(json.dumps(
             altered, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         rows = build_rows(altered["ticker"], altered["events"], altered["daily"], source_id="synthetic")
+        assert len(rows) == len(altered["events"]) == 4
+        assert [(row["ticker"], row["event_date"]) for row in rows] == [
+            (altered["ticker"], event["event_date"]) for event in altered["events"]]
+        assert all(type(row["skipped"]) is bool for row in rows)
         assert all(row["input_hash"] == changed_hash != expected_hash for row in rows)
 
 
@@ -385,7 +476,18 @@ def test_pure_boundary_ignores_extras_and_does_not_read_declared_source(monkeypa
 
     events = [{"event_date": "2024-01-05", "session": "AMC"}]
     daily = [{"date": "2024-01-05", "iv30": 50}, {"date": "2024-01-08", "iv30": 30}]
-    expected = build(events, daily)
+    projection = {"schema_version": "iv_crush_inputs.v1", "ticker": "TEST",
+                  "events": events, "daily": daily}
+    expected_hash = "sha256:" + hashlib.sha256(json.dumps(
+        projection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    expected = [{"ticker": "TEST", "event_date": "2024-01-05", "session": "AMC",
+                 "pre_date": "2024-01-05", "post_date": "2024-01-08", "pre_iv30": 50,
+                 "post_iv30": 30, "crush_pct_iv30": -40, "available_as_of_date": "2024-01-09",
+                 "skipped": False, "skip_reason": None, "source_id": "synthetic-source",
+                 "input_hash": expected_hash}]
+    original = build(events, daily)
+    assert one_row(original) == expected[0]
+    assert original[0]["skipped"] is False
     events[0].update(ticker="TEST", ignored=object())
     daily[0].update(ticker="TEST", ignored=object())
 
@@ -398,4 +500,5 @@ def test_pure_boundary_ignores_extras_and_does_not_read_declared_source(monkeypa
                              (ArtifactStore, "publish_bytes")):
             guard.setattr(target, name, forbid)
         actual = build_rows("TEST", events, daily, source_id="unverified-source")
+    assert one_row(actual)["skipped"] is False
     assert actual == [{**row, "source_id": "unverified-source"} for row in expected]
