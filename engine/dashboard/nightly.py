@@ -1172,7 +1172,7 @@ def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> li
         for (strategy, decision_offset), group in live.assign(_do=offset_of).groupby(
             ["strategy", "_do"], dropna=False
         ):
-            decision_offset = None if pd.isna(decision_offset) else decision_offset
+            decision_offset = None if pd.isna(decision_offset) else int(decision_offset)
             events = group[["ticker", "event_date", "session"]].drop_duplicates()
             keys |= board_chain_keys(
                 events, [str(strategy)], {str(strategy): decision_offset},

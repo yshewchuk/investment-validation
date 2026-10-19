@@ -21,7 +21,7 @@ from engine.data.features import panel as panel_mod
 # RAM-constrained shared host that reliably crashed a worker ("[gwN] node
 # down: Not properly terminated") and then hung xdist's own crashed-worker
 # replacement path. Isolated by bisection: tests/test_calendar.py and
-# tests/test_dashboard.py alone are both parallel-safe; only this file
+# tests/v2/dashboard/test_dashboard.py alone are both parallel-safe; only this file
 # reproduces it, and only with 2+ workers (-n 1 and plain serial are fine).
 # Not a small hidden-shared-state fix -- it is real memory pressure from
 # real data -- so grouped onto one worker instead.

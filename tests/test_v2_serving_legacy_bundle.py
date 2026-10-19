@@ -2,7 +2,7 @@
 
 Builds one small, real-shaped bundle by calling the actual
 ``engine.dashboard.render.render_bundle`` on synthetic ``ScoreResult`` rows
-(the same technique ``tests/test_dashboard.py`` already uses) — never a real
+(the same technique ``tests/v2/dashboard/test_dashboard.py`` already uses) — never a real
 feature panel, never real market data. The baked bundle is rendered ONCE
 (module-scoped) and copied per test, so refusal tests mutate their own copy
 without paying the render cost again.

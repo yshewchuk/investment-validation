@@ -193,7 +193,7 @@ def bundle() -> Path:
 @check("unittests", needs_data=False, description="the dashboard pytest suite")
 def check_unittests() -> str:
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", "tests/test_dashboard.py", "-q"],
+        [sys.executable, "-m", "pytest", "tests/v2/dashboard/test_dashboard.py", "-q"],
         cwd=str(ROOT), capture_output=True, text=True, timeout=900,
     )
     _require(proc.returncode == 0, f"pytest failed:\n{(proc.stdout + proc.stderr)[-2000:]}")

@@ -807,7 +807,8 @@ class TestNightlyPieces:
                 return _result(ticker=request.ticker, strike=request.strike)
 
         nightly.strike_ladder(board, scorer=Recorder(), alt_strikes=1, as_of=AS_OF)
-        assert DYNAMIC_STRATEGY not in asked and asked
+        assert set(asked) == {_result(ticker="REAL").strategy}
+        assert len(asked) == 2
 
     def test_strike_ladder_is_off_at_zero(self):
         from engine.dashboard import nightly
