@@ -500,3 +500,21 @@ def test_compare_identical_refuses_oversized_stamp_bytes_without_decoding(tmp_pa
     monkeypatch.undo()
     _write(tmp_path / "ok.parquet", _stamped([_H1] * 6))
     assert fc.compare_identical("tier4", tmp_path / "ok.parquet")["verdict"] == "match"
+
+
+def test_compare_identical_byte_cap_boundary_and_exact_size(tmp_path, monkeypatch):
+    import pyarrow.parquet as pq
+    import engine.v2.ops.features_compare as fc
+
+    path = tmp_path / "t.parquet"
+    _write(path, _stamped([_H1] * 6))
+    md = pq.ParquetFile(path).metadata
+    size = sum(md.row_group(i).column(j).total_uncompressed_size
+               for i in range(md.num_row_groups) for j in range(md.num_columns)
+               if md.row_group(i).column(j).path_in_schema == "tier3_snapshot")
+    assert size > 0
+    monkeypatch.setattr(fc, "STAMP_MAX_BYTES", size)
+    assert fc.compare_identical("tier4", path)["verdict"] == "match"       # exactly at the cap
+    monkeypatch.setattr(fc, "STAMP_MAX_BYTES", size - 1)
+    assert fc.compare_identical("tier4", path)["mismatches"] == [
+        {"reason": "stamp_bytes_over_cap", "column": "tier3_snapshot", "n_bytes": size}]
