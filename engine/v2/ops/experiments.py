@@ -310,9 +310,9 @@ def _finite_number(value) -> bool:
 def _valid_declared_exit(recipe) -> bool:
     """The strict shape of a declared exit recipe the resolver will execute.
 
-    ``fixed_day`` keeps its 7a key set; ``target_stop`` is exactly the four
-    keys ``kind``/``trading_days``/``target_pnl``/``stop_pnl`` with a positive
-    integer horizon, finite positive target and finite negative stop. Every
+    ``fixed_day`` keeps its 7a key set; ``target_stop`` has four required keys
+    and optional explicit threshold units, with a positive integer horizon,
+    finite positive target and finite negative stop. Every
     other key set, kind, boolean, nonfinite value and wrong sign is refused.
     """
     if not isinstance(recipe, Mapping):
@@ -324,7 +324,10 @@ def _valid_declared_exit(recipe) -> bool:
     if kind == "fixed_day":
         return set(recipe) == {"kind", "trading_days"}
     if kind == "target_stop":
-        if set(recipe) != {"kind", "trading_days", "target_pnl", "stop_pnl"}:
+        required = {"kind", "trading_days", "target_pnl", "stop_pnl"}
+        if (set(recipe) not in (required, required | {"threshold_units"})
+                or recipe.get("threshold_units", "quote_price_times_quantity") not in
+                ("quote_price_times_quantity", "entry_debit_fraction")):
             return False
         return (_finite_number(recipe["target_pnl"]) and recipe["target_pnl"] > 0
                 and _finite_number(recipe["stop_pnl"]) and recipe["stop_pnl"] < 0)
