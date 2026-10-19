@@ -374,7 +374,7 @@ def test_numeric_difference_still_fails_next_to_a_carried_stamp(tmp_path):
 
 
 @pytest.mark.parametrize("side", ["rebuilt", "pinned"])
-@pytest.mark.parametrize("bad", [None, "not-a-hash", "A" * 64, "a" * 63, "a" * 64 + "x"])
+@pytest.mark.parametrize("bad", [None, "not-a-hash", "A" * 64, "a" * 63, "a" * 64 + "x", "g" * 64])
 def test_invalid_or_null_stamp_fails_on_either_side(tmp_path, side, bad):
     good = _stamped([_H1] * 6)
     broken = _stamped([_H1, bad, _H1, bad, _H1, _H1])
@@ -384,51 +384,45 @@ def test_invalid_or_null_stamp_fails_on_either_side(tmp_path, side, bad):
     assert out["mismatches"] == [{"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 2}]
 
 
-def test_byte_identical_tier4_with_a_bad_stamp_is_still_refused(tmp_path, monkeypatch):
-    from engine.data import store
-    from engine.v2.ops.legacy_adapter import _compare_to_pinned
-
-    root = tmp_path / "mat"
-    path = root / "data" / "features" / "tier4_forecasts.parquet"
-    _write(path, _stamped([_H1, "bad", _H1, _H1, _H1, _H1]))
-    panel = root / "data" / "features" / "panel.parquet"
-    _write(panel, _frame())
-    import engine.paths as paths_module
-    monkeypatch.setattr(paths_module, "ROOT", root)
-    monkeypatch.setattr(paths_module, "PANEL", panel)
-    monkeypatch.setattr(paths_module, "TIER4", path)
-    hashes = {"panel_sha256": store.file_sha256(panel), "tier4_sha256": store.file_sha256(path)}
-    out = _compare_to_pinned(root, hashes)
-    assert out["verdict"] == "mismatch"
-    assert out["tables"]["tier4"]["mismatches"][0]["reason"] == "provenance_stamp"
-    assert out["tables"]["panel"]["verdict"] == "match"
-
-
 def test_invalid_stamps_on_both_sides_are_summed(tmp_path):
     out = _tier4_pair(tmp_path, _stamped([_H1, "bad", _H1, _H1, _H1, _H1]),
                       _stamped([_H1, "bad", "bad", _H1, _H1, _H1]))
     assert out["mismatches"] == [{"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 3}]
 
 
-def test_byte_identical_tier4_with_valid_stamps_matches_and_bad_count_is_exact(tmp_path, monkeypatch):
-    from engine.data import store
-    from engine.v2.ops.legacy_adapter import _compare_to_pinned
-    import engine.paths as paths_module
+def test_compare_identical_checks_only_stamps_and_counts_once_per_side(tmp_path):
+    from engine.v2.ops.features_compare import compare_identical
 
-    root = tmp_path / "mat"
-    panel = root / "data" / "features" / "panel.parquet"
-    path = root / "data" / "features" / "tier4_forecasts.parquet"
-    _write(panel, _frame())
-    monkeypatch.setattr(paths_module, "ROOT", root)
-    monkeypatch.setattr(paths_module, "PANEL", panel)
-    monkeypatch.setattr(paths_module, "TIER4", path)
-
-    def run(stamps):
-        _write(path, _stamped(stamps))
-        return _compare_to_pinned(root, {"panel_sha256": store.file_sha256(panel),
-                                         "tier4_sha256": store.file_sha256(path)})
-
-    assert run([_H1, _H2, _H1, _H1, _H1, _H1])["verdict"] == "match"
-    bad = run([_H1, "bad", "bad", _H1, _H1, _H1])
-    assert bad["tables"]["tier4"]["mismatches"] == [
+    ok = tmp_path / "ok.parquet"
+    _write(ok, _stamped([_H1, _H2, _H1, _H1, _H1, _H1]))
+    assert compare_identical("tier4", ok) == dict(IDENTICAL, mismatches=[])
+    bad = tmp_path / "bad.parquet"
+    _write(bad, _stamped([_H1, "bad", "bad", _H1, _H1, _H1]))
+    assert compare_identical("tier4", bad)["mismatches"] == [
         {"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 4}]
+    assert compare_identical("panel", ok) == dict(IDENTICAL, mismatches=[])
+
+
+@pytest.mark.parametrize("stamps,verdict", [([_H1, _H2, _H1, _H1, _H1, _H1], "match"),
+                                            ([_H1, "bad", _H1, _H1, _H1, _H1], "mismatch")])
+def test_byte_identical_tier4_goes_through_the_stamp_check_in_the_features_action(
+        tmp_path, monkeypatch, stamps, verdict):
+    from engine import paths as paths_module
+    from engine.data import rebuild
+
+    st, mat = tmp_path / "st", tmp_path / "mat"
+    for root in (st, mat):
+        _write(root / "data" / "features" / "panel.parquet", _frame())
+        _write(root / "data" / "features" / "tier4_forecasts.parquet", _stamped(stamps))
+    monkeypatch.setattr(paths_module, "ROOT", st)
+    monkeypatch.setattr(paths_module, "PANEL", st / "data" / "features" / "panel.parquet")
+    monkeypatch.setattr(paths_module, "TIER4", st / "data" / "features" / "tier4_forecasts.parquet")
+    monkeypatch.setattr(rebuild, "build_panel_table", lambda: {"rows": 6})
+    monkeypatch.setattr(rebuild, "build_tier4_table", lambda since=None: {"rows": 6})
+    _action_features({}, st, cross_check={"materialization_root": str(mat)})
+    receipt = json.loads((st / "features.json").read_text())
+    assert receipt["verdict"] == verdict
+    assert receipt["tables"]["panel"] == dict(IDENTICAL, mismatches=[])
+    if verdict == "mismatch":
+        assert receipt["tables"]["tier4"]["mismatches"] == [
+            {"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 2}]

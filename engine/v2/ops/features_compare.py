@@ -53,12 +53,30 @@ def _compare_float(a, b):
     return n_pattern, n_bad, max_abs, max_rel
 
 
+def _bad_stamp_count(series):
+    return int((~series.astype("string").str.fullmatch(_SHA256_RE).fillna(False).astype(bool)).sum())
+
+
+def compare_identical(name, path) -> dict:
+    """Result for a byte-identical pair of tables: nothing to diff, but provenance stamps
+    must still be well formed. Reads only the stamp columns (never the whole table)."""
+    import pyarrow.parquet as pq
+
+    present = set(pq.read_schema(path).names)
+    out = []
+    for c in [c for c in PROVENANCE_COLUMNS.get(name, ()) if c in present]:
+        # the pair is one file, so count each bad row once per side, as compare_tables does
+        n_bad = 2 * _bad_stamp_count(pd.read_parquet(path, columns=[c])[c])
+        if n_bad:
+            out.append({"reason": "provenance_stamp", "column": c, "n_rows": n_bad})
+    return dict(IDENTICAL, verdict="mismatch" if out else "match", mismatches=out)
+
+
 def _stamp_mismatches(name, rebuilt, pinned):
     """Provenance-stamp columns are checked for form (non-null sha256 hex) on both sides."""
     out = []
     for c in [c for c in PROVENANCE_COLUMNS.get(name, ()) if c in rebuilt.columns]:
-        n_bad = sum(int((~f[c].astype("string").str.fullmatch(_SHA256_RE).fillna(False).astype(bool)).sum())
-                    for f in (rebuilt, pinned))
+        n_bad = sum(_bad_stamp_count(f[c]) for f in (rebuilt, pinned))
         if n_bad:
             out.append({"reason": "provenance_stamp", "column": c, "n_rows": n_bad})
     stamps = list(PROVENANCE_COLUMNS.get(name, ()))
