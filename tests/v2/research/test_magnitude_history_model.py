@@ -75,7 +75,7 @@ def history_model_args(source, action, *extra):
 def _invoke(source, capsys, action, *extra, status=0):
     assert cli.main(history_model_args(source, action, *extra)) == status
     captured = capsys.readouterr()
-    assert not captured.err and "Traceback" not in captured.out
+    assert all(line.startswith("  [") for line in captured.err.splitlines()) and "Traceback" not in captured.out
     return json.loads(captured.out)
 
 

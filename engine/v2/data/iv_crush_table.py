@@ -31,8 +31,8 @@ def _contract():
         ColumnContract(name="source_id", physical_type="string", nullable=False),
         ColumnContract(name="input_hash", physical_type="string", nullable=False),
     )
-    contract = TableContract(contract_id=IV_CRUSH_TABLE_NAME + ".v1", table_name=IV_CRUSH_TABLE_NAME,
-        semantic_version="1.0.0", definition_hash="sha256:" + "0" * 64, columns=columns,
+    contract = TableContract(contract_id=IV_CRUSH_TABLE_NAME + ".v2", table_name=IV_CRUSH_TABLE_NAME,
+        semantic_version="2.0.0", definition_hash="sha256:" + "0" * 64, columns=columns,
         primary_key=("ticker", "event_date"), duplicate_policy="duplicate event dates refuse",
         foreign_keys=(), partition_columns=("ticker",), filterable_columns=("ticker",),
         orderable_columns=("ticker", "event_date"), observation_time_column="event_date",

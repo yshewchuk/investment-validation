@@ -398,7 +398,7 @@ def _invoke(source, kind, capsys, action, *extra):
     arguments[arguments.index("--magnitude-model") + 1] = kind
     assert cli.main(arguments) == 0
     captured = capsys.readouterr()
-    assert not captured.err and "Traceback" not in captured.out
+    assert all(line.startswith("  [") for line in captured.err.splitlines()) and "Traceback" not in captured.out
     return json.loads(captured.out)
 
 

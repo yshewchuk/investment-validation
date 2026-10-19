@@ -30,6 +30,12 @@ are ambiguous rather than released into selection.
 Classification retains both labels for overlap and labels invalid identity/date
 inputs `ambiguous`; no holdout read or authorization API is supplied.
 Invalid as-of month raises `ValueError`; research converts it to its typed refusal.
+`experiment_holdouts.calendar_date` performs no normalization or I/O.
+
+| Calendar-day input | Outcome |
+|---|---|
+| Canonical ISO date, date object or naive midnight datetime | Same calendar date |
+| Noncanonical/invalid date, wrong type, aware or non-midnight datetime | `ValueError` |
 
 `final_holdout` strictly decodes immutable declaration/request contracts and projects verified registration metadata into a request, without I/O or authority. It validates exact schema, content-addressed references, hashes, identities and shared month/membership versions; invalid metadata raises `ValueError`/`DocumentError` for caller translation.
 `experiments.native_registration` uses these pure helpers; catalog registration verification stays with its existing owner. Request identity is the existing experiment ID; recipe/model/completeness references come from the sealed registration, not preparation-time overrides.

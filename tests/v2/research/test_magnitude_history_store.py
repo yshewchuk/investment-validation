@@ -752,7 +752,7 @@ def test_cli_build_read_and_typed_refusal(source, capsys):
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"refused": "IDENTITY_CONFLICT",
         "message": "IDENTITY_CONFLICT: feature snapshot is not the committed context output"}
-    assert captured.err == ""
+    assert all(line.startswith("  [") for line in captured.err.splitlines())  # progress only
     with pytest.raises(SystemExit) as error:
         entry.main(["read", *args])
     assert error.value.code == 2
@@ -922,7 +922,7 @@ def test_cli_existing_empty_store_reaches_native_object_admission(source, capsys
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"refused": "OBJECT_CORRUPT",
         "message": "OBJECT_CORRUPT: published object bytes do not match its recorded hash"}
-    assert captured.err == ""
+    assert all(line.startswith("  [") for line in captured.err.splitlines())  # progress only
     assert list(root.iterdir()) == []
     assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
 

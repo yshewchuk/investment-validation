@@ -26,14 +26,14 @@ EXPECTED_FIELDS = (
 def test_contract_roundtrip_hash_and_identity():
     contract = IV_CRUSH_CONTRACT
     assert contract.table_name == IV_CRUSH_TABLE_NAME == "iv_crush_targets"
-    assert contract.contract_id == "iv_crush_targets.v1"
+    assert contract.contract_id == "iv_crush_targets.v2"
     assert decode_document(TableContract, to_document(contract)) == contract
     assert table_contract_hash(contract) == contract.definition_hash
     assert table_contract_hash(replace(contract, maximum_batch_rows=1)) != contract.definition_hash
     names = {c.name for c in contract.columns}
     assert set((*contract.primary_key, *contract.partition_columns, *contract.orderable_columns)) <= names
     assert tuple((c.name, c.physical_type, c.nullable) for c in contract.columns) == EXPECTED_FIELDS
-    assert contract.semantic_version == "1.0.0"
+    assert contract.semantic_version == "2.0.0"
     assert contract.primary_key == contract.orderable_columns == ("ticker", "event_date")
     assert contract.partition_columns == contract.filterable_columns == ("ticker",)
     assert contract.observation_time_column == "event_date"

@@ -69,9 +69,8 @@ Judgement calls (task brief decision 1, P2-4):
   duplicate ``event_id`` therefore already surfaces as ``MANIFEST_CORRUPT``
   by the time ``events.get_event`` sees its rows, through this path rather
   than a second check of its own.
-* the stat-tuple verification cache §8.2 step 6 describes is DEFERRED
-  (tech debt TD-1, task brief): every object open re-hashes via
-  ``objects.verify_object_path``, unconditionally.
+* default scans use ``objects.verify_object_path``'s stat-tuple cache;
+  byte-bounded scans always re-hash the exact returned immutable bytes.
 * "deadline exceeded" is its own registered code, ``DEADLINE_EXCEEDED``
   (task 2 review fix) — resource category, retryable (a caller may simply
   retry with a later deadline).
@@ -290,10 +289,12 @@ class Repository:
     # P2-4: scan — §8.2
     # ----------------------------------------------------------------------
 
-    def scan(self, query: DataQuery, *, table_name: str):
+    def scan(self, query: DataQuery, *, table_name: str, max_object_bytes: int | None = None):
         """A bounded Arrow scan over one table's pinned fragments, per §8.2's
         nine ordered steps. Never a convenience ``read_table()``: this always
         yields batches, never a combined frame."""
+        if max_object_bytes is not None and (type(max_object_bytes) is not int or max_object_bytes <= 0):
+            raise errors.fail("QUERY_NOT_BOUNDED", "max_object_bytes must be a positive integer")
         if self._store is None:
             raise RuntimeError("Repository.scan requires an ArtifactStore for object reads")
         validated = self._validated_query(query)
@@ -301,7 +302,7 @@ class Repository:
         contract, records = self._table_records(snap, table_name, validated.table_contract_ref)
         query_mod.validate_query(contract, validated)
         self.read_counters.add(contract.table_name, scans=1)
-        yield from self._execute_scan(contract, records, validated)
+        yield from self._execute_scan(contract, records, validated, max_object_bytes)
 
     def _validated_query(self, query: DataQuery) -> DataQuery:
         """§8.2 step 1: strict structural decode (limits, deadline, bounded-
@@ -379,16 +380,19 @@ class Repository:
             max_batch_rows=batch, max_result_rows=result)
 
     def _execute_scan(self, contract: TableContract, records: list[FragmentRecord],
-                      query: DataQuery):
+                      query: DataQuery, max_object_bytes=None):
         population = query_mod.plan_scan_population(
             contract, records, key_filter=query.key_filter, time_interval=query.time_interval)
         self._check_population_bound(query, population)
+        if max_object_bytes is not None and any(r.object_ref.byte_size > max_object_bytes
+                                               for r in population.records):
+            raise errors.fail("RESULT_LIMIT_EXCEEDED", "object exceeds max_object_bytes")
         bounds = {r.fragment_id: query_mod.fragment_key_bounds(r, contract)
                   for r in population.records}
         needed = tuple(dict.fromkeys((*query.columns, *contract.primary_key, *self._hidden_columns(query))))
         batch_cap = min(query.max_batch_rows, contract.maximum_batch_rows)
         merged = self._grouped_fragment_rows(
-            population.records, bounds, contract, needed, query, batch_cap)
+            population.records, bounds, contract, needed, query, batch_cap, max_object_bytes)
         try:
             yield from self._yield_batches(merged, contract, query, batch_cap)
         finally:
@@ -413,10 +417,10 @@ class Repository:
         if group:
             yield group
 
-    def _grouped_fragment_rows(self, records, bounds, contract, needed, query, batch_cap):
+    def _grouped_fragment_rows(self, records, bounds, contract, needed, query, batch_cap, max_object_bytes=None):
         for group in self._fragment_groups(records, bounds):
             streams = [self._range_checked_rows(
-                record, bounds[record.fragment_id], contract, needed, query, batch_cap)
+                record, bounds[record.fragment_id], contract, needed, query, batch_cap, max_object_bytes)
                 for record in group]
             try:
                 yield from heapq.merge(*streams, key=lambda item: item[0])
@@ -424,8 +428,10 @@ class Repository:
                 for stream in streams:
                     stream.close()
 
-    def _range_checked_rows(self, record, bounds, contract, needed, query, batch_cap):
-        stream = self._fragment_rows(record, contract, needed, query, batch_cap)
+    def _range_checked_rows(self, record, bounds, contract, needed, query, batch_cap, max_object_bytes=None):
+        stream = (self._fragment_rows(record, contract, needed, query, batch_cap)
+                  if max_object_bytes is None else self._bounded_fragment_rows(
+                      record, contract, needed, query, batch_cap, max_object_bytes))
         try:
             for key, row in stream:
                 if bounds is not None and not bounds[0] <= key <= bounds[1]:
@@ -473,6 +479,24 @@ class Repository:
             size = path.stat().st_size
         except Exception:
             size = 0
+        yield from self._decoded_fragment_rows(record, contract, needed, query, batch_cap,
+                                               parquet_file, size, opened_at)
+
+    def _bounded_fragment_rows(self, record, contract, needed, query, batch_cap, max_object_bytes):
+        """Hash bounded immutable bytes and bound all row groups before any decode."""
+        opened_at = read_counters.clock()
+        payload = objects.read_verified_bytes(self._store, record.object_ref, max_bytes=max_object_bytes)
+        with pa.BufferReader(payload) as source:
+            with self._open_parquet(source, thrift_string_size_limit=min(max_object_bytes, 2**31 - 1),
+                                    thrift_container_size_limit=min(max_object_bytes, 2**31 - 1)) as parquet_file:
+                expanded = sum(parquet_file.metadata.row_group(i).total_byte_size
+                               for i in range(parquet_file.metadata.num_row_groups))
+                if expanded > max_object_bytes:
+                    raise errors.fail("RESULT_LIMIT_EXCEEDED", "parquet exceeds max_object_bytes when uncompressed")
+                yield from self._decoded_fragment_rows(record, contract, needed, query, batch_cap,
+                                                       parquet_file, len(payload), opened_at)
+
+    def _decoded_fragment_rows(self, record, contract, needed, query, batch_cap, parquet_file, size, opened_at):
         self.read_counters.add(contract.table_name, fragments_opened=1, bytes_read=size,
                                seconds=read_counters.clock() - opened_at)
         # Slice A (PR 360): footer-vs-manifest row-count integrity, decided
@@ -527,9 +551,9 @@ class Repository:
                 columns[name] = query_mod.null_array_for(physical, batch.num_rows)
         return batch.filter(batch_matcher(columns, batch.num_rows))
 
-    def _open_parquet(self, path) -> pq.ParquetFile:
+    def _open_parquet(self, path, **limits) -> pq.ParquetFile:
         try:
-            return pq.ParquetFile(path)
+            return pq.ParquetFile(path, **limits)
         except (OSError, pa.ArrowException) as exc:
             raise errors.fail("OBJECT_CORRUPT", "parquet footer could not be read") from exc
 

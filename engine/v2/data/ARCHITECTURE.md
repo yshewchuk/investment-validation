@@ -42,11 +42,25 @@ dependency and pure query planning. Null-bearing keys prove no range: they
 retain the full merge fallback and downstream row validation. Object verification,
 footer counts, strict global order and result limits remain mandatory; batches are provisional until exhaustion.
 
+`Repository.scan(..., max_object_bytes=None)` preserves path-based reads by default.
+With a cap, `objects.read_verified_bytes` hashes bounded immutable bytes without cache
+reuse; PyArrow checks all row-group uncompressed sizes before decoding. Thrift limits
+are capped at INT32_MAX even for larger Python integers. Buffers close on completion,
+errors or generator closure; existing row/integrity checks remain.
+
+| Byte-read condition | Outcome |
+|---|---|
+| Positive integer cap (not bool); all declared sizes and total uncompressed bytes fit | Verified bounded scan; exact byte/expansion equality is admitted |
+| None passed to scan / to read_verified_bytes | Default path scan / `QUERY_NOT_BOUNDED` |
+| Other invalid cap (zero, negative, bool, non-integer) | `QUERY_NOT_BOUNDED` before object access |
+| Any surviving declared object / total uncompressed row groups exceed cap | `RESULT_LIMIT_EXCEEDED` before any object read / before batch decode |
+| Missing, unsafe, mutated or grown backing object | `OBJECT_CORRUPT`; no path/cache fallback |
+
 ## Primary contracts and public interfaces
 
 **IV-crush target construction.** `iv_crush.build_rows` is a pure, bounded,
 single-ticker builder for `iv_crush_table.IV_CRUSH_CONTRACT`
-(`iv_crush_targets.v1`). It consumes caller-supplied event date/session and
+(`iv_crush_targets.v2`). It consumes caller-supplied event date/session and
 daily date/IV30 projections, never a panel forecast or a store. Callers must
 supply IV30 in vol points expressed as percent (50 for 50% IV); the builder
 does not normalize or validate scale. Canonical and unique event/daily dates

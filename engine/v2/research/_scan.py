@@ -18,6 +18,7 @@ import pandas as pd
 
 from engine.v2.contracts.data import DataQuery, KeyPredicate, SnapshotRef, TimeInterval
 from engine.v2.data import errors, time_formats
+from engine.v2.research.progress import Progress
 
 __all__ = ["DEFAULT_SCOPE", "next_representable", "read_table", "resolve_snapshot"]
 
@@ -68,11 +69,14 @@ def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
         wanted = {str(key) for key in partition_keys}
         records = [record for record in records if record.partition_key in wanted]
     frames: list[pd.DataFrame] = []
-    for partition in dict.fromkeys(record.partition_key for record in records):
+    partitions = list(dict.fromkeys(record.partition_key for record in records))
+    progress = Progress(f"read {table_name} partitions", len(partitions))
+    for partition in partitions:
         group = [record for record in records if record.partition_key == partition]
         frames.extend(_scan_partition(repository, snapshot_ref, table_name, contract, columns,
                                       group, key_filter=tuple(key_filter),
                                       batch_filter=batch_filter))
+        progress.tick()
     frames = [frame for frame in frames if not frame.empty]
     if not frames:
         return pd.DataFrame(columns=list(columns))
