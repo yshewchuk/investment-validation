@@ -1044,7 +1044,7 @@ It does not import its layer-7.0 peers `engine.v2.serving`/
 Worker snapshots cover the entrypoint and both adapters; native registration binds the fixed runner's source closure. Legacy reads go through the
 one declared adapter module, `engine/v2/ops/legacy_adapter.py` (its `configured_root` exposes `engine.paths.ROOT` to both Massive submitters)
 (`checks/legacy_adapters.json`); its own further legacy `engine.*` imports
-are the adapter's job and are not layer-checked v2 dependencies. `finality.py` never imports the adapter: it takes legacy reads and monkeypatch-seam lookups as explicit `FinalityReads` callbacks the adapter supplies, and `legacy_adapter.session_finality`/`resolve_final_session`/`covered_tickers` bind them.
+are the adapter's job and are not layer-checked v2 dependencies. `finality.py` never imports the adapter: it takes legacy reads and monkeypatch-seam lookups as explicit `FinalityReads` callbacks the adapter supplies, and `legacy_adapter.session_finality`/`resolve_final_session`/`covered_tickers` bind them. `resolve_final_session` starts a non-trading request at the prior trading session (`calendar.shift(stamp, 0)`), checks it before stepping back, and returns the first final session within `max_sessions`, else raises `RuntimeError`.
 
 `native_board_universe.py` deliberately never imports `engine.score`, `engine.structures`, `engine.replay`,
 or `engine.fills` — the first two each pull in `engine.replay`/`engine.fills` (the legacy chain index and
