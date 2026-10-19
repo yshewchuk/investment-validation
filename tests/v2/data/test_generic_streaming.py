@@ -11,7 +11,7 @@ memory.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pyarrow.parquet as pq
 import pytest
@@ -339,6 +339,19 @@ def test_temporal_value_mismatch_refused(tmp_path):
     assert _staging_entries(store, "attempt-ts") == []
     assert _head_snapshot(conn) == parent.snapshot.snapshot_id
 
+    writer = generic_streaming.StreamingTableWriter(
+        store, parent, TABLE, "attempt-ts-aware", _coverage(contract))
+    with pytest.raises(
+            DataError,
+            match=r"^CONTRACT_MISMATCH: a streamed row has a value incompatible with its column type"
+    ) as exc:
+        writer.append_rows(
+            [{"ticker": "AAA", "date": "2025-01-02",
+              "ts": datetime(2025, 1, 1, tzinfo=timezone.utc)}])
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert _staging_entries(store, "attempt-ts-aware") == []
+    assert _head_snapshot(conn) == parent.snapshot.snapshot_id
+
 
 def test_zero_rows_refused(tmp_path):
     conn, clock, store = _setup(tmp_path)
@@ -597,6 +610,9 @@ def test_explicit_provenance_applied(tmp_path):
         ("bad_knowledge_mode", {"knowledge_mode": "bogus"}, "unknown knowledge_mode"),
         ("bad_evidence_refs", {"availability_evidence_refs": "abc"},
          "availability_evidence_refs must be a sequence of strings"),
+        ("attested_without_evidence",
+         {"knowledge_mode": "attested_stable", "availability_evidence_refs": ()},
+         "this knowledge_mode requires availability_evidence_refs"),
     ),
 )
 def test_invalid_provenance_refused(tmp_path, label, kwargs, message):

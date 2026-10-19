@@ -55,7 +55,7 @@ def _value_matches(physical_type: str, value: Any) -> bool:
     if physical_type == "bool":
         return isinstance(value, bool)
     if physical_type in ("timestamp[ns]", "timestamp[us]"):
-        return isinstance(value, datetime)
+        return isinstance(value, datetime) and value.tzinfo is None
     if physical_type == "date32":
         return isinstance(value, date) and not isinstance(value, datetime)
     return True
@@ -74,6 +74,11 @@ class StreamingTableWriter:
                 isinstance(item, str) for item in availability_evidence_refs):
             raise errors.fail("CONTRACT_MISMATCH",
                               "availability_evidence_refs must be a sequence of strings")
+        if (knowledge_mode in ("observed", "attested_stable")
+                and len(availability_evidence_refs) == 0):
+            raise errors.fail(
+                "CONTRACT_MISMATCH",
+                "this knowledge_mode requires availability_evidence_refs")
         if coverage.state != "complete":
             raise errors.fail("INPUT_CHANGED", "incomplete coverage cannot build a candidate")
         contract = incremental.table_contract(parent, table_name)

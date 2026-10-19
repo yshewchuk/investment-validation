@@ -15,8 +15,8 @@ identity chain (`objects.py`, `manifests.py`); atomic snapshot commit with
 idempotent inserts and a compare-and-swap head (`catalog.py`); the
 incremental-refresh merge policy shared by every EOD table family
 (`incremental_tables.py`, `incremental.py` for `daily_market`,
-`generic_incremental.py` for any registered `TableContract`,
-`generic_streaming.py` for a whole-table result too large to hold); bounded,
+`generic_incremental.py` for any registered `TableContract`;
+`generic_streaming.py` is the separate whole-table replacement route); bounded,
 exact reads over a committed snapshot (`repository.py`, `query.py`,
 `events.py`, `chains.py`, `price_history_query.py`); the one legacy-touching
 seam (`legacy_adapter.py`) and what is built on it read-only (table
@@ -328,17 +328,17 @@ commits.
   `conservative_full` (no row-level changes recorded).
 - *Provenance and coverage:* the new version carries the caller's `knowledge_mode`
   (default `reconstructed`) and `availability_evidence_refs` (default none), only
-  the current coverage receipt and the parent version id as lineage; nothing is
-  inherited from the parent manifest. A coverage for another table refuses
-  `CONTRACT_MISMATCH`.
+  the current coverage receipt and the parent version id as lineage, nothing
+  inherited from the parent. Another table's coverage refuses `CONTRACT_MISMATCH`.
 - *Order and validity:* each accepted row is copied (later caller mutation cannot
   change it) and must satisfy the contract: known columns only, every column present
   unless nullable, no null in a non-nullable column, and a value of the column's
-  physical type (a float64 value must be finite; a missing nullable value is `None`);
-  primary-key values must be present. Rows arrive in strictly increasing primary-key
-  order across and within batches (the caller orders batches). Shape, nulls, types
-  and key order are checked at `append_rows`, Arrow conversion at the row-group
-  write, `knowledge_mode` and evidence refs at construction. Any violation or
+  physical type (float64 finite, timestamps timezone-naive, a missing nullable value
+  `None`); primary-key values must be present. Rows arrive in strictly increasing
+  primary-key order across and within batches (the caller orders batches). Shape,
+  nulls, types and key order are checked at `append_rows`, Arrow conversion at the
+  row-group write, `knowledge_mode` and evidence refs (observed and attested modes
+  need evidence) at construction. Any violation or
   unconvertible value refuses `CONTRACT_MISMATCH`, never repaired. A staging-file
   I/O failure propagates as an `OSError` after cleanup. `append_rows` after
   `finish`/`abort`/failure refuses `INPUT_CHANGED`.
