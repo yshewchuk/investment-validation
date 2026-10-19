@@ -169,6 +169,36 @@ def test_unknown_session_is_not_silently_bmo(session, reason):
     assert_skip(row, reason, session=None)
 
 
+@pytest.mark.parametrize("session,quotes,reason,anchors", [
+    (None, [], "missing_session", (None, None, None, None)),
+    ("UNK", [], "unknown_session", (None, None, None, None)),
+    (None, [("2024-01-05", 0), ("2024-01-11", None)],
+     "missing_session", (None, None, None, None)),
+    ("UNK", [("2024-01-05", 0), ("2024-01-11", None)],
+     "unknown_session", (None, None, None, None)),
+    ("AMC", [("2024-01-08", None)], "missing_pre", (None, "2024-01-08", None, None)),
+    ("AMC", [("2024-01-05", 0)], "missing_post", ("2024-01-05", None, 0, None)),
+    ("AMC", [("2024-01-05", 0), ("2024-01-11", 30)],
+     "gap_exceeds_limit", ("2024-01-05", "2024-01-11", 0, 30)),
+    ("AMC", [("2024-01-05", 50), ("2024-01-11", None)],
+     "gap_exceeds_limit", ("2024-01-05", "2024-01-11", 50, None)),
+    ("AMC", [("2024-01-05", 0), ("2024-01-11", None)],
+     "gap_exceeds_limit", ("2024-01-05", "2024-01-11", 0, None)),
+    ("AMC", [("2024-01-05", 0), ("2024-01-08", None)],
+     "invalid_pre_iv30", ("2024-01-05", "2024-01-08", 0, None)),
+])
+def test_overlapping_skip_conditions_preserve_documented_precedence(session, quotes, reason, anchors):
+    events = [{"event_date": "2024-01-05", "session": session}]
+    daily = [{"date": day, "iv30": value} for day, value in quotes]
+    row = one_row(build(events, daily))
+    assert_skip(row, reason, session="AMC" if session == "AMC" else None,
+                pre=anchors[0], post=anchors[1], pre_iv=anchors[2], post_iv=anchors[3])
+    projection = {"schema_version": "iv_crush_inputs.v1", "ticker": "TEST",
+                  "events": events, "daily": daily}
+    assert row["input_hash"] == "sha256:" + hashlib.sha256(json.dumps(
+        projection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 @pytest.mark.parametrize("kwargs", [
     {"events": [{"event_date": "20240105", "session": "AMC"}]},
     {"events": [{"event_date": "2024-01-05T00:00:00", "session": "AMC"}]},
@@ -307,10 +337,14 @@ def test_deterministic_projection_identity_and_no_mutation():
 
 
 def test_same_relative_target_for_different_iv_scale():
-    for scale in (0.01, 1, 100):
-        row = one_row(build(daily=[{"date": "2024-01-05", "iv30": scale * 50},
-                                   {"date": "2024-01-08", "iv30": scale * 30}]))
+    for before, after in ((0.5, 0.3), (50, 30), (5000, 3000)):
+        row = one_row(build(daily=[{"date": "2024-01-05", "iv30": before},
+                                   {"date": "2024-01-08", "iv30": after}]))
+        assert (row["pre_iv30"], row["post_iv30"]) == (before, after)
+        assert (row["pre_date"], row["post_date"]) == ("2024-01-05", "2024-01-08")
         assert row["crush_pct_iv30"] == pytest.approx(-40)
+        assert row["available_as_of_date"] == "2024-01-09"
+        assert row["skipped"] is False and row["skip_reason"] is None
 
 
 def test_legacy_arithmetic_parity_from_synthetic_rows_only():
