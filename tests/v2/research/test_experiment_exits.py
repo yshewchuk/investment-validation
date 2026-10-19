@@ -616,3 +616,25 @@ def test_fraction_basis_uses_declared_entry_fill(source, alpha, cost, day, pnl):
     assert result.reason == "target"
     assert result.pnl == pytest.approx(pnl)
     assert result.fill_alpha == result.exit_fill_alpha == alpha
+
+
+@pytest.mark.parametrize("basis,cost,pnl,reason", [("credit", -4.2, -2.4, "stop"),
+                                                  ("zero", 0.0, 0.0, "fixed_day")])
+def test_absolute_units_still_accept_credit_and_zero_debit(source, basis, cost, pnl, reason):
+    position = replace(_position(), legs=(replace(_position().legs[0], side="sell"),))
+    rows = _rows()
+    if basis == "zero":
+        position = replace(_position(), legs=(replace(_position().legs[0], qty=1), _position().legs[1]))
+        for row in rows:
+            row.update(bid=2.0, ask=2.0)
+    conn, clock, store = source
+    snapshot = _snapshot(conn, clock, store, rows)
+    recipe = {"kind": "target_stop", "trading_days": 3, "target_pnl": 2, "stop_pnl": -1}
+    results = [walk_exit(Repository(conn, store), snapshot, (position,),
+                         economic_params=resolve_experiment_plan(_exit_spec(value)).economic_params)
+               for value in (recipe, {**recipe, "threshold_units": "quote_price_times_quantity"})]
+    assert results[0] == results[1]
+    result, = results[0]
+    assert result.entry_cost == pytest.approx(cost)
+    assert result.pnl == pytest.approx(pnl)
+    assert result.reason == reason
