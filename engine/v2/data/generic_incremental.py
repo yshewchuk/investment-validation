@@ -41,6 +41,11 @@ __all__ = [
     "commit_generic_table_candidate",
     "decode_row",
     "load_generic_revisions",
+    "table_contract",
+    "table_records",
+    "replace_manifest",
+    "replace_records",
+    "sort_value",
 ]
 
 
@@ -546,3 +551,10 @@ def _parquet_bytes(contract, rows):
     sink = pa.BufferOutputStream()
     pq.write_table(pa.table(arrays), sink)
     return sink.getvalue().to_pybytes()
+
+
+table_contract = _contract
+table_records = _table_records
+replace_manifest = _replace_manifest
+replace_records = _replace_records
+sort_value = _sort_value

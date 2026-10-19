@@ -54,6 +54,18 @@ def _arrow_schema(contract: TableContract) -> pa.Schema:
     return pa.schema(fields)
 
 
+def _value_matches(physical_type: str, value: Any) -> bool:
+    if physical_type == "string":
+        return isinstance(value, str)
+    if physical_type == "float64":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if physical_type == "int64":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if physical_type == "bool":
+        return isinstance(value, bool)
+    return True
+
+
 class StreamingTableWriter:
     """Stage one whole-table parquet fragment from a sequence of row batches."""
 
@@ -61,7 +73,7 @@ class StreamingTableWriter:
                  table_name: str, attempt_id: str, coverage: CompletedCoverage) -> None:
         if coverage.state != "complete":
             raise errors.fail("INPUT_CHANGED", "incomplete coverage cannot build a candidate")
-        contract = incremental._contract(parent, table_name)
+        contract = incremental.table_contract(parent, table_name)
         prior_manifest = parent.table_manifests.get(table_name)
         if prior_manifest is None:
             raise errors.fail("CONTRACT_MISMATCH", "parent snapshot has no requested table")
@@ -83,7 +95,16 @@ class StreamingTableWriter:
         staging = store.staging_dir(attempt_id)
         self._rel = "generic_stream_" + uuid.uuid4().hex + ".parquet"
         self._path = staging / self._rel
-        self._writer = pq.ParquetWriter(str(self._path), self._schema)
+        self._writer = None
+        try:
+            self._writer = pq.ParquetWriter(str(self._path), self._schema)
+        except errors.DataError:
+            self._remove_staging()
+            raise
+        except Exception:
+            self._remove_staging()
+            raise errors.fail("CONTRACT_MISMATCH",
+                              "the staging parquet writer could not be opened") from None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -123,7 +144,7 @@ class StreamingTableWriter:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        if exc_type is not None:
+        if self._state == "open":
             self.abort()
         return False
 
@@ -134,25 +155,49 @@ class StreamingTableWriter:
             raise errors.fail("INPUT_CHANGED", "the streaming writer is no longer open")
 
     def _accept(self, row: Mapping) -> None:
-        tables._validate_columns(self._contract, row)
-        key = tuple(incremental._sort_value(row[name])
+        tables.validate_columns(self._contract, row)
+        for column in self._contract.columns:
+            value = row.get(column.name)
+            if value is None:
+                if not column.nullable:
+                    raise errors.fail("CONTRACT_MISMATCH",
+                                      "a streamed row omits a required column value")
+                continue
+            if not _value_matches(column.physical_type, value):
+                raise errors.fail("CONTRACT_MISMATCH",
+                                  "a streamed row has a value incompatible with its column type")
+        key = tuple(incremental.sort_value(row[name])
                     for name in self._contract.primary_key)
-        if self._previous_key is not None and key <= self._previous_key:
-            raise errors.fail("CONTRACT_MISMATCH",
-                              "streamed rows are not in strictly increasing primary-key order")
+        if self._previous_key is not None:
+            try:
+                out_of_order = key <= self._previous_key
+            except TypeError:
+                raise errors.fail(
+                    "CONTRACT_MISMATCH",
+                    "streamed rows have incomparable primary-key values") from None
+            if out_of_order:
+                raise errors.fail(
+                    "CONTRACT_MISMATCH",
+                    "streamed rows are not in strictly increasing primary-key order")
         self._previous_key = key
-        self._buffer.append(row)
+        self._buffer.append({column.name: row.get(column.name)
+                             for column in self._contract.columns})
         self._row_count += 1
         if len(self._buffer) == ROW_GROUP_ROWS:
             self._write_row_group()
 
     def _write_row_group(self) -> None:
-        table = pa.Table.from_arrays(
-            [pa.array([row.get(column.name) for row in self._buffer],
-                      type=_ARROW_TYPES[column.physical_type])
-             for column in self._contract.columns],
-            schema=self._schema)
-        self._writer.write_table(table, row_group_size=len(self._buffer))
+        try:
+            table = pa.Table.from_arrays(
+                [pa.array([row.get(column.name) for row in self._buffer],
+                          type=_ARROW_TYPES[column.physical_type])
+                 for column in self._contract.columns],
+                schema=self._schema)
+            self._writer.write_table(table, row_group_size=len(self._buffer))
+        except (pa.ArrowInvalid, pa.ArrowTypeError, TypeError, ValueError, OverflowError):
+            raise errors.fail(
+                "CONTRACT_MISMATCH",
+                "a staged row group does not satisfy the table contract") from None
         self._buffer.clear()
 
     def _build_candidate(self) -> incremental.GenericTableCandidate:
@@ -160,10 +205,11 @@ class StreamingTableWriter:
         contract = self._contract
         coverage = self._coverage
         prior_manifest = self._prior_manifest
-        prior_records = incremental._table_records(parent, prior_manifest)
+        prior_records = incremental.table_records(parent, prior_manifest)
         ref = prior_manifest.dataset_version_ref.table_contract_ref
         published = self._store.publish_candidate(
-            self._attempt_id, self._rel, schema_ref="parquet_fragment.v1.0")
+            self._attempt_id, self._rel, schema_ref="parquet_fragment.v1.0",
+            max_bytes=self._path.stat().st_size)
         obj = ObjectRef(kind="parquet_fragment", object_id=published.artifact_id,
                         content_hash=published.content_hash, byte_size=published.byte_size)
         inspection = objects.inspect_fragment(self._store, obj, contract, ref, "__whole__")
@@ -178,7 +224,7 @@ class StreamingTableWriter:
         merge = tables.GenericMerge(
             rows=(), retained_revisions=(), incoming_revisions=(), winners=(),
             changes=(), changed_partitions=("__whole__",))
-        manifest = incremental._replace_manifest(
+        manifest = incremental.replace_manifest(
             prior_manifest, ref, prior_records, new_records, merge, coverage)
         table_manifests = dict(parent.table_manifests)
         table_manifests[self._table_name] = manifest
@@ -187,7 +233,7 @@ class StreamingTableWriter:
             source_priority_version=parent.snapshot.source_priority_version,
             finality_receipt_refs=parent.snapshot.finality_receipt_refs,
             parent_snapshot_id=parent.snapshot.snapshot_id)
-        records = incremental._replace_records(
+        records = incremental.replace_records(
             parent, prior_records, new_records, merge.changed_partitions)
         objects_by_id = {item.object_id: item for item in parent.objects}
         objects_by_id[obj.object_id] = obj

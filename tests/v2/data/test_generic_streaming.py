@@ -149,6 +149,12 @@ def _fragment_hash(candidate):
     return record.object_ref.content_hash
 
 
+def _published_object(candidate):
+    fragment_id = candidate.table_manifest.fragment_refs[0].fragment_id
+    record = next(item for item in candidate.records if item.fragment_id == fragment_id)
+    return record.object_ref
+
+
 def _dataset_version(candidate):
     return candidate.table_manifest.dataset_version_ref.dataset_version_id
 
@@ -226,6 +232,9 @@ def test_batch_size_does_not_change_identity(tmp_path):
         ("out_of_order", [_row(2), _row(1)]),
         ("duplicate_key", [_row(3), _row(3)]),
         ("unknown_column", [dict(_row(0), bogus=1)]),
+        ("null_non_nullable", [dict(_row(0), date=None)]),
+        ("wrong_type_float", [dict(_row(0), value="not-a-float")]),
+        ("mixed_key_type", [_row(0), dict(_row(1), ticker=123)]),
     ),
 )
 def test_bad_rows_refused_leave_nothing(tmp_path, label, bad_rows):
@@ -303,6 +312,9 @@ def test_append_after_finish_refused(tmp_path):
             action()
         assert exc.value.code == "INPUT_CHANGED"
 
+    assert _staging_entries(store, "attempt-finished") == []
+    assert _head_snapshot(conn) == parent.snapshot.snapshot_id
+
 
 def test_abort_removes_staging_and_refuses_append(tmp_path):
     conn, clock, store = _setup(tmp_path)
@@ -318,6 +330,8 @@ def test_abort_removes_staging_and_refuses_append(tmp_path):
         with pytest.raises(DataError) as exc:
             action()
         assert exc.value.code == "INPUT_CHANGED"
+
+    assert _head_snapshot(conn) == parent.snapshot.snapshot_id
 
 
 def test_bounded_memory_writes_row_groups(tmp_path, monkeypatch):
@@ -345,3 +359,107 @@ def test_bounded_memory_writes_row_groups(tmp_path, monkeypatch):
 
     assert calls == [100, 100, 50]
     assert max(calls) <= 100
+
+
+def test_cross_batch_order_refused(tmp_path):
+    conn, clock, store = _setup(tmp_path)
+    contract = _whole_contract()
+    parent = _parent(conn, store, clock, contract, _row(-1))
+
+    writer = generic_streaming.StreamingTableWriter(
+        store, parent, TABLE, "attempt-cross-batch", _coverage(contract))
+    writer.append_rows(_rows(3))
+    with pytest.raises(DataError) as exc:
+        writer.append_rows([_row(2)])
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert _staging_entries(store, "attempt-cross-batch") == []
+    assert _head_snapshot(conn) == parent.snapshot.snapshot_id
+
+
+def test_caller_mutation_does_not_change_published_rows(tmp_path):
+    conn, clock, store = _setup(tmp_path)
+    contract = _whole_contract()
+    parent = _parent(conn, store, clock, contract, _row(-1))
+    rows = _rows(5)
+    originals = [dict(row) for row in rows]
+
+    writer = generic_streaming.StreamingTableWriter(
+        store, parent, TABLE, "attempt-mutation", _coverage(contract))
+    writer.append_rows(rows)
+    for row in rows:
+        row["value"] = -1.0
+        row["ticker"] = "ZZZ"
+    candidate = writer.finish()
+
+    committed = generic_incremental.commit_generic_table_candidate(
+        conn, store, candidate, scope="streaming",
+        expected_head_snapshot_id=parent.snapshot.snapshot_id, expected_head_generation=1,
+        clock=clock)
+    resolved = Repository(conn).resolve_full(committed.resulting_head_snapshot_id)
+    assert _table_rows(resolved, store, contract) == tuple(originals)
+
+
+def test_row_groups_fixed_size_and_batch_independent(tmp_path, monkeypatch):
+    conn, clock, store = _setup(tmp_path)
+    contract = _whole_contract()
+    parent = _parent(conn, store, clock, contract, _row(-1))
+    group_rows = 100
+    monkeypatch.setattr(generic_streaming, "ROW_GROUP_ROWS", group_rows)
+
+    row_sets = {
+        "below": _rows(group_rows - 1),
+        "equal": _rows(group_rows),
+        "above": _rows(group_rows + 1),
+    }
+    identities = {}
+    for label, rows in row_sets.items():
+        identities[label] = set()
+        for batch_size in (1, 7, len(rows)):
+            writer = generic_streaming.StreamingTableWriter(
+                store, parent, TABLE, "attempt-rg-%s-%d" % (label, batch_size),
+                _coverage(contract))
+            for start in range(0, len(rows), batch_size):
+                writer.append_rows(rows[start:start + batch_size])
+            candidate = writer.finish()
+            identities[label].add(
+                (_fragment_hash(candidate), _dataset_version(candidate)))
+            metadata = pq.ParquetFile(
+                objects.verify_object_path(store, _published_object(candidate))).metadata
+            sizes = [metadata.row_group(i).num_rows
+                     for i in range(metadata.num_row_groups)]
+            expected = [group_rows] * (len(rows) // group_rows)
+            if len(rows) % group_rows:
+                expected.append(len(rows) % group_rows)
+            assert sizes == expected
+        assert len(identities[label]) == 1
+
+
+def test_changeset_identity(tmp_path):
+    conn, clock, store = _setup(tmp_path)
+    contract = _whole_contract()
+    parent = _parent(conn, store, clock, contract, _row(-1))
+    coverage = _coverage(contract)
+    rows = _rows(5)
+
+    writer = generic_streaming.StreamingTableWriter(
+        store, parent, TABLE, "attempt-changeset", coverage)
+    writer.append_rows(rows)
+    candidate = writer.finish()
+    changeset = candidate.changeset
+
+    assert changeset.outcome == "changed"
+    assert changeset.changed_partitions == ("__whole__",)
+    assert changeset.normalized_payloads == len(rows)
+    assert candidate.rewritten_partitions == 1
+    assert changeset.changes == ()
+    assert changeset.coverage_receipt_refs == (coverage.coverage_id,)
+    assert (changeset.base_dataset_version_ref.dataset_version_id
+            != changeset.result_dataset_version_ref.dataset_version_id)
+
+    committed = generic_incremental.commit_generic_table_candidate(
+        conn, store, candidate, scope="streaming",
+        expected_head_snapshot_id=parent.snapshot.snapshot_id, expected_head_generation=1,
+        clock=clock)
+    resolved = Repository(conn).resolve_full(committed.resulting_head_snapshot_id)
+    assert (resolved.table_manifests[TABLE].dataset_version_ref
+            == changeset.result_dataset_version_ref)
