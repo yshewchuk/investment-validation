@@ -19,6 +19,8 @@ _SHA256_RE = r"[0-9a-f]{64}"
 STAMP_MAX_ROWS = 5_000_000
 # Decoded-size cap per stamp column (footer-reported uncompressed bytes): 64 chars plus overhead per row.
 STAMP_MAX_BYTES = STAMP_MAX_ROWS * 96
+# Parquet footer (metadata) cap, read from the 8-byte file tail before the footer is parsed.
+STAMP_MAX_FOOTER_BYTES = 64 * 1024 * 1024
 TABLE_KEYS = {"panel": ("ticker", "date"), "tier4": ("ticker", "event_date")}
 IDENTICAL = {"verdict": "match", "max_abs_diff": 0.0, "max_rel_diff": 0.0,
              "n_columns_differing": 0, "mismatches": []}
@@ -76,10 +78,23 @@ def _stamp_cap_refusal(parquet_file, columns):
     return None
 
 
+def _footer_length(path):
+    """The parquet footer length from the file's 8-byte tail, or None if it is not a parquet tail."""
+    with open(path, "rb") as handle:
+        handle.seek(-8, 2)
+        tail = handle.read(8)
+    return int.from_bytes(tail[:4], "little") if tail[4:] == b"PAR1" else None
+
+
 def _footer_refusal(name, path):
     """``(stamp_columns_present, cap_refusal_or_None)`` for one table file, from the parquet footer alone."""
     import pyarrow.parquet as pq
 
+    if not PROVENANCE_COLUMNS.get(name):
+        return [], None
+    footer = _footer_length(path)
+    if footer is not None and footer > STAMP_MAX_FOOTER_BYTES:
+        return [], {"reason": "stamp_footer_over_cap", "n_bytes": footer}
     meta = pq.ParquetFile(path)
     cols = [c for c in PROVENANCE_COLUMNS.get(name, ()) if c in set(meta.schema_arrow.names)]
     return cols, _stamp_cap_refusal(meta, cols)

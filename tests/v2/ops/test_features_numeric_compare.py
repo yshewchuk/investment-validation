@@ -542,3 +542,24 @@ def test_compare_tables_refuses_an_over_cap_stamp_column_on_either_side(tmp_path
     out = fc.compare_tables("tier4", tmp_path / "r.parquet", tmp_path / "p.parquet")
     assert out["verdict"] == "mismatch"
     assert out["mismatches"] == [{"reason": "stamp_rows_over_cap", "n_rows": 6, "side": side}]
+
+
+def test_footer_cap_boundary_refuses_before_parsing_the_footer(tmp_path, monkeypatch):
+    import pyarrow.parquet as pq
+    import engine.v2.ops.features_compare as fc
+
+    path = tmp_path / "t.parquet"
+    _write(path, _stamped([_H1] * 6))
+    footer = fc._footer_length(path)
+    assert footer > 0
+    monkeypatch.setattr(fc, "STAMP_MAX_FOOTER_BYTES", footer)
+    assert fc.compare_identical("tier4", path)["verdict"] == "match"      # exactly at the cap
+    monkeypatch.setattr(fc, "STAMP_MAX_FOOTER_BYTES", footer - 1)
+
+    def no_parse(*args, **kwargs):
+        raise AssertionError("footer must not be parsed")
+
+    monkeypatch.setattr(pq, "ParquetFile", no_parse)
+    out = fc.compare_identical("tier4", path)
+    assert out["mismatches"] == [{"reason": "stamp_footer_over_cap", "n_bytes": footer}]
+    assert fc.compare_identical("panel", path)["verdict"] == "match"      # no stamp columns: footer never read
