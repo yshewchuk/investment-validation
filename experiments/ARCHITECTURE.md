@@ -677,8 +677,7 @@ are not the old full-row hashes. Changed producer/recorder closures require fres
 runs fail closed, and no historical receipt or artifact is rewritten. The fit transport
 independently projects qualified training/evaluation rows and selected horizons/columns.
 Parent, child and journal retain their 16 MiB limits. Projection removes lineage
-amplification; sufficiently large numeric folds still refuse, so full-universe capacity
-requires a separately reviewed bounded artifact/batching protocol. No scale is inferred
+amplification; sufficiently large numeric folds still refuse. No scale is inferred
 from event counts; scientific selection and cutoff rules are unchanged.
 
 | Condition | Enforced outcome |

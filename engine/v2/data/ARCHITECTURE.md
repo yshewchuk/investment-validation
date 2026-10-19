@@ -34,9 +34,10 @@ fetch or *when* to run a job (`engine/v2/ops`, a caller, owns that).
 Repository scans merge one transitively overlapping full-primary-key range group at
 a time. Disjoint inspected fragment ranges therefore keep one active fragment stream;
 unknown bounds retain the full merge fallback. Bounds use the same typed key ordering
-as decoded rows. Malformed bounds or returned keys outside their declared range refuse
-`MANIFEST_CORRUPT`; object verification, footer counts, strict global order and result
-limits remain mandatory. Batches are provisional until the scan is fully exhausted.
+as decoded rows. Shared bound admission precedes pruning in scan, population-bound,
+dependency and pure query planning. Null-bearing keys prove no range: they
+retain the full merge fallback and downstream row validation. Object verification,
+footer counts, strict global order and result limits remain mandatory; batches are provisional until exhaustion.
 
 ## Primary contracts and public interfaces
 
@@ -463,6 +464,8 @@ directly, without conversion to `DataError`.
 | `INPUT_CHANGED` | integrity | yes | coverage incomplete, a candidate built from a now-stale input, expected keys missing/malformed/empty at the normalization boundary, or a planned unit whose `expected_keys` field is missing, malformed or empty refused at refresh acquisition (Invariants) |
 | `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash, or the file keeps changing while it is verified |
 | `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row, or a fragment count is invalid or differs from its footer |
+| `MANIFEST_CORRUPT` | integrity | no | a fragment key-bound pair has one missing endpoint, wrong arity/type, nonfinite values or reversed order; all planning paths refuse before pruning, even if the fragment would be excluded |
+| `MANIFEST_CORRUPT` | integrity | no | a returned scan key lies outside its admitted full-primary-key range |
 | `IDENTITY_CONFLICT` | validation | no | an existing row's payload disagrees with a new one under the same id; also a `daily_market` revision tie (Invariants) |
 | `UNSUPPORTED_CONTRACT` | validation | no | an operation on a table contract this code path does not implement |
 | `EVENT_NOT_FOUND` | dependency | no | `events.get_event` for an unknown key |

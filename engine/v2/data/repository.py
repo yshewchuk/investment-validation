@@ -380,12 +380,11 @@ class Repository:
 
     def _execute_scan(self, contract: TableContract, records: list[FragmentRecord],
                       query: DataQuery):
-        # Validate before pruning, which also indexes these bounds. Incomplete
-        # or malformed metadata must not become a raw comparison/index error.
-        bounds = {r.fragment_id: self._fragment_key_bounds(r, contract) for r in records}
         population = query_mod.plan_scan_population(
             contract, records, key_filter=query.key_filter, time_interval=query.time_interval)
         self._check_population_bound(query, population)
+        bounds = {r.fragment_id: query_mod.fragment_key_bounds(r, contract)
+                  for r in population.records}
         needed = tuple(dict.fromkeys((*query.columns, *contract.primary_key, *self._hidden_columns(query))))
         batch_cap = min(query.max_batch_rows, contract.maximum_batch_rows)
         merged = self._grouped_fragment_rows(
@@ -396,36 +395,6 @@ class Repository:
             merged.close()
         if query.deadline is not None:
             self._check_deadline(query.deadline)
-
-    def _fragment_key_bounds(self, record: FragmentRecord, contract: TableContract):
-        lo, hi = record.primary_key_min, record.primary_key_max
-        if lo is None and hi is None:
-            return None
-        try:
-            bounds = tuple(self._normalized_key_bound(bound, contract) for bound in (lo, hi))
-            if bounds[0] > bounds[1]:
-                raise ValueError("reversed bounds")
-        except (TypeError, ValueError, KeyError, OverflowError, errors.DataError):
-            raise errors.fail("MANIFEST_CORRUPT", "fragment primary-key bounds are invalid",
-                              details={"fragment_id": record.fragment_id}) from None
-        return bounds
-
-    def _normalized_key_bound(self, bound, contract: TableContract) -> tuple:
-        if not isinstance(bound, (tuple, list)) or len(bound) != len(contract.primary_key):
-            raise ValueError("invalid bound arity")
-        physical = {column.name: column.physical_type for column in contract.columns}
-        scalar_types = {"string": (str,), "int64": (int,), "bool": (bool,),
-                        "float64": (int, float)}
-        row = {}
-        for name, value in zip(contract.primary_key, bound):
-            kind = physical[name]
-            allowed = (str,) if kind.startswith("timestamp") else scalar_types[kind]
-            if type(value) not in allowed:
-                raise ValueError("invalid bound scalar")
-            if isinstance(value, float) and (value != value or value in (float("inf"), -float("inf"))):
-                raise ValueError("nonfinite bound scalar")
-            row[name] = query_mod._parsed_bound(value) if kind.startswith("timestamp") else value
-        return query_mod.order_key(row, contract)
 
     def _fragment_groups(self, records, bounds):
         """Only metadata is sorted; missing bounds conservatively overlap all."""

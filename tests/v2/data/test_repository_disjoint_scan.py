@@ -6,6 +6,7 @@ import pytest
 
 from engine.v2.contracts.data import ColumnContract, DataQuery, KeyPredicate, TableContract
 from engine.v2.data import manifests, objects
+from engine.v2.data import query as data_query
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from tests.data_scan_support import (
@@ -18,16 +19,16 @@ from tests.data_scan_support import (
 )
 
 
-def _contract(physical="int64"):
+def _contract(physical="int64", *, nullable_sequence=False):
     contract = TableContract(
         contract_id="disjoint_scan.v1", definition_hash="sha256:" + "0" * 64,
         table_name="disjoint_scan", semantic_version="1.0",
         columns=(ColumnContract(name="key", physical_type=physical, nullable=False),
-                 ColumnContract(name="sequence", physical_type="int64", nullable=False),
+                 ColumnContract(name="sequence", physical_type="int64", nullable=nullable_sequence),
                  ColumnContract(name="partition", physical_type="string", nullable=False),
                  ColumnContract(name="payload", physical_type="string", nullable=False)),
         primary_key=("key", "sequence"), duplicate_policy="reject", foreign_keys=(),
-        partition_columns=("partition",), filterable_columns=("partition", "payload"),
+        partition_columns=("partition",), filterable_columns=("partition", "payload", "key"),
         orderable_columns=("key", "sequence"), finality_semantics="synthetic.v1",
         provenance_semantics="synthetic.v1", coverage_semantics="synthetic.v1",
         schema_evolution_policy="synthetic.v1", maximum_batch_rows=100)
@@ -47,9 +48,9 @@ def _rows(partition, keys):
             for index, (key, sequence) in enumerate(keys)]
 
 
-def _build(storage, groups, *, physical="int64", hand_built=False):
+def _build(storage, groups, *, physical="int64", hand_built=False, nullable_sequence=False):
     conn, clock, store = storage
-    contract = _contract(physical)
+    contract = _contract(physical, nullable_sequence=nullable_sequence)
     ref = contract_ref_for(contract)
     records, expected = [], []
     for index, keys in enumerate(groups):
@@ -163,6 +164,7 @@ def test_duplicate_boundary_key_is_refused_globally(storage, monkeypatch, unknow
     with pytest.raises(DataError, match="scan result is not in strict primary-key order") as error:
         list(_scan(repository, query))
     assert error.value.code == "MANIFEST_CORRUPT"
+    assert error.value.problem.message == "scan result is not in strict primary-key order"
     assert state["active"] == 0
 
 
@@ -172,21 +174,40 @@ def test_fragment_duplicate_or_regression_is_still_refused(storage, keys):
     with pytest.raises(DataError, match="scan result is not in strict primary-key order") as error:
         list(_scan(repository, query))
     assert error.value.code == "MANIFEST_CORRUPT"
+    assert error.value.problem.message == "scan result is not in strict primary-key order"
 
 
 @pytest.mark.parametrize("lo, hi", [
     ((), (2, 0)), ((1,), (2, 0)), ((1, 0), (2,)),
     ((1, 0), None), (None, (2, 0)), ((3, 0), (2, 0)),
     (("private-value", 0), (2, 0)), ((True, 0), (2, 0)),
-    ((1, None), (2, 0)), ((1.5, 0), (2, 0)),
+    ((1.5, 0), (2, 0)),
 ])
-def test_malformed_bounds_refuse_before_any_object_opens(storage, monkeypatch, lo, hi):
+@pytest.mark.parametrize("entry", ["scan", "bound", "explain", "plan", "prune"])
+@pytest.mark.parametrize("selection", ["leading-key", "excluded-partition"])
+def test_malformed_bounds_refuse_before_any_object_opens(
+        storage, monkeypatch, lo, hi, entry, selection):
     repository, query, records, _expected = _build(storage, [[(1, 0), (2, 0)]])
+    predicate = (KeyPredicate(column="key", operator="eq", values=(1,))
+                 if selection == "leading-key" else
+                 KeyPredicate(column="partition", operator="eq", values=("excluded",)))
+    query = replace(query, key_filter=(predicate,))
     record = replace(records[0], primary_key_min=lo, primary_key_max=hi)
     _replace_records(monkeypatch, [record])
     state = _track_streams(monkeypatch)
     with pytest.raises(DataError) as error:
-        list(_scan(repository, query))
+        if entry == "scan":
+            list(_scan(repository, query))
+        elif entry == "bound":
+            repository.scan_population_bound(
+                query.snapshot_id, table_name="disjoint_scan",
+                table_contract_ref=query.table_contract_ref, key_filter=query.key_filter)
+        elif entry == "explain":
+            repository.explain_dependencies(query, table_name="disjoint_scan")
+        elif entry == "plan":
+            data_query.plan_scan_population(_contract(), [record], key_filter=query.key_filter)
+        else:
+            data_query.fragment_may_match(record, _contract(), query)
     assert error.value.code == "MANIFEST_CORRUPT"
     assert error.value.problem.message == "fragment primary-key bounds are invalid"
     assert error.value.problem.details == {"fragment_id": record.fragment_id}
@@ -201,6 +222,7 @@ def test_false_disjoint_bound_refuses_out_of_range_row(storage, monkeypatch):
     with pytest.raises(DataError, match="scan key is outside fragment bounds") as error:
         list(_scan(repository, query))
     assert error.value.code == "MANIFEST_CORRUPT"
+    assert error.value.problem.message == "scan key is outside fragment bounds"
     assert state["active"] == 0 and state["maximum"] == 1
     assert state["opened"] == [records[0].fragment_id]
 
@@ -227,9 +249,15 @@ def test_disjoint_scan_cleanup_and_integrity_checks(storage, monkeypatch, stop):
     else:
         expected_code = {"limit": "RESULT_LIMIT_EXCEEDED", "footer": "MANIFEST_CORRUPT",
                          "object": "OBJECT_CORRUPT"}[stop]
+        expected_message = {
+            "limit": "scan result exceeds max_result_rows",
+            "footer": "parquet footer row count does not match the manifest",
+            "object": "published object bytes do not match its recorded hash",
+        }[stop]
         with pytest.raises(DataError) as error:
             list(scan)
         assert error.value.code == expected_code
+        assert error.value.problem.message == expected_message
     assert state["active"] == 0 and state["maximum"] == 1
 
 
@@ -286,6 +314,48 @@ def test_hidden_keys_and_empty_filtered_groups_do_not_prime_later_fragments(stor
     assert list(scan) == []
     assert state["opened"] == [record.fragment_id for record in records]
     assert state["maximum"] == 1 and state["active"] == 0
+
+
+@pytest.mark.parametrize("nullable", [False, True])
+def test_null_key_bounds_are_conservative_on_every_planning_path(storage, monkeypatch, nullable):
+    repository, query, records, expected = _build(
+        storage, [[(8, None), (9, None)], [(1, None), (2, None)]], nullable_sequence=nullable)
+    contract = repository.table_contract(repository.resolve(query.snapshot_id), "disjoint_scan")
+    for record in records:
+        assert data_query.fragment_key_bounds(record, contract) is None
+    query = replace(query, key_filter=(KeyPredicate(column="key", operator="eq", values=(1,)),))
+    assert repository.scan_population_bound(
+        query.snapshot_id, table_name="disjoint_scan", table_contract_ref=query.table_contract_ref,
+        key_filter=query.key_filter) == 4
+    plan = repository.explain_dependencies(query, table_name="disjoint_scan")
+    assert [(item.fragment_ref.fragment_id, item.estimated_rows) for item in plan.dependencies] == [
+        (record.fragment_id, 2) for record in records]
+    assert repository.read_counters.snapshot() == {}
+    state = _track_streams(monkeypatch)
+    assert [row for batch in _scan(repository, query) for row in batch.to_pylist()] == expected[:1]
+    assert state["opened"] == [record.fragment_id for record in records]
+    assert state["active"] == 0
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("2024-01-01", datetime(2024, 1, 1)),
+    ("2024-01-01T01:02:03.000004", datetime(2024, 1, 1, 1, 2, 3, 4)),
+    ("2024-01-01T01:00:00+01:00", datetime(2024, 1, 1)),
+    ("0001-01-01", datetime(1, 1, 1)),
+])
+def test_public_time_bound_parser_has_literal_utc_oracles(value, expected):
+    assert data_query.parse_time_bound(value) == expected
+
+
+@pytest.mark.parametrize("value", ["private-invalid", "2024-02-30", None,
+                                   "0001-01-01T00:00:00+01:00",
+                                   "9999-12-31T23:59:59-01:00"])
+def test_public_time_bound_parser_refuses_with_redacted_problem(value):
+    with pytest.raises(DataError) as error:
+        data_query.parse_time_bound(value)
+    assert error.value.code == "CONTRACT_MISMATCH"
+    assert error.value.problem.message == "a time bound is not a parseable date or timestamp"
+    assert error.value.problem.details == {}
 
 
 def test_closing_overlap_group_closes_every_primed_stream(storage, monkeypatch):

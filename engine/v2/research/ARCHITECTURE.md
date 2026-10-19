@@ -615,12 +615,14 @@ It does not authenticate arbitrary rehashed calendars as builder-derived.
 | Stored read | Supported entrypoint reconstructs context; engine verifies exact receipt/output and complete object isolation, then all row metadata before feature-column decoding. Checksum verification reads bytes. No historical outcomes or arithmetic; malformed reads return no partial rows. |
 | Trust/authority | Native inspected catalog metadata is trusted, not independent attestation against malicious catalog writers. Schedule/source-publication availability remain unverified reconstruction. No experiment/final-read authority; registration v1.0–v1.3 and fixed baseline are unchanged. |
 | Refusals | Missing or changed context/receipt: `IDENTITY_CONFLICT`; unprovable isolation: `HOLDOUT_ACCESS_DENIED`; bad stored schema/metadata/missingness: `CONTRACT_MISMATCH`. |
+| Invalid projection | Non-string selections, malformed selection containers, unknown event/feature or duplicate feature: `CONTRACT_MISMATCH` before any payload scan. |
 | Source/publication failures | Unknown source/feature snapshot ID: `SNAPSHOT_NOT_FOUND`; resolved source-pin mismatch during public build/read context derivation: `SNAPSHOT_UNRESOLVED`; direct `materialize` source/context mismatch: `IDENTITY_CONFLICT`. Non-native computed-moves contract: `CONTRACT_MISMATCH`; empty fold: `POPULATION_COLLAPSED`; invalid eligible label/features: `EXPERIMENT_VARIANT_FAILED`; competing head: `SNAPSHOT_CONFLICT`. Other native catalog/object/source-admission errors propagate. |
 
 `magnitude_history_inputs.admit_stored(repository, snapshot, context)` is the consumer-only
 metadata boundary used by `experiments/magnitude_history_inputs.py`: exact receipt/output,
 features-only contract and complete event isolation, without payload decoding or arithmetic.
-It reuses the stored reader's receipt/isolation rules and returns no feature values.
+It delegates to the readers' shared `magnitude_history_store.preflight_stored`
+receipt/contract/isolation boundary and returns no feature values.
 Missing/changed receipt or pin refuses `IDENTITY_CONFLICT`; bad contract refuses
 `CONTRACT_MISMATCH`; unprovable isolation refuses `HOLDOUT_ACCESS_DENIED`.
 It does not derive or authenticate a context; the unlayered caller owns supported producer

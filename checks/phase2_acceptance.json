@@ -57,7 +57,7 @@
     },
     "D13": {
       "tier": 1,
-      "tests": ["tests/test_v2_data_legacy_materialization.py",
+      "tests": ["tests/v2/data/test_legacy_materialization.py",
                 "tests/v2/ops/test_v2_ops_snapshot_stages.py",
                 "tests/test_v2_data_reference_inputs.py",
                 "tests/test_v2_data_tier4_coverage.py",
@@ -70,7 +70,7 @@
     },
     "D14": {
       "tier": 1,
-      "tests": ["tests/test_v2_data_legacy_materialization.py",
+      "tests": ["tests/v2/data/test_legacy_materialization.py",
                 "tests/v2/ops/test_v2_ops_snapshot_stages.py",
                 "tests/test_v2_data_reference_inputs.py",
                 "tests/test_checks_phase2_corpus_parity.py"],
@@ -84,7 +84,7 @@
     },
     "D16": {
       "tier": 2,
-      "tests": ["tests/test_v2_data_import.py", "tests/test_v2_data_rebuild_rollback.py"],
+      "tests": ["tests/test_v2_data_import.py", "tests/v2/data/test_rebuild_rollback.py"],
       "evidence_fields": ["rollback_receipt_ref"]
     },
     "D17": {

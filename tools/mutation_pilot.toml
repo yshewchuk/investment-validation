@@ -365,6 +365,8 @@ mutate = [
     "engine/v2/data/event_revisions.py",
 ]
 tests = [
+    "tests/v2/data/test_repository_disjoint_scan.py",
+    "tests/v2/ops/test_nightly_chain_batch.py",
     "tests/v2/data/test_string_date_intervals.py",
     "tests/test_v2_data_eod_inventory.py",
     "tests/test_v2_data_event_revisions.py",
@@ -374,7 +376,7 @@ tests = [
     "tests/test_v2_data_objects.py",
     "tests/test_v2_data_partitions.py",
     "tests/test_v2_data_query.py",
-    "tests/test_v2_data_rebuild_rollback.py",
+    "tests/v2/data/test_rebuild_rollback.py",
 ]
 
 [modules.data_incremental]
@@ -429,9 +431,10 @@ mutate = [
     "engine/v2/data/price_*.py",
 ]
 tests = [
+    "tests/v2/integration/test_checks_phase2_evidence_build.py",
     "tests/v2/data/test_legacy_reader_lifetime.py",
     "tests/test_v2_data_legacy_adapter.py",
-    "tests/test_v2_data_legacy_materialization.py",
+    "tests/v2/data/test_legacy_materialization.py",
     "tests/v2/data/test_price_downloads.py",
     "tests/test_v2_data_reference_inputs.py",
     "tests/test_v2_data_tier4_coverage.py",
@@ -1163,8 +1166,8 @@ mutate = [
 tests = [
     "tests/v2/ops/test_planned_price_refresh.py",
     "tests/v2/ops/test_planned_price_recovery.py",
-    "tests/test_v2_data_legacy_materialization.py",
-    "tests/test_v2_data_rebuild_rollback.py",
+    "tests/v2/data/test_legacy_materialization.py",
+    "tests/v2/data/test_rebuild_rollback.py",
     "tests/test_v2_data_repository.py",
     "tests/v2/ops/test_v2_ops_generation_binding_lineage.py",
     "tests/v2/ops/test_v2_ops_price_history.py",

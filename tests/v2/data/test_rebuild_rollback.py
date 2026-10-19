@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import RollbackReceipt  # noqa: E402
@@ -59,7 +59,7 @@ from tests.data_scan_support import (  # noqa: E402
 )
 from tests.ops_support import TEST_POLICY  # noqa: E402
 from tests.test_v2_data_import import _run_until_terminal, _submit_and_run, build_legacy_store  # noqa: E402
-from tests.test_v2_data_legacy_materialization import PANEL_ROWS, TIER4_ROWS  # noqa: E402
+from tests.v2.data.test_legacy_materialization import PANEL_ROWS, TIER4_ROWS  # noqa: E402
 
 POLICY = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
 

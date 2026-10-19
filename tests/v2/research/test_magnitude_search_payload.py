@@ -35,8 +35,32 @@ def inputs_and_plan(model="history_ridge"):
     return inputs, fold, plan, policy
 
 
-def request(inputs, fold, plan, policy):
-    return {"inputs": execution._fit_inputs(inputs, fold, plan, policy), "inner": fold,
+def expected_inputs():
+    """Literal row/value oracle, independent of either production projection path."""
+    columns = ("mean_prior_move", "mean_prior_abs_move", "ema2_prior_move",
+        "ema2_prior_abs_move", "ema4_prior_move", "ema4_prior_abs_move", "ema8_prior_move",
+        "ema8_prior_abs_move", "ema12_prior_move", "ema12_prior_abs_move")
+    rows = [
+        ("test-a", 1, 1, (2, 3, None, 5, 6, 7, 8, 9, 10, 11)),
+        ("test-a", 5, 1, (6, 7, None, 9, 10, 11, 12, 13, 14, 15)),
+        ("train-a", 1, 2, (4, 6, None, 10, 12, 14, 16, 18, 20, 22)),
+        ("train-a", 5, 2, (12, 14, None, 18, 20, 22, 24, 26, 28, 30)),
+        ("test-b", 1, 4, (8, 12, None, 20, 24, 28, 32, 36, 40, 44)),
+        ("test-b", 5, 4, (24, 28, None, 36, 40, 44, 48, 52, 56, 60)),
+        ("train-b", 1, 5, (10, 15, None, 25, 30, 35, 40, 45, 50, 55)),
+        ("train-b", 5, 5, (30, 35, None, 45, 50, 55, 60, 65, 70, 75)),
+    ]
+    return {"features": [{"event_id": event, "context_id": "sha256:" + "c" * 64,
+        "horizon_sessions": horizon, "n_prior": count,
+        **{name: None if value is None else value / 11
+           for name, value in zip(columns, numerators, strict=True)}}
+        for event, horizon, count, numerators in rows],
+        "training": [{"event_id": "train-b", "absolute_move_pct": 8.0},
+                     {"event_id": "train-a", "absolute_move_pct": 2.0}]}
+
+
+def expected_request(fold, plan, policy):
+    return {"inputs": expected_inputs(), "inner": fold,
             "plan": {"horizons": plan["horizons"]}, "execution": policy}
 
 
@@ -45,26 +69,15 @@ def run(inputs, fold, plan, policy, progress=lambda *args: None):
                                       execution.execution_limits(LIMITS), progress)
 
 
-def test_projected_payload_keeps_only_consumed_columns_rows_and_original_order(monkeypatch):
-    inputs, fold, plan, policy = inputs_and_plan()
+@pytest.mark.parametrize("model", ["history_ridge", "history_hgb"])
+def test_projected_payload_keeps_only_consumed_columns_rows_and_original_order(monkeypatch, model):
+    inputs, fold, plan, policy = inputs_and_plan(model)
     original = copy.deepcopy(inputs)
     observed = wire_child(monkeypatch, 'print(\'{"event":"succeeded","forecasts":[]}\')')
     assert run(inputs, fold, plan, policy) == {"event": "succeeded", "forecasts": []}
     child, scratch, payload = observed[0]
-    projected = payload["inputs"]
-    assert set(projected) == {"features", "training"}
-    assert projected["training"] == [
-        {"event_id": "train-b", "absolute_move_pct": 8.0},
-        {"event_id": "train-a", "absolute_move_pct": 2.0}]
-    columns = {"event_id", "context_id", "horizon_sessions", *policy["features"]}
-    assert [(row["event_id"], row["horizon_sessions"]) for row in projected["features"]] == [
-        (event, horizon) for event in ("test-a", "train-a", "test-b", "train-b") for horizon in (1, 5)]
-    assert all(set(row) == columns for row in projected["features"])
-    assert all(row[policy["features"][3]] is None for row in projected["features"])
+    assert payload == expected_request(fold, plan, policy)
     assert inputs == original
-    assert payload["inner"] == fold
-    assert payload["plan"] == plan
-    assert payload["execution"] == policy
     assert child.returncode == 0
     assert not scratch.exists()
 
@@ -77,7 +90,7 @@ def test_projection_does_not_read_unconsumed_values():
             for name in policy["features"]:
                 del row[name]
     projected = execution._fit_inputs(inputs, fold, plan, policy)
-    assert len(projected["features"]) == 8
+    assert projected == expected_inputs()
     canonical_json(projected)
 
 
@@ -104,7 +117,7 @@ def test_real_child_projection_preserves_exact_forecasts_and_fit_evidence(model)
 @pytest.mark.parametrize("excess", [0, 1], ids=["exact-cap", "cap-plus-one"])
 def test_cap_applies_inclusively_to_projected_payload_before_launch(monkeypatch, excess):
     inputs, fold, plan, policy = inputs_and_plan()
-    projected = request(inputs, fold, plan, policy)
+    projected = expected_request(fold, plan, policy)
     size = len(canonical_json(projected).encode())
     cap = size - excess
     assert len(canonical_json({**projected, "inputs": inputs}).encode()) > cap

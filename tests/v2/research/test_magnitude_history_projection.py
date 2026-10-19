@@ -1,15 +1,18 @@
 """Full-source admission and identity oracles for bounded projected history reads."""
 import hashlib
 import json
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pyarrow.parquet as pq
 import pytest
 
-from engine.v2.data import objects
+from engine.v2.data import errors, objects
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import canonical_json, to_document
 from engine.v2.research import magnitude_history_store as stored
+from engine.v2.research.magnitude_history_inputs import admit_stored
 from engine.v2.research.magnitude_history_table import FEATURES, METADATA, TABLE
 from tests.v2.research.magnitude_trial_support import build_history, poison_outcomes
 from tests.v2.research.test_magnitude_history_store import source  # noqa: F401
@@ -18,6 +21,49 @@ from tests.v2.research.test_magnitude_history_store import source  # noqa: F401
 def _projection(value, snapshot, context, *, columns=("n_prior", "mean_prior_abs_move")):
     return stored.read_stored_for_events(value.repository, snapshot, context,
         event_ids=[context["temporal_plan"]["events"][0]["event_id"]], columns=columns)
+
+
+@pytest.mark.parametrize("reader", ["full", "projection", "admission"])
+@pytest.mark.parametrize("change,code,message", [
+    ("receipt", "IDENTITY_CONFLICT", "history build receipt differs from its context"),
+    ("snapshot", "IDENTITY_CONFLICT", "feature snapshot is not the committed context output"),
+    ("contract", "CONTRACT_MISMATCH", "stored history contract differs"),
+    ("coverage", "HOLDOUT_ACCESS_DENIED", "stored history object coverage differs"),
+    ("isolation", "HOLDOUT_ACCESS_DENIED", "stored history event isolation cannot be proven"),
+])
+def test_all_read_paths_share_exact_admission_refusals_before_payload(source, monkeypatch, reader, change, code, message):  # noqa: F811
+    build, snapshot = build_history(source)
+    context = build["context"]
+    records = source.repository.fragment_records(snapshot, TABLE)
+    if change == "receipt":
+        class CorruptReceipt:
+            def execute(self, statement, parameters=()):
+                cursor = source.conn.execute(statement, parameters)
+                if "FROM data_import_receipts WHERE receipt_id=" in statement:
+                    row = {**dict(cursor.fetchone()), "scope": "wrong"}
+                    return SimpleNamespace(fetchone=lambda: row)
+                return cursor
+        monkeypatch.setattr(source.repository, "_conn", CorruptReceipt())
+    elif change == "snapshot":
+        monkeypatch.setattr(source.repository, "resolve", lambda _: source.snapshot)
+    elif change == "contract":
+        contract = source.repository.table_contract(snapshot, TABLE)
+        monkeypatch.setattr(source.repository, "table_contract",
+                            lambda *_: replace(contract, semantic_version="0.0.0"))
+    else:
+        corrupted = records[:-1] if change == "coverage" else (
+            *records[:-1], replace(records[-1], primary_key_max=(*records[-1].primary_key_max[:-1], 6)))
+        monkeypatch.setattr(source.repository, "fragment_records", lambda *_: corrupted)
+    monkeypatch.setattr(source.repository, "scan",
+                        lambda *args, **kwargs: pytest.fail("refused admission opened payloads"))
+    with pytest.raises(DataError) as caught:
+        if reader == "projection":
+            _projection(source, snapshot, context)
+        elif reader == "full":
+            stored.read_stored(source.repository, snapshot, context)
+        else:
+            admit_stored(source.repository, snapshot, context)
+    assert caught.value.problem == errors.fail(code, message).problem
 
 
 def test_projected_rows_keep_full_snapshot_identity_and_raw_numeric_values(source, monkeypatch):  # noqa: F811
@@ -93,16 +139,20 @@ def test_unselected_metadata_corruption_refuses_before_any_feature_scan(source, 
             yield row
 
     monkeypatch.setattr(stored, "_stream_rows", corrupt)
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with pytest.raises(DataError) as caught:
         _projection(source, snapshot, context)
+    assert caught.value.problem == errors.fail(
+        "CONTRACT_MISMATCH", "stored history metadata differs from its context").problem
     assert changed == [1]
 
 
-@pytest.mark.parametrize("field,value", [
-    ("n_prior", 999), ("mean_prior_move", float("nan")),
-    ("mean_prior_abs_move", -1), ("ema12_prior_abs_move", 0),
+@pytest.mark.parametrize("field,value,message", [
+    ("n_prior", 999, "stored history count differs"),
+    ("mean_prior_move", float("nan"), "stored history feature or missingness is invalid"),
+    ("mean_prior_abs_move", -1, "stored history feature or missingness is invalid"),
+    ("ema12_prior_abs_move", 0, "stored history feature or missingness is invalid"),
 ])
-def test_unselected_unprojected_feature_corruption_still_refuses(source, monkeypatch, field, value):  # noqa: F811
+def test_unselected_unprojected_feature_corruption_still_refuses(source, monkeypatch, field, value, message):  # noqa: F811
     build, snapshot = build_history(source)
     context = build["context"]
     selected = context["temporal_plan"]["events"][0]["event_id"]
@@ -116,14 +166,21 @@ def test_unselected_unprojected_feature_corruption_still_refuses(source, monkeyp
             yield row
 
     monkeypatch.setattr(stored, "_stream_rows", corrupt)
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with pytest.raises(DataError) as caught:
         _projection(source, snapshot, context, columns=("n_prior",))
+    assert caught.value.problem == errors.fail("CONTRACT_MISMATCH", message).problem
     assert changed == [1]
 
 
-@pytest.mark.parametrize("pass_number", [1, 2])
-@pytest.mark.parametrize("change", ["missing", "extra", "metadata"])
-def test_each_pass_requires_exact_coverage_and_unchanged_metadata(source, monkeypatch, pass_number, change):  # noqa: F811
+@pytest.mark.parametrize("pass_number,change,message", [
+    (1, "missing", "stored history row coverage differs"),
+    (1, "extra", "stored history row coverage differs"),
+    (1, "metadata", "stored history metadata differs from its context"),
+    (2, "missing", "stored history row count changed"),
+    (2, "extra", "stored history row count changed"),
+    (2, "metadata", "stored history count or metadata changed"),
+])
+def test_each_pass_requires_exact_coverage_and_unchanged_metadata(source, monkeypatch, pass_number, change, message):  # noqa: F811
     build, snapshot = build_history(source)
     original = stored._stream_rows
 
@@ -140,18 +197,25 @@ def test_each_pass_requires_exact_coverage_and_unchanged_metadata(source, monkey
             yield row
 
     monkeypatch.setattr(stored, "_stream_rows", corrupt)
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with pytest.raises(DataError) as caught:
         _projection(source, snapshot, build["context"])
+    assert caught.value.problem == errors.fail("CONTRACT_MISMATCH", message).problem
 
 
-@pytest.mark.parametrize("events,columns", [(["absent"], ["n_prior"]), ([], ["history_json"]),
-                                          ([], ["n_prior", "n_prior"])])
+@pytest.mark.parametrize("events,columns", [
+    (["absent"], ["n_prior"]), ([], ["history_json"]), ([], ["n_prior", "n_prior"]),
+    (None, ["n_prior"]), ([["absent"]], ["n_prior"]), ("absent", ["n_prior"]),
+    ([None], ["n_prior"]), ([1], ["n_prior"]),
+    ([], None), ([], [["n_prior"]]), ([], "n_prior"), ([], [None]), ([], [1]),
+])
 def test_invalid_projection_refuses_before_payload(source, monkeypatch, events, columns):  # noqa: F811
     build, snapshot = build_history(source)
     monkeypatch.setattr(stored, "_stream_rows", lambda *args: pytest.fail("invalid projection scanned"))
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with pytest.raises(DataError) as caught:
         stored.read_stored_for_events(source.repository, snapshot, build["context"],
                                       event_ids=events, columns=columns)
+    assert caught.value.problem == errors.fail(
+        "CONTRACT_MISMATCH", "stored history projection differs from its context").problem
 
 
 def test_empty_projection_still_hashes_and_validates_every_row(source):  # noqa: F811
@@ -179,12 +243,13 @@ def test_refused_projection_closes_fragment_streams_even_with_retained_traceback
         if boundary == "_stream_identity":
             next(args[-1])
         assert active
-        raise ValueError("synthetic refusal")
+        raise errors.fail("CONTRACT_MISMATCH", "synthetic refusal")
 
     monkeypatch.setattr(Repository, "_fragment_rows", tracked)
     monkeypatch.setattr(stored, boundary, refuse)
-    with pytest.raises(ValueError, match="synthetic refusal") as caught:
+    with pytest.raises(DataError) as caught:
         _projection(source, snapshot, build["context"])
+    assert caught.value.problem == errors.fail("CONTRACT_MISMATCH", "synthetic refusal").problem
     assert caught.value.__traceback__ is not None
     assert active == []
 

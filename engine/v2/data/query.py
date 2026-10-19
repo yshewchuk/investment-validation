@@ -51,7 +51,7 @@ from engine.v2.contracts.data import (
 from engine.v2.foundation import DocumentError, to_document
 
 from . import documents, time_formats
-from .errors import fail
+from .errors import DataError, fail
 
 __all__ = [
     "ARROW_TYPES",
@@ -59,9 +59,11 @@ __all__ = [
     "arrow_type_for",
     "compile_batch_matcher",
     "compile_row_matcher",
+    "fragment_key_bounds",
     "fragment_may_match",
     "null_array_for",
     "order_key",
+    "parse_time_bound",
     "plan_scan_population",
     "row_matches",
     "validate_query",
@@ -165,7 +167,9 @@ def plan_scan_population(contract: TableContract, records, *,
     """The one membership-planning path behind scans, explains, and
     ``Repository.scan_population_bound``: prune with the exact partition/
     leading-primary-key/time bounds the scan itself uses, then sum the
-    surviving fragments' recorded ``row_count`` (Python integers). Selection
+    surviving fragments' recorded ``row_count`` (Python integers). Full-key
+    bound admission precedes every fragment's pruning on all public paths.
+    Selection
     predicates are strictly re-decoded (a malformed one is
     ``QUERY_NOT_BOUNDED``, like a malformed ``DataQuery``), and a surviving
     fragment with non-int or negative metadata is ``MANIFEST_CORRUPT`` before
@@ -245,11 +249,57 @@ def fragment_may_match(record: FragmentRecord, contract: TableContract, query: D
 
 def _fragment_may_match(record: FragmentRecord, contract: TableContract, key_filter,
                         interval: TimeInterval | None) -> bool:
+    bounds = fragment_key_bounds(record, contract)
     if not _partition_may_match(record, contract, key_filter):
         return False
-    if not _leading_key_may_match(record, contract, key_filter):
+    if not _leading_key_may_match(bounds, contract, key_filter):
         return False
     return _time_may_match(record, interval)
+
+
+def fragment_key_bounds(record: FragmentRecord, contract: TableContract) -> tuple | None:
+    """Validate full-key metadata before pruning; return comparable endpoints.
+
+    Missing endpoints together, or a null key component, cannot prove
+    disjointness and return ``None``. Every other malformed bound refuses
+    ``MANIFEST_CORRUPT``, without exposing its value. Null-bearing inspected
+    rows retain their existing downstream contract validation.
+    """
+    lo, hi = record.primary_key_min, record.primary_key_max
+    if lo is None and hi is None:
+        return None
+    try:
+        bounds = tuple(_normalized_key_bound(bound, contract) for bound in (lo, hi))
+        if any(value is None for bound in bounds for value in bound):
+            return None
+        if bounds[0] > bounds[1]:
+            raise ValueError("reversed bounds")
+    except (TypeError, ValueError, KeyError, OverflowError, DataError):
+        raise fail("MANIFEST_CORRUPT", "fragment primary-key bounds are invalid",
+                   details={"fragment_id": record.fragment_id}) from None
+    return bounds
+
+
+def _normalized_key_bound(bound, contract: TableContract) -> tuple:
+    if not isinstance(bound, (tuple, list)) or len(bound) != len(contract.primary_key):
+        raise ValueError("invalid bound arity")
+    columns = {column.name: column for column in contract.columns}
+    scalar_types = {"string": (str,), "int64": (int,), "bool": (bool,),
+                    "float64": (int, float)}
+    row = {}
+    for name, value in zip(contract.primary_key, bound):
+        column = columns[name]
+        if value is None:
+            row[name] = None
+            continue
+        kind = column.physical_type
+        allowed = (str,) if kind.startswith("timestamp") else scalar_types[kind]
+        if type(value) not in allowed:
+            raise ValueError("invalid bound scalar")
+        if isinstance(value, float) and (value != value or value in (float("inf"), -float("inf"))):
+            raise ValueError("nonfinite bound scalar")
+        row[name] = parse_time_bound(value) if kind.startswith("timestamp") else value
+    return order_key(row, contract)
 
 
 def _partition_may_match(record: FragmentRecord, contract: TableContract, key_filter) -> bool:
@@ -260,12 +310,12 @@ def _partition_may_match(record: FragmentRecord, contract: TableContract, key_fi
     return True
 
 
-def _leading_key_may_match(record: FragmentRecord, contract: TableContract, key_filter) -> bool:
-    if not contract.primary_key or record.primary_key_min is None:
+def _leading_key_may_match(bounds, contract: TableContract, key_filter) -> bool:
+    if not contract.primary_key or bounds is None:
         return True
     leading = contract.primary_key[0]
     physical = _physical_type(contract, leading)
-    lo, hi = record.primary_key_min[0], record.primary_key_max[0]
+    lo, hi = bounds[0][0], bounds[1][0]
     for predicate in key_filter:
         if predicate.column != leading:
             continue
@@ -274,7 +324,7 @@ def _leading_key_may_match(record: FragmentRecord, contract: TableContract, key_
             raise fail("CONTRACT_MISMATCH",
                        "key_filter values are incompatible with fragment key bounds")
         try:
-            values = [_comparable_value(v, physical) if not isinstance(v, str) else v
+            values = [_normalize_bound(v) if physical.startswith("timestamp") else v
                       for v in predicate.values]
             if all(v < lo or v > hi for v in values):
                 return False
@@ -495,7 +545,7 @@ def _batch_value_set(physical_type: str, values) -> pa.Array:
     outside the C ``long`` range, or anything else -- caught broadly by
     :func:`compile_batch_matcher`, never by this function."""
     if physical_type.startswith("timestamp"):
-        return pa.array([_parsed_bound(v) for v in values], type=pa.timestamp("us"))
+        return pa.array([parse_time_bound(v) for v in values], type=pa.timestamp("us"))
     return pa.array(values, type=ARROW_TYPES[physical_type])
 
 
@@ -519,9 +569,9 @@ def _comparable_value(value, physical_type: str):
     return value
 
 
-def _parsed_bound(value: str) -> datetime:
-    """The parsed ``datetime`` behind :func:`_normalize_bound`, before it
-    is formatted to the shared wire string. The vectorized batch path's
+def parse_time_bound(value: str) -> datetime:
+    """Parse a date/timestamp as a naive UTC ``datetime``, or refuse
+    ``CONTRACT_MISMATCH``. The vectorized batch path's
     timestamp ``key_filter`` support (:func:`_batch_value_set`) calls this
     directly instead of calling ``_normalize_bound`` and then reparsing its
     formatted string with ``strptime`` -- that round trip is not always
@@ -536,10 +586,10 @@ def _parsed_bound(value: str) -> datetime:
         return datetime.strptime(value, time_formats.NAIVE_TIMESTAMP_FORMAT)
     try:
         parsed = datetime.fromisoformat(value)
-    except (TypeError, ValueError):
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    except (TypeError, ValueError, OverflowError):
         raise fail("CONTRACT_MISMATCH", "a time bound is not a parseable date or timestamp") from None
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
     return parsed
 
 
@@ -565,4 +615,4 @@ def _normalize_bound(value: str) -> str:
     """
     if time_formats.is_naive_timestamp(value):
         return value
-    return time_formats.format_naive_timestamp(_parsed_bound(value))
+    return time_formats.format_naive_timestamp(parse_time_bound(value))

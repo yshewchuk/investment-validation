@@ -275,13 +275,21 @@ def _validate_features(row, count):
             raise errors.fail("CONTRACT_MISMATCH", "stored history feature or missingness is invalid")
 
 
-def read_stored(repository, snapshot, context):
-    """Globally admit metadata, then decode stored columns without outcome reads."""
+def preflight_stored(repository, snapshot, context):
+    """Admit receipt, contract and complete event isolation without opening payloads.
+
+    Return the ordered event/cutoff pairs shared by full and projected readers.
+    """
     if _existing(repository, context) != snapshot or set(snapshot.table_versions) != {TABLE}:
         raise errors.fail("IDENTITY_CONFLICT", "feature snapshot is not the committed context output")
     if repository.table_contract(snapshot, TABLE) != CONTRACT:
         raise errors.fail("CONTRACT_MISMATCH", "stored history contract differs")
-    expected = _preflight_features(repository, snapshot, context)
+    return _preflight_features(repository, snapshot, context)
+
+
+def read_stored(repository, snapshot, context):
+    """Globally admit metadata, then decode stored columns without outcome reads."""
+    expected = preflight_stored(repository, snapshot, context)
     metadata = _scan(repository, snapshot, context, METADATA, len(expected))
     if len(metadata) != len(expected):
         raise errors.fail("CONTRACT_MISMATCH", "stored history row coverage differs")
@@ -335,11 +343,10 @@ def read_stored_for_events(repository, snapshot, context, *, event_ids, columns)
     per source row, selected slim rows, and a constant number of event-sized batches.
     Every call repeats both scans; no cross-call validation or outcome cache.
     """
-    if _existing(repository, context) != snapshot or set(snapshot.table_versions) != {TABLE}:
-        raise errors.fail("IDENTITY_CONFLICT", "feature snapshot is not the committed context output")
-    if repository.table_contract(snapshot, TABLE) != CONTRACT:
-        raise errors.fail("CONTRACT_MISMATCH", "stored history contract differs")
-    expected = _preflight_features(repository, snapshot, context)
+    expected = preflight_stored(repository, snapshot, context)
+    if any(not isinstance(group, (list, tuple, set, frozenset))
+           or any(not isinstance(value, str) for value in group) for group in (event_ids, columns)):
+        raise errors.fail("CONTRACT_MISMATCH", "stored history projection differs from its context")
     selected = set(event_ids)
     if (not selected <= {event["event_id"] for event, _ in expected}
             or not set(columns) <= set(FEATURES) or len(set(columns)) != len(columns)):

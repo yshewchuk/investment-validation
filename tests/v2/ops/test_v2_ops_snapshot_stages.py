@@ -55,7 +55,7 @@ from engine.v2.ops.supervisor import Service
 from engine.v2.ops.workflows import commands
 from tests.data_scan_support import RECEIPT, contract_for, fake_hash, publish_and_inspect
 from tests.ops_support import TEST_POLICY, run_until
-from tests.test_v2_data_legacy_materialization import (
+from tests.v2.data.test_legacy_materialization import (
     _EE_COMMON,
     PANEL_ROWS,
     TABLES,
