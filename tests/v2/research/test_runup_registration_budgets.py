@@ -183,10 +183,20 @@ def test_cli_register_budget_and_no_ledger_for_both_actions(source, tmp_path, ca
     assert result["receipt"]["ledger_destination"] is None
 
 
-@pytest.mark.parametrize("budget", ["0", "-1", "nan", "inf", str(2**62)])
-def test_cli_invalid_budget_is_parser_refusal_before_spec_or_storage(monkeypatch, capsys, budget):
+@pytest.mark.parametrize("action", ["register", "run"])
+@pytest.mark.parametrize("budget,message", [
+    ("0", "--max-evidence-bytes must be a positive SQLite-safe byte budget"),
+    ("-1", "--max-evidence-bytes must be a positive SQLite-safe byte budget"),
+    (str(2**62), "--max-evidence-bytes must be a positive SQLite-safe byte budget"),
+    ("nan", "argument --max-evidence-bytes: invalid int value: 'nan'"),
+    ("inf", "argument --max-evidence-bytes: invalid int value: 'inf'"),
+    ("1.0", "argument --max-evidence-bytes: invalid int value: '1.0'"),
+])
+def test_cli_invalid_budget_is_parser_refusal_before_spec_or_storage(monkeypatch, capsys, action, budget, message):
     monkeypatch.setattr(cli, "_spec", support.forbid)
-    args = ["register", "--spec", "missing", "--catalog", "missing", "--store-root", "missing",
+    monkeypatch.setattr(cli.sys, "argv", ["v2_runup_study.py"])
+    monkeypatch.setattr(cli.sys.modules["__main__"], "__spec__", None)
+    args = [action, "--spec", "missing", "--catalog", "missing", "--store-root", "missing",
             "--snapshot-id", "missing", "--scope", "shadow", "--as-of-month", "2025-01",
             "--event-id", EVENT_ID, "--max-evidence-bytes", budget]
     with pytest.raises(SystemExit) as caught:
@@ -194,4 +204,6 @@ def test_cli_invalid_budget_is_parser_refusal_before_spec_or_storage(monkeypatch
     assert caught.value.code == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "--max-evidence-bytes" in captured.err
+    assert captured.err.startswith("usage: v2_runup_study.py ")
+    assert captured.err.splitlines()[-1] == "v2_runup_study.py: error: " + message
+    assert captured.err.count(": error:") == 1

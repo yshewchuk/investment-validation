@@ -680,7 +680,7 @@ Whole-cohort coverage and daily-mark units remain the exploratory comparison con
 
 | Condition | Enforced outcome |
 |---|---|
-| Invalid policy/cohort/spec JSON or missing registration | `INVALID_EXPERIMENT_SPEC` before comparison; no terminal association. |
+| Invalid policy/cohort/spec JSON or missing registration | `INVALID_EXPERIMENT_SPEC` before comparison; no terminal association. Post-parser results are one JSON document, exit 0 on success or 2 on refusal (including replayed scientific failure); argparse errors exit 2 with stderr diagnostics and empty stdout. |
 | Non-v1.0/final-read seal | `HOLDOUT_ACCESS_DENIED` before outcome access. |
 | Changed request/source/environment or corrupt seal | `EXPERIMENT_IDENTITY_CONFLICT`; no outcome-slot access or replacement. |
 | Registration population/holdout refusal | Native typed failure; no reservation or attempted variant. |

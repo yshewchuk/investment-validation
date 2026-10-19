@@ -1,5 +1,6 @@
 """Registration/recording boundaries over committed synthetic daily chains."""
 import json
+import os
 from contextlib import contextmanager
 from datetime import datetime
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from engine.v2.foundation import (
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
+from experiments import native_gate_worker as staged
 from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
 from experiments import registered_runup as study
@@ -73,22 +75,25 @@ def assert_refusal(error, code, message, *, category="validation", retryable=Fal
     assert error.problem.retryable is retryable
 
 
-def direct_comparison(source):
-    return comparison.compare_runup_exits(source[3], source[4], as_of_month="2025-01",
-        document={"event_ids": [EVENT_ID], "fill_alpha": 0.5,
+def direct_comparison(source, *, snapshot=None, as_of_month="2025-01", document=None):
+    return comparison.compare_runup_exits(source[3], snapshot or source[4], as_of_month=as_of_month,
+        document=document if document is not None else {"event_ids": [EVENT_ID], "fill_alpha": 0.5,
                   "threshold_units": "entry_debit_fraction",
                   "arms": [{"arm_id": "candidate", "target_pnl": 0.25, "stop_pnl": -0.5}]})
 
 
-def expected_success(registration, report):
-    report_ref = to_document(artifact_reference(
+def expected_result(registration, report=None, *, failure_details=None):
+    report_ref = None if report is None else to_document(artifact_reference(
         canonical_json(report).encode(), "native_experiment_report.v1.0"))
     outcome = {"schema_version": "native_experiment_outcome.v1.0",
         "run_id": registration.run_id, "variant_id": registration.variant_id,
-        "attempted_variants": 1, "failure_code": None, "failure_details": {},
+        "attempted_variants": 1,
+        "failure_code": None if failure_details is None else "EXPERIMENT_VARIANT_FAILED",
+        "failure_details": {} if failure_details is None else failure_details,
         "report_ref": report_ref, "ledger_destination": None,
         "ledger_row": {"id": "synthetic-runup-study", "spec_hash": registration.variant_id,
-                       "date": "2025-01-15", "stage": "ran", "oos_mean_mid": "",
+                       "date": "2025-01-15", "stage": "ran" if failure_details is None else "failed",
+                       "oos_mean_mid": "",
                        "sharpe_trade": "", "promoted": "False"}}
     receipt = {"schema_version": "native_experiment_completion.v1.0",
         "outcome_ref": to_document(artifact_reference(
@@ -105,10 +110,32 @@ def assert_saved_artifacts(source, result, report):
     for document, ref in ((report, result["outcome"]["report_ref"]),
             (result["outcome"], result["receipt"]["outcome_ref"]),
             (result["receipt"], result["receipt_ref"])):
-        assert source[2].read_verified(from_document(ArtifactRef, ref)) == canonical_json(document).encode()
+        if ref is None:
+            assert document is None
+        else:
+            assert source[2].read_verified(from_document(ArtifactRef, ref)) == canonical_json(document).encode()
     saved = evidence(source)[0]
     assert saved["native_smoke"] == result["receipt"]["outcome_ref"]
     assert saved["native_smoke_receipt"] == result["receipt_ref"]
+
+
+def missing_leg_details():
+    return {"requested_count": 1, "admitted_count": 1, "selected_count": 1,
+            "compared_count": 0, "arm_count": 2, "trade_id": EVENT_ID,
+            "session": "2024-04-24", "stage": "common_horizon_coverage"}
+
+
+def cli_arguments(source, tmp_path, *, snapshot=None, scope="shadow", as_of_month="2025-01",
+                  event_ids=None):
+    path = tmp_path / "spec.json"
+    path.write_text(canonical_json(vars(specification())))
+    catalog = source[0].execute("PRAGMA database_list").fetchone()[2]
+    args = ["--spec", str(path), "--catalog", catalog, "--store-root", str(source[2].root),
+            "--snapshot-id", (snapshot or source[4]).snapshot_id, "--scope", scope,
+            "--as-of-month", as_of_month]
+    for event_id in [EVENT_ID] if event_ids is None else event_ids:
+        args.extend(["--event-id", event_id])
+    return args
 
 
 def test_register_is_metadata_only_idempotent_and_not_attempted(source, monkeypatch):
@@ -177,7 +204,7 @@ def test_success_preserves_json_report_and_terminal_replay_reads_no_market(sourc
     registration = invoke(source, study.register_runup)
     monkeypatch.setattr(outcomes, "ledger_append", forbid)
     result = invoke(source, study.run_runup)
-    assert result == expected_success(registration, report_expected)
+    assert result == expected_result(registration, report_expected)
     assert_saved_artifacts(source, result, report_expected)
     assert result["variant_id"] == registration.variant_id
     assert result["replayed"] is False
@@ -381,18 +408,16 @@ def test_late_missing_leg_records_whole_candidate_failure_and_replays(source, mo
     rows = [row for row in chain_rows() if not (row["obs_date"] == DATES[8]
             and row["strike"] == 100 and row["right"] == "P")]
     snapshot = commit(source[:3], rows, scope="incomplete")
-    invoke(source, study.register_runup, snapshot=snapshot)
+    registration = invoke(source, study.register_runup, snapshot=snapshot)
+    expected = expected_result(registration, failure_details=missing_leg_details())
     result = invoke(source, study.run_runup, snapshot=snapshot)
-    outcome = result["outcome"]
-    assert outcome["attempted_variants"] == 1
-    assert outcome["failure_code"] == "EXPERIMENT_VARIANT_FAILED"
-    assert outcome["failure_details"]["stage"] == "common_horizon_coverage"
-    assert outcome["failure_details"]["compared_count"] == 0
-    assert outcome["report_ref"] is None
+    assert result == expected
+    assert_saved_artifacts(source, result, None)
     monkeypatch.setattr(study, "compare_runup_exits", forbid)
     source[3].scans.clear()
     replay = invoke(source, study.run_runup, snapshot=snapshot)
-    assert {**replay, "replayed": False} == result
+    assert replay == {**expected, "replayed": True}
+    assert_saved_artifacts(source, replay, None)
     assert all(name == "earnings_events" for name, _ in source[3].scans)
 
 
@@ -412,7 +437,7 @@ def test_resource_failure_leaves_outcome_slot_free(source, monkeypatch):
 def test_interrupted_completion_reconciles_intent_without_rewalking(source, monkeypatch):
     report = direct_comparison(source)
     registration = invoke(source, study.register_runup)
-    expected = expected_success(registration, report)
+    expected = expected_result(registration, report)
     publish = source[2].publish_bytes
     def interrupted(payload, *, schema_ref, **kwargs):
         if schema_ref == "native_experiment_completion.v1.0":
@@ -452,18 +477,27 @@ def test_multiple_events_have_exact_complete_pairs(source):
     assert {row["entry_cost"] for row in report["rows"]} == {6.0, 12.0}
 
 
-def test_cli_register_run_and_replay_emit_one_document(source, tmp_path, capsys):
-    spec = specification()
-    path = tmp_path / "spec.json"
-    path.write_text(canonical_json({**vars(spec), "arms": list(spec.arms), "folds": []}))
-    catalog = source[0].execute("PRAGMA database_list").fetchone()[2]
-    args = ["--spec", str(path), "--catalog", catalog, "--store-root", str(source[2].root),
-            "--snapshot-id", source[4].snapshot_id, "--scope", "shadow", "--as-of-month", "2025-01",
-            "--event-id", EVENT_ID]
-    expected_registration, _ = native.prepare_native_registration(source[3], spec,
-        code_root=study.ROOT, snapshot=source[4], scope="shadow", as_of_month="2025-01",
-        event_ids=[EVENT_ID])
-    report_expected = direct_comparison(source)
+@pytest.mark.parametrize("scope,month,cohort", [
+    ("shadow", "2025-01", "original"), ("cli-shadow", "2025-02", "second"),
+    ("cli-paired", "2025-03", "both"),
+])
+def test_cli_register_run_and_replay_emit_one_document(source, tmp_path, capsys, scope, month, cohort):
+    snapshot, ids = source[4], [EVENT_ID]
+    if cohort != "original":
+        second = next(f"SECOND_{n}" for n in range(100)
+                      if not ExperimentHoldouts.random_membership(f"SECOND_{n}"))
+        rows = chain_rows() + [{**row, "ticker": "SECOND"} for row in chain_rows()]
+        events = event_rows() + [{**event_rows()[0], "event_id": second, "ticker": "SECOND"}]
+        snapshot = commit(source[:3], rows, events=events, scope=scope)
+        ids = [second] if cohort == "second" else [second, EVENT_ID]
+    binding = dict(snapshot=snapshot, scope=scope, as_of_month=month, event_ids=ids)
+    args = cli_arguments(source, tmp_path, **binding)
+    expected_registration, _ = native.prepare_native_registration(source[3], specification(),
+        code_root=study.ROOT, **binding)
+    request = {"event_ids": sorted(ids), "fill_alpha": 0.5,
+               "threshold_units": "entry_debit_fraction",
+               "arms": [{"arm_id": "candidate", "target_pnl": 0.25, "stop_pnl": -0.5}]}
+    report_expected = direct_comparison(source, snapshot=snapshot, as_of_month=month, document=request)
     capsys.readouterr()  # The independent comparison's diagnostics are not CLI output.
     assert expected_registration.run_id == "native_" + content_hash({
         "experiment_id": "synthetic-runup-study", "arm": "candidate"}).removeprefix("sha256:")
@@ -472,21 +506,146 @@ def test_cli_register_run_and_replay_emit_one_document(source, tmp_path, capsys)
         "registered": expected_registration.variant_id, "run_id": expected_registration.run_id}
     assert cli.main(["run", *args]) == 0
     first = json.loads(capsys.readouterr().out)
-    assert first == expected_success(expected_registration, report_expected)
+    assert first == expected_result(expected_registration, report_expected)
+    assert_saved_artifacts(source, first, report_expected)
     assert cli.main(["run", *args]) == 0
-    assert {**json.loads(capsys.readouterr().out), "replayed": False} == first
+    assert json.loads(capsys.readouterr().out) == {**first, "replayed": True}
 
 
-@pytest.mark.parametrize("text", ['{"experiment_id":1,"experiment_id":2}', '[]', '{', '{}',
-    canonical_json({**vars(specification()), "input_files": None}),
-    canonical_json({**vars(specification()), "input_files": 1})])
-def test_cli_bad_json_refuses_before_catalog(tmp_path, capsys, text):
+@pytest.mark.parametrize("arm,fill,units,target,stop,cost,pnl,reason", [
+    ("early_cash", 1.0, "quote_price_times_quantity", 3.0, -0.5, 4.0, 6.0, "target"),
+    ("patient_ratio", 0.0, "entry_debit_fraction", 0.75, -0.75, 8.0, 0.0, "fixed_day"),
+    ("stop_cash", 0.25, "quote_price_times_quantity", 1.5, -1.0, 7.0, -1.0, "stop"),
+])
+def test_valid_policy_values_reach_comparison_unchanged(source, arm, fill, units, target, stop, cost, pnl, reason):
+    spec = specification(primary_arm_id=arm, arms=[arm], economic_params={"fill": fill,
+        "exit": {"kind": "target_stop", "trading_days": 14, "threshold_units": units,
+                 "target_pnl": target, "stop_pnl": stop}})
+    request = {"event_ids": [EVENT_ID], "fill_alpha": fill, "threshold_units": units,
+               "arms": [{"arm_id": arm, "target_pnl": target, "stop_pnl": stop}]}
+    report_expected = direct_comparison(source, document=request)
+    registration = invoke(source, study.register_runup, spec)
+    result = invoke(source, study.run_runup, spec)
+    assert result == expected_result(registration, report_expected)
+    assert_saved_artifacts(source, result, report_expected)
+    assert report_expected["binding"]["request"] == request
+    row = next(row for row in report_expected["rows"] if row["arm_id"] == arm)
+    assert (row["entry_cost"], row["pnl"], row["reason"]) == (cost, pnl, reason)
+
+
+def test_cli_scientific_failure_and_replay_return_status_two(source, tmp_path, capsys, monkeypatch):
+    rows = [row for row in chain_rows() if not (row["obs_date"] == DATES[8]
+            and row["strike"] == 100 and row["right"] == "P")]
+    snapshot = commit(source[:3], rows, scope="incomplete")
+    registration = invoke(source, study.register_runup, snapshot=snapshot)
+    expected = expected_result(registration, failure_details=missing_leg_details())
+    args = cli_arguments(source, tmp_path, snapshot=snapshot)
+    for replayed in (False, True):
+        assert cli.main(["run", *args]) == 2
+        result = json.loads(capsys.readouterr().out)
+        assert result == {**expected, "replayed": replayed}
+        assert_saved_artifacts(source, result, None)
+        monkeypatch.setattr(study, "compare_runup_exits", forbid)
+
+
+@pytest.mark.parametrize("text,details", [
+    ('{"experiment_id":1,"experiment_id":2}', {}), ('[]', {"type": "list"}), ('{', {}), ('{}', {}),
+    (canonical_json({**vars(specification()), "input_files": None}), {}),
+    (canonical_json({**vars(specification()), "input_files": 1}), {}),
+    (canonical_json({**vars(specification()), "unused": 1}), {"fields": ["unused"]}),
+    (canonical_json({**vars(specification()), "arms": "candidate"}), {"field": "arms", "type": "str"}),
+])
+def test_cli_bad_json_refuses_before_catalog(tmp_path, capsys, text, details):
     path = tmp_path / "spec.json"
     path.write_text(text)
     args = ["register", "--spec", str(path), "--catalog", str(tmp_path / "missing"),
             "--store-root", str(tmp_path / "store"), "--snapshot-id", "missing", "--scope", "shadow",
             "--as-of-month", "2025-01", "--event-id", EVENT_ID]
     assert cli.main(args) == 2
-    assert json.loads(capsys.readouterr().out)["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert json.loads(capsys.readouterr().out) == {"refused": "INVALID_EXPERIMENT_SPEC", "details": details}
+    assert not (tmp_path / "missing").exists()
+    assert not (tmp_path / "store").exists()
+
+
+@pytest.mark.test_timeout(5)
+@pytest.mark.parametrize("kind", ["symlink", "directory", "fifo", "oversized"])
+def test_cli_spec_filesystem_refusals_precede_catalog(tmp_path, capsys, monkeypatch, kind):
+    path = tmp_path / "spec.json"
+    payload = canonical_json(vars(specification())).encode()
+    if kind == "symlink":
+        target = tmp_path / "target.json"
+        target.write_bytes(payload)
+        path.symlink_to(target)
+    elif kind == "directory":
+        path.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        path.write_bytes(payload + b" " * (16_777_217 - len(payload)))
+    opened, original_open = [], os.open
+
+    def observe_open(name, flags, *args, **kwargs):
+        if os.fspath(name) == str(path):
+            assert flags & os.O_NOFOLLOW and flags & os.O_NONBLOCK
+            opened.append(name)
+        return original_open(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(staged.os, "open", observe_open)
+    monkeypatch.setattr(cli, "connect", forbid)
+    args = ["register", "--spec", str(path), "--catalog", str(tmp_path / "missing"),
+            "--store-root", str(tmp_path / "store"), "--snapshot-id", "missing", "--scope", "shadow",
+            "--as-of-month", "2025-01", "--event-id", EVENT_ID]
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().out) == {"refused": "INVALID_EXPERIMENT_SPEC", "details": {}}
+    assert opened == [str(path)]
+    assert not (tmp_path / "missing").exists()
+    assert not (tmp_path / "store").exists()
+    if kind == "symlink":
+        assert target.read_bytes() == payload
+
+
+@pytest.mark.parametrize("grows", [False, True])
+def test_cli_spec_reads_inclusive_limit_with_bounded_growth_check(tmp_path, monkeypatch, grows):
+    path = tmp_path / "spec.json"
+    payload = canonical_json(vars(specification())).encode()
+    path.write_bytes(payload + b" " * (16_777_216 - len(payload)))
+    original_fstat, original_fdopen = os.fstat, os.fdopen
+    reads = []
+
+    def grow_after_stat(fd):
+        metadata = original_fstat(fd)
+        if grows:
+            with path.open("ab") as stream:
+                stream.write(b" ")
+        return metadata
+
+    @contextmanager
+    def bounded_stream(*args, **kwargs):
+        with original_fdopen(*args, **kwargs) as stream:
+            def read(size):
+                assert size == 16_777_217
+                reads.append(size)
+                return stream.read(size)
+            yield SimpleNamespace(read=read)
+
+    monkeypatch.setattr(staged.os, "fstat", grow_after_stat)
+    monkeypatch.setattr(staged.os, "fdopen", bounded_stream)
+    if grows:
+        with pytest.raises(OpsError) as caught:
+            cli._spec(path)
+        assert_refusal(caught.value, "INVALID_EXPERIMENT_SPEC", "native staged document exceeds its bound")
+    else:
+        assert cli._spec(path) == specification()
+    assert reads == [16_777_217]
+
+
+def test_cli_valid_spec_requires_existing_catalog(tmp_path, capsys):
+    path = tmp_path / "spec.json"
+    path.write_text(canonical_json(vars(specification())))
+    args = ["register", "--spec", str(path), "--catalog", str(tmp_path / "missing"),
+            "--store-root", str(tmp_path / "store"), "--snapshot-id", "missing", "--scope", "shadow",
+            "--as-of-month", "2025-01", "--event-id", EVENT_ID]
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().out) == {"refused": "RESOURCE_UNAVAILABLE"}
     assert not (tmp_path / "missing").exists()
     assert not (tmp_path / "store").exists()

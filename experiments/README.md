@@ -114,7 +114,7 @@ metadata/evidence but no market payloads. Missing common-horizon marks fail the 
 candidate, with no successful report or survivor subset. Supported scientific failures
 become immutable terminals; resource interruptions leave publication resumable.
 
-The CLI emits one JSON document and exits 0 on success, 2 on refusal. Run returns
+After argument parsing, the CLI emits one JSON document and exits 0 on success, 2 on refusal (including replayed scientific failure). Argparse errors exit 2 with stderr diagnostics and empty stdout. Run returns
 `variant_id`, `run_id`, `replayed`, `outcome`, `receipt` and `receipt_ref`;
 `receipt.report_ref` identifies canonical comparison JSON in the artifact store.
 Its existing exploratory report schema/mode stays unchanged; the enclosing native
