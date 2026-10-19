@@ -37,7 +37,14 @@ calendar in bounded batches (ticker groups, one year
 partition at a time; peak memory is a function of the batch, never of the
 table; slice 2 sets a hard rows-and-bytes cap per group or partition, splits an
 oversized one into sub-batches instead of loading it whole, and its memory test
-covers that case) and publishes `feature_panel` as a new dataset version of the same
+covers that case). Rolling and history features (`panel_math`, `regime`,
+`runup_math`) stay continuous across sub-batch boundaries. Finite-lookback
+features read an overlap of prior history at least as long as the lookback
+(overlap rows are not emitted twice). Expanding or recursive history (counts,
+means, seeded EMAs, uncapped streaks) cannot be recovered from a bounded
+overlap and carries explicit prefix state into the next sub-batch. A
+boundary test compares capped output with an uncapped reference. The job
+publishes `feature_panel` as a new dataset version of the same
 snapshot lineage. Row math is `panel_math`, `regime` and `runup_math` only;
 `scan_panel_row` and the batch share them, so a forward row equals the stored
 row for the same event and the same `decision_session` and `history_start`
@@ -159,7 +166,8 @@ version instead of the latest `finality`/`features` job.
 Estimates are added lines (code / test / doc); each slice is its own PR.
 
 1. This design and the contract text (docs only): 0 / 0 / ~190.
-2. Native panel producer: batch job, shared-math equality test, bounded memory
+2. Native panel producer: batch job, shared-math equality test, sub-batch
+   boundary test (capped vs uncapped output), bounded memory
    test on a synthetic wide snapshot, publish as a dataset version (add):
    ~380 / ~300 / ~30.
 3. Tier-4 coverage table and resolver, per member, with the section 4

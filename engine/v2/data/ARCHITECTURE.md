@@ -49,12 +49,14 @@ For a computable label, `available_as_of_date` is post-close date plus one
 calendar day, the native computed-moves day-clock convention. It is a modeled
 availability floor, not evidence of actual source publication or finality.
 Training/research consumers must separately admit holdouts and enforce their
-label clock; existing training recipes' tolerance is not changed here.
+label clock.
 `input_hash` binds the actual typed projections (including invalid IV scalars),
 while `source_id` is only a caller declaration, never verified provenance.
 The builder neither reads/writes files nor registers/publishes a snapshot;
 physical event isolation, source verification, feature reconstruction and
-registered evaluation remain separate slices. There is no production caller.
+registered evaluation are outside the builder. There is no production caller.
+Text columns carry no `null_policy`; null and provenance rules for them live in
+the table-level `coverage_semantics` and `provenance_semantics`.
 `RESULT_LIMIT_EXCEEDED` and `CONTRACT_MISMATCH` conditions are in the failure
 table. No cache, retries or transactions.
 
