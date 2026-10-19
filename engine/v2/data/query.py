@@ -298,6 +298,12 @@ def _normalized_key_bound(bound, contract: TableContract) -> tuple:
             raise ValueError("invalid bound scalar")
         if isinstance(value, float) and (value != value or value in (float("inf"), -float("inf"))):
             raise ValueError("nonfinite bound scalar")
+        # Some strftime platforms omit low-year padding. Admit only the exact
+        # inspector spelling; neither stored identities nor query syntax change.
+        if (kind.startswith("timestamp") and 0 < value.find("-") < 4
+                and time_formats.format_naive_timestamp(datetime.strptime(
+                    value.zfill(26), time_formats.NAIVE_TIMESTAMP_FORMAT)) == value):
+            value = value.zfill(26)
         row[name] = parse_time_bound(value) if kind.startswith("timestamp") else value
     return order_key(row, contract)
 

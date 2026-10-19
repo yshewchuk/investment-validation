@@ -214,7 +214,7 @@ def pytest_runtest_teardown(item, nextitem):
 #
 # NOT grouped, and why: the ~30 other tests that launch a real worker
 # subprocess through `Service`/`tests.ops_support.TEST_POLICY` (in
-# test_v2_data_import.py, test_v2_data_rebuild_rollback.py,
+# tests/v2/data/test_v2_data_import.py, tests/v2/data/test_rebuild_rollback.py,
 # test_v2_ops_store_barrier.py, test_v2_ops_supervised_legacy.py,
 # tests/v2/ops/test_v2_ops_nightly_completion.py, and the rest of test_v2_ops_runtime.py
 # and test_v2_ops_executor_faults.py already covered above) each use their

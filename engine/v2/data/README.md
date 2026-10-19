@@ -34,7 +34,9 @@ membership-bound planner. `Repository.scan_population_bound(...)` returns the
 candidate-row bound for one pinned snapshot and selection without opening bytes.
 `query.fragment_key_bounds(record, contract)` validates full-key metadata before
 pruning on every planning path and returns comparable endpoints, or `None` for
-unknown/null-bearing ranges. `query.parse_time_bound(value)` parses a date or
+unknown/null-bearing ranges. Stored unpadded low-year timestamp bounds are accepted only
+when the shared formatter exactly reproduces their spelling; stored identities stay unchanged.
+`query.parse_time_bound(value)` parses a date or
 timestamp to a naive UTC datetime, refusing `CONTRACT_MISMATCH` on invalid input.
 
 | Module | Names |

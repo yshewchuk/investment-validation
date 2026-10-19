@@ -174,19 +174,29 @@ def test_phase1_baseline_inventory_matches_active_suite():
     assert resolved <= set(phase1_suite(ROOT))
 
 
+_COVERAGE_RELOCATIONS = (
+    ("tests/test_v2_data_legacy_materialization.py", "tests/v2/data/test_legacy_materialization.py", (1, 2)),
+    ("tests/test_v2_data_rebuild_rollback.py", "tests/v2/data/test_rebuild_rollback.py", (1, 2)),
+    ("tests/test_v2_data_import.py", "tests/v2/data/test_v2_data_import.py", (1, 2)),
+    ("tests/test_v2_data_reference_inputs.py", "tests/v2/data/test_v2_data_reference_inputs.py", (1, 2)),
+    ("tests/test_checks_phase2_corpus_parity.py", "tests/v2/integration/test_checks_phase2_corpus_parity.py", (2,)),
+    ("tests/test_v2_ops_legacy_workflows.py", "tests/v2/ops/test_v2_ops_legacy_workflows.py", (1,)),
+)
+
+
 @pytest.mark.parametrize("phase, expected_version", [
-    (1, "phase1_coverage_suite.v15"),
-    (2, "phase2_coverage_suite:bdb9a12191eaa8089e77c38c3de9bb63eab176f28b4f5899db6631e32b258b1f"),
+    (1, "phase1_coverage_suite.v16"),
+    (2, "phase2_coverage_suite:ace14ac200b652562d90dfee0537890e1b485cc16d28a6930b19eb307c6b0911"),
 ])
-def test_materialization_moves_refresh_both_coverage_inventories(phase, expected_version):
+def test_test_layout_moves_refresh_both_coverage_inventories(phase, expected_version):
     from checks import v2_coverage_ratchet as coverage
 
     baseline = json.loads((ROOT / f"checks/v2_coverage_ratchet_phase{phase}_baseline.json").read_text())
     active = coverage.phase1_suite() if phase == 1 else coverage.phase2_suite()
     assert baseline["suite_version"] == expected_version
-    for name in ("legacy_materialization", "rebuild_rollback"):
-        old, new = f"tests/test_v2_data_{name}.py", f"tests/v2/data/test_{name}.py"
-        assert new in baseline["test_files"] and new in active
+    for old, new, phases in _COVERAGE_RELOCATIONS:
+        assert (new in baseline["test_files"]) == (phase in phases)
+        assert (new in active) == (phase in phases)
         assert old not in baseline["test_files"] and old not in active
     if phase == 1:
         assert coverage.PHASE1_SUITE_VERSION == expected_version
@@ -202,15 +212,15 @@ def test_materialization_moves_refresh_both_coverage_inventories(phase, expected
     (2, "phase2_coverage_suite:41d5881061353297d37e06599adeec4ae5c3d1efe7ae89c92e259e123dc1d451",
      "a8f009eb0687b65b502d6b9e4f2e0b9e4677073c66487d23dd7ef8184a1c3205"),
 ])
-def test_materialization_moves_preserve_historical_coverage(phase, old_version, original_digest):
+def test_test_layout_moves_preserve_historical_coverage(phase, old_version, original_digest):
     """Reverse only the relocations and compare the entire historical artifact.
 
     Literal digests pin the pre-move baselines at 9d754db3, including package
     counts, percentages, source hashes, serial mode and every Phase 2 outcome.
     """
     raw = (ROOT / f"checks/v2_coverage_ratchet_phase{phase}_baseline.json").read_text()
-    for name in ("legacy_materialization", "rebuild_rollback"):
-        raw = raw.replace(f"tests/v2/data/test_{name}.py", f"tests/test_v2_data_{name}.py")
+    for old, new, _phases in _COVERAGE_RELOCATIONS:
+        raw = raw.replace(new, old)
     restored = json.loads(raw)
     restored["suite_version"] = old_version
     canonical = json.dumps(restored, sort_keys=True, separators=(",", ":")).encode()

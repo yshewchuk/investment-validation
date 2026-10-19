@@ -3,7 +3,7 @@
 * Tier 0: every ``LEGACY_REFERENCE_INPUTS_V1`` path equals the legacy constant
   that defines it, relative to ``engine.paths.ROOT``.
 * ``plan_import`` resolution and refusals on a synthetic legacy root
-  (``tests.test_v2_data_import.build_legacy_store``).
+  (``tests.v2.data.test_v2_data_import.build_legacy_store``).
 * Imports through a real ``Service``: the exact rows recorded per receipt, and
   a model-only change that reuses the snapshot while recording new refs.
 * Schema v5: checksummed, idempotent, append-only, committed receipts only.
@@ -53,7 +53,7 @@ from tests.test_v2_data_catalog import (
     catalog,
     insert_receipt,
 )
-from tests.test_v2_data_import import (
+from tests.v2.data.test_v2_data_import import (
     REFERENCE_MODEL_ID,
     ROOT,
     _run_until_terminal,

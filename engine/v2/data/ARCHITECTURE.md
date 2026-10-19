@@ -34,7 +34,9 @@ fetch or *when* to run a job (`engine/v2/ops`, a caller, owns that).
 Repository scans merge one transitively overlapping full-primary-key range group at
 a time. Disjoint inspected fragment ranges therefore keep one active fragment stream;
 unknown bounds retain the full merge fallback. Bounds use the same typed key ordering
-as decoded rows. Shared bound admission precedes pruning in scan, population-bound,
+as decoded rows. Stored unpadded low-year timestamp spellings must round-trip exactly through
+the shared formatter; admission never rewrites their content identities.
+Shared bound admission precedes pruning in scan, population-bound,
 dependency and pure query planning. Null-bearing keys prove no range: they
 retain the full merge fallback and downstream row validation. Object verification,
 footer counts, strict global order and result limits remain mandatory; batches are provisional until exhaustion.

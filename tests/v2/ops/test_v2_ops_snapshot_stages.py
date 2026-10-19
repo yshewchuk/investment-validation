@@ -2,7 +2,7 @@
 
 Real SQLite catalog, real ArtifactStore, real ``Service`` under TEST_POLICY,
 and a real committed synthetic snapshot (the six read-plan tables from
-``tests/test_v2_data_legacy_materialization.py``). The ``legacy_materialize``
+``tests/v2/data/test_legacy_materialization.py``). The ``legacy_materialize``
 kind runs its real worker subprocess end to end.
 
 Worker-side seam for the scoring stage: the real legacy scorer cannot run on
@@ -231,7 +231,7 @@ def record_reference_inputs(case, snapshot_id, receipt_id, *, registry=b'{"model
     # pnl_sim_history/recalibration_pairs (task brief 2026-09-14): required
     # kinds `pinned_materialization_refs` now refuses a plan without --
     # fold="202401" mirrors the value every other synthetic-fixture writer in
-    # this repo uses (tests/v2/ops/test_v2_data_import.py::write_reference_inputs).
+    # this repo uses (tests/v2/data/test_v2_data_import.py::write_reference_inputs).
     published = (("calendar", b"date\n2020-01-02\n2021-01-04\n"), ("model_registry", registry),
                 ("pnl_sim_history", _PNL_SIM_HISTORY_BYTES),
                 ("recalibration_pairs", _RECALIBRATION_PAIRS_BYTES))

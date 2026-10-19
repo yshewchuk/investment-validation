@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pytest
 
+from engine.v2.contracts import Problem
 from engine.v2.contracts.data import ColumnContract, DataQuery, KeyPredicate, TableContract
 from engine.v2.data import manifests, objects
 from engine.v2.data import query as data_query
@@ -271,6 +272,81 @@ def test_timestamp_bounds_share_row_key_normalization(storage, monkeypatch):
     assert state["maximum"] == 1 and state["active"] == 0
 
 
+@pytest.mark.parametrize("physical", ["timestamp[us]", "timestamp[ns]"])
+@pytest.mark.parametrize("value, expected", [
+    ("2024-01-03", {"key": datetime(2024, 1, 3), "sequence": 0, "payload": "p001/0"}),
+    ("2024-01-04", {"key": datetime(2024, 1, 4), "sequence": 0, "payload": "p001/1"}),
+    ("2024-01-02T19:00:00-05:00",
+     {"key": datetime(2024, 1, 3), "sequence": 0, "payload": "p001/0"}),
+    ("2024-01-04T05:30:00+05:30",
+     {"key": datetime(2024, 1, 4), "sequence": 0, "payload": "p001/1"}),
+])
+def test_timestamp_leading_key_endpoint_filters_keep_literal_membership_and_rows(
+        storage, monkeypatch, physical, value, expected):
+    repository, query, records, _expected = _build(storage, [
+        [(datetime(2024, 1, 1), 0), (datetime(2024, 1, 2), 0)],
+        [(datetime(2024, 1, 3), 0), (datetime(2024, 1, 4), 0)],
+        [(datetime(2024, 1, 5), 0), (datetime(2024, 1, 6), 0)],
+    ], physical=physical)
+    query = replace(query, max_result_rows=2,
+                    key_filter=(KeyPredicate(column="key", operator="eq", values=(value,)),))
+    population = data_query.plan_scan_population(
+        _contract(physical), records, key_filter=query.key_filter)
+    assert population.records == (records[1],)
+    assert population.row_count == 2
+    assert repository.scan_population_bound(
+        query.snapshot_id, table_name="disjoint_scan", table_contract_ref=query.table_contract_ref,
+        key_filter=query.key_filter) == 2
+    plan = repository.explain_dependencies(query, table_name="disjoint_scan")
+    assert [(item.fragment_ref.fragment_id, item.estimated_rows) for item in plan.dependencies] == [
+        (records[1].fragment_id, 2)]
+    state = _track_streams(monkeypatch)
+    assert [row for batch in _scan(repository, query) for row in batch.to_pylist()] == [expected]
+    assert state == {"active": 0, "maximum": 1, "opened": [records[1].fragment_id]}
+
+
+@pytest.mark.parametrize("unpadded_platform", [False, True])
+def test_inspected_year_one_timestamp_bounds_remain_readable(storage, monkeypatch, unpadded_platform):
+    if unpadded_platform:
+        # Reproduce platforms whose %Y writes year 1 as "1", even on Python
+        # versions that always pad it. Keep the real publication/inspection path.
+        original_inspector_format = objects._format_naive_timestamp
+        original_row_format = data_query.time_formats.format_naive_timestamp
+        monkeypatch.setattr(objects, "_format_naive_timestamp",
+                            lambda micros: original_inspector_format(micros).lstrip("0"))
+        monkeypatch.setattr(data_query.time_formats, "format_naive_timestamp",
+                            lambda value: original_row_format(value).lstrip("0"))
+    repository, query, records, _expected = _build(storage, [
+        [(datetime(1, 1, 1), 0), (datetime(1, 1, 2), 0)],
+    ], physical="timestamp[us]")
+    query = replace(query, key_filter=(KeyPredicate(
+        column="key", operator="in", values=("0001-01-01", "0001-01-02")),))
+    # strftime's year padding differs by platform; use the existing inspector's
+    # actual wire spelling without rewriting any persisted fragment identity.
+    original = records[0]
+    year = "1" if unpadded_platform else datetime(1, 1, 1).strftime("%Y")
+    assert original.primary_key_min == (f"{year}-01-01T00:00:00.000000", 0)
+    assert original.primary_key_max == (f"{year}-01-02T00:00:00.000000", 0)
+    population = data_query.plan_scan_population(
+        _contract("timestamp[us]"), records, key_filter=query.key_filter)
+    assert population.records == (original,)
+    assert population.row_count == 2
+    assert repository.scan_population_bound(
+        query.snapshot_id, table_name="disjoint_scan", table_contract_ref=query.table_contract_ref,
+        key_filter=query.key_filter) == 2
+    plan = repository.explain_dependencies(query, table_name="disjoint_scan")
+    assert [(item.fragment_ref.fragment_id, item.estimated_rows) for item in plan.dependencies] == [
+        (original.fragment_id, 2)]
+    state = _track_streams(monkeypatch)
+    assert [row for batch in _scan(repository, query) for row in batch.to_pylist()] == [
+        {"key": datetime(1, 1, 1), "sequence": 0, "payload": "p000/0"},
+        {"key": datetime(1, 1, 2), "sequence": 0, "payload": "p000/1"},
+    ]
+    assert state == {"active": 0, "maximum": 1, "opened": [original.fragment_id]}
+    assert repository._table_records(
+        repository.resolve(query.snapshot_id), "disjoint_scan", query.table_contract_ref)[1] == records
+
+
 @pytest.mark.parametrize("physical, keys", [
     ("string", ["A", "B", "C", "D"]),
     ("float64", [-2.5, -0.5, 1.5, 2.5]),
@@ -289,6 +365,14 @@ def test_other_supported_key_types_keep_exact_order(storage, monkeypatch, physic
     ("timestamp[us]", "invalid-private-timestamp"), ("timestamp[us]", 1),
     ("timestamp[us]", "0001-01-01T00:00:00+01:00"),
     ("timestamp[us]", "9999-12-31T23:59:59-01:00"),
+    ("timestamp[us]", "1-02-29T00:00:00.000000"),
+    ("timestamp[us]", "1-1-01T00:00:00.000000"),
+    ("timestamp[us]", "1-01-01T00:00:00.00000"),
+    ("timestamp[us]", "1-01-01T00:00:00.0000000"),
+    ("timestamp[us]", "1-01-01 00:00:00.000000"),
+    ("timestamp[us]", "1-01-01T00:00:00.000000Z"),
+    ("timestamp[us]", "1-01-01T00:00:00.000000\n"),
+    ("timestamp[us]", "01-01-01T00:00:00.000000"),
 ])
 def test_invalid_float_and_timestamp_metadata_is_redacted(storage, monkeypatch, physical, bad):
     keys = [(1.0, 0), (2.0, 0)] if physical == "float64" else [
@@ -349,14 +433,20 @@ def test_public_time_bound_parser_has_literal_utc_oracles(value, expected):
 
 
 @pytest.mark.parametrize("value", ["private-invalid", "2024-02-30", None,
+                                   "2024-02-30T00:00:00.000000",
+                                   "2023-02-29T00:00:00.000000",
+                                   "2024-13-01T00:00:00.000000",
+                                   "2024-01-01T25:00:00.000000",
+                                   "2024-01-01T00:00:60.000000",
+                                   "1-01-01T00:00:00.000000",
                                    "0001-01-01T00:00:00+01:00",
                                    "9999-12-31T23:59:59-01:00"])
 def test_public_time_bound_parser_refuses_with_redacted_problem(value):
     with pytest.raises(DataError) as error:
         data_query.parse_time_bound(value)
-    assert error.value.code == "CONTRACT_MISMATCH"
-    assert error.value.problem.message == "a time bound is not a parseable date or timestamp"
-    assert error.value.problem.details == {}
+    assert error.value.problem == Problem(
+        code="CONTRACT_MISMATCH", category="validation", retryable=False,
+        message="a time bound is not a parseable date or timestamp")
 
 
 def test_closing_overlap_group_closes_every_primed_stream(storage, monkeypatch):

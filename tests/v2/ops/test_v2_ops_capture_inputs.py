@@ -55,7 +55,7 @@ from engine.v2.foundation import to_document  # noqa: E402
 from engine.v2.ops.capture_inputs import capture  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.legacy_adapter import copy_read_set  # noqa: E402
-from tests.test_v2_data_import import build_legacy_store  # noqa: E402
+from tests.v2.data.test_v2_data_import import build_legacy_store  # noqa: E402
 
 SESSION = "2024-01-01"
 TICKER = "fx_ticker"  # build_legacy_store's own fixed placeholder ticker
@@ -96,7 +96,7 @@ def _calendar_dates_ending_at(session: str, n: int) -> list[str]:
 
 def _build_fixture(root: Path, *, year: int = 2024, with_orats: bool = True) -> None:
     """A synthetic legacy root: TIER2 tables + reference inputs (via the
-    already-reviewed ``build_legacy_store``, ``tests/test_v2_data_import.py``),
+    already-reviewed ``build_legacy_store``, ``tests/v2/data/test_v2_data_import.py``),
     a calendar covering ``SESSION`` with 20 days of history, an empty ledger,
     and (optionally) cached ORATS market-wide files for ``SESSION``.
     """
