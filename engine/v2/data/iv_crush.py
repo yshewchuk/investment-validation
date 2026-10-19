@@ -86,8 +86,10 @@ def build_rows(ticker, events, daily, *, source_id, max_rows=10000):
     """One target-or-skip row per supplied event, sorted by canonical event date.
 
     ``events`` contains event_date/session; ``daily`` contains date/iv30 for
-    this ticker only. Both are bounded independently by max_rows. Other fields
-    are ignored, except that an optional ticker must agree. ``source_id`` is a
+    this ticker only. Callers must supply ``iv30`` in vol points expressed as
+    percent (50 for 50% IV); this builder does not normalize or validate scale.
+    Both are bounded independently by max_rows. Other fields are ignored,
+    except that an optional ticker must agree. ``source_id`` is a
     caller assertion. The input hash binds projections, not original objects,
     source publication, completeness or finality. No I/O or holdout admission.
     """
