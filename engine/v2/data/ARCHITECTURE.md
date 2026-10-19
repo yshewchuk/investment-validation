@@ -45,7 +45,8 @@ footer counts, strict global order and result limits remain mandatory; batches a
 
 **IV-crush target construction.** `iv_crush.build_rows` is a pure, bounded,
 single-ticker builder for `iv_crush_table.IV_CRUSH_CONTRACT`
-(`iv_crush_targets.v1`). It consumes caller-supplied event date/session and
+(`iv_crush_targets.v2`; v2 because the definition hash changed when column
+null rules moved to table-level semantics, even though meaning is unchanged). It consumes caller-supplied event date/session and
 daily date/IV30 projections, never a panel forecast or a store. Callers must
 supply IV30 in vol points expressed as percent (50 for 50% IV); the builder
 does not normalize or validate scale. Canonical and unique event/daily dates
