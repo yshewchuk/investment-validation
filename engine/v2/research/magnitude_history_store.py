@@ -1,6 +1,7 @@
 """Protected build-time history and stored-only reads through native snapshots."""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 
@@ -187,14 +188,15 @@ def materialize(repository, snapshot, context):
     return result.snapshot_ref
 
 
-def _scan(repository, snapshot, context, columns, count):
-    """One explicit context predicate and manifest-derived complete row bound."""
+def _scan_iter(repository, snapshot, context, columns, count):
+    """Same predicate and bounds, yielding rows batch by batch."""
     request = DataQuery(snapshot_id=snapshot.snapshot_id,
         table_contract_ref=snapshot.table_versions[TABLE].table_contract_ref, columns=tuple(columns),
         key_filter=(KeyPredicate(column="context_id", operator="eq", values=(context["context_id"],)),),
         order_by=CONTRACT.primary_key,
         max_batch_rows=min(CONTRACT.maximum_batch_rows, count), max_result_rows=count)
-    return [row for batch in repository.scan(request, table_name=TABLE) for row in batch.to_pylist()]
+    for batch in repository.scan(request, table_name=TABLE):
+        yield from batch.to_pylist()
 
 
 def _lineage(history, context, event, cutoff):
@@ -266,23 +268,60 @@ def _validate_features(row, count):
             raise errors.fail("CONTRACT_MISMATCH", "stored history feature or missingness is invalid")
 
 
-def read_stored(repository, snapshot, context):
-    """Globally admit metadata, then decode stored columns without outcome reads."""
+def _admit_metadata(repository, snapshot, context, expected):
+    """Pass 1: admit every row's metadata; keep only a compact per-row pin."""
+    admitted = []
+    for row in _scan_iter(repository, snapshot, context, METADATA, len(expected)):
+        if len(admitted) == len(expected):
+            raise errors.fail("CONTRACT_MISMATCH", "stored history row coverage differs")
+        event, cutoff = expected[len(admitted)]
+        count = _metadata(row, context, event, cutoff)
+        light = {key: row[key] for key in METADATA if key != "history_json"}
+        admitted.append((light, hashlib.sha256(row["history_json"].encode()).digest(), count))
+    if len(admitted) != len(expected):
+        raise errors.fail("CONTRACT_MISMATCH", "stored history row coverage differs")
+    return admitted
+
+
+def _stream_features(repository, snapshot, context, admitted, keep):
+    """Pass 2: validate full rows against pass 1 while hashing them; keep full or narrowed rows."""
+    narrow = ("event_id", "context_id", "horizon_sessions", *FEATURES)
+    digest = hashlib.sha256()
+    digest.update(('{"context":' + canonical_json(context) + ',"feature_snapshot":'
+                   + canonical_json(to_document(snapshot)) + ',"rows":[').encode())
+    rows, seen = [], 0
+    for row in _scan_iter(repository, snapshot, context, (*METADATA, *FEATURES), len(admitted)):
+        if seen == len(admitted):
+            raise errors.fail("CONTRACT_MISMATCH", "stored history row count changed")
+        light, history_digest, count = admitted[seen]
+        if ({key: row[key] for key in light} != light
+                or hashlib.sha256(row["history_json"].encode()).digest() != history_digest):
+            raise errors.fail("CONTRACT_MISMATCH", "stored history count or metadata changed")
+        _validate_features(row, count)
+        digest.update((("," if seen else "") + canonical_json(row)).encode())
+        if keep is None:
+            rows.append(row)
+        elif row["event_id"] in keep:
+            rows.append({key: row[key] for key in narrow})
+        seen += 1
+    if seen != len(admitted):
+        raise errors.fail("CONTRACT_MISMATCH", "stored history row count changed")
+    digest.update(b"]}")
+    return rows, "sha256:" + digest.hexdigest()
+
+
+def read_stored(repository, snapshot, context, event_ids=None):
+    """Globally admit metadata, then decode stored columns without outcome reads.
+
+    ``event_ids=None`` returns every full row. Otherwise the same admission runs
+    but only those events' rows are returned, narrowed to the identity keys and
+    feature columns; ``inputs_id`` is the same either way."""
     if _existing(repository, context) != snapshot or set(snapshot.table_versions) != {TABLE}:
         raise errors.fail("IDENTITY_CONFLICT", "feature snapshot is not the committed context output")
     if repository.table_contract(snapshot, TABLE) != CONTRACT:
         raise errors.fail("CONTRACT_MISMATCH", "stored history contract differs")
     expected = _preflight_features(repository, snapshot, context)
-    metadata = _scan(repository, snapshot, context, METADATA, len(expected))
-    if len(metadata) != len(expected):
-        raise errors.fail("CONTRACT_MISMATCH", "stored history row coverage differs")
-    counts = [_metadata(row, context, event, cutoff) for row, (event, cutoff) in zip(metadata, expected)]
-    rows = _scan(repository, snapshot, context, (*METADATA, *FEATURES), len(expected))
-    if len(rows) != len(metadata):
-        raise errors.fail("CONTRACT_MISMATCH", "stored history row count changed")
-    for row, admitted, count in zip(rows, metadata, counts):
-        if {key: row[key] for key in METADATA} != admitted:
-            raise errors.fail("CONTRACT_MISMATCH", "stored history count or metadata changed")
-        _validate_features(row, count)
-    identity = {"context": context, "feature_snapshot": to_document(snapshot), "rows": rows}
-    return {**identity, "inputs_id": content_hash(identity)}
+    admitted = _admit_metadata(repository, snapshot, context, expected)
+    keep = None if event_ids is None else frozenset(event_ids)
+    rows, inputs_id = _stream_features(repository, snapshot, context, admitted, keep)
+    return {"context": context, "feature_snapshot": to_document(snapshot), "rows": rows, "inputs_id": inputs_id}

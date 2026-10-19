@@ -339,7 +339,7 @@ def test_non_native_computed_moves_contract_refuses_before_outcome_objects(tmp_p
 ])
 def test_changed_context_cannot_reuse_feature_snapshot(source, monkeypatch, change):
     _, output = build_history(source)
-    monkeypatch.setattr(stored, "_scan", _forbid)
+    monkeypatch.setattr(stored, "_scan_iter", _forbid)
     with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
         _read(source, output, **change)
 
@@ -364,7 +364,7 @@ def test_environment_only_drift_changes_context_and_refuses_old_feature_snapshot
     assert changed == {**identity, "context_id": content_hash(identity)}
     assert changed["context_id"] != original["context_id"]
     poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
-    monkeypatch.setattr(stored, "_scan", _forbid)
+    monkeypatch.setattr(stored, "_scan_iter", _forbid)
     monkeypatch.setattr(stored, "_prepare_history", _forbid)
     before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
@@ -397,7 +397,7 @@ def test_source_only_drift_changes_context_and_refuses_old_feature_snapshot(sour
     assert changed == {**identity, "context_id": content_hash(identity)}
     assert changed["context_id"] != original["context_id"]
     poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
-    monkeypatch.setattr(stored, "_scan", _forbid)
+    monkeypatch.setattr(stored, "_scan_iter", _forbid)
     monkeypatch.setattr(stored, "_prepare_history", _forbid)
     before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
@@ -422,7 +422,7 @@ def test_empty_folds_and_late_history_start_refuse_before_build_payloads(source,
 
 def test_source_or_output_reference_drift_refuses_before_feature_payload(source, monkeypatch):
     _, output = build_history(source)
-    monkeypatch.setattr(stored, "_scan", _forbid)
+    monkeypatch.setattr(stored, "_scan_iter", _forbid)
     with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
         entry.build(source.repository, replace(source.snapshot, calendar_version="changed"), **HISTORY_REQUEST)
     with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
@@ -472,7 +472,7 @@ def test_noncommitted_matching_receipt_refuses_before_result_resolution(source, 
         (receipt, receipt, binding["context_id"], status, scope))
     poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
     monkeypatch.setattr(stored, "_preflight_source", _forbid)
-    monkeypatch.setattr(stored, "_scan", _forbid)
+    monkeypatch.setattr(stored, "_scan_iter", _forbid)
     resolve = source.repository.resolve
 
     def guarded(snapshot_id):
@@ -518,17 +518,17 @@ def test_all_metadata_is_admitted_before_any_feature_column_decode(source, monke
 ])
 def test_each_decoded_metadata_pin_refuses_before_feature_columns(source, monkeypatch, name, value):
     _, output = build_history(source)
-    scan = stored._scan
+    scan = stored._scan_iter
     seen = []
 
     def malformed(repository, snapshot, context, columns, count):
         assert not set(columns) & set(FEATURES), "feature decode preceded complete metadata admission"
-        rows = scan(repository, snapshot, context, columns, count)
+        rows = list(scan(repository, snapshot, context, columns, count))
         rows[-1][name] = value  # Exercise row admission independently of physical fragment guards.
         seen.append(columns)
-        return rows
+        return iter(rows)
 
-    monkeypatch.setattr(stored, "_scan", malformed)
+    monkeypatch.setattr(stored, "_scan_iter", malformed)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         _read(source, output)
     assert len(seen) == 1
@@ -607,10 +607,10 @@ def test_sufficient_history_nonfinite_emas_refuse_after_real_feature_scan(long_s
     _, output = build_history(source)
     poison_outcomes(monkeypatch, source.repository, source.snapshot, [], all_outcomes=True)
     monkeypatch.setattr(stored, "_prepare_history", _forbid)
-    scan, seen, changed = stored._scan, [], []
+    scan, seen, changed = stored._scan_iter, [], []
 
     def malformed(repository, snapshot, context, columns, count):
-        rows = scan(repository, snapshot, context, columns, count)
+        rows = list(scan(repository, snapshot, context, columns, count))
         seen.append(tuple(columns))
         if tuple(columns) == (*stored.METADATA, *FEATURES):
             for row in rows:
@@ -618,9 +618,9 @@ def test_sufficient_history_nonfinite_emas_refuse_after_real_feature_scan(long_s
                     assert row["n_prior"] == 12
                     row[field] = value  # Native inspection rejects infinities before publication.
                     changed.append(field)
-        return rows
+        return iter(rows)
 
-    monkeypatch.setattr(stored, "_scan", malformed)
+    monkeypatch.setattr(stored, "_scan_iter", malformed)
     observed = _observe_long_target_validation(source, monkeypatch, field)
     before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH") as failure:
@@ -1084,7 +1084,7 @@ def test_direct_engine_accepts_rehashed_calendar_metadata_but_public_read_rederi
     latest = next(row for row in result["rows"]
                   if row["event_date"] == "2024-06-17" and row["horizon_sessions"] == 1)
     assert latest["n_prior"] == 4 and latest["mean_prior_abs_move"] == 5.5
-    monkeypatch.setattr(stored, "_scan", _forbid)
+    monkeypatch.setattr(stored, "_scan_iter", _forbid)
     with pytest.raises(DataError, match="IDENTITY_CONFLICT: feature snapshot is not the committed context output"):
         _read(source, output)
     assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
@@ -1135,13 +1135,14 @@ def test_rehashed_cross_context_or_missing_lineage_refuses_before_features(sourc
 
     monkeypatch.setattr(stored, "_event_rows", malformed)
     _, output = build_history(source)
-    scan = stored._scan
+    scan = stored._scan_iter
 
     def guarded(repository, snapshot, context, columns, count):
         assert not set(columns) & set(FEATURES)
-        return scan(repository, snapshot, context, columns, count)
+        rows = list(scan(repository, snapshot, context, columns, count))
+        return iter(rows)
 
-    monkeypatch.setattr(stored, "_scan", guarded)
+    monkeypatch.setattr(stored, "_scan_iter", guarded)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         _read(source, output)
 
@@ -1175,7 +1176,7 @@ def test_old_native_contract_refuses_before_feature_scan(source, monkeypatch):
     monkeypatch.setattr(stored, "CONTRACT", old)
     _, output = build_history(source)
     monkeypatch.setattr(stored, "CONTRACT", original)
-    monkeypatch.setattr(stored, "_scan", _forbid)
+    monkeypatch.setattr(stored, "_scan_iter", _forbid)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         _read(source, output)
 
@@ -1294,13 +1295,14 @@ def test_inconsistent_stored_history_status_refuses_before_feature_columns(sourc
 
     monkeypatch.setattr(stored, "_event_rows", malformed)
     _, output = build_history(source)
-    scan = stored._scan
+    scan = stored._scan_iter
 
     def guarded(repository, snapshot, context, columns, count):
         assert not set(columns) & set(FEATURES)
-        return scan(repository, snapshot, context, columns, count)
+        rows = list(scan(repository, snapshot, context, columns, count))
+        return iter(rows)
 
-    monkeypatch.setattr(stored, "_scan", guarded)
+    monkeypatch.setattr(stored, "_scan_iter", guarded)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         _read(source, output)
 
@@ -1370,13 +1372,14 @@ def test_lineage_digest_encoding_and_closed_types_refuse_before_features(source,
 
     monkeypatch.setattr(stored, "_event_rows", malformed)
     _, output = build_history(source)
-    scan = stored._scan
+    scan = stored._scan_iter
 
     def guarded(repository, snapshot, context, columns, count):
         assert not set(columns) & set(FEATURES)
-        return scan(repository, snapshot, context, columns, count)
+        rows = list(scan(repository, snapshot, context, columns, count))
+        return iter(rows)
 
-    monkeypatch.setattr(stored, "_scan", guarded)
+    monkeypatch.setattr(stored, "_scan_iter", guarded)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         _read(source, output)
 
@@ -1384,17 +1387,17 @@ def test_lineage_digest_encoding_and_closed_types_refuse_before_features(source,
 @pytest.mark.parametrize("name", stored.METADATA)
 def test_feature_pass_metadata_drift_with_equal_counts_never_returns_partial_rows(source, monkeypatch, name):
     _, output = build_history(source)
-    scan = stored._scan
+    scan = stored._scan_iter
     seen = []
 
     def changed(repository, snapshot, context, columns, count):
-        rows = scan(repository, snapshot, context, columns, count)
+        rows = list(scan(repository, snapshot, context, columns, count))
         if set(columns) & set(FEATURES):
             rows[-1][name] = 2 if name == "horizon_sessions" else "changed"
         seen.append(len(rows))
-        return rows
+        return iter(rows)
 
-    monkeypatch.setattr(stored, "_scan", changed)
+    monkeypatch.setattr(stored, "_scan_iter", changed)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         _read(source, output)
     assert seen == [12, 12]
@@ -1403,15 +1406,15 @@ def test_feature_pass_metadata_drift_with_equal_counts_never_returns_partial_row
 @pytest.mark.parametrize("phase", ["metadata", "features"])
 def test_scan_row_coverage_guard_prevents_a_partial_stored_result(source, monkeypatch, phase):
     _, output = build_history(source)
-    scan = stored._scan
+    scan = stored._scan_iter
 
     def truncated(repository, snapshot, context, columns, count):
         is_feature_scan = bool(set(columns) & set(FEATURES))
         if phase == "metadata":
             assert not is_feature_scan
-        rows = scan(repository, snapshot, context, columns, count)
-        return rows[:-1] if is_feature_scan == (phase == "features") else rows
+        rows = list(scan(repository, snapshot, context, columns, count))
+        return iter(rows[:-1] if is_feature_scan == (phase == "features") else rows)
 
-    monkeypatch.setattr(stored, "_scan", truncated)
+    monkeypatch.setattr(stored, "_scan_iter", truncated)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         _read(source, output)

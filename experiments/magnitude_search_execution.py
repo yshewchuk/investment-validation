@@ -34,6 +34,15 @@ def execution_limits(limits):
     return {**limits, "cpu_id": cpu}
 
 
+def fit_payload(inputs, inner, plan, execution):
+    """Canonical child payload: only the row values the fit and its matrix digests read."""
+    keep = ("event_id", "context_id", "horizon_sessions", *execution.get("features", ()))
+    features = [{name: row[name] for name in keep} for row in inputs["features"]]
+    return canonical_json({"inputs": {"features": features, "training": inputs["training"]},
+                           "inner": inner, "plan": {"horizons": plan["horizons"]},
+                           "execution": execution}).encode()
+
+
 def run_fitted_trial(inputs, inner, plan, execution, limits, progress):
     """Run only the installed fit child; commit every progress marker before its ACK."""
     # CPython's Linux affinity API rejects CPU indices at or above INT_MAX.
@@ -43,9 +52,7 @@ def run_fitted_trial(inputs, inner, plan, execution, limits, progress):
     validate_execution_limits({name: value for name, value in limits.items() if name != "cpu_id"})
     forbid_fitting("run_fitted_trial")
     forbid_legacy_fitting("run_fitted_trial")
-    payload = canonical_json({"inputs": {name: inputs[name] for name in ("features", "training")},
-                              "inner": inner, "plan": {"horizons": plan["horizons"]},
-                              "execution": execution}).encode()
+    payload = fit_payload(inputs, inner, plan, execution)
     if len(payload) > MAX_BYTES:
         raise fail("RESOURCE_LIMIT_EXCEEDED", "search execution input exceeds its byte limit")
     root = Path(__file__).resolve().parents[1]

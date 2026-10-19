@@ -618,6 +618,14 @@ derivation and native registration. `experiments/magnitude_history_report.py` co
 the existing `read_stored` plus magnitude target preflight/load/qualification APIs.
 Neither consumer modifies the build closure, stored artifact identity or final-read authority.
 
+`read_stored(repository, snapshot, context, event_ids=None)` admits every stored row exactly as before
+(receipt, contract, event isolation, lineage, metadata, feature missingness) and returns the same
+`inputs_id`. With `event_ids=None` it returns all full rows. With a collection of event IDs it streams
+the two scans in lockstep, retains only a digest of each row's `history_json`, and returns only the rows
+of those events narrowed to `event_id`, `context_id`, `horizon_sessions` and the feature columns (no
+`history_json` or other metadata), so peak memory is bounded by the batch size and the requested rows.
+Any admission failure refuses the same code as the full read; nothing is cached across calls.
+
 ## External systems and libraries
 
 Direct libraries include pandas/numpy for tabular/numerical work and pyarrow
