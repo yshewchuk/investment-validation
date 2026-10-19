@@ -21,7 +21,10 @@ session -- plus the two ticker-level refusals are stored as skipped,
 no-outcome rows carrying their reason rather than vanishing. Counting stays on
 confirmed events, so a phantom never shifts a real event's ordinal or prior
 mean. ``classify_event_reasons`` holds that reason rule on its own so the
-capture path can reuse it.
+capture path can reuse it. Both entry points collapse same-date rows first
+(the CONFIRMED one wins, else the first in input order), so the output has a
+unique ``(ticker, event_date)`` and ``build_rows`` never sees a duplicate date;
+an empty ``events`` is the ONE way either returns ``[]``.
 
 Layer 1 of ``system_rearchitecture.md`` §4.1: no ``engine.v2.ops`` and no
 legacy ``engine.*`` imports -- this module is pure numpy/pandas math, the same
@@ -62,6 +65,15 @@ ADMISSION_EVENTS = 5
 
 #: Legacy panel MIN_HISTORY: an event is admitted only when 4 or more events precede it.
 WARMUP = 4
+
+
+def _below_admission(computable: int) -> bool:
+    """Fewer than ``ADMISSION_EVENTS`` computable events can never score.
+
+    The ONE admission comparison ``build_rows`` and ``classify_event_reasons``
+    share (panel admission is k>=4), so their verdicts cannot drift apart.
+    """
+    return computable < ADMISSION_EVENTS
 
 
 def _session_move_indexed(sd, sc, t, session) -> tuple[float, np.datetime64] | None:
@@ -171,7 +183,7 @@ def build_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFrame, *
             admitted=ev.admitted, mean_prior=mean_prior, n_prior=n_prior, skipped=skipped,
             computed_at=computed_at, source_hash=source_hash, capture_id=capture_id))
 
-    if computable < ADMISSION_EVENTS:  # panel admission is k>=4, so fewer cannot score
+    if _below_admission(computable):  # panel admission is k>=4, so fewer cannot score
         return []
     return rows
 
@@ -206,6 +218,69 @@ def _event_reasons(events: pd.DataFrame) -> list[str | None]:
     return reasons
 
 
+#: Every considered-event frame must carry these (the v5 builder's inputs).
+_EVENT_COLUMNS = ("event_date", "session", "src_orats")
+
+
+def _validate_inputs(events: pd.DataFrame, sd, sc, min_scoreable: int) -> None:
+    """Public-input guard: the typed ``CONTRACT_MISMATCH`` refusal, raised first.
+
+    Both v5 entry points call it before any work, so a malformed frame or bar
+    refuses outright instead of half-building rows (phase-2 guide §11: every
+    refusal is one registered code, never a bare exception).
+    """
+    if (isinstance(min_scoreable, (bool, np.bool_))
+            or not isinstance(min_scoreable, (int, np.integer)) or min_scoreable < 0):
+        raise fail("CONTRACT_MISMATCH", "min_scoreable must be a non-negative int")
+    missing = [name for name in _EVENT_COLUMNS if name not in events.columns]
+    if missing:
+        raise fail("CONTRACT_MISMATCH",
+                   "events lacks required columns: " + ", ".join(missing))
+    if len(sd) != len(sc):
+        raise fail("CONTRACT_MISMATCH", "price series sd and sc differ in length")
+
+
+def _collapse_same_date(events: pd.DataFrame) -> pd.DataFrame:
+    """One row per event date: the CONFIRMED one, else the first in input order.
+
+    Same-date ``earnings_events`` rows (a phantom plus its confirmation) would
+    reach ``event_sequence`` as a duplicate date, so both v5 entry points
+    collapse BEFORE counting or building -- on the same frame, by the same
+    rule, so they can never disagree. A survivor keeps its first-occurrence
+    position: the input's chronological order is preserved, and the input's
+    first row still wins while every same-date candidate is unconfirmed.
+    """
+    if not len(events):
+        return events
+    reasons = _event_reasons(events)
+    kept: dict[str, int] = {}
+    confirmed: dict[str, bool] = {}
+    for position, (day, reason) in enumerate(zip(events["event_date"], reasons)):
+        key = pd.Timestamp(day).strftime("%Y-%m-%d")
+        wins = reason is None
+        if key not in kept or (wins and not confirmed[key]):
+            kept[key], confirmed[key] = position, wins
+    return events.iloc[[kept[key] for key in kept]]
+
+
+def _classify(events: pd.DataFrame, sd, sc, *, min_scoreable: int) -> list[str | None]:
+    """The reason list of an ALREADY validated, ALREADY collapsed frame."""
+    reasons = _event_reasons(events)
+    if not len(reasons):
+        return []
+    if not len(sd):
+        return ["no_price_history"] * len(reasons)
+    confirmed = computable = 0
+    for event, reason in zip(events.itertuples(), reasons):
+        if reason is None:
+            confirmed += 1
+            computable += _session_move_indexed(
+                sd, sc, event.event_date.to_datetime64(), event.session) is not None
+    if confirmed < min_scoreable or _below_admission(computable):
+        return ["ticker_too_few_events"] * len(reasons)
+    return reasons
+
+
 def classify_event_reasons(events: pd.DataFrame, sd, sc, *,
                            min_scoreable: int = MIN_SCOREABLE) -> list[str | None]:
     """The ``not_computed_reason`` of every considered event of one ticker (issue #966).
@@ -218,40 +293,43 @@ def classify_event_reasons(events: pd.DataFrame, sd, sc, *,
     (checked first -- with no closes nothing is computable, so "too few" would
     be the wrong story), else ``ticker_too_few_events`` when fewer than
     ``min_scoreable`` events are confirmed or fewer than ``ADMISSION_EVENTS``
-    compute. Pure, no I/O and no clock, so the capture path can classify a
-    ticker without building its rows.
+    compute. Same-date rows collapse first -- the confirmed one wins, else the
+    first in input order -- exactly as :func:`build_event_rows` collapses them,
+    so the two always agree; ``[]`` only for an empty ``events``. Pure, no I/O
+    and no clock, so the capture path can classify a ticker without building
+    its rows.
     """
-    reasons = _event_reasons(events)
-    if not len(sd):
-        return ["no_price_history"] * len(reasons)
-    confirmed = computable = 0
-    for event, reason in zip(events.itertuples(), reasons):
-        if reason is None:
-            confirmed += 1
-            computable += _session_move_indexed(
-                sd, sc, event.event_date.to_datetime64(), event.session) is not None
-    if confirmed < min_scoreable or computable < ADMISSION_EVENTS:
-        return ["ticker_too_few_events"] * len(reasons)
-    return reasons
+    _validate_inputs(events, sd, sc, min_scoreable)
+    if not len(events):
+        return []
+    return _classify(_collapse_same_date(events), sd, sc, min_scoreable=min_scoreable)
 
 
 def build_event_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFrame, *,
                      computed_at: str, source_hash: str, capture_id: str,
                      min_scoreable: int = MIN_SCOREABLE) -> list[dict]:
-    """One ``computed_moves.v5`` row dict per considered event of ``events`` -- never ``[]``.
+    """One ``computed_moves.v5`` row dict per considered event of ``events``.
 
-    ``events`` is the ticker's ordered ``earnings_events`` slice (columns
-    ``event_date``, ``session``, ``src_orats``); what v4 dropped is now a row.
-    A CONFIRMED event gets exactly the :func:`build_rows` row over the
-    confirmed-only frame -- ``event_ordinal`` counts earlier confirmed events --
-    plus ``not_computed_reason``: null on a computed outcome, ``no_price_window``
-    on the v4 skip. An unconfirmed event, and every event under a ticker-level
-    reason, gets the no-outcome shape (null moves, ``admitted`` false,
-    ``skipped`` true, ``n_prior_implied`` 0) with ``classify_event_reasons``'
-    reason and the count of earlier confirmed events as its ordinal. A phantom
-    therefore never shifts a neighbour's ordinal or prior mean.
+    ``[]`` only for an empty ``events``; every non-empty list yields one row per
+    DISTINCT event date, so ``(ticker, event_date)`` is unique. ``events`` is the
+    ticker's ordered ``earnings_events`` slice (columns ``event_date``,
+    ``session``, ``src_orats``); what v4 dropped is now a row. Same-date rows
+    collapse first (the confirmed one wins, else the first in input order), so
+    ``build_rows`` never sees a duplicate date. A CONFIRMED event gets exactly
+    the :func:`build_rows` row over the confirmed-only frame -- ``event_ordinal``
+    counts earlier confirmed events -- plus ``not_computed_reason``: null on a
+    computed outcome, ``no_price_window`` on the v4 skip. An unconfirmed event,
+    and every event under a ticker-level reason, gets the no-outcome shape (null
+    moves, ``admitted`` false, ``skipped`` true, ``n_prior_implied`` 0) with
+    ``classify_event_reasons``' reason and the count of earlier confirmed events
+    as its ordinal. A phantom therefore never shifts a neighbour's ordinal or
+    prior mean.
     """
-    reasons = classify_event_reasons(events, sd, sc, min_scoreable=min_scoreable)
+    _validate_inputs(events, sd, sc, min_scoreable)
+    if not len(events):
+        return []
+    events = _collapse_same_date(events)
+    reasons = _classify(events, sd, sc, min_scoreable=min_scoreable)
     per_event = _event_reasons(events)
     ticker_reason = reasons[0] if reasons and reasons[0] in _TICKER_LEVEL else None
     computed: list[dict] = []
