@@ -17,6 +17,8 @@ _SHA256_RE = r"[0-9a-f]{64}"
 # Row cap on the stamp-column decode of a byte-identical table (about 25x today's tier4 rows);
 # a larger table is refused rather than decoded.
 STAMP_MAX_ROWS = 5_000_000
+# Decoded-size cap per stamp column (footer-reported uncompressed bytes): 64 chars plus overhead per row.
+STAMP_MAX_BYTES = STAMP_MAX_ROWS * 96
 TABLE_KEYS = {"panel": ("ticker", "date"), "tier4": ("ticker", "event_date")}
 IDENTICAL = {"verdict": "match", "max_abs_diff": 0.0, "max_rel_diff": 0.0,
              "n_columns_differing": 0, "mismatches": []}
@@ -60,18 +62,32 @@ def _bad_stamp_count(series):
     return int((~series.astype("string").str.fullmatch(_SHA256_RE).fillna(False).astype(bool)).sum())
 
 
+def _stamp_cap_refusal(parquet_file, columns):
+    """The mismatch entry for a stamp column too large to decode, from the footer alone; else None."""
+    md = parquet_file.metadata
+    if columns and md.num_rows > STAMP_MAX_ROWS:
+        return {"reason": "stamp_rows_over_cap", "n_rows": md.num_rows}
+    for c in columns:
+        size = sum(md.row_group(i).column(j).total_uncompressed_size
+                   for i in range(md.num_row_groups) for j in range(md.num_columns)
+                   if md.row_group(i).column(j).path_in_schema == c)
+        if size > STAMP_MAX_BYTES:
+            return {"reason": "stamp_bytes_over_cap", "column": c, "n_bytes": size}
+    return None
+
+
 def compare_identical(name, path) -> dict:
     """Result for a byte-identical pair of tables: nothing to diff, but provenance stamps
     must still be well formed. Reads only the stamp columns (never the whole table)."""
     import pyarrow.parquet as pq
 
     meta = pq.ParquetFile(path)
-    present = set(meta.schema_arrow.names)
-    if PROVENANCE_COLUMNS.get(name) and meta.metadata.num_rows > STAMP_MAX_ROWS:
-        return dict(IDENTICAL, verdict="mismatch", mismatches=[
-            {"reason": "stamp_rows_over_cap", "n_rows": meta.metadata.num_rows}])
+    cols = [c for c in PROVENANCE_COLUMNS.get(name, ()) if c in set(meta.schema_arrow.names)]
+    refusal = _stamp_cap_refusal(meta, cols)
+    if refusal:
+        return dict(IDENTICAL, verdict="mismatch", mismatches=[refusal])
     out = []
-    for c in [c for c in PROVENANCE_COLUMNS.get(name, ()) if c in present]:
+    for c in cols:
         # the pair is one file, so count each bad row once per side, as compare_tables does
         n_bad = 2 * _bad_stamp_count(pd.read_parquet(path, columns=[c])[c])
         if n_bad:

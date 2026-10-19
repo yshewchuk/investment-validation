@@ -465,3 +465,38 @@ def test_compare_identical_refuses_a_table_over_the_row_cap_without_decoding(tmp
     out = fc.compare_identical("tier4", path)
     assert out["verdict"] == "mismatch"
     assert out["mismatches"] == [{"reason": "stamp_rows_over_cap", "n_rows": 6}]
+
+
+def test_compare_identical_row_cap_boundary_and_panel_exemption(tmp_path, monkeypatch):
+    import engine.v2.ops.features_compare as fc
+
+    path = tmp_path / "t.parquet"
+    _write(path, _stamped([_H1] * 6))
+    monkeypatch.setattr(fc, "STAMP_MAX_ROWS", 6)
+    assert fc.compare_identical("tier4", path)["verdict"] == "match"      # exactly at the cap
+    monkeypatch.setattr(fc, "STAMP_MAX_ROWS", 5)
+    assert fc.compare_identical("tier4", path)["verdict"] == "mismatch"   # one over
+    assert fc.compare_identical("panel", path)["verdict"] == "match"      # panel has no stamp columns
+
+
+def test_compare_identical_refuses_oversized_stamp_bytes_without_decoding(tmp_path, monkeypatch):
+    import engine.v2.ops.features_compare as fc
+
+    path = tmp_path / "t.parquet"
+    _write(path, _stamped(["a" * 5000] * 6))      # few rows, huge values
+    monkeypatch.setattr(fc, "STAMP_MAX_BYTES", 1000)
+
+    def no_decode(*args, **kwargs):
+        raise AssertionError("must not decode")
+
+    monkeypatch.setattr(fc.pd, "read_parquet", no_decode)
+    out = fc.compare_identical("tier4", path)
+    assert out["verdict"] == "mismatch"
+    assert out["mismatches"][0]["reason"] == "stamp_bytes_over_cap"
+    assert out["mismatches"][0]["column"] == "tier3_snapshot"
+    assert out["mismatches"][0]["n_bytes"] > 1000
+
+    monkeypatch.setattr(fc, "STAMP_MAX_BYTES", 10**9)
+    monkeypatch.undo()
+    _write(tmp_path / "ok.parquet", _stamped([_H1] * 6))
+    assert fc.compare_identical("tier4", tmp_path / "ok.parquet")["verdict"] == "match"
