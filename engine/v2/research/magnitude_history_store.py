@@ -21,7 +21,6 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.research import event_history
-from engine.v2.research._progress import Progress, stage
 from engine.v2.research._snapshot import artifact_store, catalog_connection
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.magnitude_features import _feature_recipe
@@ -33,6 +32,7 @@ from engine.v2.research.magnitude_history_table import (
     TABLE,
     feature_recipe,
 )
+from engine.v2.research.progress import Progress, stage
 
 
 def build_context(repository, snapshot, *, producer, history_start, **request):

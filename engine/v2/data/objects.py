@@ -73,6 +73,7 @@ __all__ = [
     "normalize_physical_type",
     "partition_logical_hash",
     "publish_legacy_file",
+    "read_verified_bytes",
     "verify_object_path",
 ]
 
@@ -290,10 +291,26 @@ def _inspect_path(path, contract: TableContract, contract_ref: TableContractRef,
     )
 
 
+def read_verified_bytes(store: ArtifactStore, object_ref: ObjectRef, *, max_bytes: int) -> bytes:
+    """Bound immutable bytes before hashing; never use the path-verification cache."""
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise errors.fail("QUERY_NOT_BOUNDED", "max_object_bytes must be a positive integer")
+    if object_ref.byte_size > max_bytes:
+        raise errors.fail("RESULT_LIMIT_EXCEEDED", "object exceeds max_object_bytes")
+    digest = object_ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)
+    ref = ArtifactRef(artifact_id=object_ref.object_id, content_hash=object_ref.content_hash,
+        schema_ref=PARQUET_FRAGMENT_SCHEMA_REF, byte_size=object_ref.byte_size,
+        storage_key=f"objects/{digest[:2]}/{digest}")
+    try:
+        return store.read_verified(ref)
+    except ArtifactError as exc:
+        raise errors.fail("OBJECT_CORRUPT", "published object bytes do not match its recorded hash") from exc
+
+
 def verify_object_path(store: ArtifactStore, object_ref: ObjectRef):
     """Verify ``object_ref`` against ``store`` and return its path. Shared by
-    :func:`inspect_fragment` and the repository's scan path (P2-4), so the two
-    never diverge on how an object is opened.
+    :func:`inspect_fragment` and the repository's default path-based scan.
+    Byte-bounded scans instead use uncached :func:`read_verified_bytes`.
 
     The first open of an object in this process re-hashes it in full. A later
     open skips the re-hash only while the file's stat tuple — device, inode,

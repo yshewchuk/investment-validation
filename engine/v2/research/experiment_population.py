@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from engine.v2.contracts.data import SnapshotRef
 from engine.v2.data import errors
-from engine.v2.research import _progress
+from engine.v2.research import progress
 from engine.v2.research._scan import read_table
 from engine.v2.research.experiment_trades import _exclude_holdouts, _holdout_context
 
@@ -25,7 +25,7 @@ def load_population(repository, snapshot, *, as_of_month, purpose="selection",
     kwargs = dict(as_of_month=as_of_month, purpose=purpose, event_ids=event_ids)
     if event_ids is not None:
         return _load_population(*args, **kwargs)
-    with _progress.stage("load_population", quiet_under=5.0):
+    with progress.stage("load_population", quiet_under=5.0):
         return _load_population(*args, **kwargs)
 
 

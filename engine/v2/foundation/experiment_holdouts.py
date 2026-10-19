@@ -47,7 +47,8 @@ class ExperimentHoldouts:
         return frozenset(labels)
 
 
-def _calendar_date(value) -> date:
+def calendar_date(value) -> date:
+    """Canonical day from ISO date, date, or naive midnight; otherwise ValueError."""
     if isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
         value = date.fromisoformat(value)
     if isinstance(value, datetime):
@@ -58,3 +59,6 @@ def _calendar_date(value) -> date:
     if type(value) is not date:
         raise ValueError("canonical date must be an unambiguous calendar day")
     return value
+
+
+_calendar_date = calendar_date

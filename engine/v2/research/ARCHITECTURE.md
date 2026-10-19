@@ -182,6 +182,30 @@ The reader performs no supervisor dispatch, provider/market-price access or
 publication; `experiments.gate_report` consumes it for fold-local exploratory
 reporting. Production panel reads and final-read authority remain unchanged.
 
+`iv_crush_inputs.load_iv_crush_targets(repository, snapshot, *, as_of_month,
+labels_before, purpose="selection", event_ids=None)` reads signed relative IV30
+change from the exact current `iv_crush_targets` contract, including its definition
+hash (`iv_crush_targets.v2`, semantic version `2.0.0`). `preflight_iv_crush_targets(..., as_of_month, event_ids)` requires explicit
+selection participants (`CONTRACT_MISMATCH` when absent) and returns metadata-only planned-object evidence; it is
+not a capability, and the loader repeats admission. There is no production caller.
+
+| IV-crush boundary | Outcome |
+|---|---|
+| Snapshot/population | Shared canonical snapshot, holdout-union and ambiguity admission precedes targets; unsupported/final purposes or malformed holdout context refuse `HOLDOUT_ACCESS_DENIED`; a missing/malformed label cutoff refuses `CONTRACT_MISMATCH`. Bulk reads omit events on/after the explicit calendar-day label cutoff; explicit requests containing one refuse `CONTRACT_MISMATCH`. An empty eligible set refuses `POPULATION_COLLAPSED`. |
+| Physical admission | Every candidate passes public `event_history.plan_event_targets` (metadata-only singleton admission for already admitted populations) before any target opens. Missing/mixed objects or unprovable exact ticker/date bounds refuse `HOLDOUT_ACCESS_DENIED`; nonmatching contract/hash refuses `CONTRACT_MISMATCH`. Every declared target object is capped at 1 MiB before any target opens (`RESULT_LIMIT_EXCEEDED`); bounded Repository scans also cap compressed and total uncompressed bytes. This resource ceiling accommodates singleton labels without authorizing arbitrary payloads. Computed-moves defaults remain unchanged. |
+| Stored label | Exactly one matching ticker/date/session, boolean false skip and null reason are required. Canonical anchors span 1–5 calendar days: AMC requires pre ≤ event < post; BMO requires pre < event ≤ post. Availability equals post plus one calendar day, follows the event and precedes the cutoff before numeric use. These checks do not prove source-row adjacency or exchange sessions. Skipped, late or malformed rows refuse the whole read with `EXPERIMENT_VARIANT_FAILED`; finite signed values, including zero and values below -100, remain unchanged. |
+| Provenance | Row identity includes target object; attributes bind full dataset/contract ref, cutoff, month/membership pins, purpose, future exclusions and ordered fragment/object/content hashes plus caller source_id/input_hash. Source marker/hash syntax is checked, not independently authenticated or recomputed from source quotes. Publication/finality remain unverified; availability is a modeled floor. |
+| Effects/failures | No source-quote reads, target rebuilding, retries, persistent cache, writes, partial returns or experiment authority. Earlier admitted objects may decode availability before a late-label refusal. Native repository integrity/resource refusals propagate unchanged. |
+
+This consumer accepts only the exact definition, without grandfathering earlier hashes.
+`event_history.POPULATION_CONTEXT_COLUMNS` names the shared snapshot/holdout context.
+`plan_event_targets` requires a frame with ticker and naive midnight event_date columns;
+malformed candidates refuse `CONTRACT_MISMATCH`, while native DataError envelopes propagate.
+IV admission, public planning and target reads emit stderr start/end/failure stages with
+elapsed time and peak RSS; completed candidate/read ticks include count, rate and ETA,
+at most every 30 seconds. Telemetry never enters row/identity data or grants read authority.
+No publisher, source-receipt validation, forecast recipe or model is supplied.
+
 `magnitude_inputs.forecast_cutoff(event_date, session, horizon, calendar)` is a
 pure contract over native `CalendarSessions`: horizons are five, three or one
 full intervening sessions, counted backward from the shared last-pre-print
@@ -528,12 +552,14 @@ This bounds retained unmatched rows, not total process RSS.
 ## Dependencies
 
 `engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `catalog`,
-`objects`, `manifests`, `query`, `computed_moves_table`), `engine.v2.
+`objects`, `manifests`, `query`, `computed_moves_table`, `iv_crush_table`), `engine.v2.
 contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`,
 `ObjectRef`, `TableContractRef`, `ColumnContract`, `TableContract`),
 `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
+`engine.v2.features.panel_math` (`history_features`),
 `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`, `iter_canonical_json`,
-`content_hash`, `to_document`, `market_calendar`, `experiment_exits.valid_exit_recipe`, plus
+`content_hash`, `to_document`, `market_calendar`, `experiment_exits.valid_exit_recipe`,
+`experiment_holdouts.calendar_date` (canonical days for IV input/anchor/clock validation), plus
 `final_holdout.request_from_document` and `typed.to_document` for `_final_population`) — the package's own
 lower-layer dependencies, consistent with the generic "may import anything
 at a lower layer" rule (`only_imports` is unset for this package in
@@ -610,7 +636,7 @@ It does not authenticate arbitrary rehashed calendars as builder-derived.
 | Protected reads | The complete eligible singleton candidate union is preflighted before any outcome opens. Protected/ambiguous objects never open; admitted late labels may decode availability and be omitted before arithmetic. |
 | Build boundaries | Full candidate preflight completes before any outcome opens. Each admitted candidate outcome is decoded at most once per build; no cache persists across builds. Memory has no fixed byte cap; production scale is unmeasured. |
 | Catalog reads | The CLI opens its `Repository` with `pin_snapshots=True`, so each scan and bound reuses the pinned snapshot's cached table membership instead of re-decoding it from the catalog (decodes were quadratic in candidates). `fragment_records` and a table's first use still decode membership; `earnings_events` is still read once by fold planning and once by preflight. Output, receipts and identities are unchanged; the pin is per process and immutable-identity keyed. |
-| Progress | Long passes write progress to stderr only (stdout stays the JSON result): `_progress.stage` logs start/end with elapsed seconds and peak RSS for the build's `history preflight`, `history prepare` and `history materialize` stages (a full-universe `load_population` logs only its end, and only when it took 5 s or more); `_progress.Progress` logs `done/total` (counted after an item finishes), rate, ETA and peak RSS at most once per interval (default 30 s, and not before the configured item count), never per item, and nothing for passes shorter than the interval. The helper is a package-internal module, imported by siblings like `_scan`. Logging never changes results or errors. |
+| Progress | Long passes write progress to stderr only (stdout stays the JSON result): `progress.stage` logs start/end with elapsed seconds and peak RSS for the build's `history preflight`, `history prepare` and `history materialize` stages (a full-universe `load_population` logs only its end, and only when it took 5 s or more); `progress.Progress` logs `done/total` (counted after an item finishes), rate, ETA and peak RSS at most once per interval (default 30 s, and not before the configured item count), never per item, and nothing for passes shorter than the interval. The public helper is shared by package readers. Logging never changes results or errors. |
 | Per-forecast features | Shared history arithmetic preserves availability and numeric-refusal order. Consumed objects, omissions and availability accompany all eleven columns. Exclusion rosters remain transient; persisted lineage omits `holdout_exclusions` and the stored reader refuses it. Empty `n_prior` is zero; other missing values are null with `on_missing=null`. No runtime imputation or production v4 aggregates. |
 | Output | Features-only `research_magnitude_history.v1` snapshot, separate from unchanged source. Three ordered horizons per event-isolated object; primary key `(event_id, context_id, horizon_sessions)`, physical context field and context partition. |
 | Publication | Inspected objects/manifests and success receipt commit atomically under an initially empty deterministic scope. Failure admits no snapshot; complete unreferenced objects remain for normal cleanup. |

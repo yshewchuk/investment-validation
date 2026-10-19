@@ -3,7 +3,8 @@ import pandas as pd
 import pytest
 
 from engine.v2.data.repository import Repository
-from engine.v2.research import _progress
+from engine.v2.research import progress
+from experiments import magnitude_history_store as entry
 from tests.v2.research.magnitude_trial_support import (
     HISTORY_REQUEST,
     calendar_sessions,
@@ -11,7 +12,6 @@ from tests.v2.research.magnitude_trial_support import (
     history_event,
     outcome_move,
 )
-from experiments import magnitude_history_store as entry
 
 
 class Clock:
@@ -24,10 +24,10 @@ class Clock:
 
 def test_progress_cadence_is_bounded_by_interval_not_items():
     clock, lines = Clock(), []
-    progress = _progress.Progress("x", 1000, min_interval=30, clock=clock, emit=lines.append)
+    reporter = progress.Progress("x", 1000, min_interval=30, clock=clock, emit=lines.append)
     for _ in range(1000):
         clock.now += 1.0
-        progress.tick()
+        reporter.tick()
     assert len(lines) == 33  # one per 30 s of the 1000 s pass, never one per item
     for number, line in enumerate(lines, start=1):
         done = number * 30
@@ -36,12 +36,12 @@ def test_progress_cadence_is_bounded_by_interval_not_items():
 
 def test_progress_is_silent_for_short_passes_and_honours_min_items():
     clock, lines = Clock(), []
-    short = _progress.Progress("x", 5, min_interval=30, clock=clock, emit=lines.append)
+    short = progress.Progress("x", 5, min_interval=30, clock=clock, emit=lines.append)
     for _ in range(5):
         clock.now += 1.0
         short.tick()
     assert lines == []
-    gated = _progress.Progress("y", 100, min_interval=1, min_items=10, clock=clock, emit=lines.append)
+    gated = progress.Progress("y", 100, min_interval=1, min_items=10, clock=clock, emit=lines.append)
     for _ in range(25):
         clock.now += 5.0
         gated.tick()
@@ -50,23 +50,23 @@ def test_progress_is_silent_for_short_passes_and_honours_min_items():
 
 def test_stage_logs_start_done_and_failure_and_reraises():
     clock, lines = Clock(), []
-    with _progress.stage("a", clock=clock, emit=lines.append):
+    with progress.stage("a", clock=clock, emit=lines.append):
         clock.now += 3
     assert len(lines) == 2 and lines[0].startswith("  [a] start, peak RSS ")
     assert lines[1].startswith("  [a] done in 3s, peak RSS ")
     lines.clear()
     with pytest.raises(RuntimeError, match="^boom$"):
-        with _progress.stage("b", clock=clock, emit=lines.append):
+        with progress.stage("b", clock=clock, emit=lines.append):
             raise RuntimeError("boom")
     assert lines[0].startswith("  [b] start") and lines[1].startswith("  [b] failed after 0s")
 
 
 def test_quiet_stage_prints_only_when_slow():
     clock, lines = Clock(), []
-    with _progress.stage("q", quiet_under=5.0, clock=clock, emit=lines.append):
+    with progress.stage("q", quiet_under=5.0, clock=clock, emit=lines.append):
         clock.now += 4
     assert lines == []
-    with _progress.stage("q", quiet_under=5.0, clock=clock, emit=lines.append):
+    with progress.stage("q", quiet_under=5.0, clock=clock, emit=lines.append):
         clock.now += 6
     assert len(lines) == 1 and lines[0].startswith("  [q] done in 6s")
 
@@ -78,7 +78,7 @@ def test_emit_failure_never_breaks_a_pass(monkeypatch):
         attempts.append(args)
         raise OSError("closed")
     monkeypatch.setattr("builtins.print", broken)
-    with _progress.stage("c"):
+    with progress.stage("c"):
         result = 7
     assert result == 7 and len(attempts) == 2  # start and done were both attempted
 
