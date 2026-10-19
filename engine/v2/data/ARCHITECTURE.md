@@ -20,8 +20,8 @@ exact reads over a committed snapshot (`repository.py`, `query.py`,
 `events.py`, `chains.py`, `price_history_query.py`); the one legacy-touching
 seam (`legacy_adapter.py`) and what is built on it read-only (table
 mapping, pinned reference-input resolution, snapshot-import planning,
-legacy-tree materialization); two legacy-free table families
-(`computed_moves*`, bitemporal `price_history*`); the data-owner catalog
+legacy-tree materialization); legacy-free table families
+(`computed_moves*`, bitemporal `price_history*`, pure `iv_crush*` targets); the data-owner catalog
 schema (`schema.py`, colocated with ops/ledger under migration owner
 `"data"`); pure coverage checks (`eod_inventory.py`, `event_revisions.py`);
 and a Tier-4 serving-cache coverage check (`tier4_coverage.py` — not pure,
@@ -32,6 +32,49 @@ or promotes a champion (`engine/v2/models/training`); never decides *what* to
 fetch or *when* to run a job (`engine/v2/ops`, a caller, owns that).
 
 ## Primary contracts and public interfaces
+
+**IV-crush target construction.** `iv_crush.build_rows` is a pure, bounded,
+single-ticker builder for `iv_crush_table.IV_CRUSH_CONTRACT`
+(`iv_crush_targets.v1`). It consumes caller-supplied event date/session and
+daily date/IV30 projections, never a panel forecast or a store. Callers must
+supply IV30 in vol points expressed as percent (50 for 50% IV); the builder
+does not normalize or validate scale. Canonical and unique event/daily dates
+are mandatory; unordered inputs sort deterministically. AMC selects the last
+daily row on/before the event; BMO selects the last strictly before it. Post is
+the immediately following row, including when its IV is missing. No search for
+a later valid IV, forward fill, inferred holiday session or warm-up filter occurs.
+The existing target is signed `100*(post_iv30/pre_iv30-1)`, a relative percentage
+change, not a vol-point difference; anchor compatibility and skips are below.
+For a computable label, `available_as_of_date` is post-close date plus one
+calendar day, the native computed-moves day-clock convention. It is a modeled
+availability floor, not evidence of actual source publication or finality.
+Training/research consumers must separately admit holdouts and enforce their
+label clock; existing training recipes' tolerance is not changed here.
+`input_hash` binds the actual typed projections (including invalid IV scalars),
+while `source_id` is only a caller declaration, never verified provenance.
+The builder neither reads/writes files nor registers/publishes a snapshot;
+physical event isolation, source verification, feature reconstruction and
+registered evaluation remain separate slices. There is no production caller.
+`RESULT_LIMIT_EXCEEDED` and `CONTRACT_MISMATCH` conditions are in the failure
+table. No cache, retries or transactions.
+
+Builder outcomes below are checked in order. Skips have `skipped=true` and null
+target/availability, never imputed zeros; selected dates and finite IV values
+remain diagnostic. Success has `skipped=false` and `skip_reason=null`.
+
+| Condition | Outcome / skip reason |
+|---|---|
+| No supplied events, with otherwise valid bounded inputs | Empty list; daily input still validated |
+| Null / other unrecognized session | `missing_session` / `unknown_session`; session and all anchors null |
+| No pre row (including empty daily input) / no post row | `missing_pre` / `missing_post`; existing opposite anchor retained |
+| Adjacent dates more than five calendar days apart | `gap_exceeds_limit`; gap exactly five is admitted |
+| Pre-IV missing, nonnumeric, nonfinite or nonpositive | `invalid_pre_iv30`; nonpositive finite value retained diagnostically |
+| Post-IV missing, nonnumeric or nonfinite | `invalid_post_iv30`; finite zero/negative post-IV is admitted as in the existing recipe, without endorsing its quality |
+| Finite valid anchors overflow the ratio calculation | `nonfinite_target`; finite anchors retained |
+| Computable signed label | Finite target, post-date plus one calendar day availability |
+
+Both public refusals carry fixed redacted messages, empty details, no stage,
+and the category/retryability in the failure table; no partial list is returned.
 
 **Massive reconstruction.** `massive_daily` owns `massive_daily.v1`; `massive_actions`
 owns `massive_splits.v1` and `massive_dividends.v1`, with original page provenance.
@@ -404,9 +447,9 @@ directly, without conversion to `DataError`.
 | `SNAPSHOT_UNRESOLVED` | dependency | no | experiment input reader cannot verify the supplied exact committed snapshot |
 | `SNAPSHOT_NOT_READY` | dependency | yes | scope has no committed head yet |
 | `SNAPSHOT_CONFLICT` | dependency | yes | head-fence or compare-and-swap mismatch |
-| `CONTRACT_MISMATCH` | validation | no | a table, pin or selection violates the snapshot's contract, including malformed timestamp key-predicate strings, non-string timestamp predicate values, or predicate scalars incompatible with fragment key bounds |
+| `CONTRACT_MISMATCH` | validation | no | a table, pin or selection violates the snapshot's contract, including malformed timestamp key-predicate strings, non-string timestamp predicate values, or predicate scalars incompatible with fragment key bounds; IV-crush rejects malformed/missing projection fields, noncanonical dates, duplicate dates, ticker mismatch, unsupported scalar types, strings over 256 characters, invalid ticker/source text, nonpositive/noninteger row caps or unrepresentable next-day availability |
 | `QUERY_NOT_BOUNDED` | validation | no | a malformed planning selection or an unbounded `DataQuery`/`ChainQuery` |
-| `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds the query's `max_result_rows` |
+| `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds the query's `max_result_rows`; either IV-crush event or daily projection exceeds its independent `max_rows` cap (default 10,000), without truncation |
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |
 | `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty; in `daily_market` a response labeled `complete` that omits an expected key is refused before it is cached, while omissions on a `partial` response after the provider's bounded retry are committed as typed `missing` coverage outcomes |
 | `SOURCE_NOT_FINAL` | source | yes | a `daily_market` refresh unit has expected keys but the response is a `legitimate_empty`; the data layer refuses before caching the response, leaving no receipt, coverage, or snapshot write |
