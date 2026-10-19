@@ -11,6 +11,15 @@ from engine.v2.data.manifests import table_contract_hash
 from engine.v2.data.query import arrow_type_for
 from engine.v2.foundation import to_document
 
+EXPECTED_FIELDS = (
+    ("ticker", "string", False), ("event_date", "string", False), ("session", "string", True),
+    ("pre_date", "string", True), ("post_date", "string", True),
+    ("pre_iv30", "float64", True), ("post_iv30", "float64", True),
+    ("crush_pct_iv30", "float64", True), ("available_as_of_date", "string", True),
+    ("skipped", "bool", False), ("skip_reason", "string", True),
+    ("source_id", "string", False), ("input_hash", "string", False),
+)
+
 
 def test_contract_roundtrip_hash_and_identity():
     contract = IV_CRUSH_CONTRACT
@@ -21,6 +30,16 @@ def test_contract_roundtrip_hash_and_identity():
     assert table_contract_hash(replace(contract, maximum_batch_rows=1)) != contract.definition_hash
     names = {c.name for c in contract.columns}
     assert set((*contract.primary_key, *contract.partition_columns, *contract.orderable_columns)) <= names
+    assert tuple((c.name, c.physical_type, c.nullable) for c in contract.columns) == EXPECTED_FIELDS
+    assert contract.semantic_version == "1.0.0"
+    assert contract.primary_key == contract.orderable_columns == ("ticker", "event_date")
+    assert contract.partition_columns == contract.filterable_columns == ("ticker",)
+    assert contract.observation_time_column == "event_date"
+    assert contract.maximum_batch_rows == 10000
+    assert contract.foreign_keys == () and contract.legacy_mapping_ref is None
+    assert {c.name: c.unit for c in contract.columns} == {
+        name: "percent" if name in ("pre_iv30", "post_iv30", "crush_pct_iv30") else None
+        for name, _, _ in EXPECTED_FIELDS}
 
 
 def test_native_arrow_schema_accepts_signed_and_skipped_rows():
@@ -29,9 +48,20 @@ def test_native_arrow_schema_accepts_signed_and_skipped_rows():
                                {"event_date": "2024-01-08", "session": None}],
                       [{"date": "2024-01-05", "iv30": 50}, {"date": "2024-01-08", "iv30": 30}],
                       source_id="synthetic")
-    schema = pa.schema([pa.field(c.name, arrow_type_for(c.physical_type), nullable=c.nullable)
-                        for c in contract.columns])
-    assert pa.Table.from_pylist(rows, schema=schema).to_pylist() == rows
+    expected_types = {"string": pa.string(), "float64": pa.float64(), "bool": pa.bool_()}
+    schema = pa.schema([pa.field(name, expected_types[kind], nullable=nullable)
+                        for name, kind, nullable in EXPECTED_FIELDS])
+    actual_schema = pa.schema([pa.field(c.name, arrow_type_for(c.physical_type), nullable=c.nullable)
+                               for c in contract.columns])
+    assert actual_schema == schema
+    assert len(rows) == 2
+    expected_values = [("TEST", "2024-01-05", "AMC", "2024-01-05", "2024-01-08",
+                        50.0, 30.0, -40.0, "2024-01-09", False, None, "synthetic"),
+                       ("TEST", "2024-01-08", None, None, None, None, None, None,
+                        None, True, "missing_session", "synthetic")]
+    persisted = pa.Table.from_pylist(rows, schema=schema).to_pylist()
+    assert [tuple(row[name] for name, _, _ in EXPECTED_FIELDS[:-1]) for row in persisted] == expected_values
+    assert persisted == rows
 
 
 def test_clock_and_provenance_claims_remain_distinct():
