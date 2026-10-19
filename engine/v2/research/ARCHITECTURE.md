@@ -200,7 +200,7 @@ not a capability, and the loader repeats admission. There is no production calle
 This consumer accepts only the exact definition, without grandfathering earlier hashes.
 `event_history.POPULATION_CONTEXT_COLUMNS` names the shared snapshot/holdout context.
 `plan_event_targets` requires a frame with ticker and naive midnight event_date columns;
-malformed candidates refuse `CONTRACT_MISMATCH`, while native DataError envelopes propagate.
+only the candidate shape and identity checks translate to `CONTRACT_MISMATCH`; any error raised while planning (native DataError envelopes or otherwise) propagates unchanged.
 IV admission, public planning and target reads emit stderr start/end/failure stages with
 elapsed time and peak RSS; completed candidate/read ticks include count, rate and ETA,
 at most every 30 seconds. Telemetry never enters row/identity data or grants read authority.
