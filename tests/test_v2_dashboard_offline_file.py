@@ -1,9 +1,9 @@
 """P6-5 export-offline-file: validation, scan wiring, receipt shape and CLI.
 
 The release tree is a REAL ``render_bundle`` output (never hand-rolled fixture
-files), the same way ``tests/v2/dashboard/test_dashboard.py::TestSingleFile`` builds one.
+files), the same way ``tests/test_dashboard.py::TestSingleFile`` builds one.
 Only ``export_offline_file``'s own behaviour is under test here --
-``write_single_file`` itself is covered by ``tests/v2/dashboard/test_dashboard.py``.
+``write_single_file`` itself is covered by ``tests/test_dashboard.py``.
 """
 from __future__ import annotations
 
