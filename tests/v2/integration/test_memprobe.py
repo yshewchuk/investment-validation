@@ -9,6 +9,7 @@ import re
 import sys
 import time
 import types
+from pathlib import Path
 
 import pytest
 
@@ -189,21 +190,41 @@ def test_trim_reports_trimmed_only_when_trim_returns_true(monkeypatch, capsys):
 
         return fake
 
+    def no_pyarrow_release():
+        monkeypatch.setattr(memprobe, "arrow_stats", lambda: None)
+        monkeypatch.setattr(memprobe, "_arrow_release", lambda: False)
+
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TRIM", "1")
     monkeypatch.setattr(memprobe, "peak_rss_bytes", lambda: 4 * 2**30)
 
+    no_pyarrow_release()
     monkeypatch.setattr(memprobe, "rss_bytes", rss_seq([3 * 2**30, 2 * 2**30]))
     monkeypatch.setattr(memprobe, "_malloc_trim", lambda: False)
     memprobe.snapshot("x")
     head = capsys.readouterr().out.splitlines()[0]
     assert "trimmed from" not in head
 
+    no_pyarrow_release()
     monkeypatch.setattr(memprobe, "rss_bytes", rss_seq([3 * 2**30, 2 * 2**30]))
     monkeypatch.setattr(memprobe, "_malloc_trim", lambda: True)
     memprobe.snapshot("x")
     head = capsys.readouterr().out.splitlines()[0]
     assert "trimmed from" in head
+
+    monkeypatch.setattr(memprobe, "rss_bytes", rss_seq([3 * 2**30, 2 * 2**30]))
+    monkeypatch.setattr(memprobe, "_arrow_release", lambda: True)
+    monkeypatch.setattr(memprobe, "_malloc_trim", lambda: False)
+    memprobe.snapshot("x")
+    head = capsys.readouterr().out.splitlines()[0]
+    assert "trimmed from" in head
+
+    no_pyarrow_release()
+    monkeypatch.setattr(memprobe, "rss_bytes", rss_seq([3 * 2**30, 2 * 2**30]))
+    monkeypatch.setattr(memprobe, "_malloc_trim", lambda: False)
+    memprobe.snapshot("x")
+    head = capsys.readouterr().out.splitlines()[0]
+    assert "trimmed from" not in head
 
 
 def test_trim_flag_off_never_calls_malloc_trim(monkeypatch, capsys):
@@ -423,7 +444,7 @@ def test_snapshot_swallows_top_objects_failure(monkeypatch, capsys):
 
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
 
-    def boom(n):
+    def boom(*args, **kwargs):
         raise ValueError("boom")
 
     monkeypatch.setattr(memprobe, "top_objects", boom)
@@ -438,7 +459,7 @@ def test_snapshot_propagates_memory_error(monkeypatch):
 
     monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
 
-    def boom(n):
+    def boom(*args, **kwargs):
         raise MemoryError()
 
     monkeypatch.setattr(memprobe, "top_objects", boom)
@@ -526,6 +547,229 @@ def test_negative_top_value_prints_no_obj_lines(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "[mem] x rss=" in out
     assert "  obj " not in out
+
+
+# --------------------------------------------------------------------------
+# rss breakdown / top mappings / type counts / hidden arrays / arrow
+# --------------------------------------------------------------------------
+
+
+def test_rss_breakdown_parts_sum_within_five_percent_of_rss():
+    if not Path("/proc/self/status").exists():
+        pytest.skip("no /proc/self/status")
+    try:
+        with open("/proc/self/status", encoding="utf-8") as fh:
+            text = fh.read(65536)
+    except OSError:
+        pytest.skip("/proc/self/status unreadable")
+    if "RssAnon" not in text:
+        pytest.skip("RssAnon not reported")
+    import engine.memprobe as memprobe
+
+    parts = memprobe.rss_breakdown()
+    assert parts and parts["anon"] > 0 and parts["file"] > 0
+    total = parts["anon"] + parts["file"] + parts["shmem"]
+    rss = memprobe.rss_bytes()
+    assert rss > 0
+    assert abs(total - rss) <= 0.05 * rss
+
+
+def test_top_mappings_three_rows_sorted_descending():
+    import engine.memprobe as memprobe
+
+    if not Path("/proc/self/smaps").exists():
+        pytest.skip("no /proc/self/smaps")
+    rows = memprobe.top_mappings(3)
+    assert 1 <= len(rows) <= 3
+    assert all(rows[i][0] >= rows[i + 1][0] for i in range(len(rows) - 1))
+    assert rows[0][0] > 0
+    assert all(desc.strip() for _nbytes, desc in rows)
+    assert sum(nbytes for nbytes, _desc in rows) <= memprobe.rss_bytes() * 1.05
+
+
+def test_type_counts_twelve_types_returns_top_three_by_count_then_name():
+    import engine.memprobe as memprobe
+
+    objs = (
+        [1.0] * 7
+        + ["a"] * 5
+        + [[1]] * 4
+        + [{}] * 3
+        + [(1,)] * 2
+        + [set()] * 2
+        + [0] * 2
+        + [None] * 2
+        + [b"x"] * 2
+        + [bytearray(b"y")]
+        + [complex(1)]
+        + [()]
+        + [frozenset()]
+    )
+    assert len({type(o).__name__ for o in objs}) == 12
+    assert memprobe.type_counts(3, objs) == [
+        (7, "float"),
+        (5, "str"),
+        (4, "list"),
+    ]
+    tie_objs = [None, None, 0, 0, b"x", b"x", [1]]
+    assert memprobe.type_counts(10, tie_objs) == [
+        (2, "NoneType"),
+        (2, "bytes"),
+        (2, "int"),
+        (1, "list"),
+    ]
+
+
+def test_hidden_arrays_reports_held_arrays_deduped_and_sorted_descending():
+    np = pytest.importorskip("numpy")
+    import engine.memprobe as memprobe
+
+    arr_4mb = np.zeros(500_000)
+    dict_holder = {"a": np.zeros(250_000)}
+    list_holder = [arr_4mb]
+    tuple_holder = (arr_4mb,)
+    small_holder = [np.zeros(999_999, dtype=np.uint8)]
+    rows = memprobe.hidden_arrays(5, objs=[dict_holder, list_holder, tuple_holder, small_holder])
+    assert [nbytes for nbytes, _desc in rows] == [4_000_000, 2_000_000]
+    descs = [desc for _nbytes, desc in rows]
+    assert all("dtype=float64" in desc for desc in descs)
+    assert "held by list len=1" in descs[0]
+    assert "held by dict len=1" in descs[1]
+    top = memprobe.hidden_arrays(1, objs=[dict_holder, list_holder, tuple_holder, small_holder])
+    assert len(top) == 1
+    assert top[0][0] == 4_000_000
+
+
+def test_arrow_stats_and_release_with_fake_pyarrow(monkeypatch):
+    import engine.memprobe as memprobe
+
+    released: list[int] = []
+
+    class FakePool:
+        backend_name = "fakealloc"
+
+        def bytes_allocated(self):
+            return 123
+
+        def max_memory(self):
+            return 456
+
+        def release_unused(self):
+            released.append(1)
+
+    fake = types.ModuleType("pyarrow")
+    fake.default_memory_pool = lambda: FakePool()
+    fake.total_allocated_bytes = lambda: 789
+    monkeypatch.setitem(sys.modules, "pyarrow", fake)
+
+    assert memprobe.arrow_stats() == {
+        "backend": "fakealloc",
+        "allocated": 123,
+        "max": 456,
+        "total_allocated": 789,
+    }
+    assert memprobe._arrow_release() is True
+    assert released == [1]
+
+    class NoReleasePool:
+        backend_name = "fakealloc"
+
+        def bytes_allocated(self):
+            return 123
+
+        def max_memory(self):
+            return 456
+
+    fake.default_memory_pool = lambda: NoReleasePool()
+    released.clear()
+    assert memprobe._arrow_release() is False
+    assert released == []
+
+
+def test_snapshot_prints_rss_breakdown_types_and_arrow(monkeypatch, capsys):
+    import engine.memprobe as memprobe
+
+    released: list[int] = []
+
+    class FakePool:
+        backend_name = "fakealloc"
+
+        def bytes_allocated(self):
+            return 123
+
+        def max_memory(self):
+            return 456
+
+        def release_unused(self):
+            released.append(1)
+
+    fake = types.ModuleType("pyarrow")
+    fake.default_memory_pool = lambda: FakePool()
+    fake.total_allocated_bytes = lambda: 789
+    monkeypatch.setitem(sys.modules, "pyarrow", fake)
+
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
+    monkeypatch.delenv("INVESTING_PLAN_MEMPROFILE_TRIM", raising=False)
+    rss = memprobe.rss_breakdown()
+    monkeypatch.setattr(memprobe, "rss_breakdown", lambda: rss)
+    memprobe.snapshot("x")
+    out = capsys.readouterr().out
+    if rss:
+        assert " rss anon=" in out
+    else:
+        assert " rss anon=" not in out
+    types_line = next(line for line in out.splitlines() if "  types " in line)
+    pairs = [p for p in types_line.split("  types ", 1)[1].split(", ") if "=" in p]
+    assert pairs
+    assert all(name and count for name, count in (p.split("=", 1) for p in pairs))
+    assert " arrow backend=fakealloc allocated=" in out
+
+
+def test_snapshot_arrow_release_only_with_trim_flag(monkeypatch, capsys):
+    import engine.memprobe as memprobe
+
+    released: list[int] = []
+
+    class FakePool:
+        backend_name = "fakealloc"
+
+        def bytes_allocated(self):
+            return 123
+
+        def max_memory(self):
+            return 456
+
+        def release_unused(self):
+            released.append(1)
+
+    fake = types.ModuleType("pyarrow")
+    fake.default_memory_pool = lambda: FakePool()
+    fake.total_allocated_bytes = lambda: 789
+    monkeypatch.setitem(sys.modules, "pyarrow", fake)
+
+    called: list[bool] = []
+
+    def recorder():
+        called.append(True)
+        return True
+
+    monkeypatch.setattr(memprobe, "_arrow_release", recorder)
+    monkeypatch.setattr(memprobe, "_malloc_trim", lambda: True)
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE", "1")
+    monkeypatch.setenv("INVESTING_PLAN_MEMPROFILE_TRIM", "1")
+    memprobe.snapshot("x")
+    arrow_line = next(l for l in capsys.readouterr().out.splitlines() if "arrow backend=" in l)
+    assert "arrow backend=fakealloc allocated=" in arrow_line
+    assert "release_unused=yes" in arrow_line
+    assert called == [True]
+
+    called.clear()
+    released.clear()
+    monkeypatch.delenv("INVESTING_PLAN_MEMPROFILE_TRIM", raising=False)
+    memprobe.snapshot("x")
+    arrow_line = next(l for l in capsys.readouterr().out.splitlines() if "arrow backend=" in l)
+    assert "release_unused" not in arrow_line
+    assert called == []
 
 
 def test_watch_nested_float_dicts_reports_nonzero_size(monkeypatch, capsys):

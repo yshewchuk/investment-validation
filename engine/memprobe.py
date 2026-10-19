@@ -11,15 +11,26 @@ top.
 Flags (read at call time; truthy is ``1``/``true``/``yes``/``on``):
 
 - ``INVESTING_PLAN_MEMPROFILE``: enable snapshots.
-- ``INVESTING_PLAN_MEMPROFILE_TRIM``: under enable, run ``gc.collect()`` then
-  a best-effort libc ``malloc_trim(0)`` before measuring, and log RSS before
-  and after the trim so retained-by-Python separates from freed-but-held-by-glibc.
+- ``INVESTING_PLAN_MEMPROFILE_TRIM``: under enable, run ``gc.collect()``, then
+  release the pyarrow pool (``release_unused``) if pyarrow is already
+  imported, then a best-effort libc ``malloc_trim(0)`` before measuring. The
+  snapshot head then carries a ``[trimmed from X]`` suffix with the RSS read
+  before gc.collect/release when either the pyarrow release or malloc_trim
+  ran; the before/after RSS pair is printed only under this flag and only
+  when one of those two actually ran. Without them a single RSS value is
+  printed, so the line shows bytes retained by Python vs held by glibc or the
+  pyarrow pool.
 - ``INVESTING_PLAN_MEMPROFILE_EVERY``: int, default 250; used by :func:`tick`.
 - ``INVESTING_PLAN_MEMPROFILE_TOP``: int, default 12; rows of largest objects
   (negative values are clamped to 0 rows).
 
 Output lines are prefixed with two spaces then ``[mem]`` and go to stdout,
-flushed. Size estimates are sampled, not exact.
+flushed. Size estimates are sampled, not exact. Optional probes are silently
+omitted when unavailable — pyarrow rows appear only when pyarrow is already
+imported, map rows only when ``/proc/self/smaps`` is readable, and the rss
+anon/file/shmem row only when ``/proc/self/status`` is readable (otherwise the
+head line shows ``rss=0.00G peak=0.00G``); they never print a failure line.
+Only an unexpected exception in the snapshot body prints ``probe failed``.
 
 :func:`snapshot` and :func:`tick` never raise, except MemoryError which
 propagates; when disabled they return before any diagnostic work. The exported
@@ -29,9 +40,11 @@ from __future__ import annotations
 
 import ctypes
 import gc
+import heapq
 import itertools
 import os
 import sys
+from collections import Counter
 from typing import Any
 
 __all__ = [
@@ -39,10 +52,16 @@ __all__ = [
     "trim_enabled",
     "rss_bytes",
     "peak_rss_bytes",
+    "rss_breakdown",
+    "top_mappings",
     "watch",
     "DEFAULT_WATCHES",
     "estimate_size",
+    "arrow_stats",
+    "_arrow_release",
     "top_objects",
+    "type_counts",
+    "hidden_arrays",
     "snapshot",
     "tick",
 ]
@@ -51,6 +70,18 @@ _TRUTHY = {"1", "true", "yes", "on"}
 _DEFAULT_EVERY = 250
 _DEFAULT_TOP = 12
 _PREFIX = "  [mem] "
+#: kernel-owned file; budget keeps the probe cheap with very many mappings
+_MAX_SMAPS_LINES = 500_000
+
+
+def _row_limit(n: Any) -> int:
+    """Coerce a row-count request to a non-negative int; 0 on bad input."""
+    try:
+        return max(0, int(n))
+    except MemoryError:
+        raise
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 #: (name, owner-id | None) -> (weakref.ref(owner) | module-name string, attr)
 _registry: dict[tuple[str, int | None], tuple[Any, str]] = {}
@@ -118,6 +149,48 @@ def peak_rss_bytes() -> int:
     return _proc_field("VmHWM:")
 
 
+def rss_breakdown() -> dict:
+    """RssAnon/RssFile/RssShmem bytes from ``/proc/self/status``;
+    ``{}`` when unreadable."""
+    vals = {
+        "anon": _proc_field("RssAnon:"),
+        "file": _proc_field("RssFile:"),
+        "shmem": _proc_field("RssShmem:"),
+    }
+    return vals if any(vals.values()) else {}
+
+
+def top_mappings(n: int = 5) -> list[tuple[int, str]]:
+    """Largest ``/proc/self/smaps`` mappings by Rss as
+    ``(bytes, "<path or [anon]> <addr-range>")``; ``[]`` if unreadable."""
+    try:
+        n = _row_limit(n)
+        if n == 0:
+            return []
+        heap: list[tuple[int, str]] = []
+        desc = ""
+        with open("/proc/self/smaps", encoding="utf-8", errors="replace") as fh:
+            for line in itertools.islice(fh, _MAX_SMAPS_LINES):
+                parts = line.split()
+                if not parts:
+                    continue
+                tok = parts[0]
+                if tok.count("-") == 1 and all(
+                    c in "0123456789abcdefABCDEF-" for c in tok
+                ):
+                    desc = f"{' '.join(parts[5:]) or '[anon]'} {tok}"
+                elif tok == "Rss:":
+                    rss = int(parts[1]) * 1024
+                    heapq.heappush(heap, (rss, desc))
+                    if len(heap) > n:
+                        heapq.heappop(heap)
+        return sorted(heap, key=lambda x: x[0], reverse=True)
+    except MemoryError:
+        raise
+    except Exception:
+        return []
+
+
 def _fmt(n: int) -> str:
     try:
         return f"{int(n) / (1024 ** 3):.2f}G"
@@ -134,6 +207,43 @@ def _fmt_mb(n: int) -> str:
         raise
     except (TypeError, ValueError):
         return "0.0M"
+
+
+def arrow_stats() -> dict | None:
+    """Pyarrow default-pool stats; ``None`` unless pyarrow is already in
+    ``sys.modules`` (never imported here)."""
+    try:
+        if "pyarrow" not in sys.modules:
+            return None
+        mod = sys.modules["pyarrow"]
+        pool = mod.default_memory_pool()
+        return {
+            "backend": pool.backend_name,
+            "allocated": pool.bytes_allocated(),
+            "max": pool.max_memory() or 0,
+            "total_allocated": mod.total_allocated_bytes(),
+        }
+    except MemoryError:
+        raise
+    except Exception:
+        return None
+
+
+def _arrow_release() -> bool:
+    """Ask the pyarrow pool to ``release_unused()``; False when pyarrow is
+    not loaded or the pool has no such attribute."""
+    try:
+        if "pyarrow" not in sys.modules:
+            return False
+        rel = getattr(sys.modules["pyarrow"].default_memory_pool(), "release_unused", None)
+        if rel is None:
+            return False
+        rel()
+        return True
+    except MemoryError:
+        raise
+    except Exception:
+        return False
 
 
 def watch(name: str, owner: Any, attr: str) -> None:
@@ -316,27 +426,26 @@ def estimate_size(obj: Any, *, sample: int = 200) -> int:
         return 0
 
 
-def top_objects(n: int) -> list[tuple[int, str]]:
-    """Walk ``gc.get_objects()``, keep DataFrame/Series with >= 1000 rows,
-    ndarrays with nbytes >= 1_000_000, and dict/list/set with len >= 1000,
-    estimate each, and return the n largest as ``(bytes, description)``.
-    Standalone numpy arrays are NOT reported because ``gc.get_objects()``
-    only returns gc-tracked objects; arrays are seen only through
-    DataFrame/Series sizes or containers holding them. Deduplicates by id;
-    ``n`` is coerced to a non-negative int at entry (non-numeric input → 0
-    rows); never raises except MemoryError; does not check the enable flag."""
-    try:
-        n = max(0, int(n))
-    except (TypeError, ValueError):
-        n = 0
+def top_objects(n: int, objs: Any = None) -> list[tuple[int, str]]:
+    """Walk ``objs`` (default ``gc.get_objects()``), keep DataFrame/Series
+    with >= 1000 rows, ndarrays with nbytes >= 1_000_000, and dict/list/set
+    with len >= 1000, estimate each, and return the n largest as
+    ``(bytes, description)``. Standalone numpy arrays are NOT reported
+    because ``gc.get_objects()`` only returns gc-tracked objects; arrays are
+    seen only through DataFrame/Series sizes or containers holding them.
+    Deduplicates by id; ``n`` is coerced to a non-negative int at entry
+    (non-numeric input → 0 rows); never raises except MemoryError; does not
+    check the enable flag."""
+    n = _row_limit(n)
     seen: set[int] = set()
     candidates: list[tuple[int, str]] = []
-    try:
-        objs = gc.get_objects()
-    except MemoryError:
-        raise
-    except Exception:
-        return []
+    if objs is None:
+        try:
+            objs = gc.get_objects()
+        except MemoryError:
+            raise
+        except Exception:
+            return []
     for o in objs:
         try:
             if id(o) in seen:
@@ -411,6 +520,72 @@ def _describe(o: Any, name: str, is_df: bool) -> str:
         return name
 
 
+def type_counts(n: int = 10, objs: Any = None) -> list[tuple[int, str]]:
+    """Top ``n`` ``type(o).__name__`` counts over ``objs`` (default
+    ``gc.get_objects()``) as ``(count, name)``, ordered by count descending
+    with ties broken by name ascending."""
+    n = _row_limit(n)
+    if objs is None:
+        try:
+            objs = gc.get_objects()
+        except MemoryError:
+            raise
+        except Exception:
+            return []
+    try:
+        counts = Counter(type(o).__name__ for o in objs)
+        return [(c, name) for name, c in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:n]]
+    except MemoryError:
+        raise
+    except Exception:
+        return []
+
+
+def hidden_arrays(n: int = 5, objs: Any = None) -> list[tuple[int, str]]:
+    """Standalone ndarrays (untracked by gc) found via dict/list/tuple
+    holders; does not descend into DataFrames. Top ``n`` by nbytes as
+    ``(bytes, description)``."""
+    n = _row_limit(n)
+    if objs is None:
+        try:
+            objs = gc.get_objects()
+        except MemoryError:
+            raise
+        except Exception:
+            return []
+    seen: set[int] = set()
+    found: list[tuple[int, str]] = []
+    for o in objs:
+        try:
+            if not isinstance(o, (dict, list, tuple)):
+                continue
+            for r in gc.get_referents(o):
+                try:
+                    if type(r).__name__ != "ndarray":
+                        continue
+                    nbytes = int(getattr(r, "nbytes", 0) or 0)
+                    if nbytes < 1_000_000 or id(r) in seen:
+                        continue
+                    seen.add(id(r))
+                    found.append(
+                        (
+                            nbytes,
+                            f"ndarray shape={r.shape} dtype={r.dtype} "
+                            f"held by {type(o).__name__} len={len(o)}",
+                        )
+                    )
+                except MemoryError:
+                    raise
+                except Exception:
+                    continue
+        except MemoryError:
+            raise
+        except Exception:
+            continue
+    found.sort(key=lambda x: x[0], reverse=True)
+    return found[:n]
+
+
 def snapshot(label: str, *, top: int | None = None) -> None:
     """Print one diagnostic block, or return immediately if not enabled —
     the disabled path returns before any diagnostic work. Never raises,
@@ -432,18 +607,38 @@ def snapshot(label: str, *, top: int | None = None) -> None:
                 del _registry[(key_name, owner_id)]
         seen_names: dict[str, int] = {}
         n = top if top is not None else _int_flag("INVESTING_PLAN_MEMPROFILE_TOP", _DEFAULT_TOP)
-        n = max(0, n)
+        n = _row_limit(n)
         pre = rss_bytes()
         trimmed = False
+        released = False
         if trim_enabled():
             gc.collect()
-            trimmed = bool(_malloc_trim())
+            released = _arrow_release()
+            trim_ok = bool(_malloc_trim())
+            trimmed = bool(released) or trim_ok
         post = rss_bytes()
         peak = peak_rss_bytes()
         head = f"{_PREFIX}{label} rss={_fmt(post)} peak={_fmt(peak)}"
         if trimmed:
             head += f" [trimmed from {_fmt(pre)}]"
         print(head, flush=True)
+        rb = rss_breakdown()
+        if rb:
+            print(
+                f"{_PREFIX}  rss anon={_fmt(rb['anon'])} file={_fmt(rb['file'])}"
+                f" shmem={_fmt(rb['shmem'])}",
+                flush=True,
+            )
+        arr_stats = arrow_stats()
+        if arr_stats is not None:
+            suffix = " release_unused=yes" if released else ""
+            print(
+                f"{_PREFIX}  arrow backend={arr_stats['backend']}"
+                f" allocated={_fmt(arr_stats['allocated'])}"
+                f" max={_fmt(arr_stats['max'])}"
+                f" total_allocated={_fmt(arr_stats['total_allocated'])}{suffix}",
+                flush=True,
+            )
         for (key_name, owner_id), (target, attr) in list(_registry.items()):
             if isinstance(target, str):
                 mod = sys.modules.get(target)
@@ -480,8 +675,19 @@ def snapshot(label: str, *, top: int | None = None) -> None:
                 size = 0
             size_str = _fmt_mb(size) if size else "0.0M"
             print(f"{_PREFIX}  cache {display}: {length} entries ~{size_str}", flush=True)
-        for nbytes, desc in top_objects(n):
+        objs = gc.get_objects()
+        for nbytes, desc in top_objects(n, objs):
             print(f"{_PREFIX}  obj {_fmt_mb(nbytes)} {desc}", flush=True)
+        for nbytes, desc in hidden_arrays(5, objs):
+            print(f"{_PREFIX}  arr {_fmt_mb(nbytes)} {desc}", flush=True)
+        for nbytes, desc in top_mappings(5):
+            print(f"{_PREFIX}  map {_fmt_mb(nbytes)} {desc}", flush=True)
+        counts = type_counts(10, objs)
+        print(
+            _PREFIX + "  types " + ", ".join(f"{name}={c:,}" for c, name in counts),
+            flush=True,
+        )
+        del objs
     except MemoryError:
         raise
     except Exception as exc:
