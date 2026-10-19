@@ -296,6 +296,46 @@ The optional `record_receipt(record)` callback runs after fencing and insertion
 inside that same transaction, including verified replay. Its failure rolls back
 both the new receipt and caller-owned occurrence; raw content identity is unchanged.
 
+**Streaming table writer (`generic_streaming.py`, #876 slice 2a).** A second,
+additive route to a table's new dataset version for producers whose output must
+not be held in memory. `StreamingTableWriter(store, parent, table_name, attempt_id,
+coverage)` accepts rows in batches and `finish()` returns a
+`GenericTableCandidate` that the unchanged `commit_generic_table_candidate`
+commits. `build_generic_table_candidate` and its three callers are untouched.
+- *Scope:* a whole-table contract only (`partition_columns == ()`, one `__whole__`
+  fragment); any other contract refuses `UNSUPPORTED_CONTRACT`. The result
+  replaces the whole table (no prior rows are read, no per-row revisions or
+  `RowChange`s are recorded; the changeset is `changed` for the one partition with
+  `normalized_payloads` = row count).
+- *Order and validity:* every batch row must satisfy the contract columns, and rows
+  must arrive in strictly increasing primary-key order across and within batches
+  (the caller orders its batches); a violation, a duplicate key or a bad column
+  refuses `CONTRACT_MISMATCH`, never repaired. `append_rows` after `finish`/`abort`
+  refuses `INPUT_CHANGED`.
+- *Memory:* one pending buffer of at most `ROW_GROUP_ROWS` (50,000) rows plus the
+  caller's batch. Rows are written as parquet row groups of exactly
+  `ROW_GROUP_ROWS` (the last one shorter) to a file in the attempt's staging
+  directory, so the bytes, and therefore the content hash, depend only on the rows
+  and never on the caller's batch size. The staged file is streamed into the store
+  (`publish_candidate`) and inspected without materialising the table.
+- *Privacy and transaction (R4):* nothing is visible to the catalog until the one
+  `commit_generic_table_candidate`. Staged and published-but-uncommitted objects are
+  unreferenced; a failure, `abort()` or a crash leaves only reclaimable staging
+  (R5), and the writer removes its own staging file on success and on error. A
+  failed writer is terminal for its attempt (R3); a new attempt starts over.
+- *Idempotency (R6):* the same ordered rows, contract and parent snapshot give the
+  same object hash and dataset version hash; the same parent with different rows
+  gives a different one.
+- *Empty input:* zero rows refuses `CONTRACT_MISMATCH` (an empty table is not
+  published silently).
+
+**`feature_panel` native publication.** The native producer (slice 2b,
+`engine.v2.ops`) will publish `feature_panel` through this writer under the
+existing imported contract: primary key `(ticker, date)`, the existing 52
+columns, no partition columns, no new columns or provenance column. Today's table
+is 201,274 rows (54 MB parquet); the writer's peak is one batch plus at most 50,000
+pending rows. Outcome and pre-print columns exist only in the stored table.
+
 **Original panel COPY identity.** Offline size-fold authoring uses `Repository`
 and the existing object verifier to bind the named committed snapshot's
 `feature_panel` dataset version to one original object and full byte hash.
