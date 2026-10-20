@@ -124,8 +124,8 @@ def test_real_iv_stages_ticks_refusals_and_metadata_only_preflight(tmp_path, mon
             if mode == "load":
                 expected.append("  [IV targets] 2/2, 30s elapsed, 0.07/s, ETA 0s, peak RSS 12 MB")
             expected.append("  [IV target reads] " + ("done in" if mode == "load" else "failed after")
-                            + " 30s, peak RSS 12 MB" + ("; refused EXPERIMENT_VARIANT_FAILED: "
-                            "IV-crush label identity or availability is invalid" if mode == "failure" else ""))
+                            + " 30s, peak RSS 12 MB" + ("; refused EXPERIMENT_VARIANT_FAILED"
+                            if mode == "failure" else ""))
         captured = capsys.readouterr()
         assert captured.out == ""
         assert captured.err.splitlines() == expected
@@ -189,7 +189,8 @@ def test_aggregate_selection_exclusion_and_refusal_decisions(tmp_path, monkeypat
             ["  [IV targets] planned=1; max_batch_rows=1; max_object_bytes=1048576"] if selection == "bulk" else [])
         assert all(event["event_id"] not in captured.err for event in events)
         if selection != "bulk":
-            assert captured.err.rstrip().endswith(f"; refused {caught.value.code}: {caught.value.problem.message}")
+            assert captured.err.rstrip().endswith(f"; refused {caught.value.code}")
+            assert caught.value.problem.message not in captured.err
 
 
 @pytest.mark.parametrize("operation,reason", [
@@ -203,4 +204,5 @@ def test_input_refusal_reason_is_logged_without_repository_access(capsys, operat
     exact_problem(caught, "CONTRACT_MISMATCH", reason)
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.rstrip().endswith(f"; refused CONTRACT_MISMATCH: {reason}")
+    assert captured.err.rstrip().endswith("; refused CONTRACT_MISMATCH")
+    assert reason not in captured.err

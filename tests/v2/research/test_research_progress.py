@@ -73,9 +73,10 @@ def test_quiet_stage_prints_only_when_slow():
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_native_refusal_logging_is_opt_in_and_never_includes_details(monkeypatch, enabled):
+@pytest.mark.parametrize("code", ["HOLDOUT_ACCESS_DENIED", "CONTRACT_MISMATCH"])
+def test_native_refusal_logging_is_opt_in_and_never_includes_details(monkeypatch, enabled, code):
     lines, clock = [], Clock()
-    refusal = fail("HOLDOUT_ACCESS_DENIED", "requested events are excluded", details={"event_id": "private-event"})
+    refusal = fail(code, "requested events are excluded", details={"event_id": "private-event"})
     monkeypatch.setattr(progress, "_rss", lambda: ", peak RSS 12 MB")
     with pytest.raises(DataError) as caught:
         with progress.stage("admission", clock=clock, emit=lines.append, report_refusals=enabled):
@@ -83,7 +84,7 @@ def test_native_refusal_logging_is_opt_in_and_never_includes_details(monkeypatch
             raise refusal
     assert caught.value is refusal
     assert lines == ["  [admission] start, peak RSS 12 MB", "  [admission] failed after 3s, peak RSS 12 MB"
-                     + ("; refused HOLDOUT_ACCESS_DENIED" if enabled else "")]
+                     + (f"; refused {code}" if enabled else "")]
     assert "requested events are excluded" not in "".join(lines)
 
 

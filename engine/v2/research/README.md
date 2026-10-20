@@ -55,7 +55,7 @@ write path.
 ## Public interface
 
 `progress.Progress`, `progress.stage` and `progress.decision` provide shared stderr telemetry:
-bounded-cadence ticks, stage timing/RSS, optional native refusal reasons and aggregate decisions.
+bounded-cadence ticks, stage timing/RSS, optional native refusal codes (no message text) and aggregate decisions.
 
 `iv_crush_inputs.load_iv_crush_targets` reads admitted signed native IV-crush labels
 with an explicit label cutoff; `preflight_iv_crush_targets` proves an explicit
