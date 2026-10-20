@@ -32,7 +32,9 @@ def block(value):
 
 
 def lookup(value, prediction=-1.0):
-    return module.driver_pool_from_artifact(block(value), "driver", prediction)
+    pool, flag = module.driver_pool_from_artifact(block(value), "driver", prediction)
+    assert flag is None
+    return pool, flag
 
 
 @pytest.mark.parametrize("prediction,expected", [(-1.0, [1., 2.]), (0.0, [1., 2., 3., 4.]),
@@ -139,8 +141,11 @@ def test_unbucketed_empty_and_unpinned_requests_keep_behavior():
     value = artifact(buckets=False)
     request = block(value)
     del request[module.RESIDUAL_KEYS_FIELD]["driver"]["content_hash"]
-    np.testing.assert_array_equal(module.driver_pool_from_artifact(request, "driver", 0)[0], [1., 2., 3., 4.])
-    assert lookup(artifact(buckets=False, empty=True)) == (None, "MISSING_MODEL_RESIDUALS")
+    pool, flag = module.driver_pool_from_artifact(request, "driver", 0)
+    assert flag is None
+    np.testing.assert_array_equal(pool, [1., 2., 3., 4.])
+    empty = block(artifact(buckets=False, empty=True))
+    assert module.driver_pool_from_artifact(empty, "driver", -1) == (None, "MISSING_MODEL_RESIDUALS")
 
 
 def test_concurrent_misses_remain_bounded(monkeypatch):
