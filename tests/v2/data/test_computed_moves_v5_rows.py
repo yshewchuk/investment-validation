@@ -457,6 +457,45 @@ def test_np_int64_min_scoreable_is_accepted():
     assert [row["not_computed_reason"] for row in rows] == [None] * len(_CONFIRMED)
 
 
+def test_bad_min_scoreable_refuses_before_a_missing_column_on_one_frame():
+    # _validate_inputs checks the bar FIRST: a frame carrying BOTH a bad
+    # min_scoreable and a missing column raises the min_scoreable message,
+    # exact text, out of both entry points
+    for bad in (True, -1, 2.5):
+        _assert_refusal_parity(pd.DataFrame({"event_date": []}),
+                               "min_scoreable must be a non-negative int", min_scoreable=bad)
+
+
+def test_bad_src_orats_refuses_before_an_unsorted_sd_on_one_frame():
+    # src_orats is checked inside _validate_inputs, before _require_price_series,
+    # so ONE frame carrying both defects raises the src_orats message first
+    events = _events(*_CONFIRMED[:3])
+    events["src_orats"] = pd.Series([None, True, True], dtype="object")
+    unsorted_sd = _SD[::-1].copy()
+    assert np.any(unsorted_sd[1:] < unsorted_sd[:-1])  # the sd really is unsorted
+    _assert_refusal_parity(events, "events src_orats must hold a real bool per row",
+                           sd=unsorted_sd, sc=_SC)
+
+
+def test_min_scoreable_zero_is_valid_but_admission_still_applies():
+    # 0 is a non-negative int: a ticker with at least ADMISSION_EVENTS computable
+    # events computes every row, both entry points alike
+    rows = _build(_events(*_CONFIRMED), min_scoreable=0)
+    assert len(rows) == len(_CONFIRMED)
+    assert [row["not_computed_reason"] for row in rows] == [None] * len(_CONFIRMED)
+    assert classify_event_reasons(_events(*_CONFIRMED), _SD, _SC, min_scoreable=0) == (
+        [None] * len(_CONFIRMED))
+
+    # fewer than ADMISSION_EVENTS computable is STILL ticker_too_few_events:
+    # min_scoreable=0 relaxes only the confirmed-count bar, never the other one
+    too_few = _events(*_CONFIRMED[:3])  # 3 confirmed and computable < 5
+    assert classify_event_reasons(too_few, _SD, _SC, min_scoreable=0) == (
+        ["ticker_too_few_events"] * 3)
+    rows = _build(too_few, min_scoreable=0)
+    for position, row in enumerate(rows):
+        _assert_refused(row, "ticker_too_few_events", position)
+
+
 def test_missing_event_columns_or_a_price_length_mismatch_refuse():
     _assert_refusal_parity(pd.DataFrame({"event_date": []}),
                            "events lacks required columns: session, src_orats")
@@ -516,6 +555,33 @@ def test_unparseable_daily_dates_and_non_numeric_implied_move_refuse_both_ticker
     assert not pd.api.types.is_numeric_dtype(all_null["implied_move"])
     rows = _build(_events(*_CONFIRMED), daily=all_null)
     assert [row["implied_move_pct"] for row in rows] == [None] * len(_CONFIRMED)
+
+
+def test_empty_daily_frames_validate_even_against_empty_inputs():
+    # an EMPTY daily frame with the required columns is well-formed: rows still
+    # build, with no as-of anchor anywhere (every implied value null)
+    empty = pd.DataFrame({"date": pd.to_datetime([]),
+                          "implied_move": pd.Series([], dtype="float64"),
+                          "src_iv": pd.Series([], dtype="object")})
+    rows = _build(_events(*_CONFIRMED), daily=empty)
+    assert len(rows) == len(_CONFIRMED)
+    assert [row["implied_move_pct"] for row in rows] == [None] * len(_CONFIRMED)
+
+    # an EMPTY daily frame MISSING a column is malformed all the same:
+    # CONTRACT_MISMATCH with the one daily-shape message, before any row builds
+    with pytest.raises(DataError) as caught:
+        _build(_events(*_CONFIRMED), daily=empty.drop(columns="src_iv"))
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert caught.value.problem.message == (
+        "daily_market frame lacks date, implied_move or src_iv")
+
+    # an EMPTY events frame does not skip the daily check either: build_event_rows
+    # validates daily BEFORE the empty-input return, so the malformed frame wins
+    with pytest.raises(DataError) as caught:
+        _build(_events(), daily=pd.DataFrame())
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert caught.value.problem.message == (
+        "daily_market frame lacks date, implied_move or src_iv")
 
 
 @pytest.mark.parametrize("bad", [None, pd.NA, float("nan")])

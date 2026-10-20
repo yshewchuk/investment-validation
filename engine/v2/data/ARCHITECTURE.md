@@ -436,6 +436,7 @@ and never computed per run by a reader:
 | duplicate or unsorted event dates, or duplicate or unsorted `daily_market` dates, for a ticker | `build_rows` raises `CONTRACT_MISMATCH`; the refresh fails before any catalog commit, surfaced by the store as `OpsError` `INPUT_CHANGED` (`details.data_code` = the data code) |
 | the `daily_market` frame, empty or not, lacks `date`, `implied_move` or `src_iv` | `build_rows` raises `CONTRACT_MISMATCH` (the store's own scan refuses a missing table column first, per the ops doc) |
 | no `src_iv` row before an event | `implied_move_pct` null, no contribution to the aggregate |
+| `daily_market` calendar days unsorted or duplicated for a ticker | `build_rows` raises `CONTRACT_MISMATCH` (via `AsofSeries`) before any row is built |
 
 A refresh over a parent that still holds v3 partitions refuses `VALIDATION_FAILED`
 ("full rebuild required", ops doc) when it neither rewrites nor attempts every non-v4

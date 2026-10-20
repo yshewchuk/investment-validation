@@ -4,7 +4,7 @@ Not built by ``legacy_mapping.py``: ``computed_moves`` has no legacy Tier-2
 table backing it -- the legacy pull writes one ``moves_<TICKER>.json`` file
 per ticker under ``engine.paths.COMPUTED_MOVES`` and the panel globs that
 directory directly. There is no legacy-scanned table to map, so this module
-builds its one contract directly, the same *mechanism*
+builds its two contracts (v4 and the additive v5) directly, the same *mechanism*
 ``price_history_table.py`` uses (``manifests.table_contract_hash`` over a
 placeholder, never a dataclass deriving its own hash) and none of
 ``legacy_mapping``'s legacy-annotation plumbing.
