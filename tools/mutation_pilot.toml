@@ -428,6 +428,7 @@ excluded = "legacy materialization/mapping/reference bridge the rearchitecture d
 why = "Legacy materialization, mapping, reference inputs and price history: the bridge that feeds legacy-shaped inputs into v2."
 mutate = [
     "engine/v2/data/legacy_*.py",
+    "engine/v2/data/materialize_progress.py",
     "engine/v2/data/import_snapshot.py",
     "engine/v2/data/reference_*.py",
     "engine/v2/data/tier4_coverage.py",
@@ -438,6 +439,7 @@ tests = [
     "tests/v2/data/test_legacy_reader_lifetime.py",
     "tests/test_v2_data_legacy_adapter.py",
     "tests/v2/data/test_legacy_materialization.py",
+    "tests/v2/data/test_legacy_materialize_progress.py",
     "tests/v2/data/test_price_downloads.py",
     "tests/v2/data/test_v2_data_reference_inputs.py",
     "tests/test_v2_data_tier4_coverage.py",
