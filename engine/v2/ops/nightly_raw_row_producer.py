@@ -22,13 +22,13 @@ import json
 import math
 import numbers
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
 
-from engine.v2.contracts import PriceSeriesRow, SnapshotRef
+from engine.v2.contracts import SnapshotRef
 from engine.v2.data.errors import DataError, fail
 from engine.v2.data.price_history_query import tickers_with_price_history
 from engine.v2.data.price_history_table import PRICE_HISTORY_TABLE_NAME
@@ -42,6 +42,7 @@ from engine.v2.ops.native_score_batch_types import (
     NativeScoreBatchRowRefusal,
 )
 from engine.v2.ops.nightly_calendar_inputs import (
+    SpotReader,
     make_spot_reader,
     scan_calendar_row_inputs,
     scan_decision_calendar,
@@ -198,7 +199,7 @@ def _compose_event(
     calendar: Any,
     panel: PanelRowInputs,
     chain_rows: Sequence[Mapping[str, Any]] | None = None,
-    spot_reader: Callable[[str, str], PriceSeriesRow | None] | None = None,
+    spot_reader: SpotReader | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """One admitted request's event document, or its in-place refusal document."""
     if not _regime_history_available(panel):
