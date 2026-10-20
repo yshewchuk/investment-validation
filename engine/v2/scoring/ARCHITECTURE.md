@@ -767,6 +767,7 @@ not total RSS; retained source objects and Python metadata are additional overhe
 | Condition | Outcome |
 | --- | --- |
 | Missing/wrong kind, causal key or requested hash pin | `MODEL_NOT_READY` before cache lookup on every call. |
+| Valid artifact whose selected residual pool is empty | `MISSING_MODEL_RESIDUALS`; no pool is returned. |
 | Distinct direct objects with equal declared hashes and different contents | Return each object's own pool; existing declared-hash admission is unchanged. |
 | Same retained deeply immutable object | Reuse its immutable numeric buffers after the per-call identity checks. |
 | Valid miss fitting both caps | Retain the object and buffers with FIFO eviction; both retention caps remain satisfied. |
