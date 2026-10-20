@@ -71,6 +71,23 @@ def counted_publisher(monkeypatch):
     return published
 
 
+def expected_partition(section, batch, target):
+    """Shard row counts write_section yields for a batch of known row widths."""
+    empty = len(canonical_json({"schema_version": shards.SHARD_SCHEMA,
+                                "section": section, "rows": []}).encode())
+    partitions, size, count = [], empty, 0
+    for item in batch:
+        width = len(canonical_json(item).encode())
+        if count and size + width + 1 > target:
+            partitions.append(count)
+            size, count = empty, 0
+        size += width if not count else width + 1
+        count += 1
+    if count:
+        partitions.append(count)
+    return partitions
+
+
 def test_write_is_deterministic_across_batch_iterator_types(tmp_path):
     store = ArtifactStore(tmp_path / "store")
     batch = rows(6)
@@ -83,6 +100,9 @@ def test_write_is_deterministic_across_batch_iterator_types(tmp_path):
     )
     assert alternatives[0] == alternatives[1] == alternatives[2] == first
     assert once.calls == 1
+    assert [entry["rows"] for entry in first["shards"]] == [len(batch)]
+    assert [item for entry in first["shards"]
+            for item in json.loads(store.read_verified(reference(entry)))["rows"]] == batch
     inline = {"stored_inputs_id": "sha256:x"}
     manifest = shards.build_manifest(inline, {"features": first})
     assert shards.build_manifest(inline, {"features": first}) == manifest
@@ -97,6 +117,8 @@ def test_cut_at_target_and_size_equals_computed_size(tmp_path, monkeypatch):
     written = shards.write_section(store, "features", batch, key)
     assert written["row_count"] == len(batch)
     assert len(written["shards"]) > 1
+    assert [entry["rows"] for entry in written["shards"]] == expected_partition("features", batch, 200)
+    recovered = []
     for entry in written["shards"]:
         payload = store.read_verified(reference(entry))
         document = json.loads(payload)
@@ -105,6 +127,13 @@ def test_cut_at_target_and_size_equals_computed_size(tmp_path, monkeypatch):
         assert entry["first_key"] == list(key(document["rows"][0]))
         assert entry["last_key"] == list(key(document["rows"][-1]))
         assert entry["ref"]["byte_size"] <= 200
+        recovered.extend(document["rows"])
+    assert recovered == batch
+    changed = list(batch)
+    changed[0] = row(batch[0]["event_id"], batch[0]["value"] + 1)
+    altered = shards.write_section(store, "features", changed, key)
+    assert shards.manifest_id(shards.build_manifest({}, {"features": altered})) != \
+        shards.manifest_id(shards.build_manifest({}, {"features": written}))
 
 
 def test_round_trip_order_for_zero_one_and_many_rows(tmp_path, monkeypatch):
@@ -115,11 +144,19 @@ def test_round_trip_order_for_zero_one_and_many_rows(tmp_path, monkeypatch):
     assert list(shards.iter_section(store, "features", empty, key)) == []
     one = rows(1)
     written = shards.write_section(store, "features", one, key)
+    assert [entry["rows"] for entry in written["shards"]] == [1]
     assert list(shards.iter_section(store, "features", written, key)) == one
     many = rows(30)
     written = shards.write_section(store, "features", many, key)
     assert len(written["shards"]) > 1
-    assert list(shards.iter_section(store, "features", written, key)) == many
+    assert [entry["rows"] for entry in written["shards"]] == expected_partition("features", many, 150)
+    recovered = []
+    for entry in written["shards"]:
+        document = json.loads(store.read_verified(reference(entry)))
+        assert entry["ref"]["byte_size"] == len(canonical_json(document).encode())
+        recovered.extend(document["rows"])
+    assert recovered == many
+    assert recovered == list(shards.iter_section(store, "features", written, key))
 
 
 def test_oversized_row_refuses_without_publishing(tmp_path, monkeypatch):
@@ -154,10 +191,60 @@ def test_duplicate_and_out_of_order_keys_refuse_while_writing(tmp_path):
 def test_build_manifest_shard_budget(monkeypatch):
     monkeypatch.setattr(shards, "MAX_SHARDS", 2)
     shard = {"ref": {}, "rows": 1, "first_key": [0], "last_key": [1]}
-    assert shards.build_manifest({}, {"features": {"row_count": 2, "shards": [shard, shard]}})
+    sections = {"features": {"row_count": 2, "shards": [shard, shard]}}
+    assert shards.build_manifest({}, sections) == {
+        "schema_version": shards.MANIFEST_SCHEMA, "inline": {}, "sections": sections}
     with refusal("RESOURCE_LIMIT_EXCEEDED", False):
         shards.build_manifest({}, {"features": {"row_count": 2, "shards": [shard, shard]},
                                    "training": {"row_count": 1, "shards": [shard]}})
+
+
+def test_verify_manifest_shard_budget(monkeypatch):
+    monkeypatch.setattr(shards, "MAX_SHARDS", 2)
+    shard = {"ref": {}, "rows": 1, "first_key": [0], "last_key": [1]}
+    manifest = {"schema_version": shards.MANIFEST_SCHEMA, "inline": {},
+                "sections": {"features": {"row_count": 3, "shards": [shard, shard, shard]}}}
+    with refusal("EXPERIMENT_IDENTITY_CONFLICT", False):
+        shards.verify_manifest(manifest, shards.manifest_id(manifest))
+
+
+def _collecting_reads(monkeypatch):
+    reads = []
+    original = ArtifactStore.read_verified
+
+    def counted(self, ref):
+        reads.append(ref)
+        return original(self, ref)
+
+    monkeypatch.setattr(ArtifactStore, "read_verified", counted)
+    return reads
+
+
+def test_section_total_refuses_before_any_read(tmp_path, monkeypatch):
+    store = ArtifactStore(tmp_path / "store")
+    entry = shards.write_section(store, "features", rows(2), key)
+    broken = {"row_count": 3, "shards": entry["shards"]}
+    reads = _collecting_reads(monkeypatch)
+    collected = []
+    with refusal("EXPERIMENT_IDENTITY_CONFLICT", False):
+        for item in shards.iter_section(store, "features", broken, key):
+            collected.append(item)
+    assert collected == []
+    assert reads == []
+
+
+def test_section_shard_budget_refuses_before_any_read(tmp_path, monkeypatch):
+    store = ArtifactStore(tmp_path / "store")
+    monkeypatch.setattr(shards, "MAX_SHARDS", 2)
+    shard = {"ref": {}, "rows": 1, "first_key": [0], "last_key": [1]}
+    entry = {"row_count": 3, "shards": [shard, shard, shard]}
+    reads = _collecting_reads(monkeypatch)
+    collected = []
+    with refusal("EXPERIMENT_IDENTITY_CONFLICT", False):
+        for item in shards.iter_section(store, "features", entry, key):
+            collected.append(item)
+    assert collected == []
+    assert reads == []
 
 
 def test_verify_manifest_shape_and_hash():
@@ -309,10 +396,15 @@ def test_reader_streams_one_shard_at_a_time(tmp_path, monkeypatch):
 
 def test_inventory_sections_are_unique_and_keyed_or_flagged():
     members = shards.LIST_MEMBERS
-    assert len({member["section"] for member in members}) == len(members)
+    assert [member["section"] for member in members] == [
+        "features", "training", "preflight.event_ids", "preflight.planned_inputs",
+        "training_inputs.candidate_event_ids", "training_inputs.qualified_event_ids",
+        "training_inputs.read_inputs", "training_inputs.omitted_labels"]
     for member in members:
         assert member["rows"]
-        if member.get("problem"):
-            assert member["key"] is None
-        else:
+        if member["section"] == "features":
             assert callable(member["key"])
+            assert "problem" not in member
+        else:
+            assert member["key"] is None
+            assert member["problem"]

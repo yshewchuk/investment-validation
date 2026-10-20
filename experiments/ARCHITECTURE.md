@@ -303,15 +303,10 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   validation target. Transport memory is one shard plus the manifest.
 * Shards are published, outside the catalog transaction, before the manifest append,
   which is the commit point.
-* Decided (supervisor, 2026-10-20): the manifest hash is a Merkle `inputs_id` (only smoke and
-  test journals sealed before activation stop replaying), and every cohort shards, however small.
-  Sharded outputs (forecasts, `validation:` targets, receipts) are decided after the child
-  transport lands, on measured sizes.
+* The manifest hash is a Merkle `inputs_id`, and every cohort shards, however small.
 * `magnitude_search_shards` implements the cut rule, writer, manifest hash and verified reader
-  and lists the list-valued members (`LIST_MEMBERS`); nothing calls it until activation.
-  Open for activation: every member except `features` is in the admitted `(event_date, event_id)`
-  order but its rows carry no `event_date`, so no strictly increasing key exists yet; activation
-  must supply one (for example carry the date in each row) before those sections are written.
+  and lists the list-valued members (`LIST_MEMBERS`); a member without a strictly increasing
+  sort key carries a `problem` note and is not written.
 
 | Condition | Outcome |
 |---|---|
@@ -321,7 +316,8 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 | Manifest committed, later shard lost or corrupted | Fails closed as above on every read. |
 | Same slot, different manifest | `EXPERIMENT_IDENTITY_CONFLICT`. |
 | Same slot, same manifest (retry after an ambiguous append) | No-op success; shards are content-addressed, so republishing is harmless, and no cache entry depends on the attempt. |
-| A row above 8 MiB or more than 8192 shards | Nonretryable `RESOURCE_LIMIT_EXCEEDED` before the manifest append; published shards stay unreferenced. |
+| A row above 8 MiB or more than 8192 shards | Nonretryable `RESOURCE_LIMIT_EXCEEDED` before the manifest append; published shards stay unreferenced. A stored manifest or section listing more than 8192 shards is `EXPERIMENT_IDENTITY_CONFLICT`. |
+| Writer given a row whose sort key is missing, not a tuple of strings/integers, or not strictly above the previous key | `INVALID_EXPERIMENT_SPEC` before that shard is published. |
 | Older whole-cohort record read by sharded code | `EXPERIMENT_IDENTITY_CONFLICT`; no rewrite or migration. |
 
 Registration, snapshot, plan and execution-spec bindings are unchanged; `inputs:<trial>`

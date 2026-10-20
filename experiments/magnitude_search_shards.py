@@ -179,7 +179,13 @@ def _section_binding(entry):
             or type(entry["row_count"]) is not int or entry["row_count"] < 0
             or not isinstance(entry["shards"], list)):
         raise fail(_CONFLICT, "search cohort section binding is invalid")
+    if len(entry["shards"]) > MAX_SHARDS:
+        raise fail(_CONFLICT, "search cohort section exceeds its shard limit")
     if (entry["row_count"] == 0) != (not entry["shards"]):
+        raise fail(_CONFLICT, "search cohort section count is invalid")
+    if all(isinstance(shard, dict) and type(shard.get("rows")) is int and shard["rows"] > 0
+           for shard in entry["shards"]) and (
+            sum(shard["rows"] for shard in entry["shards"]) != entry["row_count"]):
         raise fail(_CONFLICT, "search cohort section count is invalid")
     return entry["row_count"], entry["shards"]
 
@@ -276,6 +282,8 @@ def _manifest_shape(manifest):
                     or not isinstance(shard["first_key"], list)
                     or not isinstance(shard["last_key"], list)):
                 raise fail(_CONFLICT, "search cohort manifest is invalid")
+    if sum(len(entry["shards"]) for entry in manifest["sections"].values()) > MAX_SHARDS:
+        raise fail(_CONFLICT, "search cohort manifest exceeds its shard limit")
 
 
 def verify_manifest(manifest, expected_id):
