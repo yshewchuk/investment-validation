@@ -155,10 +155,10 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   planned-unit key validation, `normalizer_id` versioning, coverage
   completeness, and mcap carry-forward.
 - **Snapshot resolution and bounded reads** — `repository.Repository`:
-  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`; opt-in `pin_snapshots=True` memoises per instance `resolve` by snapshot id and the scan/bound path's table contract and membership by `(dataset_version_id, contract_id)`, not `fragment_records`, default off, a failure is never cached; a pinned `scan` whose `key_filter` names a partition column plans only that partition's fragments (index built once per pinned table, every fragment's key bounds validated when it is built, so a corrupt bound still refuses every pinned scan), each call returns an independent copy), a bounded Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/`get_close`, and `explain_dependencies`.
+  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`; opt-in `pin_snapshots=True` memoises per instance `resolve` by snapshot id and the scan/bound path's table contract and membership by `(dataset_version_id, contract_id)`, not `fragment_records`, default off, a failure is never cached; a pinned `scan` or `scan_population_bound` whose `key_filter` names a partition column plans only the matching partitions' fragments (invalid key bounds in any fragment, including unselected fragments, refuse every pinned scan or bound lookup), each call returns an independent copy), a bounded Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/`get_close`, and `explain_dependencies`.
   Metadata-only `scan_population_bound` sums recorded counts of surviving
   fragments of the supplied snapshot, with no head fallback or object reads,
-  through the same membership-bound planner behind `scan` and
+  with the same strict predicate refusals and membership-bound semantics as `scan` and
   `explain_dependencies`. That summed manifest-footer count is the
   authoritative selected-population bound: both paths check a request's
   `max_result_rows` against it before row streaming. A query-level limit
@@ -449,6 +449,8 @@ partition, or produces no v4 rows at all; v3 records are never carried.
 imports `event_history` from this same package (no new cross-component dependency).
 
 **`computed_moves.v5` — one row per considered event, with a reason (issue #966).**
+Status: v5 is defined but not yet produced. Capture still commits `computed_moves.v4`; no
+production path calls `build_event_rows` / `classify_event_reasons` yet.
 Contract `computed_moves.v5` / `5.0.0` (`COMPUTED_MOVES_V5_CONTRACT`) and the pure
 `build_event_rows` / `classify_event_reasons` sit beside v4, which stays pinned and
 readable (no migration, dual read or backfill; the standard capture rewrites
@@ -489,7 +491,7 @@ is unchanged: a candidate with no fragment is still a refusal. Nothing is writte
 | an empty event list with valid inputs | no rows; the input refusals below still apply first |
 | reason precedence for one event | per-event `not_orats`, then `no_session`; ticker-level overrides every event: `no_price_history` (no closes, checked first), else `ticker_too_few_events`; otherwise a confirmed event with no bracketing window is `no_price_window`, else null |
 | event dates not strictly ascending after the same-date collapse, or `sd` not non-decreasing | `CONTRACT_MISMATCH` from both entry points, whatever the ticker-level outcome |
-| `min_scoreable` not a non-negative int, an event frame lacking `event_date`/`session`/`src_orats`, a non-datetime, NaT or intraday `event_date`, a non-bool `src_orats`, a non-null `session` other than `BMO`/`AMC` (the source schema's set), or `sd`/`sc` of different lengths (both entry points); a `daily` frame lacking `date`/`implied_move`/`src_iv`, or with unparseable or NaT dates, or a non-real-number `implied_move` cell of any dtype (bool and complex included) (`build_event_rows` up front before any branch, and `build_rows` through the same `_validate_daily`); `daily` calendar days (`YYYY-MM-DD`) not strictly ascending and unique (`build_event_rows` up front; `build_rows` through `AsofSeries`). The classifier takes no `daily` | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
+| a malformed `min_scoreable`, event frame, price series or `daily` frame (both v5 entry points refuse alike, except that only `build_event_rows` takes and validates `daily`; per-branch detail lives in code docstrings and tests) | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
 | `prices_known` not a `bool`, or `prices_known=False` with `MIN_SCOREABLE` or more confirmed events (both entry points) | `CONTRACT_MISMATCH`; with `prices_known=False` and fewer, every event is `ticker_too_few_events` whatever `sd`/`sc` hold |
 
 **`event_history.py` — event-history primitives (design #651).** Pure, no I/O,

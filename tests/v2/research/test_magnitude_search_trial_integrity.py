@@ -359,6 +359,7 @@ def test_source_closure_failure_is_exact_identity_refusal_before_sealing(journal
 
 def test_changed_shared_cohort_blocks_selection_instead_of_excluding_candidate(journal, monkeypatch):
     journal.recorder.start("2024", "2023", "z-last")
+    journal.recorder._memo.clear()
     monkeypatch.setattr(journal.recorder, "_inputs", lambda inner: {"native_inputs": "changed"})
     with pytest.raises(OpsError) as caught:
         journal.recorder.start("2024", "2023", "a-first")
@@ -887,6 +888,7 @@ def test_shared_admission_refusal_never_becomes_candidate_terminal(journal, monk
         raise original
     if phase != "start":
         journal.recorder.start("2024", "2023", "z-last")
+        journal.recorder._memo.clear()
     monkeypatch.setattr(trials if phase == "labels" else journal.recorder,
                         "load_magnitude_targets" if phase == "labels" else "_inputs", refused)
     with pytest.raises(DataError) as caught:

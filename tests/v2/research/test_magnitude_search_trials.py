@@ -311,6 +311,7 @@ def test_source_and_plan_drift_refuse_before_native_payloads(case, monkeypatch):
 def test_native_input_drift_blocks_selection_without_excluding_candidate(case, monkeypatch):
     args = trial_cases(case)[0]
     started = case.recorder.start(*args)
+    case.recorder._memo.clear()
     original = case.recorder._inputs
     monkeypatch.setattr(case.recorder, "_inputs", lambda fold: {**original(fold), "stored_inputs_id": "changed"})
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("validation opened"))
@@ -324,6 +325,7 @@ def test_native_input_drift_blocks_selection_without_excluding_candidate(case, m
 def test_native_history_binding_drift_refuses_exactly_before_readmission(case, monkeypatch):
     args = trial_cases(case)[0]
     started = case.recorder.start(*args)
+    case.recorder._memo.clear()
     changed = {**case.source.registration.document["magnitude_history"], "unexpected_identity": "changed"}
     monkeypatch.setattr(evidence, "history_binding", lambda *a, **k: changed)
     monkeypatch.setattr(evidence, "preflight_magnitude_targets", lambda *a, **k: pytest.fail("preflight opened"))
