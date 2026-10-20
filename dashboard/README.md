@@ -314,6 +314,7 @@ Order matters; each step gates the next.
 2a. **Warm** the Tier-4 serving models the score will touch: any missing for
    the current panel are fit in a subprocess first, so score never refits
    in-process. A failure stops the run (`WARM_SERVING_FAILED`, nothing scored).
+   Skipped when a custom scorer is injected.
 3. **Score** the confirmed calendar, ATM, with one shared Scorer.
 4. **Ledger** — the ATM board is frozen into `ledger/predictions/` *before*
    rendering. Missed nights backfill honestly (real `decision_ts`, flagged

@@ -275,3 +275,55 @@ def test_nightly_wires_warm_failure_to_a_stop():
     source = Path(warm_serving.__file__).with_name("nightly.py").read_text()
     assert "warm_serving.warm(" in source
     assert "WARM_SERVING_FAILED" in source
+
+
+def test_child_publishes_atomically_and_cleans_staging(tmp_path, monkeypatch):
+    import engine.features
+
+    monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+    monkeypatch.setattr(warm_serving, "_panel_snapshot", lambda: "a" * 64)
+    monkeypatch.setattr(engine.features, "load_panel", lambda: None)
+
+    seen: dict = {}
+
+    def fake_serving_model(fold, *, panel=None, model=None, cache=True):
+        path = tier4._serving_path(model.model_id, pd.Timestamp(fold), "a" * 64)
+        path.write_bytes(b"x")
+        seen["path"] = path
+        seen["staged_parent"] = path.parent.name.startswith(".warm-")
+
+    monkeypatch.setattr(tier4, "serving_model", fake_serving_model)
+
+    ret = warm_serving._child([("pred_abs_move", "2026-10-01")], "a" * 64)
+    assert ret == 0
+    assert (tmp_path / seen["path"].name).read_bytes() == b"x"
+    assert seen["staged_parent"] is True
+    assert tier4.SERVING_DIR == tmp_path
+    assert not list(tmp_path.glob(".warm-*"))
+
+
+def test_child_refuses_when_panel_changes_mid_fit(tmp_path, monkeypatch):
+    import engine.features
+
+    monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+    calls = {"n": 0}
+
+    def fake_snapshot():
+        calls["n"] += 1
+        return "a" * 64 if calls["n"] == 1 else "b" * 64
+
+    monkeypatch.setattr(warm_serving, "_panel_snapshot", fake_snapshot)
+    monkeypatch.setattr(engine.features, "load_panel", lambda: None)
+
+    def fake_serving_model(fold, *, panel=None, model=None, cache=True):
+        path = tier4._serving_path(model.model_id, pd.Timestamp(fold), "a" * 64)
+        path.write_bytes(b"x")
+
+    monkeypatch.setattr(tier4, "serving_model", fake_serving_model)
+
+    ret = warm_serving._child([("pred_abs_move", "2026-10-01")], "a" * 64)
+    assert ret == 2
+    model = tier4.feature_model("pred_abs_move")
+    live = tier4._serving_path(model.model_id, pd.Timestamp("2026-10-01"), "a" * 64)
+    assert not live.exists()
+    assert not list(tmp_path.glob(".warm-*"))

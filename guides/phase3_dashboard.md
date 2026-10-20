@@ -19,7 +19,7 @@ engine/dashboard/
   render.py        # score_calendar() output -> snapshot bundle
   selfcheck.py     # bundle vs direct engine.score diff
   publish.py       # bundle -> Cloudflare Pages/R2 (or S3), atomic
-  nightly.py       # orchestrator: refresh -> rescore -> ledger -> render -> check -> publish
+  nightly.py       # orchestrator: refresh -> warm Tier-4 models -> rescore -> ledger -> render -> check -> publish
 dashboard/earnings/           # served + published bundle
   index.html  assets/app.js  assets/app.css
   data/board.json  data/tickers/{T}.json  data/meta.json  data/health.json

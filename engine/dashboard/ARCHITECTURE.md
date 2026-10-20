@@ -192,7 +192,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 
   | Condition | Outcome |
   | --- | --- |
-  | Warm step (default scorer): subprocess exits non-zero, times out (3 h), leaves a fit missing or not ready, or the panel changed under it | `NightlyStop` `WARM_SERVING_FAILED`; exit 1; nothing scored; no in-process refit |
+  | Warm step (default scorer): subprocess exits non-zero, cannot start, times out (3 h), fails to plan/verify, leaves a fit missing or not ready, or the panel changed under it | `NightlyStop` `WARM_SERVING_FAILED`; exit 1; nothing scored; no in-process refit |
   | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`); no gap flag once repaired |
   | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no new SNAPSHOT (the previous one is kept), so the native import sees no new session for the night (`not_yet`, unless an earlier run that night already wrote one) |
   | With tiers on, run stops between refresh and tiers (red validation, as-of finality stop) | Store refreshed, no new SNAPSHOT; the previous SNAPSHOT is kept (with `--no-tiers` the refresh step has already written one) |

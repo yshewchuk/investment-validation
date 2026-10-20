@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import resource
+import shutil
 import subprocess
 import sys
 import time
@@ -118,11 +120,16 @@ def warm(event_dates, decision_start, decision_end=None, *, command=None, log=No
     """Fit every missing serving model in a subprocess; raise `WarmError` on failure."""
     log = log or (lambda m: print(m, file=sys.stderr, flush=True))
     started = time.time()
-    folds = needed_folds(event_dates, decision_start, decision_end)
-    snapshot = _panel_snapshot()
-    jobs = missing_jobs(folds, snapshot)
+    try:
+        folds = needed_folds(event_dates, decision_start, decision_end)
+        snapshot = _panel_snapshot()
+        jobs = missing_jobs(folds, snapshot)
+    except Exception as exc:  # noqa: BLE001 - planning failures stop the nightly typed
+        raise WarmError(f"warm planning failed: {type(exc).__name__}: {exc}") from exc
     log(f"[warm] {len(folds)} fold(s) needed, {len(jobs)} model fit(s) missing")
     if not jobs:
+        if _panel_snapshot() != snapshot:
+            raise WarmError("panel changed while the warm step inspected caches; refusing to score")
         return {"folds": len(folds), "fitted": 0, "elapsed_s": round(time.time() - started, 1)}
     cmd = command or [sys.executable, "-m", "engine.dashboard.warm_serving",
                       "--jobs-json", json.dumps(jobs), "--snapshot", snapshot]
@@ -138,7 +145,10 @@ def warm(event_dates, decision_start, decision_end=None, *, command=None, log=No
     if proc.returncode != 0:
         raise WarmError(f"warm subprocess exited {proc.returncode} after {elapsed}s "
                         f"with {len(jobs)} fit(s) pending")
-    remaining = missing_jobs(folds, snapshot)
+    try:
+        remaining = missing_jobs(folds, snapshot)
+    except Exception as exc:  # noqa: BLE001 - verification failures stop the nightly typed
+        raise WarmError(f"warm verification failed: {type(exc).__name__}: {exc}") from exc
     if remaining:
         raise WarmError(f"warm subprocess exited 0 but {len(remaining)} fit(s) are still missing")
     if _panel_snapshot() != snapshot:
@@ -161,33 +171,31 @@ def _child(jobs, snapshot: str) -> int:
         return 2
     panel = load_panel()
     print(f"[warm] panel loaded, peak RSS {_peak_rss_mb():.0f} MB", file=sys.stderr, flush=True)
-    written = []
-    for i, (produces, fold) in enumerate(jobs, 1):
-        model, path = _serving_file(produces, fold, snapshot)
-        if path.exists():  # present but not ready (old format / corrupt): refit it
-            path.unlink()
-        tier4.serving_model(pd.Timestamp(fold), panel=panel, model=model)
-        written.append(path)
-        now = _panel_snapshot()
-        if now != snapshot:
-            # serving_model hashes the live panel itself, so a swap could have
-            # filed an old-panel fit under the NEW hash: remove both paths.
-            for stale in written + [_serving_file(produces, fold, now)[1]]:
-                stale.unlink(missing_ok=True)
-            print("[warm] panel changed during fitting; caches removed",
-                  file=sys.stderr, flush=True)
-            return 2
-        elapsed = time.time() - started
-        eta = elapsed / i * (len(jobs) - i)
-        print(f"[warm] fold {i}/{len(jobs)} {produces} {fold} done, "
-              f"{elapsed:.0f}s elapsed, {i / elapsed * 60:.1f} fits/min, ETA {eta:.0f}s, "
-              f"peak RSS {_peak_rss_mb():.0f} MB", file=sys.stderr, flush=True)
-    if _panel_snapshot() != snapshot:
-        for path in written:
-            path.unlink(missing_ok=True)
-        print("[warm] panel changed during fitting; caches removed", file=sys.stderr, flush=True)
-        return 2
-    return 0
+    live_dir = tier4.SERVING_DIR
+    stage_dir = live_dir / f".warm-{os.getpid()}"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    tier4.SERVING_DIR = stage_dir  # serving_model writes here, never into the live dir
+    try:
+        for i, (produces, fold) in enumerate(jobs, 1):
+            model, staged = _serving_file(produces, fold, snapshot)
+            tier4.serving_model(pd.Timestamp(fold), panel=panel, model=model)
+            now = _panel_snapshot()
+            if now != snapshot or not staged.exists():
+                # serving_model hashes the live panel itself: a swap could have
+                # filed an old-panel fit under the new hash. Publish nothing more.
+                print("[warm] panel changed during fitting; refusing to publish",
+                      file=sys.stderr, flush=True)
+                return 2
+            os.replace(staged, live_dir / staged.name)  # atomic install
+            elapsed = time.time() - started
+            eta = elapsed / i * (len(jobs) - i)
+            print(f"[warm] fold {i}/{len(jobs)} {produces} {fold} done, "
+                  f"{elapsed:.0f}s elapsed, {i / elapsed * 60:.1f} fits/min, ETA {eta:.0f}s, "
+                  f"peak RSS {_peak_rss_mb():.0f} MB", file=sys.stderr, flush=True)
+        return 0
+    finally:
+        tier4.SERVING_DIR = live_dir
+        shutil.rmtree(stage_dir, ignore_errors=True)
 
 
 def main(argv=None) -> int:
