@@ -18,6 +18,7 @@ refused submission can say *which* field was wrong without echoing its value.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import math
 import re
 import types
@@ -28,6 +29,16 @@ from engine.v2.contracts.serving import DEFAULT_SHADOW_SERVING_SCORER, SHADOW_SE
 __all__ = ["DEFAULT_SHADOW_SERVING_SCORER", "SHADOW_SERVING_SCORERS",
            "DocumentError", "from_document", "parse_schema_version", "to_document",
            "shadow_serving_scorer"]
+
+@functools.cache
+def _class_hints(cls: type) -> dict[str, Any]:
+    """Resolved annotations of a document class; they are fixed once the class exists.
+
+    Resolving forward references costs ~0.2 ms and every decoded document paid it.
+    Callers must treat the mapping as read-only. A failed resolution is not cached.
+    """
+    return get_type_hints(cls)
+
 
 _VERSION = re.compile(r"^(?P<family>[a-z][a-z0-9_]*)\.v(?P<major>\d+)\.(?P<minor>\d+)$")
 _SCALARS: dict[type, tuple[type, ...]] = {
@@ -76,7 +87,7 @@ def from_document(cls: type, doc: Any, *, path: str = "$") -> Any:
     if unknown:
         raise DocumentError("UNKNOWN_FIELD", f"{path}.{unknown[0]}",
                             f"{cls.__name__} declares no such field")
-    hints = get_type_hints(cls)
+    hints = _class_hints(cls)
     kwargs: dict[str, Any] = {}
     for name, spec in fields.items():
         if name in doc:
