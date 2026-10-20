@@ -339,6 +339,29 @@ def test_missing_tier1_history_is_logged_no_history_without_failing(tmp_path, mo
     assert row["outcome"] == "no_history"
 
 
+def _committed_reasons(conn, store, snapshot_id, ticker):
+    """The committed ``not_computed_reason`` of every row of ``ticker`` in one snapshot."""
+    from engine.v2.contracts import DataQuery, KeyPredicate
+    from engine.v2.data.computed_moves_table import COMPUTED_MOVES_TABLE_NAME
+
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(snapshot_id)
+    version = snapshot.table_versions[COMPUTED_MOVES_TABLE_NAME]
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(ticker,)),)
+    bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=COMPUTED_MOVES_TABLE_NAME,
+        table_contract_ref=version.table_contract_ref, key_filter=key_filter,
+        time_interval=None)
+    query = DataQuery(
+        snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
+        columns=("event_date", "not_computed_reason"), key_filter=key_filter,
+        order_by=("ticker", "event_date"),
+        max_batch_rows=max(1, min(100, bound)), max_result_rows=max(1, min(100, bound)))
+    return [row["not_computed_reason"]
+            for batch in repository.scan(query, table_name=COMPUTED_MOVES_TABLE_NAME)
+            for row in batch.to_pylist()]
+
+
 def test_all_missing_tier1_persists_no_history_and_commits_no_price_history_rows(
         tmp_path, monkeypatch):
     monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
@@ -360,6 +383,9 @@ def test_all_missing_tier1_persists_no_history_and_commits_no_price_history_rows
     assert result.status == "complete"
     current = _head_row(conn)
     assert current["snapshot_id"] != head["snapshot_id"]  # the no_price_history rows were committed
+    for ticker in ("AAAA", "BBBB"):
+        reasons = _committed_reasons(conn, store, current["snapshot_id"], ticker)
+        assert reasons and set(reasons) == {"no_price_history"}
     rows = conn.execute(
         "SELECT ticker, outcome FROM data_computed_moves_captures ORDER BY ticker").fetchall()
     assert [tuple(row) for row in rows] == [
@@ -615,6 +641,8 @@ def test_selected_source_missing_entry_is_no_history_not_cached(tmp_path, monkey
     assert row["capture_id"] != _capture_id_for(_unit("AAAA", _AS_OF))
     current = _head_row(conn)
     assert current["snapshot_id"] != head["snapshot_id"]  # the no_price_history rows were committed
+    reasons = _committed_reasons(conn, store, current["snapshot_id"], "AAAA")
+    assert reasons and set(reasons) == {"no_price_history"}
 
 
 def test_supervised_default_still_reuses_cached_catalog_receipt(tmp_path, monkeypatch):

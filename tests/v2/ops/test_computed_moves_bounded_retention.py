@@ -185,13 +185,13 @@ def _outcomes(conn) -> dict[str, str]:
 _GOLDEN_REPORT = {"mode": "all_scoreable", "scoreable_on_orats_calendar": 6, "also_in_oquants": 0,
                   "no_daily_market_rows": 1, "targets": 6}
 _GOLDEN_ROWS = {
-    "A": (14, "24d813098748da7ea35c0744a1c997821042b276e9cf123c0b1a3220414bbb5e"),
-    "AA": (12, "49c47a87928e8347566d6361186a3c4072d9378dfe93d62142042bd1c79ed91a"),
-    "AB": (13, "5c141a649f0eddeab0ec175878fca581c355337ef9c2d40687334e11d5936dcb"),
-    "B": (13, "e4caa7c0fa6f78adeee1305c1ccf4f4c15fd9944f360e8bf90d16fda3d65c052"),
-    "C": (13, "7998f442284234744e4f2ef1b653ccbcb5bbab41b597c2bd41d9a142c6cc874c"),
-    "D": (14, "11170fe255c3919e35e0d07bcb4dc5db95c849b1fb1b1c099c0d5578779e49e2"),
-    "E": (12, "2113a8e466f1cf55583933b9f5aa6295ce82b24b5f9e767be54c0b52373e58bc"),
+    "A": (14, "2b54b4184be22e8c0e3c27fcdad38ce45fee7259dfd0a34985ebf0035a58c1a4"),
+    "AA": (12, "55ce17acce081a171c5e83d44b776add0df377dda108280a0d4fffedfef94464"),
+    "AB": (13, "42860f25c055765a13253f881cb9fe03387254ed4e165b943e13c46027a1abed"),
+    "B": (13, "2a8396368930b430387a2892ada959dc2fe7eba78762dfeddfbc0b067b837aac"),
+    "C": (13, "780812a24211750913185e4b0df00911e4d0b9eeb33b14c803ae208ec0a2b598"),
+    "D": (14, "c2d29714b3b04d3a2a3a9216e26a3e73cb7c610e2e2c34633ee241305bddfaea"),
+    "E": (12, "ba2b3559a66b524a25210fe87cb3b54830d6cfc11f0708da114adb443e00e197"),
 }
 _GOLDEN_OUTCOMES = {"A": "added", "AA": "added", "AB": "below_bar", "B": "added",
                     "C": "added", "D": "no_history", "E": "added"}

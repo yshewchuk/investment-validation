@@ -489,7 +489,7 @@ is unchanged: a candidate with no fragment is still a refusal. Nothing is writte
 | a ticker with no earnings events | no rows |
 | same-ticker same-date `earnings_events` rows | one row; a confirmed row wins over an unconfirmed one, else the first in input order |
 | an empty event list with valid inputs | no rows; the input refusals below still apply first |
-| reason precedence for one event | per-event `not_orats`, then `no_session`; ticker-level overrides every event: `no_price_history` (no closes, checked first), else `ticker_too_few_events`; otherwise a confirmed event with no bracketing window is `no_price_window`, else null |
+| reason precedence for one event | per-event `not_orats`, then `no_session`; ticker-level overrides every event: with `prices_known=False` `ticker_too_few_events`, else `no_price_history` (no closes, checked first), else `ticker_too_few_events`; otherwise a confirmed event with no bracketing window is `no_price_window`, else null |
 | event dates not strictly ascending after the same-date collapse, or `sd` not non-decreasing | `CONTRACT_MISMATCH` from both entry points, whatever the ticker-level outcome |
 | a malformed `min_scoreable`, event frame, price series or `daily` frame (both v5 entry points refuse alike, except that only `build_event_rows` takes and validates `daily`; per-branch detail lives in code docstrings and tests) | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
 | `prices_known` not a `bool`, or `prices_known=False` with `MIN_SCOREABLE` or more confirmed events (both entry points) | `CONTRACT_MISMATCH`; with `prices_known=False` and fewer, every event is `ticker_too_few_events` whatever `sd`/`sc` hold |

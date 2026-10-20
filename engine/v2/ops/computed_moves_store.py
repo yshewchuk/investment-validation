@@ -1034,7 +1034,8 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
                                  [unit.expected_keys[0] for unit in plan.units], stats),
             as_of_day=as_of_day)
         _capture_below_bar(store, repository, parent.snapshot, stats, fragment_records,
-                           attempts, as_of_day=as_of_day, created_at=clock.now().isoformat())
+                           attempts, as_of_day=as_of_day, created_at=clock.now().isoformat(),
+                           since=document.get("since"))
         if not fragment_records:
             return _no_fragment_result(
                 conn, parameters, attempts, targets, document, parent, clock)
@@ -1111,11 +1112,14 @@ def _unit_history(conn, store, unit, fetcher, cached, *, created_at):
     return series, kind, fresh
 
 
-def _inputs_hash(events: pd.DataFrame, daily: pd.DataFrame) -> str:
+def _inputs_hash(events: pd.DataFrame, daily: pd.DataFrame, sd=None) -> str:
     """Hash of the considered events and daily_market inputs that shape one ticker's rows.
 
     Folded into the capture id so a corrected or added event (or implied move) at the
     same ``as_of`` and closes never reuses an earlier capture id for different rows.
+    ``sd`` (the truncated close dates) is hashed too: equal closes on other dates shape
+    different windows. The caller passes ``daily`` already limited to dates before
+    ``as_of``.
     """
     event_part = [[stamp.strftime("%Y-%m-%d"), bool(orats),
                    None if pd.isna(session) else str(session)]
@@ -1128,7 +1132,20 @@ def _inputs_hash(events: pd.DataFrame, daily: pd.DataFrame) -> str:
          None if pd.isna(source) else str(source)]
         for day, implied, source in zip(
             daily["date"], daily["implied_move"], daily["src_iv"])]) if len(daily) else ""
-    return content_hash({"events": event_part, "daily": daily_part})
+    dates = ""
+    if sd is not None and len(sd):
+        dates = hashlib.sha256(np.asarray(sd).astype("datetime64[ns]").tobytes()).hexdigest()
+    return content_hash({"events": event_part, "daily": daily_part, "dates": dates})
+
+
+def _progress_line(stage: str, done: int, total: int, started: float) -> str:
+    """One stderr progress line: done/total, rate, ETA, elapsed and RSS (never per item)."""
+    elapsed = time.monotonic() - started
+    rate = done / elapsed if elapsed else 0.0
+    eta = (total - done) / rate if rate else 0.0
+    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    return (f"[computed_moves] {stage} {done}/{total}, {rate:.1f}/s, ETA {eta:.0f}s, "
+            f"{elapsed:.0f}s elapsed, RSS {rss_mb:.0f}M")
 
 
 def _capture_id_for(unit, *, source_hash: str | None = None, inputs_hash: str | None = None,
@@ -1180,7 +1197,7 @@ def _build_rows_typed(*args, **kwargs):
 
 
 def _capture_below_bar(store, repository, snapshot, stats: _SourceStats, fragment_records: dict,
-                       attempts: list, *, as_of_day: str, created_at: str) -> None:
+                       attempts: list, *, as_of_day: str, created_at: str, since=None) -> None:
     """Rows for tickers below the fetch bar: no prices loaded, no fetch, no unit.
 
     Every event of such a ticker is a ``ticker_too_few_events`` row (v5, #966), decided by
@@ -1189,9 +1206,13 @@ def _capture_below_bar(store, repository, snapshot, stats: _SourceStats, fragmen
     """
     handled = {str(attempt["ticker"]) for attempt in attempts}  # fetched targets win
     tickers = [ticker for ticker in below_bar_tickers(stats) if ticker not in handled]
+    if since is not None:  # a partial refresh only rewrites tickers the target rule would select
+        cutoff = pd.Timestamp(_as_of_day(since))
+        tickers = [ticker for ticker in tickers
+                   if stats.latest.get(ticker, pd.Timestamp.min) >= cutoff]
     inputs = _TickerChunks(repository, snapshot, tickers, stats, with_daily=False)
     started, last_log = time.monotonic(), time.monotonic()
-    print(f"[computed_moves] below-bar capture start: {len(tickers)} tickers", file=sys.stderr)
+    print(_progress_line("below-bar capture start", 0, len(tickers), started), file=sys.stderr)
     as_of_ts = pd.Timestamp(as_of_day)
     source_hash = hashlib.sha256(b"").hexdigest()
     no_dates, no_closes = np.array([], dtype="datetime64[ns]"), np.array([], dtype="float64")
@@ -1201,13 +1222,7 @@ def _capture_below_bar(store, repository, snapshot, stats: _SourceStats, fragmen
         done += 1
         if time.monotonic() - last_log >= 30:  # bounded cadence, never per ticker
             last_log = time.monotonic()
-            elapsed = last_log - started
-            rate = (done - 1) / elapsed if elapsed else 0.0
-            eta = (len(tickers) - done + 1) / rate if rate else 0.0
-            rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-            print(f"[computed_moves] below-bar {done - 1}/{len(tickers)} tickers, "
-                  f"{rate:.1f}/s, ETA {eta:.0f}s, {elapsed:.0f}s elapsed, RSS {rss_mb:.0f}M",
-                  file=sys.stderr)
+            print(_progress_line("below-bar", done - 1, len(tickers), started), file=sys.stderr)
         events = inputs.events(ticker)
         if events is None:
             continue
@@ -1229,8 +1244,38 @@ def _capture_below_bar(store, repository, snapshot, stats: _SourceStats, fragmen
         written += 1
         attempts.append({"capture_id": capture_id, "ticker": ticker,
                          "created_at": created_at, "outcome": "below_bar"})
-    print(f"[computed_moves] below-bar tickers: {written} of {len(tickers)} wrote rows in "
-          f"{time.monotonic() - started:.0f}s", file=sys.stderr)
+    print(_progress_line("below-bar capture end", done, len(tickers), started)
+          + f", {written} wrote rows", file=sys.stderr)
+
+
+def _ticker_rows(unit, ticker: str, series, events: pd.DataFrame, daily: pd.DataFrame, *,
+                 as_of_day: str):
+    """Truncate to ``as_of``, derive the capture id from the row-shaping inputs, build the rows.
+
+    Issue #99: the fetch returns history up to the run's real wall clock, later than
+    ``as_of_day`` on a backfill re-run. The series is truncated BEFORE hashing (capture
+    identity stays a pure function of as_of + the truncated source) and events are bounded
+    to strictly before ``as_of``, or a post-as_of event scored against real future closes
+    would commit as a row stamped ``computed_at = as_of_day``. Events keep every row
+    (confirmed or not) before as_of: they count in event_ordinal and are stored as skipped
+    rows, never dropped. Returns ``(rows, capture_id, truncated_dates)``.
+    """
+    sd, sc = series
+    as_of_ts = pd.Timestamp(as_of_day)
+    keep = sd <= np.datetime64(as_of_ts)
+    sd, sc = sd[keep], sc[keep]
+    source_hash = hashlib.sha256(np.ascontiguousarray(sc).tobytes()).hexdigest()
+    events = events[events["event_date"] < as_of_ts]
+    shaping = daily
+    if len(shaping):  # only dates before as_of can shape a row; later ones never enter the id
+        shaping = shaping[pd.to_datetime(shaping["date"]) < as_of_ts]
+    capture_id = _capture_id_for(
+        unit, source_hash=source_hash if sd.size else None,
+        inputs_hash=_inputs_hash(events, shaping, sd))
+    rows = _build_rows_typed(
+        ticker, events, sd, sc, daily, computed_at=as_of_day, source_hash=source_hash,
+        capture_id=capture_id, min_scoreable=MIN_SCOREABLE)
+    return rows, capture_id, sd
 
 
 def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks,
@@ -1256,7 +1301,13 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
     created_at = clock.now().isoformat()
     cached = cached_unit_payloads(conn, store, plan)
     fragment_records, attempts, kinds = {}, [], []
-    for unit in plan.units:
+    started = last_log = time.monotonic()
+    print(_progress_line("target capture start", 0, len(plan.units), started), file=sys.stderr)
+    for position, unit in enumerate(plan.units):
+        if time.monotonic() - last_log >= 30:  # bounded cadence, never per ticker
+            last_log = time.monotonic()
+            print(_progress_line("target capture", position, len(plan.units), started),
+                  file=sys.stderr)
         ticker = unit.expected_keys[0]
         series, kind, fresh = _unit_history(conn, store, unit, fetcher, cached,
                                             created_at=created_at)
@@ -1275,28 +1326,8 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
             attempts.append({"capture_id": capture_id, "ticker": ticker,
                              "created_at": created_at, "outcome": "too_few"})
             continue
-        sd, sc = series
-        # Issue #99: the fetch returns history up to the run's real wall
-        # clock, later than as_of_day on a backfill re-run. Truncate the
-        # series BEFORE hashing (capture identity stays a pure function of
-        # as_of + the truncated source) and bound events to strictly before
-        # as_of_ts, or a post-as_of event scored against real future closes
-        # commits as a row stamped computed_at = as_of_day.
-        as_of_ts = pd.Timestamp(as_of_day)
-        keep = sd <= np.datetime64(as_of_ts)
-        sd, sc = sd[keep], sc[keep]
-        source_hash = hashlib.sha256(np.ascontiguousarray(sc).tobytes()).hexdigest()
-        # Events keep every row (confirmed or not) strictly before as_of: they count in
-        # event_ordinal (the ticker's full event history) and are stored as skipped rows,
-        # never dropped.
-        events = events[events["event_date"] < as_of_ts]
-        capture_id = _capture_id_for(
-            unit, source_hash=source_hash if sd.size else None,
-            inputs_hash=_inputs_hash(events, inputs.daily(ticker)))
-        rows = _build_rows_typed(
-            ticker, events, sd, sc, inputs.daily(ticker),
-            computed_at=as_of_day, source_hash=source_hash, capture_id=capture_id,
-            min_scoreable=MIN_SCOREABLE)
+        rows, capture_id, sd = _ticker_rows(unit, ticker, series, events, inputs.daily(ticker),
+                                            as_of_day=as_of_day)
         if not rows:
             attempts.append({"capture_id": capture_id, "ticker": ticker,
                              "created_at": created_at, "outcome": "too_few"})
@@ -1309,6 +1340,8 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
                          "created_at": created_at,
                          "outcome": ("no_history" if sd.size == 0
                                      else "added" if fresh else "cached")})
+    print(_progress_line("target capture end", len(plan.units), len(plan.units), started),
+          file=sys.stderr)
     code = provider_failure_code(kinds)
     if code:
         raise fail(code, "computed moves provider response was not complete")
