@@ -4,6 +4,7 @@ Never stdout, never per item; cadence is ``_PROGRESS_INTERVAL_S``.
 """
 from __future__ import annotations
 
+import resource
 import sys
 import time
 
@@ -42,8 +43,10 @@ class TableProgress:
                     f"{rate:.2f}/s, ETA {eta:.0f}s")
 
     def finish(self) -> None:
-        """Print the phase's elapsed-seconds bracket line."""
-        self._print(f"[materialize] done in {time.monotonic() - self.started:.1f}s")
+        """Print the phase's elapsed-seconds bracket line with peak RSS."""
+        peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        self._print(f"[materialize] done in {time.monotonic() - self.started:.1f}s, "
+                    f"peak RSS {peak_mb:.0f} MB")
 
     @staticmethod
     def _print(message: str) -> None:

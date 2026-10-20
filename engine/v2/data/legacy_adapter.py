@@ -43,8 +43,8 @@ edges, this module imports only its own package's ``errors`` and
 ``engine.v2.ops``. §4.3 fan-out: 6 distinct modules —
 ``engine.data.features.panel``, ``engine.data.features.tier4``,
 ``engine.data.schemas``, ``engine.data.store``, ``engine.paths``,
-``engine.models.registry`` — plus ``"."`` (errors + legacy_materialization)
-and ``shutil``, 8, exactly the budget.
+``engine.models.registry`` — plus ``"."`` (errors + legacy_materialization +
+materialize_progress) and ``shutil``, 8, exactly the budget.
 
 P2-C02: :func:`legacy_serving_fold` and :func:`legacy_tier4_serving_header`
 add two exact legacy symbols (``engine.data.features.tier4.serving_fold``,
@@ -314,7 +314,10 @@ def materialize(repository, store, request, dest_root) -> dict[str, str]:
     "the full tree, locked down": a caller can never observe a partial,
     writable materialization and mistake it for a valid one.
 
-    Emits bounded [materialize] progress on stderr (#1018).
+    Emits bounded [materialize] progress on stderr (#1018): a start line per
+    phase, then one line at most every 30 s for ``tables written`` and
+    ``tables validated``, plus a final tick line per phase (always at
+    ``done == total``), and a ``done in`` line with peak RSS per phase.
     """
     try:
         write_progress = materialize_progress.TableProgress(
