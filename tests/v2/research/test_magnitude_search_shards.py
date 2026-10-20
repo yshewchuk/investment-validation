@@ -6,6 +6,7 @@ import pytest
 
 from engine.v2.contracts import ArtifactRef
 from engine.v2.foundation import (
+    ArtifactError,
     ArtifactStore,
     canonical_json,
     content_hash,
@@ -200,15 +201,18 @@ def test_duplicate_and_out_of_order_keys_refuse_while_writing(tmp_path):
         shards.write_section(store, "features", [row("E001"), row("E001")], key)
 
 
-def test_build_manifest_shard_budget(monkeypatch):
+def test_build_manifest_shard_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(shards, "MAX_SHARDS", 2)
-    shard = {"ref": {}, "rows": 1, "first_key": [0], "last_key": [1]}
-    sections = {"features": {"row_count": 2, "shards": [shard, shard]}}
+    store = ArtifactStore(tmp_path / "store")
+    first = shards.write_section(store, "features", [row("E001")], key)
+    second = shards.write_section(store, "features", [row("E002")], key)
+    shard_list = first["shards"] + second["shards"]
+    sections = {"features": {"row_count": 2, "shards": shard_list}}
     assert shards.build_manifest({}, sections) == {
         "schema_version": shards.MANIFEST_SCHEMA, "inline": {}, "sections": sections}
     with refusal("RESOURCE_LIMIT_EXCEEDED", False):
-        shards.build_manifest({}, {"features": {"row_count": 2, "shards": [shard, shard]},
-                                   "training": {"row_count": 1, "shards": [shard]}})
+        shards.build_manifest({}, {"features": {"row_count": 2, "shards": shard_list},
+                                   "training": {"row_count": 1, "shards": first["shards"]}})
 
 
 def test_verify_manifest_shard_budget(monkeypatch):
@@ -223,11 +227,12 @@ def test_verify_manifest_shard_budget(monkeypatch):
 def test_verify_manifest_section_count_binding(tmp_path):
     store = ArtifactStore(tmp_path / "store")
     entry = shards.write_section(store, "features", rows(1), key)
-    too_many = shards.build_manifest({}, {"features": {"row_count": 2, "shards": entry["shards"]}})
+    too_many = {"schema_version": shards.MANIFEST_SCHEMA, "inline": {},
+                "sections": {"features": {"row_count": 2, "shards": entry["shards"]}}}
     with refusal("EXPERIMENT_IDENTITY_CONFLICT", False):
         shards.verify_manifest(too_many, shards.manifest_id(too_many))
-    empty_with_shards = shards.build_manifest(
-        {}, {"features": {"row_count": 0, "shards": entry["shards"]}})
+    empty_with_shards = {"schema_version": shards.MANIFEST_SCHEMA, "inline": {},
+                         "sections": {"features": {"row_count": 0, "shards": entry["shards"]}}}
     with refusal("EXPERIMENT_IDENTITY_CONFLICT", False):
         shards.verify_manifest(empty_with_shards, shards.manifest_id(empty_with_shards))
 
@@ -461,3 +466,78 @@ def test_manifest_id_tracks_inline_and_content():
     assert shards.manifest_id(first) == content_hash(first)
     assert shards.manifest_id(second) == content_hash(second)
     assert shards.manifest_id(first) != shards.manifest_id(second)
+
+
+def test_write_snapshots_rows_against_generator_mutation(tmp_path):
+    store = ArtifactStore(tmp_path / "store")
+    yielded = []
+
+    def mutating():
+        shared = {"event_id": "E000", "horizon_sessions": 1, "value": 0}
+        for index in range(6):
+            shared["event_id"] = f"E{index:03d}"
+            shared["value"] = index
+            yielded.append(dict(shared))
+            yield shared
+
+    written = shards.write_section(store, "features", mutating(), key)
+    recovered = list(shards.iter_section(store, "features", written, key))
+    assert recovered == rows(6)
+    assert recovered == yielded
+    assert written["row_count"] == 6
+    assert [entry["rows"] for entry in written["shards"]] == [6]
+
+
+def test_wire_constants_are_literal():
+    assert shards.SHARD_SCHEMA == "magnitude_search_shard.v1"
+    assert shards.MANIFEST_SCHEMA == "magnitude_search_cohort_manifest.v1"
+    assert shards.TARGET_BYTES == 4 * 1024 * 1024
+    assert shards.MAX_SHARD_BYTES == 8 * 1024 * 1024
+    assert shards.MAX_SHARDS == 8192
+
+
+def test_features_key_returns_pair_and_refuses_missing_field():
+    feature = next(member for member in shards.LIST_MEMBERS if member["section"] == "features")
+    assert feature["key"]({"event_id": "E007", "horizon_sessions": 3}) == ("E007", 3)
+    with pytest.raises(KeyError):
+        feature["key"]({"event_id": "E007"})
+
+
+@pytest.mark.parametrize("inline, sections", [
+    (None, {}),
+    ({}, None),
+    ({}, {"s": 5}),
+    ({}, {"features": {"row_count": 1, "shards": [{"bad": 1}]}}),
+    ({}, {"features": {"row_count": 1, "shards": "nope"}}),
+], ids=["inline_none", "sections_none", "section_not_dict", "shard_not_dict", "shards_not_list"])
+def test_build_manifest_invalid_inputs_are_invalid_spec(inline, sections):
+    with refusal("INVALID_EXPERIMENT_SPEC", False):
+        shards.build_manifest(inline, sections)
+
+
+class RaisingStore:
+    def __init__(self, error):
+        self.error = error
+
+    def publish_bytes(self, data, *, schema_ref):
+        raise self.error
+
+    def read_verified(self, ref):
+        raise self.error
+
+
+@pytest.mark.parametrize("error, code, retryable", [
+    (ArtifactError("INTEGRITY_FAILED", "torn object"), "EXPERIMENT_IDENTITY_CONFLICT", False),
+    (OSError("storage gone"), "RESOURCE_UNAVAILABLE", True),
+], ids=["integrity_failed", "oserror"])
+def test_publish_failures_map_to_shared_classification(error, code, retryable):
+    with refusal(code, retryable):
+        shards.write_section(RaisingStore(error), "features", rows(1), key)
+
+
+def test_read_unsafe_path_is_retryable_resource_unavailable(tmp_path):
+    real = ArtifactStore(tmp_path / "store")
+    entry = shards.write_section(real, "features", rows(1), key)
+    with refusal("RESOURCE_UNAVAILABLE", True):
+        list(shards.iter_section(
+            RaisingStore(ArtifactError("UNSAFE_PATH", "traversing path")), "features", entry, key))

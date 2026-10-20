@@ -13,7 +13,7 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.foundation.artifacts import safe_relative_path
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from experiments.magnitude_search_errors import artifact_failure
 
 SHARD_SCHEMA = "magnitude_search_shard.v1"
@@ -103,9 +103,9 @@ def _empty_size(section):
     return len(canonical_json(document).encode())
 
 
-def _row_width(row):
+def _row_payload(row):
     try:
-        return len(canonical_json(row).encode())
+        return canonical_json(row)
     except (TypeError, ValueError, OverflowError, RecursionError):
         raise fail(_INVALID_SPEC, "search cohort row is not canonical JSON") from None
 
@@ -151,15 +151,17 @@ def write_section(store, section, rows, key):
     batch, first, last, previous, count = [], None, None, None, 0
     shards, size = [], _empty_size(section)
     for row in rows:
-        row_key = _sort_key(key, row, previous)
-        width = _row_width(row)
+        payload = _row_payload(row)
+        width = len(payload.encode())
+        snapshot = json.loads(payload)
+        row_key = _sort_key(key, snapshot, previous)
         if batch and size + width + 1 > TARGET_BYTES:
             _flush(store, section, shards, batch, first, last)
             batch, size, first = [], _empty_size(section), None
         size += width if not batch else width + 1
         if size > MAX_SHARD_BYTES:
             raise fail("RESOURCE_LIMIT_EXCEEDED", "search cohort shard exceeds its byte limit")
-        batch.append(row)
+        batch.append(snapshot)
         first = row_key if first is None else first
         last = row_key
         previous = row_key
@@ -169,11 +171,23 @@ def write_section(store, section, rows, key):
     return {"row_count": count, "shards": shards}
 
 
+def _builder_shard_total(sections):
+    try:
+        return sum(len(entry["shards"]) for entry in sections.values())
+    except (AttributeError, KeyError, TypeError):
+        raise fail(_INVALID_SPEC, "search cohort manifest is invalid") from None
+
+
 def build_manifest(inline, sections):
     """Bind inline scalars and section entries into one cohort manifest."""
-    if sum(len(entry["shards"]) for entry in sections.values()) > MAX_SHARDS:
+    if _builder_shard_total(sections) > MAX_SHARDS:
         raise fail("RESOURCE_LIMIT_EXCEEDED", "search cohort manifest exceeds its shard limit")
-    return {"schema_version": MANIFEST_SCHEMA, "inline": inline, "sections": sections}
+    manifest = {"schema_version": MANIFEST_SCHEMA, "inline": inline, "sections": sections}
+    try:
+        _manifest_shape(manifest)
+    except OpsError:
+        raise fail(_INVALID_SPEC, "search cohort manifest is invalid") from None
+    return manifest
 
 
 def manifest_id(manifest):
