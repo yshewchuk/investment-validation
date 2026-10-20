@@ -1,6 +1,7 @@
 """Bounded immutable conversion reuse never replaces per-call identity checks."""
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Barrier
 
 import numpy as np
 import pytest
@@ -104,8 +105,10 @@ def test_new_content_does_not_reuse_old_arrays():
 
 def test_fifo_entry_cap_and_rebuild(monkeypatch):
     values = [artifact(i) for i in range(5)]
-    for value in values:
+    for value in values[:4]:
         lookup(value)
+    lookup(values[0])  # A hit must not promote FIFO order into LRU order.
+    lookup(values[4])
     assert list(module._DRIVER_ARRAY_CACHE) == [id(value) for value in values[1:]]
     original, calls = module._immutable_array, []
     def convert(value):
@@ -150,8 +153,8 @@ def test_concurrent_misses_remain_bounded(monkeypatch):
     for value, (pool, flag) in zip(values * 3, results, strict=True):
         assert flag is None
         np.testing.assert_array_equal(pool, value.flat_residuals)
-    assert len(module._DRIVER_ARRAY_CACHE) <= 2
-    assert sum(entry[2] for entry in module._DRIVER_ARRAY_CACHE.values()) <= 160
+    assert len(module._DRIVER_ARRAY_CACHE) == 2
+    assert sum(entry[2] for entry in module._DRIVER_ARRAY_CACHE.values()) == 160
 
 
 def test_corrupted_serialized_pool_cannot_hit_warm_original_hash():
@@ -207,3 +210,79 @@ def test_shallow_frozen_mutable_input_is_never_retained():
     np.testing.assert_array_equal(lookup(mutable)[0], [999.0, 2.0, 3.0, 4.0])
     assert not module._DRIVER_ARRAY_CACHE
     np.testing.assert_array_equal(first, original.flat_residuals)
+
+
+def test_default_numeric_byte_and_entry_caps_are_the_published_contract():
+    assert module._DRIVER_ARRAY_CACHE_BYTES == 16 * 1024 * 1024
+    assert module._DRIVER_ARRAY_CACHE_LIMIT == 4
+
+
+@pytest.mark.parametrize("field", ["oversized", "flat_residuals", "bucket_edges", "bucket_pools", "nested_pool"])
+def test_bypassed_inputs_preserve_residents_and_observe_mutable_values(monkeypatch, field):
+    monkeypatch.setattr(module, "_DRIVER_ARRAY_CACHE_BYTES", 80)
+    resident = artifact(1)
+    retained, flag = lookup(resident)
+    assert flag is None
+    entry = module._DRIVER_ARRAY_CACHE[id(resident)]
+    candidate = artifact(2)
+    if field == "oversized":
+        candidate = replace(candidate, flat_residuals=candidate.flat_residuals + (5.0,))
+    elif field == "nested_pool":
+        candidate = replace(candidate, bucket_pools=(list(candidate.bucket_pools[0]), candidate.bucket_pools[1]))
+    else:
+        candidate = replace(candidate, **{field: list(getattr(candidate, field))})
+    for changed in (False, True):
+        if changed:
+            if field == "flat_residuals":
+                candidate.flat_residuals[0] = 99.0
+            elif field == "bucket_edges":
+                candidate.bucket_edges[1] = -2.0
+            elif field == "bucket_pools":
+                candidate.bucket_pools[0] = (99.0, 98.0)
+            elif field == "nested_pool":
+                candidate.bucket_pools[0][0] = 99.0
+        prediction = None if field == "flat_residuals" else -1.0
+        pool, flag = lookup(candidate, prediction)
+        expected = [1.0, 2.0]
+        if field == "flat_residuals":
+            expected = [99.0 if changed else 1.0, 2.0, 3.0, 4.0]
+        elif changed and field == "bucket_edges":
+            expected = [1.0, 2.0, 3.0, 4.0]
+        elif changed and field == "bucket_pools":
+            expected = [99.0, 98.0]
+        elif changed and field == "nested_pool":
+            expected = [99.0, 2.0]
+        assert flag is None
+        np.testing.assert_array_equal(pool, expected)
+        assert list(module._DRIVER_ARRAY_CACHE) == [id(resident)]
+        assert module._DRIVER_ARRAY_CACHE[id(resident)] is entry
+        assert lookup(resident)[0] is retained
+
+
+def test_overlapping_same_object_misses_reuse_winner_without_evicting_peers(monkeypatch):
+    peers = [artifact(i) for i in range(3)]
+    resident_arrays = [lookup(peer)[0] for peer in peers]
+    entries = dict(module._DRIVER_ARRAY_CACHE)
+    target = artifact(4, buckets=False)
+    barrier = Barrier(2, timeout=5)
+    convert = module._immutable_array
+    def overlapping(values):
+        # Both callers have already missed; neither may insert until both
+        # private conversions exist. This forces the under-lock winner path.
+        result = convert(values)
+        barrier.wait()
+        return result
+    monkeypatch.setattr(module, "_immutable_array", overlapping)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(lookup, target) for _ in range(2)]
+        results = [future.result(timeout=10) for future in futures]
+    (first, flag1), (second, flag2) = results
+    assert flag1 is flag2 is None
+    np.testing.assert_array_equal(first, [1.0, 2.0, 3.0, 4.0])
+    assert first is second
+    assert list(module._DRIVER_ARRAY_CACHE) == [*(id(peer) for peer in peers), id(target)]
+    assert sum(entry[2] for entry in module._DRIVER_ARRAY_CACHE.values()) == 272
+    for peer, array in zip(peers, resident_arrays, strict=True):
+        assert module._DRIVER_ARRAY_CACHE[id(peer)] is entries[id(peer)]
+        assert lookup(peer)[0] is array
+    assert lookup(target)[0] is first
