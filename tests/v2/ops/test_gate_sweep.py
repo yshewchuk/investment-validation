@@ -474,7 +474,7 @@ def test_supervised_receipt_serialization_failures_are_variant_failures(source, 
     # repeating fitting here only delays the boundary this test exercises.
     evaluation = checkout / "experiments/native_gate_evaluation.py"
     evaluation_text = evaluation.read_text()
-    calculation = "            result = gate_result(Repository(conn, store), registration, spec)"
+    calculation = "            result = gate_result(Repository(conn, store, pin_snapshots=True), registration, spec)"
     assert evaluation_text.count(calculation) == 1
     synthetic_result = ('            result = {"schema_version": "native_gate_result.v1.0", '
                         '"run_id": registration.run_id, "variant_id": registration.variant_id, '
