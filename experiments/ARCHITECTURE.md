@@ -269,6 +269,52 @@ both flag states publish/verify the same plan and never write a ledger.
 | Journal payload exceeds 16 MiB | Refuse nonretryable `RESOURCE_LIMIT_EXCEEDED` before publishing that record; incomplete attempts remain unfinished and block selection. |
 | Submitted-forecast selection | These submission/selection methods do not fit or authenticate estimator execution; wholesale fabrication of matching evidence is outside their consistency guarantee. Native fitting is separately described under [bounded inner-trial execution](#bounded-inner-trial-execution). Neither path grants outer evaluation, deployment, ledger or final-read authority. |
 
+## Sharded cohort inputs (accepted contract, not yet enforced)
+
+The rows above, and the current 16 MiB cohort record and child payload, are enforced
+as described until the implementation lands (#991 fix 4); this section states the
+accepted replacement contract. Cohort rows (`features`, `training`, preflight
+`planned_inputs`, and the same rows in `outer-inputs:<id>`) are ordered sections of
+content-addressed shards, not one record or payload. Population-sized receipt lists
+(`training_inputs` candidate, qualified, read and omitted event lists, and preflight
+`event_ids`) are sections too; only fixed-size scalars stay inline in the manifest.
+
+* A shard is canonical JSON `{schema_version: magnitude_search_shard.v1, section, rows}`
+  published with `ArtifactStore.publish_bytes`; its `ArtifactRef` is its address and it
+  names no cohort or position. Rows keep the admitted order. The cut is deterministic
+  (target 4 MiB; hard maximum 8 MiB; at most 8192 shards in total across all sections of
+  one manifest, so a manifest of ~0.5 KB entries stays under ~4 MiB, well below the
+  16 MiB record cap), so equal rows give equal shards; a row or count above the
+  maxima is `RESOURCE_LIMIT_EXCEEDED`.
+* `cohort:<id>` and `outer-inputs:<id>` hold a small manifest (inline scalar members plus,
+  per section, `row_count` and ordered `{ref, rows, first_key, last_key}`). `inputs_id`
+  is `content_hash(manifest)`. Older whole-cohort records refuse
+  `EXPERIMENT_IDENTITY_CONFLICT`; none is rewritten.
+* One streaming reader serves parent and child: each shard is `read_verified` (size is
+  the allocation bound) and checked for schema, section, row count and boundary keys;
+  totals equal `row_count`. Matrix evidence keeps today's training / evaluation list
+  order. The child gets a header (limits, fold, horizons, execution spec, manifest,
+  expected `inputs_id`, store root) and checks the manifest hash against it, reads only manifest-named objects and opens no repository, catalog or
+  validation target. Transport memory is one shard plus the manifest.
+* Shards are published, outside the catalog transaction, before the manifest append,
+  which is the commit point.
+
+| Condition | Outcome |
+|---|---|
+| Shard missing or `OSError` | Retryable `RESOURCE_UNAVAILABLE`; no association change or candidate failure. |
+| Hash/size mismatch, wrong schema or section, count or boundary-key disagreement, duplicate key, unsafe ref, manifest hash differing from `inputs_id` (parent or child) | `EXPERIMENT_IDENTITY_CONFLICT`; no rows used. |
+| Crash after some shards, before the manifest | Orphan shards confer no authority and are reclaimable by the store owner; the immutable claim stays unfinished. |
+| Manifest committed, later shard lost or corrupted | Fails closed as above on every read. |
+| Same slot, different manifest | `EXPERIMENT_IDENTITY_CONFLICT`. |
+| A row above 8 MiB or more than 8192 shards | Nonretryable `RESOURCE_LIMIT_EXCEEDED` before the manifest append; published shards stay unreferenced. |
+| Older whole-cohort record read by sharded code | `EXPERIMENT_IDENTITY_CONFLICT`; no rewrite or migration. |
+
+Registration, snapshot, plan and execution-spec bindings are unchanged; `inputs:<trial>`
+binds the manifest hash and so every shard. The outer result record that today binds the
+hash of the `outer-inputs:<id>` document binds that manifest's hash instead, and outer
+activation and replay verify it before reading any shard. Source closures include the shard module, so
+seals change. Replay identity holds within one format version.
+
 ## Stored research-history entrypoint
 
 `python -m experiments.magnitude_history_store build|read` requires an existing catalog file.
