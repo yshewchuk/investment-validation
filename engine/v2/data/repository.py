@@ -299,7 +299,12 @@ class Repository:
             raise RuntimeError("Repository.scan requires an ArtifactStore for object reads")
         validated = self._validated_query(query)
         snap = self.resolve(validated.snapshot_id)
-        contract, records = self._table_records(snap, table_name, validated.table_contract_ref)
+        if self._pin_snapshots:
+            contract, records = self._table_records(
+                snap, table_name, validated.table_contract_ref, validated.key_filter)
+        else:
+            contract, records = self._table_records(
+                snap, table_name, validated.table_contract_ref)
         query_mod.validate_query(contract, validated)
         self.read_counters.add(contract.table_name, scans=1)
         yield from self._execute_scan(contract, records, validated, max_object_bytes)
@@ -314,10 +319,21 @@ class Repository:
             raise errors.fail("QUERY_NOT_BOUNDED", f"{exc.code} at {exc.path}: {exc}") from exc
 
     def _table_records(self, snap: SnapshotRef, table_name: str,
-                       table_contract_ref: TableContractRef) -> tuple[TableContract, list]:
+                       table_contract_ref: TableContractRef,
+                       key_filter=()) -> tuple[TableContract, list]:
         """§8.2 step 2: resolve ``table_name`` under ``snap`` and verify the
         caller's ``table_contract_ref`` pins the same version, then fetch the
-        full ordered fragment membership (§8.2 step 4 — never a glob)."""
+        full ordered fragment membership (§8.2 step 4 — never a glob).
+
+        Pinned mode only: the first fetch for a table validates every
+        fragment's primary-key bounds (``query_mod.fragment_key_bounds``,
+        refusing ``MANIFEST_CORRUPT`` exactly as the planner does — a failure
+        caches nothing) and stores a ``partition_key -> ascending record
+        indices`` index with the pinned entry; a ``key_filter`` predicate on
+        a partition column then returns just that partition's records, in
+        original order, as a fresh list (the planner still runs on whatever
+        list this returns). Unpinned mode never builds or consults an index.
+        """
         if table_name not in snap.table_versions:
             raise errors.fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
                       details={"table_name": table_name})
@@ -328,15 +344,43 @@ class Repository:
                       details={"table_name": table_name})
         pin_key = (dvr.dataset_version_id, dvr.table_contract_ref.contract_id)
         if self._pin_snapshots and pin_key in self._pinned_tables:
-            pinned_contract, pinned_records = self._pinned_tables[pin_key]
-            return pinned_contract, list(pinned_records)
+            pinned_contract, pinned_records, by_partition = self._pinned_tables[pin_key]
+            return pinned_contract, self._partition_subset(
+                pinned_contract, pinned_records, by_partition, key_filter)
         with _read_only(self._conn) as conn:
             contract = self._full_contract(conn, dvr.table_contract_ref.contract_id)
             records = self._records(conn, dvr.dataset_version_id, dvr.table_contract_ref)
         if self._pin_snapshots:
-            self._pinned_tables[pin_key] = (contract, records)
-            return contract, list(records)
+            grouped: dict[str, list[int]] = {}
+            for index, record in enumerate(records):
+                query_mod.fragment_key_bounds(record, contract)
+                grouped.setdefault(record.partition_key, []).append(index)
+            by_partition = {key: tuple(indices) for key, indices in grouped.items()}
+            self._pinned_tables[pin_key] = (contract, records, by_partition)
+            return contract, self._partition_subset(contract, records, by_partition, key_filter)
         return contract, records
+
+    def _partition_subset(self, contract: TableContract, records: list,
+                          by_partition: dict[str, tuple[int, ...]], key_filter) -> list:
+        """Pinned-mode partition pruning: the records whose ``partition_key``
+        satisfies every partition-column predicate of ``key_filter`` — the
+        exact keep-rule of ``query._partition_may_match`` (a record survives
+        iff its key is in ``{str(v) for v in predicate.values}`` for each
+        such predicate, so several predicates intersect) — in original
+        record order, as a fresh list; no partition predicate returns a fresh
+        copy of the full membership."""
+        if not contract.partition_columns:
+            return list(records)
+        selected: set[int] | None = None
+        for predicate in key_filter:
+            if predicate.column in contract.partition_columns:
+                matched: set[int] = set()
+                for value in predicate.values:
+                    matched.update(by_partition.get(str(value), ()))
+                selected = matched if selected is None else selected & matched
+        if selected is None:
+            return list(records)
+        return [records[i] for i in sorted(selected)]
 
     def _full_contract(self, conn: sqlite3.Connection, contract_id: str) -> TableContract:
         row = conn.execute("SELECT definition_json FROM data_contracts WHERE contract_id = ?",
