@@ -28,6 +28,16 @@ schema (`schema.py`, colocated with ops/ledger under migration owner
 and a Tier-4 serving-cache coverage check (`tier4_coverage.py` — not pure,
 not legacy-free) gating a scoring launch from `engine.v2.ops`.
 
+Tier-4 coverage contract (#1047): the scorer serves each event at
+`min(event_fold, fold(decision_date))` and `decision_date` is per
+(event, strategy), later than the session, so a score window can reach the
+NEXT month's fold. `required_serving_triples` therefore requires, per
+(event, producer), every monthly fold from the scorer's own floor
+(`serving_fold(event_date, as_of)`) up to the event's own fold, never only the
+floor. A missing triple refuses before launch with `TIER4_CACHE_MISSING`
+(listing each triple); the worker never fits on a miss, and the post-attempt
+materialization-root fingerprint check stays as the backstop.
+
 Non-responsibilities: never computes a trading verdict (`engine/v2/scoring`)
 or promotes a champion (`engine/v2/models/training`); never decides *what* to
 fetch or *when* to run a job (`engine/v2/ops`, a caller, owns that).

@@ -33,6 +33,8 @@ Tier-4 serving-cache header bytes off the artifact store through
 """
 from __future__ import annotations
 
+import pandas as pd
+
 from engine.v2.foundation import CONTENT_HASH_PREFIX
 
 from . import legacy_adapter, reference_inputs
@@ -71,20 +73,27 @@ def required_serving_triples(population, registry_models, panel_sha: str) -> fro
     ``population`` is an iterable of ``(event_date, as_of)`` pairs — the
     scorer serves every Tier-4 producer at the SAME fold for a given event
     (``Scorer._serving`` keys its cache on ``(fold, produces)``, and the fold
-    itself does not depend on ``produces``), so the fold is computed once per
-    distinct ``(event_date, as_of)`` pair and then crossed with every
-    producer model.
+    itself does not depend on ``produces``), so the fold range is computed
+    once per distinct pair and crossed with every producer model. The range
+    runs from the scorer's floor up to the event's own fold, because the real
+    decision date (per strategy) can fall in a later month than ``as_of``.
     """
-    folds: dict[tuple, str] = {}
+    folds: dict[tuple, tuple[str, ...]] = {}
     triples = set()
     for event_date, as_of in population:
         key = (event_date, as_of)
-        fold = folds.get(key)
-        if fold is None:
-            fold = legacy_adapter.legacy_serving_fold(event_date, as_of).strftime("%Y%m")
-            folds[key] = fold
+        months = folds.get(key)
+        if months is None:
+            # The scorer serves min(event_fold, fold(decision_date)) and the
+            # per-strategy decision_date is >= as_of, so every month from the
+            # floor (as_of's fold) up to the event's own fold can be asked for.
+            lo = legacy_adapter.legacy_serving_fold(event_date, as_of)
+            hi = legacy_adapter.legacy_serving_fold(event_date, event_date)
+            months = tuple(p.strftime("%Y%m") for p in pd.period_range(lo, hi, freq="M"))
+            folds[key] = months
         for model in registry_models:
-            triples.add((model["model_id"], fold, panel_sha))
+            for fold in months:
+                triples.add((model["model_id"], fold, panel_sha))
     return frozenset(triples)
 
 

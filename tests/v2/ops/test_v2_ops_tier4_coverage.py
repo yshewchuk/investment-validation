@@ -157,17 +157,20 @@ def test_walked_back_finality_session_moves_the_required_fold(case, monkeypatch)
     its real ``as_of`` from a bound ``finality.json`` (which may walk the
     requested session BACK), not from the requested ``session`` directly.
     Event 2026-10-05, requested session 2026-10-01 (fold 202610), finality
-    walked back to 2026-09-15 (fold 202609) -- only the RESOLVED fold's cache
-    is pinned. The old (pre-fix) behaviour of folding on the requested date
-    would refuse this as TIER4_CACHE_MISSING for fold 202610; the fix must
-    launch clean instead, because 202609 is what the worker will actually
-    ask for."""
+    walked back to 2026-09-15 (fold 202609) -- the check requires the
+    RESOLVED fold 202609 and the event's own fold 202610 (a decision date
+    in the event month is possible, #1047), both pinned here, so it launches
+    clean."""
     panel_sha = _panel_sha(case)
     cache = case.store.publish_bytes(
         _cache_bytes(fold_start="2026-09-01", tier3_snapshot=panel_sha), schema_ref="legacy_pinned_ref.v1")
     tier4_ref = lm.format_pinned_ref(f"{TIER4_SERVING_DIR}/size_202609_{panel_sha[:12]}.joblib",
                                      cache.content_hash)
-    request = _custom_request(case, registry_bytes=_registry_bytes(), tier4_refs=(tier4_ref,))
+    cache_oct = case.store.publish_bytes(
+        _cache_bytes(fold_start="2026-10-01", tier3_snapshot=panel_sha), schema_ref="legacy_pinned_ref.v1")
+    tier4_ref_oct = lm.format_pinned_ref(f"{TIER4_SERVING_DIR}/size_202610_{panel_sha[:12]}.joblib",
+                                         cache_oct.content_hash)
+    request = _custom_request(case, registry_bytes=_registry_bytes(), tier4_refs=(tier4_ref, tier4_ref_oct))
     request_ref = case.publish(to_document(request), "legacy_materialization_request.v1.0")
     mat = case.submit_materialize("mat-walkback", request_ref=request_ref)
     assert case.run(mat) == "succeeded", case.failure(mat)
