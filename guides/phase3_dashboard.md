@@ -47,6 +47,8 @@ Order matters; each step gates the next:
    from the 3k/month reserve; ORATS quota guard active).
 2. Validation battery on the fresh data — red stops the pipeline (yesterday's
    snapshot stays published; a flag email/file is raised).
+2a. Warm the Tier-4 serving models the score will touch (subprocess; a
+   failure stops the run with `WARM_SERVING_FAILED`).
 3. `score_calendar(as_of=today)`.
 4. Append predictions to the Phase 4 ledger (BEFORE rendering — the frozen
    record is the point).

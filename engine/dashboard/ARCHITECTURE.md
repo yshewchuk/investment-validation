@@ -30,8 +30,9 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   or no embedded residual pool), in a SUBPROCESS via `tier4.serving_model`
   (same cache files). Folds are a superset: every month from
   `decision_start - 30 days` (STR-RUNUP enters 14 trading days early) to the latest event's month, because each
-  strategy's own decision date picks the fold. The child refuses and removes
-  its files if the panel sha changes. Failure raises `WarmError`; the nightly
+  strategy's own decision date picks the fold. If the panel sha changes, the
+  child stops installing and discards its staged file (fits already installed
+  are keyed by the old sha). Failure raises `WarmError`; the nightly
   stops with `WARM_SERVING_FAILED` and never refits in-process.
 - `render.py` — `build_meta`, `build_health`, `build_strategies`,
   `compact_row`, `row_digest`, `freshness_summary`, `quota_state`,
@@ -115,8 +116,10 @@ inside function bodies):
   `engine.memprobe` (`nightly.py`, also provided to `engine.score` and
   `engine.replay`, which are outside this package).
 - Lazy, `warm_serving.py` only: `engine.data.features.tier4` (`serving_model`,
-  `serving_fold`-era fold helpers, `PRODUCES`, the serving-cache path) and
-  `engine.features` (`load_panel`, in the child process).
+  `fold_start_of`, `feature_model`, `PRODUCES`, panel hashing through
+  `store.file_sha256` and `paths.PANEL`, private `_serving_path`; the child
+  temporarily reassigns `SERVING_DIR` to stage writes) and `engine.features`
+  (`load_panel`, child only).
 - Lazy (function-local) only, never at module top level: `engine.calendar`
   (`model_evidence.py::_dataset_for`, `nightly.py::_date_change_flag`/
   `_panel_staleness_flags`/`refresh_forward_chains`/`run_nightly`);
