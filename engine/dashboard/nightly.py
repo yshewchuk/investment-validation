@@ -1704,7 +1704,15 @@ def run_nightly(
                 ]
             context_tickers.update(backfill_events["ticker"].dropna().astype(str))
             warm_event_dates += list(backfill_events["event_date"])
-            warm_decision_start = backfill_start
+            # Only the nights the bounded backfill will actually score (at most
+            # MAX_BACKFILL_DAYS), not the whole gap since the last run.
+            from engine.calendar import trading_calendar
+
+            warm_nights, _, _ = _nights_to_backfill(
+                backfill_start, as_of, calendar=trading_calendar()
+            )
+            if warm_nights:
+                warm_decision_start = warm_nights[0]
         # Fit any missing Tier-4 serving models in a subprocess BEFORE score:
         # an in-process refit inside score added ~2.4 GB and floor-killed two
         # nightlies. A failure stops the run; it never falls back to refitting.
