@@ -1121,10 +1121,13 @@ def _inputs_hash(events: pd.DataFrame, daily: pd.DataFrame) -> str:
                    None if pd.isna(session) else str(session)]
                   for stamp, session, orats in zip(
                       events["event_date"], events["session"], events["src_orats"])]
-    daily_part = ""
-    if len(daily):
-        daily_part = hashlib.sha256(pd.util.hash_pandas_object(
-            daily[["date", "implied_move", "src_iv"]], index=False).to_numpy().tobytes()).hexdigest()
+    # Values, not dtypes: a chunk whose implied_move is all-null is object dtype, another is float.
+    daily_part = content_hash([
+        [None if pd.isna(day) else str(pd.Timestamp(day).date()),
+         None if pd.isna(implied) else float(implied),
+         None if pd.isna(source) else str(source)]
+        for day, implied, source in zip(
+            daily["date"], daily["implied_move"], daily["src_iv"])]) if len(daily) else ""
     return content_hash({"events": event_part, "daily": daily_part})
 
 
