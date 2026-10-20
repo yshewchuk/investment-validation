@@ -318,7 +318,8 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 | Same slot, different manifest | `EXPERIMENT_IDENTITY_CONFLICT`. |
 | Same slot, same manifest (retry after an ambiguous append) | No-op success; shards are content-addressed, so republishing is harmless, and no cache entry depends on the attempt. |
 | A row above 8 MiB or more than 8192 shards | Nonretryable `RESOURCE_LIMIT_EXCEEDED` before the manifest append; published shards stay unreferenced. A stored manifest or section listing more than 8192 shards is `EXPERIMENT_IDENTITY_CONFLICT`. |
-| Writer given a row whose sort key is missing, not a tuple of strings/integers, or not strictly above the previous key | `INVALID_EXPERIMENT_SPEC` before that shard is published. |
+| Writer given a row whose sort key is missing, not a tuple of strings/integers, or not strictly above the previous key, or a row that is not canonical JSON | `INVALID_EXPERIMENT_SPEC` before that shard is published. |
+| Read-time `UNSAFE_PATH` (for example a symlink) on a syntactically valid shard ref | Retryable `RESOURCE_UNAVAILABLE`, like a missing shard; invalid ref syntax stays a conflict. |
 | Older whole-cohort record read by sharded code | `EXPERIMENT_IDENTITY_CONFLICT`; no rewrite or migration. |
 
 Registration, snapshot, plan and execution-spec bindings are unchanged; `inputs:<trial>`
