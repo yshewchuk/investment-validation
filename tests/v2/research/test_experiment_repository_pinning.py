@@ -23,16 +23,20 @@ def unpinned_repository_calls(source: bytes) -> tuple[int, list[int]]:
     while grew:
         grew = False
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets, value = [node.target], node.value
+            else:
                 continue
-            target = node.targets[0]
-            if not isinstance(target, ast.Name):
-                continue
-            value = node.value
-            if (isinstance(value, ast.Name) and value.id in names) or (
+            if not (
+                isinstance(value, ast.Name) and value.id in names
+            ) and not (
                 isinstance(value, ast.Attribute) and value.attr == "Repository"
             ):
-                if target.id not in names:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in names:
                     names.add(target.id)
                     grew = True
     seen = 0
@@ -66,9 +70,11 @@ def test_experiment_repository_calls_pin_snapshots():
     seen = 0
     for path in sorted((ROOT / "experiments").rglob("*.py")):
         assert not path.is_symlink()
-        assert path.stat().st_size <= 1_000_000
         rel = path.relative_to(ROOT)
-        count, unpinned = unpinned_repository_calls(path.read_bytes())
+        with path.open("rb") as handle:
+            data = handle.read(1_000_001)
+        assert len(data) <= 1_000_000
+        count, unpinned = unpinned_repository_calls(data)
         seen += count
         offenders.extend(f"{rel}:{lineno}" for lineno in unpinned)
     assert offenders == []
@@ -82,5 +88,11 @@ make_repo = Repository
 a = Repository(c, s, pin_snapshots=True)
 b = Repo(c, s)
 d = make_repo(c, s)
+import engine.v2.data.repository as data
+e = data.Repository(c, s)
+typed: object = Repository
+f = typed(c, s)
+left = chained = Repository
+g = chained(c, s)
 """
-    assert unpinned_repository_calls(source) == (3, [5, 6])
+    assert unpinned_repository_calls(source) == (6, [5, 6, 8, 10, 12])
