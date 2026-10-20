@@ -101,11 +101,15 @@ _S_IFMT = 0o170000
 _S_IFREG = 0o100000
 _S_IFDIR = 0o040000
 
-#: pyarrow's own spellings for two contract physical types. Every other
+#: pyarrow's own spellings for three contract physical types. Every other
 #: pyarrow type string — including a timestamp's unit — passes through
 #: unchanged, so a genuine ``timestamp[ns]`` vs ``timestamp[us]`` mismatch is
 #: still reported rather than aliased away.
-_PHYSICAL_TYPE_ALIASES: dict[str, str] = {"large_string": "string", "double": "float64"}
+_PHYSICAL_TYPE_ALIASES: dict[str, str] = {
+    "large_string": "string",
+    "double": "float64",
+    "date32[day]": "date32",
+}
 
 
 def normalize_physical_type(actual: str) -> str:

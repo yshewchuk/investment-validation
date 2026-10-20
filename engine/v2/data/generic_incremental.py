@@ -21,7 +21,7 @@ from engine.v2.contracts import (
     RevisionCandidate,
     TableContract,
 )
-from engine.v2.data import catalog, errors, manifests, objects
+from engine.v2.data import catalog, errors, manifests, objects, query
 from engine.v2.data import incremental_tables as tables
 from engine.v2.foundation import (
     CONTENT_HASH_PREFIX,
@@ -49,18 +49,11 @@ __all__ = [
     "sort_value",
 ]
 
-#: The Arrow type each contract ``physical_type`` maps to when this module (and
-#: ``generic_streaming``) writes a parquet fragment. The one shared map, so the
-#: staged and merged writers can never drift apart on a physical type.
-ARROW_TYPES: dict[str, pa.DataType] = {
-    "string": pa.string(),
-    "float64": pa.float64(),
-    "int64": pa.int64(),
-    "bool": pa.bool_(),
-    "timestamp[ns]": pa.timestamp("ns"),
-    "timestamp[us]": pa.timestamp("us"),
-    "date32": pa.date32(),
-}
+#: Re-export of the one shared physical-type map, defined in ``query``
+#: (including ``date32``), used when this module and ``generic_streaming``
+#: write a parquet fragment — so the staged and merged writers and a scan can
+#: never drift apart on a physical type.
+ARROW_TYPES: dict[str, pa.DataType] = query.ARROW_TYPES
 
 
 @dataclass(frozen=True, kw_only=True)
