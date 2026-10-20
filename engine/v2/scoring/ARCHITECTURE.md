@@ -715,7 +715,7 @@ pin on every call. Only the exact same deeply immutable object reuses converted
 arrays; a strong reference prevents identity reuse. Distinct objects never share
 cached conversions, even if their declared hashes match. Direct mutable inputs
 are converted on every call, without retention. Admission trusts the declared
-hash exactly as before; no payload-hash check is added. Arrays have immutable
+hash alone; the payload is not re-hashed. Arrays have immutable
 bytes backing. The process-local FIFO retains at most four entries and 16 MiB of
 numeric buffer bytes, not total RSS (retained source objects and Python metadata
 are extra). A lock serializes lookup/accounting/eviction; conversion stays
