@@ -114,9 +114,8 @@ _COLUMNS = (
                                "came from; never null"),
 )
 
-#: The six v4 column descriptors whose text states a v4 row rule v5 breaks
-#: (issue #966), keyed by column name: ``_V5_COLUMNS`` rewrites only these and
-#: keeps every other v4 descriptor byte-identical, so no v4 contract moves.
+#: The six v4 descriptors stating a v4 row rule v5 breaks (issue #966);
+#: every other v4 descriptor stays byte-identical, so no v4 contract moves.
 _V5_TEXT_OVERRIDES: dict[str, dict[str, str]] = {
     "implied_move_pct": dict(
         null_policy=(
@@ -154,15 +153,15 @@ _V5_TEXT_OVERRIDES: dict[str, dict[str, str]] = {
 _NOT_COMPUTED_REASON_COLUMN = ColumnContract(
     name="not_computed_reason", physical_type="string", nullable=True,
     null_policy="null exactly when the row is a computed outcome (skipped false); non-null "
-                "exactly when skipped is true and realized_move_pct and "
-                "available_as_of_date are null. Closed reason set: not_orats (no ORATS "
-                "confirmation, e.g. a forward_claim phantom), no_session (ORATS-confirmed "
-                "but session null), no_price_window (the v4 skipped case: a missing close "
-                "on either side or a P->Q window wider than MAX_GAP_CALENDAR_DAYS), "
-                "no_price_history (the ticker's close series is empty), "
-                "ticker_too_few_events (fewer than MIN_SCOREABLE ORATS-confirmed sessioned "
-                "events, or fewer than ADMISSION_EVENTS computable ones); the last two are "
-                "ticker-level and apply to every row of that ticker.",
+                "exactly when skipped is true and realized_move_pct and available_as_of_date "
+                "are null. Closed reason set: not_orats (no ORATS confirmation, e.g. a "
+                "forward_claim phantom), no_session (ORATS-confirmed but session null), "
+                "no_price_window (the v4 skipped case: a missing close on either side or a "
+                "P->Q window wider than MAX_GAP_CALENDAR_DAYS), no_price_history (the "
+                "ticker's close series is empty), ticker_too_few_events (fewer than "
+                "MIN_SCOREABLE ORATS-confirmed sessioned events or fewer than "
+                "ADMISSION_EVENTS computable ones); the last two are ticker-level and apply "
+                "to every row of that ticker.",
 )
 
 #: v4's columns with the contradicting descriptors rewritten, plus

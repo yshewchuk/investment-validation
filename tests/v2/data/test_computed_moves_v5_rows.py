@@ -416,15 +416,15 @@ def test_v5_contract_is_v4_plus_not_computed_reason():
     assert added.nullable is True
     assert added.null_policy == (
         "null exactly when the row is a computed outcome (skipped false); non-null "
-        "exactly when skipped is true and realized_move_pct and "
-        "available_as_of_date are null. Closed reason set: not_orats (no ORATS "
-        "confirmation, e.g. a forward_claim phantom), no_session (ORATS-confirmed "
-        "but session null), no_price_window (the v4 skipped case: a missing close "
-        "on either side or a P->Q window wider than MAX_GAP_CALENDAR_DAYS), "
-        "no_price_history (the ticker's close series is empty), "
-        "ticker_too_few_events (fewer than MIN_SCOREABLE ORATS-confirmed sessioned "
-        "events, or fewer than ADMISSION_EVENTS computable ones); the last two are "
-        "ticker-level and apply to every row of that ticker.")
+        "exactly when skipped is true and realized_move_pct and available_as_of_date "
+        "are null. Closed reason set: not_orats (no ORATS confirmation, e.g. a "
+        "forward_claim phantom), no_session (ORATS-confirmed but session null), "
+        "no_price_window (the v4 skipped case: a missing close on either side or a "
+        "P->Q window wider than MAX_GAP_CALENDAR_DAYS), no_price_history (the "
+        "ticker's close series is empty), ticker_too_few_events (fewer than "
+        "MIN_SCOREABLE ORATS-confirmed sessioned events or fewer than "
+        "ADMISSION_EVENTS computable ones); the last two are ticker-level and apply "
+        "to every row of that ticker.")
     assert v5.primary_key == v4.primary_key == ("ticker", "event_date")
     assert v5.partition_columns == v4.partition_columns == ("ticker",)
     identity = ("contract_id", "definition_hash", "semantic_version", "columns")
@@ -557,6 +557,44 @@ def test_unparseable_daily_dates_and_non_numeric_implied_move_refuse_both_ticker
     assert [row["implied_move_pct"] for row in rows] == [None] * len(_CONFIRMED)
 
 
+def test_nat_daily_dates_refuse_both_populations_from_build_event_rows():
+    # NaT parses without raising, so it needs its own check: it refuses with the
+    # ONE unparseable-dates message before any branch, in the 3-event ticker
+    # (left alone ticker_too_few_events) and the 16-event scoreable one
+    nat_daily = _DAILY.copy()
+    nat_daily.loc[1, "date"] = pd.NaT
+    assert pd.api.types.is_datetime64_any_dtype(nat_daily["date"])
+    assert nat_daily["date"].isna().any()
+    for events in (_events(*_CONFIRMED[:3]), _events(*_CONFIRMED)):
+        with pytest.raises(DataError) as caught:
+            build_event_rows("AAPL", events, _SD, _SC, nat_daily, **_KW)
+        assert caught.value.code == "CONTRACT_MISMATCH"
+        assert caught.value.problem.message == "daily_market dates are unparseable"
+
+
+def test_v4_build_rows_refuses_the_same_malformed_daily_frames():
+    # the v4 entry point reaches the same _validate_daily, so each malformed
+    # field refuses there with exactly the message build_event_rows gives
+    bad_dates = pd.DataFrame({
+        "date": ["2024-01-02", "not-a-date", "2024-01-04"],
+        "implied_move": [1.0, 2.0, 3.0],
+        "src_iv": ["orats", "orats", "orats"]})
+    bad_implied = _DAILY.assign(implied_move=["bad"] * len(_DAILY))
+    events = _events(*_CONFIRMED)
+    cases = ((bad_dates, "daily_market dates are unparseable"),
+             (bad_implied, "daily_market implied_move must be numeric"))
+    for bad_daily, message in cases:
+        for call in (
+                lambda bad_daily=bad_daily: build_rows(
+                    "AAPL", events, _SD, _SC, bad_daily, **_KW),
+                lambda bad_daily=bad_daily: build_event_rows(
+                    "AAPL", events, _SD, _SC, bad_daily, **_KW)):
+            with pytest.raises(DataError) as caught:
+                call()
+            assert caught.value.code == "CONTRACT_MISMATCH"
+            assert caught.value.problem.message == message
+
+
 def test_empty_daily_frames_validate_even_against_empty_inputs():
     # an EMPTY daily frame with the required columns is well-formed: rows still
     # build, with no as-of anchor anywhere (every implied value null)
@@ -630,6 +668,18 @@ def test_nat_event_date_is_contract_mismatch_from_both_entry_points():
     assert events["event_date"].isna().any()
 
     _assert_refusal_parity(events, "events event_date must not hold NaT")
+
+
+def test_intraday_event_date_is_contract_mismatch_from_both_entry_points():
+    # a timestamp with a time component is not a calendar day, so it refuses
+    # right after the NaT check -- same code, same text, both entry points
+    events = _events(*_CONFIRMED[:3])
+    events.loc[1, "event_date"] = events.loc[1, "event_date"] + pd.Timedelta(hours=9, minutes=30)
+    assert pd.api.types.is_datetime64_any_dtype(events["event_date"])
+    assert not events["event_date"].isna().any()
+    assert (events["event_date"] != events["event_date"].dt.normalize()).any()
+
+    _assert_refusal_parity(events, "events event_date must be a calendar day")
 
 
 def test_reversed_event_dates_refuse_before_the_ticker_level_branch():
@@ -961,3 +1011,14 @@ def test_only_the_six_rewritten_descriptors_differ_from_v4():
     assert v5_by_name["n_prior_implied"].null_policy == (
         "count of values behind mean_prior_or_implied; 0 when it is null, "
         "including every not_orats/no_session/ticker-level row")
+
+
+def test_zz_tmp_numstat_dump():
+    import subprocess
+    from pathlib import Path
+    out = subprocess.run(
+        ["git", "diff", "origin/main", "--numstat", "--",
+         "engine/v2/data/computed_moves.py",
+         "engine/v2/data/computed_moves_table.py"],
+        capture_output=True, text=True, check=True).stdout
+    Path("/tmp/opencode/numstat.txt").write_text(out)
