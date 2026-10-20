@@ -385,6 +385,7 @@ why = "Incremental merge rules (append, correction, tombstone, replay) for curat
 mutate = [
     "engine/v2/data/incremental.py",
     "engine/v2/data/generic_incremental.py",
+    "engine/v2/data/generic_streaming.py",
     "engine/v2/data/incremental_tables.py",
     "engine/v2/data/computed_moves.py",
     "engine/v2/data/computed_moves_table.py",
@@ -409,6 +410,7 @@ tests = [
     "tests/test_v2_data_incremental.py",
     "tests/test_v2_data_incremental_persistence.py",
     "tests/test_v2_data_incremental_tables.py",
+    "tests/v2/data/test_generic_streaming.py",
 ]
 
 [modules.data_legacy]

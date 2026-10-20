@@ -104,8 +104,16 @@ def test_phantom_forward_claim_is_not_orats_and_leaves_neighbours_unchanged():
     assert rows[:5] == base[:5]
     assert rows[6:] == base[5:]
     neighbour = rows[6]
-    assert neighbour["mean_prior_or_implied"] is not None  # the comparison is not vacuous
-    assert neighbour["event_ordinal"] == 5 == base[5]["event_ordinal"]
+    # the neighbour's own values, hard-coded: 2024-01-22 BMO counts its ordinal
+    # (5 >= WARMUP, so admitted), measures close[15]/close[14] on _SC, and takes
+    # its prior mean from the ONE earlier admitted event -- the 2024-01-19 row's
+    # as-of anchor on the 2024-01-18 daily row, 13.0
+    assert neighbour["event_ordinal"] == 5
+    assert neighbour["admitted"] is True
+    assert neighbour["realized_move_pct"] == pytest.approx(0.4746835443037975, rel=1e-9)
+    assert neighbour["mean_prior_or_implied"] == 13.0
+    assert neighbour["n_prior_implied"] == 1
+    assert neighbour["not_computed_reason"] is None
 
 
 def test_confirmed_event_without_a_session_is_no_session():
@@ -255,6 +263,19 @@ def test_same_date_phantom_collapses_to_the_confirmed_row():
     assert [row["event_date"] for row in rows] == [
         day.strftime("%Y-%m-%d") for day, _, _ in _CONFIRMED]  # order preserved
 
+    # the collapsed row's own values, hard-coded rather than read off another
+    # builder call: 2024-01-19 BMO is the 5th confirmed event (ordinal 4 ==
+    # WARMUP, so admitted), measures close[14]/close[13] on _SC, and has no
+    # earlier admitted event behind its prior mean -- a computed outcome
+    survivor = rows[4]
+    assert survivor["event_date"] == "2024-01-19"
+    assert survivor["event_ordinal"] == 4
+    assert survivor["admitted"] is True
+    assert survivor["realized_move_pct"] == pytest.approx(0.4769475357710652, rel=1e-9)
+    assert survivor["mean_prior_or_implied"] is None
+    assert survivor["n_prior_implied"] == 0
+    assert survivor["not_computed_reason"] is None
+
 
 def test_two_same_date_confirmed_rows_collapse_to_the_first_in_input_order():
     base = _build(_events(*_CONFIRMED))
@@ -264,6 +285,19 @@ def test_two_same_date_confirmed_rows_collapse_to_the_first_in_input_order():
 
     assert len(rows) == len(base)  # two confirmed, one row: the input's first wins
     assert rows == base  # and it is the BMO row, not the AMC twin
+
+    # the collapsed row's own values, hard-coded: it is the BMO event of
+    # 2024-01-19 (ordinal 4 == WARMUP, so admitted), measuring close[14]/close[13]
+    # on _SC -- the AMC twin would measure close[15]/close[14] -- with no earlier
+    # admitted event behind its prior mean and a computed outcome
+    survivor = rows[4]
+    assert survivor["event_date"] == "2024-01-19"
+    assert survivor["event_ordinal"] == 4
+    assert survivor["admitted"] is True
+    assert survivor["realized_move_pct"] == pytest.approx(0.4769475357710652, rel=1e-9)
+    assert survivor["mean_prior_or_implied"] is None
+    assert survivor["n_prior_implied"] == 0
+    assert survivor["not_computed_reason"] is None
 
 
 def test_empty_event_list_returns_no_rows():
@@ -389,6 +423,17 @@ def test_non_bool_src_orats_is_contract_mismatch(bad):
     events = _events(*_CONFIRMED[:3])
     events["src_orats"] = pd.Series([bad, True, True], dtype="object")
     _assert_refusal_parity(events, "events src_orats must hold a real bool per row")
+
+
+def test_string_event_date_is_contract_mismatch_from_both_entry_points():
+    # the store converts with pd.to_datetime; a caller handing over strings must
+    # meet one typed refusal, never an AttributeError from .to_datetime64()
+    events = _events(*_CONFIRMED[:3])
+    events["event_date"] = pd.Series(
+        [day.strftime("%Y-%m-%d") for day, _, _ in _CONFIRMED[:3]], dtype="object")
+    assert events["event_date"].dtype == object  # the input really is strings
+
+    _assert_refusal_parity(events, "events event_date must be a datetime column")
 
 
 def test_reversed_event_dates_refuse_before_the_ticker_level_branch():
@@ -592,3 +637,25 @@ def test_only_the_five_rewritten_descriptors_differ_from_v4():
     # column descriptor is byte-identical to v4's
     assert {name for name, column in v4_by_name.items()
             if v5_by_name[name] != column} == rewritten
+
+    # and those five carry EXACTLY this text -- pinned here rather than read
+    # from _V5_TEXT_OVERRIDES, which is the thing under test
+    assert v5_by_name["event_ordinal"].observation_time_semantics == (
+        "0-based count of earlier ORATS-confirmed sessioned events of the "
+        "ticker; counts confirmed events only, so unconfirmed/no-outcome "
+        "rows carry the count of earlier confirmed events")
+    assert v5_by_name["admitted"].null_policy == (
+        "event_ordinal >= 4 and the row is a confirmed event on a ticker "
+        "that clears the bars; false on every row whose "
+        "not_computed_reason is not_orats, no_session or ticker-level")
+    assert v5_by_name["skipped"].null_policy == (
+        "true exactly when not_computed_reason is non-null: no outcome "
+        "was computed for this event")
+    assert v5_by_name["mean_prior_or_implied"].null_policy == (
+        "mean of the stored implied_move_pct of earlier admitted events, "
+        "nulls skipped; null on a non-admitted row, on a "
+        "not_orats/no_session/ticker-level row, or when no earlier "
+        "admitted event has an implied value")
+    assert v5_by_name["n_prior_implied"].null_policy == (
+        "count of values behind mean_prior_or_implied; 0 when it is null, "
+        "including every not_orats/no_session/ticker-level row")

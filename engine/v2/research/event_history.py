@@ -30,9 +30,9 @@ def plan_event_targets(repository, snapshot, candidates, contract, *, columns=No
                         or event.ticker != event.ticker.strip()
                         or calendar_date(event.event_date) != event.event_date.date()):
                     raise ValueError
-            return _plans(repository, snapshot, candidates, contract, columns=columns)
         except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
             raise errors.fail("CONTRACT_MISMATCH", "event target candidates are malformed") from None
+        return _plans(repository, snapshot, candidates, contract, columns=columns)
 
 
 def _window(history_start, decision_session):

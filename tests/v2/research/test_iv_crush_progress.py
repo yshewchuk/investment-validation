@@ -34,6 +34,15 @@ def test_public_planner_malformed_candidates_refuse_before_repository_access(can
     exact_problem(caught, "CONTRACT_MISMATCH", "event target candidates are malformed")
 
 
+def test_public_planner_downstream_errors_escape_candidate_translation(monkeypatch):
+    def boom(*args, **kwargs):
+        raise ValueError("boom")
+    monkeypatch.setattr(event_history, "_plans", boom)
+    candidates = pd.DataFrame({"ticker": ["SYNTH"], "event_date": [pd.Timestamp("2024-01-04")]})
+    with pytest.raises(ValueError, match="boom"):
+        event_history.plan_event_targets(None, None, candidates, IV_CRUSH_CONTRACT)
+
+
 class Clock:
     now = 0.
 

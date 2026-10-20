@@ -15,7 +15,8 @@ identity chain (`objects.py`, `manifests.py`); atomic snapshot commit with
 idempotent inserts and a compare-and-swap head (`catalog.py`); the
 incremental-refresh merge policy shared by every EOD table family
 (`incremental_tables.py`, `incremental.py` for `daily_market`,
-`generic_incremental.py` for any registered `TableContract`); bounded,
+`generic_incremental.py` for any registered `TableContract`;
+`generic_streaming.py` is the separate whole-table replacement route); bounded,
 exact reads over a committed snapshot (`repository.py`, `query.py`,
 `events.py`, `chains.py`, `price_history_query.py`); the one legacy-touching
 seam (`legacy_adapter.py`) and what is built on it read-only (table
@@ -44,8 +45,8 @@ footer counts, strict global order and result limits remain mandatory; batches a
 `Repository.scan(..., max_object_bytes=None)` preserves path-based reads by default.
 With a cap, `objects.read_verified_bytes` hashes bounded immutable bytes without cache
 reuse; PyArrow checks all row-group uncompressed sizes before decoding. Thrift limits
-are capped at INT32_MAX even for larger Python integers. Buffers close on completion,
-errors or generator closure; existing row/integrity checks remain.
+are capped at the library's 32-bit maximum even for larger Python integers. Buffers
+close on completion, errors or generator closure; existing row/integrity checks remain.
 
 | Byte-read condition | Outcome |
 |---|---|
@@ -310,6 +311,55 @@ The optional `record_receipt(record)` callback runs after fencing and insertion
 inside that same transaction, including verified replay. Its failure rolls back
 both the new receipt and caller-owned occurrence; raw content identity is unchanged.
 
+**Streaming table writer (`generic_streaming.py`).** A second,
+additive route to a table's new dataset version for producers whose output must
+not be held in memory. `StreamingTableWriter(store, parent, table_name, attempt_id,
+coverage)` accepts rows in batches and `finish()` returns a
+`GenericTableCandidate` that the unchanged `commit_generic_table_candidate`
+commits.
+- *Scope:* a whole-table contract only (`partition_columns == ()`); any other
+  contract refuses `UNSUPPORTED_CONTRACT`. The result is one fragment that
+  REPLACES the whole table: every partition the parent holds for the table (an
+  imported table's single partition is `all`, a generic one `__whole__`) is
+  removed, and the new fragment takes the parent's partition key when all prior
+  fragments share one, else `__whole__`. No prior rows are read, no per-row
+  revisions or `RowChange`s are recorded; the changeset is `changed` for the
+  replaced and new partitions, `normalized_payloads` = row count, disposition
+  `conservative_full` (no row-level changes recorded).
+- *Provenance and coverage:* the new version carries the caller's `knowledge_mode`
+  (default `reconstructed`) and `availability_evidence_refs` (default none), only
+  the current coverage receipt and the parent version id as lineage, nothing
+  inherited from the parent. Another table's coverage refuses `CONTRACT_MISMATCH`.
+- *Order and validity:* each accepted row is copied (later caller mutation cannot
+  change it) and must satisfy the contract: known columns only, every column present
+  unless nullable, no null in a non-nullable column, and a value of the column's
+  physical type (float64 finite, timestamps timezone-naive, a missing nullable value
+  `None`); primary-key values must be present. Rows arrive in strictly increasing
+  primary-key order across and within batches (the caller orders batches). Shape,
+  nulls, types and key order are checked at `append_rows`, Arrow conversion at the
+  row-group write, `knowledge_mode` and evidence refs (observed and attested modes
+  need evidence) at construction. Any violation or
+  unconvertible value refuses `CONTRACT_MISMATCH`, never repaired. A staging-file
+  I/O failure propagates as an `OSError` after cleanup. `append_rows` after
+  `finish`/`abort`/failure refuses `INPUT_CHANGED`.
+- *Memory:* one pending buffer of at most `ROW_GROUP_ROWS` (50,000) rows plus the
+  caller's batch, and 65,536-row inspection batches at `finish`. Row groups are
+  exactly `ROW_GROUP_ROWS` (the last shorter), so the hash depends only on the
+  rows; the staged file is streamed into the store and inspected unmaterialised.
+- *Failure semantics:*
+
+  | R | Rule |
+  | --- | --- |
+  | R1 | Contract, coverage (`complete`) and parent table are checked at construction; rows at append; refusals above |
+  | R2 | No cache; each writer owns one uniquely named staging file |
+  | R3 | Any failure makes the writer terminal (`failed`); a new attempt starts over |
+  | R4 | Nothing is visible to the catalog until the one `commit_generic_table_candidate` |
+  | R5 | A failure, `abort()` or `__exit__` on an open writer removes the staging file; a crash leaves the staging file in the attempt's staging directory (reclaimed by the attempt-staging policy, not by this writer), and a published-but-uncommitted object stays unreferenced |
+  | R6 | The same ordered rows, contract, parent snapshot and coverage id give the same object and dataset version hash; other rows give another |
+
+  Zero rows at `finish` refuse `CONTRACT_MISMATCH` (an empty table is not
+  published silently).
+
 **Original panel COPY identity.** Offline size-fold authoring uses `Repository`
 and the existing object verifier to bind the named committed snapshot's
 `feature_panel` dataset version to one original object and full byte hash.
@@ -432,7 +482,7 @@ is unchanged: a candidate with no fragment is still a refusal. Nothing is writte
 | an empty event list | no rows |
 | reason precedence for one event | per-event `not_orats`, then `no_session`; ticker-level overrides every event: `no_price_history` (no closes, checked first), else `ticker_too_few_events`; otherwise a confirmed event with no bracketing window is `no_price_window`, else null |
 | event dates not strictly ascending after the same-date collapse, or `daily` dates not strictly ascending | `CONTRACT_MISMATCH` from both entry points, whatever the ticker-level outcome |
-| `min_scoreable` not a non-negative int, an event frame lacking `event_date`/`session`/`src_orats`, a non-bool `src_orats`, `sd`/`sc` of different lengths, or a `daily` frame lacking `date`/`implied_move`/`src_iv` | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
+| `min_scoreable` not a non-negative int, an event frame lacking `event_date`/`session`/`src_orats`, a non-datetime `event_date`, a non-bool `src_orats`, `sd`/`sc` of different lengths, or a `daily` frame lacking `date`/`implied_move`/`src_iv` | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
 
 **`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
 no clock. A feature declares its parameters; none is hard-coded in the module.

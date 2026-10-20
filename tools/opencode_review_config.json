@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "openrouter/qwen/qwen3.8-flash",
+  "model": "openrouter/xiaomi/mimo-v2.6-flash",
   "permission": {
     "bash": {
       "*": "deny"
@@ -25,7 +25,8 @@
       "models": {
         "deepseek/deepseek-v4.1-flash": {},
         "qwen/qwen3.8-flash": {},
-        "z-ai/glm-5.3": {}
+        "z-ai/glm-5.3": {},
+        "xiaomi/mimo-v2.6-flash": {}
       }
     }
   },
