@@ -303,6 +303,15 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   validation target. Transport memory is one shard plus the manifest.
 * Shards are published, outside the catalog transaction, before the manifest append,
   which is the commit point.
+* Decided (supervisor, 2026-10-20): the manifest hash is a Merkle `inputs_id` (only smoke and
+  test journals sealed before activation stop replaying), and every cohort shards, however small.
+  Sharded outputs (forecasts, `validation:` targets, receipts) are decided after the child
+  transport lands, on measured sizes.
+* `magnitude_search_shards` implements the cut rule, writer, manifest hash and verified reader
+  and lists the list-valued members (`LIST_MEMBERS`); nothing calls it until activation.
+  Open for activation: every member except `features` is in the admitted `(event_date, event_id)`
+  order but its rows carry no `event_date`, so no strictly increasing key exists yet; activation
+  must supply one (for example carry the date in each row) before those sections are written.
 
 | Condition | Outcome |
 |---|---|
