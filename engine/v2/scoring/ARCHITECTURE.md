@@ -708,6 +708,29 @@ returns no partial bundle. Other strategies retain their existing projection.
   arrives already loaded, and nothing this function does can mutate a
   store, a file, or its own arguments.
 
+### Frozen driver-residual array cache
+
+Frozen driver-residual lookup checks the requested causal key and optional hash
+pin on every call. Only the exact same deeply immutable object reuses converted
+arrays; a strong reference prevents identity reuse. Distinct objects never share
+cached conversions, even if their declared hashes match. Direct mutable inputs
+are converted on every call, without retention. Admission trusts the declared
+hash exactly as before; no payload-hash check is added. Arrays have immutable
+bytes backing. The process-local FIFO retains at most four entries and 16 MiB of
+numeric buffer bytes, not total RSS (retained source objects and Python metadata
+are extra). A lock serializes lookup/accounting/eviction; conversion stays
+outside it. Sampling order and legacy scoring are independent of cache state.
+
+| Condition | Outcome |
+| --- | --- |
+| Missing/wrong kind, causal key or requested hash pin | `MODEL_NOT_READY` before cache lookup on every call. |
+| Distinct direct objects with equal declared hashes and different contents | Convert each object's own contents. |
+| Same retained deeply immutable object | Reuse its immutable numeric buffers after the per-call identity checks. |
+| Valid miss fitting both caps | Convert once; retain the object and buffers, evicting oldest entries until both caps hold. |
+| Valid conversion exceeds 16 MiB or input contains mutable fields | Return converted buffers without retention or eviction of existing entries. |
+| Concurrent misses for the same object | Recheck under the lock and reuse the first insertion; no duplicate accounting or unnecessary eviction. |
+| Evicted object requested again | Check immutability and reconvert; output and sampling order are identical to a hit. |
+
 ## Invariants
 
 Root doc §5 invariants this package is responsible for: "Native vs. legacy
@@ -758,23 +781,3 @@ unlike `compatibility.py`.
 - **Layering.** Scoring (5.0) never imports ops (7.0) or serving (7.0);
   `nightly_source_bundle.py` follows that rule even where it costs a small
   duplicated validator (`validated_as_of`) rather than an upward import.
-
-Frozen driver-residual lookup checks the requested causal key and optional hash
-pin on every call. Only the exact same deeply immutable object reuses converted arrays;
-a strong reference prevents identity reuse. Distinct objects never share cached
-conversions, even if their declared hashes match. Direct mutable inputs are
-converted on every call, without retention. No new payload-hash admission is added. Arrays have immutable bytes
-backing. The process-local FIFO retains at most four entries and 16 MiB of numeric
-buffer bytes, not total RSS (retained source objects and Python metadata are extra).
-A lock serializes lookup/accounting/eviction; conversion stays outside it.
-Sampling order and legacy scoring are unchanged.
-
-| Condition | Outcome |
-| --- | --- |
-| Missing/wrong kind, causal key or requested hash pin | `MODEL_NOT_READY` before cache lookup on every call. |
-| Distinct direct objects with equal declared hashes and different contents | Convert each object's own contents; existing declared-hash admission is unchanged. |
-| Same retained deeply immutable object | Reuse its immutable numeric buffers after the per-call identity checks. |
-| Valid miss fitting both caps | Convert once; retain the object and buffers, evicting oldest entries until both caps hold. |
-| Valid conversion exceeds 16 MiB or input contains mutable fields | Return converted buffers without retention or eviction of existing entries. |
-| Concurrent misses for the same object | Recheck under the lock and reuse the first insertion; no duplicate accounting or unnecessary eviction. |
-| Evicted object requested again | Check immutability and reconvert; output and sampling order are unchanged. |
