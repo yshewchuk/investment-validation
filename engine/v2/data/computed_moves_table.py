@@ -22,7 +22,7 @@ and readable; the two contracts share every field but ``contract_id``,
 Layout: ``ticker, event_date, realized_move_pct, available_as_of_date,
 implied_move_pct, event_ordinal, admitted, mean_prior_or_implied,
 n_prior_implied, skipped, computed_at, source_hash,
-capture_id``, primary key
+capture_id`` (v5: plus ``not_computed_reason``), primary key
 ``(ticker, event_date)``, one partition per ticker (``partition_columns =
 ("ticker",)``). New captures use one fragment per event; older snapshots may
 hold a whole ticker in one fragment. Both layouts use the same
@@ -35,6 +35,8 @@ Layer 1 of ``system_rearchitecture.md`` §4.1: imports only
 ``engine.v2.ops`` or legacy ``engine.*``.
 """
 from __future__ import annotations
+
+import dataclasses
 
 from engine.v2.contracts.data import ColumnContract, TableContract
 
@@ -112,6 +114,36 @@ _COLUMNS = (
                                "came from; never null"),
 )
 
+#: The v4 column descriptors whose text states a v4 row rule v5 breaks (issue
+#: #966), keyed by column name: ``_V5_COLUMNS`` rewrites only these and keeps
+#: every other v4 descriptor byte-identical, so no v4 contract moves.
+_V5_TEXT_OVERRIDES: dict[str, dict[str, str]] = {
+    "event_ordinal": dict(
+        observation_time_semantics=(
+            "0-based count of earlier ORATS-confirmed sessioned events of the "
+            "ticker; counts confirmed events only, so unconfirmed/no-outcome "
+            "rows carry the count of earlier confirmed events")),
+    "admitted": dict(
+        null_policy=(
+            "event_ordinal >= 4 and the row is a confirmed event on a ticker "
+            "that clears the bars; false on every row whose "
+            "not_computed_reason is not_orats, no_session or ticker-level")),
+    "skipped": dict(
+        null_policy=(
+            "true exactly when not_computed_reason is non-null: no outcome "
+            "was computed for this event")),
+    "mean_prior_or_implied": dict(
+        null_policy=(
+            "mean of the stored implied_move_pct of earlier admitted events, "
+            "nulls skipped; null on a non-admitted row, on a "
+            "not_orats/no_session/ticker-level row, or when no earlier "
+            "admitted event has an implied value")),
+    "n_prior_implied": dict(
+        null_policy=(
+            "count of values behind mean_prior_or_implied; 0 when it is null, "
+            "including every not_orats/no_session/ticker-level row")),
+}
+
 _NOT_COMPUTED_REASON_COLUMN = ColumnContract(
     name="not_computed_reason", physical_type="string", nullable=True,
     null_policy="null exactly when the row is a computed outcome (skipped false); non-null "
@@ -120,14 +152,19 @@ _NOT_COMPUTED_REASON_COLUMN = ColumnContract(
                 "confirmation, e.g. a forward_claim phantom), no_session (ORATS-confirmed "
                 "but session null), no_price_window (the v4 skipped case: a missing close "
                 "on either side or a P->Q window wider than MAX_GAP_CALENDAR_DAYS), "
-                "no_price_history (the ticker has no daily_market rows or usable closes), "
+                "no_price_history (the ticker's close series is empty), "
                 "ticker_too_few_events (fewer than MIN_SCOREABLE ORATS-confirmed sessioned "
                 "events, or fewer than ADMISSION_EVENTS computable ones); the last two are "
                 "ticker-level and apply to every row of that ticker.",
 )
 
-#: v4's columns plus ``not_computed_reason`` (issue #966); never a copy-paste.
-_V5_COLUMNS = (*_COLUMNS, _NOT_COMPUTED_REASON_COLUMN)
+#: v4's columns with the contradicting descriptors rewritten, plus
+#: ``not_computed_reason`` (issue #966); derived, never a copy-paste.
+_V5_COLUMNS = tuple(
+    dataclasses.replace(column, **_V5_TEXT_OVERRIDES[column.name])
+    if column.name in _V5_TEXT_OVERRIDES else column
+    for column in _COLUMNS
+) + (_NOT_COMPUTED_REASON_COLUMN,)
 
 
 def _fields(*, contract_id: str, semantic_version: str, columns) -> dict:

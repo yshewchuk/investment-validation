@@ -23,8 +23,10 @@ confirmed events, so a phantom never shifts a real event's ordinal or prior
 mean. ``classify_event_reasons`` holds that reason rule on its own so the
 capture path can reuse it. Both entry points collapse same-date rows first
 (the CONFIRMED one wins, else the first in input order), so the output has a
-unique ``(ticker, event_date)`` and ``build_rows`` never sees a duplicate date;
-an empty ``events`` is the ONE way either returns ``[]``.
+unique ``(ticker, event_date)`` and ``build_rows`` never sees a duplicate date,
+and both then require those dates to be strictly ascending (``CONTRACT_MISMATCH``
+otherwise) before any population branch; an empty ``events`` is the ONE way
+either returns ``[]``.
 
 Layer 1 of ``system_rearchitecture.md`` §4.1: no ``engine.v2.ops`` and no
 legacy ``engine.*`` imports -- this module is pure numpy/pandas math, the same
@@ -139,6 +141,21 @@ def _validate_daily(daily: pd.DataFrame) -> None:
     """
     if not {"date", "implied_move", "src_iv"} <= set(daily.columns):
         raise fail("CONTRACT_MISMATCH", "daily_market frame lacks date, implied_move or src_iv")
+
+
+def _require_daily_order(daily: pd.DataFrame) -> None:
+    """Strictly ascending, unique ``daily`` dates whenever the frame is non-empty.
+
+    The ordering refusal :func:`build_rows` reaches through ``AsofSeries``,
+    checked UP FRONT by :func:`build_event_rows` before any population branch,
+    so a ticker-level reason cannot skip it. ``build_rows`` itself is unchanged
+    (v4 keeps the refusal it gives today), and an empty frame is still fine.
+    """
+    if not len(daily):
+        return
+    days = pd.to_datetime(daily["date"])
+    if not (days.is_monotonic_increasing and days.is_unique):
+        raise fail("CONTRACT_MISMATCH", "rows must be strictly date-ascending")
 
 
 def _implied_by_event(dates: list[str], daily: pd.DataFrame) -> list[float | None]:
@@ -280,6 +297,23 @@ def _collapse_same_date(events: pd.DataFrame) -> pd.DataFrame:
     return events.iloc[[kept[key] for key in kept]]
 
 
+def _collapse_and_order(events: pd.DataFrame) -> pd.DataFrame:
+    """Same-date collapse, then the ONE ordering check both v5 entry points run.
+
+    AFTER the collapse and BEFORE any population branch, so a reversed
+    ``events`` frame refuses from :func:`classify_event_reasons` exactly as it
+    does from :func:`build_event_rows` -- same ``CONTRACT_MISMATCH``, same
+    message (the one ``build_rows``' ``event_sequence`` gives), whatever the
+    ticker-level outcome.
+    """
+    events = _collapse_same_date(events)
+    days = [pd.Timestamp(day).strftime("%Y-%m-%d") for day in events["event_date"]]
+    for previous, current in zip(days, days[1:]):
+        if current <= previous:
+            raise fail("CONTRACT_MISMATCH", "event dates must be strictly ascending")
+    return events
+
+
 def _classify(events: pd.DataFrame, sd, sc, *, min_scoreable: int) -> list[str | None]:
     """The reason list of an ALREADY validated, ALREADY collapsed frame.
 
@@ -326,14 +360,13 @@ def classify_event_reasons(events: pd.DataFrame, sd, sc, *,
     ``ticker_too_few_events`` when fewer than ``min_scoreable`` events are
     confirmed or fewer than ``ADMISSION_EVENTS`` compute. Same-date rows
     collapse first -- the confirmed one wins, else the first in input order --
-    exactly as :func:`build_event_rows` collapses them, so the two always
-    agree; ``[]`` only for an empty ``events``. Pure, no I/O and no clock, so
-    the capture path can classify a ticker without building its rows.
+    then the dates must be strictly ascending or the call refuses
+    ``CONTRACT_MISMATCH``, exactly as :func:`build_event_rows` does, so the
+    two always agree; ``[]`` only for an empty ``events``. Pure, no I/O and no
+    clock, so the capture path can classify a ticker without building its rows.
     """
     _validate_inputs(events, sd, sc, min_scoreable)
-    if not len(events):
-        return []
-    return _classify(_collapse_same_date(events), sd, sc, min_scoreable=min_scoreable)
+    return _classify(_collapse_and_order(events), sd, sc, min_scoreable=min_scoreable)
 
 
 def build_event_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFrame, *,
@@ -345,26 +378,27 @@ def build_event_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFr
     DISTINCT event date, so ``(ticker, event_date)`` is unique. ``events`` is the
     ticker's ordered ``earnings_events`` slice (columns ``event_date``,
     ``session``, ``src_orats``); what v4 dropped is now a row. The ``daily``
-    frame is validated up front, before any branch, so a ticker-level refusal
-    cannot hide a malformed frame. Same-date rows collapse first (the confirmed
-    one wins, else the first in input order), so ``build_rows`` never sees a
-    duplicate date. A CONFIRMED event gets exactly the :func:`build_rows` row
-    over the confirmed-only frame -- ``event_ordinal`` counts earlier confirmed
-    events -- plus ``not_computed_reason`` taken STRAIGHT from the
-    classification: null on a computed outcome (``skipped`` false),
-    ``no_price_window`` where the classification found no price window (that
-    row is ``skipped`` true). An unconfirmed event, and every event under a
-    ticker-level reason, gets the no-outcome shape (null moves, ``admitted``
-    false, ``skipped`` true, ``n_prior_implied`` 0) with
-    ``classify_event_reasons``' reason and the count of earlier confirmed events
-    as its ordinal. A phantom therefore never shifts a neighbour's ordinal or
-    prior mean.
+    frame is validated up front, dates strictly ascending and unique, before any
+    branch, so a ticker-level refusal cannot hide a malformed or reordered
+    frame. Same-date rows collapse first (the confirmed one wins, else the
+    first in input order) and the collapsed dates must then be strictly
+    ascending -- the same check :func:`classify_event_reasons` runs -- so
+    ``build_rows`` never sees a duplicate or descending date. A CONFIRMED event
+    gets exactly the :func:`build_rows` row over the confirmed-only frame --
+    ``event_ordinal`` counts earlier confirmed events -- plus
+    ``not_computed_reason`` taken STRAIGHT from the classification: null on a
+    computed outcome (``skipped`` false), ``no_price_window`` where the
+    classification found no price window (that row is ``skipped`` true). An
+    unconfirmed event, and every event under a ticker-level reason, gets the
+    no-outcome shape (null moves, ``admitted`` false, ``skipped`` true,
+    ``n_prior_implied`` 0) with ``classify_event_reasons``' reason and the
+    count of earlier confirmed events as its ordinal. A phantom therefore never
+    shifts a neighbour's ordinal or prior mean.
     """
     _validate_inputs(events, sd, sc, min_scoreable)
     _validate_daily(daily)
-    if not len(events):
-        return []
-    events = _collapse_same_date(events)
+    _require_daily_order(daily)
+    events = _collapse_and_order(events)
     reasons = _classify(events, sd, sc, min_scoreable=min_scoreable)
     per_event = _event_reasons(events)
     ticker_reason = reasons[0] if reasons and reasons[0] in _TICKER_LEVEL else None

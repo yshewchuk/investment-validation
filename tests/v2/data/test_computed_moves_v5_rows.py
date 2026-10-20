@@ -12,11 +12,13 @@ the first in input order -- so ``(ticker, event_date)`` stays unique.
 from __future__ import annotations
 
 import dataclasses
+import re
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from engine.v2.data import manifests
 from engine.v2.data.computed_moves import build_event_rows, build_rows, classify_event_reasons
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.data.errors import DataError
@@ -66,6 +68,26 @@ def _assert_refused(row, reason, ordinal):
     assert row["implied_move_pct"] is None
     assert row["mean_prior_or_implied"] is None
     assert row["n_prior_implied"] == 0
+
+
+def _assert_refusal_parity(events, expected, *, sd=_SD, sc=_SC, daily=_DAILY, **kw):
+    """``classify_event_reasons`` and ``build_event_rows`` refuse ALIKE (issue #966).
+
+    For every input both entry points validate: CONTRACT_MISMATCH with the exact
+    code's message, the SAME text out of both -- so a caller switching between
+    them never meets two flavours of one refusal.
+    """
+    calls = (
+        lambda: classify_event_reasons(events, sd, sc, **kw),
+        lambda: build_event_rows("AAPL", events, sd, sc, daily, **_KW, **kw),
+    )
+    messages = []
+    for call in calls:
+        with pytest.raises(DataError) as caught:
+            call()
+        assert caught.value.code == "CONTRACT_MISMATCH"
+        messages.append(caught.value.problem.message)
+    assert messages == [expected, expected]
 
 
 def test_phantom_forward_claim_is_not_orats_and_leaves_neighbours_unchanged():
@@ -325,7 +347,7 @@ def test_v5_contract_is_v4_plus_not_computed_reason():
         "confirmation, e.g. a forward_claim phantom), no_session (ORATS-confirmed "
         "but session null), no_price_window (the v4 skipped case: a missing close "
         "on either side or a P->Q window wider than MAX_GAP_CALENDAR_DAYS), "
-        "no_price_history (the ticker has no daily_market rows or usable closes), "
+        "no_price_history (the ticker's close series is empty), "
         "ticker_too_few_events (fewer than MIN_SCOREABLE ORATS-confirmed sessioned "
         "events, or fewer than ADMISSION_EVENTS computable ones); the last two are "
         "ticker-level and apply to every row of that ticker.")
@@ -338,29 +360,17 @@ def test_v5_contract_is_v4_plus_not_computed_reason():
 
 @pytest.mark.parametrize("bad", [True, -1, None])
 def test_invalid_min_scoreable_is_contract_mismatch(bad):
-    events = _events(*_CONFIRMED[:3])
-    calls = (
-        lambda: classify_event_reasons(events, _SD, _SC, min_scoreable=bad),
-        lambda: build_event_rows("AAPL", events, _SD, _SC, _DAILY, min_scoreable=bad, **_KW),
-    )
-
-    for call in calls:
-        with pytest.raises(DataError) as caught:
-            call()
-        assert caught.value.code == "CONTRACT_MISMATCH"
-        assert caught.value.problem.message == "min_scoreable must be a non-negative int"
+    _assert_refusal_parity(_events(*_CONFIRMED[:3]),
+                           "min_scoreable must be a non-negative int", min_scoreable=bad)
 
 
 def test_missing_event_columns_or_a_price_length_mismatch_refuse():
-    for frame in (pd.DataFrame({"event_date": []}),
-                  _events(*_CONFIRMED[:3]).drop(columns="session")):
-        with pytest.raises(DataError) as caught:
-            classify_event_reasons(frame, _SD, _SC)
-        assert caught.value.code == "CONTRACT_MISMATCH"
-
-    with pytest.raises(DataError) as caught:
-        build_event_rows("AAPL", _events(*_CONFIRMED[:3]), _SD, _SC[:5], _DAILY, **_KW)
-    assert caught.value.code == "CONTRACT_MISMATCH"
+    _assert_refusal_parity(pd.DataFrame({"event_date": []}),
+                           "events lacks required columns: session, src_orats")
+    _assert_refusal_parity(_events(*_CONFIRMED[:3]).drop(columns="session"),
+                           "events lacks required columns: session")
+    _assert_refusal_parity(_events(*_CONFIRMED[:3]),
+                           "price series sd and sc differ in length", sc=_SC[:5])
 
 
 def test_a_malformed_daily_frame_refuses_even_a_ticker_level_refusal():
@@ -378,13 +388,207 @@ def test_a_malformed_daily_frame_refuses_even_a_ticker_level_refusal():
 def test_non_bool_src_orats_is_contract_mismatch(bad):
     events = _events(*_CONFIRMED[:3])
     events["src_orats"] = pd.Series([bad, True, True], dtype="object")
-    calls = (
-        lambda: classify_event_reasons(events, _SD, _SC),
-        lambda: build_event_rows("AAPL", events, _SD, _SC, _DAILY, **_KW),
-    )
+    _assert_refusal_parity(events, "events src_orats must hold a real bool per row")
 
-    for call in calls:
-        with pytest.raises(DataError) as caught:
-            call()
-        assert caught.value.code == "CONTRACT_MISMATCH"
-        assert caught.value.problem.message == "events src_orats must hold a real bool per row"
+
+def test_reversed_event_dates_refuse_before_the_ticker_level_branch():
+    # three confirmed events: left alone this frame would classify
+    # ticker_too_few_events, so the ordering refusal has to fire FIRST in both
+    # entry points -- a ticker-level verdict must not hide a descending frame
+    _assert_refusal_parity(_events(*_CONFIRMED[:3][::-1]),
+                           "event dates must be strictly ascending")
+
+
+def test_reversed_daily_dates_refuse_even_a_ticker_level_refusal():
+    # build_event_rows only: classify_event_reasons takes no daily frame to
+    # order, and the three-event ticker below would otherwise take the
+    # ticker_too_few_events verdict instead of this refusal
+    reversed_daily = _DAILY.iloc[::-1].reset_index(drop=True)
+    with pytest.raises(DataError) as caught:
+        build_event_rows("AAPL", _events(*_CONFIRMED[:3]), _SD, _SC, reversed_daily, **_KW)
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert caught.value.problem.message == "rows must be strictly date-ascending"
+
+
+# --------------------------------------------------------------------------
+# row provenance: the call inputs, and only the v5 keys, on every row
+# --------------------------------------------------------------------------
+
+#: An empty close series: nothing of the ticker's price history exists, so
+#: every considered event is ``no_price_history``.
+_EMPTY_SD = np.array([], dtype="datetime64[ns]")
+_EMPTY_SC = np.array([])
+
+#: ``_mixed_events``' event dates, ISO, position by position.
+_MIXED_DATES = (
+    "2023-12-29", "2024-01-15", "2024-01-16", "2024-01-17", "2024-01-18",
+    "2024-01-19", "2024-01-20", "2024-01-21", "2024-01-22", "2024-01-23",
+    "2024-01-24", "2024-01-25", "2024-01-26", "2024-01-29", "2024-01-30",
+    "2024-01-31", "2024-02-01", "2024-02-02", "2024-02-05",
+)
+
+#: ``_CONFIRMED[:3]``'s event dates, ISO: the too-few ticker's rows.
+_TOO_FEW_DATES = ("2024-01-15", "2024-01-16", "2024-01-17")
+
+
+def test_every_row_carries_the_call_inputs_and_the_v5_key_set():
+    # (events, sd, sc, expected ISO dates, provenance) -- a mixed ticker, one
+    # below the admission bar, and one with no price history at all
+    cases = (
+        (_mixed_events(), _SD, _SC, _MIXED_DATES,
+         dict(computed_at="2026-09-25T00:00:00+00:00", source_hash="sha256:" + "a" * 64,
+              capture_id="capture_test")),
+        (_events(*_CONFIRMED[:3]), _SD, _SC, _TOO_FEW_DATES,
+         dict(computed_at="2026-10-02T08:30:00+00:00", source_hash="sha256:" + "b" * 64,
+              capture_id="capture_other")),
+        (_mixed_events(), _EMPTY_SD, _EMPTY_SC, _MIXED_DATES,
+         dict(computed_at="2026-11-11T00:00:00+00:00", source_hash="sha256:" + "c" * 64,
+              capture_id="capture_third")),
+    )
+    for events, sd, sc, dates, provenance in cases:
+        rows = build_event_rows("AAPL", events, sd, sc, _DAILY, **provenance)
+
+        assert len(rows) == len(dates) > 0
+        for row, day in zip(rows, dates):
+            assert set(row) == set(_V5_COLUMNS)
+            assert row["ticker"] == "AAPL"
+            assert row["event_date"] == day
+            assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", row["event_date"])
+            assert row["computed_at"] == provenance["computed_at"]
+            assert row["source_hash"] == provenance["source_hash"]
+            assert row["capture_id"] == provenance["capture_id"]
+
+
+# --------------------------------------------------------------------------
+# the two admission bars, isolated from each other
+# --------------------------------------------------------------------------
+
+#: Six CONFIRMED BMO events on the sessions BEFORE ``_BDAYS[0]`` (2023-12-18
+#: through 2023-12-26): every one is unbracketable against ``_SD`` -- there is
+#: no earlier close -- so this ticker can hold a confirmed count at or above
+#: ``min_scoreable`` while its computable count stays below ``ADMISSION_EVENTS``.
+_PRE_CLOSE_DAYS = ("2023-12-18", "2023-12-19", "2023-12-20",
+                   "2023-12-21", "2023-12-22", "2023-12-26")
+_PRE_CLOSE_EVENTS = [(pd.Timestamp(day), "BMO", True) for day in _PRE_CLOSE_DAYS]
+
+#: The closes that WOULD bracket ``_PRE_CLOSE_EVENTS``: 40 business days ending
+#: on the last of those events, with a positive close series, so each event has
+#: an earlier close in this series alone.
+_PRE_CLOSE_SD = pd.bdate_range("2023-11-01", periods=40).to_numpy(dtype="datetime64[ns]")
+_PRE_CLOSE_SC = np.linspace(100.0, 130.0, 40)
+
+
+def test_confirmed_below_min_scoreable_refuses_while_computable_clears_the_bar():
+    events = _events(*_CONFIRMED[:6])  # 6 confirmed, all 6 computable: ADMISSION clears
+    rows = _build(events, min_scoreable=12)
+
+    assert len(rows) == 6
+    for position, row in enumerate(rows):
+        _assert_refused(row, "ticker_too_few_events", position)
+    assert classify_event_reasons(events, _SD, _SC, min_scoreable=12) == (
+        ["ticker_too_few_events"] * 6)
+    # dropping the bar to the confirmed count is the ONLY change: they compute,
+    # so the refusal above was min_scoreable and nothing else
+    computed = _build(events, min_scoreable=6)
+    assert [row["not_computed_reason"] for row in computed] == [None] * 6
+
+
+def test_computable_below_admission_refuses_even_with_enough_confirmed():
+    events = _events(*_PRE_CLOSE_EVENTS)  # 6 confirmed (>= 5), 0 computable (< 5)
+    rows = _build(events, min_scoreable=5)
+
+    assert len(rows) == 6
+    for position, row in enumerate(rows):
+        _assert_refused(row, "ticker_too_few_events", position)
+    assert classify_event_reasons(events, _SD, _SC, min_scoreable=5) == (
+        ["ticker_too_few_events"] * 6)
+    # the SAME events compute once their closes exist: the refusal above was the
+    # computable-count bar, not the confirmed count
+    computed = _build(events, sd=_PRE_CLOSE_SD, sc=_PRE_CLOSE_SC, min_scoreable=5)
+    assert [row["not_computed_reason"] for row in computed] == [None] * 6
+
+
+def test_empty_price_history_beats_the_too_few_events_bar():
+    events = _events(*_CONFIRMED[:3])  # 3 confirmed: below min_scoreable too
+    rows = _build(events, sd=_EMPTY_SD, sc=_EMPTY_SC)
+
+    assert len(rows) == 3
+    for position, row in enumerate(rows):
+        _assert_refused(row, "no_price_history", position)
+    assert classify_event_reasons(events, _EMPTY_SD, _EMPTY_SC) == (
+        ["no_price_history"] * 3)
+
+
+# --------------------------------------------------------------------------
+# same-date collapse of UNCONFIRMED twins: the FIRST input event's reason
+# --------------------------------------------------------------------------
+
+
+def test_two_same_date_phantoms_collapse_to_one_row_with_the_first_reason():
+    base = _build(_events(*_CONFIRMED))
+    considered = (*_CONFIRMED[:5], (_BETWEEN, "BMO", False), (_BETWEEN, "AMC", False),
+                  *_CONFIRMED[5:])
+    rows = _build(_events(*considered))
+
+    assert len(rows) == len(base) + 1  # two unconfirmed events, ONE row
+    _assert_refused(rows[5], "not_orats", 5)  # the first input event's reason
+    assert rows[5]["event_date"] == "2024-01-20"
+    assert rows[:5] == base[:5]
+    assert rows[6:] == base[5:]
+
+
+def test_same_date_phantom_and_no_session_collapse_to_the_first_input_reason():
+    base = _build(_events(*_CONFIRMED))
+    phantom_first = (*_CONFIRMED[:5], (_BETWEEN, "BMO", False), (_BETWEEN, None, True),
+                     *_CONFIRMED[5:])
+    session_first = (*_CONFIRMED[:5], (_BETWEEN, None, True), (_BETWEEN, "AMC", False),
+                     *_CONFIRMED[5:])
+
+    rows = _build(_events(*phantom_first))
+    assert len(rows) == len(base) + 1
+    _assert_refused(rows[5], "not_orats", 5)  # the phantom came first
+    assert rows[5]["event_date"] == "2024-01-20"
+
+    rows = _build(_events(*session_first))
+    assert len(rows) == len(base) + 1
+    _assert_refused(rows[5], "no_session", 5)  # the sessionless event came first
+    assert rows[5]["event_date"] == "2024-01-20"
+    assert rows[:5] == base[:5]
+    assert rows[6:] == base[5:]
+
+
+# --------------------------------------------------------------------------
+# the v5 contract's own identity (issue #966)
+# --------------------------------------------------------------------------
+
+
+def test_v5_definition_hash_is_the_placeholder_hash_of_v5():
+    v5 = COMPUTED_MOVES_V5_CONTRACT
+    placeholder = dataclasses.replace(v5, definition_hash="sha256:" + "0" * 64)
+
+    assert v5.definition_hash == manifests.table_contract_hash(placeholder)
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", v5.definition_hash)
+
+
+def test_v4_definition_hash_is_still_the_pinned_literal():
+    v4 = COMPUTED_MOVES_CONTRACT
+
+    assert v4.definition_hash == (
+        "sha256:c7f3d2c5a042403e9262bb6d63225c9e2ed6a969dd5b46dcca2813527f9f2d9f")
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", v4.definition_hash)
+
+
+def test_only_the_five_rewritten_descriptors_differ_from_v4():
+    v4, v5 = COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
+    v4_by_name = {column.name: column for column in v4.columns}
+    v5_by_name = {column.name: column for column in v5.columns}
+    rewritten = {"event_ordinal", "admitted", "skipped",
+                 "mean_prior_or_implied", "n_prior_implied"}
+
+    assert [column.name for column in v5.columns] == (
+        [column.name for column in v4.columns] + ["not_computed_reason"])
+    assert set(v5_by_name) == set(v4_by_name) | {"not_computed_reason"}
+    # exactly the five contradicting v4 descriptors moved; every other shared
+    # column descriptor is byte-identical to v4's
+    assert {name for name, column in v4_by_name.items()
+            if v5_by_name[name] != column} == rewritten

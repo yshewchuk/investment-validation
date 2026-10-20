@@ -408,8 +408,8 @@ is unchanged: a candidate with no fragment is still a refusal. Nothing is writte
   `realized_move_pct` and `available_as_of_date` are null. Closed set:
   `not_orats` (no ORATS confirmation, e.g. a `forward_claim` phantom), `no_session`
   (confirmed, session null), `no_price_window` (the v4 skipped case: missing close or
-  a P→Q gap over `MAX_GAP_CALENDAR_DAYS`), `no_price_history` (ticker has no
-  `daily_market` rows or closes), `ticker_too_few_events` (fewer than `MIN_SCOREABLE`
+  a P→Q gap over `MAX_GAP_CALENDAR_DAYS`), `no_price_history` (the ticker's close
+  series is empty), `ticker_too_few_events` (fewer than `MIN_SCOREABLE`
   past ORATS-confirmed sessioned events, or fewer than `ADMISSION_EVENTS` computable
   ones). Ticker-level reasons apply to every event of that ticker.
 - Considered events: every `earnings_events` row of a ticker dated before `as_of`.
@@ -430,6 +430,8 @@ is unchanged: a candidate with no fragment is still a refusal. Nothing is writte
 | a ticker with no earnings events | no rows |
 | same-ticker same-date `earnings_events` rows | one row; a confirmed row wins over an unconfirmed one, else the first in input order |
 | an empty event list | no rows |
+| reason precedence for one event | per-event `not_orats`, then `no_session`; ticker-level overrides every event: `no_price_history` (no closes, checked first), else `ticker_too_few_events`; otherwise a confirmed event with no bracketing window is `no_price_window`, else null |
+| event dates not strictly ascending after the same-date collapse, or `daily` dates not strictly ascending | `CONTRACT_MISMATCH` from both entry points, whatever the ticker-level outcome |
 | `min_scoreable` not a non-negative int, an event frame lacking `event_date`/`session`/`src_orats`, a non-bool `src_orats`, `sd`/`sc` of different lengths, or a `daily` frame lacking `date`/`implied_move`/`src_iv` | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
 
 **`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
