@@ -1,5 +1,5 @@
-"""The nightly orchestrator: refresh → validate → score → ledger → render →
-selfcheck → publish → flags → backup, each step gating the next.
+"""The nightly orchestrator: refresh → validate → warm → score → ledger →
+render → selfcheck → publish → flags → backup, each step gating the next.
 
 Order is load-bearing, per the guide:
 
@@ -9,6 +9,8 @@ Order is load-bearing, per the guide:
    retry loops against a dead key only burn goodwill.
 2. **Validate** the fresh data. Red stops the pipeline; yesterday's snapshot
    stays published and a flag is raised.
+2a. **Warm** the Tier-4 serving models score will touch, in a subprocess; a
+   failure stops the run (`WARM_SERVING_FAILED`) so score never refits.
 3. **Score** the calendar (one shared Scorer, one shared chain index).
 4. **Ledger** — predictions are frozen BEFORE rendering; the frozen record is
    the point. Missed nights are backfilled honestly: their rows carry the true
@@ -1684,6 +1686,8 @@ def run_nightly(
         from engine.features import FeatureContext
 
         context_tickers = set(scoring_tickers or calendar_tickers)
+        warm_event_dates = list(upcoming["event_date"])
+        warm_decision_start = as_of
         # Backfill is a historical re-score, not a reason to construct a
         # second default Scorer. Include its possible events in this one
         # bounded daily slice so the existing engine can score those nights.
@@ -1701,6 +1705,27 @@ def run_nightly(
                     backfill_events["ticker"].isin(set(tickers))
                 ]
             context_tickers.update(backfill_events["ticker"].dropna().astype(str))
+            warm_event_dates += list(backfill_events["event_date"])
+            # Only the nights the bounded backfill will actually score (at most
+            # MAX_BACKFILL_DAYS), not the whole gap since the last run.
+            from engine.calendar import trading_calendar
+
+            warm_nights, _, _ = _nights_to_backfill(
+                backfill_start, as_of, calendar=trading_calendar()
+            )
+            if warm_nights:
+                warm_decision_start = warm_nights[0]
+        # Fit any missing Tier-4 serving models in a subprocess BEFORE score:
+        # an in-process refit inside score added ~2.4 GB and floor-killed two
+        # nightlies. A failure stops the run; it never falls back to refitting.
+        from engine.dashboard import warm_serving
+
+        try:
+            report.steps["warm_serving"] = warm_serving.warm(
+                warm_event_dates, warm_decision_start, as_of
+            )
+        except warm_serving.WarmError as exc:
+            raise _refuse(report, "warm_serving", f"WARM_SERVING_FAILED: {exc}") from exc
         context_years = range(as_of.year - 1, horizon.year + 1)
         context = FeatureContext.load(sorted(context_tickers), years=context_years)
         engine = Scorer(context=context)
