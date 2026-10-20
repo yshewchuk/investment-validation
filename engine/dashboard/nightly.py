@@ -1684,6 +1684,8 @@ def run_nightly(
         from engine.features import FeatureContext
 
         context_tickers = set(scoring_tickers or calendar_tickers)
+        warm_event_dates = list(upcoming["event_date"])
+        warm_decision_start = as_of
         # Backfill is a historical re-score, not a reason to construct a
         # second default Scorer. Include its possible events in this one
         # bounded daily slice so the existing engine can score those nights.
@@ -1701,6 +1703,19 @@ def run_nightly(
                     backfill_events["ticker"].isin(set(tickers))
                 ]
             context_tickers.update(backfill_events["ticker"].dropna().astype(str))
+            warm_event_dates += list(backfill_events["event_date"])
+            warm_decision_start = backfill_start
+        # Fit any missing Tier-4 serving models in a subprocess BEFORE score:
+        # an in-process refit inside score added ~2.4 GB and floor-killed two
+        # nightlies. A failure stops the run; it never falls back to refitting.
+        from engine.dashboard import warm_serving
+
+        try:
+            report.steps["warm_serving"] = warm_serving.warm(
+                warm_event_dates, warm_decision_start, as_of
+            )
+        except warm_serving.WarmError as exc:
+            raise _refuse(report, "warm_serving", f"WARM_SERVING_FAILED: {exc}") from exc
         context_years = range(as_of.year - 1, horizon.year + 1)
         context = FeatureContext.load(sorted(context_tickers), years=context_years)
         engine = Scorer(context=context)

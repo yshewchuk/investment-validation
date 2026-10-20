@@ -24,6 +24,12 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 - `nightly.py` — the orchestrator; run as the legacy nightly entrypoint
   (root doc §4). Public helpers for the Tier-4 gap repair:
   `repair_tier4_gap`, `repair_tier4_gap_if_needed`, `mark_tiers_degraded`.
+- `warm_serving.py` — `warm(event_dates, decision_start, decision_end)`: before
+  score (default scorer only), fits every Tier-4 serving model fold the score
+  window touches (`tier4.serving_fold`, all `PRODUCES`) whose cache file for the
+  current panel sha is missing, in a SUBPROCESS via `tier4.serving_model` (same
+  cache files). Failure raises `WarmError`; the nightly stops with
+  `WARM_SERVING_FAILED` and never refits in-process.
 - `render.py` — `build_meta`, `build_health`, `build_strategies`,
   `compact_row`, `row_digest`, `freshness_summary`, `quota_state`,
   `size_model_mae_from_ledger`, `payoff_curve`: the board's row/meta/health
