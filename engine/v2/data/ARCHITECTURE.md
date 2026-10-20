@@ -488,7 +488,7 @@ is unchanged: a candidate with no fragment is still a refusal. Nothing is writte
 | an empty event list with valid inputs | no rows; the input refusals below still apply first |
 | reason precedence for one event | per-event `not_orats`, then `no_session`; ticker-level overrides every event: `no_price_history` (no closes, checked first), else `ticker_too_few_events`; otherwise a confirmed event with no bracketing window is `no_price_window`, else null |
 | event dates not strictly ascending after the same-date collapse, or `sd` not non-decreasing | `CONTRACT_MISMATCH` from both entry points, whatever the ticker-level outcome |
-| a malformed `min_scoreable`, event frame, price series or `daily` frame (both v5 entry points refuse alike; per-branch detail lives in code docstrings and tests) | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
+| a malformed `min_scoreable`, event frame, price series or `daily` frame (both v5 entry points refuse alike, except that only `build_event_rows` takes and validates `daily`; per-branch detail lives in code docstrings and tests) | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
 
 **`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
 no clock. A feature declares its parameters; none is hard-coded in the module.
