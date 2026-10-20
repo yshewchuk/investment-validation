@@ -20,7 +20,8 @@ def load_population(repository, snapshot, *, as_of_month, purpose="selection",
                     event_ids=None):
     """Read canonical metadata only; explicit excluded IDs refuse the whole read.
 
-    A full-universe read (no ``event_ids``) logs its end with elapsed time on stderr only when it took 5 s or more."""
+    Canonical scans log stage boundaries and bounded row progress for both modes.
+    Full-universe reads also log outer completion when they take at least 5 s."""
     args = (repository, snapshot)
     kwargs = dict(as_of_month=as_of_month, purpose=purpose, event_ids=event_ids)
     if event_ids is not None:

@@ -25,6 +25,7 @@ from tests.v2.research.magnitude_trial_support import (
     catalog_rows,
     prediction_spec,
 )
+from tests.v2.research.scan_progress_support import assert_scan_boundaries, observe_scan_outcomes
 from tests.v2.research.test_native_outcomes import read_ledger_rows, set_outcome_clock
 from tests.v2.research.test_native_registration import (
     advance_snapshot_head,
@@ -70,10 +71,14 @@ def _args(source, action, *extra):
             "--as-of-month", MONTH, *map(str, extra)]
 
 
-def _invoke(source, capsys, action, *extra, status=0):
-    assert cli.main(_args(source, action, *extra)) == status
+def _invoke(source, capsys, action, *extra, status=0, required_tables=None):
+    with observe_scan_outcomes({"earnings_events"}) as scans:
+        assert cli.main(_args(source, action, *extra)) == status
     captured = capsys.readouterr()
-    assert not captured.err
+    # Admission scans canonical events; pre-scan refusals opt out explicitly.
+    assert_scan_boundaries(captured.err, tables={"earnings_events"}, expected_scans=scans,
+                           required_tables=required_tables,
+                           allow_failures=status != 0)
     assert "Traceback" not in captured.out
     return json.loads(captured.out)
 
@@ -269,7 +274,7 @@ def test_pre_admission_refusals_do_not_evaluate_or_record(source, monkeypatch, c
         extra += ["--scope", "does-not-exist"]
     _metadata_only(monkeypatch)
     before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
-    response = _invoke(source, capsys, "run", *extra, status=2)
+    response = _invoke(source, capsys, "run", *extra, status=2, required_tables=set())
     _private_refusal(source, response,
                      "SNAPSHOT_UNRESOLVED" if kind == "missing-scope" else "INVALID_EXPERIMENT_SPEC")
     _preserved(source, before, objects)
@@ -488,7 +493,7 @@ def test_changed_binding_precedes_holdout_and_cannot_consume_original_outcome(
             patch.setattr(outcomes, "replay_native_outcome", _forbid)
             patch.setattr(outcomes, "ledger_append", _forbid)
             catalog, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
-            response = _invoke(source, capsys, "run", *recording, *selected, status=2)
+            response = _invoke(source, capsys, "run", *recording, *selected, status=2, required_tables=set())
             _private_refusal(source, response, "EXPERIMENT_IDENTITY_CONFLICT")
             _preserved(source, catalog, objects)
             assert _evidence(source) == original_evidence
@@ -551,7 +556,8 @@ def test_r6_preserves_prior_report_catalog_and_ledger(source, monkeypatch, capsy
     before, objects, csv_bytes, report_bytes = (
         catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes(), report.read_bytes())
     _metadata_only(monkeypatch)
-    response = _invoke(source, capsys, "run", "--ledger", target, status=2)
+    response = _invoke(source, capsys, "run", "--ledger", target, status=2,
+                       required_tables={"earnings_events"} if kind in {"outcome-bytes", "destination"} else set())
     _private_refusal(source, response, "EXPERIMENT_IDENTITY_CONFLICT")
     _preserved(source, before, objects)
     assert ledger.read_bytes() == csv_bytes and report.read_bytes() == report_bytes
@@ -587,7 +593,8 @@ def test_storage_faults_are_typed_without_raw_tracebacks(source, monkeypatch, ca
         def unavailable(*args, **kwargs):
             raise OSError("SECRET synthetic export failure")
         monkeypatch.setattr(outcomes, "export_native_report", unavailable)
-    response = _invoke(source, capsys, action, *extra, status=2)
+    response = _invoke(source, capsys, action, *extra, status=2,
+                       required_tables=set() if fault in {"catalog", "refusal"} else {"earnings_events"})
     assert response["refused"] == "RESOURCE_UNAVAILABLE"
     assert "SECRET" not in json.dumps(response)
     assert not list(source.root.rglob("REPORT.md"))
@@ -602,7 +609,9 @@ def test_module_subprocess_register_and_smoke(source):
             env={**os.environ, "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
                  "MKL_NUM_THREADS": "1"}, capture_output=True, text=True, timeout=60)
         assert completed.returncode == 0, completed.stdout + completed.stderr
-        assert not completed.stderr
+        # Three fixture years: one admission pass, plus one target-loader pass on run.
+        assert_scan_boundaries(completed.stderr, tables={"earnings_events"},
+                               expected_scans=[("earnings_events", "done")] * (3 if action == "register" else 6))
         result = json.loads(completed.stdout)
     assert result["recording_mode"] == "smoke"
     _assert_runtime_sources(source)
@@ -650,8 +659,12 @@ def test_unsupported_prior_seed_refuses_before_admission_or_reads(tmp_path, monk
     source = _source(tmp_path, spec=spec)
     try:
         if action == "run":
-            native.register_native(source.conn, source.store, Repository(source.conn, source.store), spec,
-                code_root=Path(__file__).resolve().parents[3], as_of_month=MONTH)
+            with observe_scan_outcomes({"earnings_events"}) as setup_scans:
+                native.register_native(source.conn, source.store, Repository(source.conn, source.store), spec,
+                    code_root=Path(__file__).resolve().parents[3], as_of_month=MONTH)
+            setup = capsys.readouterr()
+            assert setup.out == "" and setup_scans == [("earnings_events", "done")] * 3
+            assert_scan_boundaries(setup.err, tables={"earnings_events"}, expected_scans=setup_scans)
         before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
         monkeypatch.setattr(Repository, "scan", _forbid)
         monkeypatch.setattr(DummyClassifier, "fit", _forbid)
@@ -659,7 +672,7 @@ def test_unsupported_prior_seed_refuses_before_admission_or_reads(tmp_path, monk
         monkeypatch.setattr(outcomes, "ledger_append", _forbid)
         ledger = tmp_path / "must-not-exist" / "ledger.csv"
         args = ["--ledger", ledger] + (["--no-ledger"] if smoke else [])
-        response = _invoke(source, capsys, action, *args, status=2)
+        response = _invoke(source, capsys, action, *args, status=2, required_tables=set())
         _private_refusal(source, response, "INVALID_EXPERIMENT_SPEC")
         _preserved(source, before, objects)
         assert not ledger.parent.exists()

@@ -85,9 +85,18 @@ The replay half: `replay.replay`, `replay.replay_one`, `replay.ALPHA_GRID`,
 `_replay_run.run`, `_replay_run.events_frame`, `_plan.plan_events`,
 `_chains.ChainIndex`, `_chains.load_chain_index`,
 `_chains.filter_plan_by_availability`, `_chains.read_chain_keys`,
-`_chains.read_chain_keys_for`, `_trades_table.to_trades_table`, `_build_run.run`, `reconcile_trades.run`,
+`_chains.read_chain_keys_for`, `_chains.read_chains_for_years`,
+`_trades_table.to_trades_table`, `_build_run.run`, `reconcile_trades.run`,
 `_trades_publish.publish`, `build_trades.coverage`, `_pricing.STRUCTURES`,
 `_pricing.trading_calendar_from_snapshot`, `_pricing.execution_variant_label`.
+
+`_chains.read_chains_for_years(repository, snapshot_ref, years, batch_filter=None,
+key_filter=())` materializes the fixed chain projection from a pinned snapshot.
+Years must be a nonempty, non-scalar-string iterable; empty or scalar str/bytes input
+raises `ValueError` before repository access. String elements such as `["2024"]`
+remain supported. A batch filter narrows rows or returns `None`; key predicates are forwarded
+unchanged. Candidate-row/batch limits do not cap retained memory. This raw reader
+performs no experiment holdout admission; errors propagate without retries.
 
 The entry-selection surface also exposes `replay.clean_chain_rows` (drop invalid
 quotes without mutating the input) and `_pricing.MIN_MEANINGFUL_COST`,
@@ -159,7 +168,7 @@ The manual no-ledger `experiments.v2_gate_variant` CLI consumes
 `experiments.gate_report` combines protected historical features, pinned
 calendar plans and fresh per-arm pricing for exploratory fold reports.
 
-<!-- public-interface: progress.Progress, progress.stage, progress.decision, iv_crush_inputs.load_iv_crush_targets, iv_crush_inputs.preflight_iv_crush_targets, event_history.plan_event_targets, event_history.POPULATION_CONTEXT_COLUMNS, replay.clean_chain_rows, _pricing.MIN_MEANINGFUL_COST, _pricing.ChainSnapshot, _pricing.FillModel, _pricing.StructureError, _pricing.price_structure, signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ReplayResult, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label, experiment_exits.PositionLeg, experiment_exits.EnteredPosition, experiment_exits.ExitDecision, experiment_exits.walk_fixed_day, experiment_exits.walk_exit, experiment_exits.exit_report_frame, experiment_population.load_population, prediction_inputs.load_prediction_targets, event_history.load_event_history, magnitude_inputs.magnitude_recipe, magnitude_inputs.forecast_cutoff, magnitude_inputs.load_magnitude_targets, magnitude_inputs.preflight_magnitude_targets, magnitude_inputs.qualify_magnitude_training_targets, magnitude_features.load_magnitude_history, magnitude_folds.plan_magnitude_folds, magnitude_folds.magnitude_window, magnitude_folds.annual_fold, magnitude_history_store.build_context, magnitude_history_store.materialize, magnitude_history_store.read_stored, magnitude_history_store.preflight_stored, magnitude_history_store.read_stored_for_events, magnitude_history_inputs.admit_stored -->
+<!-- public-interface: progress.Progress, progress.stage, progress.decision, iv_crush_inputs.load_iv_crush_targets, iv_crush_inputs.preflight_iv_crush_targets, event_history.plan_event_targets, event_history.POPULATION_CONTEXT_COLUMNS, replay.clean_chain_rows, _pricing.MIN_MEANINGFUL_COST, _pricing.ChainSnapshot, _pricing.FillModel, _pricing.StructureError, _pricing.price_structure, signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ReplayResult, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _chains.read_chains_for_years, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label, experiment_exits.PositionLeg, experiment_exits.EnteredPosition, experiment_exits.ExitDecision, experiment_exits.walk_fixed_day, experiment_exits.walk_exit, experiment_exits.exit_report_frame, experiment_population.load_population, prediction_inputs.load_prediction_targets, event_history.load_event_history, magnitude_inputs.magnitude_recipe, magnitude_inputs.forecast_cutoff, magnitude_inputs.load_magnitude_targets, magnitude_inputs.preflight_magnitude_targets, magnitude_inputs.qualify_magnitude_training_targets, magnitude_features.load_magnitude_history, magnitude_folds.plan_magnitude_folds, magnitude_folds.magnitude_window, magnitude_folds.annual_fold, magnitude_history_store.build_context, magnitude_history_store.materialize, magnitude_history_store.read_stored, magnitude_history_store.preflight_stored, magnitude_history_store.read_stored_for_events, magnitude_history_inputs.admit_stored -->
 
 ## Consumers
 
