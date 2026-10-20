@@ -38,13 +38,13 @@ _PLAN = {
     "A": (14, True, True),    # ordinary; prefix of "AA"/"AB" (event_id order interleaves tickers)
     "AA": (12, True, True),   # exactly MIN_SCOREABLE, plus events ON and AFTER as_of
     "AB": (11, True, True),   # one short; a non-ORATS and a null-session event never count
-    "B": (13, False, True),   # scoreable but no daily_market rows
+    "B": (13, False, True),   # scoreable, no daily_market rows: still a target (v5)
     "C": (13, True, True),    # history starts ON its first event date; implied_move all null
-    "D": (14, True, False),   # provider has no history: no_history, no fragment
+    "D": (14, True, False),   # provider has no history: no_price_history rows
     "E": (12, True, True),    # corrected events (date_conflict / updated_at / reconciliation)
 }
-_EXPECTED_TARGETS = ["A", "AA", "C", "D", "E"]
-_FRAGMENT_TICKERS = ["A", "AA", "C", "E"]
+_EXPECTED_TARGETS = ["A", "AA", "B", "C", "D", "E"]
+_FRAGMENT_TICKERS = ["A", "AA", "AB", "B", "C", "D", "E"]
 
 
 def _events_for(ticker: str, qualifying: int) -> list[dict]:
@@ -181,16 +181,20 @@ def _outcomes(conn) -> dict[str, str]:
         "SELECT ticker, outcome FROM data_computed_moves_captures")}
 
 
-#: Captured from the pre-change whole-history reader over this exact fixture.
+#: Regenerated for the v5 writer (#966): B is a target without daily rows, D and AB commit rows.
 _GOLDEN_REPORT = {"mode": "all_scoreable", "scoreable_on_orats_calendar": 6, "also_in_oquants": 0,
-                  "no_daily_market_rows": 1, "targets": 5}
+                  "no_daily_market_rows": 1, "targets": 6}
 _GOLDEN_ROWS = {
-    "A": (14, "cf814b2e876f58b5219ce0b0081f5d189d29131c2e53f0b318b7a54cdc945887"),
-    "AA": (12, "08f5b806b058c30f24978515f1eebbaf56174ffac16d8f69fa6dd179967dde50"),
-    "C": (13, "49cffaba44f65f4e0f0aa0f4694aa731132803b98a5be04fe918eb29313297ab"),
-    "E": (12, "8b4710bed15c4fc0b5d450c160ed832b717563a066c8039cdb7e90caa89fba06"),
+    "A": (14, "74ef52c8da441d5c0f22db6eb0c5e77ce58f08c1ff188ded89660e646ee4330d"),
+    "AA": (12, "26719a062454b463f99f557ba44551c1ab9ed93b12470342fc06c8c7d644943f"),
+    "AB": (13, "ddbfd94c3161841cf211d9954662cb49784ca1e13e673b6000b852e0dc896109"),
+    "B": (13, "8c391269f668e6c34a75cb2fa68a05fa635d20e1e682451584f94abe6961000b"),
+    "C": (13, "0f29329e7c6eaa0a5ef91ab310adc0f8c76e0474723f165099db998ba2b9b792"),
+    "D": (14, "2ea360442d7fc36fb9c1cf4ec767ee1d88e4736106b99ee27f610efaed7365e1"),
+    "E": (12, "341a9faf1c7dabe681f2affd66b6c2d530a5b9f4db407cd8dcd322e197a0991e"),
 }
-_GOLDEN_OUTCOMES = {"A": "added", "AA": "added", "C": "added", "D": "no_history", "E": "added"}
+_GOLDEN_OUTCOMES = {"A": "added", "AA": "added", "AB": "below_bar", "B": "added",
+                    "C": "added", "D": "no_history", "E": "added"}
 _GOLDEN_ROWS_TOTAL = sum(count for count, _ in _GOLDEN_ROWS.values())
 
 
@@ -234,7 +238,7 @@ def test_selection_from_streamed_counters_matches_whole_frame_selection(tmp_path
                 repository, head["snapshot_id"], events=events, daily=daily, **kwargs)
             assert streamed == framed
     assert computed_moves_store.target_tickers_from_snapshot(
-        repository, head["snapshot_id"], since=boundary, as_of=_AS_OF)[0] == ["A", "AA", "C", "D", "E"]
+        repository, head["snapshot_id"], since=boundary, as_of=_AS_OF)[0] == ["A", "AA", "B", "C", "D", "E"]
 
 
 def test_history_larger_than_the_guard_completes_with_identical_outputs(tmp_path, monkeypatch):

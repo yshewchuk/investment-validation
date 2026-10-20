@@ -31,6 +31,7 @@ import io
 import json
 import sqlite3
 import sys
+import time
 from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
@@ -76,7 +77,6 @@ from engine.v2.ops.unit_receipts import (
 )
 
 __all__ = [
-    "below_bar_tickers",
     "computed_moves_units",
     "fetch_history",
     "run_computed_moves_refresh",
@@ -398,7 +398,9 @@ def _selection_stats(repository: Repository, parent_snapshot_id: str,
         day, bad_as_of = None, error
     stats = _SourceStats()
     if events is not None:
-        stats.add_confirmed(events, day)
+        # _scan_once returns every event row (v5); selection counts only confirmed ones.
+        confirmed = events if events.empty else events[events["src_orats"] & events["session"].notna()]
+        stats.add_confirmed(confirmed, day)
     if daily is not None and not daily.empty:
         stats.daily_rows.update(daily["ticker"].astype(str))
     if events is None or daily is None:
@@ -1164,12 +1166,18 @@ def _capture_below_bar(store, repository, snapshot, stats: _SourceStats, fragmen
     handled = {str(attempt["ticker"]) for attempt in attempts}  # fetched targets win
     tickers = [ticker for ticker in below_bar_tickers(stats) if ticker not in handled]
     inputs = _TickerChunks(repository, snapshot, tickers, stats, with_daily=False)
+    started, last_log = time.monotonic(), time.monotonic()
+    print(f"[computed_moves] below-bar capture start: {len(tickers)} tickers", file=sys.stderr)
     as_of_ts = pd.Timestamp(as_of_day)
     source_hash = hashlib.sha256(b"").hexdigest()
     no_dates, no_closes = np.array([], dtype="datetime64[ns]"), np.array([], dtype="float64")
     definition_hash = COMPUTED_MOVES_CONTRACT.definition_hash
     written = 0
     for ticker in tickers:
+        if time.monotonic() - last_log >= 30:  # bounded cadence, never per ticker
+            last_log = time.monotonic()
+            print(f"[computed_moves] below-bar {written}/{len(tickers)} tickers, "
+                  f"{time.monotonic() - started:.0f}s", file=sys.stderr)
         events = inputs.events(ticker)
         if events is None:
             continue
@@ -1185,7 +1193,8 @@ def _capture_below_bar(store, repository, snapshot, stats: _SourceStats, fragmen
         capture_id = "capture_" + content_hash(identity).removeprefix("sha256:")[:32]
         rows = _build_rows_typed(
             ticker, events, no_dates, no_closes, _EMPTY_DAILY, computed_at=as_of_day,
-            source_hash=source_hash, capture_id=capture_id, prices_known=False)
+            source_hash=source_hash, capture_id=capture_id, prices_known=False,
+            min_scoreable=MIN_SCOREABLE)
         request_hash = content_hash({"kind": "computed_moves_fragment", "ticker": ticker,
                                      "capture_id": capture_id})
         fragment_records[ticker] = _write_ticker_fragments(store, ticker, rows,
@@ -1193,8 +1202,8 @@ def _capture_below_bar(store, repository, snapshot, stats: _SourceStats, fragmen
         written += 1
         attempts.append({"capture_id": capture_id, "ticker": ticker,
                          "created_at": created_at, "outcome": "below_bar"})
-    print(f"[computed_moves] below-bar tickers: {written} of {len(tickers)} wrote rows",
-          file=sys.stderr)
+    print(f"[computed_moves] below-bar tickers: {written} of {len(tickers)} wrote rows in "
+          f"{time.monotonic() - started:.0f}s", file=sys.stderr)
 
 
 def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks,
@@ -1250,14 +1259,15 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
         keep = sd <= np.datetime64(as_of_ts)
         sd, sc = sd[keep], sc[keep]
         source_hash = hashlib.sha256(np.ascontiguousarray(sc).tobytes()).hexdigest()
-        capture_id = _capture_id_for(unit, source_hash=source_hash)
+        capture_id = _capture_id_for(unit, source_hash=source_hash if sd.size else None)
         # Events keep every row (confirmed or not) strictly before as_of: they count in
         # event_ordinal (the ticker's full event history) and are stored as skipped rows,
         # never dropped.
         events = events[events["event_date"] < as_of_ts]
         rows = _build_rows_typed(
             ticker, events, sd, sc, inputs.daily(ticker),
-            computed_at=as_of_day, source_hash=source_hash, capture_id=capture_id)
+            computed_at=as_of_day, source_hash=source_hash, capture_id=capture_id,
+            min_scoreable=MIN_SCOREABLE)
         if not rows:
             attempts.append({"capture_id": capture_id, "ticker": ticker,
                              "created_at": created_at, "outcome": "too_few"})

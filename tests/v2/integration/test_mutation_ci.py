@@ -3557,11 +3557,11 @@ def test_select_pr_tests_real_pr156_diff_selects_its_own_test_and_reports_dynami
     changed = [
         "engine/v2/ops/ARCHITECTURE.md",
         "engine/v2/ops/computed_moves_store.py",
-        "tests/test_v2_ops_computed_moves_store.py",
+        "tests/v2/ops/test_v2_ops_computed_moves_store.py",
     ]
     selected = pilot.select_pr_tests(pilot.load_config(), changed)
     assert selected is not None
-    assert "tests/test_v2_ops_computed_moves_store.py" in selected
+    assert "tests/v2/ops/test_v2_ops_computed_moves_store.py" in selected
     real_graph = pilot.build_import_graph()
     real_tests = pilot.pytest_test_files(set(real_graph))
     dyn_leaf = pilot.dynamic_files(real_graph) & set(real_tests)
@@ -5777,5 +5777,5 @@ def test_the_real_tests_conftest_proven_root_insert_never_taints_every_test():
     tests = pilot.pytest_test_files(set(graph))
     selected = pilot.select_pr_tests(pilot.load_config(), ["engine/v2/ops/computed_moves_store.py"], graph=graph)
     assert selected is not None
-    assert "tests/test_v2_ops_computed_moves_store.py" in selected
+    assert "tests/v2/ops/test_v2_ops_computed_moves_store.py" in selected
     assert len(selected) < len(tests)

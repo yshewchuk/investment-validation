@@ -50,6 +50,7 @@ def test_v5_columns_match_the_store_fragment_schema_and_drop_quarter_ordinal():
     names = tuple(column.name for column in COMPUTED_MOVES_V5_CONTRACT.columns)
     assert names == FRAGMENT_COLUMNS == tuple(_ARROW_SCHEMA.names)
     assert "quarter_ordinal" not in names
+    assert "not_computed_reason" in names
     columns = {column.name: column for column in COMPUTED_MOVES_V5_CONTRACT.columns}
     assert columns["mean_prior_or_implied"].nullable is True
     for name in ("event_ordinal", "admitted", "n_prior_implied"):

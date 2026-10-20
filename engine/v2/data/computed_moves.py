@@ -353,6 +353,8 @@ def _classify(events: pd.DataFrame, sd, sc, *, min_scoreable: int,
     source and no caller re-derives it from a built row.
     ``prices_known=False`` is for a ticker the caller did not load prices for; it classifies ``ticker_too_few_events`` (and refuses CONTRACT_MISMATCH at or above ``min_scoreable`` confirmed events).
     """
+    if not isinstance(prices_known, (bool, np.bool_)):
+        raise fail("CONTRACT_MISMATCH", "prices_known must be a bool")
     reasons = _event_reasons(events)
     if not len(reasons):
         return []

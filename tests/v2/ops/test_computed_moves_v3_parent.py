@@ -27,6 +27,14 @@ _NEW = ("event_ordinal", "admitted", "mean_prior_or_implied", "n_prior_implied")
 _TICKERS = ("AAAA", "BBBB", "CCCC")
 
 
+@pytest.fixture(autouse=True)
+def _small_fixture_bar(monkeypatch):
+    """The fixtures carry 8-ish events per ticker: lower the store's one bar to the old
+    effective admission bar (5) so they classify as computed outcomes."""
+    from engine.v2.ops import computed_moves_store as _store
+    monkeypatch.setattr(_store, "MIN_SCOREABLE", 5)
+
+
 def _v3_contract():
     v4 = store_module.COMPUTED_MOVES_CONTRACT
     columns = [c for c in v4.columns if c.name not in _NEW]
@@ -108,13 +116,13 @@ def test_incremental_generation_over_a_v3_parent_refuses_without_writing(tmp_pat
         v3_head["snapshot_id"], v3_head["generation"])
 
 
-def test_full_rebuild_over_a_v3_head_writes_complete_v4(tmp_path, monkeypatch):
+def test_full_rebuild_over_a_v3_head_writes_complete_v5(tmp_path, monkeypatch):
     conn, store, v3_head = _v3_head(tmp_path, monkeypatch)
     assert _run(conn, tmp_path, "v4full", v3_head, _TICKERS, monkeypatch).status == "complete"
     new_head = _head_row(conn)
     assert new_head["snapshot_id"] != v3_head["snapshot_id"]
     records = _records(conn, store, new_head["snapshot_id"])
-    assert {contract for contract, _, _ in records} == {"computed_moves.v4"}
+    assert {contract for contract, _, _ in records} == {"computed_moves.v5"}
     assert {ticker for _, ticker, _ in records} == set(_TICKERS)
 
 
@@ -131,7 +139,7 @@ def test_all_v4_incremental_generation_carries_unselected_tickers(tmp_path, monk
 
 
 
-def test_full_rebuild_where_a_v3_ticker_has_no_v4_rows_drops_its_manifest_hash(
+def test_full_rebuild_where_a_v3_ticker_has_no_v5_rows_drops_its_manifest_hash(
         tmp_path, monkeypatch):
     conn, store, v3_head = _v3_head(tmp_path, monkeypatch)
     before = Repository(conn, store).resolve_full(v3_head["snapshot_id"])
@@ -144,7 +152,7 @@ def test_full_rebuild_where_a_v3_ticker_has_no_v4_rows_drops_its_manifest_hash(
     new_head = _head_row(conn)
     assert new_head["snapshot_id"] != v3_head["snapshot_id"]
     records = _records(conn, store, new_head["snapshot_id"])
-    assert {contract for contract, _, _ in records} == {"computed_moves.v4"}
+    assert {contract for contract, _, _ in records} == {"computed_moves.v5"}
     assert {ticker for _, ticker, _ in records} == {"AAAA", "BBBB"}
     after = Repository(conn, store).resolve_full(new_head["snapshot_id"])
     hashes = after.table_manifests["computed_moves"].partition_logical_hashes

@@ -490,6 +490,7 @@ is unchanged: a candidate with no fragment is still a refusal. Nothing is writte
 | reason precedence for one event | per-event `not_orats`, then `no_session`; ticker-level overrides every event: `no_price_history` (no closes, checked first), else `ticker_too_few_events`; otherwise a confirmed event with no bracketing window is `no_price_window`, else null |
 | event dates not strictly ascending after the same-date collapse, or `sd` not non-decreasing | `CONTRACT_MISMATCH` from both entry points, whatever the ticker-level outcome |
 | `min_scoreable` not a non-negative int, an event frame lacking `event_date`/`session`/`src_orats`, a non-datetime, NaT or intraday `event_date`, a non-bool `src_orats`, a non-null `session` other than `BMO`/`AMC` (the source schema's set), or `sd`/`sc` of different lengths (both entry points); a `daily` frame lacking `date`/`implied_move`/`src_iv`, or with unparseable or NaT dates, or a non-real-number `implied_move` cell of any dtype (bool and complex included) (`build_event_rows` up front before any branch, and `build_rows` through the same `_validate_daily`); `daily` calendar days (`YYYY-MM-DD`) not strictly ascending and unique (`build_event_rows` up front; `build_rows` through `AsofSeries`). The classifier takes no `daily` | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
+| `prices_known` not a `bool`, or `prices_known=False` with `MIN_SCOREABLE` or more confirmed events (both entry points) | `CONTRACT_MISMATCH`; with `prices_known=False` and fewer, every event is `ticker_too_few_events` whatever `sd`/`sc` hold |
 
 **`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
 no clock. A feature declares its parameters; none is hard-coded in the module.
@@ -508,7 +509,8 @@ no clock. A feature declares its parameters; none is hard-coded in the module.
 - Dates are canonical `YYYY-MM-DD` data dates only; `retrieved_at` and
   `computed_at` are provenance and never filter or order.
 - The module only computes from the inputs it is given; it stores nothing. Its
-  one production caller is `computed_moves.build_rows` (`computed_moves.v4`).
+  production callers are `computed_moves.build_rows` (`computed_moves.v4`) and, through
+  it, `computed_moves.build_event_rows` (`computed_moves.v5`).
 
 | Condition | Outcome |
 |---|---|

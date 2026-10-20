@@ -26,6 +26,14 @@ from tests.data_scan_support import (
 from tests.ops_support import FakeClock, catalog, enqueue_claim
 
 
+@pytest.fixture(autouse=True)
+def _small_fixture_bar(monkeypatch):
+    """The fixtures carry 8-ish events per ticker: lower the store's one bar to the old
+    effective admission bar (5) so they classify as computed outcomes."""
+    from engine.v2.ops import computed_moves_store as _store
+    monkeypatch.setattr(_store, "MIN_SCOREABLE", 5)
+
+
 def _unit(ticker: str, day: str) -> RefreshUnit:
     return RefreshUnit(request_id=f"computed_moves:{ticker}:{day}",
                        table_name="computed_moves", partition_key=ticker,
@@ -331,7 +339,8 @@ def test_missing_tier1_history_is_logged_no_history_without_failing(tmp_path, mo
     assert row["outcome"] == "no_history"
 
 
-def test_all_missing_tier1_persists_no_history_without_generation(tmp_path, monkeypatch):
+def test_all_missing_tier1_persists_no_history_and_commits_no_price_history_rows(
+        tmp_path, monkeypatch):
     monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
                         lambda *a, **k: (["AAAA", "BBBB"], {}))
     conn, clock, _ = catalog(tmp_path)
@@ -348,10 +357,9 @@ def test_all_missing_tier1_persists_no_history_without_generation(tmp_path, monk
         parameters, root, as_of=_AS_OF,
         fetcher=lambda ticker: (b"", "legitimate_empty", {}, []))
 
-    assert result.status == "noop"
+    assert result.status == "complete"
     current = _head_row(conn)
-    assert (current["snapshot_id"], current["generation"]) == (
-        head["snapshot_id"], head["generation"])
+    assert current["snapshot_id"] != head["snapshot_id"]  # the no_price_history rows were committed
     rows = conn.execute(
         "SELECT ticker, outcome FROM data_computed_moves_captures ORDER BY ticker").fetchall()
     assert [tuple(row) for row in rows] == [
@@ -597,15 +605,14 @@ def test_selected_source_missing_entry_is_no_history_not_cached(tmp_path, monkey
         parameters, root, as_of=_AS_OF, fetcher=missing_fetcher, use_cached_receipts=False)
 
     assert calls == ["AAAA"]
-    assert result.status == "noop"
+    assert result.status == "complete"
     row = conn.execute(
         "SELECT outcome, capture_id FROM data_computed_moves_captures WHERE ticker = ?",
         ("AAAA",)).fetchone()
     assert row["outcome"] == "no_history"
     assert row["capture_id"] == _capture_id_for(_unit("AAAA", _AS_OF))
     current = _head_row(conn)
-    assert (current["snapshot_id"], current["generation"]) == (
-        head["snapshot_id"], head["generation"])
+    assert current["snapshot_id"] != head["snapshot_id"]  # the no_price_history rows were committed
 
 
 def test_supervised_default_still_reuses_cached_catalog_receipt(tmp_path, monkeypatch):
@@ -973,7 +980,7 @@ def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_aft
     assert committed_pre[0]["realized_move_pct"] is not None
 
 
-def test_run_computed_moves_refresh_series_entirely_after_as_of_is_too_few(
+def test_run_computed_moves_refresh_series_entirely_after_as_of_is_no_history(
         tmp_path, monkeypatch):
     """The issue #99 truncation branch of ``_capture_targets``: every fetched
     close is dated AFTER ``as_of``, so the series truncates to empty before
@@ -1021,7 +1028,7 @@ def test_run_computed_moves_refresh_series_entirely_after_as_of_is_too_few(
     row = conn.execute(
         "SELECT outcome FROM data_computed_moves_captures WHERE ticker = ?",
         ("AAAA",)).fetchone()
-    assert row["outcome"] == "too_few"
+    assert row["outcome"] == "no_history"
     other = conn.execute(
         "SELECT outcome FROM data_computed_moves_captures WHERE ticker = ?",
         ("BBBB",)).fetchone()
@@ -2094,8 +2101,8 @@ def test__scan_rows_discharges_the_creation_charge_of_an_edited_leased_batch(tmp
     assert account.peak_rows <= computed_moves_store.MAX_SCAN_ROWS
 
 
-def test__scan_once_keeps_only_orats_confirmed_events_that_carry_a_session(tmp_path,
-                                                                            monkeypatch):
+def test__scan_once_returns_every_event_confirmed_or_not(tmp_path,
+                                                         monkeypatch):
     """Slice 2 changed HOW rows arrive, not which rows are usable: the wired
     ``_scan_once`` must still apply the existing availability filter
     (``src_orats`` confirmed AND ``session`` present). One pin, three
@@ -2169,10 +2176,12 @@ def test__scan_once_keeps_only_orats_confirmed_events_that_carry_a_session(tmp_p
 
     events, daily = computed_moves_store._scan_once(repository, snapshot)
 
-    assert list(events["ticker"]) == ["AAAA"]  # (b) and (c) never survive the filter
-    assert list(events["session"]) == ["AMC"]
-    assert list(events["src_orats"]) == [True]
-    assert list(events["event_date"]) == [pd.Timestamp(_EVENT_DAYS[0])]
+    assert list(events["ticker"]) == ["AAAA", "BBBB", "CCCC"]
+    assert list(events["session"]) == ["AMC", "AMC", None]
+    assert list(events["src_orats"]) == [True, False, True]
+    assert list(events["event_date"]) == [pd.Timestamp(_EVENT_DAYS[0]),
+                                          pd.Timestamp(_EVENT_DAYS[2]),
+                                          pd.Timestamp(_EVENT_DAYS[4])]
     assert daily.empty  # the empty daily table scans through unchanged
 
     assert converted_batches == [2, 1]  # the two events leases; the daily scan adds no chunk
@@ -2232,7 +2241,7 @@ def test__scan_frame_discards_its_chunks_on_a_mid_partition_failure(tmp_path, mo
 # --------------------------------------------------------------------------
 
 
-def test_earlier_as_of_refuses_inherited_future_dated_fragment(tmp_path):
+def test_earlier_as_of_refuses_inherited_future_dated_fragment(tmp_path, monkeypatch):
     """Run A captures ``BBBB`` at the later ``_AS_OF`` and commits a fragment
     whose ``event_date`` rows extend past the earlier ``as_of`` run B will
     request. Run B pins run A's committed snapshot as its parent and targets
@@ -2292,6 +2301,7 @@ def test_earlier_as_of_refuses_inherited_future_dated_fragment(tmp_path):
         assert any(d >= earlier_as_of for d in bbbb_dates)
 
         targets[:] = ["AAAA"]  # BBBB survives run B only by carry-forward
+        monkeypatch.setattr(computed_moves_store, "below_bar_tickers", lambda stats: [])  # keep BBBB inherited
         root_b = tmp_path / "attempt_b"
         _write_input(root_b, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path,
                      head=committed_parent, as_of=earlier_as_of)
