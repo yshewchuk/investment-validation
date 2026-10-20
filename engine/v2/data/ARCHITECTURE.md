@@ -334,7 +334,9 @@ commits.
   change it) and must satisfy the contract: known columns only, every column present
   unless nullable, no null in a non-nullable column, and a value of the column's
   physical type (float64 finite, timestamps timezone-naive, a missing nullable value
-  `None`); primary-key values must be present. Rows arrive in strictly increasing
+  `None`); primary-key values must be present. The physical-type map
+  `ARROW_TYPES` (including `date32`) is defined once in `query` and re-exported by
+  `generic_incremental`. Rows arrive in strictly increasing
   primary-key order across and within batches (the caller orders batches). Shape,
   nulls, types and key order are checked at `append_rows`, Arrow conversion at the
   row-group write, `knowledge_mode` and evidence refs (observed and attested modes

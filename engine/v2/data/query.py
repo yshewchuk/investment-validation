@@ -69,10 +69,13 @@ __all__ = [
     "validate_query",
 ]
 
-#: The closed physical-type vocabulary this package's four legacy tables use
-#: (``legacy_mapping.ALLOWED_PHYSICAL_TYPES``, mirrored here rather than
-#: imported — that constant lives in the legacy-free mapping module, which
-#: this module must not depend on).
+#: The one shared physical-type map of this package — defined here, used by
+#: ``Repository.scan`` via :func:`arrow_type_for` and re-exported by
+#: ``generic_incremental``/``generic_streaming``'s writers, so a scan and a
+#: writer can never disagree on a physical type. It is the legacy vocabulary
+#: ``legacy_mapping.ALLOWED_PHYSICAL_TYPES`` (mirrored rather than imported —
+#: that constant lives in the legacy-free mapping module, which this module
+#: must not depend on) plus ``date32``.
 ARROW_TYPES: dict[str, pa.DataType] = {
     "string": pa.string(),
     "float64": pa.float64(),
@@ -80,6 +83,7 @@ ARROW_TYPES: dict[str, pa.DataType] = {
     "bool": pa.bool_(),
     "timestamp[ns]": pa.timestamp("ns"),
     "timestamp[us]": pa.timestamp("us"),
+    "date32": pa.date32(),
 }
 
 
