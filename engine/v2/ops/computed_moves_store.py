@@ -1223,6 +1223,7 @@ def _capture_below_bar(store, repository, snapshot, stats: _SourceStats, fragmen
         if time.monotonic() - last_log >= 30:  # bounded cadence, never per ticker
             last_log = time.monotonic()
             print(_progress_line("below-bar", done - 1, len(tickers), started), file=sys.stderr)
+        events = rows = None  # drop the last ticker frame before the next chunk can load
         events = inputs.events(ticker)
         if events is None:
             continue
