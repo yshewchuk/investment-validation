@@ -1,6 +1,9 @@
 """Bounded stderr progress for legacy materialization (#1018): never stdout, never per item."""
 from __future__ import annotations
 
+import io
+import sys
+
 from engine.v2.data import legacy_adapter, materialize_progress
 from engine.v2.data.reference_inputs import LEGACY_SNAPSHOT_PATH, REGISTRY_PATH
 from engine.v2.data.repository import Repository
@@ -97,3 +100,15 @@ def test_table_progress_interval_zero_prints_every_tick(capsys, monkeypatch):
     fake["now"] = 4.0
     progress.finish()
     assert "done in" in capsys.readouterr().err
+
+
+def test_table_progress_never_falls_back_to_stdout(monkeypatch, capsys):
+    """A missing (None) or closed stderr is dropped, never redirected to stdout."""
+    closed = io.StringIO()
+    closed.close()
+    for bad_stderr in (None, closed):
+        monkeypatch.setattr(sys, "stderr", bad_stderr)
+        progress = materialize_progress.TableProgress(1)
+        progress.tick()
+        progress.finish()
+    assert capsys.readouterr().out == ""

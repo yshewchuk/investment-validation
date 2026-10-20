@@ -50,7 +50,9 @@ class TableProgress:
 
     @staticmethod
     def _print(message: str) -> None:
+        if sys.stderr is None:
+            return
         try:
             print(message, file=sys.stderr, flush=True)
-        except OSError:
+        except (OSError, ValueError):
             pass
