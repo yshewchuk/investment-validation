@@ -771,5 +771,5 @@ not total RSS; retained source objects and Python metadata are additional overhe
 | Same retained deeply immutable object | Reuse its immutable numeric buffers after the per-call identity checks. |
 | Valid miss fitting both caps | Retain the object and buffers with FIFO eviction; both retention caps remain satisfied. |
 | Valid conversion exceeds 16 MiB or input contains mutable fields | Return converted buffers without retention or eviction of existing entries. |
-| Concurrent cache-eligible misses for the same object fitting both caps | Return the same winning immutable buffers; no duplicate accounting or unnecessary eviction. |
+| Concurrent cache-eligible misses for the same object fitting both caps | Reuse the winning immutable buffers while that entry remains retained; intervening eviction may yield distinct buffers with the same pool values. |
 | Evicted object requested again | Output and sampling order are unchanged by prior eviction. |
