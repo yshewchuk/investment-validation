@@ -216,3 +216,7 @@ driver seal, whose hash `seal` returns as `driver_id`, supplies driver provenanc
 `seal_search_run(..., clock=...)` exposes the explicit seal as a library API.
 `seal` and `collect` reject resource flags. Optional `--no-ledger` is a no-op:
 all modes exclude ledger/outcome publication, final holdouts, releases and orders.
+
+Native inner recording normalizes each successful forecast submission once within
+the recording call, reusing that local value for its completion digest and publication.
+This adds no cross-call cache: fresh reads, validation order and receipt verification remain unchanged.
