@@ -266,8 +266,57 @@ both flag states publish/verify the same plan and never write a ledger.
 | Current migrated journal missing its seal; valid submission/evidence without admitted inputs, repeated start, changed submission, another plan for the anchor, source drift or corrupt evidence | Refuse `EXPERIMENT_IDENTITY_CONFLICT`; no retry authorization. Missing migrations instead refuse `INTEGRITY_FAILED` under schema admission above. |
 | Unavailable artifact, raw `OSError`, or read-time `UNSAFE_PATH` after stored-path syntax admission | Refuse sanitized retryable `RESOURCE_UNAVAILABLE`, including open-time OS errors and symlink rejection; no journal association changes, symlink traversal or attempt-retry authorization. |
 | Invalid stored-path syntax or reference; publication `UNSAFE_PATH` | Refuse `EXPERIMENT_IDENTITY_CONFLICT`; invalid reference syntax is rejected before artifact access. Content/hash mismatch during verified reads remains an identity conflict. |
-| Journal payload exceeds 16 MiB | Refuse nonretryable `RESOURCE_LIMIT_EXCEEDED` before publishing that record; incomplete attempts remain unfinished and block selection. |
+| Journal payload exceeds 16 MiB | Refuse nonretryable `RESOURCE_LIMIT_EXCEEDED` before publishing that record; incomplete attempts remain unfinished and block selection. Cohort rows are not one record: see [Sharded cohort inputs](#sharded-cohort-inputs). |
 | Submitted-forecast selection | These submission/selection methods do not fit or authenticate estimator execution; wholesale fabrication of matching evidence is outside their consistency guarantee. Native fitting is separately described under [bounded inner-trial execution](#bounded-inner-trial-execution). Neither path grants outer evaluation, deployment, ledger or final-read authority. |
+
+## Sharded cohort inputs
+
+Contract for #991 fix 4 (design: `guides/magnitude_search_payload_shards_design.md`);
+implemented in staged PRs, so until each lands the older whole-record behaviour above
+applies to that path. Cohort rows (`features`, `training`, preflight `planned_inputs`
+and any other member that grows with event count) are stored as ordered **sections**
+of content-addressed **shards**, not one record or child payload.
+
+* A shard is canonical JSON `{schema_version: magnitude_search_shard.v1, section, rows}`
+  published by `ArtifactStore.publish_bytes`; its `ArtifactRef` is its address. It
+  carries no cohort, run or position. Rows keep the admitted order (never sorted).
+* The deterministic cut rule closes a shard before the row that would pass
+  `SHARD_TARGET_BYTES` (4 MiB); a shard above `SHARD_MAX_BYTES` (8 MiB) or a cohort of
+  more than `SHARD_MAX_COUNT` (8192) shards is `RESOURCE_LIMIT_EXCEEDED`. Changing the
+  rule is a new schema version and new seals.
+* `cohort:<id>` holds a small manifest (`magnitude_search_cohort.v2`): inline scalar
+  members plus, per section, `row_count` and ordered `{ref, rows, first_key, last_key}`.
+  `inputs_id` is `content_hash(manifest)`; trial records bind it under the existing field
+  names. Sealed journals and artifacts of the older whole-cohort shape refuse
+  `EXPERIMENT_IDENTITY_CONFLICT`; none is rewritten or migrated.
+* One streaming verified reader serves parent and child. Each shard is read with
+  `read_verified` (registered size bounds the allocation, hash checked over returned
+  bytes) and checked for schema, section, row count and boundary keys before any row is
+  used; totals must equal `row_count`. Parent replay streams shards to recompute fit
+  evidence and target validation; the child receives a header (limits, inner fold,
+  plan horizons, execution spec, manifest, store root), reads only the objects the
+  manifest names, projects rows shard by shard, and opens no repository, catalog or
+  validation target. Transport memory is one shard plus the manifest; the fit working
+  set stays bounded by the child's `RLIMIT_AS`.
+* Shards are published (idempotently, outside the catalog transaction) before the
+  manifest append, which is the commit point. Same rows give identical shards and
+  manifest, so retry and replay are idempotent; a different manifest for the slot is
+  an identity conflict.
+
+| Condition | Outcome |
+|---|---|
+| Shard missing, unreadable or `OSError` | Retryable `RESOURCE_UNAVAILABLE` through the journal's artifact mapping; no association change, retry authorization or candidate failure. In the child: the same refusal after the unfinished claim is kept. |
+| Shard hash/size mismatch, wrong schema or section, row-count or boundary-key disagreement, duplicate key, malformed or unsafe ref, manifest hash differing from `inputs_id` | `EXPERIMENT_IDENTITY_CONFLICT`; no rows used, no fitting, no new association. |
+| Row above `SHARD_MAX_BYTES` or shard count above `SHARD_MAX_COUNT` | Nonretryable `RESOURCE_LIMIT_EXCEEDED` before the manifest append; published shards stay unreferenced. |
+| Crash after some shards, before the manifest | Unreferenced shards confer no authority and are reclaimable by the store owner; the claim stays unfinished and retries republish identical bytes. |
+| Manifest committed, later shard removed or corrupted | Fails closed as above on every read; evidence already committed is kept. |
+| Same cohort slot, different manifest | `EXPERIMENT_IDENTITY_CONFLICT` (input drift keeps its existing reporting). |
+
+Registration, snapshot, plan and execution-spec bindings are unchanged. The anchor
+(`inputs:<trial>`) binds the manifest hash and so every shard hash. The recorder and
+outer source closures include the shard module, so seals change. Replay identity holds
+within one format version: same snapshot, plan and code give the same `inputs_id`;
+native replay launches nothing and reads only published shards.
 
 ## Stored research-history entrypoint
 
@@ -577,7 +626,7 @@ The source seal explicitly includes the fixed child and its transitive fitting s
 | Missing/extra limit keys, Boolean/noninteger/nonpositive or platform-unrepresentable values | `INVALID_EXPERIMENT_SPEC` before a claim or subprocess launch. |
 | Direct `run_fitted_trial` call | Requires exactly those three resource keys plus an integer `cpu_id` in `[0, 2**31 - 1)`, excluding Boolean values. Revalidates all limits before input access, scratch creation or launch; malformed resolved limits refuse `INVALID_EXPERIMENT_SPEC`. CPU availability is still enforced by child setup, not reserved by this pure check. |
 | Parent Linux affinity query unavailable or empty | `RESOURCE_UNAVAILABLE` before a claim or subprocess launch. Child limit/affinity setup failure instead preserves the post-claim unfinished attempt and refuses `RESOURCE_UNAVAILABLE`. |
-| Serialized input or a buffered child-output record exceeds 16 MiB | `RESOURCE_LIMIT_EXCEEDED`; preserve the unfinished claim, publish no candidate failure and block freeze. |
+| Serialized request header or a buffered child-output record exceeds 16 MiB | `RESOURCE_LIMIT_EXCEEDED`; preserve the unfinished claim, publish no candidate failure and block freeze. Cohort rows are read as shards, not in the header: see [Sharded cohort inputs](#sharded-cohort-inputs). |
 | Started trial with admitted cohort | A fixed fit-only subprocess receives stored features and qualified training targets, never a repository, catalog or validation targets. Every horizon uses the existing fresh-fit pipeline and declared candidate recipe. |
 | Child reaches a horizon fit | Parent independently reconstructs its matrix/event evidence and commits a non-replayable fit admission before acknowledging. Completion is separately acknowledged only after its immutable evidence commits. Counts distinguish admitted fit attempts from completed fits; an interrupted admission does not prove the estimator was entered. |
 | Child returns a checked result after exit and reap | Commit immutable `execution-result:<trial_id>` with the exact native result, original attempt/limits and admitted input hash before execution/forecast/scoring publication. Successful fits publish complete forecasts before validation labels open; original scoring policy applies. Public `record` cannot finish an unfinished native attempt. |
@@ -678,9 +727,9 @@ Slim cohort documents have their own honest content hashes: their journal/result
 are not the old full-row hashes. Changed producer/recorder closures require fresh build contexts and seals; old sealed
 runs fail closed, and no historical receipt or artifact is rewritten. The fit transport
 independently projects qualified training/evaluation rows and selected horizons/columns.
-Parent, child and journal retain their 16 MiB limits. Projection removes lineage
-amplification; sufficiently large numeric folds still refuse. No scale is inferred
-from event counts; scientific selection and cutoff rules are unchanged.
+Projection removes lineage amplification. Cohort rows are no longer bounded by one
+16 MiB record or child payload: see [Sharded cohort inputs](#sharded-cohort-inputs).
+No scale is inferred from event counts; scientific selection and cutoff rules are unchanged.
 
 | Condition | Enforced outcome |
 |---|---|
