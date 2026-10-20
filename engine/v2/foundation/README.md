@@ -15,6 +15,8 @@ Replaces (§4.4): `paths.py`, `env.py`, `jsonio.py`, `audit.py`, `session arithm
 - Canonical JSON (RFC 8785) and content hashing, per contracts §2.2.
 - Path and environment resolution.
 - Session arithmetic: BMO/AMC anchoring, trading-day offsets.
+- Pure holiday-year sets are immutable and LRU-bounded to 128 years; supplied
+  sessions and anchor requests are validated afresh on every call.
 - Causality primitives — the cutoff comparison every feature respects.
 - Strict decoding of contract documents: unknown fields, unknown enum values
   and unsupported schema versions are refused (contracts §2.3).
