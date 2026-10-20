@@ -95,11 +95,22 @@ def test_repeated_submitted_record_rechecks_forecasts(recording, monkeypatch):
     recorder = journal.recorder
     first = recorder.record("2024", "2023", "a-first", forecasts=rows(3.5))
     before = durable_evidence(journal)
-    calls = track(recorder, monkeypatch)
-    assert recorder.record("2024", "2023", "a-first", forecasts=rows(3.5)) == first
-    assert calls  # This later call cannot reuse a previous normalized submission.
+    original, calls = recorder._forecasts, []
+    matching, conflicting = rows(3.5), rows(4)
+    def normalize(value, *args):
+        # Receipt verification also normalizes stored rows. Only identity proves
+        # that this call admitted the caller's own new submission.
+        if value is matching or value is conflicting:
+            calls.append(value)
+        return original(value, *args)
+    monkeypatch.setattr(recorder, "_forecasts", normalize)
+    assert recorder.record("2024", "2023", "a-first", forecasts=matching) == first
+    assert calls == [matching]
+    assert calls[0] is matching
     with pytest.raises(OpsError) as caught:
-        recorder.record("2024", "2023", "a-first", forecasts=rows(4))
+        recorder.record("2024", "2023", "a-first", forecasts=conflicting)
+    assert calls == [matching, conflicting]
+    assert calls[1] is conflicting
     assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "terminal trial cannot accept another submission").problem
     assert durable_evidence(journal) == before
 
@@ -139,4 +150,19 @@ def test_public_native_execute_reuses_only_record_local_normalization(native, mo
     assert receipt["fit_attempt_count"] == receipt["completed_fit_count"] == 3
     before = durable_evidence(native)
     assert recorder.execute("2024", "2023", "a-first", limits=LIMITS) == receipt
+    assert durable_evidence(native) == before
+
+    original_read, reads = recorder._read, []
+    key = content_hash(["plan", "2024", "2023", "a-first"])
+    def corrupt_fresh_read(slot):
+        reads.append(slot)
+        value = original_read(slot)
+        if slot == "execution:" + key:
+            value = {**value, "completed_fit_count": 0}
+        return value
+    monkeypatch.setattr(recorder, "_read", corrupt_fresh_read)
+    with pytest.raises(OpsError) as caught:
+        recorder.execute("2024", "2023", "a-first", limits=LIMITS)
+    assert "execution:" + key in reads
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs").problem
     assert durable_evidence(native) == before
