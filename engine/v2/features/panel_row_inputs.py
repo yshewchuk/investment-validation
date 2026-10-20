@@ -168,6 +168,7 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
     Every row in the window is returned; ``_available_rows`` applies the
     outcome-availability filter separately. ``event_day`` is the caller's
     already-validated, already-midnight-normalized event day.
+    On a v5 table, rows whose ``not_computed_reason`` is set (other than ``no_price_window``) are dropped, so a later refusal row cannot clear the stored implied mean.
     """
     contract = data_repository.table_contract(snapshot, _COMPUTED_MOVES_TABLE)
     missing = [c for c in _IMPLIED_COLUMNS
@@ -177,6 +178,8 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
                           "computed_moves lacks the stored implied-history columns (v3 table)",
                           details={"table_name": _COMPUTED_MOVES_TABLE,
                                    "missing_columns": missing})
+    has_reason = "not_computed_reason" in {col.name for col in contract.columns}
+    columns = (*_COMPUTED_COLUMNS, "not_computed_reason") if has_reason else _COMPUTED_COLUMNS
     version = _pinned_version(snapshot, _COMPUTED_MOVES_TABLE)
     start = history_start.date().isoformat()
     end = min(event_day, decision).date().isoformat()
@@ -199,7 +202,7 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
     query = DataQuery(
         snapshot_id=snapshot.snapshot_id,
         table_contract_ref=version.table_contract_ref,
-        columns=_COMPUTED_COLUMNS,
+        columns=columns,
         key_filter=key_filter,
         time_interval=time_interval,
         order_by=tuple(contract.primary_key),
@@ -207,6 +210,8 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
         max_result_rows=max_result_rows,
     )
     rows = _consume(data_repository, query, _COMPUTED_MOVES_TABLE)
+    if has_reason:  # v5: a refusal row (not_orats, no_session, ticker-level) never shapes confirmed history
+        rows = [row for row in rows if row["not_computed_reason"] in (None, "no_price_window")]
     return rows
 
 

@@ -319,6 +319,36 @@ def test_6_only_non_skipped_computed_moves_feed_history():
     assert panel["mean_prior_abs_move"] == 1.5
 
 
+def test_6b_v5_refusal_rows_never_clear_the_stored_implied_mean():
+    """A newest v5 refusal row (not_orats) is dropped before the carry step, so the prior
+    admitted row's stored mean still feeds the panel row."""
+    from engine.v2.data.computed_moves_table import COMPUTED_MOVES_V5_CONTRACT
+
+    v5_ref = TableContractRef(contract_id=COMPUTED_MOVES_V5_CONTRACT.contract_id,
+                              definition_hash=COMPUTED_MOVES_V5_CONTRACT.definition_hash)
+    snapshot = _snapshot()
+    versions = dict(snapshot.table_versions)
+    versions[COMPUTED_MOVES_TABLE_NAME] = dataclasses.replace(
+        versions[COMPUTED_MOVES_TABLE_NAME], table_contract_ref=v5_ref)
+    snapshot = dataclasses.replace(snapshot, table_versions=versions)
+    contracts = {**_contracts(), COMPUTED_MOVES_TABLE_NAME: COMPUTED_MOVES_V5_CONTRACT}
+    rows = _computed_rows([("2024-01-10", 2.0, False), ("2024-01-11", -1.0, False),
+                           ("2024-01-12", None, True)])
+    for row in rows:
+        row["not_computed_reason"] = None
+    for row in rows[:2]:  # admitted rows carry the stored aggregate
+        row.update(admitted=True, mean_prior_or_implied=1.5, n_prior_implied=3)
+    rows[2]["not_computed_reason"] = "not_orats"
+    batches = _default_batches()
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = rows
+    repo = _FakeRepository(snapshot, contracts, batches)
+
+    panel = scan_panel_row(repo, snapshot, _key(), history_start=_HISTORY_START,
+                           decision_session=_DECISION).panel_row
+
+    assert panel["mean_prior_or_implied"] == 1.5
+
+
 def test_7_retry_is_idempotent():
     first = _scan()
     second = _scan()

@@ -823,7 +823,7 @@ def _computed_moves_capture_report(dry_run, targets, cache):
 
 
 def computed_moves_command(args, root, conn, clock):
-    """Build one computed_moves.v4 generation from the local Tier-1 cache."""
+    """Build one computed_moves.v5 generation from the local Tier-1 cache."""
     from engine.v2.data.repository import Repository
     from engine.v2.ops import computed_moves_store
     from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters

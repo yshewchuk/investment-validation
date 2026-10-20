@@ -95,6 +95,46 @@ def _assert_refusal_parity(events, expected, *, sd=_SD, sc=_SC, daily=_DAILY, **
     assert messages == [expected, expected]
 
 
+def test_prices_known_false_classifies_ticker_too_few_events_without_prices():
+    no_dates, no_closes = np.array([], dtype="datetime64[ns]"), np.array([])
+    considered = _events(*_CONFIRMED[:3])
+
+    rows = _build(considered, sd=no_dates, sc=no_closes, prices_known=False)
+
+    assert len(rows) == 3
+    for position, row in enumerate(rows):
+        _assert_refused(row, "ticker_too_few_events", position)  # never no_price_history
+    assert classify_event_reasons(
+        considered, no_dates, no_closes, prices_known=False) == ["ticker_too_few_events"] * 3
+
+
+@pytest.mark.parametrize("entry", ["build", "classify"])
+def test_prices_known_false_refuses_a_ticker_at_or_above_the_bar(entry):
+    no_dates, no_closes = np.array([], dtype="datetime64[ns]"), np.array([])
+    considered = _events(*_CONFIRMED)  # 16 confirmed events clear MIN_SCOREABLE
+    def call():
+        if entry == "build":
+            return _build(considered, sd=no_dates, sc=no_closes, prices_known=False)
+        return classify_event_reasons(considered, no_dates, no_closes, prices_known=False)
+    with pytest.raises(DataError) as error:
+        call()
+    assert error.value.code == "CONTRACT_MISMATCH"
+    assert "fewer than min_scoreable confirmed events" in error.value.problem.message
+
+
+@pytest.mark.parametrize("entry", ["build", "classify"])
+def test_prices_known_must_be_a_bool(entry):
+    considered = _events(*_CONFIRMED[:3])
+    def call():
+        if entry == "build":
+            return _build(considered, prices_known="no")
+        return classify_event_reasons(considered, _SD, _SC, prices_known="no")
+    with pytest.raises(DataError) as error:
+        call()
+    assert error.value.code == "CONTRACT_MISMATCH"
+    assert "prices_known must be a bool" in error.value.problem.message
+
+
 def test_phantom_forward_claim_is_not_orats_and_leaves_neighbours_unchanged():
     base = _build(_events(*_CONFIRMED))
     considered = _CONFIRMED[:5] + [(_BETWEEN, "BMO", False)] + _CONFIRMED[5:]

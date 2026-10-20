@@ -4,7 +4,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from engine.v2.data import errors
-from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.foundation import content_hash, market_calendar
 from engine.v2.foundation.experiment_holdouts import _calendar_date
 from engine.v2.research.event_history import _CONTEXT, _plans
@@ -81,7 +81,7 @@ def _candidate_plans(repository, snapshot, as_of_month, purpose, event_ids, cuto
     if rows.empty:
         raise errors.fail("POPULATION_COLLAPSED", "no magnitude events precede label cutoff")
     contract = repository.table_contract(snapshot, "computed_moves")
-    if contract != COMPUTED_MOVES_CONTRACT:
+    if contract not in (COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT):
         raise errors.fail("CONTRACT_MISMATCH", "magnitude labels require native computed moves")
     return population, eligible, rows, _plans(repository, snapshot, rows, contract)
 

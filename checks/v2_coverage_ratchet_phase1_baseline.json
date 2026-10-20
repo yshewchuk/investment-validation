@@ -1,6 +1,6 @@
 {
   "schema_version": "phase1_coverage.v1.0",
-  "suite_version": "phase1_coverage_suite.v16",
+  "suite_version": "phase1_coverage_suite.v17",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_dashboard_board_filters_ops_root.py",
@@ -46,7 +46,7 @@
     "tests/test_v2_ops_cli_refresh_action.py",
     "tests/test_v2_ops_cli_whatif.py",
     "tests/test_v2_ops_computed_moves_nightly_wiring.py",
-    "tests/test_v2_ops_computed_moves_store.py",
+    "tests/v2/ops/test_v2_ops_computed_moves_store.py",
     "tests/test_v2_ops_contracts.py",
     "tests/test_v2_ops_coordinator_lease.py",
     "tests/test_v2_ops_critical_review.py",

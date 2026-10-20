@@ -181,11 +181,13 @@ _COVERAGE_RELOCATIONS = (
     ("tests/test_v2_data_reference_inputs.py", "tests/v2/data/test_v2_data_reference_inputs.py", (1, 2)),
     ("tests/test_checks_phase2_corpus_parity.py", "tests/v2/integration/test_checks_phase2_corpus_parity.py", (2,)),
     ("tests/test_v2_ops_legacy_workflows.py", "tests/v2/ops/test_v2_ops_legacy_workflows.py", (1,)),
+    ("tests/test_v2_ops_computed_moves_store.py",
+     "tests/v2/ops/test_v2_ops_computed_moves_store.py", (1,)),
 )
 
 
 @pytest.mark.parametrize("phase, expected_version", [
-    (1, "phase1_coverage_suite.v16"),
+    (1, "phase1_coverage_suite.v17"),
     (2, "phase2_coverage_suite:ace14ac200b652562d90dfee0537890e1b485cc16d28a6930b19eb307c6b0911"),
 ])
 def test_test_layout_moves_refresh_both_coverage_inventories(phase, expected_version):
