@@ -299,17 +299,21 @@ def test_supplied_target_bound_preserves_query_limits_without_lookup(tmp_path, m
 
 def test_v5_history_omissions_report_the_writers_reason(tmp_path):
     target = history_event("2024-06-20")
-    reasoned, nameless = history_event("2023-01-02"), history_event("2023-02-02")
-    conn, repository, snapshot = commit_history_inputs(tmp_path, [target, reasoned, nameless], [
-        outcome_move(reasoned, None, skipped=True, available_as_of_date=None,
+    orats, few_events, nameless = (history_event(day) for day in
+        ("2023-01-02", "2023-02-02", "2023-03-02"))
+    conn, repository, snapshot = commit_history_inputs(tmp_path, [target, orats, few_events, nameless], [
+        outcome_move(orats, None, skipped=True, available_as_of_date=None,
                      not_computed_reason="not_orats"),
+        outcome_move(few_events, None, skipped=True, available_as_of_date=None,
+                     not_computed_reason="ticker_too_few_events"),
         outcome_move(nameless, None, skipped=True, available_as_of_date=None),
         outcome_move(target, None)],
         contract=COMPUTED_MOVES_V5_CONTRACT, include_calendar=False)
     try:
         result = read_event_history(repository, snapshot, target)
         assert result["omitted_history"] == [
-            {"event_id": reasoned["event_id"], "reason": "not_orats"},
+            {"event_id": orats["event_id"], "reason": "not_orats"},
+            {"event_id": few_events["event_id"], "reason": "ticker_too_few_events"},
             {"event_id": nameless["event_id"], "reason": "skipped"}]
     finally:
         conn.close()

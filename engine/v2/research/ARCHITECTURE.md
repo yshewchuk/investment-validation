@@ -121,13 +121,16 @@ and magnitude readers (`event_history`, `magnitude_inputs`, `magnitude_history_s
 accept the `computed_moves.v4` or `computed_moves.v5` contract and refuse any other
 `CONTRACT_MISMATCH`; on v5 a row with a `not_computed_reason` other than `no_price_window`
 is `skipped` and carries no outcome, so it never counts as a scoreable event. The
-writer's reason is the only reason research reports: the history and training-label
-omission lists (`omitted_history`, `omitted_labels`) carry the row's `not_computed_reason`
-as the omission `reason` (v4 rows keep `skipped`), never a research-side re-derivation. The
-isolation guard is unchanged: every candidate still needs exactly one isolated fragment,
-and a candidate with no fragment refuses `HOLDOUT_ACCESS_DENIED`. `prediction_inputs`
-refuses a table that is neither contract with `CONTRACT_MISMATCH`, and a v5 skipped row with
-`EXPERIMENT_VARIANT_FAILED` naming the reason.
+writer's reason is the only reason research reports for a skipped row: the history and
+training-label omission lists (`omitted_history`, `omitted_labels`) carry the row's
+`not_computed_reason` as the omission `reason` (v4 rows, and v5 rows without a reason, keep
+`skipped`), never a research-side re-derivation. Non-skipped rows the readers omit for
+availability keep the reader's own `unavailable` / `not_available_before_fit` reasons. The
+isolation guard of the history and magnitude readers (`_plans`) is unchanged: every
+candidate still needs exactly one isolated fragment, and a candidate with no fragment
+refuses `HOLDOUT_ACCESS_DENIED`. `prediction_inputs` does not use that guard: it refuses a
+table whose contract is neither native contract with `CONTRACT_MISMATCH` before any target
+scan, and a v5 skipped row with `EXPERIMENT_VARIANT_FAILED` naming the reason.
 It returns the signed move, binary `positive_move` target, and
 `target_available_on` date. The date is required and later than the event;
 fold consumers must admit training labels only when available before their
@@ -140,6 +143,7 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 | Integrity or object failure during a table scan | Repository's typed refusal, such as `MANIFEST_CORRUPT` or `OBJECT_CORRUPT`; no partial returned frame. |
 | Missing table or malformed table contract | Repository's typed refusal; no partial returned frame. |
 | Invalid holdout context, unknown requested ID, excluded/ambiguous requested event, or empty explicit population (R5) | `HOLDOUT_ACCESS_DENIED` before target scans; no metrics or report. |
+| Well-formed `computed_moves` contract that is neither native v4 nor v5 | `CONTRACT_MISMATCH` before any target scan; no partial returned frame. |
 | Empty bulk canonical calendar | `POPULATION_COLLAPSED`; no empty success. |
 | Missing, skipped, non-finite target, non-date outcome key or invalid target availability (R4) | `EXPERIMENT_VARIANT_FAILED`; no partial returned frame. |
 | Cache, retry, transaction, partial write, replay | No cache or automatic retry; read-only, no writes; complete scans precede return; identical pinned inputs return identical rows (R6). |

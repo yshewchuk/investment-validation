@@ -298,15 +298,16 @@ def test_empty_bulk_calendar_is_not_a_success(tmp_path):
         conn.close()
 
 
-def test_v5_skipped_target_refuses_naming_the_writers_reason(tmp_path):
+@pytest.mark.parametrize("reason", ["not_orats", "no_session"])
+def test_v5_skipped_target_refuses_naming_the_writers_reason(tmp_path, reason):
     event = prediction_event("2024-05-02")
     conn, repository, snapshot = commit_prediction_inputs(tmp_path, [event], [
         outcome_move(event, None, skipped=True, available_as_of_date=None,
-                     not_computed_reason="not_orats")], contract=COMPUTED_MOVES_V5_CONTRACT)
+                     not_computed_reason=reason)], contract=COMPUTED_MOVES_V5_CONTRACT)
     try:
         with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED") as refusal:
             _targets(repository, snapshot)
-        assert refusal.value.problem.message == "prediction target was not computed: not_orats"
+        assert refusal.value.problem.message == f"prediction target was not computed: {reason}"
     finally:
         conn.close()
 
@@ -331,6 +332,26 @@ def test_foreign_computed_moves_contract_refuses_before_any_target_scan(tmp_path
     event = prediction_event("2024-05-02")
     conn, repository, snapshot = commit_prediction_inputs(tmp_path, [event], [
         outcome_move(event, None, skipped=True, available_as_of_date=None)], contract=foreign)
+    try:
+        with pytest.raises(DataError, match="CONTRACT_MISMATCH") as refusal:
+            _targets(repository, snapshot)
+        assert refusal.value.problem.message == "prediction targets require native computed moves"
+        assert all(name == "earnings_events" for name, _ in repository.scans)
+    finally:
+        conn.close()
+
+
+def test_revision_under_the_native_v5_contract_id_refuses_before_any_target_scan(tmp_path):
+    from engine.v2.data.manifests import table_contract_hash
+    # Same contract_id as the native v5, revision 5.0.1: a reader equality check
+    # against the pinned definitions must refuse it, not the id alone. The fixture
+    # commits this definition as the only one under the id in a fresh catalog, so
+    # no changed-definition clash arises and the contract_id stays native.
+    revised = replace(COMPUTED_MOVES_V5_CONTRACT, semantic_version="5.0.1")
+    revised = replace(revised, definition_hash=table_contract_hash(revised))
+    event = prediction_event("2024-05-02")
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [event], [
+        outcome_move(event, None, skipped=True, available_as_of_date=None)], contract=revised)
     try:
         with pytest.raises(DataError, match="CONTRACT_MISMATCH") as refusal:
             _targets(repository, snapshot)
