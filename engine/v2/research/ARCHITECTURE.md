@@ -1,12 +1,7 @@
 # `engine/v2/research` — architecture
 
-Layer 7.0 in the root `/ARCHITECTURE.md` layer table (declared twice in
-`checks/layer_map.py`, at 6.0 and at 7.0; `package_of`'s dict keeps the last
-definition, so 7.0 is the enforced layer — see the root doc's own note on
-this disagreement). Not a row of the root doc's §4 owner table: added by
-Phase 6 slice 6/7 to resolve decision **UD-4** (2026-09-20 — "we can move
-[the research tools] to the v2 snapshots ... we need to get off of legacy
-either way"). Replaces the store-reaching halves of `tools/signal_screen.py`,
+Layer 7.0 in both `checks/layer_map.py` and the root `/ARCHITECTURE.md`
+layer table. Native snapshot-reading counterparts to `tools/signal_screen.py`,
 `tools/fill_quality.py`, `engine/data/pulls/polygon_fills.py`'s read path,
 `engine/replay.py` (over a committed snapshot) and `engine/build_trades.py`'s
 v2 write path. The legacy modules themselves are untouched and keep
@@ -187,23 +182,21 @@ labels_before, purpose="selection", event_ids=None)` reads signed relative IV30
 change from the exact current `iv_crush_targets` contract, including its definition
 hash (`iv_crush_targets.v2`, semantic version `2.0.0`). `preflight_iv_crush_targets(..., as_of_month, event_ids)` requires explicit
 selection participants (`CONTRACT_MISMATCH` when absent) and returns metadata-only planned-object evidence; it is
-not a capability, and the loader repeats admission. There is no production caller.
+not a capability, and the loader repeats admission. These offline library APIs
+do not publish sources, register experiments or participate in production entrypoints.
 
 | IV-crush boundary | Outcome |
 |---|---|
 | Snapshot/population | Shared canonical snapshot, holdout-union and ambiguity admission precedes targets; unsupported/final purposes or malformed holdout context refuse `HOLDOUT_ACCESS_DENIED`; a missing/malformed label cutoff refuses `CONTRACT_MISMATCH`. Bulk reads omit events on/after the explicit calendar-day label cutoff; explicit requests containing one refuse `CONTRACT_MISMATCH`. An empty eligible set refuses `POPULATION_COLLAPSED`. |
+| Public planner candidates | `plan_event_targets` requires ticker and naive midnight event_date columns. Only candidate shape/identity checks translate to `CONTRACT_MISMATCH` before repository access; every error raised while planning, including native `DataError` envelopes, propagates unchanged. |
 | Physical admission | Every candidate passes public `event_history.plan_event_targets` (metadata-only singleton admission for already admitted populations) before any target opens. Missing/mixed objects or unprovable exact ticker/date bounds refuse `HOLDOUT_ACCESS_DENIED`; nonmatching contract/hash refuses `CONTRACT_MISMATCH`. Every declared target object is capped at 1 MiB before any target opens (`RESULT_LIMIT_EXCEEDED`); bounded Repository scans also cap compressed and total uncompressed bytes. This resource ceiling accommodates singleton labels without authorizing arbitrary payloads. Computed-moves defaults remain unchanged. |
 | Stored label | Exactly one matching ticker/date/session, boolean false skip and null reason are required. Canonical anchors span 1–5 calendar days: AMC requires pre ≤ event < post; BMO requires pre < event ≤ post. Availability equals post plus one calendar day, follows the event and precedes the cutoff before numeric use. These checks do not prove source-row adjacency or exchange sessions. Skipped, late or malformed rows refuse the whole read with `EXPERIMENT_VARIANT_FAILED`; finite signed values, including zero and values below -100, remain unchanged. |
 | Provenance | Row identity includes target object; attributes bind full dataset/contract ref, cutoff, month/membership pins, purpose, future exclusions and ordered fragment/object/content hashes plus caller source_id/input_hash. Source marker/hash syntax is checked, not independently authenticated or recomputed from source quotes. Publication/finality remain unverified; availability is a modeled floor. |
+| Progress | Admission, planning and read stages report start/end/failure, elapsed time and peak RSS to stderr. Completed-item ticks report count/rate/ETA at most every 30 seconds. Aggregate decisions include bulk/explicit selection, admitted/holdout/ambiguity/cutoff counts and planned batch/byte limits; IV refusals include native codes/redacted reasons, never event identities or error details. Logging cannot change results, identities, errors or read authority. |
 | Effects/failures | No source-quote reads, target rebuilding, retries, persistent cache, writes, partial returns or experiment authority. Earlier admitted objects may decode availability before a late-label refusal. Native repository integrity/resource refusals propagate unchanged. |
 
 This consumer accepts only the exact definition, without grandfathering earlier hashes.
 `event_history.POPULATION_CONTEXT_COLUMNS` names the shared snapshot/holdout context.
-`plan_event_targets` requires a frame with ticker and naive midnight event_date columns;
-only the candidate shape and identity checks translate to `CONTRACT_MISMATCH`; any error raised while planning (native DataError envelopes or otherwise) propagates unchanged.
-IV admission, public planning and target reads emit stderr start/end/failure stages with
-elapsed time and peak RSS; completed candidate/read ticks include count, rate and ETA,
-at most every 30 seconds. Telemetry never enters row/identity data or grants read authority.
 No publisher, source-receipt validation, forecast recipe or model is supplied.
 
 `magnitude_inputs.forecast_cutoff(event_date, session, horizon, calendar)` is a
@@ -636,7 +629,7 @@ It does not authenticate arbitrary rehashed calendars as builder-derived.
 | Protected reads | The complete eligible singleton candidate union is preflighted before any outcome opens. Protected/ambiguous objects never open; admitted late labels may decode availability and be omitted before arithmetic. |
 | Build boundaries | Full candidate preflight completes before any outcome opens. Each admitted candidate outcome is decoded at most once per build; no cache persists across builds. Memory has no fixed byte cap; production scale is unmeasured. |
 | Catalog reads | The CLI opens its `Repository` with `pin_snapshots=True`, so each scan and bound reuses the pinned snapshot's cached table membership instead of re-decoding it from the catalog (decodes were quadratic in candidates). `fragment_records` and a table's first use still decode membership; `earnings_events` is still read once by fold planning and once by preflight. Output, receipts and identities are unchanged; the pin is per process and immutable-identity keyed. |
-| Progress | Long passes write progress to stderr only (stdout stays the JSON result): `progress.stage` logs start/end with elapsed seconds and peak RSS for the build's `history preflight`, `history prepare` and `history materialize` stages (a full-universe `load_population` logs only its end, and only when it took 5 s or more); `progress.Progress` logs `done/total` (counted after an item finishes), rate, ETA and peak RSS at most once per interval (default 30 s, and not before the configured item count), never per item, and nothing for passes shorter than the interval. The public helper is shared by package readers. Logging never changes results or errors. |
+| Progress | Long passes write progress to stderr only (stdout stays the JSON result): `progress.stage` logs start/end with elapsed seconds and peak RSS for the build's `history preflight`, `history prepare` and `history materialize` stages (a full-universe `load_population` logs only its end, and only when it took 5 s or more); `progress.Progress` logs `done/total` (counted after an item finishes), rate, ETA and peak RSS at most once per interval (default 30 s, and not before the configured item count), never per item, and nothing for passes shorter than the interval. `progress.decision` emits aggregate control decisions; opt-in `stage(report_refusals=True)` adds native DataError codes/redacted messages, without details. The public helper is shared by package readers. Logging never changes results or errors. |
 | Per-forecast features | Shared history arithmetic preserves availability and numeric-refusal order. Consumed objects, omissions and availability accompany all eleven columns. Exclusion rosters remain transient; persisted lineage omits `holdout_exclusions` and the stored reader refuses it. Empty `n_prior` is zero; other missing values are null with `on_missing=null`. No runtime imputation or production v4 aggregates. |
 | Output | Features-only `research_magnitude_history.v1` snapshot, separate from unchanged source. Three ordered horizons per event-isolated object; primary key `(event_id, context_id, horizon_sessions)`, physical context field and context partition. |
 | Publication | Inspected objects/manifests and success receipt commit atomically under an initially empty deterministic scope. Failure admits no snapshot; complete unreferenced objects remain for normal cleanup. |

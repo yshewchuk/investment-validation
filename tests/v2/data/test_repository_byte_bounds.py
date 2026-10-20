@@ -64,6 +64,28 @@ def problem(caught, code, message, category):
         code, message, category, False, None, {})
 
 
+def test_public_byte_bound_validator_is_exported():
+    namespace = {}
+    exec("from engine.v2.data.objects import *", namespace)
+    assert namespace["validate_max_object_bytes"] is objects.validate_max_object_bytes
+
+
+@pytest.mark.parametrize("cap", [None, True, False, 0, -1, 1.5, "1024"])
+def test_exported_byte_bound_validator_has_its_own_exact_refusal(cap):
+    namespace = {}
+    exec("from engine.v2.data.objects import *", namespace)
+    with pytest.raises(DataError) as caught:
+        namespace["validate_max_object_bytes"](cap)
+    problem(caught, "QUERY_NOT_BOUNDED", "max_object_bytes must be a positive integer", "validation")
+
+
+@pytest.mark.parametrize("cap", [1, 1024, 10**100])
+def test_exported_byte_bound_validator_accepts_positive_builtin_integers(cap):
+    namespace = {}
+    exec("from engine.v2.data.objects import *", namespace)
+    assert namespace["validate_max_object_bytes"](cap) is None
+
+
 @pytest.mark.parametrize("cap", [True, False, 0, -1, 1.5, "1024"])
 def test_invalid_bound_refuses_before_store_or_catalog_access(cap):
     with pytest.raises(DataError) as caught:

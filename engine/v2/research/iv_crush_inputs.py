@@ -15,9 +15,18 @@ MAX_TARGET_OBJECT_BYTES = 1 << 20
 
 def _candidates(repository, snapshot, as_of_month, purpose, event_ids, cutoff=None):
     """Complete population and singleton-object admission precedes any target read."""
-    population = experiment_population.load_population(repository, snapshot, as_of_month=as_of_month,
-                                 purpose=purpose, event_ids=event_ids)
+    progress.decision("IV population", "selection=" + ("bulk" if event_ids is None else "explicit"))
+    try:
+        population = experiment_population.load_population(repository, snapshot, as_of_month=as_of_month,
+                                     purpose=purpose, event_ids=event_ids)
+    except errors.DataError as exc:
+        if "holdout_exclusions" in exc.problem.details:
+            progress.decision("IV population", f"holdout_or_ambiguous_refused={len(exc.problem.details['holdout_exclusions'])}")
+        raise
     eligible = population.event_date.dt.date < cutoff if cutoff else population.event_id.notna()
+    progress.decision("IV population", f"admitted={len(population)}; "
+        f"holdout_or_ambiguous_excluded={len(population.attrs.get('holdout_exclusions', []))}; "
+        f"cutoff_excluded={int((~eligible).sum())}; cutoff={cutoff.isoformat() if cutoff else 'none (preflight)'}")
     if event_ids is not None and not eligible.all():
         raise errors.fail("CONTRACT_MISMATCH", "requested IV-crush events must precede label cutoff")
     rows = population[eligible].sort_values(["event_date", "event_id"]).reset_index(drop=True)
@@ -30,6 +39,8 @@ def _candidates(repository, snapshot, as_of_month, purpose, event_ids, cutoff=No
                                columns=tuple(column.name for column in contract.columns))
     if any(record.object_ref.byte_size > MAX_TARGET_OBJECT_BYTES for _, _, record in plans):
         raise errors.fail("RESULT_LIMIT_EXCEEDED", "IV-crush target object exceeds the 1 MiB byte bound")
+    progress.decision("IV targets", f"planned={len(plans)}; max_batch_rows={plans[0][1].max_batch_rows}; "
+                      f"max_object_bytes={MAX_TARGET_OBJECT_BYTES}")
     return rows, plans, sorted(population.loc[~eligible, "event_id"].tolist())
 
 
@@ -49,9 +60,9 @@ def _identity(rows, snapshot, purpose):
 
 def preflight_iv_crush_targets(repository, snapshot, *, as_of_month, event_ids):
     """Prove explicit selection participants without opening target payloads."""
-    if event_ids is None:
-        raise errors.fail("CONTRACT_MISMATCH", "IV-crush preflight requires explicit participants")
-    with progress.stage("IV target admission"):
+    with progress.stage("IV target admission", report_refusals=True):
+        if event_ids is None:
+            raise errors.fail("CONTRACT_MISMATCH", "IV-crush preflight requires explicit participants")
         rows, plans, _ = _candidates(repository, snapshot, as_of_month, "selection", event_ids)
     identity = {"schema_version": "research_iv_crush_preflight.v1",
         **_identity(rows, snapshot, "selection"), "event_ids": rows.event_id.tolist(),
@@ -108,15 +119,15 @@ def _value(row):
 def load_iv_crush_targets(repository, snapshot, *, as_of_month, labels_before,
                           purpose="selection", event_ids=None):
     """Read complete admitted signed labels; skips/late labels refuse, never impute."""
-    try:
-        cutoff = calendar_date(labels_before)
-    except (TypeError, ValueError, OverflowError):
-        raise errors.fail("CONTRACT_MISMATCH", "an explicit IV-crush label cutoff is required") from None
-    with progress.stage("IV target admission"):
+    with progress.stage("IV target admission", report_refusals=True):
+        try:
+            cutoff = calendar_date(labels_before)
+        except (TypeError, ValueError, OverflowError):
+            raise errors.fail("CONTRACT_MISMATCH", "an explicit IV-crush label cutoff is required") from None
         rows, plans, future = _candidates(repository, snapshot, as_of_month, purpose, event_ids, cutoff)
     targets, consumed = [], []
     reporter = progress.Progress("IV targets", len(plans))
-    with progress.stage("IV target reads"):
+    with progress.stage("IV target reads", report_refusals=True):
         for event, request, record in plans:
             decoded = [row for batch in repository.scan(request, table_name=IV_CRUSH_TABLE_NAME,
                                                         max_object_bytes=MAX_TARGET_OBJECT_BYTES)
