@@ -248,7 +248,7 @@ tests = [
     "tests/test_phase4_trace_verifier.py",
     "tests/test_v2_contracts_scoring.py",
     "tests/test_v2_data_contracts.py",
-    "tests/test_v2_data_tier4_coverage.py",
+    "tests/v2/data/test_tier4_coverage.py",
     "tests/test_v2_features_recipes.py",
     "tests/test_v2_models_inference.py",
     "tests/test_v2_models_releases.py",
@@ -445,7 +445,7 @@ tests = [
     "tests/v2/data/test_legacy_materialize_progress.py",
     "tests/v2/data/test_price_downloads.py",
     "tests/v2/data/test_v2_data_reference_inputs.py",
-    "tests/test_v2_data_tier4_coverage.py",
+    "tests/v2/data/test_tier4_coverage.py",
     "tests/v2/ops/test_v2_ops_price_history.py",
     "tests/v2/ops/test_v2_ops_tier4_coverage.py",
 ]

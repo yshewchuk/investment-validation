@@ -1,6 +1,6 @@
 {
   "schema_version": "phase2_coverage.v1.0",
-  "suite_version": "phase2_coverage_suite:ace14ac200b652562d90dfee0537890e1b485cc16d28a6930b19eb307c6b0911",
+  "suite_version": "phase2_coverage_suite:7ae743b96f5398e1a4cfbb1f88d6bf811af0ca4aaf785f3ece4b2f1d8431fd4d",
   "test_files": [
     "tests/v2/integration/test_checks_phase2_corpus_parity.py",
     "tests/test_checks_phase2_fault_matrix.py",
@@ -25,7 +25,7 @@
     "tests/v2/data/test_v2_data_reference_inputs.py",
     "tests/test_v2_data_repository.py",
     "tests/test_v2_data_roundtrip.py",
-    "tests/test_v2_data_tier4_coverage.py",
+    "tests/v2/data/test_tier4_coverage.py",
     "tests/test_v2_ops_decision_validation_order.py",
     "tests/test_v2_ops_fingerprints_code_assets.py",
     "tests/v2/ops/test_v2_ops_fingerprints_model_scan.py",
@@ -2221,75 +2221,75 @@
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_champion_producer_models_keeps_only_tier4_producers",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_champion_producer_models_keeps_only_tier4_producers",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-01-15-2026-01-10]",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-01-15-2026-01-10]",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-02-03-2026-01-28]",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-02-03-2026-01-28]",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-03-01-2026-03-01]",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-03-01-2026-03-01]",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2025-12-20-2026-01-05]",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2025-12-20-2026-01-05]",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_required_serving_triples_crosses_events_with_every_producer",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_required_serving_triples_crosses_events_with_every_producer",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_required_serving_triples_dedupes_repeated_event_as_of_pairs",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_required_serving_triples_dedupes_repeated_event_as_of_pairs",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_covered_triple_launches_clean",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_covered_triple_launches_clean",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_missing_reason_absent_when_nothing_is_pinned",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_missing_reason_absent_when_nothing_is_pinned",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_missing_reason_fold_mismatch_for_a_new_month_beyond_pinned_folds",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_missing_reason_fold_mismatch_for_a_new_month_beyond_pinned_folds",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_missing_reason_panel_mismatch_when_header_disagrees_with_filename",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_missing_reason_panel_mismatch_when_header_disagrees_with_filename",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_missing_reason_features_mismatch",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_missing_reason_features_mismatch",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_multiple_misses_are_all_listed",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_multiple_misses_are_all_listed",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_oversized_cache_file_is_never_unpickled",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_oversized_cache_file_is_never_unpickled",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_serving_header_accessor_returns_none_past_the_cap",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_serving_header_accessor_returns_none_past_the_cap",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_serving_header_accessor_returns_none_on_hash_mismatch",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_serving_header_accessor_returns_none_on_hash_mismatch",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_serving_header_accessor_returns_none_for_a_missing_file",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_serving_header_accessor_returns_none_for_a_missing_file",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_serving_header_accessor_reads_plain_fields_not_the_estimator",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_serving_header_accessor_reads_plain_fields_not_the_estimator",
       "outcome": "passed"
     },
     {
