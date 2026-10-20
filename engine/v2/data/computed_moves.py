@@ -344,16 +344,24 @@ def _collapse_and_order(events: pd.DataFrame) -> pd.DataFrame:
     return events
 
 
-def _classify(events: pd.DataFrame, sd, sc, *, min_scoreable: int) -> list[str | None]:
+def _classify(events: pd.DataFrame, sd, sc, *, min_scoreable: int,
+              prices_known: bool = True) -> list[str | None]:
     """The reason list of an ALREADY validated, ALREADY collapsed frame.
 
     A confirmed event no window brackets earns ``no_price_window`` HERE when the
     ticker still clears both bars, so the classification alone is that reason's
     source and no caller re-derives it from a built row.
+    ``prices_known=False`` is for a ticker the caller did not load prices for; it classifies ``ticker_too_few_events`` (and refuses CONTRACT_MISMATCH at or above ``min_scoreable`` confirmed events).
     """
     reasons = _event_reasons(events)
     if not len(reasons):
         return []
+    if not prices_known:
+        # The caller skipped the price load: only a ticker below the bar may do that.
+        if reasons.count(None) >= min_scoreable:
+            raise fail("CONTRACT_MISMATCH",
+                       "prices_known=False needs fewer than min_scoreable confirmed events")
+        return ["ticker_too_few_events"] * len(reasons)
     if not len(sd):
         return ["no_price_history"] * len(reasons)
     confirmed = computable = 0
@@ -373,7 +381,8 @@ def _classify(events: pd.DataFrame, sd, sc, *, min_scoreable: int) -> list[str |
 
 
 def classify_event_reasons(events: pd.DataFrame, sd, sc, *,
-                           min_scoreable: int = MIN_SCOREABLE) -> list[str | None]:
+                           min_scoreable: int = MIN_SCOREABLE,
+                           prices_known: bool = True) -> list[str | None]:
     """The ``not_computed_reason`` of every considered event of one ticker (issue #966).
 
     ``None`` means CONFIRMED (``src_orats`` and a session), the ticker clears both
@@ -388,14 +397,17 @@ def classify_event_reasons(events: pd.DataFrame, sd, sc, *,
     compute. Same-date collapse first, then strictly ascending dates or
     ``CONTRACT_MISMATCH``, exactly as :func:`build_event_rows`; ``[]`` only for an
     empty ``events``. Pure, no I/O and no clock, for the capture path to reuse.
+    ``prices_known=False`` marks a ticker whose prices were not loaded (below the bar), see `_classify`.
     """
     _validate_inputs(events, sd, sc, min_scoreable)
-    return _classify(_collapse_and_order(events), sd, sc, min_scoreable=min_scoreable)
+    return _classify(_collapse_and_order(events), sd, sc, min_scoreable=min_scoreable,
+                     prices_known=prices_known)
 
 
 def build_event_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFrame, *,
                      computed_at: str, source_hash: str, capture_id: str,
-                     min_scoreable: int = MIN_SCOREABLE) -> list[dict]:
+                     min_scoreable: int = MIN_SCOREABLE,
+                     prices_known: bool = True) -> list[dict]:
     """One ``computed_moves.v5`` row dict per considered event of ``events``.
 
     ``[]`` only for an empty ``events``; every non-empty list yields one row per DISTINCT
@@ -419,7 +431,7 @@ def build_event_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFr
     _validate_daily(daily)
     _require_daily_order(daily)
     events = _collapse_and_order(events)
-    reasons = _classify(events, sd, sc, min_scoreable=min_scoreable)
+    reasons = _classify(events, sd, sc, min_scoreable=min_scoreable, prices_known=prices_known)
     per_event = _event_reasons(events)
     ticker_reason = reasons[0] if reasons and reasons[0] in _TICKER_LEVEL else None
     computed: list[dict] = []

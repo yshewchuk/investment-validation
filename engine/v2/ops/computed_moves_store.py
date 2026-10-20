@@ -30,6 +30,7 @@ import hashlib
 import io
 import json
 import sqlite3
+import sys
 from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
@@ -42,8 +43,11 @@ import pyarrow.parquet as pq
 from engine.v2.contracts import ObjectRef, TableContractRef
 from engine.v2.data import catalog as data_catalog
 from engine.v2.data import manifests, objects, reference_catalog
-from engine.v2.data.computed_moves import MIN_SCOREABLE, build_rows
-from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_TABLE_NAME
+from engine.v2.data.computed_moves import MIN_SCOREABLE, build_event_rows
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_TABLE_NAME
+from engine.v2.data.computed_moves_table import (
+    COMPUTED_MOVES_V5_CONTRACT as COMPUTED_MOVES_CONTRACT,  # this store commits v5 only (#966)
+)
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
@@ -72,6 +76,7 @@ from engine.v2.ops.unit_receipts import (
 )
 
 __all__ = [
+    "below_bar_tickers",
     "computed_moves_units",
     "fetch_history",
     "run_computed_moves_refresh",
@@ -86,7 +91,8 @@ _EVENT_COLUMNS = ("ticker", "event_date", "session", "src_orats")
 _DAILY_COLUMNS = ("ticker", "date", "implied_move", "src_iv")
 FRAGMENT_COLUMNS = ("ticker", "event_date", "realized_move_pct", "available_as_of_date",
                     "implied_move_pct", "event_ordinal", "admitted", "mean_prior_or_implied",
-                    "n_prior_implied", "skipped", "computed_at", "source_hash", "capture_id")
+                    "n_prior_implied", "skipped", "computed_at", "source_hash", "capture_id",
+                    "not_computed_reason")
 
 _EMPTY_DAILY = pd.DataFrame(columns=["date", "implied_move", "src_iv"])
 
@@ -97,6 +103,7 @@ _ARROW_SCHEMA = pa.schema([
     ("admitted", pa.bool_()), ("mean_prior_or_implied", pa.float64()),
     ("n_prior_implied", pa.int64()), ("skipped", pa.bool_()),
     ("computed_at", pa.string()), ("source_hash", pa.string()), ("capture_id", pa.string()),
+    ("not_computed_reason", pa.string()),
 ])
 
 _CONTRACT_REF = TableContractRef(contract_id=COMPUTED_MOVES_CONTRACT.contract_id,
@@ -254,11 +261,13 @@ def _scan_frame(repository: Repository, snapshot, table_name: str, columns,
 
 
 def _scan_once(repository: Repository, snapshot, tickers=None,
-               held: RetainedRowCount | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+               held: RetainedRowCount | None = None,
+               with_daily: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
     """One scan of each source table, optionally narrowed to ``tickers``.
 
-    Returns the ORATS-confirmed ``earnings_events`` frame (``event_date``
-    parsed) and the ``daily_market`` frame, both sorted by key. Each frame
+    Returns EVERY ``earnings_events`` row (``event_date`` parsed; confirmed or
+    not, since v5 emits a row per considered event) and the ``daily_market``
+    frame (empty when ``with_daily`` is false), both sorted by key. Each frame
     arrives through the batch-aware :func:`_scan_frame` consumer, so no scan
     retains the whole selection's row dictionaries at once. With ``tickers``
     omitted the frames are the whole tables; the refresh passes one bounded
@@ -266,10 +275,11 @@ def _scan_once(repository: Repository, snapshot, tickers=None,
     """
     events = _scan_frame(repository, snapshot, "earnings_events", _EVENT_COLUMNS, tickers, held)
     if not events.empty:
-        events = events[events["src_orats"] & events["session"].notna()].copy()
+        events = events.copy()
         events["event_date"] = pd.to_datetime(events["event_date"])
         events = events.sort_values("event_date").reset_index(drop=True)
-    daily = _scan_frame(repository, snapshot, "daily_market", _DAILY_COLUMNS, tickers, held)
+    daily = (_scan_frame(repository, snapshot, "daily_market", _DAILY_COLUMNS, tickers, held)
+             if with_daily else pd.DataFrame())
     if not daily.empty:
         daily = daily.sort_values("date").reset_index(drop=True)
     return events, daily
@@ -321,17 +331,21 @@ class _TickerChunks:
     (``held.peak_rows`` is that total). A chunk is loaded on its first ticker's
     request and released (the charge returned) before the next one loads. One
     ticker alone above the bound is refused: nothing partial is built.
+    ``with_daily=False`` loads events only (the below-bar tickers, whose rows
+    carry no implied move).
     """
 
-    def __init__(self, repository: Repository, snapshot, order, stats: _SourceStats) -> None:
+    def __init__(self, repository: Repository, snapshot, order, stats: _SourceStats, *,
+                 with_daily: bool = True) -> None:
         self._repository, self._snapshot = repository, snapshot
+        self._with_daily = with_daily
         self.held = RetainedRowCount()
         budget = MAX_SCAN_ROWS - _lease_cap()
         self._chunks: list[list[str]] = []
         self._index: dict[str, int] = {}
         size = 0
         for ticker in order:
-            rows = stats.event_rows[ticker] + stats.daily_rows[ticker]
+            rows = stats.event_rows[ticker] + (stats.daily_rows[ticker] if with_daily else 0)
             if rows > budget:
                 raise fail("RESOURCE_LIMIT_EXCEEDED",
                            "computed moves source rows for one ticker exceed the retained-row guard",
@@ -353,7 +367,8 @@ class _TickerChunks:
             self._groups, self._loaded = ({}, {}), None
             self.held.discharge(self.held.live_rows)
             events, daily = _scan_once(self._repository, self._snapshot,
-                                       set(self._chunks[index]), self.held)
+                                       set(self._chunks[index]), self.held,
+                                       with_daily=self._with_daily)
             self._groups, self._loaded = (_group_by_ticker(events), _group_by_ticker(daily)), index
         return self._groups
 
@@ -404,7 +419,8 @@ def target_tickers_from_snapshot(repository: Repository, parent_snapshot_id: str
 
     Same selection as ``engine.data.pulls.computed_moves.target_tickers``:
     tickers with at least ``MIN_SCOREABLE`` past ORATS-confirmed sessioned
-    events AND at least one ``daily_market`` row. ``oquants_tickers`` is the
+    events (a ticker with no ``daily_market`` row is still a target: its rows
+    carry a null implied move). ``oquants_tickers`` is the
     caller's optional replacement for the legacy extension-only oquants glob
     (the v2 catalog carries no oquants moves table); it only matters for
     ``all_scoreable=False``. ``events``/``daily`` are the caller's already
@@ -422,7 +438,7 @@ def target_tickers_from_snapshot(repository: Repository, parent_snapshot_id: str
 
     oq_tickers = {str(ticker) for ticker in oquants_tickers}
     pool = scoreable if all_scoreable else (scoreable - oq_tickers)
-    targets = sorted(pool & dm_tickers)
+    targets = sorted(pool)  # v5 (#966): a ticker without daily_market rows still gets rows
     report = {
         "mode": "all_scoreable" if all_scoreable else "extension_only",
         "scoreable_on_orats_calendar": len(scoreable),
@@ -437,6 +453,14 @@ def target_tickers_from_snapshot(repository: Repository, parent_snapshot_id: str
         report["printed_since"] = len(printed)
     report["targets"] = len(targets)
     return targets, report
+
+
+def below_bar_tickers(stats: _SourceStats) -> list[str]:
+    """Tickers with earnings events but fewer than ``MIN_SCOREABLE`` past confirmed events.
+
+    They are never fetched; the writer emits their rows with no prices loaded (v5, #966).
+    """
+    return sorted(ticker for ticker in stats.event_rows if stats.past[ticker] < MIN_SCOREABLE)
 
 
 def computed_moves_units(targets, *, as_of) -> tuple[RefreshUnit, ...]:
@@ -591,7 +615,7 @@ def _stale_partition_keys(parent) -> set:
 
 
 def _refuse_unrebuilt_stale_partitions(parent, rewritten, attempts) -> None:
-    """Rebuild over migration: a v3 (non-v4) partition is never carried or migrated.
+    """Rebuild over migration: a v3/v4 (non-v5) partition is never carried or migrated.
 
     A generation that would drop one it neither rewrites nor attempts (an attempted but
     unbuildable ticker is rebuilt away) refuses before any write.
@@ -600,7 +624,7 @@ def _refuse_unrebuilt_stale_partitions(parent, rewritten, attempts) -> None:
     attempted = {str(attempt["ticker"]) for attempt in attempts}
     if stale - rewritten - attempted:
         raise fail("VALIDATION_FAILED",
-                   "computed moves full rebuild required: the parent holds non-v4 "
+                   "computed moves full rebuild required: the parent holds non-v5 "
                    "partitions this run does not attempt")
 
 
@@ -727,9 +751,9 @@ def _noop_result(parameters, completed_ids) -> RefreshCallbackResult:
 
 def _no_fragment_result(conn, parameters, attempts, targets, document, parent, clock):
     """Persist fenced audit attempts without publishing a generation."""
-    if _stale_partition_keys(parent):  # a full rebuild must not leave a v3 head live
+    if _stale_partition_keys(parent):  # a full rebuild must not leave a v3/v4 head live
         raise fail("VALIDATION_FAILED",
-                   "computed moves full rebuild required: no v4 rows were produced for a "
+                   "computed moves full rebuild required: no v5 rows were produced for a "
                    "parent that still holds non-v4 partitions")
     with transaction(conn):
         _fence_check_for(document.get("attempt_id"), document.get("fence"), clock)(conn)
@@ -948,6 +972,24 @@ def _validate_job_identity(parameters) -> None:
     _validated_refresh_plan_hash(parameters.refresh_plan_hash)
 
 
+def _select_and_plan(conn, repository, parent, parameters, document, *, as_of, as_of_day: str,
+                     use_cached_receipts: bool):
+    """Counter-only source scan, target selection and the refresh plan: ``(stats, targets, plan)``."""
+    stats = _SourceStats()
+    _scan_stats(repository, parent.snapshot, stats, as_of_day)
+    targets, _selection = target_tickers_from_snapshot(
+        repository, parameters.parent_snapshot_id,
+        all_scoreable=document.get("all_scoreable", True),
+        since=document.get("since"), stats=stats, as_of=as_of)
+    units = computed_moves_units(targets, as_of=as_of)
+    plan = plan_refresh(
+        parent.snapshot, units,
+        cached_outcomes=_plan_cached_outcomes(conn, units, use_cached_receipts),
+        provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
+        expected_head_generation=int(document["expected_head_generation"]))
+    return stats, targets, plan
+
+
 def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
                                use_cached_receipts: bool = True) -> RefreshCallbackResult:
     """This job's own callback (spec s4b Change 3), called directly -- NOT
@@ -980,23 +1022,16 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
         store = ArtifactStore(document["objects_root"])
         repository = Repository(conn, store)
         parent = repository.resolve_full(parameters.parent_snapshot_id)
-        stats = _SourceStats()
-        _scan_stats(repository, parent.snapshot, stats, as_of_day)
-        targets, _selection = target_tickers_from_snapshot(
-            repository, parameters.parent_snapshot_id,
-            all_scoreable=document.get("all_scoreable", True),
-            since=document.get("since"), stats=stats, as_of=as_of)
-        units = computed_moves_units(targets, as_of=as_of)
-        plan = plan_refresh(
-            parent.snapshot, units,
-            cached_outcomes=_plan_cached_outcomes(conn, units, use_cached_receipts),
-            provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
-            expected_head_generation=int(document["expected_head_generation"]))
+        stats, targets, plan = _select_and_plan(
+            conn, repository, parent, parameters, document, as_of=as_of, as_of_day=as_of_day,
+            use_cached_receipts=use_cached_receipts)
         fragment_records, attempts = _capture_targets(
             conn, store, plan, fetcher, clock,
             inputs=_TickerChunks(repository, parent.snapshot,
                                  [unit.expected_keys[0] for unit in plan.units], stats),
             as_of_day=as_of_day)
+        _capture_below_bar(store, repository, parent.snapshot, stats, fragment_records,
+                           attempts, as_of_day=as_of_day, created_at=clock.now().isoformat())
         if not fragment_records:
             return _no_fragment_result(
                 conn, parameters, attempts, targets, document, parent, clock)
@@ -1104,18 +1139,61 @@ def _capture_id_for(unit, *, source_hash: str | None = None,
 
 
 def _build_rows_typed(*args, **kwargs):
-    """``build_rows`` with its DataError refusals surfaced as a typed OpsError.
+    """``build_event_rows`` with its DataError refusals surfaced as a typed OpsError.
 
     The CLI catches only OpsError and ops has no data codes, so the data code rides in the
     message and ``details["data_code"]`` (the ``snapshot_planning`` precedent). Only the
     builder is converted: object-store DataErrors from the fragment writer pass through.
     """
     try:
-        return build_rows(*args, **kwargs)
+        return build_event_rows(*args, **kwargs)
     except DataError as exc:
         raise fail("INPUT_CHANGED", "computed moves rows cannot be built from the pinned "
                    f"inputs: {exc.code}: {exc.problem.message}",
                    details={"data_code": exc.code}) from None
+
+
+def _capture_below_bar(store, repository, snapshot, stats: _SourceStats, fragment_records: dict,
+                       attempts: list, *, as_of_day: str, created_at: str) -> None:
+    """Rows for tickers below the fetch bar: no prices loaded, no fetch, no unit.
+
+    Every event of such a ticker is a ``ticker_too_few_events`` row (v5, #966), decided by
+    the writer's own classification (``prices_known=False``), never by a reader.
+    Adds the rows to ``fragment_records`` and the log rows to ``attempts``; the tickers are disjoint from the fetched targets (past < ``MIN_SCOREABLE``).
+    """
+    tickers = below_bar_tickers(stats)
+    inputs = _TickerChunks(repository, snapshot, tickers, stats, with_daily=False)
+    as_of_ts = pd.Timestamp(as_of_day)
+    source_hash = hashlib.sha256(b"").hexdigest()
+    no_dates, no_closes = np.array([], dtype="datetime64[ns]"), np.array([], dtype="float64")
+    definition_hash = COMPUTED_MOVES_CONTRACT.definition_hash
+    written = 0
+    for ticker in tickers:
+        events = inputs.events(ticker)
+        if events is None:
+            continue
+        events = events[events["event_date"] < as_of_ts]
+        if events.empty:
+            continue
+        identity = {"kind": "computed_moves_below_bar", "ticker": ticker, "as_of": as_of_day,
+                    "definition_hash": definition_hash,
+                    "events": [[stamp.strftime("%Y-%m-%d"), bool(orats),
+                                None if pd.isna(session) else str(session)]
+                               for stamp, session, orats in zip(
+                                   events["event_date"], events["session"], events["src_orats"])]}
+        capture_id = "capture_" + content_hash(identity).removeprefix("sha256:")[:32]
+        rows = _build_rows_typed(
+            ticker, events, no_dates, no_closes, _EMPTY_DAILY, computed_at=as_of_day,
+            source_hash=source_hash, capture_id=capture_id, prices_known=False)
+        request_hash = content_hash({"kind": "computed_moves_fragment", "ticker": ticker,
+                                     "capture_id": capture_id})
+        fragment_records[ticker] = _write_ticker_fragments(store, ticker, rows,
+                                                           request_hash=request_hash)
+        written += 1
+        attempts.append({"capture_id": capture_id, "ticker": ticker,
+                         "created_at": created_at, "outcome": "below_bar"})
+    print(f"[computed_moves] below-bar tickers: {written} of {len(tickers)} wrote rows",
+          file=sys.stderr)
 
 
 def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks,
@@ -1136,6 +1214,7 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
     content-addressed identity, must be a pure function of ``as_of`` and the
     fetched source, or a same-``as_of`` rerun with identical inputs commits a
     new generation instead of resolving to a true no-op.
+    A ticker whose close series is empty still emits one ``no_price_history`` row per event (v5, #966).
     """
     created_at = clock.now().isoformat()
     cached = cached_unit_payloads(conn, store, plan)
@@ -1145,13 +1224,13 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
         series, kind, fresh = _unit_history(conn, store, unit, fetcher, cached,
                                             created_at=created_at)
         kinds.append(kind)
-        if series is None:
+        if series is None and kind != "legitimate_empty":
             capture_id = _capture_id_for(unit)
             attempts.append({"capture_id": capture_id, "ticker": ticker,
-                             "created_at": created_at,
-                             "outcome": ("no_history" if kind == "legitimate_empty"
-                                         else kind)})
+                             "created_at": created_at, "outcome": kind})
             continue
+        if series is None:  # v5 (#966): a ticker with no closes still gets its event rows
+            series = (np.array([], dtype="datetime64[ns]"), np.array([], dtype="float64"))
         events = None  # drop the last ticker's frame before the next chunk can load
         events = inputs.events(ticker)
         if events is None:
@@ -1169,15 +1248,11 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
         as_of_ts = pd.Timestamp(as_of_day)
         keep = sd <= np.datetime64(as_of_ts)
         sd, sc = sd[keep], sc[keep]
-        if sd.size == 0:
-            capture_id = _capture_id_for(unit)
-            attempts.append({"capture_id": capture_id, "ticker": ticker,
-                             "created_at": created_at, "outcome": "too_few"})
-            continue
         source_hash = hashlib.sha256(np.ascontiguousarray(sc).tobytes()).hexdigest()
         capture_id = _capture_id_for(unit, source_hash=source_hash)
-        # Keep events before the first close: they count in event_ordinal (the ticker's full
-        # event history) and are stored as skipped rows, never dropped.
+        # Events keep every row (confirmed or not) strictly before as_of: they count in
+        # event_ordinal (the ticker's full event history) and are stored as skipped rows,
+        # never dropped.
         events = events[events["event_date"] < as_of_ts]
         rows = _build_rows_typed(
             ticker, events, sd, sc, inputs.daily(ticker),
@@ -1192,7 +1267,8 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
                                                            request_hash=request_hash)
         attempts.append({"capture_id": capture_id, "ticker": ticker,
                          "created_at": created_at,
-                         "outcome": "added" if fresh else "cached"})
+                         "outcome": ("no_history" if sd.size == 0
+                                     else "added" if fresh else "cached")})
     code = provider_failure_code(kinds)
     if code:
         raise fail(code, "computed moves provider response was not complete")

@@ -12,7 +12,7 @@ import pyarrow.parquet as pq
 
 from engine.v2.contracts.data import DataQuery, KeyPredicate, ObjectRef, TableContractRef
 from engine.v2.data import catalog, errors, manifests, objects, query
-from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.foundation import (
     SystemClock,
     canonical_json,
@@ -115,7 +115,7 @@ def _preflight_source(repository, snapshot, context):
     candidates = population[(days >= context["history_start"])
         & (days < population.ticker.map(ceilings).fillna(""))]
     contract = repository.table_contract(snapshot, "computed_moves")
-    if contract != COMPUTED_MOVES_CONTRACT:
+    if contract not in (COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT):
         raise errors.fail("CONTRACT_MISMATCH", "history requires native computed moves")
     plans = event_history._plans(repository, snapshot,
         candidates.sort_values(["event_date", "event_id"]), contract)

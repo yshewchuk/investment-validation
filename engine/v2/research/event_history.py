@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from engine.v2.data import errors
 from engine.v2.data import query as query_planner
-from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.features.panel_math import history_features
 from engine.v2.foundation import content_hash
 from engine.v2.foundation.experiment_holdouts import calendar_date
@@ -186,7 +186,7 @@ def load_event_history(repository, snapshot, *, event_id, as_of_month,
         & (population.event_date.dt.date < min(event_day, decision))]
     candidates = candidates.sort_values(["event_date", "event_id"])
     contract = repository.table_contract(snapshot, "computed_moves")
-    if contract != COMPUTED_MOVES_CONTRACT:
+    if contract not in (COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT):
         raise errors.fail("CONTRACT_MISMATCH", "history requires the native computed-moves contract")
     plans = _plans(repository, snapshot, candidates, contract)
 

@@ -456,7 +456,7 @@ partitions). In a v5 dataset version the builder, not a reader, decides which ev
 computed moves omits and records that decision on the event's own row, so every
 considered event has exactly one single-row fragment and the research isolation guard
 is unchanged: a candidate with no fragment is still a refusal. Nothing is written to
-`earnings_events`. The ops store's committed contract is documented in the ops doc.
+`earnings_events`. The ops store commits `computed_moves.v5` (ops doc); v4 is readable but no longer written.
 - New column `not_computed_reason` string nullable. Null exactly when the row is a
   computed outcome (`skipped` false). Non-null exactly when `skipped` is true and
   `realized_move_pct` and `available_as_of_date` are null. Closed set:
@@ -465,7 +465,10 @@ is unchanged: a candidate with no fragment is still a refusal. Nothing is writte
   a P→Q gap over `MAX_GAP_CALENDAR_DAYS`), `no_price_history` (the ticker's close
   series is empty), `ticker_too_few_events` (fewer than `MIN_SCOREABLE`
   past ORATS-confirmed sessioned events, or fewer than `ADMISSION_EVENTS` computable
-  ones). Ticker-level reasons apply to every event of that ticker.
+  ones). Ticker-level reasons apply to every event of that ticker. A caller that skips
+  loading prices for a ticker below `MIN_SCOREABLE` passes `prices_known=False`: the
+  ticker classifies `ticker_too_few_events` (never `no_price_history`), and the builder
+  refuses `CONTRACT_MISMATCH` at or above `MIN_SCOREABLE` confirmed events.
 - Considered events: every `earnings_events` row of a ticker dated before `as_of`.
   The v4 omissions (non-ORATS event, ticker below the bars, ticker without prices)
   become rows; the whole-ticker empty return is gone.
