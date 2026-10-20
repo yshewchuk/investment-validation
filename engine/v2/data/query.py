@@ -59,6 +59,7 @@ __all__ = [
     "arrow_type_for",
     "compile_batch_matcher",
     "compile_row_matcher",
+    "decode_predicates",
     "fragment_key_bounds",
     "fragment_may_match",
     "null_array_for",
@@ -181,7 +182,7 @@ def plan_scan_population(contract: TableContract, records, *,
     is metadata planning, not a scan, which still refuses unbounded queries
     in ``documents._check_data_query``. Error messages carry no path or row
     value (guide §7.2 redaction)."""
-    predicates = _decoded_predicates(key_filter)
+    predicates = decode_predicates(key_filter)
     interval = _decoded_interval(time_interval)
     for predicate in predicates:
         _check_predicate_column(contract, predicate)
@@ -201,7 +202,8 @@ def plan_scan_population(contract: TableContract, records, *,
     return ScanPopulation(records=surviving, row_count=row_count)
 
 
-def _decoded_predicates(key_filter) -> tuple[KeyPredicate, ...]:
+def decode_predicates(key_filter) -> tuple[KeyPredicate, ...]:
+    """Shared strict predicate decoding for planning and indexed selection."""
     if not isinstance(key_filter, (list, tuple)):
         raise fail("QUERY_NOT_BOUNDED", "key_filter must be a list or tuple of predicates")
     decoded = []
