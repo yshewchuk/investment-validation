@@ -1,5 +1,6 @@
 """Shard cut, manifest binding, verified reader and inventory coverage."""
 import json
+import math
 from contextlib import contextmanager
 
 import pytest
@@ -166,6 +167,17 @@ def test_round_trip_order_for_zero_one_and_many_rows(tmp_path, monkeypatch):
     assert recovered == list(shards.iter_section(store, "features", written, key))
 
 
+def test_reader_decodes_nonfinite_feature_values(tmp_path):
+    store = ArtifactStore(tmp_path / "store")
+    batch = [{"event_id": "E000", "horizon_sessions": 1, "value": float("nan")},
+             {"event_id": "E001", "horizon_sessions": 1, "value": float("inf")}]
+    written = shards.write_section(store, "features", batch, key)
+    recovered = list(shards.iter_section(store, "features", written, key))
+    assert [item["event_id"] for item in recovered] == ["E000", "E001"]
+    assert math.isnan(recovered[0]["value"])
+    assert recovered[1]["value"] == float("inf")
+
+
 def test_oversized_row_refuses_without_publishing(tmp_path, monkeypatch):
     store = ArtifactStore(tmp_path / "store")
     published = counted_publisher(monkeypatch)
@@ -222,6 +234,29 @@ def test_verify_manifest_shard_budget(monkeypatch):
                 "sections": {"features": {"row_count": 3, "shards": [shard, shard, shard]}}}
     with refusal("EXPERIMENT_IDENTITY_CONFLICT", False):
         shards.verify_manifest(manifest, shards.manifest_id(manifest))
+
+
+def _two_shard_section(store, section):
+    first = shards.write_section(store, section, [row("E000"), row("E001")], key)
+    second = shards.write_section(store, section, [row("E002"), row("E003")], key)
+    return {"row_count": 4, "shards": first["shards"] + second["shards"]}
+
+
+def test_verify_manifest_cross_section_shard_total(tmp_path, monkeypatch):
+    monkeypatch.setattr(shards, "MAX_SHARDS", 8192)
+    store = ArtifactStore(tmp_path / "store")
+    features = _two_shard_section(store, "features")
+    training = _two_shard_section(store, "training")
+    assert [len(features["shards"]), len(training["shards"])] == [2, 2]
+    manifest = {"schema_version": shards.MANIFEST_SCHEMA, "inline": {},
+                "sections": {"features": features, "training": training}}
+    expected_id = shards.manifest_id(manifest)
+    monkeypatch.setattr(shards, "MAX_SHARDS", 2)
+    with pytest.raises(OpsError) as caught:
+        shards.verify_manifest(manifest, expected_id)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.retryable is False
+    assert "shard limit" in caught.value.problem.message
 
 
 def test_verify_manifest_section_count_binding(tmp_path):
@@ -509,10 +544,28 @@ def test_features_key_returns_pair_and_refuses_missing_field():
     ({}, {"s": 5}),
     ({}, {"features": {"row_count": 1, "shards": [{"bad": 1}]}}),
     ({}, {"features": {"row_count": 1, "shards": "nope"}}),
-], ids=["inline_none", "sections_none", "section_not_dict", "shard_not_dict", "shards_not_list"])
+    ({"x": object()}, {}),
+], ids=["inline_none", "sections_none", "section_not_dict", "shard_not_dict", "shards_not_list",
+        "non_canonical_inline"])
 def test_build_manifest_invalid_inputs_are_invalid_spec(inline, sections):
     with refusal("INVALID_EXPERIMENT_SPEC", False):
         shards.build_manifest(inline, sections)
+
+
+def test_build_manifest_snapshots_caller_inputs(tmp_path):
+    store = ArtifactStore(tmp_path / "store")
+    entry = shards.write_section(store, "features", rows(2), key)
+    inline = {"stored_inputs_id": "sha256:x"}
+    sections = {"features": entry}
+    manifest = shards.build_manifest(inline, sections)
+    before = json.loads(canonical_json(manifest))
+    expected_id = shards.manifest_id(manifest)
+    inline["stored_inputs_id"] = "sha256:y"
+    sections["features"] = {}
+    entry["row_count"] = 99
+    entry["shards"][0]["rows"] = 99
+    assert manifest == before
+    assert shards.manifest_id(manifest) == expected_id
 
 
 class RaisingStore:

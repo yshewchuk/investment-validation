@@ -11,6 +11,7 @@ from engine.v2.foundation import (
     content_hash,
     from_document,
     to_document,
+    untag_nonfinite,
 )
 from engine.v2.foundation.artifacts import safe_relative_path
 from engine.v2.ops.errors import OpsError, fail
@@ -184,8 +185,10 @@ def build_manifest(inline, sections):
         raise fail("RESOURCE_LIMIT_EXCEEDED", "search cohort manifest exceeds its shard limit")
     manifest = {"schema_version": MANIFEST_SCHEMA, "inline": inline, "sections": sections}
     try:
+        json.dumps(manifest, allow_nan=False)
+        manifest = json.loads(canonical_json(manifest))
         _manifest_shape(manifest)
-    except OpsError:
+    except (OpsError, TypeError, ValueError, OverflowError, RecursionError):
         raise fail(_INVALID_SPEC, "search cohort manifest is invalid") from None
     return manifest
 
@@ -254,7 +257,7 @@ def _payload_rows(payload, section, expected):
         raise fail(_CONFLICT, "search cohort shard binding is invalid") from None
     if len(document["rows"]) != expected:
         raise fail(_CONFLICT, "search cohort shard binding is invalid")
-    return document["rows"]
+    return untag_nonfinite(document["rows"])
 
 
 def _verified_keys(rows, key, first, last):
