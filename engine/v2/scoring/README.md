@@ -239,12 +239,6 @@ the comparator, and assert it names **this package's stage** and that field
 path — not that "a row is red". A check that has never failed is not known to
 work.
 
-Frozen driver-residual lookup checks the requested causal key and optional hash
-pin on every call. Only the exact same deeply immutable object reuses converted arrays;
-a strong reference prevents identity reuse. Distinct objects never share cached
-conversions, even if their declared hashes match. Direct mutable inputs are
-converted on every call, without retention. No new payload-hash admission is added. Arrays have immutable bytes
-backing. The process-local FIFO retains at most four entries and 16 MiB of numeric
-buffer bytes, not total RSS (retained source objects and Python metadata are extra).
-A lock serializes lookup/accounting/eviction; conversion stays outside it.
-Sampling order and legacy scoring are unchanged.
+The frozen driver-residual array cache contract lives in `ARCHITECTURE.md`
+(Failure semantics); its tests are
+`tests/v2/scoring/test_driver_residual_array_cache.py`.
