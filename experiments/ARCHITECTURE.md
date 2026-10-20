@@ -790,7 +790,3 @@ Each invocation revalidates bindings/evidence; there is no cross-call admission 
 | CLI typed `OpsError`/`DataError`; unexpected builtin failure | Preserve the complete typed `Problem` in one refusal document, exit 2; unexpected builtin errors propagate. An opened connection closes in either case. |
 | Output exceeds the byte budget or output staging fails with an artifact, filesystem or SQLite error | Report bytes are discarded; only the refusal document reaches stdout, emitting `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Other staging errors are unexpected builtin failures and propagate. Prior journal commits remain. |
 | Stdout write or flush failure | The original stream error propagates with no retry and no second document; downstream may have received a prefix, and stdout remains caller-owned. |
-
-Native inner recording normalizes each successful forecast submission once within
-the recording call, reusing that local value for its completion digest and publication.
-This adds no cross-call cache: fresh reads, validation order and receipt verification remain unchanged.

@@ -724,6 +724,7 @@ outside it. Sampling order and legacy scoring are independent of cache state.
 | Condition | Outcome |
 | --- | --- |
 | Missing/wrong kind, causal key or requested hash pin | `MODEL_NOT_READY` before cache lookup on every call. |
+| Valid artifact whose selected residual pool is empty | `MISSING_MODEL_RESIDUALS`; no pool is returned. |
 | Distinct direct objects with equal declared hashes and different contents | Convert each object's own contents. |
 | Same retained deeply immutable object | Reuse its immutable numeric buffers after the per-call identity checks. |
 | Valid miss fitting both caps | Convert once; retain the object and buffers, evicting oldest entries until both caps hold. |
