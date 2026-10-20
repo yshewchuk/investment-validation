@@ -610,7 +610,9 @@ def test_selected_source_missing_entry_is_no_history_not_cached(tmp_path, monkey
         "SELECT outcome, capture_id FROM data_computed_moves_captures WHERE ticker = ?",
         ("AAAA",)).fetchone()
     assert row["outcome"] == "no_history"
-    assert row["capture_id"] == _capture_id_for(_unit("AAAA", _AS_OF))
+    assert row["capture_id"].startswith("capture_")
+    # the id now also folds in the considered events/daily inputs, so it differs from the bare unit id
+    assert row["capture_id"] != _capture_id_for(_unit("AAAA", _AS_OF))
     current = _head_row(conn)
     assert current["snapshot_id"] != head["snapshot_id"]  # the no_price_history rows were committed
 
@@ -2104,12 +2106,12 @@ def test__scan_rows_discharges_the_creation_charge_of_an_edited_leased_batch(tmp
 def test__scan_once_returns_every_event_confirmed_or_not(tmp_path,
                                                          monkeypatch):
     """Slice 2 changed HOW rows arrive, not which rows are usable: the wired
-    ``_scan_once`` must still apply the existing availability filter
-    (``src_orats`` confirmed AND ``session`` present). One pin, three
-    synthetic events: (a) a confirmed ORATS row with a session, (b) a row with
-    ``src_orats=False``, and (c) a confirmed row with ``session=None`` -- only
-    (a) may appear in the returned events frame. The committed-empty
-    ``daily_market`` table is the established fixture shape.
+    ``_scan_once`` returns every event row, confirmed or not (v5 considers
+    all of them). One pin, three synthetic events: (a) a confirmed ORATS row
+    with a session, (b) a row with ``src_orats=False``, and (c) a confirmed
+    row with ``session=None`` -- all three appear in the returned events
+    frame. The committed-empty ``daily_market`` table is the established
+    fixture shape.
 
     Cap wiring on the SAME production path: ``MAX_SCAN_ROWS`` is lowered to
     two, BELOW the three-row population, and every ``RetainedRowCount`` the

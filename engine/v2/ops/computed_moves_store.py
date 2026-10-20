@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import resource
 import sqlite3
 import sys
 import time
@@ -1110,7 +1111,24 @@ def _unit_history(conn, store, unit, fetcher, cached, *, created_at):
     return series, kind, fresh
 
 
-def _capture_id_for(unit, *, source_hash: str | None = None,
+def _inputs_hash(events: pd.DataFrame, daily: pd.DataFrame) -> str:
+    """Hash of the considered events and daily_market inputs that shape one ticker's rows.
+
+    Folded into the capture id so a corrected or added event (or implied move) at the
+    same ``as_of`` and closes never reuses an earlier capture id for different rows.
+    """
+    event_part = [[stamp.strftime("%Y-%m-%d"), bool(orats),
+                   None if pd.isna(session) else str(session)]
+                  for stamp, session, orats in zip(
+                      events["event_date"], events["session"], events["src_orats"])]
+    daily_part = ""
+    if len(daily):
+        daily_part = hashlib.sha256(pd.util.hash_pandas_object(
+            daily[["date", "implied_move", "src_iv"]], index=False).to_numpy().tobytes()).hexdigest()
+    return content_hash({"events": event_part, "daily": daily_part})
+
+
+def _capture_id_for(unit, *, source_hash: str | None = None, inputs_hash: str | None = None,
                     definition_hash: str = COMPUTED_MOVES_CONTRACT.definition_hash) -> str:
     """The stable capture identity for one refresh unit's ACTUAL content.
 
@@ -1133,10 +1151,13 @@ def _capture_id_for(unit, *, source_hash: str | None = None,
     or a same-session no-op replay -- must still resolve to the identity
     ``_insert_captures`` already logged, or its dedup-by-``capture_id`` check
     never dedups anything.
+    ``inputs_hash`` (the considered events and daily inputs, see ``_inputs_hash``) is folded in when rows were built.
     """
     payload = {"request_id": unit.request_id, "contract_definition_hash": definition_hash}
     if source_hash is not None:
         payload["source_hash"] = source_hash
+    if inputs_hash is not None:
+        payload["inputs_hash"] = inputs_hash
     return "capture_" + content_hash(payload).removeprefix("sha256:")[:32]
 
 
@@ -1172,12 +1193,18 @@ def _capture_below_bar(store, repository, snapshot, stats: _SourceStats, fragmen
     source_hash = hashlib.sha256(b"").hexdigest()
     no_dates, no_closes = np.array([], dtype="datetime64[ns]"), np.array([], dtype="float64")
     definition_hash = COMPUTED_MOVES_CONTRACT.definition_hash
-    written = 0
+    written = done = 0
     for ticker in tickers:
+        done += 1
         if time.monotonic() - last_log >= 30:  # bounded cadence, never per ticker
             last_log = time.monotonic()
-            print(f"[computed_moves] below-bar {written}/{len(tickers)} tickers, "
-                  f"{time.monotonic() - started:.0f}s", file=sys.stderr)
+            elapsed = last_log - started
+            rate = (done - 1) / elapsed if elapsed else 0.0
+            eta = (len(tickers) - done + 1) / rate if rate else 0.0
+            rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            print(f"[computed_moves] below-bar {done - 1}/{len(tickers)} tickers, "
+                  f"{rate:.1f}/s, ETA {eta:.0f}s, {elapsed:.0f}s elapsed, RSS {rss_mb:.0f}M",
+                  file=sys.stderr)
         events = inputs.events(ticker)
         if events is None:
             continue
@@ -1186,10 +1213,7 @@ def _capture_below_bar(store, repository, snapshot, stats: _SourceStats, fragmen
             continue
         identity = {"kind": "computed_moves_below_bar", "ticker": ticker, "as_of": as_of_day,
                     "definition_hash": definition_hash,
-                    "events": [[stamp.strftime("%Y-%m-%d"), bool(orats),
-                                None if pd.isna(session) else str(session)]
-                               for stamp, session, orats in zip(
-                                   events["event_date"], events["session"], events["src_orats"])]}
+                    "inputs": _inputs_hash(events, _EMPTY_DAILY)}
         capture_id = "capture_" + content_hash(identity).removeprefix("sha256:")[:32]
         rows = _build_rows_typed(
             ticker, events, no_dates, no_closes, _EMPTY_DAILY, computed_at=as_of_day,
@@ -1259,11 +1283,13 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
         keep = sd <= np.datetime64(as_of_ts)
         sd, sc = sd[keep], sc[keep]
         source_hash = hashlib.sha256(np.ascontiguousarray(sc).tobytes()).hexdigest()
-        capture_id = _capture_id_for(unit, source_hash=source_hash if sd.size else None)
         # Events keep every row (confirmed or not) strictly before as_of: they count in
         # event_ordinal (the ticker's full event history) and are stored as skipped rows,
         # never dropped.
         events = events[events["event_date"] < as_of_ts]
+        capture_id = _capture_id_for(
+            unit, source_hash=source_hash if sd.size else None,
+            inputs_hash=_inputs_hash(events, inputs.daily(ticker)))
         rows = _build_rows_typed(
             ticker, events, sd, sc, inputs.daily(ticker),
             computed_at=as_of_day, source_hash=source_hash, capture_id=capture_id,

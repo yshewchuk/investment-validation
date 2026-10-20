@@ -108,17 +108,31 @@ def test_prices_known_false_classifies_ticker_too_few_events_without_prices():
         considered, no_dates, no_closes, prices_known=False) == ["ticker_too_few_events"] * 3
 
 
-def test_prices_known_false_refuses_a_ticker_at_or_above_the_bar():
+@pytest.mark.parametrize("entry", ["build", "classify"])
+def test_prices_known_false_refuses_a_ticker_at_or_above_the_bar(entry):
+    no_dates, no_closes = np.array([], dtype="datetime64[ns]"), np.array([])
+    considered = _events(*_CONFIRMED)  # 16 confirmed events clear MIN_SCOREABLE
+    def call():
+        if entry == "build":
+            return _build(considered, sd=no_dates, sc=no_closes, prices_known=False)
+        return classify_event_reasons(considered, no_dates, no_closes, prices_known=False)
     with pytest.raises(DataError) as error:
-        _build(_events(*_CONFIRMED), sd=np.array([], dtype="datetime64[ns]"),
-               sc=np.array([]), prices_known=False)  # 16 confirmed events clear MIN_SCOREABLE
+        call()
     assert error.value.code == "CONTRACT_MISMATCH"
+    assert "fewer than min_scoreable confirmed events" in error.value.problem.message
 
 
-def test_prices_known_must_be_a_bool():
+@pytest.mark.parametrize("entry", ["build", "classify"])
+def test_prices_known_must_be_a_bool(entry):
+    considered = _events(*_CONFIRMED[:3])
+    def call():
+        if entry == "build":
+            return _build(considered, prices_known="no")
+        return classify_event_reasons(considered, _SD, _SC, prices_known="no")
     with pytest.raises(DataError) as error:
-        _build(_events(*_CONFIRMED[:3]), prices_known="no")
+        call()
     assert error.value.code == "CONTRACT_MISMATCH"
+    assert "prices_known must be a bool" in error.value.problem.message
 
 
 def test_phantom_forward_claim_is_not_orats_and_leaves_neighbours_unchanged():

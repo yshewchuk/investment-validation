@@ -449,8 +449,8 @@ partition, or produces no v4 rows at all; v3 records are never carried.
 imports `event_history` from this same package (no new cross-component dependency).
 
 **`computed_moves.v5` — one row per considered event, with a reason (issue #966).**
-Status: v5 is defined but not yet produced. Capture still commits `computed_moves.v4`; no
-production path calls `build_event_rows` / `classify_event_reasons` yet.
+Status: the ops capture (`run_computed_moves_refresh`) commits `computed_moves.v5` through
+`build_event_rows`; v4 is no longer written and survives only as a readable contract.
 Contract `computed_moves.v5` / `5.0.0` (`COMPUTED_MOVES_V5_CONTRACT`) and the pure
 `build_event_rows` / `classify_event_reasons` sit beside v4, which stays pinned and
 readable (no migration, dual read or backfill; the standard capture rewrites
