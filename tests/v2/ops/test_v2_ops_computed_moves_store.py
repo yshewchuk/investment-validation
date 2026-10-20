@@ -541,13 +541,13 @@ def test_selected_source_fetcher_overrides_cached_catalog_receipt(tmp_path, monk
     _seed_catalog_receipt(conn, store, clock, "AAAA", cached_csv)
 
     captured = {}
-    real_build_rows = computed_moves_store.build_rows
+    real_build_rows = computed_moves_store.build_event_rows
 
     def _spy_build_rows(ticker, events, sd, sc, daily, **kwargs):
         captured["closes"] = np.array(sc)
         return real_build_rows(ticker, events, sd, sc, daily, **kwargs)
 
-    monkeypatch.setattr(computed_moves_store, "build_rows", _spy_build_rows)
+    monkeypatch.setattr(computed_moves_store, "build_event_rows", _spy_build_rows)
 
     root = tmp_path / "attempt"
     _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
@@ -831,7 +831,7 @@ def test_run_computed_moves_refresh_carries_reference_pins_and_lineage(tmp_path,
 
     Only target selection is stubbed to keep the fixture focused on one ticker.
     The parent catalog receipt is seeded with one reference pin; runner,
-    ``build_rows``, ``commit_snapshot`` and its reference callback are real.
+    ``build_event_rows``, ``commit_snapshot`` and its reference callback are real.
     """
     from engine.v2.data import reference_catalog
 
@@ -871,7 +871,7 @@ def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_aft
         tmp_path, monkeypatch):
     """Issue #99: a re-run of a past session fetches the ticker's FULL
     history at the run's real wall-clock time, which extends past ``as_of``.
-    Nothing may reach ``build_rows`` beyond ``as_of``: not the closes series,
+    Nothing may reach ``build_event_rows`` beyond ``as_of``: not the closes series,
     and not an event dated on/after it (which would be scored against real
     future closes and committed stamped ``computed_at = as_of``, leaking
     realized data).
@@ -882,7 +882,7 @@ def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_aft
     ``int(partition_key)`` raises before any scan). So this test proves
     committed content with a direct ``DataQuery``/``KeyPredicate`` scan below
     -- the same mechanism ``tests/test_v2_ops_price_history.py`` uses for its
-    own ticker-partitioned table -- plus a ``build_rows`` spy for what was
+    own ticker-partitioned table -- plus a ``build_event_rows`` spy for what was
     proposed to the row builder: no event at/after ``as_of``, a series
     truncated at ``as_of``, and the ordinary pre-``as_of`` event still
     computing a real (non-skipped) move. The capture log's
@@ -902,7 +902,7 @@ def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_aft
     head = _build_parent(conn, clock, store, events_rows=events_rows)
 
     captured: dict = {}
-    real_build_rows = computed_moves_store.build_rows
+    real_build_rows = computed_moves_store.build_event_rows
 
     def _spy_build_rows(ticker, events, sd, sc, daily, **kwargs):
         captured["event_dates"] = [str(ts.date()) for ts in events["event_date"]]
@@ -910,7 +910,7 @@ def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_aft
         captured["rows"] = real_build_rows(ticker, events, sd, sc, daily, **kwargs)
         return captured["rows"]
 
-    monkeypatch.setattr(computed_moves_store, "build_rows", _spy_build_rows)
+    monkeypatch.setattr(computed_moves_store, "build_event_rows", _spy_build_rows)
 
     root = tmp_path / "attempt"
     _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)

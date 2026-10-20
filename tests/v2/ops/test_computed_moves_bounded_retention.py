@@ -26,7 +26,7 @@ from engine.v2.ops.errors import OpsError
 from engine.v2.ops.pinned_partition_reader import RetainedRowCount
 from tests.data_scan_support import commit_tables, publish_and_inspect
 from tests.ops_support import catalog
-from tests.test_v2_ops_computed_moves_store import (
+from tests.v2.ops.test_v2_ops_computed_moves_store import (
     _DAILY, _DAILY_REF, _EVENTS, _EVENTS_REF, _event_row, _head_row, _parameters, _write_input)
 
 _AS_OF = "2024-09-16"
@@ -273,13 +273,13 @@ def _spy_live_frame_rows(monkeypatch) -> list[int]:
     measured with ``gc``, independent of the store's own live-row accounting."""
     peaks: list[int] = []
     baseline = _frames_now()
-    real = computed_moves_store.build_rows
+    real = computed_moves_store.build_event_rows
 
     def spy(*args, **kwargs):
         peaks.append(_frame_rows_since(baseline))
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(computed_moves_store, "build_rows", spy)
+    monkeypatch.setattr(computed_moves_store, "build_event_rows", spy)
     return peaks
 
 

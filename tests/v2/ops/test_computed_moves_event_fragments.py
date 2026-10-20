@@ -14,7 +14,7 @@ from engine.v2.foundation import ArtifactStore
 from engine.v2.ops import computed_moves_store as producer
 from tests.data_scan_support import contract_ref_for, publish_and_inspect
 from tests.ops_support import catalog
-from tests.test_v2_ops_computed_moves_store import (
+from tests.v2.ops.test_v2_ops_computed_moves_store import (
     _AS_OF,
     _EVENT_DAYS,
     _build_parent,
