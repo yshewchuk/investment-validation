@@ -32,11 +32,10 @@ Tier-4 coverage contract (#1047): the scorer serves each event at
 `min(event_fold, fold(decision_date))`, and `decision_date` is per
 (event, strategy), so a score window can reach the NEXT month's fold.
 `required_serving_triples` therefore requires, per (event, producer), every
-monthly fold from `serving_fold(event_date, as_of)` up to the event's own fold,
-not only the first. The lower bound still assumes a decision is not earlier
-than the session's month; a strategy with an earlier entry offset can pass it
-(follow-up issue). The native worker does not yet refuse to fit on a miss; the
-post-attempt materialization-root fingerprint check is the backstop.
+monthly fold from the earlier of `serving_fold(event_date, as_of)` and the
+month before the event (a strategy may decide before the session), up to the
+event's own fold. The post-attempt materialization-root fingerprint check
+remains a separate backstop.
 
 | Condition | Outcome |
 |---|---|

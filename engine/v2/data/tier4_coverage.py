@@ -76,9 +76,10 @@ def required_serving_triples(population, registry_models, panel_sha: str) -> fro
     (``Scorer._serving`` keys its cache on ``(fold, produces)``, and the fold
     itself does not depend on ``produces``), so the fold range is computed
     once per distinct pair and crossed with every producer model. The range
-    runs from the floor ``serving_fold(event_date, as_of)`` up to the event's
-    own fold, because the real decision date (per strategy) can fall in a
-    later month than ``as_of`` (an earlier one is #1053).
+    runs from the earlier of the floor ``serving_fold(event_date, as_of)``
+    and the month before the event, up to the event's own fold, because the
+    real decision date (per strategy) can fall in a later month than
+    ``as_of`` or up to a month before the event.
     """
     folds: dict[tuple, tuple[str, ...]] = {}
     triples = set()
@@ -87,11 +88,14 @@ def required_serving_triples(population, registry_models, panel_sha: str) -> fro
         months = folds.get(key)
         if months is None:
             # The scorer serves min(event_fold, fold(decision_date)); the
-            # per-strategy decision_date is unknown here, so require every
-            # month from the floor (as_of's fold) up to the event's own fold.
-            # Known gap (#1053): a strategy deciding before as_of's month.
-            lo = legacy_adapter.legacy_serving_fold(event_date, as_of)
+            # per-strategy decision_date is unknown here. A strategy can decide
+            # up to one month before its event (entry offsets) even when that is
+            # before the session, so require every month from the earlier of the
+            # floor (as_of's fold) and the month before the event, up to the
+            # event's own fold.
             hi = legacy_adapter.legacy_serving_fold(event_date, event_date)
+            lo = min(legacy_adapter.legacy_serving_fold(event_date, as_of),
+                     hi - pd.DateOffset(months=1))
             months = tuple(p.strftime("%Y%m") for p in pd.period_range(lo, hi, freq="M"))
             folds[key] = months
         for model in registry_models:

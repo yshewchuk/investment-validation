@@ -99,13 +99,17 @@ def _materialize_and_score(case, monkeypatch, *, registry_bytes, tier4_refs, key
 
 def test_covered_population_launches(case, monkeypatch):
     """A champion registered + its exact serving cache pinned and
-    materialized for the required fold -> the launch proceeds."""
+    materialized for the required folds (the event's and the month before)
+    -> the launch proceeds."""
     panel_sha = _panel_sha(case)
     cache = case.store.publish_bytes(
         _cache_bytes(tier3_snapshot=panel_sha), schema_ref="legacy_pinned_ref.v1")
     ref = lm.format_pinned_ref(f"{TIER4_SERVING_DIR}/size_{FOLD}_{panel_sha[:12]}.joblib", cache.content_hash)
+    prior = case.store.publish_bytes(
+        _cache_bytes(fold_start="2019-12-01", tier3_snapshot=panel_sha), schema_ref="legacy_pinned_ref.v1")
+    prior_ref = lm.format_pinned_ref(f"{TIER4_SERVING_DIR}/size_201912_{panel_sha[:12]}.joblib", prior.content_hash)
     stage = _materialize_and_score(case, monkeypatch, registry_bytes=_registry_bytes(),
-                                   tier4_refs=(ref,), key="cov")
+                                   tier4_refs=(ref, prior_ref), key="cov")
     assert case.run(stage) == "succeeded", case.failure(stage)
     (record,) = case.recorded()
     assert record["envelope"]["parameters"]["expected_ids"] == ["legacy_score"]
@@ -220,8 +224,41 @@ def test_walked_back_finality_session_requires_the_september_fold(case, monkeypa
                         "legacy_action.v1.0", deps=(mat,))
     assert case.run(stage) == "failed"
     failure = case.failure(stage)
-    assert "TIER4_CACHE_MISSING" in failure
+    assert '"code":"TIER4_CACHE_MISSING"' in failure
     assert "202609" in failure
+    assert case.recorded() == []
+
+
+def test_walked_back_finality_session_requires_the_event_month_fold(case, monkeypatch):
+    """Only the September cache pinned: the walked-back session resolves to 202609, but the event's own fold 202610 is still required (a resolved-fold-only check would pass), so the launch refuses."""
+    panel_sha = _panel_sha(case)
+    cache = case.store.publish_bytes(
+        _cache_bytes(fold_start="2026-09-01", tier3_snapshot=panel_sha), schema_ref="legacy_pinned_ref.v1")
+    tier4_ref = lm.format_pinned_ref(f"{TIER4_SERVING_DIR}/size_202609_{panel_sha[:12]}.joblib",
+                                     cache.content_hash)
+    request = _custom_request(case, registry_bytes=_registry_bytes(), tier4_refs=(tier4_ref,))
+    request_ref = case.publish(to_document(request), "legacy_materialization_request.v1.0")
+    mat = case.submit_materialize("mat-walkback3", request_ref=request_ref)
+    assert case.run(mat) == "succeeded", case.failure(mat)
+    case.install_stub(monkeypatch)
+
+    finality_doc = {"date": "2026-09-15", "is_final": True, "detail": "walked back for test"}
+    finality_ref = case.publish(finality_doc, "legacy_action.v1.0")
+    bindings = {"snapshot_ref.json": case.snapshot_ref.artifact_id,
+               "materialization_request.json": request_ref.artifact_id,
+               "materialization_manifest.json": mat + "#" + MANIFEST,
+               "finality.json": finality_ref.artifact_id}
+    parameters = {"expected_ids": ["legacy_score"], "session": "2026-10-01",
+                 "tickers": ["AAA", "BBB"], "year_start": 2020, "year_end": 2026,
+                 "expected_population": ["AAA|S1|2026-10-05"], "input_mode": "snapshot",
+                 "input_bindings": bindings}
+    refs = (case.snapshot_ref.artifact_id, request_ref.artifact_id, finality_ref.artifact_id)
+    stage = case.submit("legacy_score", parameters, refs, "score-walkback3", "legacy_score",
+                        "legacy_action.v1.0", deps=(mat,))
+    assert case.run(stage) == "failed"
+    failure = case.failure(stage)
+    assert '"code":"TIER4_CACHE_MISSING"' in failure
+    assert "202610" in failure
     assert case.recorded() == []
 
 

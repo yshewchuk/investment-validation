@@ -1,4 +1,4 @@
-"""#1047: the Tier-4 coverage requirement spans every fold the score window can reach."""
+"""#1047: the Tier-4 coverage requirement spans every fold the score window can reach, down to the month before the event."""
 from __future__ import annotations
 
 from engine.v2.data import tier4_coverage as tc
@@ -15,14 +15,20 @@ def test_next_month_event_requires_both_current_and_next_fold():
         (m["model_id"], fold, PANEL_SHA) for m in MODELS for fold in ("202610", "202611"))
 
 
-def test_same_month_event_requires_one_fold():
+def test_same_month_event_requires_previous_and_event_fold():
     required = tc.required_serving_triples([("2026-10-28", "2026-10-19")], MODELS[:1], PANEL_SHA)
-    assert required == frozenset({("opf_implied_t1_gbm", "202610", PANEL_SHA)})
+    assert required == frozenset(("opf_implied_t1_gbm", f, PANEL_SHA) for f in ("202609", "202610"))
 
 
-def test_event_before_as_of_requires_event_fold_only():
+def test_event_before_as_of_requires_month_before_and_event_fold():
     required = tc.required_serving_triples([("2026-09-20", "2026-10-19")], MODELS[:1], PANEL_SHA)
-    assert required == frozenset({("opf_implied_t1_gbm", "202609", PANEL_SHA)})
+    assert required == frozenset(("opf_implied_t1_gbm", f, PANEL_SHA) for f in ("202608", "202609"))
+
+
+def test_early_entry_strategy_event_early_in_session_month_requires_prior_fold():
+    # STR-RUNUP decides ~14 trading days before the event, before the session
+    required = tc.required_serving_triples([("2026-10-05", "2026-10-01")], MODELS[:1], PANEL_SHA)
+    assert required == frozenset(("opf_implied_t1_gbm", f, PANEL_SHA) for f in ("202609", "202610"))
 
 
 def test_event_two_months_out_requires_every_intermediate_fold():
