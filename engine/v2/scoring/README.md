@@ -238,3 +238,11 @@ A negative control here looks like: corrupt one field of a frozen record, run
 the comparator, and assert it names **this package's stage** and that field
 path — not that "a row is red". A check that has never failed is not known to
 work.
+
+Frozen driver-residual lookup checks the requested causal key and optional content
+hash on every call before reusing numeric conversions by admitted artifact hash.
+The process-local FIFO cache retains at most four entries and 16 MiB of numeric
+buffer bytes (not total RSS); oversized entries are converted but not retained.
+Arrays have immutable bytes backing. A lock serializes cache accounting/eviction;
+conversion stays outside the lock. This caches no reads or validation outcomes,
+changes no sampling order and does not affect legacy scoring.

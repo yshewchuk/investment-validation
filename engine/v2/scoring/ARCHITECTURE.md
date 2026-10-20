@@ -758,3 +758,11 @@ unlike `compatibility.py`.
 - **Layering.** Scoring (5.0) never imports ops (7.0) or serving (7.0);
   `nightly_source_bundle.py` follows that rule even where it costs a small
   duplicated validator (`validated_as_of`) rather than an upward import.
+
+Frozen driver-residual lookup checks the requested causal key and optional content
+hash on every call before reusing numeric conversions by admitted artifact hash.
+The process-local FIFO cache retains at most four entries and 16 MiB of numeric
+buffer bytes (not total RSS); oversized entries are converted but not retained.
+Arrays have immutable bytes backing. A lock serializes cache accounting/eviction;
+conversion stays outside the lock. This caches no reads or validation outcomes,
+changes no sampling order and does not affect legacy scoring.
