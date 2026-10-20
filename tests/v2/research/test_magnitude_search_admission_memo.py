@@ -2,12 +2,18 @@
 # ruff: noqa: F811
 import pytest
 
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import canonical_json, content_hash
 from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_trials as trials
-from tests.v2.research.magnitude_trial_support import trial_cases
+from tests.v2.research.magnitude_trial_support import trial_cases, trial_forecasts
 from tests.v2.research.test_magnitude_search_plan import source as base_source  # noqa: F401
-from tests.v2.research.test_magnitude_search_trials import _all, case  # noqa: F401
+from tests.v2.research.test_magnitude_search_trials import case  # noqa: F401
+
+
+def _all(case):
+    for args in trial_cases(case):
+        case.recorder.start(*args)
+        case.recorder.record(*args, forecasts=trial_forecasts(case, args, 7))
 
 
 def test_one_native_admission_per_cohort_across_all_trials(case, monkeypatch):
@@ -27,10 +33,27 @@ def test_one_native_admission_per_cohort_across_all_trials(case, monkeypatch):
 
 def test_memoised_slots_match_uncached_admission(case):
     _all(case)
-    for args in trial_cases(case):
-        key = trials.SearchTrials._trial(case.plan, *args)[0]
-        admitted = case.recorder._read("inputs:" + key)
-        assert admitted["inputs_id"] == content_hash(case.recorder._read("cohort:" + admitted["cohort"]))
+    for outer_year, inner_year in {(args[0], args[1]) for args in trial_cases(case)}:
+        inner = next(inner for outer in case.plan["folds"] if outer["outer"]["year"] == outer_year
+                     for inner in outer["inner"] if inner["year"] == inner_year)
+        cohort = content_hash([case.plan["plan_id"], outer_year, inner_year])
+        fresh = trials.admit_fold_inputs(case.source.repository, case.source.registration.document, inner,
+            history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "x"))
+        assert canonical_json(case.recorder._read("cohort:" + cohort)) == canonical_json(fresh)
+        key = trials.SearchTrials._trial(case.plan, outer_year, inner_year,
+                                         case.plan["candidates"][0]["candidate_id"])[0]
+        assert case.recorder._read("inputs:" + key)["inputs_id"] == content_hash(fresh)
+
+
+def test_start_returns_detached_inputs_copy(case):
+    args = trial_cases(case)[0]
+    second = (args[0], args[1], case.plan["candidates"][1]["candidate_id"])
+    started = case.recorder.start(*args)
+    cohort = content_hash([case.plan["plan_id"], args[0], args[1]])
+    started["inputs"]["features"].clear()
+    assert case.recorder._memo[cohort][0]["features"]
+    resumed = case.recorder.start(*second)
+    assert canonical_json(resumed["inputs"]) == canonical_json(case.recorder._memo[cohort][0])
 
 
 def test_failed_admission_is_not_memoised(case, monkeypatch):
@@ -55,3 +78,4 @@ def test_failed_admission_is_not_memoised(case, monkeypatch):
     admitted = case.recorder._cohort_inputs(cohort, inner)
     assert admitted == case.recorder._memo[cohort]
     assert admitted[1] == content_hash(admitted[0])
+    assert canonical_json(admitted[0]) == canonical_json(original(inner))

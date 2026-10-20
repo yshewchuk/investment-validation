@@ -1,4 +1,5 @@
 """Immutable search recording, bounded native inner fits and forecast-based selection."""
+import copy
 import json
 import sqlite3
 from pathlib import Path
@@ -136,7 +137,8 @@ class SearchTrials:
         inputs, inputs_id = self._cohort_inputs(cohort, inner)
         self._append("cohort:" + cohort, inputs)
         self._append("inputs:" + key, {"cohort": cohort, "inputs_id": inputs_id})
-        return {**started, "inputs": inputs}
+        # Callers may mutate their copy; the memo stays private.
+        return {**started, "inputs": copy.deepcopy(inputs)}
 
     def execute(self, outer_year, inner_year, candidate_id, *, limits):
         """Run one bounded native inner trial once, or verify its completed replay."""
