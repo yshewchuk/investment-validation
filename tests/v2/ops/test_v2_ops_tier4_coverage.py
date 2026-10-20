@@ -192,6 +192,39 @@ def test_walked_back_finality_session_moves_the_required_fold(case, monkeypatch)
     assert case.run(stage) == "succeeded", case.failure(stage)
 
 
+def test_walked_back_finality_session_requires_the_september_fold(case, monkeypatch):
+    """Only the October cache pinned: the walked-back session needs 202609, so the launch refuses (a requested-session-only check would pass)."""
+    panel_sha = _panel_sha(case)
+    cache_oct = case.store.publish_bytes(
+        _cache_bytes(fold_start="2026-10-01", tier3_snapshot=panel_sha), schema_ref="legacy_pinned_ref.v1")
+    tier4_ref_oct = lm.format_pinned_ref(f"{TIER4_SERVING_DIR}/size_202610_{panel_sha[:12]}.joblib",
+                                         cache_oct.content_hash)
+    request = _custom_request(case, registry_bytes=_registry_bytes(), tier4_refs=(tier4_ref_oct,))
+    request_ref = case.publish(to_document(request), "legacy_materialization_request.v1.0")
+    mat = case.submit_materialize("mat-walkback2", request_ref=request_ref)
+    assert case.run(mat) == "succeeded", case.failure(mat)
+    case.install_stub(monkeypatch)
+
+    finality_doc = {"date": "2026-09-15", "is_final": True, "detail": "walked back for test"}
+    finality_ref = case.publish(finality_doc, "legacy_action.v1.0")
+    bindings = {"snapshot_ref.json": case.snapshot_ref.artifact_id,
+               "materialization_request.json": request_ref.artifact_id,
+               "materialization_manifest.json": mat + "#" + MANIFEST,
+               "finality.json": finality_ref.artifact_id}
+    parameters = {"expected_ids": ["legacy_score"], "session": "2026-10-01",
+                 "tickers": ["AAA", "BBB"], "year_start": 2020, "year_end": 2026,
+                 "expected_population": ["AAA|S1|2026-10-05"], "input_mode": "snapshot",
+                 "input_bindings": bindings}
+    refs = (case.snapshot_ref.artifact_id, request_ref.artifact_id, finality_ref.artifact_id)
+    stage = case.submit("legacy_score", parameters, refs, "score-walkback2", "legacy_score",
+                        "legacy_action.v1.0", deps=(mat,))
+    assert case.run(stage) == "failed"
+    failure = case.failure(stage)
+    assert "TIER4_CACHE_MISSING" in failure
+    assert "202609" in failure
+    assert case.recorded() == []
+
+
 # --------------------------------------------------------------------------
 # generation binding
 # --------------------------------------------------------------------------

@@ -17,9 +17,10 @@ Tier-4 serving-cache header bytes off the artifact store through
   from an already-parsed list of champion registry entries
   (``reference_inputs.champion_entries``); model_id/features/produces only,
   never the registry's own artifact path or hyperparameters.
-* :func:`required_serving_triples` — one ``(model_id, fold_yyyymm, panel_sha)``
-  per (event, Tier-4 producer) the planned population needs. The fold itself
-  comes from ``legacy_adapter.legacy_serving_fold`` — the scorer's own
+* :func:`required_serving_triples` — every ``(model_id, fold_yyyymm, panel_sha)``
+  per (event, Tier-4 producer) the planned population can need: each monthly
+  fold from the scorer's floor up to the event's own fold. The bounds come
+  from ``legacy_adapter.legacy_serving_fold`` — the scorer's own
   ``min(event_fold, decision_fold)`` rule (``engine/data/features/tier4.py``
   ``serving_fold``) — never reimplemented here.
 * :func:`missing_triples` — which required triples the pinned
@@ -75,8 +76,9 @@ def required_serving_triples(population, registry_models, panel_sha: str) -> fro
     (``Scorer._serving`` keys its cache on ``(fold, produces)``, and the fold
     itself does not depend on ``produces``), so the fold range is computed
     once per distinct pair and crossed with every producer model. The range
-    runs from the scorer's floor up to the event's own fold, because the real
-    decision date (per strategy) can fall in a later month than ``as_of``.
+    runs from the floor ``serving_fold(event_date, as_of)`` up to the event's
+    own fold, because the real decision date (per strategy) can fall in a
+    later month than ``as_of`` (an earlier one is #1053).
     """
     folds: dict[tuple, tuple[str, ...]] = {}
     triples = set()
@@ -84,9 +86,10 @@ def required_serving_triples(population, registry_models, panel_sha: str) -> fro
         key = (event_date, as_of)
         months = folds.get(key)
         if months is None:
-            # The scorer serves min(event_fold, fold(decision_date)) and the
-            # per-strategy decision_date is >= as_of, so every month from the
-            # floor (as_of's fold) up to the event's own fold can be asked for.
+            # The scorer serves min(event_fold, fold(decision_date)); the
+            # per-strategy decision_date is unknown here, so require every
+            # month from the floor (as_of's fold) up to the event's own fold.
+            # Known gap (#1053): a strategy deciding before as_of's month.
             lo = legacy_adapter.legacy_serving_fold(event_date, as_of)
             hi = legacy_adapter.legacy_serving_fold(event_date, event_date)
             months = tuple(p.strftime("%Y%m") for p in pd.period_range(lo, hi, freq="M"))

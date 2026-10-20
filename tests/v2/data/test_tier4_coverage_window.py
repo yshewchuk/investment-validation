@@ -27,11 +27,13 @@ def test_event_before_as_of_requires_event_fold_only():
 
 def test_event_two_months_out_requires_every_intermediate_fold():
     required = tc.required_serving_triples([("2026-12-02", "2026-10-19")], MODELS[:1], PANEL_SHA)
-    assert {t[1] for t in required} == {"202610", "202611", "202612"}
+    assert required == frozenset(("opf_implied_t1_gbm", f, PANEL_SHA) for f in ("202610", "202611", "202612"))
 
 
-def test_missing_next_month_fold_is_reported_absent(tmp_path):
-    from engine.v2.foundation import ArtifactStore  # noqa: F401  (store only resolves pinned refs)
+def test_missing_next_month_fold_is_reported_absent():
     required = tc.required_serving_triples([("2026-11-05", "2026-10-19")], MODELS[:1], PANEL_SHA)
     missing = tc.missing_triples(required, {}, None, registry_models=MODELS[:1])
-    assert [(m["fold"], m["reason"]) for m in missing] == [("202610", "absent"), ("202611", "absent")]
+    assert missing == [
+        {"model_id": "opf_implied_t1_gbm", "fold": "202610", "panel_sha12": "a" * 12, "reason": "absent"},
+        {"model_id": "opf_implied_t1_gbm", "fold": "202611", "panel_sha12": "a" * 12, "reason": "absent"},
+    ]
