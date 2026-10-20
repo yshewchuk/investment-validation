@@ -517,6 +517,10 @@ def test_warm_holiday_cache_never_bypasses_supplied_calendar_validation(days: tu
     assert str(caught.value) == message
 
 
-def test_planned_exit_does_not_validate_observed_through() -> None:
+@pytest.mark.parametrize("event,session,expected", [
+    ("2024-03-12", "BMO", "2024-03-12"),
+    ("2024-03-13", "AMC", "2024-03-14"),
+])
+def test_planned_exit_does_not_validate_observed_through(event, session, expected) -> None:
     calendar = CalendarSessions(OBS_MAR, "bad")
-    assert planned_exit_date(_key("STR-THRU", "2024-03-12", "BMO"), calendar) == "2024-03-12"
+    assert planned_exit_date(_key("STR-THRU", event, session), calendar) == expected
