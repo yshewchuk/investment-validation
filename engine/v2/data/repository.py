@@ -372,7 +372,7 @@ class Repository:
         if not contract.partition_columns:
             return list(records)
         selected: set[int] | None = None
-        for predicate in key_filter:
+        for predicate in query_mod.decode_predicates(key_filter):
             if predicate.column in contract.partition_columns:
                 matched: set[int] = set()
                 for value in predicate.values:
@@ -856,7 +856,8 @@ class Repository:
         a smaller limit stays unchanged, and a zero-row membership admits a
         zero limit with a positive batch size."""
         snap = self.resolve(snapshot_id)
-        contract, records = self._table_records(snap, table_name, table_contract_ref)
+        contract, records = self._table_records(
+            snap, table_name, table_contract_ref, key_filter if self._pin_snapshots else ())
         population = query_mod.plan_scan_population(
             contract, records, key_filter=key_filter, time_interval=time_interval)
         return population.row_count
