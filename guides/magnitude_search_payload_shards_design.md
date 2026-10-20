@@ -53,7 +53,7 @@ any scientific rule (cutoffs, row order, horizons, features, fit pipeline).
   {name: {"row_count": n, "shards": [{"ref": <ArtifactRef doc>, "rows": k,
   "first_key": [...], "last_key": [...]}]}}}`. Keys are the section's primary key
   (`event_id`, or `event_id, horizon_sessions`). `SHARD_MAX_COUNT` (8192) bounds the
-  manifest (<= ~4 MB, under the 16 MiB record cap) and the cohort (<= 32 GiB).
+  manifest (<= ~4 MB, under the 16 MiB record cap) and the cohort (<= 64 GiB at the 8 MiB hard cap, typically ~32 GiB at the target).
 * **`inputs_id` = `content_hash(manifest)`** (Merkle root). The existing
   `inputs:<trial>` record, execution results and terminals keep their field names and
   bind this id; nothing else about their shape changes.
@@ -70,8 +70,10 @@ and `safe_relative_path(storage_key)` (the journal's existing `_reference` rules
 
 * **Parent** (`_record`, reconcile, freeze, outer replay): verifies the manifest hash
   against `inputs_id`, then streams shards to recompute `fit_evidence` digests and
-  validate targets. It never holds the whole cohort; evidence digests are fed
-  incrementally in section order.
+  validate targets. Replay reads never hold the whole cohort (the admission-time memo
+  is covered by R2). Matrix digests keep today's order: rows are looked up by
+  `(event, horizon)` and assembled in the training / evaluation list orders, so the
+  canonical matrix documents and hashes are unchanged.
 * **Child**: the request file shrinks to a header `{inner, plan, execution, cohort
   manifest, store_root}` (still bounded by `MAX_BYTES`). The worker constructs a
   read-only `ArtifactStore(store_root)` (the constructor creates nothing) and calls
@@ -85,7 +87,7 @@ and `safe_relative_path(storage_key)` (the journal's existing `_reference` rules
   O(rows); it is bounded by the existing `RLIMIT_AS` `memory_bytes` and surfaces as
   `RESOURCE_LIMIT_EXCEEDED`, not by transport. Reducing that working set (columnar
   arrays instead of one dict per row) is fit-pipeline work, outside this design;
-  PR 3 reports the measured child RSS at scale so the user can size `memory_bytes`.
+  PR 4 (the first with the streaming child) reports the measured child RSS at scale so the user can size `memory_bytes`.
 
 ## 4. Failure semantics (R1-R6)
 
@@ -93,8 +95,8 @@ and `safe_relative_path(storage_key)` (the journal's existing `_reference` rules
 |---|---|
 | R1 verified input | Admission order unchanged. Writer cuts rows, publishes shards, then appends the manifest. Reader checks manifest hash vs `inputs_id`, then each shard's size and hash before decode. Hash/size mismatch, wrong schema/section, row-count or key-boundary disagreement, duplicate `(event, horizon)` key, unsafe or malformed ref: `EXPERIMENT_IDENTITY_CONFLICT`. A `cohort:` record in the old v1 shape: `EXPERIMENT_IDENTITY_CONFLICT` (sealed to older closures; no auto-migration). |
 | R1 unusable input | A shard object missing, unreadable or `OSError`: retryable `RESOURCE_UNAVAILABLE` through the journal's existing artifact mapping; no association change, no attempt-retry authorization. A row larger than `SHARD_MAX_BYTES` or more than `SHARD_MAX_COUNT` shards: nonretryable `RESOURCE_LIMIT_EXCEEDED` before the manifest is appended; already published shards stay unreferenced. |
-| R2 cache | None persisted. The per-instance cohort memo (one entry per cohort) holds the admitted rows or manifest, never a failed admission. Shards are immutable and never invalidated; a cohort's bytes are never rewritten. |
-| R3 retry | Publishing a shard is idempotent (`publish_bytes` links or re-verifies an existing object). Re-running `_start` after a crash between shards and manifest republishes identical shards and appends the same manifest. Claim semantics are unchanged: a trial's `start:` claim still cannot restart, and a failed native read keeps the unfinished claim and blocks selection. Child failures keep today's outcomes; a shard read failure inside the child is `unavailable`/`resource_limit` -> `RESOURCE_UNAVAILABLE`/`RESOURCE_LIMIT_EXCEEDED`, never a candidate failure. |
+| R2 cache | None persisted. The per-instance cohort memo (one entry per cohort, as in the current contract) holds the admitted rows from admission until fix 5 streams admission; from then on it holds only the manifest. Until then parent peak memory is admission-bound, not transport-bound; never a failed admission. Shards are immutable and never invalidated; a cohort's bytes are never rewritten. |
+| R3 retry | Publishing a shard is idempotent (`publish_bytes` links or re-verifies an existing object). The immutable `start:` claim is committed before admission, so a crashed `_start` cannot be re-run (unchanged: unfinished claim, selection blocked). Only a first call whose shards were published but whose manifest append failed *within the same call* can be completed by publishing again, because the cohort slot, not the claim, is the commit point; across a crash the orphan shards are inert and the trial stays unfinished. A different trial of the same cohort, whose claim is new, reaches the shard writer, republishes identical shards and appends or replays the same manifest. Child shard reads keep the reader's classification: integrity failures (hash, schema, section, count, key) are `EXPERIMENT_IDENTITY_CONFLICT`, missing/`OSError` is `RESOURCE_UNAVAILABLE`, memory is `RESOURCE_LIMIT_EXCEEDED`; the worker gains a distinct integrity event for this, never a candidate failure. |
 | R4 transaction | Shards are published before, and outside, the catalog transaction (no artifact I/O under the lock). The single `INSERT` of the `cohort:<id>` reference is the commit point; the manifest is visible only after every shard it names is durable. |
 | R5 partial failure | Shards without a manifest are unreferenced and confer no authority; the store owner may reclaim them (agents never hand-delete under a store). A manifest whose shard later vanishes or corrupts fails closed per R1. No partial cohort is ever readable. |
 | R6 idempotency | Same rows give byte-identical shards (deterministic cut) and the identical manifest, so `append_record` replay returns the committed record. A different manifest for the same `cohort:<id>` slot is `EXPERIMENT_IDENTITY_CONFLICT` (input drift is reported exactly as before). |
@@ -126,9 +128,13 @@ and `safe_relative_path(storage_key)` (the journal's existing `_reference` rules
   scale but doubles the code paths and the tests.
 * **D3 - outputs.** Forecasts (`execution-result:` record, child output) and
   `validation:<cohort>` targets also grow with evaluation events; at full scale they
-  may approach the cap after the inputs are fixed. Recommend a measured decision after
-  PR 3: if the largest fold's forecasts exceed ~4 MiB, add the sharded-output PR below;
-  otherwise leave them under the 16 MiB record cap.
+  may approach the cap after the inputs are fixed. Records that grow with the *training*
+  population also remain: outer terminals inline `training_inputs` (candidate,
+  qualified, read and omitted event lists) and execution receipts repeat event lists per
+  horizon. Recommend a measured decision after PR 4 (the first PR with the streaming
+  child): if the largest fold's forecasts, validation targets or any such receipt exceed
+  ~4 MiB, add the sharded-output PR below (receipt lists included); otherwise leave them
+  under the 16 MiB record cap.
 
 ## 7. Split list (add, then wire, then remove)
 
@@ -139,18 +145,24 @@ Estimates are added lines: code / tests / docs.
    list-valued cohort members. Tests: determinism, boundary keys, corruption, vanished
    shard, oversize row, shard-count cap. Docs: the new module's section in
    `experiments/ARCHITECTURE.md` (format, cut rule, reader).
-2. **Journal wiring (~300 / ~200 / ~40).** `_start` publishes shards + v2 manifest;
-   `inputs_id` = manifest hash; v1 `cohort:` records refuse; closure/seal update.
-   Docs: journal and cap rows, seal note.
-3. **Parent replay paths (~300 / ~200 / ~30).** `_record`, reconcile, freeze, outer and
-   `fit_evidence` stream the reader; the validation check uses `planned_inputs`
-   streamed. Docs: replay and outer rows.
+2. **Consumers first (~300 / ~200 / ~30).** `_record`, reconcile, freeze, outer,
+   `_validation` and `fit_evidence` read cohort rows through one loader that streams
+   `iter_section` for a v2 manifest and adapts the existing v1 whole record, with the
+   v1 behaviour and ids unchanged (no activation yet). Matrix evidence keeps today's
+   order: the loader yields rows keyed by `(event, horizon)` and `fit_evidence` still
+   assembles `row_keys` and values in the training / evaluation list orders, hashing
+   the same canonical matrix documents. Docs: replay and outer rows.
+3. **Activate the format (~300 / ~200 / ~40).** `_start` publishes shards + v2
+   manifest; `inputs_id` = manifest hash (including the execution-result binding);
+   v1 `cohort:` records refuse; closure/seal update. Docs: journal and cap rows, seal
+   note.
 4. **Child transport (~250 / ~150 / ~40).** Header request, worker streaming reader and
    projection, parent `_fit_inputs` and the 16 MiB input check removed. Reports
    measured child RSS (supervisor-run scale job; agents run no heavy jobs). Docs:
    execution table and `experiments/README.md` transport line.
 5. **Cleanup (remove; net negative code / ~50 / ~20).** Delete dead v1 whole-cohort
-   paths and superseded doc lines.
+   paths, superseded doc lines and this guide (its content now lives in
+   `experiments/ARCHITECTURE.md`).
 6. **Conditional: sharded outputs** (D3; ~300 / ~200 / ~30), same reader/writer for
    forecasts and validation targets, with chunked child output lines.
 
