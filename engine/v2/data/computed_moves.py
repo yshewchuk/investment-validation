@@ -144,16 +144,20 @@ def _validate_daily(daily: pd.DataFrame) -> None:
 
 
 def _require_daily_order(daily: pd.DataFrame) -> None:
-    """Strictly ascending, unique ``daily`` dates whenever the frame is non-empty.
+    """Strictly ascending, unique ``daily`` calendar days whenever the frame is non-empty.
 
     The ordering refusal :func:`build_rows` reaches through ``AsofSeries``,
     checked UP FRONT by :func:`build_event_rows` before any population branch,
-    so a ticker-level reason cannot skip it. ``build_rows`` itself is unchanged
-    (v4 keeps the refusal it gives today), and an empty frame is still fine.
+    so a ticker-level reason cannot skip it. The comparison is the SAME
+    ``%Y-%m-%d`` calendar-day projection :func:`_implied_by_event` feeds
+    ``AsofSeries``, so two ascending intraday timestamps on one calendar day
+    refuse here exactly as they refuse there -- in every branch,
+    ``build_rows`` included. ``build_rows`` itself is unchanged (v4 keeps the
+    refusal it gives today), and an empty frame is still fine.
     """
     if not len(daily):
         return
-    days = pd.to_datetime(daily["date"])
+    days = pd.to_datetime(daily["date"]).dt.strftime("%Y-%m-%d")
     if not (days.is_monotonic_increasing and days.is_unique):
         raise fail("CONTRACT_MISMATCH", "rows must be strictly date-ascending")
 
@@ -262,8 +266,11 @@ def _validate_inputs(events: pd.DataFrame, sd, sc, min_scoreable: int) -> None:
     as an ``AttributeError`` from ``.to_datetime64()`` later -- and it must hold
     no NaT, which is no event date at all. ``src_orats`` must
     hold a real ``bool``/``np.bool_`` per row -- ``None``/``pd.NA``/``NaN``/
-    text are not a confirmation verdict; ``session`` values are per-event data,
-    not the contract, and are read but never validated here.
+    text are not a confirmation verdict. Every non-null ``session`` must be
+    exactly ``"BMO"`` or ``"AMC"`` -- the source schema's set
+    (``engine/data/schemas.py``) -- while a null session stays allowed (it
+    classifies as ``no_session``), so a typo refuses here instead of being read
+    as an AMC window later.
     """
     if (isinstance(min_scoreable, (bool, np.bool_))
             or not isinstance(min_scoreable, (int, np.integer)) or min_scoreable < 0):
@@ -278,6 +285,9 @@ def _validate_inputs(events: pd.DataFrame, sd, sc, min_scoreable: int) -> None:
         raise fail("CONTRACT_MISMATCH", "events event_date must not hold NaT")
     if any(not isinstance(value, (bool, np.bool_)) for value in events["src_orats"]):
         raise fail("CONTRACT_MISMATCH", "events src_orats must hold a real bool per row")
+    if any(not pd.isna(session) and session not in ("BMO", "AMC")
+           for session in events["session"]):
+        raise fail("CONTRACT_MISMATCH", "events session must be BMO or AMC")
     if len(sd) != len(sc):
         raise fail("CONTRACT_MISMATCH", "price series sd and sc differ in length")
 
@@ -385,10 +395,10 @@ def build_event_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFr
     ``[]`` only for an empty ``events``; every non-empty list yields one row per
     DISTINCT event date, so ``(ticker, event_date)`` is unique. ``events`` is the
     ticker's ordered ``earnings_events`` slice (columns ``event_date``,
-    ``session``, ``src_orats``); what v4 dropped is now a row. The ``daily``
-    frame is validated up front, dates strictly ascending and unique, before any
-    branch, so a ticker-level refusal cannot hide a malformed or reordered
-    frame. Same-date rows collapse first (the confirmed one wins, else the
+    ``session``,     ``src_orats``); what v4 dropped is now a row. The ``daily``
+    frame is validated up front, calendar days (``YYYY-MM-DD``) strictly
+    ascending and unique, before any branch, so a ticker-level refusal cannot
+    hide a malformed or reordered frame. Same-date rows collapse first (the confirmed one wins, else the
     first in input order) and the collapsed dates must then be strictly
     ascending -- the same check :func:`classify_event_reasons` runs -- so
     ``build_rows`` never sees a duplicate or descending date. A CONFIRMED event

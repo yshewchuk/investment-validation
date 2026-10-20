@@ -19,7 +19,12 @@ import pandas as pd
 import pytest
 
 from engine.v2.data import manifests
-from engine.v2.data.computed_moves import build_event_rows, build_rows, classify_event_reasons
+from engine.v2.data.computed_moves import (
+    ADMISSION_EVENTS,
+    build_event_rows,
+    build_rows,
+    classify_event_reasons,
+)
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.data.errors import DataError
 
@@ -116,13 +121,16 @@ def test_phantom_forward_claim_is_not_orats_and_leaves_neighbours_unchanged():
     assert neighbour["not_computed_reason"] is None
 
 
-def test_confirmed_event_without_a_session_is_no_session():
-    considered = _CONFIRMED[:5] + [(_BETWEEN, None, True)] + _CONFIRMED[5:]
-    rows = _build(_events(*considered))
+@pytest.mark.parametrize("null", [None, float("nan")])
+def test_confirmed_event_without_a_session_is_no_session(null):
+    considered = _CONFIRMED[:5] + [(_BETWEEN, null, True)] + _CONFIRMED[5:]
+    events = _events(*considered)
+    rows = _build(events)
 
     _assert_refused(rows[5], "no_session", 5)
     assert rows[5]["event_date"] == "2024-01-20"
     assert rows[:5] + rows[6:] == _build(_events(*_CONFIRMED))
+    assert classify_event_reasons(events, _SD, _SC)[5] == "no_session"
 
 
 def test_three_confirmed_events_all_get_ticker_too_few_events():
@@ -378,6 +386,24 @@ def test_confirmed_rows_carry_hand_computed_values():
         assert set(row) == set(_V5_COLUMNS)
 
 
+def test_one_confirmed_amc_event_end_to_end():
+    # 2024-03-01 AMC measures the NEXT close (160.0) against its own (128.0)
+    # on _SC8: exactly +25.0%, available the day after that measured close
+    # (Mon 2024-03-04 + 1 calendar day), clear of both bars with 6 confirmed
+    considered = [(_D8[0], "AMC", True), *_D8_EVENTS[1:6]]
+    events = _events(*considered)
+
+    assert classify_event_reasons(events, _SD8, _SC8, min_scoreable=6) == [None] * 6
+    rows = _build(events, sd=_SD8, sc=_SC8, daily=_DAILY8, min_scoreable=6)
+
+    assert [row["not_computed_reason"] for row in rows] == [None] * 6
+    amc = rows[0]
+    assert amc["event_date"] == "2024-03-01"
+    assert amc["realized_move_pct"] == 25.0
+    assert amc["available_as_of_date"] == "2024-03-05"
+    assert amc["skipped"] is False
+
+
 def test_v5_contract_is_v4_plus_not_computed_reason():
     v4, v5 = COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 
@@ -439,6 +465,16 @@ def test_non_bool_src_orats_is_contract_mismatch(bad):
     _assert_refusal_parity(events, "events src_orats must hold a real bool per row")
 
 
+@pytest.mark.parametrize("bad", ["PM", "bmo", 5])
+def test_session_outside_bmo_amc_is_contract_mismatch(bad):
+    # the source schema's set is exactly BMO/AMC nullable: a typo, wrong case
+    # or non-string refuses outright from both entry points, same message --
+    # it must never reach _session_move_indexed and read as an AMC window
+    events = _events(*_CONFIRMED[:3])
+    events["session"] = pd.Series([bad, "BMO", "AMC"], dtype="object")
+    _assert_refusal_parity(events, "events session must be BMO or AMC")
+
+
 def test_string_event_date_is_contract_mismatch_from_both_entry_points():
     # the store converts with pd.to_datetime; a caller handing over strings must
     # meet one typed refusal, never an AttributeError from .to_datetime64()
@@ -480,6 +516,28 @@ def test_reversed_daily_dates_refuse_even_a_ticker_level_refusal():
     assert caught.value.problem.message == "rows must be strictly date-ascending"
 
 
+def test_two_intraday_daily_timestamps_on_one_calendar_day_refuse_every_branch():
+    # ascending TIMESTAMPS on one calendar day are a duplicate day for the
+    # %Y-%m-%d as-of projection, so they refuse with the one daily-order
+    # message in EVERY population branch: the ticker-level one (3 confirmed,
+    # left alone ticker_too_few_events) and the computing one (16 confirmed)
+    intraday = pd.DataFrame({
+        "date": pd.to_datetime(["2024-01-15 09:30:00", "2024-01-15 16:00:00"]),
+        "implied_move": [5.0, 6.0],
+        "src_iv": ["orats", "orats"],
+    })
+    assert intraday["date"].is_monotonic_increasing and intraday["date"].is_unique
+    for events in (_events(*_CONFIRMED[:3]), _events(*_CONFIRMED)):
+        for call in (
+                lambda events=events: build_event_rows(
+                    "AAPL", events, _SD, _SC, intraday, **_KW),
+                lambda events=events: build_rows("AAPL", events, _SD, _SC, intraday, **_KW)):
+            with pytest.raises(DataError) as caught:
+                call()
+            assert caught.value.code == "CONTRACT_MISMATCH"
+            assert caught.value.problem.message == "rows must be strictly date-ascending"
+
+
 # --------------------------------------------------------------------------
 # row provenance: the call inputs, and only the v5 keys, on every row
 # --------------------------------------------------------------------------
@@ -502,31 +560,43 @@ _TOO_FEW_DATES = ("2024-01-15", "2024-01-16", "2024-01-17")
 
 
 def test_every_row_carries_the_call_inputs_and_the_v5_key_set():
-    # (events, sd, sc, expected ISO dates, provenance) -- a mixed ticker, one
-    # below the admission bar, and one with no price history at all
+    # (ticker, events, sd, sc, expected ISO dates, expected reasons, provenance)
+    # -- three DIFFERENT tickers: a mixed one holding a computed row
+    # (null), a no_price_window row, a phantom row and a no_session row, one
+    # below the admission bar (a ticker-level row), one with no price history
+    # (the other ticker-level row)
     cases = (
-        (_mixed_events(), _SD, _SC, _MIXED_DATES,
+        ("AAPL", _mixed_events(), _SD, _SC, _MIXED_DATES, list(_MIXED_REASONS),
          dict(computed_at="2026-09-25T00:00:00+00:00", source_hash="sha256:" + "a" * 64,
               capture_id="capture_test")),
-        (_events(*_CONFIRMED[:3]), _SD, _SC, _TOO_FEW_DATES,
+        ("MSFT", _events(*_CONFIRMED[:3]), _SD, _SC, _TOO_FEW_DATES,
+         ["ticker_too_few_events"] * len(_TOO_FEW_DATES),
          dict(computed_at="2026-10-02T08:30:00+00:00", source_hash="sha256:" + "b" * 64,
               capture_id="capture_other")),
-        (_mixed_events(), _EMPTY_SD, _EMPTY_SC, _MIXED_DATES,
+        ("NVDA", _mixed_events(), _EMPTY_SD, _EMPTY_SC, _MIXED_DATES,
+         ["no_price_history"] * len(_MIXED_DATES),
          dict(computed_at="2026-11-11T00:00:00+00:00", source_hash="sha256:" + "c" * 64,
               capture_id="capture_third")),
     )
-    for events, sd, sc, dates, provenance in cases:
-        rows = build_event_rows("AAPL", events, sd, sc, _DAILY, **provenance)
+    seen: set = set()
+    for ticker, events, sd, sc, dates, reasons, provenance in cases:
+        rows = build_event_rows(ticker, events, sd, sc, _DAILY, **provenance)
 
-        assert len(rows) == len(dates) > 0
-        for row, day in zip(rows, dates):
+        assert len(rows) == len(dates) == len(reasons) > 0
+        for row, day, reason in zip(rows, dates, reasons):
             assert set(row) == set(_V5_COLUMNS)
-            assert row["ticker"] == "AAPL"
+            assert row["ticker"] == ticker
             assert row["event_date"] == day
+            assert row["not_computed_reason"] == reason  # exact, per row
             assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", row["event_date"])
             assert row["computed_at"] == provenance["computed_at"]
             assert row["source_hash"] == provenance["source_hash"]
             assert row["capture_id"] == provenance["capture_id"]
+        seen.update(reasons)
+
+    # the four row kinds the cases were built to cover are all actually present
+    assert {None, "no_price_window", "not_orats"} <= seen
+    assert "ticker_too_few_events" in seen
 
 
 # --------------------------------------------------------------------------
@@ -587,6 +657,72 @@ def test_empty_price_history_beats_the_too_few_events_bar():
         _assert_refused(row, "no_price_history", position)
     assert classify_event_reasons(events, _EMPTY_SD, _EMPTY_SC) == (
         ["no_price_history"] * 3)
+
+
+def test_admission_boundaries_count_only_computable_and_min_scoreable_separately():
+    # a phantom and a no_session event ride along NEITHER frame: neither is
+    # confirmed nor computable, so neither counts toward either bar
+    filler = [(_BETWEEN, "BMO", False), (_BETWEEN + pd.Timedelta(days=1), None, True)]
+    below = _events(*(_CONFIRMED[: ADMISSION_EVENTS - 1] + filler))
+    at_bar = _events(*(_CONFIRMED[:ADMISSION_EVENTS] + filler))
+    refused_below = ["ticker_too_few_events"] * (ADMISSION_EVENTS + 1)
+    refused_at_bar = ["ticker_too_few_events"] * (ADMISSION_EVENTS + 2)
+    clears = [None] * ADMISSION_EVENTS + ["not_orats", "no_session"]
+
+    # exactly ADMISSION_EVENTS-1 computable: the admission bar alone refuses,
+    # even though confirmed == min_scoreable clears the other one
+    assert classify_event_reasons(below, _SD, _SC,
+                                  min_scoreable=ADMISSION_EVENTS - 1) == refused_below
+    assert [row["not_computed_reason"] for row in
+            _build(below, min_scoreable=ADMISSION_EVENTS - 1)] == refused_below
+
+    # exactly ADMISSION_EVENTS computable: rows compute, and the phantom and
+    # the no_session event kept their own per-event reasons throughout
+    assert classify_event_reasons(at_bar, _SD, _SC,
+                                  min_scoreable=ADMISSION_EVENTS - 1) == clears
+    assert [row["not_computed_reason"] for row in
+            _build(at_bar, min_scoreable=ADMISSION_EVENTS - 1)] == clears
+
+    # the min_scoreable bar alone: confirmed == min_scoreable passes ...
+    assert classify_event_reasons(at_bar, _SD, _SC,
+                                  min_scoreable=ADMISSION_EVENTS) == clears
+    assert [row["not_computed_reason"] for row in
+            _build(at_bar, min_scoreable=ADMISSION_EVENTS)] == clears
+    # ... and confirmed == min_scoreable - 1 fails
+    assert classify_event_reasons(at_bar, _SD, _SC,
+                                  min_scoreable=ADMISSION_EVENTS + 1) == refused_at_bar
+    assert [row["not_computed_reason"] for row in
+            _build(at_bar, min_scoreable=ADMISSION_EVENTS + 1)] == refused_at_bar
+
+
+def test_reason_precedence_over_one_mixed_population_three_tickers():
+    # ONE frame: a phantom, a no_session event and five computable confirmed
+    # events; only the ticker's own price history (and the bars) change
+    considered = [(_CONFIRMED[0][0], "BMO", False), (_CONFIRMED[1][0], None, True),
+                  *_CONFIRMED[2:7]]
+    events = _events(*considered)
+    per_event = ["not_orats", "no_session"] + [None] * 5
+
+    # empty closes: no_price_history is checked FIRST and overrides everything
+    assert classify_event_reasons(events, _EMPTY_SD, _EMPTY_SC, min_scoreable=5) == (
+        ["no_price_history"] * len(considered))
+    assert [row["not_computed_reason"] for row in
+            _build(events, sd=_EMPTY_SD, sc=_EMPTY_SC, min_scoreable=5)] == (
+                ["no_price_history"] * len(considered))
+
+    # closes that exist but bracket none of the events: 0 computable <
+    # ADMISSION_EVENTS, so ticker_too_few_events overrides the per-event reasons
+    far_sd = pd.bdate_range("2024-02-01", periods=10).to_numpy(dtype="datetime64[ns]")
+    far_sc = np.linspace(100.0, 110.0, 10)
+    too_few = ["ticker_too_few_events"] * len(considered)
+    assert classify_event_reasons(events, far_sd, far_sc, min_scoreable=5) == too_few
+    assert [row["not_computed_reason"] for row in
+            _build(events, sd=far_sd, sc=far_sc, min_scoreable=5)] == too_few
+
+    # the SAME frame on a good ticker: each event keeps its own reason
+    assert classify_event_reasons(events, _SD, _SC, min_scoreable=5) == per_event
+    assert [row["not_computed_reason"] for row in
+            _build(events, min_scoreable=5)] == per_event
 
 
 # --------------------------------------------------------------------------
