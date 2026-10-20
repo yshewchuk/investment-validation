@@ -1023,7 +1023,7 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
     clock = SystemClock()
     try:
         store = ArtifactStore(document["objects_root"])
-        repository = Repository(conn, store)
+        repository = Repository(conn, store, pin_snapshots=True)
         parent = repository.resolve_full(parameters.parent_snapshot_id)
         stats, targets, plan = _select_and_plan(
             conn, repository, parent, parameters, document, as_of=as_of, as_of_day=as_of_day,
