@@ -149,6 +149,101 @@ def test_complete_signed_rows_identity_purity_and_protected_bytes(tmp_path, monk
         assert all(q.columns == tuple(c.name for c in CONTRACT.columns) for q in queries)
 
 
+@pytest.mark.parametrize("session,pre,post,available", [
+    ("AMC", "2024-05-06", "2024-05-07", "2024-05-08"),
+    ("BMO", "2024-05-03", "2024-05-06", "2024-05-07"),
+])
+def test_canonical_session_survives_population_merge_planning_and_nonempty_load(tmp_path, session, pre, post, available):
+    event = history_event("2024-05-06", session=session)
+    row = target(event, pre_date=pre, post_date=post, available_as_of_date=available)
+    with committed(tmp_path, [event], [row]) as (_, repository, snapshot):
+        population = reader.experiment_population.load_population(repository, snapshot, as_of_month=MONTH)
+        assert population.session.tolist() == [session]
+        assert not {"session_x", "session_y"} & set(population.columns)
+        plans = reader.event_history.plan_event_targets(repository, snapshot, population, CONTRACT,
+            columns=tuple(column.name for column in CONTRACT.columns))
+        assert [candidate.session for candidate, _, _ in plans] == [session]
+        result = load(repository, snapshot)
+        assert result[["session", "crush_pct_iv30", "target_available_on"]].values.tolist() == [
+            [session, -40., available]]
+
+
+@pytest.mark.parametrize("as_of_month,purpose", [("2024-12", "training"), ("2025-02", "sweep")])
+def test_identity_binds_varied_context_and_each_objects_distinct_provenance(tmp_path, monkeypatch, as_of_month, purpose):
+    events = [history_event(day) for day in ("2024-01-04", "2024-03-05")]
+    sources, hashes = ["caller-alpha", "caller-beta"], ["sha256:" + "b" * 64, "sha256:" + "c" * 64]
+    rows = [target(e, value, source_id=source, input_hash=digest)
+            for e, value, source, digest in zip(events, (-25., 50.), sources, hashes, strict=True)]
+    with committed(tmp_path, events[::-1], rows[::-1]) as (_, repository, snapshot):
+        result = load(repository, snapshot, as_of_month=as_of_month, purpose=purpose)
+        records = {record.time_min: record for record in repository.fragment_records(snapshot, TABLE)}
+        planned = [{"event_id": e["event_id"], "fragment_id": records[day].fragment_id,
+            "object_id": records[day].object_ref.object_id, "content_hash": records[day].object_ref.content_hash}
+            for e, day in zip(events, ("2024-01-04", "2024-03-05"), strict=True)]
+        context = {"snapshot_id": snapshot.snapshot_id, "holdout_as_of_month": as_of_month,
+            "random_membership_version": "canonical-event-sha256.v1", "rolling_membership_version": "calendar-months.v1",
+            "population_use": "post-release selection", "target_version": to_document(snapshot.table_versions[TABLE]),
+            "availability_basis": "modeled_post_close_plus_one_calendar_day",
+            "source_publication": "unverified", "source_finality": "unverified"}
+        expected = {"schema_version": "research_iv_crush_targets.v1", **context, "purpose": purpose,
+            "labels_before": "2024-07-01", "excluded_future_events": [],
+            "consumed_inputs": [{**entry, "source_id": source, "input_hash": digest}
+                for entry, source, digest in zip(planned, sources, hashes, strict=True)]}
+        assert result.attrs == {**expected, "inputs_id": content_hash(expected), "holdout_exclusions": []}
+        assert result.event_id.tolist() == [e["event_id"] for e in events]
+        assert result.crush_pct_iv30.tolist() == [-25., 50.]
+        poison(monkeypatch, repository, snapshot)
+        before = len(repository.scans)
+        preflight = reader.preflight_iv_crush_targets(repository, snapshot, as_of_month=as_of_month,
+            event_ids=[e["event_id"] for e in events[::-1]])
+        expected_preflight = {"schema_version": "research_iv_crush_preflight.v1", **context, "purpose": "selection",
+            "event_ids": [e["event_id"] for e in events], "planned_inputs": planned}
+        assert preflight == {**expected_preflight, "preflight_id": content_hash(expected_preflight)}
+        assert all(name == "earnings_events" for name, _ in repository.scans[before:])
+
+
+def test_null_canonical_session_refuses_before_unskipped_target_reads(tmp_path, monkeypatch):
+    event = history_event("2024-05-06", session=None)
+    with committed(tmp_path, [event], [target(event, skipped=False)]) as (_, repository, snapshot):
+        poison(monkeypatch, repository, snapshot)
+        for action in (lambda: load(repository, snapshot), lambda: reader.preflight_iv_crush_targets(
+                repository, snapshot, as_of_month=MONTH, event_ids=[event["event_id"]])):
+            with pytest.raises(DataError) as caught:
+                action()
+            exact_problem(caught, "HOLDOUT_ACCESS_DENIED", "requested events are excluded from experiment reads",
+                details={"snapshot_id": snapshot.snapshot_id, "holdout_as_of_month": MONTH,
+                    "random_membership_version": "canonical-event-sha256.v1", "rolling_membership_version": "calendar-months.v1",
+                    "purpose": "selection", "holdout_exclusions": [{"event_id": event["event_id"], "memberships": ["ambiguous"]}]})
+        assert all(name == "earnings_events" for name, _ in repository.scans)
+
+
+def test_null_stored_session_refuses_for_admitted_canonical_event(tmp_path):
+    event = history_event("2024-05-06", session="AMC")
+    with committed(tmp_path, [event], [target(event, session=None, skipped=False)]) as (_, repository, snapshot):
+        with pytest.raises(DataError) as caught:
+            load(repository, snapshot)
+        exact_problem(caught, "EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
+        assert [name for name, _ in repository.scans].count(TABLE) == 1
+
+
+@pytest.mark.parametrize("canonical,stored", [("AMC", "BMO"), ("BMO", "AMC")])
+def test_session_mismatch_refuses_with_anchors_valid_for_both_sessions(tmp_path, canonical, stored):
+    event = history_event("2024-05-06", session=canonical)
+    # Both session anchor rules admit these dates; only identity distinguishes them.
+    row = target(event, pre_date="2024-05-03", post_date="2024-05-07", available_as_of_date="2024-05-08")
+    (tmp_path / "matching").mkdir()
+    with committed(tmp_path / "matching", [event], [row]) as (_, repository, snapshot):
+        result = load(repository, snapshot)
+        assert result[["session", "crush_pct_iv30", "target_available_on"]].values.tolist() == [
+            [canonical, -40., "2024-05-08"]]
+    (tmp_path / "mismatch").mkdir()
+    with committed(tmp_path / "mismatch", [event], [{**row, "session": stored}]) as (_, repository, snapshot):
+        with pytest.raises(DataError) as caught:
+            load(repository, snapshot)
+        exact_problem(caught, "EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
+        assert [name for name, _ in repository.scans].count(TABLE) == 1
+
+
 def test_preflight_binds_exact_participants_and_objects_without_opening_targets(tmp_path, monkeypatch):
     events = [history_event(day) for day in ("2024-01-04", "2024-03-05")]
     with committed(tmp_path, events, [target(e) for e in events]) as (_, repository, snapshot):

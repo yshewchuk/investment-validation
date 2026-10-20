@@ -2,6 +2,7 @@
 import pandas as pd
 import pytest
 
+from engine.v2.data.errors import DataError, fail
 from engine.v2.data.repository import Repository
 from engine.v2.research import progress
 from experiments import magnitude_history_store as entry
@@ -69,6 +70,32 @@ def test_quiet_stage_prints_only_when_slow():
     with progress.stage("q", quiet_under=5.0, clock=clock, emit=lines.append):
         clock.now += 6
     assert len(lines) == 1 and lines[0].startswith("  [q] done in 6s")
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_native_refusal_logging_is_opt_in_and_never_includes_details(monkeypatch, enabled):
+    lines, clock = [], Clock()
+    refusal = fail("HOLDOUT_ACCESS_DENIED", "requested events are excluded", details={"event_id": "private-event"})
+    monkeypatch.setattr(progress, "_rss", lambda: ", peak RSS 12 MB")
+    with pytest.raises(DataError) as caught:
+        with progress.stage("admission", clock=clock, emit=lines.append, report_refusals=enabled):
+            clock.now += 3
+            raise refusal
+    assert caught.value is refusal
+    assert lines == ["  [admission] start, peak RSS 12 MB", "  [admission] failed after 3s, peak RSS 12 MB"
+                     + ("; refused HOLDOUT_ACCESS_DENIED: requested events are excluded" if enabled else "")]
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("private detail"), KeyboardInterrupt("private detail"), SystemExit(7)])
+def test_enabled_refusal_reporting_preserves_non_data_errors_and_interruptions(monkeypatch, failure):
+    lines, clock = [], Clock()
+    monkeypatch.setattr(progress, "_rss", lambda: ", peak RSS 12 MB")
+    with pytest.raises(type(failure)) as caught:
+        with progress.stage("admission", clock=clock, emit=lines.append, report_refusals=True):
+            clock.now += 3
+            raise failure
+    assert caught.value is failure
+    assert lines == ["  [admission] start, peak RSS 12 MB", "  [admission] failed after 3s, peak RSS 12 MB"]
 
 
 def test_emit_failure_never_breaks_a_pass(monkeypatch):
