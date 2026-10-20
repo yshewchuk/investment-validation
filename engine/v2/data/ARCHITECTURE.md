@@ -482,7 +482,7 @@ is unchanged: a candidate with no fragment is still a refusal. Nothing is writte
 | an empty event list | no rows |
 | reason precedence for one event | per-event `not_orats`, then `no_session`; ticker-level overrides every event: `no_price_history` (no closes, checked first), else `ticker_too_few_events`; otherwise a confirmed event with no bracketing window is `no_price_window`, else null |
 | event dates not strictly ascending after the same-date collapse, or `daily` dates not strictly ascending | `CONTRACT_MISMATCH` from both entry points, whatever the ticker-level outcome |
-| `min_scoreable` not a non-negative int, an event frame lacking `event_date`/`session`/`src_orats`, a non-datetime `event_date`, a non-bool `src_orats`, `sd`/`sc` of different lengths, or a `daily` frame lacking `date`/`implied_move`/`src_iv` | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
+| `min_scoreable` not a non-negative int, an event frame lacking `event_date`/`session`/`src_orats`, a non-datetime or NaT `event_date`, a non-bool `src_orats`, or `sd`/`sc` of different lengths (both entry points); a `daily` frame lacking `date`/`implied_move`/`src_iv` or with non-ascending dates (`build_event_rows` only, the classifier takes no `daily`) | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
 
 **`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
 no clock. A feature declares its parameters; none is hard-coded in the module.

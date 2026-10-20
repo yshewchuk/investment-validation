@@ -307,6 +307,20 @@ def test_empty_event_list_returns_no_rows():
     assert classify_event_reasons(empty, _SD, _SC) == []
 
 
+@pytest.mark.parametrize("bad", [True, -1])
+def test_empty_events_with_invalid_min_scoreable_still_refuse(bad):
+    # validation runs BEFORE the empty-input return: an empty frame is not a
+    # licence to skip the contract -- both entry points refuse alike
+    _assert_refusal_parity(_events(),
+                           "min_scoreable must be a non-negative int", min_scoreable=bad)
+
+
+def test_empty_events_missing_a_required_column_still_refuse():
+    # likewise a column check precedes the empty-input return
+    _assert_refusal_parity(pd.DataFrame({"event_date": []}),
+                           "events lacks required columns: session, src_orats")
+
+
 def test_min_scoreable_above_the_confirmed_count_refuses_every_row():
     considered = _events(*_D8_EVENTS)  # 8 confirmed, 7 computable: k >= 5 holds
     rows = _build(considered, sd=_SD8, sc=_SC8, daily=_DAILY8, min_scoreable=9)
@@ -434,6 +448,17 @@ def test_string_event_date_is_contract_mismatch_from_both_entry_points():
     assert events["event_date"].dtype == object  # the input really is strings
 
     _assert_refusal_parity(events, "events event_date must be a datetime column")
+
+
+def test_nat_event_date_is_contract_mismatch_from_both_entry_points():
+    # NaT is a datetime-dtype cell no ordering or as-of lookup can place, so it
+    # refuses right after the dtype check -- same code, same text, both entry points
+    events = _events(*_CONFIRMED[:3])
+    events.loc[1, "event_date"] = pd.NaT
+    assert pd.api.types.is_datetime64_any_dtype(events["event_date"])
+    assert events["event_date"].isna().any()
+
+    _assert_refusal_parity(events, "events event_date must not hold NaT")
 
 
 def test_reversed_event_dates_refuse_before_the_ticker_level_branch():
@@ -623,23 +648,29 @@ def test_v4_definition_hash_is_still_the_pinned_literal():
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", v4.definition_hash)
 
 
-def test_only_the_five_rewritten_descriptors_differ_from_v4():
+def test_only_the_six_rewritten_descriptors_differ_from_v4():
     v4, v5 = COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
     v4_by_name = {column.name: column for column in v4.columns}
     v5_by_name = {column.name: column for column in v5.columns}
-    rewritten = {"event_ordinal", "admitted", "skipped",
+    rewritten = {"implied_move_pct", "event_ordinal", "admitted", "skipped",
                  "mean_prior_or_implied", "n_prior_implied"}
 
     assert [column.name for column in v5.columns] == (
         [column.name for column in v4.columns] + ["not_computed_reason"])
     assert set(v5_by_name) == set(v4_by_name) | {"not_computed_reason"}
-    # exactly the five contradicting v4 descriptors moved; every other shared
+    # exactly the six contradicting v4 descriptors moved; every other shared
     # column descriptor is byte-identical to v4's
     assert {name for name, column in v4_by_name.items()
             if v5_by_name[name] != column} == rewritten
 
-    # and those five carry EXACTLY this text -- pinned here rather than read
+    # and those six carry EXACTLY this text -- pinned here rather than read
     # from _V5_TEXT_OVERRIDES, which is the thing under test
+    assert v5_by_name["implied_move_pct"].null_policy == (
+        "implied_move on the last daily_market row strictly before "
+        "event_date whose src_iv is non-null, filled for no_price_window "
+        "rows; null when no such row precedes the event or that row's "
+        "implied_move is null or non-finite (never an older row); always "
+        "null on not_orats, no_session and ticker-level rows")
     assert v5_by_name["event_ordinal"].observation_time_semantics == (
         "0-based count of earlier ORATS-confirmed sessioned events of the "
         "ticker; counts confirmed events only, so unconfirmed/no-outcome "

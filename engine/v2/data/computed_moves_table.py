@@ -114,10 +114,17 @@ _COLUMNS = (
                                "came from; never null"),
 )
 
-#: The v4 column descriptors whose text states a v4 row rule v5 breaks (issue
-#: #966), keyed by column name: ``_V5_COLUMNS`` rewrites only these and keeps
-#: every other v4 descriptor byte-identical, so no v4 contract moves.
+#: The six v4 column descriptors whose text states a v4 row rule v5 breaks
+#: (issue #966), keyed by column name: ``_V5_COLUMNS`` rewrites only these and
+#: keeps every other v4 descriptor byte-identical, so no v4 contract moves.
 _V5_TEXT_OVERRIDES: dict[str, dict[str, str]] = {
+    "implied_move_pct": dict(
+        null_policy=(
+            "implied_move on the last daily_market row strictly before "
+            "event_date whose src_iv is non-null, filled for no_price_window "
+            "rows; null when no such row precedes the event or that row's "
+            "implied_move is null or non-finite (never an older row); always "
+            "null on not_orats, no_session and ticker-level rows")),
     "event_ordinal": dict(
         observation_time_semantics=(
             "0-based count of earlier ORATS-confirmed sessioned events of the "

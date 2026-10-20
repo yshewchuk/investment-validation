@@ -259,7 +259,8 @@ def _validate_inputs(events: pd.DataFrame, sd, sc, min_scoreable: int) -> None:
     refusal is one registered code, never a bare exception). ``event_date`` must
     already be a datetime column -- the store converts with ``pd.to_datetime``,
     and a string date is not accepted, so it refuses here rather than escaping
-    as an ``AttributeError`` from ``.to_datetime64()`` later. ``src_orats`` must
+    as an ``AttributeError`` from ``.to_datetime64()`` later -- and it must hold
+    no NaT, which is no event date at all. ``src_orats`` must
     hold a real ``bool``/``np.bool_`` per row -- ``None``/``pd.NA``/``NaN``/
     text are not a confirmation verdict; ``session`` values are per-event data,
     not the contract, and are read but never validated here.
@@ -273,6 +274,8 @@ def _validate_inputs(events: pd.DataFrame, sd, sc, min_scoreable: int) -> None:
                    "events lacks required columns: " + ", ".join(missing))
     if not pd.api.types.is_datetime64_any_dtype(events["event_date"]):
         raise fail("CONTRACT_MISMATCH", "events event_date must be a datetime column")
+    if events["event_date"].isna().any():
+        raise fail("CONTRACT_MISMATCH", "events event_date must not hold NaT")
     if any(not isinstance(value, (bool, np.bool_)) for value in events["src_orats"]):
         raise fail("CONTRACT_MISMATCH", "events src_orats must hold a real bool per row")
     if len(sd) != len(sc):
