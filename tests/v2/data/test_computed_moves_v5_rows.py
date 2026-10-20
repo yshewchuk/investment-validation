@@ -631,6 +631,34 @@ def test_object_dtype_implied_move_validates_per_cell_not_by_column_dtype():
             assert caught.value.problem.message == "daily_market implied_move must be numeric"
 
 
+def test_bool_complex_and_object_complex_implied_move_refuse_both_populations():
+    # a bool or complex COLUMN is never a real-number series (pandas counts
+    # both as numeric, so the dtype alone must refuse), and a Python complex
+    # CELL in an object column is not one either: each raises the ONE message
+    # from build_event_rows, in the 3-event ticker (left alone
+    # ticker_too_few_events) and the 16-event scoreable one -- while the float
+    # dtype the store hands over still computes
+    bad_series = (
+        pd.Series([True, False] * (len(_DAILY) // 2), dtype="bool"),
+        pd.Series([1.5 + 2.5j] * len(_DAILY), dtype="complex128"),
+        pd.Series([1.5 + 2.5j] * len(_DAILY), dtype=object),
+    )
+    assert pd.api.types.is_bool_dtype(bad_series[0])
+    assert pd.api.types.is_complex_dtype(bad_series[1])
+    assert bad_series[2].dtype == object and isinstance(bad_series[2].iloc[0], complex)
+    for series in bad_series:
+        bad_daily = _DAILY.assign(implied_move=series)
+        for events in (_events(*_CONFIRMED[:3]), _events(*_CONFIRMED)):
+            with pytest.raises(DataError) as caught:
+                build_event_rows("AAPL", events, _SD, _SC, bad_daily, **_KW)
+            assert caught.value.code == "CONTRACT_MISMATCH"
+            assert caught.value.problem.message == "daily_market implied_move must be numeric"
+
+    assert pd.api.types.is_float_dtype(_DAILY["implied_move"])
+    rows = _build(_events(*_CONFIRMED))
+    assert [row["implied_move_pct"] for row in rows] == [float(i) for i in range(9, 25)]
+
+
 def test_empty_daily_frames_validate_even_against_empty_inputs():
     # an EMPTY daily frame with the required columns is well-formed: rows still
     # build, with no as-of anchor anywhere (every implied value null)

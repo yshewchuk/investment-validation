@@ -17,7 +17,7 @@ capture/store path in :mod:`engine.v2.ops.computed_moves_store`.
 columns are v4's plus ``not_computed_reason`` (see the module docstring in
 :mod:`engine.v2.data.computed_moves` and ``ARCHITECTURE.md``). v4 stays pinned
 and readable; the two contracts share every field but ``contract_id``,
-``semantic_version`` and ``columns``.
+``semantic_version``, ``columns`` and the derived ``definition_hash``.
 
 Layout: ``ticker, event_date, realized_move_pct, available_as_of_date,
 implied_move_pct, event_ordinal, admitted, mean_prior_or_implied,

@@ -140,9 +140,10 @@ def _validate_daily(daily: pd.DataFrame) -> None:
         raise fail("CONTRACT_MISMATCH", "daily_market dates are unparseable") from None
     if parsed.isna().any():
         raise fail("CONTRACT_MISMATCH", "daily_market dates are unparseable")
-    if not pd.api.types.is_numeric_dtype(daily["implied_move"]) and any(
-            isinstance(cell, (bool, np.bool_)) or not isinstance(cell, (int, float, np.number))
-            for cell in daily["implied_move"].dropna()):
+    column = daily["implied_move"]
+    if pd.api.types.is_bool_dtype(column) or pd.api.types.is_complex_dtype(column) or any(
+            isinstance(cell, (bool, np.bool_)) or not isinstance(cell, (int, float, np.integer, np.floating))
+            for cell in column.dropna()):
         raise fail("CONTRACT_MISMATCH", "daily_market implied_move must be numeric")
 
 
@@ -339,9 +340,7 @@ def _collapse_and_order(events: pd.DataFrame) -> pd.DataFrame:
     """
     events = _collapse_same_date(events)
     days = [pd.Timestamp(day).strftime("%Y-%m-%d") for day in events["event_date"]]
-    for previous, current in zip(days, days[1:]):
-        if current <= previous:
-            raise fail("CONTRACT_MISMATCH", "event dates must be strictly ascending")
+    event_sequence(days, warmup=WARMUP)  # the ascending-date refusal; the result is discarded
     return events
 
 
