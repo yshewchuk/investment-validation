@@ -28,8 +28,11 @@ from pathlib import Path
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-#: Earliest a strategy's decision date can fall before the nightly decision start.
-DECISION_LOOKBACK_DAYS = 10
+#: Earliest a strategy's decision date can fall before the nightly decision start;
+#: STR-RUNUP enters 14 trading days before the event, so 30 calendar days covers it.
+DECISION_LOOKBACK_DAYS = 30
+#: A serving cache larger than this is not read; it is refit instead.
+MAX_CACHE_BYTES = 1 << 30
 #: Hard bound on the whole warm subprocess.
 WARM_TIMEOUT_S = 3 * 3600
 
@@ -77,6 +80,8 @@ def _ready(model, fold, snapshot: str, path) -> bool:
     """
     if not path.exists():
         return False
+    if not path.is_file() or path.stat().st_size > MAX_CACHE_BYTES:
+        return False
     import joblib
 
     try:
@@ -86,6 +91,7 @@ def _ready(model, fold, snapshot: str, path) -> bool:
             and pd.Timestamp(stored.get("fold_start")) == pd.Timestamp(fold)
             and stored.get("tier3_snapshot") == snapshot
             and tuple(stored.get("features", ())) == tuple(model.features)
+            and stored.get("estimator") is not None
             and "pool_pred" in stored
             and "pool_res" in stored
         )
@@ -126,6 +132,8 @@ def warm(event_dates, decision_start, decision_end=None, *, command=None, log=No
     except subprocess.TimeoutExpired as exc:
         raise WarmError(f"warm subprocess timed out after {timeout_s:.0f}s "
                         f"with {len(jobs)} fit(s) pending") from exc
+    except OSError as exc:
+        raise WarmError(f"warm subprocess could not start: {exc}") from exc
     elapsed = round(time.time() - started, 1)
     if proc.returncode != 0:
         raise WarmError(f"warm subprocess exited {proc.returncode} after {elapsed}s "
@@ -160,11 +168,20 @@ def _child(jobs, snapshot: str) -> int:
             path.unlink()
         tier4.serving_model(pd.Timestamp(fold), panel=panel, model=model)
         written.append(path)
+        now = _panel_snapshot()
+        if now != snapshot:
+            # serving_model hashes the live panel itself, so a swap could have
+            # filed an old-panel fit under the NEW hash: remove both paths.
+            for stale in written + [_serving_file(produces, fold, now)[1]]:
+                stale.unlink(missing_ok=True)
+            print("[warm] panel changed during fitting; caches removed",
+                  file=sys.stderr, flush=True)
+            return 2
         elapsed = time.time() - started
         eta = elapsed / i * (len(jobs) - i)
         print(f"[warm] fold {i}/{len(jobs)} {produces} {fold} done, "
-              f"{elapsed:.0f}s elapsed, ETA {eta:.0f}s, peak RSS {_peak_rss_mb():.0f} MB",
-              file=sys.stderr, flush=True)
+              f"{elapsed:.0f}s elapsed, {i / elapsed * 60:.1f} fits/min, ETA {eta:.0f}s, "
+              f"peak RSS {_peak_rss_mb():.0f} MB", file=sys.stderr, flush=True)
     if _panel_snapshot() != snapshot:
         for path in written:
             path.unlink(missing_ok=True)

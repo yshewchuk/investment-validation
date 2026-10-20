@@ -13,16 +13,30 @@ from engine.data.features import tier4
 
 def test_needed_folds_crosses_month_boundary():
     result = warm_serving.needed_folds(["2026-11-03"], "2026-10-20", "2026-10-20")
-    assert result == [pd.Timestamp("2026-10-01"), pd.Timestamp("2026-11-01")]
+    assert result == [
+        pd.Timestamp("2026-09-01"),
+        pd.Timestamp("2026-10-01"),
+        pd.Timestamp("2026-11-01"),
+    ]
 
 
 def test_needed_folds_single_month():
     result = warm_serving.needed_folds(["2026-10-25"], "2026-10-20")
-    assert result == [pd.Timestamp("2026-10-01")]
+    assert result == [pd.Timestamp("2026-09-01"), pd.Timestamp("2026-10-01")]
 
 
 def test_needed_folds_early_entry_lookback():
     result = warm_serving.needed_folds(["2026-11-05"], "2026-11-02")
+    assert result == [pd.Timestamp("2026-10-01"), pd.Timestamp("2026-11-01")]
+
+
+def test_needed_folds_lookback_crosses_into_september():
+    result = warm_serving.needed_folds(["2026-10-27"], "2026-10-25")
+    assert result == [pd.Timestamp("2026-09-01"), pd.Timestamp("2026-10-01")]
+
+
+def test_needed_folds_lookback_lands_on_month_start():
+    result = warm_serving.needed_folds(["2026-11-02"], "2026-10-31")
     assert result == [pd.Timestamp("2026-10-01"), pd.Timestamp("2026-11-01")]
 
 
@@ -47,6 +61,7 @@ def test_missing_jobs_ready_file_skips_producer(monkeypatch, tmp_path):
             "fold_start": "2026-10-01",
             "tier3_snapshot": "a" * 64,
             "features": list(m.features),
+            "estimator": {"coef": [1.0]},
             "pool_pred": [],
             "pool_res": [],
         },
@@ -68,6 +83,55 @@ def test_missing_jobs_ready_file_skips_producer(monkeypatch, tmp_path):
     ]
 
 
+def test_missing_jobs_estimator_none_is_present(monkeypatch, tmp_path):
+    monkeypatch.setattr(tier4.store, "file_sha256", lambda p: "a" * 64)
+    monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+
+    fold = pd.Timestamp("2026-10-01")
+    m = tier4.feature_model("pred_abs_move")
+    path = tier4._serving_path(m.model_id, fold, "a" * 64)
+    joblib.dump(
+        {
+            "model_id": m.model_id,
+            "fold_start": "2026-10-01",
+            "tier3_snapshot": "a" * 64,
+            "features": list(m.features),
+            "estimator": None,
+            "pool_pred": [],
+            "pool_res": [],
+        },
+        path,
+    )
+    assert warm_serving.missing_jobs([fold]) == [
+        (p, "2026-10-01") for p in tier4.PRODUCES
+    ]
+
+
+def test_missing_jobs_over_max_cache_bytes_is_present(monkeypatch, tmp_path):
+    monkeypatch.setattr(tier4.store, "file_sha256", lambda p: "a" * 64)
+    monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+    monkeypatch.setattr(warm_serving, "MAX_CACHE_BYTES", 1)
+
+    fold = pd.Timestamp("2026-10-01")
+    m = tier4.feature_model("pred_abs_move")
+    path = tier4._serving_path(m.model_id, fold, "a" * 64)
+    joblib.dump(
+        {
+            "model_id": m.model_id,
+            "fold_start": "2026-10-01",
+            "tier3_snapshot": "a" * 64,
+            "features": list(m.features),
+            "estimator": {"coef": [1.0]},
+            "pool_pred": [],
+            "pool_res": [],
+        },
+        path,
+    )
+    assert warm_serving.missing_jobs([fold]) == [
+        (p, "2026-10-01") for p in tier4.PRODUCES
+    ]
+
+
 def test_warm_no_missing_does_not_spawn(monkeypatch):
     monkeypatch.setattr(warm_serving, "missing_jobs", lambda folds, snapshot=None: [])
     monkeypatch.setattr(warm_serving, "_panel_snapshot", lambda: "a" * 64)
@@ -79,7 +143,7 @@ def test_warm_no_missing_does_not_spawn(monkeypatch):
     result = warm_serving.warm(
         ["2026-10-25"], "2026-10-20", "2026-10-20", log=lambda m: None
     )
-    assert result["folds"] == 1
+    assert result["folds"] == 2
     assert result["fitted"] == 0
     assert "elapsed_s" in result
 
@@ -97,6 +161,27 @@ def test_warm_subprocess_failure_raises(monkeypatch):
             "2026-10-20",
             "2026-10-20",
             command=[sys.executable, "-c", "import sys; sys.exit(3)"],
+            log=lambda m: None,
+        )
+
+
+def test_warm_subprocess_cannot_start_raises(monkeypatch):
+    monkeypatch.setattr(
+        warm_serving,
+        "missing_jobs",
+        lambda folds, snapshot=None: [("pred_abs_move", "2026-10-01")],
+    )
+    monkeypatch.setattr(warm_serving, "_panel_snapshot", lambda: "a" * 64)
+
+    def boom(*args, **kwargs):
+        raise FileNotFoundError("x")
+
+    monkeypatch.setattr(warm_serving.subprocess, "run", boom)
+    with pytest.raises(warm_serving.WarmError, match="could not start"):
+        warm_serving.warm(
+            ["2026-10-25"],
+            "2026-10-20",
+            "2026-10-20",
             log=lambda m: None,
         )
 
@@ -181,7 +266,7 @@ def test_warm_success(monkeypatch):
         command=[sys.executable, "-c", "pass"],
         log=lambda m: None,
     )
-    assert result["folds"] == 1
+    assert result["folds"] == 2
     assert result["fitted"] == 1
     assert "elapsed_s" in result
 

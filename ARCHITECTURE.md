@@ -474,7 +474,7 @@ Only a tracked path absent from the worktree reads as empty.
 
 - **Legacy nightly — `engine.dashboard.nightly`.** The board in production
   today. Its own module docstring states the load-bearing order: refresh →
-  validate → score → ledger → render → selfcheck → publish → flags → backup,
+  validate → warm Tier-4 serving models → score → ledger → render → selfcheck → publish → flags → backup,
   each step gating the next. It stays unchanged until Phase 7 cutover. See
   `engine/dashboard/ARCHITECTURE.md` for the full per-step detail.
 - **v2 supervisor — `python3 -m engine.v2.ops`.** The operator interface is

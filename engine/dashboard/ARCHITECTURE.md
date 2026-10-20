@@ -29,7 +29,7 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   cache file for the current panel sha is missing or not ready (bad metadata,
   or no embedded residual pool), in a SUBPROCESS via `tier4.serving_model`
   (same cache files). Folds are a superset: every month from
-  `decision_start - 10 days` to the latest event's month, because each
+  `decision_start - 30 days` (STR-RUNUP enters 14 trading days early) to the latest event's month, because each
   strategy's own decision date picks the fold. The child refuses and removes
   its files if the panel sha changes. Failure raises `WarmError`; the nightly
   stops with `WARM_SERVING_FAILED` and never refits in-process.

@@ -311,6 +311,9 @@ Order matters; each step gates the next.
    instead of going silent.
 2. **Validate** the store it is about to score from. Red stops the pipeline:
    yesterday's snapshot stays published and a flag is written.
+2a. **Warm** the Tier-4 serving models the score will touch: any missing for
+   the current panel are fit in a subprocess first, so score never refits
+   in-process. A failure stops the run (`WARM_SERVING_FAILED`, nothing scored).
 3. **Score** the confirmed calendar, ATM, with one shared Scorer.
 4. **Ledger** — the ATM board is frozen into `ledger/predictions/` *before*
    rendering. Missed nights backfill honestly (real `decision_ts`, flagged

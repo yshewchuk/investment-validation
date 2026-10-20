@@ -1,5 +1,5 @@
-"""The nightly orchestrator: refresh → validate → score → ledger → render →
-selfcheck → publish → flags → backup, each step gating the next.
+"""The nightly orchestrator: refresh → validate → warm → score → ledger →
+render → selfcheck → publish → flags → backup, each step gating the next.
 
 Order is load-bearing, per the guide:
 
