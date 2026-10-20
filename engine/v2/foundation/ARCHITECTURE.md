@@ -69,7 +69,8 @@ Invalid/empty sessions, malformed/missing dates (`None`, `NaT`), unknown strateg
 
 Only pure annual holiday calculations use a process-local stdlib LRU (128 years),
 returning immutable sets. Every supplied calendar is still validated on every call;
-no observed sessions, anchors, exceptions or external data are cached.
+one-off closure dates are included in each cached annual set. Observed sessions,
+anchors, validation failures and external data are not cached.
 
 | Holiday-cache condition | Outcome |
 |---|---|

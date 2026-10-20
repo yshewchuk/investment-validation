@@ -482,11 +482,17 @@ def test_holiday_lru_is_bounded_and_eviction_preserves_values() -> None:
             assert holidays(year) == expected
         for year in range(1800, 1928):
             holidays(year)
+            if year == 1864:
+                assert holidays(2024) == EXPECTED_HOLIDAYS[2024]
         assert holidays.cache_info().maxsize == holidays.cache_info().currsize == 128
         assert holidays.cache_info().misses == 130
-        for year, expected in EXPECTED_HOLIDAYS.items():
-            assert holidays(year) == expected
-        assert holidays.cache_info().misses == 132
+        # Refreshing 2024 keeps it resident; FIFO would evict it instead.
+        hits = holidays.cache_info().hits
+        assert holidays(2024) == EXPECTED_HOLIDAYS[2024]
+        assert holidays.cache_info().hits == hits + 1
+        assert holidays.cache_info().misses == 130
+        assert holidays(2025) == EXPECTED_HOLIDAYS[2025]
+        assert holidays.cache_info().misses == 131
         assert holidays.cache_info().currsize == 128
     finally:
         holidays.cache_clear()
@@ -505,5 +511,6 @@ def test_warm_holiday_cache_never_bypasses_supplied_calendar_validation(days: tu
     assert planned_exit_date(_key("STR-THRU", "2024-03-12", "BMO"), valid) == "2024-03-12"
     with pytest.raises(CalendarInputError) as caught:
         planned_exit_date(_key("STR-THRU", "2024-03-12", "BMO"), CalendarSessions(days, "2024-03-15"))
+    assert type(caught.value) is CalendarInputError
     assert caught.value.code == "INVALID_REQUEST"
     assert str(caught.value) == message
