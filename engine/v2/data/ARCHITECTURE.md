@@ -442,9 +442,9 @@ and never computed per run by a reader:
 | `daily_market` calendar days unsorted or duplicated for a ticker | `build_rows` raises `CONTRACT_MISMATCH` (via `AsofSeries`) before any row is built |
 
 The ops store now commits v5. A refresh over a parent that still holds v3 or v4
-partitions refuses `VALIDATION_FAILED` ("full rebuild required", ops doc) when it neither
-rewrites nor attempts every non-v5 partition, or produces no v5 rows at all; older
-records are never carried.
+partitions refuses `VALIDATION_FAILED` ("full rebuild required", ops doc) when it
+leaves any non-v5 partition neither rewritten nor attempted, or when the run produces
+no v5 rows; older records are never carried.
 
 `computed_at` and `retrieved_at` never order or filter anything here. The builder
 imports `event_history` from this same package (no new cross-component dependency).
