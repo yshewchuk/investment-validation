@@ -449,6 +449,8 @@ partition, or produces no v4 rows at all; v3 records are never carried.
 imports `event_history` from this same package (no new cross-component dependency).
 
 **`computed_moves.v5` — one row per considered event, with a reason (issue #966).**
+Status: v5 is defined but not yet produced. Capture still commits `computed_moves.v4`; no
+production path calls `build_event_rows` / `classify_event_reasons` yet.
 Contract `computed_moves.v5` / `5.0.0` (`COMPUTED_MOVES_V5_CONTRACT`) and the pure
 `build_event_rows` / `classify_event_reasons` sit beside v4, which stays pinned and
 readable (no migration, dual read or backfill; the standard capture rewrites
@@ -486,7 +488,7 @@ is unchanged: a candidate with no fragment is still a refusal. Nothing is writte
 | an empty event list with valid inputs | no rows; the input refusals below still apply first |
 | reason precedence for one event | per-event `not_orats`, then `no_session`; ticker-level overrides every event: `no_price_history` (no closes, checked first), else `ticker_too_few_events`; otherwise a confirmed event with no bracketing window is `no_price_window`, else null |
 | event dates not strictly ascending after the same-date collapse, or `sd` not non-decreasing | `CONTRACT_MISMATCH` from both entry points, whatever the ticker-level outcome |
-| `min_scoreable` not a non-negative int, an event frame lacking `event_date`/`session`/`src_orats`, a non-datetime, NaT or intraday `event_date`, a non-bool `src_orats`, a non-null `session` other than `BMO`/`AMC` (the source schema's set), or `sd`/`sc` of different lengths (both entry points); a `daily` frame lacking `date`/`implied_move`/`src_iv`, or with unparseable or NaT dates, or a non-real-number `implied_move` cell of any dtype (bool and complex included) (`build_event_rows` up front before any branch, and `build_rows` through the same `_validate_daily`); `daily` calendar days (`YYYY-MM-DD`) not strictly ascending and unique (`build_event_rows` up front; `build_rows` through `AsofSeries`). The classifier takes no `daily` | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
+| a malformed `min_scoreable`, event frame, price series or `daily` frame (both v5 entry points refuse alike, except that only `build_event_rows` takes and validates `daily`; per-branch detail lives in code docstrings and tests) | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
 
 **`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
 no clock. A feature declares its parameters; none is hard-coded in the module.
