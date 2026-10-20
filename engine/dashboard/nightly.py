@@ -9,6 +9,8 @@ Order is load-bearing, per the guide:
    retry loops against a dead key only burn goodwill.
 2. **Validate** the fresh data. Red stops the pipeline; yesterday's snapshot
    stays published and a flag is raised.
+2a. **Warm** the Tier-4 serving models score will touch, in a subprocess; a
+   failure stops the run (`WARM_SERVING_FAILED`) so score never refits.
 3. **Score** the calendar (one shared Scorer, one shared chain index).
 4. **Ledger** — predictions are frozen BEFORE rendering; the frozen record is
    the point. Missed nights are backfilled honestly: their rows carry the true

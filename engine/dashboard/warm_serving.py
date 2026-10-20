@@ -198,12 +198,31 @@ def _child(jobs, snapshot: str) -> int:
         shutil.rmtree(stage_dir, ignore_errors=True)
 
 
+def _validated_jobs(raw: str) -> list[tuple[str, str]]:
+    """Parse the `--jobs-json` document; exit 2 on any malformed entry."""
+    from engine.data.features import tier4
+
+    try:
+        doc = json.loads(raw)
+        jobs = []
+        for item in doc:
+            produces, fold = item
+            stamp = pd.Timestamp(fold)
+            if produces not in tier4.PRODUCES or stamp != tier4.fold_start_of([stamp]).iloc[0]:
+                raise ValueError(f"bad job {item!r}")
+            jobs.append((str(produces), str(stamp.date())))
+    except (TypeError, ValueError) as exc:
+        print(f"[warm] invalid --jobs-json: {exc}", file=sys.stderr, flush=True)
+        raise SystemExit(2) from exc
+    return jobs
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--jobs-json", required=True)
     parser.add_argument("--snapshot", required=True)
     args = parser.parse_args(argv)
-    return _child([tuple(job) for job in json.loads(args.jobs_json)], args.snapshot)
+    return _child(_validated_jobs(args.jobs_json), args.snapshot)
 
 
 if __name__ == "__main__":

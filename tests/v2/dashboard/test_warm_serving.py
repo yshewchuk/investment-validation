@@ -327,3 +327,20 @@ def test_child_refuses_when_panel_changes_mid_fit(tmp_path, monkeypatch):
     live = tier4._serving_path(model.model_id, pd.Timestamp("2026-10-01"), "a" * 64)
     assert not live.exists()
     assert not list(tmp_path.glob(".warm-*"))
+
+
+def test_main_rejects_malformed_jobs():
+    for doc in (
+        '[["nope", "2026-10-01"]]',
+        '[["pred_abs_move","2026-10-15"]]',
+        "5",
+    ):
+        with pytest.raises(SystemExit) as e:
+            warm_serving.main(["--jobs-json", doc, "--snapshot", "a" * 64])
+        assert e.value.code == 2
+
+
+def test_validated_jobs_accepts_good_document():
+    assert warm_serving._validated_jobs('[["pred_abs_move","2026-10-01"]]') == [
+        ("pred_abs_move", "2026-10-01")
+    ]
