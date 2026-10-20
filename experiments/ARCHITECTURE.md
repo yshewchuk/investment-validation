@@ -275,7 +275,9 @@ The rows above, and the current 16 MiB cohort record and child payload, are enfo
 as described until the implementation lands (#991 fix 4); this section states the
 accepted replacement contract. Cohort rows (`features`, `training`, preflight
 `planned_inputs`, and the same rows in `outer-inputs:<id>`) are ordered sections of
-content-addressed shards, not one record or payload.
+content-addressed shards, not one record or payload. Population-sized receipt lists
+(`training_inputs` candidate, qualified, read and omitted event lists, and preflight
+`event_ids`) are sections too; only fixed-size scalars stay inline in the manifest.
 
 * A shard is canonical JSON `{schema_version: magnitude_search_shard.v1, section, rows}`
   published with `ArtifactStore.publish_bytes`; its `ArtifactRef` is its address and it
@@ -302,6 +304,8 @@ content-addressed shards, not one record or payload.
 | Crash after some shards, before the manifest | Orphan shards confer no authority and are reclaimable by the store owner; the immutable claim stays unfinished. |
 | Manifest committed, later shard lost or corrupted | Fails closed as above on every read. |
 | Same slot, different manifest | `EXPERIMENT_IDENTITY_CONFLICT`. |
+| A row above 8 MiB or more than 8192 shards | Nonretryable `RESOURCE_LIMIT_EXCEEDED` before the manifest append; published shards stay unreferenced. |
+| Older whole-cohort record read by sharded code | `EXPERIMENT_IDENTITY_CONFLICT`; no rewrite or migration. |
 
 Registration, snapshot, plan and execution-spec bindings are unchanged; `inputs:<trial>`
 binds the manifest hash and so every shard. Source closures include the shard module, so
