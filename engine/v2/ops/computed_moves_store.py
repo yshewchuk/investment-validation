@@ -1161,7 +1161,8 @@ def _capture_below_bar(store, repository, snapshot, stats: _SourceStats, fragmen
     the writer's own classification (``prices_known=False``), never by a reader.
     Adds the rows to ``fragment_records`` and the log rows to ``attempts``; the tickers are disjoint from the fetched targets (past < ``MIN_SCOREABLE``).
     """
-    tickers = below_bar_tickers(stats)
+    handled = {str(attempt["ticker"]) for attempt in attempts}  # fetched targets win
+    tickers = [ticker for ticker in below_bar_tickers(stats) if ticker not in handled]
     inputs = _TickerChunks(repository, snapshot, tickers, stats, with_daily=False)
     as_of_ts = pd.Timestamp(as_of_day)
     source_hash = hashlib.sha256(b"").hexdigest()
