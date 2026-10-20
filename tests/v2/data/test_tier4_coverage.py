@@ -81,16 +81,23 @@ def test_required_serving_triples_crosses_events_with_every_producer():
     )
 
 
-def test_required_serving_triples_dedupes_repeated_event_as_of_pairs():
-    """Two events sharing an (event_date, as_of) pair compute their folds once
-    (an implementation property, checked by asserting the *set* is right
-    rather than any internal call count) and the result is still a plain set
-    -- no duplicate triples, however many events share the same folds."""
-    population = [("2026-01-15", "2026-01-10"), ("2026-01-16", "2026-01-10")]
+def test_required_serving_triples_dedupes_repeated_event_as_of_pairs(monkeypatch):
+    """A repeated (event_date, as_of) pair computes its folds once, and the
+    result is a plain set with no duplicate triples."""
+    calls = []
+    real = legacy_adapter.legacy_serving_fold
+
+    def spy(event_date, as_of):
+        calls.append((event_date, as_of))
+        return real(event_date, as_of)
+
+    monkeypatch.setattr(legacy_adapter, "legacy_serving_fold", spy)
+    population = [("2026-01-15", "2026-01-10"), ("2026-01-15", "2026-01-10")]
     required = tc.required_serving_triples(population, MODELS[:1], PANEL_SHA)
     assert required == frozenset(
         {("size", "202512", PANEL_SHA), ("size", "202601", PANEL_SHA)}
     )
+    assert len(calls) == 2  # floor + event fold, once for the repeated pair
 
 
 # --------------------------------------------------------------------------
