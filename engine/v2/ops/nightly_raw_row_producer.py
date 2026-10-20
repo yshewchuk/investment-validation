@@ -22,13 +22,13 @@ import json
 import math
 import numbers
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
 
-from engine.v2.contracts import SnapshotRef
+from engine.v2.contracts import PriceSeriesRow, SnapshotRef
 from engine.v2.data.errors import DataError, fail
 from engine.v2.data.price_history_query import tickers_with_price_history
 from engine.v2.data.price_history_table import PRICE_HISTORY_TABLE_NAME
@@ -42,6 +42,7 @@ from engine.v2.ops.native_score_batch_types import (
     NativeScoreBatchRowRefusal,
 )
 from engine.v2.ops.nightly_calendar_inputs import (
+    make_spot_reader,
     scan_calendar_row_inputs,
     scan_decision_calendar,
 )
@@ -197,6 +198,7 @@ def _compose_event(
     calendar: Any,
     panel: PanelRowInputs,
     chain_rows: Sequence[Mapping[str, Any]] | None = None,
+    spot_reader: Callable[[str, str], PriceSeriesRow | None] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """One admitted request's event document, or its in-place refusal document."""
     if not _regime_history_available(panel):
@@ -204,7 +206,7 @@ def _compose_event(
     try:
         calendar_row = scan_calendar_row_inputs(
             repository, snapshot, key, decision_session=decision_session,
-            calendar=calendar, chain_rows=chain_rows).calendar_row
+            calendar=calendar, chain_rows=chain_rows, spot_reader=spot_reader).calendar_row
         quotes = scan_quote_rows(
             repository, snapshot, key, expiry=calendar_row["expiry"],
             decision_session=decision_session, chain_rows=chain_rows)
@@ -323,6 +325,7 @@ def _compose_admitted(repository: Repository, snapshot: SnapshotRef,
     """Compose every admitted request's event, mutating ``refusals`` for each in-place refusal."""
     tracker.delta()  # discard: reset the baseline so step 1's reads cover only step 1
     events: list[dict[str, Any]] = []
+    spot_reader = make_spot_reader(repository, snapshot)
     for done, (position, key) in enumerate(admitted, 1):
         # Live progress: one step per row, "done_of_total" in its name (no-op outside a worker).
         name = f"compose_event_{done}_of_{len(admitted)}"
@@ -332,7 +335,7 @@ def _compose_admitted(repository: Repository, snapshot: SnapshotRef,
             event, refusal = _compose_event(
                 repository, snapshot, key, decision_session=decision_session,
                 calendar=calendar, panel=panels[_panel_marker(key)],
-                chain_rows=chains[key.ticker])
+                chain_rows=chains[key.ticker], spot_reader=spot_reader)
         finally:
             reads = tracker.delta()
             worker_progress.step_end(name, units=1, reads=reads)

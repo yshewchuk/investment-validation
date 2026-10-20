@@ -16,11 +16,12 @@ module never imports ``engine.score``/``engine.structures``/``engine.replay``/
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+from functools import lru_cache
 from typing import Any
 
-from engine.v2.contracts import DataQuery, KeyPredicate, PriceQuery, SnapshotRef
+from engine.v2.contracts import DataQuery, KeyPredicate, PriceQuery, PriceSeriesRow, SnapshotRef
 from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.price_history_query import get_price_series
 from engine.v2.data.price_history_table import CALENDAR_TICKER
@@ -45,7 +46,8 @@ from engine.v2.scoring.nightly_source_bundle import (
 )
 from engine.v2.scoring.source_inputs import SUPPORTED_STRATEGIES
 
-__all__ = ["scan_calendar_row_inputs", "scan_candidate_expiries", "scan_decision_calendar"]
+__all__ = ["make_spot_reader", "scan_calendar_row_inputs", "scan_candidate_expiries",
+           "scan_decision_calendar"]
 
 _CALENDAR_TICKER = CALENDAR_TICKER
 _CANDIDATE_COLUMNS = ("right", "strike", "expiry")
@@ -196,9 +198,32 @@ def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: 
     return tuple(sorted(expiries))
 
 
+def _read_spot(repository: Repository, snapshot: SnapshotRef, ticker: str,
+               session_day: str) -> PriceSeriesRow | None:
+    series = get_price_series(repository, PriceQuery(
+        ticker=ticker, session_date=session_day, observation_ceiling=session_day,
+        lookback_sessions=0), snapshot)
+    return next((row for row in series if row.date == session_day), None)
+
+
+def make_spot_reader(repository: Repository, snapshot: SnapshotRef
+                     ) -> Callable[[str, str], PriceSeriesRow | None]:
+    """One build's reader bound to its repository and immutable snapshot.
+
+    Keep at most 128 exact-session rows (including missing spots), not their
+    full price histories. Exceptions are not cached; a new build reads afresh.
+    The calendar reader still validates each key and its chain rows before use.
+    """
+    @lru_cache(maxsize=128)
+    def read(ticker: str, session_day: str) -> PriceSeriesRow | None:
+        return _read_spot(repository, snapshot, ticker, session_day)
+    return read
+
+
 def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key: BoardRequest, *,
                              decision_session: Any, calendar: CalendarSessions,
-                             chain_rows: Sequence[Mapping[str, Any]] | None = None
+                             chain_rows: Sequence[Mapping[str, Any]] | None = None,
+                             spot_reader: Callable[[str, str], PriceSeriesRow | None] | None = None,
                              ) -> CalendarRowInputs:
     """One row's pinned spot, resolved strategy expiry and independent planned
     exit staged into ``scan_calendar_row``. A missing or unusable exact-session
@@ -219,10 +244,8 @@ def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key:
     session_day = _calendar_day(decision_session, "decision_session")
     if chain_rows is not None:
         chain_rows = require_chain_rows(chain_rows, key.ticker, session_day, check_quotes=False)
-    series = get_price_series(repository, PriceQuery(
-        ticker=key.ticker, session_date=session_day, observation_ceiling=session_day,
-        lookback_sessions=0), snapshot)
-    spot_row = next((row for row in series if row.date == session_day), None)
+    spot_row = (_read_spot(repository, snapshot, key.ticker, session_day)
+                if spot_reader is None else spot_reader(key.ticker, session_day))
     if spot_row is None:
         raise NativeScoreBatchRowRefusal(
             key, "PRICE_HISTORY_NOT_AVAILABLE", PRICE_HISTORY_NOT_AVAILABLE_DETAIL)

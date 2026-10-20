@@ -20,7 +20,7 @@ from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT
 from engine.v2.data.repository import Repository
 from engine.v2.domain import generation
 from engine.v2.domain.generation import GeometryRefusal
-from engine.v2.foundation.market_calendar import CalendarSessions
+from engine.v2.foundation.market_calendar import CalendarSessions, build_calendar_sessions
 from engine.v2.ops import nightly_calendar_inputs as nci
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_board_universe import BoardRequest
@@ -768,3 +768,129 @@ def test_calendar_row_inputs_rejects_bad_event_date_before_source(bad_event_date
         scan_calendar_row_inputs(None, None, key,
                                  decision_session=_SESSION, calendar=_CALENDAR)
     assert exc.value.code == "INVALID_REQUEST"
+
+
+@pytest.mark.parametrize("close_raw", [10.0, None, 0.0])
+def test_producer_spot_reuse_preserves_all_documents_and_reads_afresh_per_build(
+        tmp_path, monkeypatch, close_raw):
+    from engine.v2.features.panel_row_inputs import PanelRowInputs
+    from engine.v2.ops import nightly_raw_row_producer as producer
+
+    prices = {ticker: [_price_row(ticker, day.date().isoformat(), close_raw=close_raw)
+                       for day in pd.bdate_range(end=_SESSION, periods=300)]
+              for ticker in ("AAA", "BBB")}
+    chains = [_chain_row(ticker, datetime(2024, 1, 5), datetime(2024, 2, 16), 10., right=right)
+              for ticker in prices for right in ("C", "P")]
+    repository, snapshot = _snapshot(tmp_path, price=prices, chains=chains,
+                                    events=[_event_row(t, _EVENT, "BMO") for t in prices])
+    historical = build_calendar_sessions(("2022-01-03",), event_through=_SESSION)
+    calendar = build_calendar_sessions(
+        tuple(day for day in historical.days if day <= _SESSION), event_through="2024-02-16")
+    monkeypatch.setattr(producer, "scan_decision_calendar", lambda *a, **k: calendar)
+    monkeypatch.setattr(producer, "scan_panel_row", lambda *a, **k: PanelRowInputs(
+        panel_row={"spy_ret252": 0.0}, panel_anchor=pd.Timestamp(_SESSION)))
+    queries = []
+    original = nci.get_price_series
+
+    def counted(repo, query, snap):
+        queries.append((snap.snapshot_id, query.ticker, query.session_date))
+        return original(repo, query, snap)
+
+    monkeypatch.setattr(nci, "get_price_series", counted)
+    try:
+        with monkeypatch.context() as uncached:
+            uncached.setattr(producer, "make_spot_reader", lambda *a: None)
+            expected = producer.build_native_score_batch_events(
+                repository, snapshot, as_of=_SESSION, horizon_days=35)
+        assert len(queries) == 20
+        queries.clear()
+        actual = producer.build_native_score_batch_events(
+            repository, snapshot, as_of=_SESSION, horizon_days=35)
+        assert actual == expected
+        assert queries == [(snapshot.snapshot_id, t, _SESSION) for t in ("AAA", "BBB")]
+        events, refusals = actual
+        if close_raw == 10.0:
+            assert len(events) == 20
+            assert refusals["refusals"] == []
+            assert {event["calendar_row"]["spot"] for event in events} == {10.0}
+        else:
+            assert events == []
+            assert len(refusals["refusals"]) == 20
+            assert {row["code"] for row in refusals["refusals"]} == {
+                "PRICE_HISTORY_NOT_AVAILABLE"}
+        assert producer.build_native_score_batch_events(
+            repository, snapshot, as_of=_SESSION, horizon_days=35) == expected
+        assert len(queries) == 4  # no memo survives the preceding build
+    finally:
+        repository._conn.close()
+
+
+def test_spot_reader_keeps_ticker_session_snapshot_and_provenance_separate(tmp_path):
+    (tmp_path / "first").mkdir()
+    (tmp_path / "second").mkdir()
+    first_rows = [_price_row("AAA", "2024-01-04", close_raw=9.),
+                  _price_row("AAA", _SESSION, close_raw=10.)]
+    correction = {**first_rows[-1], "close_raw": 20., "retrieved_at": "2024-01-07T00:00:00Z",
+                  "source_hash": fake_hash("correction"), "capture_id": "correction"}
+    first, snapshot = _snapshot(tmp_path / "first", price={
+        "AAA": first_rows + [correction], "BBB": [_price_row("BBB", _SESSION, close_raw=30.)]})
+    second, newer = _snapshot(tmp_path / "second", price={
+        "AAA": first_rows + [{**correction, "deleted": True}]})
+    try:
+        read = nci.make_spot_reader(first, snapshot)
+        row = read("AAA", _SESSION)
+        assert (row.close_raw, row.retrieved_at, row.source_hash) == (
+            20., correction["retrieved_at"], correction["source_hash"])
+        assert read("AAA", _SESSION) is row
+        assert read("AAA", "2024-01-04").close_raw == 9.
+        assert read("BBB", _SESSION).close_raw == 30.
+        assert nci.make_spot_reader(second, newer)("AAA", _SESSION) is None
+        assert read("AAA", _SESSION) is row
+    finally:
+        first._conn.close()
+        second._conn.close()
+
+
+def test_spot_reader_is_bounded_retains_only_spot_rows_and_never_caches_exceptions(monkeypatch):
+    from engine.v2.contracts import PriceSeriesRow
+
+    calls = []
+    problem = data_fail("CONTRACT_MISMATCH", "synthetic source refusal")
+    row = PriceSeriesRow(date=_SESSION, close_adj=9., close_raw=10., high_raw=10.,
+                         retrieved_at=None, source_hash=None)
+
+    def source(repo, query, snapshot):
+        calls.append(query.ticker)
+        if len(calls) == 1:
+            raise problem
+        return (row,)
+
+    monkeypatch.setattr(nci, "get_price_series", source)
+    read = nci.make_spot_reader(None, None)
+    with pytest.raises(DataError) as failure:
+        read("AAA", _SESSION)
+    assert failure.value is problem
+    assert read("AAA", _SESSION) is row
+    assert read("AAA", _SESSION) is row
+    assert calls == ["AAA", "AAA"]
+    for index in range(129):
+        assert read(f"T{index}", _SESSION) is row
+    assert read.cache_info().currsize == read.cache_info().maxsize == 128
+    read("AAA", _SESSION)
+    assert len(calls) == 132  # evicted entry is read again
+
+
+def test_cached_spot_does_not_move_key_date_or_chain_validation(monkeypatch):
+    def forbidden(*args):
+        raise AssertionError("spot read preceded existing validation")
+
+    for key, session, chains in [
+        (replace(_STRADDLE_KEY, strategy="not-a-strategy"), _SESSION, None),
+        (_STRADDLE_KEY, "2024-01-05T01:00:00", None),
+        (_STRADDLE_KEY, _SESSION, [{"ticker": "AAA"}]),
+    ]:
+        with pytest.raises(OpsError) as failure:
+            scan_calendar_row_inputs(None, None, key, decision_session=session,
+                                     calendar=_CALENDAR, chain_rows=chains,
+                                     spot_reader=forbidden)
+        assert failure.value.code == "INVALID_REQUEST"

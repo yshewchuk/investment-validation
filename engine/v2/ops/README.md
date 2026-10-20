@@ -122,9 +122,14 @@ candidate row.
 `nightly_calendar_inputs.scan_decision_calendar`,
 `nightly_calendar_inputs.scan_candidate_expiries`, and
 `nightly_calendar_inputs.scan_calendar_row_inputs` (both of the latter accept
-an optional `chain_rows`) are internal staging APIs
+an optional `chain_rows`; calendar-row scanning also accepts `spot_reader`) are internal staging APIs
 for pinned raw-row calendar inputs. They compose decision-calendar sessions,
 strategy-eligible expiries and calendar-row inputs; `nightly_raw_row_producer` calls `scan_decision_calendar` and `scan_calendar_row_inputs` (which calls `scan_candidate_expiries`). See the component architecture contract.
+
+`nightly_calendar_inputs.make_spot_reader(repository, snapshot)` binds one build's
+LRU reader to those exact inputs; at most 128 `(ticker, session)` spot rows or
+missing values are retained. Full histories and exceptions are never cached.
+The calendar helper calls this reader only after each key/date/chain validation.
 
 `nightly_raw_row_producer.build_native_score_batch_events` is an internal
 producer that composes native raw-row event and refusal documents from pinned

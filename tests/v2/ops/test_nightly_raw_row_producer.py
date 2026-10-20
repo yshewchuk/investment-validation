@@ -213,7 +213,7 @@ class _ReaderRig:
             return _calendar()
 
         def calendar_row(repository, snapshot, key, *, decision_session, calendar,
-                         chain_rows=None):
+                         chain_rows=None, spot_reader=None):
             self.calendar_row_calls.append(key)
             self.chain_rows_seen.append(chain_rows)
             if self.calendar_row_hook is not None:
@@ -435,7 +435,8 @@ def test_panel_reader_called_once_per_ticker(
             fixture._EVENT.date().isoformat(),)
         return CalendarSessions(days=days, observed_through=decision_session)
 
-    def calendar_row(repo, snap, key, *, decision_session, calendar, chain_rows=None):
+    def calendar_row(repo, snap, key, *, decision_session, calendar, chain_rows=None,
+                     spot_reader=None):
         day = key.event_date.date().isoformat()
         return CalendarRowInputs(calendar_revision="events-rev", calendar_row={
             "event_id": f"{key.ticker}-{key.strategy}", "ticker": key.ticker,
@@ -541,7 +542,8 @@ def test_real_panel_spy_corruption_changes_pinned_event_digest(monkeypatch):
             fixture._EVENT.date().isoformat(),)
         return CalendarSessions(days=days, observed_through=decision_session)
 
-    def calendar_row(repo, snap, key, *, decision_session, calendar, chain_rows=None):
+    def calendar_row(repo, snap, key, *, decision_session, calendar, chain_rows=None,
+                     spot_reader=None):
         day = key.event_date.date().isoformat()
         return CalendarRowInputs(calendar_revision="events-rev", calendar_row={
             "event_id": f"{key.ticker}-{key.strategy}", "ticker": key.ticker,
@@ -975,7 +977,8 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
 
     calendar_row_calls: list = []
 
-    def calendar_row(repo, snap, key, *, decision_session, calendar, chain_rows=None):
+    def calendar_row(repo, snap, key, *, decision_session, calendar, chain_rows=None,
+                     spot_reader=None):
         calendar_row_calls.append(key)
         day = key.event_date.date().isoformat()
         observed = fixture._DECISION.date().isoformat()
