@@ -282,8 +282,10 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 * A shard is canonical JSON `{schema_version: magnitude_search_shard.v1, section, rows}`
   published with `ArtifactStore.publish_bytes`; its `ArtifactRef` is its address and it
   names no cohort or position. Rows keep the admitted order. The cut is deterministic
-  (target 4 MiB; hard maximum 8 MiB; at most 8192 shards), so equal rows give equal
-  shards; a row or count above the maxima is `RESOURCE_LIMIT_EXCEEDED`.
+  (target 4 MiB; hard maximum 8 MiB; at most 8192 shards in total across all sections of
+  one manifest, so a manifest of ~0.5 KB entries stays under ~4 MiB, well below the
+  16 MiB record cap), so equal rows give equal shards; a row or count above the
+  maxima is `RESOURCE_LIMIT_EXCEEDED`.
 * `cohort:<id>` and `outer-inputs:<id>` hold a small manifest (inline scalar members plus,
   per section, `row_count` and ordered `{ref, rows, first_key, last_key}`). `inputs_id`
   is `content_hash(manifest)`. Older whole-cohort records refuse
@@ -292,7 +294,7 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   the allocation bound) and checked for schema, section, row count and boundary keys;
   totals equal `row_count`. Matrix evidence keeps today's training / evaluation list
   order. The child gets a header (limits, fold, horizons, execution spec, manifest,
-  store root), reads only manifest-named objects and opens no repository, catalog or
+  expected `inputs_id`, store root) and checks the manifest hash against it, reads only manifest-named objects and opens no repository, catalog or
   validation target. Transport memory is one shard plus the manifest.
 * Shards are published, outside the catalog transaction, before the manifest append,
   which is the commit point.
@@ -308,7 +310,9 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 | Older whole-cohort record read by sharded code | `EXPERIMENT_IDENTITY_CONFLICT`; no rewrite or migration. |
 
 Registration, snapshot, plan and execution-spec bindings are unchanged; `inputs:<trial>`
-binds the manifest hash and so every shard. Source closures include the shard module, so
+binds the manifest hash and so every shard. The outer result record that today binds the
+hash of the `outer-inputs:<id>` document binds that manifest's hash instead, and outer
+activation and replay verify it before reading any shard. Source closures include the shard module, so
 seals change. Replay identity holds within one format version.
 
 ## Stored research-history entrypoint
