@@ -439,6 +439,7 @@ and never computed per run by a reader:
 | duplicate or unsorted event dates, or duplicate or unsorted `daily_market` dates, for a ticker | `build_rows` raises `CONTRACT_MISMATCH`; the refresh fails before any catalog commit, surfaced by the store as `OpsError` `INPUT_CHANGED` (`details.data_code` = the data code) |
 | the `daily_market` frame, empty or not, lacks `date`, `implied_move` or `src_iv` | `build_rows` raises `CONTRACT_MISMATCH` (the store's own scan refuses a missing table column first, per the ops doc) |
 | no `src_iv` row before an event | `implied_move_pct` null, no contribution to the aggregate |
+| `daily_market` calendar days unsorted or duplicated for a ticker | `build_rows` raises `CONTRACT_MISMATCH` (via `AsofSeries`) before any row is built |
 
 A refresh over a parent that still holds v3 partitions refuses `VALIDATION_FAILED`
 ("full rebuild required", ops doc) when it neither rewrites nor attempts every non-v4
@@ -446,6 +447,46 @@ partition, or produces no v4 rows at all; v3 records are never carried.
 
 `computed_at` and `retrieved_at` never order or filter anything here. The builder
 imports `event_history` from this same package (no new cross-component dependency).
+
+**`computed_moves.v5` — one row per considered event, with a reason (issue #966).**
+Contract `computed_moves.v5` / `5.0.0` (`COMPUTED_MOVES_V5_CONTRACT`) and the pure
+`build_event_rows` / `classify_event_reasons` sit beside v4, which stays pinned and
+readable (no migration, dual read or backfill; the standard capture rewrites
+partitions). In a v5 dataset version the builder, not a reader, decides which events
+computed moves omits and records that decision on the event's own row, so every
+considered event has exactly one single-row fragment and the research isolation guard
+is unchanged: a candidate with no fragment is still a refusal. Nothing is written to
+`earnings_events`. The ops store's committed contract is documented in the ops doc.
+- New column `not_computed_reason` string nullable. Null exactly when the row is a
+  computed outcome (`skipped` false). Non-null exactly when `skipped` is true and
+  `realized_move_pct` and `available_as_of_date` are null. Closed set:
+  `not_orats` (no ORATS confirmation, e.g. a `forward_claim` phantom), `no_session`
+  (confirmed, session null), `no_price_window` (the v4 skipped case: missing close or
+  a P→Q gap over `MAX_GAP_CALENDAR_DAYS`), `no_price_history` (the ticker's close
+  series is empty), `ticker_too_few_events` (fewer than `MIN_SCOREABLE`
+  past ORATS-confirmed sessioned events, or fewer than `ADMISSION_EVENTS` computable
+  ones). Ticker-level reasons apply to every event of that ticker.
+- Considered events: every `earnings_events` row of a ticker dated before `as_of`.
+  The v4 omissions (non-ORATS event, ticker below the bars, ticker without prices)
+  become rows; the whole-ticker empty return is gone.
+- Counting stays on confirmed events: `event_ordinal` counts earlier ORATS-confirmed
+  sessioned events; on a row whose reason is `not_orats`, `no_session` or ticker-level,
+  `admitted` is false, `implied_move_pct` and `mean_prior_or_implied` are null and
+  `n_prior_implied` is 0. `no_price_window` rows keep v4 semantics. A phantom never
+  shifts a real event's ordinal or prior mean.
+- Readers must not treat a row as a scoreable event unless `not_computed_reason` is
+  null or `no_price_window`; each history feature decides explicitly how every reason
+  counts.
+
+| Condition | Outcome |
+|---|---|
+| a considered event | exactly one row, `(ticker, event_date)` unique |
+| a ticker with no earnings events | no rows |
+| same-ticker same-date `earnings_events` rows | one row; a confirmed row wins over an unconfirmed one, else the first in input order |
+| an empty event list with valid inputs | no rows; the input refusals below still apply first |
+| reason precedence for one event | per-event `not_orats`, then `no_session`; ticker-level overrides every event: `no_price_history` (no closes, checked first), else `ticker_too_few_events`; otherwise a confirmed event with no bracketing window is `no_price_window`, else null |
+| event dates not strictly ascending after the same-date collapse, or `sd` not non-decreasing | `CONTRACT_MISMATCH` from both entry points, whatever the ticker-level outcome |
+| `min_scoreable` not a non-negative int, an event frame lacking `event_date`/`session`/`src_orats`, a non-datetime, NaT or intraday `event_date`, a non-bool `src_orats`, a non-null `session` other than `BMO`/`AMC` (the source schema's set), or `sd`/`sc` of different lengths (both entry points); a `daily` frame lacking `date`/`implied_move`/`src_iv`, or with unparseable or NaT dates, or a non-real-number `implied_move` cell of any dtype (bool and complex included) (`build_event_rows` up front before any branch, and `build_rows` through the same `_validate_daily`); `daily` calendar days (`YYYY-MM-DD`) not strictly ascending and unique (`build_event_rows` up front; `build_rows` through `AsofSeries`). The classifier takes no `daily` | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
 
 **`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
 no clock. A feature declares its parameters; none is hard-coded in the module.
