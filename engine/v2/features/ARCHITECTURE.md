@@ -163,12 +163,14 @@ are the daily-state `im` and `rvol30` (absent when those are absent;
 is NaN (`engine/features.py` `add_absolute_features`); `has_implied_quote`
 is 1.0 when `or_implied` is present and above 0, else 0.0
 (`add_quote_indicators`). `mean_prior_or_implied` is READ from the stored
-`computed_moves.v4` columns (`event_ordinal`, `admitted`, `implied_move_pct`,
+`computed_moves.v4`/`v5` columns (`event_ordinal`, `admitted`, `implied_move_pct`,
 `mean_prior_or_implied`, `n_prior_implied`), never computed from history per
 run (platform rule, #651). The scored event has no row of its own, so the
 value carries the latest row strictly before
 `min(event_day, decision_session)` forward by one event (any `skipped`/availability
-state; implied quotes are anchored before their own event). It is `None` when
+state; implied quotes are anchored before their own event). On a v5 table the read drops
+refusal rows (`not_computed_reason` set, other than `no_price_window`) first, so a later
+`not_orats`/`no_session`/ticker-level row never replaces the latest confirmed row. It is `None` when
 that row is not admitted or no row exists. A null value is the key present with `None`, so it is never reported
 as a missing feature.
 It never assigns `tier4_row` or

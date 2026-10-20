@@ -1120,7 +1120,7 @@ tests = [
     "tests/test_v2_data_incremental_persistence.py",
     "tests/v2/ops/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_computed_moves_nightly_wiring.py",
-    "tests/test_v2_ops_computed_moves_store.py",
+    "tests/v2/ops/test_v2_ops_computed_moves_store.py",
     "tests/v2/ops/test_computed_moves_event_fragments.py",
     "tests/test_v2_ops_partition_consumer.py",
     "tests/test_v2_ops_coordinator_lease.py",

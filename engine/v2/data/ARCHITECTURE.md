@@ -441,16 +441,17 @@ and never computed per run by a reader:
 | no `src_iv` row before an event | `implied_move_pct` null, no contribution to the aggregate |
 | `daily_market` calendar days unsorted or duplicated for a ticker | `build_rows` raises `CONTRACT_MISMATCH` (via `AsofSeries`) before any row is built |
 
-A refresh over a parent that still holds v3 partitions refuses `VALIDATION_FAILED`
-("full rebuild required", ops doc) when it neither rewrites nor attempts every non-v4
-partition, or produces no v4 rows at all; v3 records are never carried.
+The ops store now commits v5. A refresh over a parent that still holds v3 or v4
+partitions refuses `VALIDATION_FAILED` ("full rebuild required", ops doc) when it neither
+rewrites nor attempts every non-v5 partition, or produces no v5 rows at all; older
+records are never carried.
 
 `computed_at` and `retrieved_at` never order or filter anything here. The builder
 imports `event_history` from this same package (no new cross-component dependency).
 
 **`computed_moves.v5` — one row per considered event, with a reason (issue #966).**
-Status: v5 is defined but not yet produced. Capture still commits `computed_moves.v4`; no
-production path calls `build_event_rows` / `classify_event_reasons` yet.
+Status: the ops capture (`run_computed_moves_refresh`) commits `computed_moves.v5` through
+`build_event_rows`; v4 is no longer written and survives only as a readable contract.
 Contract `computed_moves.v5` / `5.0.0` (`COMPUTED_MOVES_V5_CONTRACT`) and the pure
 `build_event_rows` / `classify_event_reasons` sit beside v4, which stays pinned and
 readable (no migration, dual read or backfill; the standard capture rewrites
@@ -458,7 +459,7 @@ partitions). In a v5 dataset version the builder, not a reader, decides which ev
 computed moves omits and records that decision on the event's own row, so every
 considered event has exactly one single-row fragment and the research isolation guard
 is unchanged: a candidate with no fragment is still a refusal. Nothing is written to
-`earnings_events`. The ops store's committed contract is documented in the ops doc.
+`earnings_events`. The ops store commits `computed_moves.v5` (ops doc); v4 is readable but no longer written.
 - New column `not_computed_reason` string nullable. Null exactly when the row is a
   computed outcome (`skipped` false). Non-null exactly when `skipped` is true and
   `realized_move_pct` and `available_as_of_date` are null. Closed set:
@@ -467,7 +468,10 @@ is unchanged: a candidate with no fragment is still a refusal. Nothing is writte
   a P→Q gap over `MAX_GAP_CALENDAR_DAYS`), `no_price_history` (the ticker's close
   series is empty), `ticker_too_few_events` (fewer than `MIN_SCOREABLE`
   past ORATS-confirmed sessioned events, or fewer than `ADMISSION_EVENTS` computable
-  ones). Ticker-level reasons apply to every event of that ticker.
+  ones). Ticker-level reasons apply to every event of that ticker. A caller that skips
+  loading prices for a ticker below `MIN_SCOREABLE` passes `prices_known=False`: the
+  ticker classifies `ticker_too_few_events` (never `no_price_history`), and the builder
+  refuses `CONTRACT_MISMATCH` at or above `MIN_SCOREABLE` confirmed events.
 - Considered events: every `earnings_events` row of a ticker dated before `as_of`.
   The v4 omissions (non-ORATS event, ticker below the bars, ticker without prices)
   become rows; the whole-ticker empty return is gone.
@@ -486,9 +490,10 @@ is unchanged: a candidate with no fragment is still a refusal. Nothing is writte
 | a ticker with no earnings events | no rows |
 | same-ticker same-date `earnings_events` rows | one row; a confirmed row wins over an unconfirmed one, else the first in input order |
 | an empty event list with valid inputs | no rows; the input refusals below still apply first |
-| reason precedence for one event | per-event `not_orats`, then `no_session`; ticker-level overrides every event: `no_price_history` (no closes, checked first), else `ticker_too_few_events`; otherwise a confirmed event with no bracketing window is `no_price_window`, else null |
+| reason precedence for one event | per-event `not_orats`, then `no_session`; ticker-level overrides every event: with `prices_known=False` `ticker_too_few_events`, else `no_price_history` (no closes, checked first), else `ticker_too_few_events`; otherwise a confirmed event with no bracketing window is `no_price_window`, else null |
 | event dates not strictly ascending after the same-date collapse, or `sd` not non-decreasing | `CONTRACT_MISMATCH` from both entry points, whatever the ticker-level outcome |
 | a malformed `min_scoreable`, event frame, price series or `daily` frame (both v5 entry points refuse alike, except that only `build_event_rows` takes and validates `daily`; per-branch detail lives in code docstrings and tests) | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
+| `prices_known` not a `bool`, or `prices_known=False` with `MIN_SCOREABLE` or more confirmed events (both entry points) | `CONTRACT_MISMATCH`; with `prices_known=False` and fewer, every event is `ticker_too_few_events` whatever `sd`/`sc` hold |
 
 **`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
 no clock. A feature declares its parameters; none is hard-coded in the module.
@@ -507,7 +512,8 @@ no clock. A feature declares its parameters; none is hard-coded in the module.
 - Dates are canonical `YYYY-MM-DD` data dates only; `retrieved_at` and
   `computed_at` are provenance and never filter or order.
 - The module only computes from the inputs it is given; it stores nothing. Its
-  one production caller is `computed_moves.build_rows` (`computed_moves.v4`).
+  production caller is `computed_moves.build_event_rows` (`computed_moves.v5`), which
+  reaches these primitives through `build_rows` over the confirmed-only frame.
 
 | Condition | Outcome |
 |---|---|

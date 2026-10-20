@@ -19,12 +19,20 @@ from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore
 from engine.v2.ops import computed_moves_store as store_module
 from tests.ops_support import catalog
-from tests.test_v2_ops_computed_moves_store import (
+from tests.v2.ops.test_v2_ops_computed_moves_store import (
     _AS_OF, _EVENT_DAYS, _CountingFetcher, _build_parent, _closes_csv, _event_row, _head_row,
     _parameters, _write_input)
 
 _NEW = ("event_ordinal", "admitted", "mean_prior_or_implied", "n_prior_implied")
 _TICKERS = ("AAAA", "BBBB", "CCCC")
+
+
+@pytest.fixture(autouse=True)
+def _small_fixture_bar(monkeypatch):
+    """The fixtures carry 8-ish events per ticker: lower the store's one bar to the old
+    effective admission bar (5) so they classify as computed outcomes."""
+    from engine.v2.ops import computed_moves_store as _store
+    monkeypatch.setattr(_store, "MIN_SCOREABLE", 5)
 
 
 def _v3_contract():
@@ -45,13 +53,13 @@ def _patch_v3(monkeypatch):
                   pa.field("quarter_ordinal", pa.int64()))
     names = [c for c in store_module.FRAGMENT_COLUMNS if c not in _NEW]
     names.insert(names.index("implied_move_pct") + 1, "quarter_ordinal")
-    real_build_rows = store_module.build_rows
+    real_build_rows = store_module.build_event_rows
     monkeypatch.setattr(store_module, "COMPUTED_MOVES_CONTRACT", v3)
     monkeypatch.setattr(store_module, "_CONTRACT_REF", TableContractRef(
         contract_id=v3.contract_id, definition_hash=v3.definition_hash))
     monkeypatch.setattr(store_module, "_ARROW_SCHEMA", pa.schema(fields))
     monkeypatch.setattr(store_module, "FRAGMENT_COLUMNS", tuple(names))
-    monkeypatch.setattr(store_module, "build_rows", lambda *a, **k: [
+    monkeypatch.setattr(store_module, "build_event_rows", lambda *a, **k: [
         {**row, "quarter_ordinal": 0} for row in real_build_rows(*a, **k)])
 
 
@@ -108,13 +116,13 @@ def test_incremental_generation_over_a_v3_parent_refuses_without_writing(tmp_pat
         v3_head["snapshot_id"], v3_head["generation"])
 
 
-def test_full_rebuild_over_a_v3_head_writes_complete_v4(tmp_path, monkeypatch):
+def test_full_rebuild_over_a_v3_head_writes_complete_v5(tmp_path, monkeypatch):
     conn, store, v3_head = _v3_head(tmp_path, monkeypatch)
     assert _run(conn, tmp_path, "v4full", v3_head, _TICKERS, monkeypatch).status == "complete"
     new_head = _head_row(conn)
     assert new_head["snapshot_id"] != v3_head["snapshot_id"]
     records = _records(conn, store, new_head["snapshot_id"])
-    assert {contract for contract, _, _ in records} == {"computed_moves.v4"}
+    assert {contract for contract, _, _ in records} == {"computed_moves.v5"}
     assert {ticker for _, ticker, _ in records} == set(_TICKERS)
 
 
@@ -131,20 +139,20 @@ def test_all_v4_incremental_generation_carries_unselected_tickers(tmp_path, monk
 
 
 
-def test_full_rebuild_where_a_v3_ticker_has_no_v4_rows_drops_its_manifest_hash(
+def test_full_rebuild_where_a_v3_ticker_has_no_v5_rows_drops_its_manifest_hash(
         tmp_path, monkeypatch):
     conn, store, v3_head = _v3_head(tmp_path, monkeypatch)
     before = Repository(conn, store).resolve_full(v3_head["snapshot_id"])
     assert "CCCC" in before.table_manifests["computed_moves"].partition_logical_hashes
-    real_build_rows = store_module.build_rows
+    real_build_rows = store_module.build_event_rows
     # CCCC yields no v4 rows (the refresh records it as too_few); the rest is the real builder.
-    monkeypatch.setattr(store_module, "build_rows", lambda ticker, *a, **k: (
+    monkeypatch.setattr(store_module, "build_event_rows", lambda ticker, *a, **k: (
         [] if ticker == "CCCC" else real_build_rows(ticker, *a, **k)))
     _run(conn, tmp_path, "v4full", v3_head, _TICKERS, monkeypatch)
     new_head = _head_row(conn)
     assert new_head["snapshot_id"] != v3_head["snapshot_id"]
     records = _records(conn, store, new_head["snapshot_id"])
-    assert {contract for contract, _, _ in records} == {"computed_moves.v4"}
+    assert {contract for contract, _, _ in records} == {"computed_moves.v5"}
     assert {ticker for _, ticker, _ in records} == {"AAAA", "BBBB"}
     after = Repository(conn, store).resolve_full(new_head["snapshot_id"])
     hashes = after.table_manifests["computed_moves"].partition_logical_hashes
@@ -154,7 +162,7 @@ def test_full_rebuild_where_a_v3_ticker_has_no_v4_rows_drops_its_manifest_hash(
 def test_full_rebuild_producing_no_rows_over_a_v3_head_refuses_instead_of_leaving_v3_live(
         tmp_path, monkeypatch):
     conn, store, v3_head = _v3_head(tmp_path, monkeypatch)
-    monkeypatch.setattr(store_module, "build_rows", lambda *a, **k: [])
+    monkeypatch.setattr(store_module, "build_event_rows", lambda *a, **k: [])
     written = _write_counts(conn)
     with pytest.raises(OpsError) as err:
         _run(conn, tmp_path, "v4none", v3_head, _TICKERS, monkeypatch)
@@ -167,10 +175,10 @@ def test_full_rebuild_producing_no_rows_over_a_v3_head_refuses_instead_of_leavin
 
 
 def test_build_rows_refusal_reaches_the_ops_layer_typed_without_writing(tmp_path, monkeypatch):
-    """A DataError from build_rows (duplicate event dates, a daily frame without src_iv: those
+    """A DataError from build_event_rows (duplicate event dates, a daily frame without src_iv: those
     refusals are unit-tested on build_rows itself, and the fixture publisher cannot carry such
     a parent) must leave the refresh as an OpsError (INPUT_CHANGED, data code kept in the message and details): the CLI catches only
-    OpsError. The raise is injected at build_rows; the conversion under test is the store's."""
+    OpsError. The raise is injected at build_event_rows; the conversion under test is the store's."""
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path)
     events = [_event_row(t, d) for t in _TICKERS for d in _EVENT_DAYS]
@@ -179,7 +187,7 @@ def test_build_rows_refusal_reaches_the_ops_layer_typed_without_writing(tmp_path
     def refuse(*args, **kwargs):
         raise fail("CONTRACT_MISMATCH", "event dates must be strictly ascending")
 
-    monkeypatch.setattr(store_module, "build_rows", refuse)
+    monkeypatch.setattr(store_module, "build_event_rows", refuse)
     written = _write_counts(conn)
     with pytest.raises(OpsError) as err:
         _run(conn, tmp_path, "dup", head, _TICKERS, monkeypatch)
