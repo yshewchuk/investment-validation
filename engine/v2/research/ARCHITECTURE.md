@@ -120,7 +120,14 @@ then scans each eligible ticker/event-date pair in pinned `computed_moves`. The 
 and magnitude readers (`event_history`, `magnitude_inputs`, `magnitude_history_store`)
 accept the `computed_moves.v4` or `computed_moves.v5` contract and refuse any other
 `CONTRACT_MISMATCH`; on v5 a row with a `not_computed_reason` other than `no_price_window`
-is `skipped` and carries no outcome, so it never counts as a scoreable event.
+is `skipped` and carries no outcome, so it never counts as a scoreable event. The
+writer's reason is the only reason research reports: the history and training-label
+omission lists (`omitted_history`, `omitted_labels`) carry the row's `not_computed_reason`
+as the omission `reason` (v4 rows keep `skipped`), never a research-side re-derivation. The
+isolation guard is unchanged: every candidate still needs exactly one isolated fragment,
+and a candidate with no fragment refuses `HOLDOUT_ACCESS_DENIED`. `prediction_inputs`
+refuses a table that is neither contract with `CONTRACT_MISMATCH`, and a v5 skipped row with
+`EXPERIMENT_VARIANT_FAILED` naming the reason.
 It returns the signed move, binary `positive_move` target, and
 `target_available_on` date. The date is required and later than the event;
 fold consumers must admit training labels only when available before their

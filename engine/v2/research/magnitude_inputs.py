@@ -141,7 +141,8 @@ def _training_label(rows, event, cutoff):
         raise errors.fail("EXPERIMENT_VARIANT_FAILED", "magnitude training label identity is invalid")
     row = rows[0]
     if row["skipped"]:
-        return None, "skipped"
+        reason = row.get("not_computed_reason")
+        return None, reason if isinstance(reason, str) and reason else "skipped"
     if row["available_as_of_date"] is None:
         return None, "unavailable"
     try:

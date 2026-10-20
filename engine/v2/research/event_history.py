@@ -157,7 +157,8 @@ def _historical_target(rows, event, decision):
         raise errors.fail("EXPERIMENT_VARIANT_FAILED", "historical outcome identity is invalid")
     row = rows[0]
     if row["skipped"] is True:
-        return None, "skipped"
+        reason = row.get("not_computed_reason")
+        return None, reason if isinstance(reason, str) and reason else "skipped"
     if row["available_as_of_date"] is None:
         return None, "unavailable"
     try:

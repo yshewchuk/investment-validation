@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 from sklearn.linear_model import LogisticRegression
 
-from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.data.errors import DataError
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.ops.experiment_folds import TrainFoldRule, fit_walk_forward_fold
@@ -45,13 +45,14 @@ def prediction_event(day, *, random=False, prefix="T", **overrides):
                 date_agree=True, date_conflict=False, **overrides)
 
 
-def commit_prediction_inputs(tmp_path, events, moves=None, *, include_targets=True):
+def commit_prediction_inputs(tmp_path, events, moves=None, *, include_targets=True,
+                             contract=COMPUTED_MOVES_CONTRACT):
     tmp_path.mkdir(parents=True, exist_ok=True)
     conn, clock, store = catalog_and_store(tmp_path)
     contracts = {"earnings_events": contract_for("earnings_events")}
     input_rows = {"earnings_events": events}
     if include_targets:
-        contracts["computed_moves"] = COMPUTED_MOVES_CONTRACT
+        contracts["computed_moves"] = contract
         input_rows["computed_moves"] = moves if moves is not None else [outcome_move(e) for e in events]
     tables = {}
     for table, contract in contracts.items():
@@ -292,6 +293,48 @@ def test_empty_bulk_calendar_is_not_a_success(tmp_path):
     try:
         with pytest.raises(DataError, match="POPULATION_COLLAPSED"):
             _targets(repository, snapshot)
+        assert all(name == "earnings_events" for name, _ in repository.scans)
+    finally:
+        conn.close()
+
+
+def test_v5_skipped_target_refuses_naming_the_writers_reason(tmp_path):
+    event = prediction_event("2024-05-02")
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [event], [
+        outcome_move(event, None, skipped=True, available_as_of_date=None,
+                     not_computed_reason="not_orats")], contract=COMPUTED_MOVES_V5_CONTRACT)
+    try:
+        with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED") as refusal:
+            _targets(repository, snapshot)
+        assert refusal.value.problem.message == "prediction target was not computed: not_orats"
+    finally:
+        conn.close()
+
+
+def test_v4_skipped_target_keeps_the_generic_refusal(tmp_path):
+    event = prediction_event("2024-05-02")
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [event], [
+        outcome_move(event, None, skipped=True, available_as_of_date=None,
+                     not_computed_reason="not_orats")])
+    try:
+        with pytest.raises(DataError, match="EXPERIMENT_VARIANT_FAILED") as refusal:
+            _targets(repository, snapshot)
+        assert refusal.value.problem.message == "prediction target or availability is invalid"
+    finally:
+        conn.close()
+
+
+def test_foreign_computed_moves_contract_refuses_before_any_target_scan(tmp_path):
+    from engine.v2.data.manifests import table_contract_hash
+    foreign = replace(COMPUTED_MOVES_CONTRACT, contract_id="computed_moves.v0", semantic_version="0.0.0")
+    foreign = replace(foreign, definition_hash=table_contract_hash(foreign))
+    event = prediction_event("2024-05-02")
+    conn, repository, snapshot = commit_prediction_inputs(tmp_path, [event], [
+        outcome_move(event, None, skipped=True, available_as_of_date=None)], contract=foreign)
+    try:
+        with pytest.raises(DataError, match="CONTRACT_MISMATCH") as refusal:
+            _targets(repository, snapshot)
+        assert refusal.value.problem.message == "prediction targets require native computed moves"
         assert all(name == "earnings_events" for name, _ in repository.scans)
     finally:
         conn.close()
