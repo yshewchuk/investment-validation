@@ -5,7 +5,13 @@ from contextlib import contextmanager
 import pytest
 
 from engine.v2.contracts import ArtifactRef
-from engine.v2.foundation import ArtifactStore, canonical_json, from_document, to_document
+from engine.v2.foundation import (
+    ArtifactStore,
+    canonical_json,
+    content_hash,
+    from_document,
+    to_document,
+)
 from engine.v2.ops.errors import OpsError
 from experiments import magnitude_search_shards as shards
 
@@ -169,6 +175,12 @@ def test_oversized_row_refuses_without_publishing(tmp_path, monkeypatch):
     assert published == []
 
 
+def test_non_canonical_row_refuses_while_writing(tmp_path):
+    store = ArtifactStore(tmp_path / "store")
+    with refusal("INVALID_EXPERIMENT_SPEC", False):
+        shards.write_section(store, "features", [{"k": object()}], key)
+
+
 def test_shard_count_bound_refuses_before_extra_publish(tmp_path, monkeypatch):
     store = ArtifactStore(tmp_path / "store")
     published = counted_publisher(monkeypatch)
@@ -208,6 +220,18 @@ def test_verify_manifest_shard_budget(monkeypatch):
         shards.verify_manifest(manifest, shards.manifest_id(manifest))
 
 
+def test_verify_manifest_section_count_binding(tmp_path):
+    store = ArtifactStore(tmp_path / "store")
+    entry = shards.write_section(store, "features", rows(1), key)
+    too_many = shards.build_manifest({}, {"features": {"row_count": 2, "shards": entry["shards"]}})
+    with refusal("EXPERIMENT_IDENTITY_CONFLICT", False):
+        shards.verify_manifest(too_many, shards.manifest_id(too_many))
+    empty_with_shards = shards.build_manifest(
+        {}, {"features": {"row_count": 0, "shards": entry["shards"]}})
+    with refusal("EXPERIMENT_IDENTITY_CONFLICT", False):
+        shards.verify_manifest(empty_with_shards, shards.manifest_id(empty_with_shards))
+
+
 def _collecting_reads(monkeypatch):
     reads = []
     original = ArtifactStore.read_verified
@@ -224,6 +248,20 @@ def test_section_total_refuses_before_any_read(tmp_path, monkeypatch):
     store = ArtifactStore(tmp_path / "store")
     entry = shards.write_section(store, "features", rows(2), key)
     broken = {"row_count": 3, "shards": entry["shards"]}
+    reads = _collecting_reads(monkeypatch)
+    collected = []
+    with refusal("EXPERIMENT_IDENTITY_CONFLICT", False):
+        for item in shards.iter_section(store, "features", broken, key):
+            collected.append(item)
+    assert collected == []
+    assert reads == []
+
+
+def test_later_zero_row_shard_refuses_before_any_read(tmp_path, monkeypatch):
+    store = ArtifactStore(tmp_path / "store")
+    entry = shards.write_section(store, "features", rows(1), key)
+    shard = entry["shards"][0]
+    broken = {"row_count": 1, "shards": [shard, {**shard, "rows": 0}]}
     reads = _collecting_reads(monkeypatch)
     collected = []
     with refusal("EXPERIMENT_IDENTITY_CONFLICT", False):
@@ -395,16 +433,31 @@ def test_reader_streams_one_shard_at_a_time(tmp_path, monkeypatch):
 
 
 def test_inventory_sections_are_unique_and_keyed_or_flagged():
+    expected = {
+        "features": ("event_id", "context_id", "horizon_sessions", "feature columns"),
+        "training": ("event_id", "absolute_move_pct"),
+        "preflight.event_ids": ("event_id",),
+        "preflight.planned_inputs": ("event_id", "fragment_id", "object_id", "content_hash"),
+        "training_inputs.candidate_event_ids": ("event_id",),
+        "training_inputs.qualified_event_ids": ("event_id",),
+        "training_inputs.read_inputs": ("event_id", "fragment_id", "object_id", "content_hash"),
+        "training_inputs.omitted_labels": ("event_id", "reason"),
+    }
     members = shards.LIST_MEMBERS
-    assert [member["section"] for member in members] == [
-        "features", "training", "preflight.event_ids", "preflight.planned_inputs",
-        "training_inputs.candidate_event_ids", "training_inputs.qualified_event_ids",
-        "training_inputs.read_inputs", "training_inputs.omitted_labels"]
+    assert [member["section"] for member in members] == list(expected)
     for member in members:
-        assert member["rows"]
+        assert member["rows"] == expected[member["section"]]
         if member["section"] == "features":
             assert callable(member["key"])
             assert "problem" not in member
         else:
             assert member["key"] is None
-            assert member["problem"]
+            assert "no strictly increasing key" in member["problem"]
+
+
+def test_manifest_id_tracks_inline_and_content():
+    first = shards.build_manifest({"stored_inputs_id": "sha256:x"}, {})
+    second = shards.build_manifest({"stored_inputs_id": "sha256:y"}, {})
+    assert shards.manifest_id(first) == content_hash(first)
+    assert shards.manifest_id(second) == content_hash(second)
+    assert shards.manifest_id(first) != shards.manifest_id(second)

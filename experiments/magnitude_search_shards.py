@@ -103,6 +103,13 @@ def _empty_size(section):
     return len(canonical_json(document).encode())
 
 
+def _row_width(row):
+    try:
+        return len(canonical_json(row).encode())
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        raise fail(_INVALID_SPEC, "search cohort row is not canonical JSON") from None
+
+
 def _less(left, right):
     try:
         return left < right
@@ -145,7 +152,7 @@ def write_section(store, section, rows, key):
     shards, size = [], _empty_size(section)
     for row in rows:
         row_key = _sort_key(key, row, previous)
-        width = len(canonical_json(row).encode())
+        width = _row_width(row)
         if batch and size + width + 1 > TARGET_BYTES:
             _flush(store, section, shards, batch, first, last)
             batch, size, first = [], _empty_size(section), None
@@ -183,10 +190,6 @@ def _section_binding(entry):
         raise fail(_CONFLICT, "search cohort section exceeds its shard limit")
     if (entry["row_count"] == 0) != (not entry["shards"]):
         raise fail(_CONFLICT, "search cohort section count is invalid")
-    if all(isinstance(shard, dict) and type(shard.get("rows")) is int and shard["rows"] > 0
-           for shard in entry["shards"]) and (
-            sum(shard["rows"] for shard in entry["shards"]) != entry["row_count"]):
-        raise fail(_CONFLICT, "search cohort section count is invalid")
     return entry["row_count"], entry["shards"]
 
 
@@ -212,6 +215,18 @@ def _shard_binding(shard, previous_last):
     if previous_last is not None and not _less(previous_last, first):
         raise fail(_CONFLICT, "search cohort shard boundaries are out of order")
     return ref, shard["rows"], first, last
+
+
+def _bindings(entry):
+    row_count, shards = _section_binding(entry)
+    bindings, previous_last = [], None
+    for shard in shards:
+        binding = _shard_binding(shard, previous_last)
+        bindings.append(binding)
+        previous_last = binding[3]
+    if sum(binding[1] for binding in bindings) != row_count:
+        raise fail(_CONFLICT, "search cohort section count is invalid")
+    return row_count, bindings
 
 
 def _payload_rows(payload, section, expected):
@@ -246,23 +261,15 @@ def _verified_keys(rows, key, first, last):
 
 def iter_section(store, section, entry, key):
     """Stream one section's verified rows in order, holding one shard at a time."""
-    row_count, shards = _section_binding(entry)
-    total, previous_last = 0, None
-    for shard in shards:
-        ref, expected, first, last = _shard_binding(shard, previous_last)
+    _, bindings = _bindings(entry)
+    for ref, expected, first, last in bindings:
         try:
             payload = store.read_verified(ref)
         except (ArtifactError, OSError) as error:
             raise _artifact_failure(error, "read", unsafe_is_conflict=False) from None
         rows = _payload_rows(payload, section, expected)
-        if total + len(rows) > row_count:
-            raise fail(_CONFLICT, "search cohort section count is invalid")
-        keys = _verified_keys(rows, key, first, last)
+        _verified_keys(rows, key, first, last)
         yield from rows
-        total += len(rows)
-        previous_last = keys[-1]
-    if total != row_count:
-        raise fail(_CONFLICT, "search cohort section count is invalid")
 
 
 def _manifest_shape(manifest):
@@ -272,16 +279,7 @@ def _manifest_shape(manifest):
             or not isinstance(manifest["sections"], dict)):
         raise fail(_CONFLICT, "search cohort manifest is invalid")
     for entry in manifest["sections"].values():
-        if (not isinstance(entry, dict) or set(entry) != {"row_count", "shards"}
-                or type(entry["row_count"]) is not int or entry["row_count"] < 0
-                or not isinstance(entry["shards"], list)):
-            raise fail(_CONFLICT, "search cohort manifest is invalid")
-        for shard in entry["shards"]:
-            if (not isinstance(shard, dict) or set(shard) != {"ref", "rows", "first_key", "last_key"}
-                    or type(shard["rows"]) is not int or shard["rows"] <= 0
-                    or not isinstance(shard["first_key"], list)
-                    or not isinstance(shard["last_key"], list)):
-                raise fail(_CONFLICT, "search cohort manifest is invalid")
+        _bindings(entry)
     if sum(len(entry["shards"]) for entry in manifest["sections"].values()) > MAX_SHARDS:
         raise fail(_CONFLICT, "search cohort manifest exceeds its shard limit")
 

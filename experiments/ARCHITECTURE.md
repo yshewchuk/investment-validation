@@ -305,8 +305,9 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   which is the commit point.
 * The manifest hash is a Merkle `inputs_id`, and every cohort shards, however small.
 * `magnitude_search_shards` implements the cut rule, writer, manifest hash and verified reader
-  and lists the list-valued members (`LIST_MEMBERS`); a member without a strictly increasing
-  sort key carries a `problem` note and is not written.
+  and lists the list-valued members (`LIST_MEMBERS`) as data. A member without a strictly
+  increasing sort key carries a `problem` note and no key function; the writer takes a
+  caller-supplied key and does not consult the inventory, so callers must not write such a member.
 
 | Condition | Outcome |
 |---|---|
