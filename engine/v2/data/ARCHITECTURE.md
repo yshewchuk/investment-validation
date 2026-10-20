@@ -693,7 +693,15 @@ replay shortcut keyed on `request_hash`/`attempt_id`/`fence`/`scope`/
 `snapshot_id` — through the composed fence, reachable only for a no-op or
 that candidate's own already-applied effect; a direct caller with a
 head-blind `fence_check` gets a weaker guarantee (a matching replay returns
-the prior receipt even if the head moved since).
+the prior receipt even if the head moved since). A replay never reports a head
+move it did not make (#1060): when the head still equals the caller's
+expected snapshot and generation and the receipt's snapshot differs, the
+shortcut applies the head CAS under the existing receipt (generation + 1) in
+the same transaction, so a same-session rerun on unchanged sources, whose
+content-addressed candidate and receipt already exist, still ends with the
+head at the candidate. A head that has moved past the expectation keeps the
+prior-receipt return. Every `commit_snapshot` caller (computed-moves,
+price-history, snapshot import) inherits this.
 
 **`repository.py` reads (summary).** Missing input maps to the codes above;
 a corrupt id is `MANIFEST_CORRUPT`; a re-hash mismatch is `OBJECT_CORRUPT`.
