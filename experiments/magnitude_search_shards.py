@@ -7,6 +7,7 @@ import json
 from engine.v2.contracts import ArtifactRef
 from engine.v2.foundation import (
     ArtifactError,
+    NONFINITE_KEY,
     canonical_json,
     content_hash,
     from_document,
@@ -104,8 +105,28 @@ def _empty_size(section):
     return len(canonical_json(document).encode())
 
 
+def _scan_reserved_keys(value):
+    """Refuse a row that carries the non-finite tag key as literal data.
+
+    ``canonical_json`` tags a non-finite float as ``{"__nonfinite__": ...}``
+    and ``untag_nonfinite`` decodes that shape, so a row dict with that exact
+    key would be ambiguous on the read side. Recurse over dicts' keys and
+    lists'/tuples' items, bounded by the RecursionError mapping in
+    ``_row_payload``.
+    """
+    if isinstance(value, dict):
+        if NONFINITE_KEY in value:
+            raise fail(_INVALID_SPEC, "search cohort row uses a reserved key")
+        for item in value.values():
+            _scan_reserved_keys(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _scan_reserved_keys(item)
+
+
 def _row_payload(row):
     try:
+        _scan_reserved_keys(row)
         return canonical_json(row)
     except (TypeError, ValueError, OverflowError, RecursionError):
         raise fail(_INVALID_SPEC, "search cohort row is not canonical JSON") from None

@@ -194,6 +194,37 @@ def test_non_canonical_row_refuses_while_writing(tmp_path):
         shards.write_section(store, "features", [{"k": object()}], key)
 
 
+def test_reserved_nonfinite_key_row_refuses_while_writing(tmp_path):
+    store = ArtifactStore(tmp_path / "store")
+    with pytest.raises(OpsError) as caught:
+        shards.write_section(store, "features",
+                             [{"event_id": "a", "x": {"__nonfinite__": "NaN"}}], key)
+    assert caught.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
+    assert "reserved key" in caught.value.problem.message
+
+
+def test_reserved_nonfinite_key_nested_in_list_refuses_while_writing(tmp_path):
+    store = ArtifactStore(tmp_path / "store")
+    batch = [{"event_id": "a", "horizon_sessions": 1,
+              "values": [0.5, {"__nonfinite__": "NaN"}]}]
+    with pytest.raises(OpsError) as caught:
+        shards.write_section(store, "features", batch, key)
+    assert caught.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
+    assert "reserved key" in caught.value.problem.message
+
+
+def test_real_nonfinite_values_still_round_trip(tmp_path):
+    store = ArtifactStore(tmp_path / "store")
+    batch = [{"event_id": "a", "horizon_sessions": 1,
+              "values": [float("nan"), {"score": float("inf")}]}]
+    written = shards.write_section(store, "features", batch, key)
+    recovered = list(shards.iter_section(store, "features", written, key))
+    assert math.isnan(recovered[0]["values"][0])
+    assert recovered[0]["values"][1]["score"] == float("inf")
+
+
 def test_shard_count_bound_refuses_before_extra_publish(tmp_path, monkeypatch):
     store = ArtifactStore(tmp_path / "store")
     published = counted_publisher(monkeypatch)
@@ -227,13 +258,28 @@ def test_build_manifest_shard_budget(tmp_path, monkeypatch):
                                    "training": {"row_count": 1, "shards": first["shards"]}})
 
 
-def test_verify_manifest_shard_budget(monkeypatch):
-    monkeypatch.setattr(shards, "MAX_SHARDS", 2)
-    shard = {"ref": {}, "rows": 1, "first_key": [0], "last_key": [1]}
+def _three_shard_section(store, section="features"):
+    """A valid section of three shards: real published shards, not a fake ref."""
+    entries = [shards.write_section(store, section, [row(f"E{index:03d}")], key)
+               for index in range(3)]
+    shard_list = [shard for entry in entries for shard in entry["shards"]]
+    assert len(shard_list) == 3
+    return {"row_count": 3, "shards": shard_list}
+
+
+def test_verify_manifest_shard_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(shards, "MAX_SHARDS", 8192)
+    store = ArtifactStore(tmp_path / "store")
+    section = _three_shard_section(store)
     manifest = {"schema_version": shards.MANIFEST_SCHEMA, "inline": {},
-                "sections": {"features": {"row_count": 3, "shards": [shard, shard, shard]}}}
-    with refusal("EXPERIMENT_IDENTITY_CONFLICT", False):
-        shards.verify_manifest(manifest, shards.manifest_id(manifest))
+                "sections": {"features": section}}
+    expected_id = shards.manifest_id(manifest)
+    monkeypatch.setattr(shards, "MAX_SHARDS", 2)
+    with pytest.raises(OpsError) as caught:
+        shards.verify_manifest(manifest, expected_id)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.retryable is False
+    assert "shard limit" in caught.value.problem.message
 
 
 def _two_shard_section(store, section):
@@ -312,15 +358,18 @@ def test_later_zero_row_shard_refuses_before_any_read(tmp_path, monkeypatch):
 
 
 def test_section_shard_budget_refuses_before_any_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(shards, "MAX_SHARDS", 8192)
     store = ArtifactStore(tmp_path / "store")
-    monkeypatch.setattr(shards, "MAX_SHARDS", 2)
-    shard = {"ref": {}, "rows": 1, "first_key": [0], "last_key": [1]}
-    entry = {"row_count": 3, "shards": [shard, shard, shard]}
+    entry = _three_shard_section(store)
     reads = _collecting_reads(monkeypatch)
     collected = []
-    with refusal("EXPERIMENT_IDENTITY_CONFLICT", False):
+    monkeypatch.setattr(shards, "MAX_SHARDS", 2)
+    with pytest.raises(OpsError) as caught:
         for item in shards.iter_section(store, "features", entry, key):
             collected.append(item)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.retryable is False
+    assert "shard limit" in caught.value.problem.message
     assert collected == []
     assert reads == []
 
