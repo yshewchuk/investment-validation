@@ -24,6 +24,13 @@ from tests.data_scan_support import (
 
 TICKERS = [("A", "2024-05-01"), ("B", "2024-05-02"),
            ("C", "2024-05-03"), ("D", "2024-05-04")]
+MULTI_FRAGMENT = [
+    ("A", ("2024-05-01", "2024-05-02")),
+    ("A", ("2024-05-03", "2024-05-04", "2024-05-05")),
+    ("B", ("2024-05-02",)),
+    ("C", ("2024-05-02", "2024-05-03", "2024-05-04", "2024-05-05")),
+    ("D", ("2024-05-04", "2024-05-05")),
+]
 
 
 def _move(ticker, day):
@@ -34,13 +41,22 @@ def _move(ticker, day):
                 capture_id="synthetic")
 
 
-def _build(tmp_path):
+def _build(tmp_path, groups=None):
     conn, clock, store = catalog_and_store(tmp_path)
     ref = contract_ref_for(CONTRACT)
-    records = [publish_and_inspect(store, CONTRACT, ref, [_move(t, d)], t)
-               for t, d in TICKERS]
+    groups = [(t, (d,)) for t, d in TICKERS] if groups is None else groups
+    records = [publish_and_inspect(store, CONTRACT, ref, [_move(t, d) for d in days], t)
+               for t, days in groups]
+    hashes = {}
+    for ticker in sorted({t for t, _ in groups}):
+        parts = [days for t, days in groups if t == ticker]
+        if len(parts) > 1:
+            rows = [_move(ticker, day) for days in parts for day in days]
+            hashes[ticker] = publish_and_inspect(
+                store, CONTRACT, ref, rows, ticker).logical_content_hash
     snapshot = commit_tables(conn, clock, {"computed_moves": records},
-                             {"computed_moves": CONTRACT}, store=store)
+                             {"computed_moves": CONTRACT}, store=store,
+                             partition_logical_hashes={"computed_moves": hashes})
     return conn, store, ref, snapshot
 
 
@@ -120,8 +136,9 @@ def test_partition_predicate_plans_only_that_partition_pinned_vs_every_fragment_
         conn.close()
 
 
-def test_corrupt_bound_on_an_unfiltered_fragment_refuses_every_pinned_scan_and_is_never_cached(
-        tmp_path, monkeypatch):
+@pytest.mark.parametrize("bound_only", [False, True])
+def test_corrupt_bound_on_an_unfiltered_fragment_refuses_and_is_never_cached(
+        tmp_path, monkeypatch, bound_only):
     conn, store, ref, snapshot = _build(tmp_path)
     try:
         original = Repository._records
@@ -139,9 +156,100 @@ def test_corrupt_bound_on_an_unfiltered_fragment_refuses_every_pinned_scan_and_i
         request = _request(snapshot, ref, key_filter=key_filter, max_result_rows=1)
         for _ in range(2):
             with pytest.raises(DataError) as failure:
-                _rows(repository, request)
+                if bound_only:
+                    repository.scan_population_bound(
+                        snapshot.snapshot_id, table_name="computed_moves",
+                        table_contract_ref=ref, key_filter=key_filter)
+                else:
+                    _rows(repository, request)
             assert failure.value.code == "MANIFEST_CORRUPT"
+            assert failure.value.problem.message == "fragment primary-key bounds are invalid"
+            assert failure.value.problem.retryable is False
             assert repository._pinned_tables == {}
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("as_document", [False, True])
+@pytest.mark.parametrize("values,expected,partitions", [
+    (("A",), 5, ["A", "A"]), (("A", "C"), 9, ["A", "A", "C"]), (("ZZZ",), 0, []),
+])
+def test_pinned_bound_and_scan_plan_only_selected_partitions_on_cold_and_warm_cache(
+        tmp_path, monkeypatch, values, expected, partitions, as_document):
+    conn, store, ref, snapshot = _build(tmp_path, MULTI_FRAGMENT)
+    try:
+        key_filter = (KeyPredicate(column="ticker", operator="in", values=values),)
+        bound_filter = ([dataclasses.asdict(key_filter[0])] if as_document else key_filter)
+        repository = Repository(conn, store, pin_snapshots=True)
+        calls = _spy_plans(monkeypatch)
+        for _ in range(2):
+            bound = repository.scan_population_bound(
+                snapshot.snapshot_id, table_name="computed_moves",
+                table_contract_ref=ref, key_filter=bound_filter)
+            assert bound == expected
+            rows = _rows(repository, _request(
+                snapshot, ref, key_filter=key_filter, max_result_rows=bound))
+            assert rows == [{"ticker": ticker, "event_date": day}
+                            for ticker, days in MULTI_FRAGMENT if ticker in values for day in days]
+        assert [[record.partition_key for record in records] for records in calls] == [
+            partitions] * 4
+        calls.clear()
+        assert Repository(conn, store).scan_population_bound(
+            snapshot.snapshot_id, table_name="computed_moves",
+            table_contract_ref=ref, key_filter=bound_filter) == expected
+        assert [len(records) for records in calls] == [len(MULTI_FRAGMENT)]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("key_filter,code,message", [
+    (None, "QUERY_NOT_BOUNDED", "key_filter must be a list or tuple of predicates"),
+    ({}, "QUERY_NOT_BOUNDED", "key_filter must be a list or tuple of predicates"),
+    ([None], "QUERY_NOT_BOUNDED", "a key_filter predicate is refused: BAD_TYPE"),
+    ((KeyPredicate(column="ticker", operator="in", values=None),), "QUERY_NOT_BOUNDED",
+     "a key_filter predicate is refused: BAD_TYPE"),
+    ((KeyPredicate(column="ticker", operator="in", values=("A", "B", "D")),
+      KeyPredicate(column="ticker", operator="in", values=("B", "C"))), "QUERY_NOT_BOUNDED",
+     "the same column is filtered twice"),
+    ((KeyPredicate(column="event_date", operator="eq", values=("2024-05-02",)),),
+     "CONTRACT_MISMATCH", "'event_date' is not a filterable column"),
+])
+def test_pinned_bounds_preserve_invalid_filter_refusals(tmp_path, key_filter, code, message):
+    conn, store, ref, snapshot = _build(tmp_path)
+    try:
+        for pinned in (False, True):
+            repository = Repository(conn, store, pin_snapshots=pinned)
+            with pytest.raises(DataError) as failure:
+                repository.scan_population_bound(
+                    snapshot.snapshot_id, table_name="computed_moves",
+                    table_contract_ref=ref, key_filter=key_filter)
+            assert failure.value.code == code
+            assert failure.value.problem.message == message
+            assert failure.value.problem.retryable is False
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("values,start,end,expected", [
+    ((), "2024-05-01", "2024-05-04", 10), (("A", "D"), "2024-05-01", "2024-05-04", 5),
+    (("A", "D"), "2024-05-01", "2024-05-06", 7),
+    (("A", "D"), "2024-05-03", "2024-05-06", 5), (("A", "D"), "2024-05-06", None, 0),
+])
+def test_pinned_bounds_preserve_time_filters(tmp_path, monkeypatch, values, start, end, expected):
+    conn, store, ref, snapshot = _build(tmp_path, MULTI_FRAGMENT)
+    try:
+        key_filter = (KeyPredicate(column="ticker", operator="in", values=values),) if values else ()
+        interval = TimeInterval(column="event_date", start_inclusive=start,
+                                end_exclusive=end)
+        calls = _spy_plans(monkeypatch)
+        for pinned in (False, True):
+            repository = Repository(conn, store, pin_snapshots=pinned)
+            assert repository.scan_population_bound(
+                snapshot.snapshot_id, table_name="computed_moves", table_contract_ref=ref,
+                key_filter=key_filter, time_interval=interval) == expected
+            assert [record.partition_key for record in calls[-1]] == [
+                ticker for ticker, _ in MULTI_FRAGMENT
+                if not pinned or not values or ticker in values]
     finally:
         conn.close()
 
