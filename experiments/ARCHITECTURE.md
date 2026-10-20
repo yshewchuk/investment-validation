@@ -292,7 +292,12 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   `EXPERIMENT_IDENTITY_CONFLICT`; none is rewritten.
 * One streaming reader serves parent and child: each shard is `read_verified` (size is
   the allocation bound) and checked for schema, section, row count and boundary keys;
-  totals equal `row_count`. Matrix evidence keeps today's training / evaluation list
+  totals equal `row_count`. Each section has one key comparator (the row's sort key):
+  within a shard keys strictly increase, and across shards the previous `last_key` is
+  strictly below the next `first_key`, so out-of-order or overlapping shards are refused.
+  An empty section has `row_count` 0, an empty shard list and no keys; any shard listed
+  for it, or a nonzero count with an empty list, is a count disagreement. Parent and
+  child apply the same rule. Matrix evidence keeps today's training / evaluation list
   order. The child gets a header (limits, fold, horizons, execution spec, manifest,
   expected `inputs_id`, store root) and checks the manifest hash against it, reads only manifest-named objects and opens no repository, catalog or
   validation target. Transport memory is one shard plus the manifest.
@@ -306,6 +311,7 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 | Crash after some shards, before the manifest | Orphan shards confer no authority and are reclaimable by the store owner; the immutable claim stays unfinished. |
 | Manifest committed, later shard lost or corrupted | Fails closed as above on every read. |
 | Same slot, different manifest | `EXPERIMENT_IDENTITY_CONFLICT`. |
+| Same slot, same manifest (retry after an ambiguous append) | No-op success; shards are content-addressed, so republishing is harmless, and no cache entry depends on the attempt. |
 | A row above 8 MiB or more than 8192 shards | Nonretryable `RESOURCE_LIMIT_EXCEEDED` before the manifest append; published shards stay unreferenced. |
 | Older whole-cohort record read by sharded code | `EXPERIMENT_IDENTITY_CONFLICT`; no rewrite or migration. |
 
