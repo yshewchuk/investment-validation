@@ -1011,14 +1011,3 @@ def test_only_the_six_rewritten_descriptors_differ_from_v4():
     assert v5_by_name["n_prior_implied"].null_policy == (
         "count of values behind mean_prior_or_implied; 0 when it is null, "
         "including every not_orats/no_session/ticker-level row")
-
-
-def test_zz_tmp_numstat_dump():
-    import subprocess
-    from pathlib import Path
-    out = subprocess.run(
-        ["git", "diff", "origin/main", "--numstat", "--",
-         "engine/v2/data/computed_moves.py",
-         "engine/v2/data/computed_moves_table.py"],
-        capture_output=True, text=True, check=True).stdout
-    Path("/tmp/opencode/numstat.txt").write_text(out)
