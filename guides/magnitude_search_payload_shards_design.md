@@ -1,8 +1,10 @@
 # Magnitude-search cohort inputs as content-addressed shards (#991 fix 4)
 
-Status: design. Contract lives in `experiments/ARCHITECTURE.md` ("Sharded cohort
-inputs"); this file holds the reasoning, failure table and the split list. No code
-in this PR.
+Status: proposed design; sections 2-5 are the contract the implementation PRs
+adopt. `experiments/ARCHITECTURE.md` describes only current behaviour, so it is
+unchanged here: split PRs 2-4 each update it (and `experiments/README.md`, which
+states the 16 MiB child transport) in the same PR that changes the behaviour. No
+code in this PR.
 
 ## 1. Problem
 
@@ -130,22 +132,27 @@ and `safe_relative_path(storage_key)` (the journal's existing `_reference` rules
 
 ## 7. Split list (add, then wire, then remove)
 
-1. **Shard module (add, ~350 lines + tests, no wiring).** Cut rule, writer,
+Estimates are added lines: code / tests / docs.
+
+1. **Shard module (add; ~350 / ~250 / ~40, no wiring).** Cut rule, writer,
    manifest builder, verified streaming reader, failure mapping, inventory of
    list-valued cohort members. Tests: determinism, boundary keys, corruption, vanished
-   shard, oversize row, shard-count cap.
-2. **Journal wiring (~300 lines).** `_start` publishes shards + v2 manifest;
+   shard, oversize row, shard-count cap. Docs: the new module's section in
+   `experiments/ARCHITECTURE.md` (format, cut rule, reader).
+2. **Journal wiring (~300 / ~200 / ~40).** `_start` publishes shards + v2 manifest;
    `inputs_id` = manifest hash; v1 `cohort:` records refuse; closure/seal update.
-3. **Parent replay paths (~300 lines).** `_record`, reconcile, freeze, outer and
+   Docs: journal and cap rows, seal note.
+3. **Parent replay paths (~300 / ~200 / ~30).** `_record`, reconcile, freeze, outer and
    `fit_evidence` stream the reader; the validation check uses `planned_inputs`
-   streamed. Contract section moves from "design" to enforced.
-4. **Child transport (~250 lines).** Header request, worker streaming reader and
+   streamed. Docs: replay and outer rows.
+4. **Child transport (~250 / ~150 / ~40).** Header request, worker streaming reader and
    projection, parent `_fit_inputs` and the 16 MiB input check removed. Reports
-   measured child RSS (supervisor-run scale job; agents run no heavy jobs).
-5. **Cleanup (remove).** Delete dead v1 whole-cohort paths and the superseded doc
-   lines.
-6. **Conditional: sharded outputs** (D3), same reader/writer for forecasts and
-   validation targets, with chunked child output lines.
+   measured child RSS (supervisor-run scale job; agents run no heavy jobs). Docs:
+   execution table and `experiments/README.md` transport line.
+5. **Cleanup (remove; net negative code / ~50 / ~20).** Delete dead v1 whole-cohort
+   paths and superseded doc lines.
+6. **Conditional: sharded outputs** (D3; ~300 / ~200 / ~30), same reader/writer for
+   forecasts and validation targets, with chunked child output lines.
 
 Fix 5 (parent memory) reuses PR 1's writer with an iterator source and is independent
 of PRs 2-4. A full-universe run needs fixes 1-3 (merged), PRs 2-4, and fix 5 if
