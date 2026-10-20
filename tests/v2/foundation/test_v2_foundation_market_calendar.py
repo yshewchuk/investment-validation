@@ -519,6 +519,8 @@ def test_warm_holiday_cache_never_bypasses_supplied_calendar_validation(days: tu
 
 @pytest.mark.parametrize("event,session,expected", [
     ("2024-03-12", "BMO", "2024-03-12"),
+    ("2024-03-12", "AMC", "2024-03-13"),
+    ("2024-03-13", "BMO", "2024-03-13"),
     ("2024-03-13", "AMC", "2024-03-14"),
 ])
 def test_planned_exit_does_not_validate_observed_through(event, session, expected) -> None:
