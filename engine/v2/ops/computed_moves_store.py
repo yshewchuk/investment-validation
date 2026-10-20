@@ -757,7 +757,7 @@ def _no_fragment_result(conn, parameters, attempts, targets, document, parent, c
     if _stale_partition_keys(parent):  # a full rebuild must not leave a v3/v4 head live
         raise fail("VALIDATION_FAILED",
                    "computed moves full rebuild required: no v5 rows were produced for a "
-                   "parent that still holds non-v4 partitions")
+                   "parent that still holds non-v5 partitions")
     with transaction(conn):
         _fence_check_for(document.get("attempt_id"), document.get("fence"), clock)(conn)
         _parent_receipt_id_for_commit(

@@ -116,7 +116,11 @@ workers. Their no-report/no-ledger contracts live in `experiments/ARCHITECTURE.m
 protected `event_history` and fresh replay for each fold's training/evaluation rows;
 its reconstructed date-ceiling and native publication contracts live in that same doc.
 `prediction_inputs.load_prediction_targets` consumes this population first,
-then scans each eligible ticker/event-date pair in pinned `computed_moves`.
+then scans each eligible ticker/event-date pair in pinned `computed_moves`. The history
+and magnitude readers (`event_history`, `magnitude_inputs`, `magnitude_history_store`)
+accept the `computed_moves.v4` or `computed_moves.v5` contract and refuse any other
+`CONTRACT_MISMATCH`; on v5 a row with a `not_computed_reason` other than `no_price_window`
+is `skipped` and carries no outcome, so it never counts as a scoreable event.
 It returns the signed move, binary `positive_move` target, and
 `target_available_on` date. The date is required and later than the event;
 fold consumers must admit training labels only when available before their

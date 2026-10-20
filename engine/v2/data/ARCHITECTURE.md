@@ -512,8 +512,8 @@ no clock. A feature declares its parameters; none is hard-coded in the module.
 - Dates are canonical `YYYY-MM-DD` data dates only; `retrieved_at` and
   `computed_at` are provenance and never filter or order.
 - The module only computes from the inputs it is given; it stores nothing. Its
-  production callers are `computed_moves.build_rows` (`computed_moves.v4`) and, through
-  it, `computed_moves.build_event_rows` (`computed_moves.v5`).
+  production caller is `computed_moves.build_event_rows` (`computed_moves.v5`), which
+  reaches these primitives through `build_rows` over the confirmed-only frame.
 
 | Condition | Outcome |
 |---|---|
