@@ -137,10 +137,19 @@ def _validate_daily(daily: pd.DataFrame) -> None:
     ``build_rows`` reaches it through :func:`_implied_by_event`, while
     ``build_event_rows`` calls it BEFORE any branch, so a ticker-level refusal
     (``ticker_too_few_events``/``no_price_history``) cannot mask a malformed
-    frame, empty or not.
+    frame, empty or not. ``date`` must parse as datetimes and ``implied_move``
+    must be numeric (an all-null object column of None is fine), so a bad cell
+    refuses here rather than escaping as a raw parse error later.
     """
     if not {"date", "implied_move", "src_iv"} <= set(daily.columns):
         raise fail("CONTRACT_MISMATCH", "daily_market frame lacks date, implied_move or src_iv")
+    try:
+        pd.to_datetime(daily["date"])
+    except (ValueError, TypeError, OverflowError):
+        raise fail("CONTRACT_MISMATCH", "daily_market dates are unparseable") from None
+    if (not pd.api.types.is_numeric_dtype(daily["implied_move"])
+            and not daily["implied_move"].isna().all()):
+        raise fail("CONTRACT_MISMATCH", "daily_market implied_move must be numeric")
 
 
 def _require_daily_order(daily: pd.DataFrame) -> None:
@@ -270,7 +279,8 @@ def _validate_inputs(events: pd.DataFrame, sd, sc, min_scoreable: int) -> None:
     exactly ``"BMO"`` or ``"AMC"`` -- the source schema's set
     (``engine/data/schemas.py``) -- while a null session stays allowed (it
     classifies as ``no_session``), so a typo refuses here instead of being read
-    as an AMC window later.
+    as an AMC window later. The price-series stage (equal lengths, ``sd``
+    non-decreasing) lives in :func:`_require_price_series`.
     """
     if (isinstance(min_scoreable, (bool, np.bool_))
             or not isinstance(min_scoreable, (int, np.integer)) or min_scoreable < 0):
@@ -288,8 +298,25 @@ def _validate_inputs(events: pd.DataFrame, sd, sc, min_scoreable: int) -> None:
     if any(not pd.isna(session) and session not in ("BMO", "AMC")
            for session in events["session"]):
         raise fail("CONTRACT_MISMATCH", "events session must be BMO or AMC")
+    _require_price_series(sd, sc)
+
+
+def _require_price_series(sd, sc) -> None:
+    """The price-series stage of the public-input contract: equal lengths, ``sd`` ordered.
+
+    Split out of :func:`_validate_inputs` (complexity budget): a length
+    mismatch or a ``sd`` that is not non-decreasing refuses BEFORE any row is
+    built, from both v5 entry points alike -- a reversed or shuffled close
+    series would bracket events against the wrong side of history -- and a
+    length below 2 is always ordered.
+    """
     if len(sd) != len(sc):
         raise fail("CONTRACT_MISMATCH", "price series sd and sc differ in length")
+    if len(sd) < 2:
+        return
+    dates = np.asarray(sd).astype("datetime64[ns]")
+    if not np.all(np.diff(dates) >= np.timedelta64(0, "ns")):
+        raise fail("CONTRACT_MISMATCH", "price dates sd must be ascending")
 
 
 def _collapse_same_date(events: pd.DataFrame) -> pd.DataFrame:

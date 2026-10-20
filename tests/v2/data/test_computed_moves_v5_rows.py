@@ -438,6 +438,25 @@ def test_invalid_min_scoreable_is_contract_mismatch(bad):
                            "min_scoreable must be a non-negative int", min_scoreable=bad)
 
 
+@pytest.mark.parametrize("bad", [2.5, "3"])
+def test_non_int_min_scoreable_is_contract_mismatch(bad):
+    # a float bar or a numeric string is not an int count: both entry points
+    # refuse the type outright, same code and same message
+    _assert_refusal_parity(_events(*_CONFIRMED[:3]),
+                           "min_scoreable must be a non-negative int", min_scoreable=bad)
+
+
+def test_np_int64_min_scoreable_is_accepted():
+    # the store hands over numpy ints; they clear the same bar as a Python int
+    events = _events(*_CONFIRMED)
+    assert isinstance(np.int64(12), np.integer)
+
+    assert classify_event_reasons(events, _SD, _SC, min_scoreable=np.int64(12)) == (
+        [None] * len(_CONFIRMED))
+    rows = _build(events, min_scoreable=np.int64(12))
+    assert [row["not_computed_reason"] for row in rows] == [None] * len(_CONFIRMED)
+
+
 def test_missing_event_columns_or_a_price_length_mismatch_refuse():
     _assert_refusal_parity(pd.DataFrame({"event_date": []}),
                            "events lacks required columns: session, src_orats")
@@ -445,6 +464,19 @@ def test_missing_event_columns_or_a_price_length_mismatch_refuse():
                            "events lacks required columns: session")
     _assert_refusal_parity(_events(*_CONFIRMED[:3]),
                            "price series sd and sc differ in length", sc=_SC[:5])
+
+
+def test_unsorted_sd_refuses_from_both_entry_points():
+    # a close series that is not non-decreasing would bracket events against
+    # the wrong side of history, so it refuses BEFORE any ticker-level branch,
+    # same code and same message out of both entry points
+    swapped = _SD.copy()
+    swapped[[5, 6]] = swapped[[6, 5]]
+    for bad_sd in (_SD[::-1].copy(), swapped):
+        assert np.any(bad_sd[1:] < bad_sd[:-1])  # the input really is unsorted
+        _assert_refusal_parity(_events(*_CONFIRMED[:3]),
+                               "price dates sd must be ascending",
+                               sd=bad_sd, sc=_SC)
 
 
 def test_a_malformed_daily_frame_refuses_even_a_ticker_level_refusal():
@@ -458,8 +490,45 @@ def test_a_malformed_daily_frame_refuses_even_a_ticker_level_refusal():
             "daily_market frame lacks date, implied_move or src_iv")
 
 
+def test_unparseable_daily_dates_and_non_numeric_implied_move_refuse_both_tickers():
+    # each malformed field keeps its OWN message, in BOTH populations: the
+    # 3-event ticker (left alone ticker_too_few_events) and the 16-event
+    # scoreable one -- the refusal fires before any branch either way
+    bad_dates = pd.DataFrame({
+        "date": ["2024-01-02", "not-a-date", "2024-01-04"],
+        "implied_move": [1.0, 2.0, 3.0],
+        "src_iv": ["orats", "orats", "orats"]})
+    bad_implied = _DAILY.assign(implied_move=["bad"] * len(_DAILY))
+    assert not pd.api.types.is_datetime64_any_dtype(bad_dates["date"])  # really strings
+    assert not pd.api.types.is_numeric_dtype(bad_implied["implied_move"])
+    cases = ((bad_dates, "daily_market dates are unparseable"),
+             (bad_implied, "daily_market implied_move must be numeric"))
+    for events in (_events(*_CONFIRMED[:3]), _events(*_CONFIRMED)):
+        for bad_daily, message in cases:
+            with pytest.raises(DataError) as caught:
+                build_event_rows("AAPL", events, _SD, _SC, bad_daily, **_KW)
+            assert caught.value.code == "CONTRACT_MISMATCH"
+            assert caught.value.problem.message == message
+
+    # ... while an all-null object column of None is NOT malformed: it is the
+    # "no implied quote captured" frame, and every row still computes
+    all_null = _DAILY.assign(implied_move=[None] * len(_DAILY))
+    assert not pd.api.types.is_numeric_dtype(all_null["implied_move"])
+    rows = _build(_events(*_CONFIRMED), daily=all_null)
+    assert [row["implied_move_pct"] for row in rows] == [None] * len(_CONFIRMED)
+
+
 @pytest.mark.parametrize("bad", [None, pd.NA, float("nan")])
 def test_non_bool_src_orats_is_contract_mismatch(bad):
+    events = _events(*_CONFIRMED[:3])
+    events["src_orats"] = pd.Series([bad, True, True], dtype="object")
+    _assert_refusal_parity(events, "events src_orats must hold a real bool per row")
+
+
+@pytest.mark.parametrize("bad", ["False", 0, 1, np.nan])
+def test_non_null_invalid_src_orats_is_contract_mismatch(bad):
+    # a truthy-looking string, 0/1 ints and a float NaN are each NOT a real
+    # bool verdict, so each refuses from both entry points, same message
     events = _events(*_CONFIRMED[:3])
     events["src_orats"] = pd.Series([bad, True, True], dtype="object")
     _assert_refusal_parity(events, "events src_orats must hold a real bool per row")
