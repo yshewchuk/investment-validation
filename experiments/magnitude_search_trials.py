@@ -311,14 +311,17 @@ class SearchTrials:
         if (forecasts is None) == (failure is None):
             raise fail("INVALID_EXPERIMENT_SPEC", "record exactly one forecast submission or failure")
         execution = self._read("execution-start:" + key)
+        submitted = None
         if execution is not None:
             if not native and self._read("terminal:" + key) is None:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native execution must finish before recording")
             completed = self._read("execution:" + key)
-            if (not isinstance(completed, dict) or completed.get("status") != ("failed" if failure is not None else "succeeded")
-                    or (forecasts is not None and content_hash(self._forecasts(forecasts, inner, plan["horizons"]))
-                        != completed.get("forecasts_id"))):
+            if not isinstance(completed, dict) or completed.get("status") != ("failed" if failure is not None else "succeeded"):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording")
+            if forecasts is not None:
+                submitted = self._forecasts(forecasts, inner, plan["horizons"])
+                if content_hash(submitted) != completed.get("forecasts_id"):
+                    raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording")
         if failure is not None:
             problem = _problem(failure)
             if not _candidate_failure(problem):
@@ -327,7 +330,8 @@ class SearchTrials:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial has no admitted native inputs")
             self._append("terminal:" + key, {"status": "failed", "problem": problem}, absent=("forecasts:" + key,))
             return self._terminal(plan, outer_year, inner_year, candidate_id)[1]
-        submitted = self._forecasts(forecasts, inner, plan["horizons"])
+        if submitted is None:
+            submitted = self._forecasts(forecasts, inner, plan["horizons"])
         terminal = self._read("terminal:" + key)
         if terminal is not None:
             if self._read("forecasts:" + key) != submitted:

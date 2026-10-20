@@ -499,6 +499,7 @@ def test_holiday_lru_is_bounded_and_eviction_preserves_values() -> None:
 
 
 @pytest.mark.parametrize("days,message", [
+    (["2024-03-11", "2024-03-12"], "calendar days must be a non-empty tuple of YYYY-MM-DD strings"),
     ((), "calendar days must be a non-empty tuple of YYYY-MM-DD strings"),
     (("2024-03-16",), "calendar days must be weekday non-holiday sessions"),
     (("2024-12-25",), "calendar days must be weekday non-holiday sessions"),
@@ -506,7 +507,7 @@ def test_holiday_lru_is_bounded_and_eviction_preserves_values() -> None:
     (("2024-03-13", "2024-03-13"), "calendar days must be sorted and duplicate-free"),
     (("2024-03-15", "2024-03-11"), "calendar days must be sorted and duplicate-free"),
 ])
-def test_warm_holiday_cache_never_bypasses_supplied_calendar_validation(days: tuple, message: str) -> None:
+def test_warm_holiday_cache_never_bypasses_supplied_calendar_validation(days: tuple | list, message: str) -> None:
     valid = CalendarSessions(OBS_MAR, "2024-03-15")
     assert planned_exit_date(_key("STR-THRU", "2024-03-12", "BMO"), valid) == "2024-03-12"
     with pytest.raises(CalendarInputError) as caught:
@@ -514,3 +515,14 @@ def test_warm_holiday_cache_never_bypasses_supplied_calendar_validation(days: tu
     assert type(caught.value) is CalendarInputError
     assert caught.value.code == "INVALID_REQUEST"
     assert str(caught.value) == message
+
+
+@pytest.mark.parametrize("event,session,expected", [
+    ("2024-03-12", "BMO", "2024-03-12"),
+    ("2024-03-12", "AMC", "2024-03-13"),
+    ("2024-03-13", "BMO", "2024-03-13"),
+    ("2024-03-13", "AMC", "2024-03-14"),
+])
+def test_planned_exit_does_not_validate_observed_through(event, session, expected) -> None:
+    calendar = CalendarSessions(OBS_MAR, "bad")
+    assert planned_exit_date(_key("STR-THRU", event, session), calendar) == expected
