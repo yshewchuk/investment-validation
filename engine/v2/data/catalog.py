@@ -510,7 +510,7 @@ def _update_head(conn: sqlite3.Connection, scope: str, new_snapshot_id: str,
 
 
 # --------------------------------------------------------------------------
-# receipt-level idempotency: a repeated call under the same receipt_id is a no-op
+# receipt-level idempotency: a repeated call under the same receipt_id returns the stored receipt and applies its pending head CAS (#1060)
 # --------------------------------------------------------------------------
 
 

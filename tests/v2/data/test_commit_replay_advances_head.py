@@ -92,6 +92,7 @@ def test_replay_applies_cas_when_head_sits_at_expected_parent(tmp_path):
         replay = _commit(conn, clock, store, **{**s1_args, "expected_generation": 3})
         assert _head(conn) == (s1, 4)
         assert replay.resulting_head_snapshot_id == s1
+        assert replay.resulting_head_generation == 4
     finally:
         conn.close()
 
@@ -105,6 +106,7 @@ def test_replay_leaves_head_when_already_advanced(tmp_path):
         replay = _commit(conn, clock, store, **s1_args)
         assert _head(conn) == (s1, 2)
         assert replay.resulting_head_snapshot_id == s1
+        assert replay.resulting_head_generation == 2
         assert h0 != s1
     finally:
         conn.close()
@@ -122,6 +124,22 @@ def test_replay_leaves_head_when_moved_to_a_third_snapshot(tmp_path):
 
         replay = _commit(conn, clock, store, **s1_args)
         assert _head(conn) == (x, 3)
+        assert replay.resulting_head_snapshot_id == s1
+        assert replay.resulting_head_generation == 2
+    finally:
+        conn.close()
+
+
+def test_replay_with_stale_expected_generation_leaves_head(tmp_path):
+    conn, clock, store = catalog_and_store(tmp_path)
+    try:
+        h0, s1, _, s1_args = _seed_h0_and_s1(conn, clock, store)
+        conn.execute("UPDATE data_snapshot_heads SET snapshot_id=?, generation=? WHERE scope=?",
+                     (h0, 3, SCOPE))
+        assert _head(conn) == (h0, 3)
+
+        replay = _commit(conn, clock, store, **{**s1_args, "expected_generation": 1})
+        assert _head(conn) == (h0, 3)
         assert replay.resulting_head_snapshot_id == s1
     finally:
         conn.close()
