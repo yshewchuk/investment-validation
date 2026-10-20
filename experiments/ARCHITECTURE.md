@@ -224,6 +224,7 @@ both flag states publish/verify the same plan and never write a ledger.
 
 | Condition | Enforced outcome |
 |---|---|
+| Experiment CLI or helper reads one fixed snapshot | Its `Repository` is built with `pin_snapshots=True`: scans reuse table membership cached per instance by immutable ids; output is identical to an unpinned read. |
 | Request shape | `magnitude_search_request.v1`: explicit `inner_years`, `space`, `max_candidates`, `max_fits`; Ridge `alpha` and/or HGB `learning_rate`, `max_iter`, `max_leaf_nodes`, `min_samples_leaf`, `l2_regularization` axes. |
 | Valid fitted anchor and closed request | Return detached canonical plan bytes binding request, anchor, installed sources/environment, full recipes/hashes, grouped event/horizon metadata, count limits and recorded selection policy. No estimator construction, fitting, labels, features, repository scans or results. |
 | Missing/extra fields, invalid or unordered axes/years, or candidate count outside 2..`max_candidates` (itself 2..4096) | Nonretryable `INVALID_EXPERIMENT_SPEC` before search-plan artifact access/expansion; CLI registration metadata may already be read. Ridge alpha and all five HGB axes are explicit; no inferred knobs. |

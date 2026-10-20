@@ -89,7 +89,7 @@ def main(argv=None):
         conn = _catalog(args.catalog)
         store = ArtifactStore(args.store_root)
         action = run_sweep if args.action == "run" else collect_sweep
-        result = action(conn, store, Repository(conn, store), document,
+        result = action(conn, store, Repository(conn, store, pin_snapshots=True), document,
             code_root=Path(args.code_root), as_of_month=args.as_of_month, scope=args.scope,
             event_ids=args.event_id, no_ledger=args.no_ledger, ledger_path=args.ledger,
             **({"timeout_seconds": args.timeout_seconds} if args.action == "run" else {}))

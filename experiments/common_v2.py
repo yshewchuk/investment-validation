@@ -38,7 +38,7 @@ def load_v2_trades(strategy: str, *, catalog: Path | str, store_root: Path | str
     POPULATION_COLLAPSED -- no row for this strategy/provenance pair."""
     conn = open_catalog(Path(catalog), clock=SystemClock())
     try:
-        repository = Repository(conn, ArtifactStore(Path(store_root)))
+        repository = Repository(conn, ArtifactStore(Path(store_root)), pin_snapshots=True)
         return experiment_trades.load_trades(repository, repository.resolve(snapshot_id), strategy)
     finally:
         conn.close()
@@ -63,7 +63,7 @@ def make_v2_repricer(
     """
     conn = open_catalog(Path(catalog), clock=SystemClock())
     try:
-        repository = Repository(conn, ArtifactStore(Path(store_root)))
+        repository = Repository(conn, ArtifactStore(Path(store_root)), pin_snapshots=True)
         snapshot = repository.resolve(snapshot_id)
         cal = _pricing.trading_calendar_from_snapshot(repository, snapshot)
     finally:
@@ -118,7 +118,7 @@ def make_v2_repricer(
         if missing:
             chain_conn = open_catalog(Path(catalog), clock=SystemClock())
             try:
-                chain_repository = Repository(chain_conn, ArtifactStore(Path(store_root)))
+                chain_repository = Repository(chain_conn, ArtifactStore(Path(store_root)), pin_snapshots=True)
                 fetched = load_chain_index(chain_repository, snapshot, missing)
             finally:
                 chain_conn.close()
@@ -164,7 +164,7 @@ def load_v2_chain_quotes(
     raises."""
     conn = open_catalog(Path(catalog), clock=SystemClock())
     try:
-        repository = Repository(conn, ArtifactStore(Path(store_root)))
+        repository = Repository(conn, ArtifactStore(Path(store_root)), pin_snapshots=True)
         snapshot = repository.resolve(snapshot_id)
         return load_chain_index(repository, snapshot, set(keys))
     finally:

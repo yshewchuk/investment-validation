@@ -233,7 +233,7 @@ def test_real_mixed_success_unexpected_failure_and_holdout_reconcile_once(source
     checkout = sweep_checkout(tmp_path)
     worker = checkout / "experiments/native_gate_evaluation.py"
     text = worker.read_text()
-    marker = "            result = gate_result(Repository(conn, store), registration, spec)"
+    marker = "            result = gate_result(Repository(conn, store, pin_snapshots=True), registration, spec)"
     assert text.count(marker) == 1
     replace_checkout_source(worker, text.replace(marker, marker + "\n            if spec.primary_arm_id == 'candidate':\n"
                                         "                raise RuntimeError('synthetic private programming failure')"))
@@ -1331,7 +1331,7 @@ def test_cli_dispatches_requested_action_and_prints_result_and_exit(tmp_path, mo
         assert path == str(tmp_path / "catalog.sqlite") and must_exist is True
         return conn
     monkeypatch.setattr(cli, "connect", connect)
-    monkeypatch.setattr(cli, "Repository", lambda got_conn, store: repository)
+    monkeypatch.setattr(cli, "Repository", lambda got_conn, store, *, pin_snapshots: repository)
     monkeypatch.setattr(cli, "run_sweep" if action == "run" else "collect_sweep", selected)
     monkeypatch.setattr(cli, "collect_sweep" if action == "run" else "run_sweep", forbid_effect)
     (tmp_path / "catalog.sqlite").touch()
@@ -2109,7 +2109,7 @@ def test_cli_preserves_exact_typed_artifact_and_data_codes(tmp_path, monkeypatch
     conn.close = lambda: setattr(conn, "closed", True)
     monkeypatch.setattr(cli, "read_native_staged_input", lambda path: b"{}")
     monkeypatch.setattr(cli, "connect", lambda *args, **kwargs: conn)
-    monkeypatch.setattr(cli, "Repository", lambda *args: object())
+    monkeypatch.setattr(cli, "Repository", lambda *args, **kwargs: object())
     def refused(*args, **kwargs):
         raise error
     monkeypatch.setattr(cli, "collect_sweep", refused)
@@ -2125,7 +2125,7 @@ def test_cli_does_not_rebrand_an_unexpected_action_bug_as_bad_input(tmp_path, mo
     conn.close = lambda: setattr(conn, "closed", True)
     monkeypatch.setattr(cli, "read_native_staged_input", lambda path: b"{}")
     monkeypatch.setattr(cli, "connect", lambda *args, **kwargs: conn)
-    monkeypatch.setattr(cli, "Repository", lambda *args: object())
+    monkeypatch.setattr(cli, "Repository", lambda *args, **kwargs: object())
     original = error_type("implementation defect")
     def broken(*args, **kwargs):
         raise original
@@ -2141,7 +2141,7 @@ def test_library_and_cli_observer_defaults_are_one_hour(tmp_path, monkeypatch, c
     conn = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr(cli, "read_native_staged_input", lambda path: b"{}")
     monkeypatch.setattr(cli, "connect", lambda *args, **kwargs: conn)
-    monkeypatch.setattr(cli, "Repository", lambda *args: object())
+    monkeypatch.setattr(cli, "Repository", lambda *args, **kwargs: object())
     def run(*args, **kwargs):
         assert kwargs["timeout_seconds"] == 3600
         return {"index": {"complete": False}, "index_ref": None}
