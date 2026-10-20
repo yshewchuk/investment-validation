@@ -140,8 +140,9 @@ def _validate_daily(daily: pd.DataFrame) -> None:
         raise fail("CONTRACT_MISMATCH", "daily_market dates are unparseable") from None
     if parsed.isna().any():
         raise fail("CONTRACT_MISMATCH", "daily_market dates are unparseable")
-    if (not pd.api.types.is_numeric_dtype(daily["implied_move"])
-            and not daily["implied_move"].isna().all()):
+    if not pd.api.types.is_numeric_dtype(daily["implied_move"]) and any(
+            isinstance(cell, (bool, np.bool_)) or not isinstance(cell, (int, float, np.number))
+            for cell in daily["implied_move"].dropna()):
         raise fail("CONTRACT_MISMATCH", "daily_market implied_move must be numeric")
 
 

@@ -595,6 +595,42 @@ def test_v4_build_rows_refuses_the_same_malformed_daily_frames():
             assert caught.value.problem.message == message
 
 
+def test_object_dtype_implied_move_validates_per_cell_not_by_column_dtype():
+    # pd.concat of an all-null object batch and a float batch can yield an
+    # object column holding valid floats, so the contract check is per CELL:
+    # numbers and None compute normally from both entry points ...
+    values = [float(i) for i in range(len(_DAILY))]
+    values[12] = None
+    mixed = _DAILY.assign(implied_move=pd.Series(values, dtype=object))
+    assert not pd.api.types.is_numeric_dtype(mixed["implied_move"])
+    events = _events(*_CONFIRMED)
+    anchors = [None if i == 12 else float(i) for i in range(9, 25)]
+    for daily in (mixed, _DAILY.assign(
+            implied_move=pd.Series([None] * len(_DAILY), dtype=object))):
+        for call in (
+                lambda daily=daily: build_event_rows(
+                    "AAPL", events, _SD, _SC, daily, **_KW),
+                lambda daily=daily: build_rows("AAPL", events, _SD, _SC, daily, **_KW)):
+            rows = call()
+            assert len(rows) == len(_CONFIRMED)
+            assert all(not row["skipped"] for row in rows)
+            assert [row["implied_move_pct"] for row in rows] == (
+                anchors if daily is mixed else [None] * len(_CONFIRMED))
+
+    # ... while a string or a bool cell still refuses with the ONE message,
+    # out of build_event_rows and build_rows alike
+    for bad in ("bad", True):
+        bad_daily = _DAILY.assign(implied_move=pd.Series([bad] * len(_DAILY), dtype=object))
+        for call in (
+                lambda daily=bad_daily: build_event_rows(
+                    "AAPL", events, _SD, _SC, daily, **_KW),
+                lambda daily=bad_daily: build_rows("AAPL", events, _SD, _SC, daily, **_KW)):
+            with pytest.raises(DataError) as caught:
+                call()
+            assert caught.value.code == "CONTRACT_MISMATCH"
+            assert caught.value.problem.message == "daily_market implied_move must be numeric"
+
+
 def test_empty_daily_frames_validate_even_against_empty_inputs():
     # an EMPTY daily frame with the required columns is well-formed: rows still
     # build, with no as-of anchor anywhere (every implied value null)
