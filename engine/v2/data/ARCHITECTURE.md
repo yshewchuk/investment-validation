@@ -155,10 +155,10 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   planned-unit key validation, `normalizer_id` versioning, coverage
   completeness, and mcap carry-forward.
 - **Snapshot resolution and bounded reads** — `repository.Repository`:
-  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`; opt-in `pin_snapshots=True` memoises per instance `resolve` by snapshot id and the scan/bound path's table contract and membership by `(dataset_version_id, contract_id)`, not `fragment_records`, default off, a failure is never cached; a pinned `scan` or `scan_population_bound` whose `key_filter` names a partition column plans only the matching partitions' fragments (index built once per pinned table, every fragment's key bounds validated when it is built, so a corrupt bound still refuses every pinned scan or bound lookup), each call returns an independent copy), a bounded Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/`get_close`, and `explain_dependencies`.
+  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`; opt-in `pin_snapshots=True` memoises per instance `resolve` by snapshot id and the scan/bound path's table contract and membership by `(dataset_version_id, contract_id)`, not `fragment_records`, default off, a failure is never cached; a pinned `scan` or `scan_population_bound` whose `key_filter` names a partition column plans only the matching partitions' fragments (invalid key bounds in any fragment, including unselected fragments, refuse every pinned scan or bound lookup), each call returns an independent copy), a bounded Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/`get_close`, and `explain_dependencies`.
   Metadata-only `scan_population_bound` sums recorded counts of surviving
   fragments of the supplied snapshot, with no head fallback or object reads,
-  through the same membership-bound planner (and shared strict `query.decode_predicates`) behind `scan` and
+  with the same strict predicate refusals and membership-bound semantics as `scan` and
   `explain_dependencies`. That summed manifest-footer count is the
   authoritative selected-population bound: both paths check a request's
   `max_result_rows` against it before row streaming. A query-level limit
