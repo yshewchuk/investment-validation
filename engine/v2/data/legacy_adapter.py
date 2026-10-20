@@ -37,8 +37,9 @@ other piece of its machinery (dest_root safety, Parquet writing, hashing,
 row comparison, lock-down) already lives in ``legacy_materialization.py``.
 
 Layer 1 of ``system_rearchitecture.md`` §4.1: besides the declared legacy
-edges, this module imports only its own package's ``errors`` and
-``legacy_materialization`` (both reached through one relative-import edge)
+edges, this module imports only its own package's ``errors``,
+``legacy_materialization`` and ``materialize_progress``
+(all reached through one relative-import edge)
 — never ``engine.v2.contracts``, ``engine.v2.foundation`` or
 ``engine.v2.ops``. §4.3 fan-out: 6 distinct modules —
 ``engine.data.features.panel``, ``engine.data.features.tier4``,

@@ -229,7 +229,8 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   importing legacy `engine.*` code (17 declared, read-only entries). Built
   on it, read-only: `legacy_mapping.py` (table mapping);
   `legacy_materialization.py`/`legacy_nightly_read_plan.py` (materialization
-  and nightly barrier plans, neither importing legacy `engine.*` directly);
+  and nightly barrier plans, neither importing legacy `engine.*` directly;
+  `materialize_tree(..., progress=None)` calls `progress(done)` after each written table, and `materialize_progress.TableProgress.tick` turns that into at most one stderr line per 30 s plus a final line);
   `reference_inputs.py`/`reference_catalog.py` (pinned reference-input
   resolution, the latter legacy-free); `import_snapshot.py`; `tier4_coverage.py`.
 - **`computed_moves`/`price_history`** — pure math + each family's
