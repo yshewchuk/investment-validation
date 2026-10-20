@@ -45,7 +45,7 @@ def stage(name, *, quiet_under=0.0, clock=time.monotonic, emit=_emit, report_ref
 
     With ``quiet_under`` > 0 the start line is omitted and the end line is printed only
     when the stage took at least that many seconds, so short calls stay silent.
-    ``report_refusals`` adds native DataError code/redacted message, never row/details data."""
+    ``report_refusals`` adds the native DataError code only, never the message, row data or details."""
     started = clock()
     if not quiet_under:
         emit(f"  [{name}] start{_rss()}")
@@ -54,7 +54,7 @@ def stage(name, *, quiet_under=0.0, clock=time.monotonic, emit=_emit, report_ref
     except BaseException as exc:
         elapsed = clock() - started
         if not quiet_under or elapsed >= quiet_under:
-            reason = f"; refused {exc.code}: {exc.problem.message}" if report_refusals and isinstance(exc, DataError) else ""
+            reason = f"; refused {exc.code}" if report_refusals and isinstance(exc, DataError) else ""
             emit(f"  [{name}] failed after {elapsed:.0f}s{_rss()}{reason}")
         raise
     elapsed = clock() - started

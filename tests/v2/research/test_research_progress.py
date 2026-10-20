@@ -83,7 +83,8 @@ def test_native_refusal_logging_is_opt_in_and_never_includes_details(monkeypatch
             raise refusal
     assert caught.value is refusal
     assert lines == ["  [admission] start, peak RSS 12 MB", "  [admission] failed after 3s, peak RSS 12 MB"
-                     + ("; refused HOLDOUT_ACCESS_DENIED: requested events are excluded" if enabled else "")]
+                     + ("; refused HOLDOUT_ACCESS_DENIED" if enabled else "")]
+    assert "requested events are excluded" not in "".join(lines)
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("private detail"), KeyboardInterrupt("private detail"), SystemExit(7)])
