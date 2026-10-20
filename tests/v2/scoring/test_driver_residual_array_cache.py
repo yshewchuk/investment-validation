@@ -1,5 +1,6 @@
 """Bounded immutable conversion reuse never replaces per-call identity checks."""
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -37,8 +38,12 @@ def lookup(value, prediction=-1.0):
     (10.0, [1., 2., 3., 4.]), (None, [1., 2., 3., 4.]), (np.nan, [1., 2., 3., 4.])])
 def test_cold_warm_values_fallback_and_sampling_match(prediction, expected):
     value = artifact()
+    cold = None
     for _ in range(2):
         pool, flag = lookup(value, prediction)
+        if cold is not None:
+            assert pool is cold
+        cold = pool
         assert flag is None
         np.testing.assert_array_equal(pool, expected)
         np.testing.assert_array_equal(np.random.default_rng(7).choice(pool, 20),
@@ -49,9 +54,11 @@ def test_warm_hit_does_not_convert_and_arrays_cannot_be_made_writable(monkeypatc
     value = artifact()
     cold, _ = lookup(value)
     monkeypatch.setattr(module, "_immutable_array", lambda *a: pytest.fail("warm hit converted"))
+    monkeypatch.setattr(module, "_deeply_frozen", lambda *a: pytest.fail("warm hit rescanned input"))
     warm, _ = lookup(value)
     assert cold is warm
-    buckets, flat, _ = module._DRIVER_ARRAY_CACHE[value.content_hash]
+    buckets, flat, _, retained = module._DRIVER_ARRAY_CACHE[id(value)]
+    assert retained is value
     for array in (flat, buckets["edges"], *buckets["pools"]):
         with pytest.raises(ValueError):
             array[0] = 99
@@ -99,7 +106,7 @@ def test_fifo_entry_cap_and_rebuild(monkeypatch):
     values = [artifact(i) for i in range(5)]
     for value in values:
         lookup(value)
-    assert list(module._DRIVER_ARRAY_CACHE) == [value.content_hash for value in values[1:]]
+    assert list(module._DRIVER_ARRAY_CACHE) == [id(value) for value in values[1:]]
     original, calls = module._immutable_array, []
     def convert(value):
         calls.append(1)
@@ -115,9 +122,9 @@ def test_byte_cap_eviction_and_oversized_nonretention(monkeypatch):
     monkeypatch.setattr(module, "_DRIVER_ARRAY_CACHE_BYTES", 80)
     first, second = artifact(1), artifact(2)
     lookup(first)
-    assert module._DRIVER_ARRAY_CACHE[first.content_hash][2] == 80
+    assert module._DRIVER_ARRAY_CACHE[id(first)][2] == 80
     lookup(second)
-    assert list(module._DRIVER_ARRAY_CACHE) == [second.content_hash]
+    assert list(module._DRIVER_ARRAY_CACHE) == [id(second)]
     monkeypatch.setattr(module, "_DRIVER_ARRAY_CACHE_BYTES", 79)
     module._DRIVER_ARRAY_CACHE.clear()
     for _ in range(2):
@@ -135,12 +142,14 @@ def test_unbucketed_empty_and_unpinned_requests_keep_behavior():
 
 def test_concurrent_misses_remain_bounded(monkeypatch):
     monkeypatch.setattr(module, "_DRIVER_ARRAY_CACHE_BYTES", 160)
-    values = [artifact(i) for i in range(8)]
+    values = [make_driver_residual_pool_artifact(role="size", model_id=f"model-{i}", fold=None,
+        flat_residuals=(float(i),) * 10, buckets=None, deciles=1, min_pool=1, lineage=Lineage())
+        for i in range(8)]
     with ThreadPoolExecutor(max_workers=4) as executor:
         results = list(executor.map(lookup, values * 3))
-    for pool, flag in results:
+    for value, (pool, flag) in zip(values * 3, results, strict=True):
         assert flag is None
-        np.testing.assert_array_equal(pool, [1.0, 2.0])
+        np.testing.assert_array_equal(pool, value.flat_residuals)
     assert len(module._DRIVER_ARRAY_CACHE) <= 2
     assert sum(entry[2] for entry in module._DRIVER_ARRAY_CACHE.values()) <= 160
 
@@ -158,3 +167,43 @@ def test_corrupted_serialized_pool_cannot_hit_warm_original_hash():
     request[module.RESIDUAL_KEYS_FIELD]["driver"]["content_hash"] = original.content_hash
     assert module.driver_pool_from_artifact(request, "driver", 0) == (None, "MODEL_NOT_READY")
     np.testing.assert_array_equal(lookup(original, None)[0], [1., 2., 3., 4.])
+
+
+@pytest.mark.parametrize("warm_original", [False, True])
+def test_direct_artifacts_with_same_declared_hash_keep_their_own_contents(warm_original):
+    original = artifact(buckets=False)
+    forged = replace(original, flat_residuals=(999.0,))
+    assert forged.content_hash == original.content_hash
+    if warm_original:
+        lookup(original)
+    np.testing.assert_array_equal(lookup(forged)[0], [999.0])
+    np.testing.assert_array_equal(lookup(forged)[0], [999.0])
+    np.testing.assert_array_equal(lookup(original)[0], original.flat_residuals)
+
+
+def test_distinct_equal_objects_convert_independently_and_same_object_reuses(monkeypatch):
+    original, equal = artifact(), artifact()
+    convert, calls = module._immutable_array, []
+    def track(values):
+        calls.append(values)
+        return convert(values)
+    monkeypatch.setattr(module, "_immutable_array", track)
+    first, _ = lookup(original)
+    second, _ = lookup(equal)
+    assert first is not second
+    assert len(calls) == 8
+    assert lookup(original)[0] is first
+    assert lookup(equal)[0] is second
+    assert len(calls) == 8
+
+
+def test_shallow_frozen_mutable_input_is_never_retained():
+    original = artifact(buckets=False)
+    mutable = replace(original, flat_residuals=list(original.flat_residuals))
+    first, _ = lookup(mutable)
+    np.testing.assert_array_equal(first, original.flat_residuals)
+    assert not module._DRIVER_ARRAY_CACHE
+    mutable.flat_residuals[0] = 999.0
+    np.testing.assert_array_equal(lookup(mutable)[0], [999.0, 2.0, 3.0, 4.0])
+    assert not module._DRIVER_ARRAY_CACHE
+    np.testing.assert_array_equal(first, original.flat_residuals)

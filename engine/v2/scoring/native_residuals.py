@@ -14,11 +14,13 @@ Each helper returns ``(value, flag)``: exactly one of the two is ``None``.
 """
 from __future__ import annotations
 
+from dataclasses import fields
 from threading import Lock
 from typing import Any, Mapping
 
 import numpy as np
 
+from engine.v2.models.lineage import DataDependency, Lineage
 from engine.v2.models.residual_artifact import (
     DriverResidualPoolArtifact,
     PairedResidualPoolArtifact,
@@ -50,9 +52,9 @@ _PAIRED_KEY_PARTS = ("move_model_id", "crush_model_id", "cutoff")
 _DRIVER_KEY_PARTS = ("role", "model_id", "fold")
 _ARRAY_CACHE: dict[str, tuple[np.ndarray, ...]] = {}
 _ARRAY_CACHE_LIMIT = 4
-_DRIVER_ARRAY_CACHE: dict[str, tuple[dict | None, np.ndarray, int]] = {}
 _DRIVER_ARRAY_CACHE_LIMIT = 4
 _DRIVER_ARRAY_CACHE_BYTES = 16 * 1024 * 1024
+_DRIVER_ARRAY_CACHE: dict[int, tuple[dict | None, np.ndarray, int, DriverResidualPoolArtifact]] = {}
 _DRIVER_ARRAY_CACHE_LOCK = Lock()
 
 
@@ -61,13 +63,24 @@ def _immutable_array(values) -> np.ndarray:
     return np.frombuffer(np.asarray(values, dtype=float).tobytes(), dtype=float)
 
 
+def _deeply_frozen(value) -> bool:
+    # Direct dataclass construction need not respect tuple annotations. Only
+    # these exact frozen model types and immutable builtins may retain arrays.
+    if type(value) in (DriverResidualPoolArtifact, Lineage, DataDependency):
+        return all(_deeply_frozen(getattr(value, field.name)) for field in fields(value))
+    if type(value) is tuple:
+        return all(_deeply_frozen(item) for item in value)
+    return type(value) in (str, int, float, bool, type(None))
+
+
 def _driver_arrays(artifact: DriverResidualPoolArtifact):
-    """Cache only numeric conversion of an already admitted frozen artifact."""
-    key = artifact.content_hash
+    """Retain conversions only for the exact deeply frozen input object."""
+    key = id(artifact)
     with _DRIVER_ARRAY_CACHE_LOCK:
         cached = _DRIVER_ARRAY_CACHE.get(key)
-    if cached is not None:
+    if cached is not None and cached[3] is artifact:
         return cached[:2]
+    retain = _deeply_frozen(artifact)
     buckets = artifact.buckets
     if buckets is not None:
         buckets = {
@@ -76,17 +89,28 @@ def _driver_arrays(artifact: DriverResidualPoolArtifact):
             "min_pool": buckets["min_pool"],
         }
     flat = _immutable_array(artifact.flat_residuals)
+    return _retain_driver_arrays(artifact, buckets, flat) if retain else (buckets, flat)
+
+
+def _retain_driver_arrays(artifact, buckets, flat):
+    """Account for and retain an immutable conversion under both cache caps."""
+    key = id(artifact)
     size = flat.nbytes
     if buckets is not None:
         size += buckets["edges"].nbytes + sum(pool.nbytes for pool in buckets["pools"])
     if size <= _DRIVER_ARRAY_CACHE_BYTES:
         with _DRIVER_ARRAY_CACHE_LOCK:
+            # Concurrent conversion of this same object must not evict a peer.
+            cached = _DRIVER_ARRAY_CACHE.get(key)
+            if cached is not None:
+                return cached[:2]
             while _DRIVER_ARRAY_CACHE and (
                 len(_DRIVER_ARRAY_CACHE) >= _DRIVER_ARRAY_CACHE_LIMIT
                 or sum(entry[2] for entry in _DRIVER_ARRAY_CACHE.values()) + size > _DRIVER_ARRAY_CACHE_BYTES
             ):
                 _DRIVER_ARRAY_CACHE.pop(next(iter(_DRIVER_ARRAY_CACHE)))
-            _DRIVER_ARRAY_CACHE[key] = (buckets, flat, size)
+            # The strong reference prevents id reuse while this entry exists.
+            _DRIVER_ARRAY_CACHE[key] = (buckets, flat, size, artifact)
     return buckets, flat
 
 
