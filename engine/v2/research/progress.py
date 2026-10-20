@@ -11,7 +11,9 @@ import sys
 import time
 from contextlib import contextmanager
 
-__all__ = ["Progress", "stage"]
+from engine.v2.data.errors import DataError
+
+__all__ = ["Progress", "decision", "stage"]
 
 DEFAULT_INTERVAL_S = 30.0
 
@@ -32,21 +34,28 @@ def _rss() -> str:
         return ""
 
 
+def decision(name: str, message: str) -> None:
+    """Emit one aggregate control decision, never call once per item."""
+    _emit(f"  [{name}] {message}")
+
+
 @contextmanager
-def stage(name, *, quiet_under=0.0, clock=time.monotonic, emit=_emit):
+def stage(name, *, quiet_under=0.0, clock=time.monotonic, emit=_emit, report_refusals=False):
     """Log ``start`` and ``done in Ns`` (or ``failed after Ns``) with peak RSS around a stage.
 
     With ``quiet_under`` > 0 the start line is omitted and the end line is printed only
-    when the stage took at least that many seconds, so short calls stay silent."""
+    when the stage took at least that many seconds, so short calls stay silent.
+    ``report_refusals`` adds native DataError code/redacted message, never row/details data."""
     started = clock()
     if not quiet_under:
         emit(f"  [{name}] start{_rss()}")
     try:
         yield
-    except BaseException:
+    except BaseException as exc:
         elapsed = clock() - started
         if not quiet_under or elapsed >= quiet_under:
-            emit(f"  [{name}] failed after {elapsed:.0f}s{_rss()}")
+            reason = f"; refused {exc.code}: {exc.problem.message}" if report_refusals and isinstance(exc, DataError) else ""
+            emit(f"  [{name}] failed after {elapsed:.0f}s{_rss()}{reason}")
         raise
     elapsed = clock() - started
     if not quiet_under or elapsed >= quiet_under:

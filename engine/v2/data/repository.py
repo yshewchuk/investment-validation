@@ -293,8 +293,8 @@ class Repository:
         """A bounded Arrow scan over one table's pinned fragments, per §8.2's
         nine ordered steps. Never a convenience ``read_table()``: this always
         yields batches, never a combined frame."""
-        if max_object_bytes is not None and (type(max_object_bytes) is not int or max_object_bytes <= 0):
-            raise errors.fail("QUERY_NOT_BOUNDED", "max_object_bytes must be a positive integer")
+        if max_object_bytes is not None:
+            objects.validate_max_object_bytes(max_object_bytes)
         if self._store is None:
             raise RuntimeError("Repository.scan requires an ArtifactStore for object reads")
         validated = self._validated_query(query)

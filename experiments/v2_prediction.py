@@ -55,7 +55,7 @@ def main(argv=None):
         if args.action == "run" and not args.no_ledger and args.ledger is None:
             raise fail("INVALID_EXPERIMENT_SPEC", "recorded execution requires --ledger")
         conn = connect(args.catalog, must_exist=True)
-        repository = Repository(conn, store)
+        repository = Repository(conn, store, pin_snapshots=True)
         binding = dict(code_root=Path(__file__).resolve().parents[1], as_of_month=args.as_of_month,
                        scope=args.scope, event_ids=args.event_id)
         if magnitude:

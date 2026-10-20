@@ -39,7 +39,7 @@ def main(argv=None):
             raise fail("INVALID_EXPERIMENT_SPEC", "recorded gate evaluation requires --ledger")
         store = foundation.ArtifactStore(args.store_root)
         conn = connect(args.catalog, must_exist=True)
-        repository = Repository(conn, store)
+        repository = Repository(conn, store, pin_snapshots=True)
         binding = dict(code_root=Path(__file__).resolve().parents[1], as_of_month=args.as_of_month,
                        scope=args.scope, event_ids=args.event_id)
         if args.action == "register":

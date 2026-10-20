@@ -36,7 +36,7 @@ def test_cli_forwards_default_or_explicit_finite_budget_and_closes(tmp_path, mon
         monkeypatch.setattr(cli, "ArtifactStore", lambda path: store)
     else:
         monkeypatch.setattr(cli.foundation, "ArtifactStore", lambda path: store)
-        monkeypatch.setattr(cli, "Repository", lambda *args: None)
+        monkeypatch.setattr(cli, "Repository", lambda *args, **kwargs: None)
         owner = cli.gate if cli is v2_gate else cli.prediction
         name = "validate_gate_spec" if cli is v2_gate else "validate_prediction_spec"
         monkeypatch.setattr(owner, name, lambda value: None)

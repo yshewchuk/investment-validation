@@ -74,6 +74,7 @@ __all__ = [
     "partition_logical_hash",
     "publish_legacy_file",
     "read_verified_bytes",
+    "validate_max_object_bytes",
     "verify_object_path",
 ]
 
@@ -101,11 +102,15 @@ _S_IFMT = 0o170000
 _S_IFREG = 0o100000
 _S_IFDIR = 0o040000
 
-#: pyarrow's own spellings for two contract physical types. Every other
+#: pyarrow's own spellings for three contract physical types. Every other
 #: pyarrow type string — including a timestamp's unit — passes through
 #: unchanged, so a genuine ``timestamp[ns]`` vs ``timestamp[us]`` mismatch is
 #: still reported rather than aliased away.
-_PHYSICAL_TYPE_ALIASES: dict[str, str] = {"large_string": "string", "double": "float64"}
+_PHYSICAL_TYPE_ALIASES: dict[str, str] = {
+    "large_string": "string",
+    "double": "float64",
+    "date32[day]": "date32",
+}
 
 
 def normalize_physical_type(actual: str) -> str:
@@ -291,10 +296,15 @@ def _inspect_path(path, contract: TableContract, contract_ref: TableContractRef,
     )
 
 
-def read_verified_bytes(store: ArtifactStore, object_ref: ObjectRef, *, max_bytes: int) -> bytes:
-    """Bound immutable bytes before hashing; never use the path-verification cache."""
+def validate_max_object_bytes(max_bytes: int) -> None:
+    """Require one positive built-in integer byte cap at either read boundary."""
     if type(max_bytes) is not int or max_bytes <= 0:
         raise errors.fail("QUERY_NOT_BOUNDED", "max_object_bytes must be a positive integer")
+
+
+def read_verified_bytes(store: ArtifactStore, object_ref: ObjectRef, *, max_bytes: int) -> bytes:
+    """Bound immutable bytes before hashing; never use the path-verification cache."""
+    validate_max_object_bytes(max_bytes)
     if object_ref.byte_size > max_bytes:
         raise errors.fail("RESULT_LIMIT_EXCEEDED", "object exceeds max_object_bytes")
     digest = object_ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)

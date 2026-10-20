@@ -43,6 +43,7 @@ retain the full merge fallback and downstream row validation. Object verificatio
 footer counts, strict global order and result limits remain mandatory; batches are provisional until exhaustion.
 
 `Repository.scan(..., max_object_bytes=None)` preserves path-based reads by default.
+Both byte-read boundaries share `objects.validate_max_object_bytes` admission below.
 With a cap, `objects.read_verified_bytes` hashes bounded immutable bytes without cache
 reuse; PyArrow checks all row-group uncompressed sizes before decoding. Thrift limits
 are capped at the library's 32-bit maximum even for larger Python integers. Buffers
@@ -334,7 +335,9 @@ commits.
   change it) and must satisfy the contract: known columns only, every column present
   unless nullable, no null in a non-nullable column, and a value of the column's
   physical type (float64 finite, timestamps timezone-naive, a missing nullable value
-  `None`); primary-key values must be present. Rows arrive in strictly increasing
+  `None`); primary-key values must be present. The physical-type map
+  `ARROW_TYPES` (including `date32`) is defined once in `query` and re-exported by
+  `generic_incremental`. Rows arrive in strictly increasing
   primary-key order across and within batches (the caller orders batches). Shape,
   nulls, types and key order are checked at `append_rows`, Arrow conversion at the
   row-group write, `knowledge_mode` and evidence refs (observed and attested modes
@@ -526,7 +529,7 @@ never imports this package (root doc §3).
 the Phase 1 fence, snapshot import/promotion, nightly barrier read plans,
 `daily_market`/`computed_moves`/`price_history` refresh submission (`forward_calendar_store.py`
 supplies a candidate `fence_check`; Massive acquisition fences raw receipts). `engine.v2.serving`
-(7.0) imports `repository.Repository`. `engine.v2.research` (6.0/7.0) reads
+(7.0) imports `repository.Repository`. `engine.v2.research` (7.0) reads
 pinned snapshots and calls `generic_incremental.commit_generic_table_candidate`
 (no `fence_check`) and `incremental_tables.revision_hash`/`GenericRevision`.
 `engine.v2.models.training` uses `errors`, `Repository`, `reference_catalog` and
