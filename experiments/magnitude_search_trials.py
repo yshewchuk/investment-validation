@@ -53,6 +53,7 @@ class SearchTrials:
     def __init__(self, conn, store, repository, registration, request, plan_ref):
         self.conn, self.store, self.repository = conn, store, repository
         self.registration, self.plan_ref = registration, plan_ref
+        self._memo = {}
         try:
             self.request = json.loads(json.dumps(request, allow_nan=False))
             if self.request != request:
@@ -111,6 +112,13 @@ class SearchTrials:
         return admit_fold_inputs(self.repository, self.registration.document, inner,
             history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"))
 
+    def _cohort_inputs(self, cohort, inner):
+        """Admit each cohort once per instance; failures are never memoised."""
+        if cohort not in self._memo:
+            inputs = self._inputs(inner)
+            self._memo[cohort] = (inputs, content_hash(inputs))
+        return self._memo[cohort]
+
     def start(self, outer_year, inner_year, candidate_id):
         """Claim once, then bind native inputs; interrupted starts cannot be restarted."""
         return self._start(outer_year, inner_year, candidate_id)
@@ -124,10 +132,10 @@ class SearchTrials:
         self._append("start:" + key, started, replay=False)
         if execution is not None:
             self._append("execution-start:" + key, execution, replay=False)
-        inputs = self._inputs(inner)
         cohort = content_hash([plan["plan_id"], outer_year, inner_year])
+        inputs, inputs_id = self._cohort_inputs(cohort, inner)
         self._append("cohort:" + cohort, inputs)
-        self._append("inputs:" + key, {"cohort": cohort, "inputs_id": content_hash(inputs)})
+        self._append("inputs:" + key, {"cohort": cohort, "inputs_id": inputs_id})
         return {**started, "inputs": inputs}
 
     def execute(self, outer_year, inner_year, candidate_id, *, limits):
@@ -329,7 +337,7 @@ class SearchTrials:
         self._append("forecasts:" + key, submitted, replay=reconcile, absent=("terminal:" + key,))
         validation = self._read("validation:" + admitted["cohort"]) if reconcile else None
         if validation is None:
-            if content_hash(self._inputs(inner)) != admitted["inputs_id"]:
+            if self._cohort_inputs(admitted["cohort"], inner)[1] != admitted["inputs_id"]:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start")
             binding = self.registration.document
             labels = load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),
