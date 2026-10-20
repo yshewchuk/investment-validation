@@ -728,7 +728,7 @@ outside it. Sampling order and legacy scoring are independent of cache state.
 | Same retained deeply immutable object | Reuse its immutable numeric buffers after the per-call identity checks. |
 | Valid miss fitting both caps | Convert once; retain the object and buffers, evicting oldest entries until both caps hold. |
 | Valid conversion exceeds 16 MiB or input contains mutable fields | Return converted buffers without retention or eviction of existing entries. |
-| Concurrent misses for the same object | Recheck under the lock and reuse the first insertion; no duplicate accounting or unnecessary eviction. |
+| Concurrent misses for the same object | Recheck under the lock and reuse the first insertion if it is still retained, with no duplicate accounting. If another insertion evicted it first, the loser inserts its own conversion under the normal caps. |
 | Evicted object requested again | Check immutability and reconvert; output and sampling order are identical to a hit. |
 
 ## Invariants
