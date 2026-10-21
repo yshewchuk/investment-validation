@@ -129,3 +129,5 @@ or release is established by this development implementation.
 
 See [the stage-2 design](STAGE2_DESIGN.md) for causal panel features, bounded
 inner-only selection and a proposed matched legacy comparison; it is not implemented.
+Stage-2 scope, acceptance criteria and the PR split (design section 5) live in that
+design; this Spec adds nothing until a stage-2 PR is accepted.
