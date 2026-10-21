@@ -450,7 +450,7 @@ Manifest hashes describe the exact bytes on disk. Every conflict is detected bef
 | Number held by another experiment_id or an unlinked folder; experiment_id linked to another number | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
 | Existing results file that is over the cap, a symlink or not a regular file; folder or `results/` that is a symlink | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
 | JSON over the cap | A summary (original bytes, sha256, longest fitting list prefix) is written instead and listed under `trimmed`. |
-| Existing file with different bytes (a replay) | The first record is kept, a stderr warning is printed and the result is `unchanged`. |
+| Existing file with different bytes (a replay, or a further arm sharing the experiment_id) | One record exists per experiment_id; the first record is kept, a stderr warning is printed and the result is `unchanged`. |
 | Existing result file whose bytes differ from the hash in its existing manifest, or a manifest missing a document hash | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
 | Non-finite number (NaN, Infinity) in a document | `INVALID_EXPERIMENT_SPEC`; exports are strict JSON. |
 | Symlinked run folder or `results/` | Refused during number resolution as well as export (`EXPERIMENT_IDENTITY_CONFLICT`), before any evaluation. |
@@ -458,7 +458,7 @@ Manifest hashes describe the exact bytes on disk. Every conflict is detected bef
 | Report text over the cap | `REPORT.md` holds a truncated report plus a truncation line, so replay never exceeds the cap. |
 | Manifest whose `exp_number` differs from its folder number | `EXPERIMENT_IDENTITY_CONFLICT`. |
 | Non-string slug or non-JSON-serializable document | `INVALID_EXPERIMENT_SPEC`. |
-| Export fails after the outcome was published | The outcome stays valid; the CLI exits 2 with `record_export_failed`; a rerun replays, then exports. |
+| Export fails after the outcome was published | The outcome stays valid; the CLI exits 2 with `record_export_failed`. A rerun replays, then exports, unless the failure left a manifestless folder (see the crash row), which it refuses. |
 
 ## Reconstructed gate evaluation
 

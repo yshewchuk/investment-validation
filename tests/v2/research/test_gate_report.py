@@ -268,8 +268,10 @@ def test_two_real_cli_arms_consume_distinct_fill_record_and_replay_once(source, 
     assert {row["spec_hash"] for row in rows} == {result["variant_id"] for result in results}
     before = ledger.read_bytes()
     monkeypatch.setattr(gate, "gate_result", _forbid)
-    for spec, output in zip((build_gate_spec(), build_gate_spec(1.0, "control")), outputs, strict=True):
+    for index, (spec, output) in enumerate(zip((build_gate_spec(), build_gate_spec(1.0, "control")), outputs, strict=True)):
         replayed = _invoke(source, capsys, "run", spec, "--ledger", ledger)
+        assert replayed["record_export"]["status"] == "unchanged"
+        assert output["record_export"]["status"] == ("written" if index == 0 else "unchanged")
         assert {key: value for key, value in replayed.items() if key != "record_export"} == {
             key: value for key, value in output.items() if key != "record_export"}
     assert ledger.read_bytes() == before

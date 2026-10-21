@@ -72,6 +72,22 @@ def _read_manifest(path: Path):
     return doc if isinstance(doc, dict) else None
 
 
+def _read_manifest_following(path: Path):
+    """Like _read_manifest but follows symlinks (plain capped open)."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(MAX_JSON_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > MAX_JSON_BYTES:
+        return None
+    try:
+        doc = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
 def _manifest_for(folder: Path):
     """Export manifest for folder; None for a symlinked folder/results dir."""
     if folder.is_symlink() or (folder / "results").is_symlink():
@@ -83,7 +99,22 @@ def _linked_number(root: Path, experiment_id):
     """Find an EXP folder whose manifest links this experiment_id."""
     for num, folder in experiment_dirs(root).items():
         man = _manifest_for(folder)
-        if man is None or man.get("experiment_id") != experiment_id:
+        if man is None:
+            if not (folder.is_symlink() or (folder / "results").is_symlink()):
+                continue
+            man = _read_manifest_following(
+                folder / "results" / "export_manifest.json"
+            )
+            if (
+                man is None
+                or man.get("experiment_id") != experiment_id
+            ):
+                continue
+            raise fail(
+                "EXPERIMENT_IDENTITY_CONFLICT",
+                f"{experiment_id} in {folder.name}: run folder is a symlink",
+            )
+        if man.get("experiment_id") != experiment_id:
             continue
         if man.get("exp_number") != num:
             raise fail(

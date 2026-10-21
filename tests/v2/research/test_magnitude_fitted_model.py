@@ -460,6 +460,8 @@ def test_cli_register_smoke_record_and_replay_never_refits_or_duplicates_ledger(
         monkeypatch.setattr(training, "fit_magnitude_predictions", forbid_access)
         set_outcome_clock(monkeypatch, "2026-02-10")
         smoke_replay = _invoke(source, kind, capsys, "run", "--no-ledger")
+        assert smoke_replay["record_export"]["status"] == "unchanged"
+        assert smoke["record_export"]["status"] == "written"
         assert {key: value for key, value in smoke_replay.items() if key != "record_export"} == {
             key: value for key, value in smoke.items() if key != "record_export"}
         assert _invoke(source, kind, capsys, "run", "--ledger", ledger) == recorded

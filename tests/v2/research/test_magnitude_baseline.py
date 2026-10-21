@@ -430,6 +430,8 @@ def test_cli_metadata_registration_then_durable_smoke_never_touches_ledger(tmp_p
         with monkeypatch.context() as patch:
             _metadata_only(patch)
             replayed = _invoke(source, capsys, "run", "--no-ledger")
+        assert replayed["record_export"]["status"] == "unchanged"
+        assert output["record_export"]["status"] == "written"
         assert {key: value for key, value in replayed.items() if key != "record_export"} == {
             key: value for key, value in output.items() if key != "record_export"}
         assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before

@@ -280,9 +280,34 @@ class _Registration:
 
 
 def test_resolve_linked_id_reuses_number_with_request_none(tmp_path):
+    export_run_record(
+        tmp_path,
+        exp_number=101,
+        experiment_id="x",
+        slug="x",
+        spec={"hypothesis": "h"},
+        request={"action": "run"},
+        event_ids=["e1"],
+        outcome={"failure_code": None},
+        report_text="# report body\n",
+        recording_mode="ledger",
+    )
+    assert resolve_exp_number(tmp_path, "x", None) == 101
+
+
+def test_resolve_unlinked_id_with_none_is_invalid(tmp_path):
     with pytest.raises(OpsError) as exc:
         resolve_exp_number(tmp_path, "x", None)
     assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_resolve_symlinked_run_folder_with_matching_id_conflicts(tmp_path):
+    real = tmp_path / "real-x"
+    _write_manifest(real, "x", 101)
+    (tmp_path / "EXP-101_x").symlink_to(real)
+    with pytest.raises(OpsError) as exc:
+        resolve_exp_number(tmp_path, "x", None)
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_export_native_run_independent_oracle(tmp_path):

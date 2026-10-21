@@ -805,6 +805,8 @@ def test_native_build_cli_register_smoke_record_and_replay_without_rebuilding(tm
         set_outcome_clock(monkeypatch, "2026-02-10")
         forbid_history_model_payloads(monkeypatch)
         smoke_replay = _invoke(source, capsys, "run", "--no-ledger")
+        assert smoke_replay["record_export"]["status"] == "unchanged"
+        assert smoke["record_export"]["status"] == "written"
         assert {key: value for key, value in smoke_replay.items() if key != "record_export"} == {
             key: value for key, value in smoke.items() if key != "record_export"}
         assert _invoke(source, capsys, "run", "--ledger", ledger) == recorded
