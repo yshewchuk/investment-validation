@@ -39,7 +39,7 @@ Limit: a sample cannot prove the provider never revises. A pass supports R as an
 
 ## Commands for the supervisor
 
-Run from a checkout of this branch. The output directory must be outside any repository, for example `~/finality-probe` (mode 0700, never mirrored). Keys come from the environment (`ORATS_API_KEY`, and `MASSIVE_API_KEY` for `--massive`); the script never prints or stores them. Source the nightly env file in the same shell, do not paste keys into commands.
+Run from a checkout of this branch. The output directory must be outside any repository, for example `~/finality-probe` (directories are created 0700 and files 0600, a response over 64 MiB is recorded as a failed unit, and the directory is never mirrored). Keys come from the environment (`ORATS_API_KEY`, and `MASSIVE_API_KEY` for `--massive`); the script never prints or stores them. Source the nightly env file in the same shell, do not paste keys into commands.
 
 Pick a recent normal full session `S` (not a half day). Eastern times:
 
@@ -57,6 +57,6 @@ python3 tools/finality_probe.py capture --session S --tickers $TICKERS --label L
 python3 tools/finality_probe.py compare --out ~/finality-probe --session S
 ```
 
-Repeat for at least 3 sessions (one capture series each). `--massive` adds the option chain snapshot, which is a current-state endpoint: it can only show `day.last_updated` freezing after the close, so run it on the same schedule but treat it as secondary. If `--massive` returns a plan error, record that and skip it. Post the `compare` output (metadata only) to #877.
+Repeat for at least 3 sessions (one capture series each). `--massive` adds the option chain snapshot, which is a current-state endpoint: it can only show `day.last_updated` and `last_quote.last_updated` freezing after the close (`compare` uses the larger of the two; all pages of a ticker are compared as one snapshot, so an added or changed page counts as a content change), so run it on the same schedule but treat it as secondary. If `--massive` returns a plan error, record that and skip it. Post the `compare` output (metadata only) to #877.
 
 `capture` exits 1 if any request failed or a Massive result was truncated at the 20-page cap, but still writes every unit; rerun a failed label rather than comparing around it. Cost: about 4 labels x 5 tickers x 2 endpoints = 40 ORATS GETs per session; no retries. Not a heavy job.

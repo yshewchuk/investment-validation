@@ -19,6 +19,7 @@ DROP_HEADERS = frozenset({"set-cookie", "authorization", "cookie"})
 MAX_MASSIVE_PAGES = 20
 REQUEST_TIMEOUT_S = 30
 MAX_META_BYTES = 1024 * 1024
+MAX_BODY_BYTES = 64 * 1024 * 1024
 SESSION_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 TICKER_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -70,10 +71,22 @@ def _leaks_key(key, meta, body):
                for v in (key, quote(key, safe=""), quote_plus(key)))
 
 
+_TMP_COUNTER = 0
+
+
 def _atomic_write(path, data):
-    tmp = path.with_name(path.name + ".tmp")
+    global _TMP_COUNTER
+    while True:
+        _TMP_COUNTER += 1
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{_TMP_COUNTER}.tmp")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            break
+        except FileExistsError:
+            continue
     try:
-        tmp.write_bytes(data)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -101,7 +114,7 @@ def _content_sha256(rows, ignore_keys):
 
 
 def _max_updated_orats(rows):
-    vals = [r.get("updatedAt") for r in rows if isinstance(r, dict) and r.get("updatedAt") is not None]
+    vals = [r.get("updatedAt") for r in rows if isinstance(r, dict) and isinstance(r.get("updatedAt"), str)]
     return max(vals) if vals else None
 
 
@@ -126,8 +139,19 @@ def _default_http_get(req):
     headers = dict(req.get("headers") or {})
     headers.setdefault("Accept-Encoding", "identity")
     resp = requests.get(req["url"], params=req.get("params"), headers=headers,
-                        timeout=req.get("timeout", REQUEST_TIMEOUT_S), allow_redirects=False)
-    return int(resp.status_code), {str(k).lower(): v for k, v in resp.headers.items()}, bytes(resp.content)
+                        timeout=req.get("timeout", REQUEST_TIMEOUT_S),
+                        allow_redirects=False, stream=True)
+    try:
+        chunks, total = [], 0
+        for chunk in resp.iter_content(65536):
+            total += len(chunk)
+            if total > MAX_BODY_BYTES:
+                raise ValueError("BodyTooLarge")
+            if chunk:
+                chunks.append(chunk)
+    finally:
+        resp.close()
+    return int(resp.status_code), {str(k).lower(): v for k, v in resp.headers.items()}, b"".join(chunks)
 
 
 def capture(args_ns, http_get=None, now=None):
@@ -137,6 +161,7 @@ def capture(args_ns, http_get=None, now=None):
     if not _valid_session(session): _fail(f"invalid session {session!r}: expected YYYY-MM-DD", 2)
     if not LABEL_RE.match(label or "") or label in (".", ".."): _fail(f"invalid label {label!r}", 2)
     tickers = [t.strip() for t in args_ns.tickers.split(",") if t.strip()]
+    if not tickers: _fail("empty ticker list", 2)
     for t in tickers:
         if not TICKER_RE.match(t): _fail(f"invalid ticker {t!r}", 2)
     if len(set(tickers)) != len(tickers): _fail(f"duplicate tickers {tickers!r}", 2)
@@ -194,11 +219,14 @@ def capture(args_ns, http_get=None, now=None):
             max_updated_at = _max_updated_orats(rows) if provider == "orats" else _max_updated_massive(rows)
             content_sha = _content_sha256(rows, ignore_keys)
         truncated = False
-        if provider == "massive" and page == MAX_MASSIVE_PAGES - 1:
+        if provider == "massive":
             nu = parsed.get("next_url") if isinstance(parsed, dict) else None
-            if isinstance(nu, str) and nu.startswith(MASSIVE_ORIGIN):
+            if page == MAX_MASSIVE_PAGES - 1 and isinstance(nu, str) and nu.startswith(MASSIVE_ORIGIN):
                 truncated = True
                 print(f"[capture] warning: truncated massive pagination for {ticker} after {MAX_MASSIVE_PAGES} pages", file=sys.stderr)
+            elif nu is not None and (not isinstance(nu, str) or not nu.startswith(MASSIVE_ORIGIN)):
+                truncated = True
+                print(f"[capture] warning: non-massive next_url for {ticker} page {page}; marking truncated", file=sys.stderr)
         ok = isinstance(parsed, dict) and 200 <= status < 300 and not truncated
         meta = {
             "provider": provider, "endpoint": endpoint, "ticker": ticker, "session": session,
@@ -307,6 +335,26 @@ def _read_meta(path):
     return obj
 
 
+def _composite(key, pages):
+    ordered = sorted(pages, key=lambda r: int(r.get("page") or 0))
+    sha = hashlib.sha256("|".join(f"{int(r.get('page') or 0)}:{r.get('content_sha256')}" for r in ordered).encode("utf-8")).hexdigest()
+    rcs = [r.get("row_count") for r in ordered if r.get("row_count") is not None]
+    mus = [r.get("max_updated_at") for r in ordered if r.get("max_updated_at") is not None]
+    sts = [r.get("status") for r in ordered if isinstance(r.get("status"), int)]
+    base = dict(ordered[0])
+    base.update({
+        "session": key[0], "provider": key[1], "endpoint": key[2], "ticker": key[3], "label": key[4],
+        "page": None, "pages": len(ordered), "content_sha256": sha,
+        "row_count": sum(rcs) if rcs else None,
+        "max_updated_at": max(mus) if mus else None,
+        "fetched_at_utc": max(ordered, key=lambda r: _ts(r.get("fetched_at_utc")) or 0.0).get("fetched_at_utc"),
+        "headers": next((r.get("headers") for r in ordered if int(r.get("page") or 0) == 0), ordered[0].get("headers")),
+        "status": max(sts) if sts else 0,
+        "ok": all(_meta_ok(r) and not r.get("truncated") for r in ordered),
+    })
+    return base
+
+
 def compare(args_ns):
     rule = "a refetch at T+X whose content hash equals the fetch at T, with max(updatedAt) at T earlier than T, counts as final at T"
     hdrs = ("etag", "last-modified", "age", "date", "content-length")
@@ -323,10 +371,17 @@ def compare(args_ns):
             if not f.resolve().is_relative_to(root): _skip(str(f), "outside output root"); continue
             m = _read_meta(f)
             if m is not None: metas.append(m)
+    plain, by_page_label = [], {}
+    for m in metas:
+        if m.get("page") is None:
+            plain.append(m)
+        else:
+            k = (m.get("session"), m.get("provider"), m.get("endpoint"), m.get("ticker"), m.get("label"))
+            by_page_label.setdefault(k, []).append(m)
+    metas = plain + [_composite(k, v) for k, v in by_page_label.items()]
     groups = {}
     for m in metas:
         groups.setdefault((m.get("session"), m.get("provider"), m.get("endpoint"), m.get("ticker"), m.get("page")), []).append(m)
-    cols = ["label", "ok", "fetched_at_utc", "status", "row_count", "max_updated_at", "content_sha256[:12]"]
     ff = tnf = 0
     group_trk = {}
     print("# finality compare")
@@ -336,12 +391,17 @@ def compare(args_ns):
         ok_rows = [r for r in rows if _meta_ok(r)]
         bad = [(r.get("label"), r.get("status")) for r in rows if not _meta_ok(r)]
         n, shas = len(ok_rows), [r.get("content_sha256") for r in ok_rows]
-        present = [h for h in hdrs if any((r.get("headers") or {}).get(h) is not None for r in rows)]
         session, provider, endpoint, ticker, page = key
+        present = [h for h in hdrs if any((r.get("headers") or {}).get(h) is not None for r in rows)]
+        has_pages = any("pages" in r for r in rows)
+        cols = ["label", "ok", "fetched_at_utc", "status", "row_count", "max_updated_at", "content_sha256[:12]"]
+        if has_pages: cols.append("pages")
         print(f"\n## {session} {provider} {endpoint} {ticker} page={page}\n| " + " | ".join(cols + present) + " |\n| " + " | ".join(["---"] * (len(cols) + len(present))) + " |")
         for r in rows:
             h, sha = r.get("headers") or {}, r.get("content_sha256")
-            cells = [str(r.get("label")), "yes" if _meta_ok(r) else "no", str(r.get("fetched_at_utc")), str(r.get("status")), str(r.get("row_count")), str(r.get("max_updated_at")), sha[:12] if sha else ""] + [str(h.get(c, "")) for c in present]
+            cells = [str(r.get("label")), "yes" if _meta_ok(r) else "no", str(r.get("fetched_at_utc")), str(r.get("status")), str(r.get("row_count")), str(r.get("max_updated_at")), sha[:12] if sha else ""]
+            if has_pages: cells.append(f"pages={r.get('pages', '')}")
+            cells.extend(str(h.get(c, "")) for c in present)
             print("| " + " | ".join(cells) + " |")
         if n <= 1: stable = "n/a"
         elif shas[-1] != shas[-2]: stable = "never"
