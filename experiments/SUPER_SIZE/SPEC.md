@@ -124,3 +124,8 @@ It reuses standard argparse/SQLite/tempfile plus existing journal and canonical
 serialization APIs, without another scheduler, report store or parser dependency.
 No real-data run, measured data availability, holdout/final access, ledger result
 or release is established by this development implementation.
+
+## Stage 2 proposal
+
+See [the stage-2 design](STAGE2_DESIGN.md) for causal panel features, bounded
+inner-only selection and a proposed matched legacy comparison; it is not implemented.
