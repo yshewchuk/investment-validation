@@ -322,10 +322,16 @@ def iter_section(store, section, entry, key):
         yield from rows
 
 
+def _scalar_inline(inline):
+    return all(value is None or type(value) in (str, int, float, bool)
+               for value in inline.values())
+
+
 def _manifest_shape(manifest):
     if (not isinstance(manifest, dict) or set(manifest) != {"schema_version", "inline", "sections"}
             or manifest["schema_version"] != MANIFEST_SCHEMA
             or not isinstance(manifest["inline"], dict)
+            or not _scalar_inline(manifest["inline"])
             or not isinstance(manifest["sections"], dict)):
         raise fail(_CONFLICT, "search cohort manifest is invalid")
     for entry in manifest["sections"].values():
