@@ -135,16 +135,21 @@ def _content_sha256(rows):
     return hashlib.sha256(_canon([rows[i] for i in order]).encode("utf-8")).hexdigest()
 
 
+def _envelope_rows(provider, parsed):
+    if not isinstance(parsed, dict):
+        return None
+    rows = parsed.get("data" if provider == "orats" else "results")
+    return rows if isinstance(rows, list) else None
+
+
 def _content_digest(provider, body):
     try:
         parsed = json.loads(body)
     except Exception:
         return None, None
-    if not isinstance(parsed, dict):
+    rows = _envelope_rows(provider, parsed)
+    if rows is None:
         return None, None
-    rows = parsed.get("data" if provider == "orats" else "results")
-    if not isinstance(rows, list):
-        rows = []
     return _content_sha256(rows), len(rows)
 
 
@@ -179,10 +184,8 @@ def _max_updated_massive(rows):
 
 
 def _rows_and_max(provider, parsed):
-    rows = None
-    if isinstance(parsed, dict):
-        rows = parsed.get("data" if provider == "orats" else "results")
-    if not isinstance(rows, list):
+    rows = _envelope_rows(provider, parsed)
+    if rows is None:
         rows = []
     if provider == "orats":
         return rows, _max_updated_orats(rows)
@@ -256,8 +259,13 @@ def capture(args_ns, http_get=None, now=None):
                     _fail_path(exc)
     run_id = uuid.uuid4().hex
     orats_planned = len(endpoints) * len(tickers)
+    start_units, massive_note = orats_planned, ""
+    if orats_planned == 0 and want_massive:
+        start_units = len(tickers)
+        massive_note = f" massive_tickers={start_units}"
     t_start = time.perf_counter()
-    print(f"[capture] start units={orats_planned} label={label}", file=sys.stderr)
+    start_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    print(f"[capture] start units={start_units}{massive_note} label={label} elapsed=0 rss={start_rss:.1f}MB", file=sys.stderr)
     total = not_ok = 0
     saw_massive = False
     last_prog_t = time.perf_counter()
@@ -288,7 +296,8 @@ def capture(args_ns, http_get=None, now=None):
             parsed = json.loads(body)
         except Exception:
             parsed = None
-        if isinstance(parsed, dict):
+        env_rows = _envelope_rows(provider, parsed)
+        if env_rows is not None:
             rows, max_updated_at = _rows_and_max(provider, parsed)
             row_count = len(rows)
             content_sha = _content_sha256(rows)
@@ -303,7 +312,7 @@ def capture(args_ns, http_get=None, now=None):
             elif nu is not None and not has_next:
                 truncated = True
                 print(f"[capture] warning: non-massive next_url for {ticker} page {page}; marking truncated", file=sys.stderr)
-        envelope_ok = isinstance(parsed, dict) and isinstance(parsed.get("data" if provider == "orats" else "results"), list)
+        envelope_ok = env_rows is not None
         ok = envelope_ok and 200 <= status < 300 and not truncated
         meta = {
             "provider": provider, "endpoint": endpoint, "ticker": ticker, "session": session,
@@ -553,11 +562,10 @@ def _read_meta(path, session_dir, label_dir):
         if (not isinstance(stored_next, bool) or stored_next != derived_next
                 or not isinstance(stored_trunc, bool) or stored_trunc != expected_trunc):
             return _skip(name, "continuation mismatch")
-    envelope_ok = (isinstance(parsed_body, dict)
-                   and isinstance(parsed_body.get("data" if provider == "orats" else "results"), list))
+    envelope_ok = _envelope_rows(provider, parsed_body) is not None
     if obj.get("ok") != (envelope_ok and 200 <= obj["status"] < 300 and not expected_trunc):
         return _skip(name, "ok receipt mismatch")
-    _, calc_max = _rows_and_max(obj.get("provider"), parsed_body)
+    _, calc_max = _rows_and_max(provider, parsed_body)
     if calc_max != obj.get("max_updated_at"):
         return _skip(name, "max_updated_at mismatch")
     sha, n_rows = _content_digest(obj.get("provider"), body)
