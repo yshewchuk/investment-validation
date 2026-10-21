@@ -78,8 +78,15 @@ def _linked_number(root: Path, experiment_id):
     """Find an EXP folder whose manifest links this experiment_id."""
     for num, folder in experiment_dirs(root).items():
         man = _manifest_for(folder)
-        if man is not None and man.get("experiment_id") == experiment_id:
-            return num
+        if man is None or man.get("experiment_id") != experiment_id:
+            continue
+        if man.get("exp_number") != num:
+            raise fail(
+                "EXPERIMENT_IDENTITY_CONFLICT",
+                f"export manifest in {folder.name} claims EXP-{man.get('exp_number')!r} "
+                f"but the folder name is EXP-{num:03d}",
+            )
+        return num
     return None
 
 
@@ -110,6 +117,12 @@ def _check_number_folder(folder: Path, exp_number: int, experiment_id):
             "EXPERIMENT_IDENTITY_CONFLICT",
             f"EXP-{exp_number:03d} in {folder.name} already belongs to "
             f"{man.get('experiment_id')!r}, not {experiment_id!r}",
+        )
+    if man.get("exp_number") != exp_number:
+        raise fail(
+            "EXPERIMENT_IDENTITY_CONFLICT",
+            f"export manifest in {folder.name} claims EXP-{man.get('exp_number')!r} "
+            f"but the folder name is EXP-{exp_number:03d}",
         )
 
 
@@ -278,6 +291,16 @@ def export_run_record(
     bytes on disk for every file this call writes.
     """
     root = Path(experiments_root)
+    if not isinstance(slug, str):
+        raise fail(
+            "INVALID_EXPERIMENT_SPEC",
+            f"slug must be a string, got {type(slug).__name__}",
+        )
+    if not isinstance(experiment_id, str):
+        raise fail(
+            "INVALID_EXPERIMENT_SPEC",
+            f"experiment_id must be a string, got {type(experiment_id).__name__}",
+        )
     if isinstance(exp_number, bool) or not isinstance(exp_number, int):
         raise _bad(exp_number, experiment_id)
     if exp_number < FIRST_NUMBER:
@@ -300,7 +323,13 @@ def export_run_record(
     }
     proposed: dict[Path, bytes] = {}
     for name, doc in docs.items():
-        raw, was_trimmed = _encode_doc(doc)
+        try:
+            raw, was_trimmed = _encode_doc(doc)
+        except (TypeError, ValueError) as exc:
+            raise fail(
+                "INVALID_EXPERIMENT_SPEC",
+                f"cannot JSON-encode {name}: {exc}",
+            ) from exc
         if was_trimmed and name not in trimmed:
             trimmed.append(name)
         proposed[results / name] = raw
@@ -409,7 +438,11 @@ def export_native_run(
     if saved["outcome"]["failure_code"] is None and report_path is not None:
         report_raw = _read_capped(Path(report_path))
         if report_raw is not None:
-            report_text = report_raw[:MAX_JSON_BYTES].decode("utf-8", errors="replace")
+            limit = MAX_JSON_BYTES - 8192
+            text = report_raw[:limit].decode("utf-8", errors="ignore")
+            if len(report_raw) > limit:
+                text += "\n[report truncated to fit the 1 MB export cap]"
+            report_text = text
     closure = document.get("source_closure")
     source_closure_hash = hashlib.sha256(
         json.dumps(closure, sort_keys=True).encode("utf-8")

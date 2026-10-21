@@ -95,7 +95,7 @@ def test_layout_writes_results_and_report(tmp_path):
     assert result["dir"] == str(folder)
 
 
-def test_layout_writes_results_and_report(tmp_path):
+def test_resolve_linked_number_from_manifest(tmp_path):
     _write_manifest(tmp_path / "EXP-107_linked", "linked", 107)
     assert resolve_exp_number(tmp_path, "linked", None) == 107
 
@@ -310,6 +310,16 @@ def test_export_native_run_independent_oracle(tmp_path):
     ).hexdigest()
     assert outcome["source_closure_hash"] == expected_hash
     assert outcome["environment"] == {"python": "3"}
+    assert isinstance(outcome["elapsed_seconds"], (int, float))
+    assert outcome["elapsed_seconds"] >= 0
+    assert isinstance(outcome["peak_rss_kb"], int)
+    assert outcome["peak_rss_kb"] > 0
+    commit = outcome["commit_id"]
+    assert commit is None or (
+        isinstance(commit, str)
+        and len(commit) == 40
+        and all(c in "0123456789abcdef" for c in commit)
+    )
     event_ids = json.loads((folder / "results" / "event_ids.json").read_bytes())
     assert event_ids == ["a", "b"]
 
@@ -338,6 +348,81 @@ def test_export_native_run_refusal_reports_failure_code(tmp_path):
     )
     folder = Path(result["dir"])
     assert "HOLDOUT_ACCESS_DENIED" in (folder / "REPORT.md").read_text()
+
+
+def test_large_report_is_truncated_and_replay_unchanged(tmp_path):
+    registration = _Registration({
+        "execution_plan": {"experiment_id": "exp-x"},
+        "snapshot": {"snapshot_id": "snap-1"},
+        "event_ids": [],
+        "source_closure": {},
+        "environment": {},
+    })
+    saved = {
+        "outcome": {"failure_code": None},
+        "receipt": {"recording_mode": "smoke"},
+    }
+    report = tmp_path / "report.md"
+    report.write_bytes(b"a" * 2_000_000)
+    first = export_native_run(
+        tmp_path,
+        registration,
+        {"hypothesis": "h"},
+        {"action": "run"},
+        saved,
+        exp_number=101,
+        replayed=False,
+        started=time.monotonic(),
+        report_path=report,
+    )
+    folder = Path(first["dir"])
+    report_md = folder / "REPORT.md"
+    assert first["status"] == "written"
+    assert report_md.stat().st_size <= MAX_JSON_BYTES
+    assert "[report truncated" in report_md.read_text()
+    second = export_native_run(
+        tmp_path,
+        registration,
+        {"hypothesis": "h"},
+        {"action": "run"},
+        saved,
+        exp_number=101,
+        replayed=False,
+        started=time.monotonic(),
+        report_path=report,
+    )
+    assert second["status"] == "unchanged"
+
+
+def test_manifest_number_mismatch_is_identity_conflict(tmp_path):
+    folder = tmp_path / "EXP-101_x"
+    _write_manifest(folder, "x", 102)
+    with pytest.raises(OpsError) as exc:
+        resolve_exp_number(tmp_path, "x", None)
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_slug_none_is_invalid_spec(tmp_path):
+    with pytest.raises(OpsError) as exc:
+        export_run_record(
+            tmp_path,
+            exp_number=101,
+            experiment_id="x",
+            slug=None,
+            spec={"hypothesis": "h"},
+            request={"action": "run"},
+            event_ids=["e1"],
+            outcome={"failure_code": None},
+            report_text="# report body\n",
+            recording_mode="ledger",
+        )
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_set_value_in_spec_is_invalid_spec(tmp_path):
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path, spec={"bad": set()})
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def test_oversize_manifest_is_ignored_as_unreadable(tmp_path):

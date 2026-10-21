@@ -451,7 +451,10 @@ Manifest hashes describe the exact bytes on disk. Every conflict is detected bef
 | Existing results file that is over the cap, a symlink or not a regular file; folder or `results/` that is a symlink | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
 | JSON over the cap | A summary (original bytes, sha256, longest fitting list prefix) is written instead and listed under `trimmed`. |
 | Existing file with different bytes (a replay) | The first record is kept, a stderr warning is printed and the result is `unchanged`. |
-| Crash before the manifest is written | The folder has no manifest, so a retry refuses; the operator removes it (known limit, not auto-resumed). |
+| Crash before the manifest is written | The folder has no manifest, so a retry refuses with the conflict above; partial exports are not auto-resumed (known limit). |
+| Report text over the cap | `REPORT.md` holds a truncated report plus a truncation line, so replay never exceeds the cap. |
+| Manifest whose `exp_number` differs from its folder number | `EXPERIMENT_IDENTITY_CONFLICT`. |
+| Non-string slug or non-JSON-serializable document | `INVALID_EXPERIMENT_SPEC`. |
 | Export fails after the outcome was published | The outcome stays valid; the CLI exits 2 with `record_export_failed`; a rerun replays, then exports. |
 
 ## Reconstructed gate evaluation
