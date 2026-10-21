@@ -173,22 +173,6 @@ def test_resource_failures_leave_unfinished_claims_and_no_retry(case, monkeypatc
         case.recorder.execute(*trial_cases(case)[0], limits=limits)
 
 
-def test_oversized_native_input_preserves_unfinished_claim_and_blocks_freeze(case, monkeypatch):
-    monkeypatch.setattr(execution, "MAX_BYTES", 1)
-    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("oversized native input launched"))
-    args = trial_cases(case)[0]
-    with problem("RESOURCE_LIMIT_EXCEEDED", "search execution input exceeds its byte limit"):
-        case.recorder.execute(*args, limits=LIMITS)
-    slots = [slot for slot, _ in trial_slots(case)]
-    for prefix in ("start:", "execution-start:", "inputs:"):
-        assert sum(slot.startswith(prefix) for slot in slots) == 1
-    assert not any(slot.startswith(("fit-started:", "execution:", "forecasts:", "terminal:")) for slot in slots)
-    with problem("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt"):
-        case.recorder.freeze()
-    with problem("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
-        case.recorder.execute(*args, limits=LIMITS)
-
-
 @pytest.mark.parametrize("guard, error", [(no_fit_guard, RuntimeFitForbidden), (legacy_guard, LegacyRuntimeFitForbidden)])
 def test_parent_no_fit_guard_precedes_claim_and_launch(case, monkeypatch, guard, error):
     before = trial_slots(case)

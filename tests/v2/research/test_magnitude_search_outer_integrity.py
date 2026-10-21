@@ -15,6 +15,7 @@ from engine.v2.ops.migrations import Migration, migrate
 from experiments import magnitude_search_outer as outer
 from experiments import magnitude_search_records as records
 from experiments import magnitude_search_trials as trials
+from experiments.magnitude_search_inputs import load_inputs
 from tests.v2.models.training.test_magnitude_estimators import FEATURES, RIDGE_PARAMS
 from tests.v2.research.magnitude_trial_support import history_event, trial_cases, trial_forecasts
 from tests.v2.research.test_magnitude_search_execution import LIMITS, inject_child
@@ -291,7 +292,8 @@ def test_collection_cannot_fit_if_terminal_disappears_after_inventory(outer_case
 
 def test_valid_native_candidate_failure_is_excluded_without_blocking_outer(case, monkeypatch):  # noqa: F811
     original = trials.run_fitted_trial
-    def failed(inputs, fold, plan, execution, limits, progress):
+    def failed(source, fold, plan, execution, limits, progress):
+        inputs = load_inputs(ArtifactStore(source["store_root"]), source["manifest"], source["inputs_id"])
         first = trials.SearchTrials._fit_evidence(inputs, fold, plan, execution)[0]
         progress("started", first)
         return {"event": "failed"}

@@ -275,9 +275,8 @@ The rows above describe the journal; this section states the sharded (v2) contra
 inputs. Implemented: the shard module, the loader, the cohort and outer-input writers
 (`_start` publishes `cohort:<id>` and the outer writer `outer-inputs:<id>`, each as shards plus a
 manifest) and the manifest bindings of `inputs:<trial>`, `execution-result:<trial>` and the outer
-result. Not implemented: the child transport, which still sends the whole inputs under the
-16 MiB child payload cap (split PR 4). A whole-cohort (v1) record still reads through the
-loader's adapter. Cohort rows (`features`, `training`, preflight
+result, and the child transport (below). A whole-cohort (v1) record still reads through the
+loader's adapter, but only for replay: a new fit always publishes and streams a manifest. Cohort rows (`features`, `training`, preflight
 `planned_inputs`, and the same rows in `outer-inputs:<id>`) are ordered sections of
 content-addressed shards, not one record or payload. Population-sized receipt lists
 (`training_inputs` candidate, qualified, read and omitted event lists, and preflight
@@ -305,9 +304,15 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   An empty section has `row_count` 0, an empty shard list and no keys; any shard listed
   for it, or a nonzero count with an empty list, is a count disagreement. Parent and
   child apply the same rule. Matrix evidence keeps today's training / evaluation list
-  order. Not yet implemented (split PR 4): the child gets a header (limits, fold, horizons, execution spec, manifest,
-  expected `inputs_id`, store root) and checks the manifest hash against it, reads only manifest-named objects and opens no repository, catalog or
-  validation target. Transport memory is one shard plus the manifest.
+  order. The child transport: the child gets a header file (inner fold, horizons, execution spec,
+  manifest, expected `inputs_id`, store root; limits stay an argument) and no input rows. It calls
+  `load_fit_inputs`, which checks the manifest hash against the header, streams only the
+  `training` and `features` sections through the reader above, keeps the training and
+  evaluation events at the selected horizons, and opens no repository, catalog or validation
+  target. A hash, shape or shard failure inside the child is an infrastructure failure
+  (`RESOURCE_UNAVAILABLE`), since the parent just published and bound that manifest.
+  Transport memory is the projected fit rows plus one shard; there is no input byte cap, only
+  the child's `RLIMIT_AS`. The child output cap stays 16 MiB.
 * Shards are published, outside the catalog transaction, before the manifest append,
   which is the commit point.
 * The manifest hash is a Merkle `inputs_id`, and every cohort is sharded, including empty and one-row cohorts.
@@ -658,8 +663,8 @@ The source seal explicitly includes the fixed child and its transitive fitting s
 | Missing/extra limit keys, Boolean/noninteger/nonpositive or platform-unrepresentable values | `INVALID_EXPERIMENT_SPEC` before a claim or subprocess launch. |
 | Direct `run_fitted_trial` call | Requires exactly those three resource keys plus an integer `cpu_id` in `[0, 2**31 - 1)`, excluding Boolean values. Revalidates all limits before input access, scratch creation or launch; malformed resolved limits refuse `INVALID_EXPERIMENT_SPEC`. CPU availability is still enforced by child setup, not reserved by this pure check. |
 | Parent Linux affinity query unavailable or empty | `RESOURCE_UNAVAILABLE` before a claim or subprocess launch. Child limit/affinity setup failure instead preserves the post-claim unfinished attempt and refuses `RESOURCE_UNAVAILABLE`. |
-| Serialized input or a buffered child-output record exceeds 16 MiB | `RESOURCE_LIMIT_EXCEEDED`; preserve the unfinished claim, publish no candidate failure and block freeze. |
-| Started trial with admitted cohort | A fixed fit-only subprocess receives stored features and qualified training targets, never a repository, catalog or validation targets. Every horizon uses the existing fresh-fit pipeline and declared candidate recipe. |
+| A buffered child-output record exceeds 16 MiB, or the child exhausts `RLIMIT_AS` loading its rows | `RESOURCE_LIMIT_EXCEEDED`; preserve the unfinished claim, publish no candidate failure and block freeze. The input is not serialized and has no byte cap. |
+| Started trial with admitted cohort | A fixed fit-only subprocess streams stored features and qualified training targets from the manifest, never a repository, catalog or validation targets. Every horizon uses the existing fresh-fit pipeline and declared candidate recipe. |
 | Child reaches a horizon fit | Parent independently reconstructs its matrix/event evidence and commits a non-replayable fit admission before acknowledging. Completion is separately acknowledged only after its immutable evidence commits. Counts distinguish admitted fit attempts from completed fits; an interrupted admission does not prove the estimator was entered. |
 | Child returns a checked result after exit and reap | Commit immutable `execution-result:<trial_id>` with the exact native result, original attempt/limits and admitted input hash before execution/forecast/scoring publication. Successful fits publish complete forecasts before validation labels open; original scoring policy applies. Public `record` cannot finish an unfinished native attempt. |
 | Candidate scoring refuses after successful native fits | Preserve the successful execution receipt and durable `refused` terminal. Initial scoring propagates `EXPERIMENT_VARIANT_FAILED`; replay returns the intact receipt without refitting or rescoring, and freeze excludes that candidate while retaining successful peers. |
@@ -757,10 +762,10 @@ Fresh inner/outer admission streams complete validation, retaining only fold par
 primary keys and registered numeric features. Full stored `inputs_id`, matrices and fits are preserved.
 Slim cohort documents have their own honest content hashes: their journal/result IDs
 are not the old full-row hashes. Changed producer/recorder closures require fresh build contexts and seals; old sealed
-runs fail closed, and no historical receipt or artifact is rewritten. The fit transport
-independently projects qualified training/evaluation rows and selected horizons/columns.
-Parent, child and journal retain their 16 MiB limits. Projection removes lineage
-amplification; sufficiently large numeric folds still refuse. No scale is inferred
+runs fail closed, and no historical receipt or artifact is rewritten. The child
+projects qualified training/evaluation rows and selected horizons/columns while streaming
+shards. Child output and the journal retain their 16 MiB limits; the input cap is removed,
+so a large fold is bounded by the child's memory limit. No scale is inferred
 from event counts; scientific selection and cutoff rules are unchanged.
 
 | Condition | Enforced outcome |

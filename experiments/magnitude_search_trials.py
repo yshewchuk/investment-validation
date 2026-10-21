@@ -188,7 +188,11 @@ class SearchTrials:
             else:
                 fits.append(pending.pop())
 
-        result = run_fitted_trial(inputs, inner, plan, execution, resolved, progress)
+        # The child streams the admitted manifest's shards itself; no inputs cross the pipe.
+        admitted = self._read("inputs:" + key)
+        source = {"manifest": self._read("cohort:" + admitted["cohort"]), "inputs_id": admitted["inputs_id"],
+                  "store_root": str(self.store.root)}
+        result = run_fitted_trial(source, inner, plan, execution, resolved, progress)
         succeeded = isinstance(result, dict) and result.get("event") == "succeeded"
         if (not isinstance(result, dict) or result.get("event") not in ("succeeded", "failed")
                 or (succeeded and (pending or len(fits) != len(plan["horizons"]) or set(result) != {"event", "forecasts"}))

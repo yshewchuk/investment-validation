@@ -21,16 +21,21 @@ def _position_key(row):
     return (row["position"],)
 
 
-def _section_rows(store, member, entry):
-    """Stream one section; keyless sections store ``{position, row}`` and are unwrapped."""
+def _iter_rows(store, member, entry):
+    """Stream one section's verified rows, holding one shard at a time; keyless sections are unwrapped."""
     if member["key"] is not None:
-        return list(iter_section(store, member["section"], entry, member["key"]))
-    rows = []
+        yield from iter_section(store, member["section"], entry, member["key"])
+        return
+    count = 0
     for item in iter_section(store, member["section"], entry, _position_key):
-        if set(item) != {"position", "row"} or item["position"] != len(rows):
+        if set(item) != {"position", "row"} or item["position"] != count:
             raise fail(_CONFLICT, "search cohort section positions are invalid")
-        rows.append(item["row"])
-    return rows
+        count += 1
+        yield item["row"]
+
+
+def _section_rows(store, member, entry):
+    return list(_iter_rows(store, member, entry))
 
 
 def _place(inputs, path, value):
@@ -69,6 +74,33 @@ def load_inputs(store, record, expected_id):
     for member in LIST_MEMBERS:
         _place(inputs, member["section"], _section_rows(store, member, sections[member["section"]]))
     return inputs
+
+
+def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons, feature_columns):
+    """Stream only the rows the fit child consumes from a sharded manifest.
+
+    Verifies the manifest against ``expected_id`` and reads only its ``training`` and
+    ``features`` sections, shard by shard. Returns ``{"features", "training"}``: training rows
+    reduced to (event_id, absolute_move_pct); feature rows kept for training or evaluation
+    events at the selected horizons, reduced to (event_id, context_id, horizon_sessions,
+    *feature_columns), in stored order. Any mismatch is EXPERIMENT_IDENTITY_CONFLICT.
+    """
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != MANIFEST_SCHEMA:
+        raise fail(_CONFLICT, "search cohort record is invalid")
+    verify_manifest(manifest, expected_id)
+    sections = manifest["sections"]
+    if set(sections) != {member["section"] for member in LIST_MEMBERS}:
+        raise fail(_CONFLICT, "search cohort manifest sections are invalid")
+    members = {member["section"]: member for member in LIST_MEMBERS}
+    training = [{name: row[name] for name in ("event_id", "absolute_move_pct")}
+                for row in _iter_rows(store, members["training"], sections["training"])]
+    events = {row["event_id"] for row in training} | set(evaluation_event_ids)
+    wanted = set(horizons)
+    columns = ("event_id", "context_id", "horizon_sessions", *feature_columns)
+    features = [{name: row[name] for name in columns}
+                for row in _iter_rows(store, members["features"], sections["features"])
+                if row["event_id"] in events and row["horizon_sessions"] in wanted]
+    return {"features": features, "training": training}
 
 
 def _path_value(inputs, path):

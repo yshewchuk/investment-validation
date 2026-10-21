@@ -10,6 +10,8 @@ from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_execution as execution
 from tests.v2.research.test_magnitude_search_execution import LIMITS
 
+STUB_SOURCE = {"manifest": {"stub": True}, "inputs_id": "sha256:" + "0" * 64, "store_root": "/nonexistent-store"}
+
 
 def wire_child(monkeypatch, script):
     """Replace only the child program while retaining real pipes and lifecycle."""
@@ -26,8 +28,7 @@ def wire_child(monkeypatch, script):
 
 
 def run_wire(progress=lambda *args: None):
-    return execution.run_fitted_trial({"features": [], "training": [], "preflight": "not child data",
-        "training_inputs": "not child data", "stored_inputs_id": "not child data"}, {},
+    return execution.run_fitted_trial(STUB_SOURCE, {},
         {"horizons": [1]}, {}, execution.execution_limits(LIMITS), progress)
 
 
@@ -55,12 +56,11 @@ def test_child_protocol_refuses_exactly_and_removes_scratch(monkeypatch, script,
     assert not scratch.exists()
 
 
-def test_child_receives_only_fit_inputs_and_success_removes_scratch(monkeypatch):
+def test_child_receives_only_a_header_and_success_removes_scratch(monkeypatch):
     observed = wire_child(monkeypatch, "print('{\"event\":\"succeeded\",\"forecasts\":[]}')")
     assert run_wire() == {"event": "succeeded", "forecasts": []}
     child, scratch, request = observed[0]
-    assert request == {"inputs": {"features": [], "training": []}, "inner": {},
-                       "plan": {"horizons": [1]}, "execution": {}}
+    assert request == {**STUB_SOURCE, "inner": {}, "plan": {"horizons": [1]}, "execution": {}}
     assert child.returncode == 0
     assert not scratch.exists()
 
@@ -161,30 +161,15 @@ def test_exited_child_still_requires_unexpired_deadline(monkeypatch, remaining, 
     assert not scratch.exists()
 
 
-def test_input_cap_precedes_launch(monkeypatch):
-    monkeypatch.setattr(execution, "MAX_BYTES", 1)
-    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("launched oversized input"))
-    with pytest.raises(OpsError) as caught:
-        run_wire()
-    assert caught.value.problem == fail("RESOURCE_LIMIT_EXCEEDED", "search execution input exceeds its byte limit").problem
-
-
-def test_fixed_worker_independently_rejects_grown_input(monkeypatch):
-    original = subprocess.Popen
-    observed = []
-    def launch(args, **kwargs):
-        source = Path(args[3])
-        source.write_bytes(b" " * (execution.MAX_BYTES + 1))
-        child = original(args, **kwargs)
-        observed.append((child, source.parent))
-        return child
-    monkeypatch.setattr(execution.subprocess, "Popen", launch)
-    with pytest.raises(OpsError) as caught:
-        run_wire()
-    assert caught.value.problem == fail("RESOURCE_LIMIT_EXCEEDED", "search execution exceeded its resource limits").problem
-    child, scratch = observed[0]
-    assert child.poll() is not None
-    assert not scratch.exists()
+def test_header_is_not_capped_and_only_output_is(monkeypatch):
+    """The removed input cap: a header above MAX_BYTES launches; the output cap still applies."""
+    monkeypatch.setattr(execution, "MAX_BYTES", 600)
+    big = {**STUB_SOURCE, "manifest": {"stub": "x" * 5000}}
+    observed = wire_child(monkeypatch, "print('{\"event\":\"succeeded\",\"forecasts\":[]}')")
+    result = execution.run_fitted_trial(big, {}, {"horizons": [1]}, {}, execution.execution_limits(LIMITS),
+                                        lambda *args: None)
+    assert result == {"event": "succeeded", "forecasts": []}
+    assert observed[0][2]["manifest"] == {"stub": "x" * 5000}
 
 
 def test_parent_progress_failure_kills_and_reaps_child_before_removing_scratch(monkeypatch):

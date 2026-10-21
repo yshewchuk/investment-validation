@@ -6,7 +6,7 @@ import pytest
 from engine.v2.foundation import ArtifactStore, content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import magnitude_search_shards as shards
-from experiments.magnitude_search_inputs import load_inputs
+from experiments.magnitude_search_inputs import load_fit_inputs, load_inputs, publish_inputs
 
 
 def _ids(*names):
@@ -152,3 +152,46 @@ def test_malformed_keyless_wrapper_is_a_conflict(tmp_path):
         store, "preflight.event_ids",
         [{"position": 0, "row": "E1", "extra": 1}], _position)
     _conflict(lambda: load_inputs(store, bad, shards.manifest_id(bad)))
+
+
+def _fit_cohort(count):
+    events = [f"E{index:03d}" for index in range(count)]
+    cohort = copy.deepcopy(COHORT)
+    cohort["training"] = [{"event_id": event, "absolute_move_pct": 1.0 + index, "extra": "dropped"}
+                          for index, event in enumerate(events[:3])]
+    cohort["features"] = [{"event_id": event, "context_id": "c", "horizon_sessions": horizon, "x": 0.5, "y": 2.0,
+                           "unused": "dropped"} for event in events for horizon in (1, 3, 5)]
+    return cohort, events
+
+
+def test_load_fit_inputs_streams_many_shards_and_projects_only_fit_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(shards, "TARGET_BYTES", 300)
+    monkeypatch.setattr(shards, "MAX_SHARD_BYTES", 600)
+    cohort, events = _fit_cohort(12)
+    store = ArtifactStore(tmp_path)
+    manifest, inputs_id = publish_inputs(store, cohort)
+    assert len(manifest["sections"]["features"]["shards"]) > 3
+    evaluation = [events[7], events[9]]
+    loaded = load_fit_inputs(store, manifest, inputs_id, evaluation, [1, 5], ("x",))
+    wanted = set(events[:3]) | set(evaluation)
+    assert loaded["training"] == [{"event_id": row["event_id"], "absolute_move_pct": row["absolute_move_pct"]}
+                                  for row in cohort["training"]]
+    assert loaded["features"] == [{"event_id": event, "context_id": "c", "horizon_sessions": horizon, "x": 0.5}
+                                  for event in events if event in wanted for horizon in (1, 5)]
+
+
+def test_load_fit_inputs_refuses_a_wrong_id_a_v1_record_and_a_corrupt_shard(tmp_path):
+    cohort, events = _fit_cohort(4)
+    store = ArtifactStore(tmp_path)
+    manifest, inputs_id = publish_inputs(store, cohort)
+    for record, expected in ((manifest, "sha256:" + "0" * 64), (cohort, content_hash(cohort))):
+        with pytest.raises(OpsError) as caught:
+            load_fit_inputs(store, record, expected, [], [1], ("x",))
+        assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    ref = manifest["sections"]["features"]["shards"][0]["ref"]
+    path = store.root / ref["storage_key"]
+    size = path.stat().st_size
+    path.chmod(0o644)
+    path.write_bytes(b"x" * size)
+    with pytest.raises(OpsError):
+        load_fit_inputs(store, manifest, inputs_id, [], [1], ("x",))
