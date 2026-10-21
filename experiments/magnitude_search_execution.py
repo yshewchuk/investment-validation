@@ -34,20 +34,12 @@ def execution_limits(limits):
     return {**limits, "cpu_id": cpu}
 
 
-def _fit_inputs(inputs, inner, plan, execution):
-    """Project admitted history to precisely the ordered inputs the child consumes."""
-    training = [{name: row[name] for name in ("event_id", "absolute_move_pct")}
-                for row in inputs["training"]]
-    events = {row["event_id"] for row in training} | set(inner.get("evaluation_event_ids", ()))
-    horizons = set(plan["horizons"])
-    columns = ("event_id", "context_id", "horizon_sessions", *execution.get("features", ()))
-    features = [{name: row[name] for name in columns} for row in inputs["features"]
-                if row["event_id"] in events and row["horizon_sessions"] in horizons]
-    return {"features": features, "training": training}
+def run_fitted_trial(source, inner, plan, execution, limits, progress):
+    """Run only the installed fit child; commit every progress marker before its ACK.
 
-
-def run_fitted_trial(inputs, inner, plan, execution, limits, progress):
-    """Run only the installed fit child; commit every progress marker before its ACK."""
+    ``source`` names the admitted cohort: ``{"manifest", "inputs_id", "store_root"}``. The child streams the
+    manifest's shards itself; no input payload crosses the pipe, so there is no input size cap.
+    """
     # CPython's Linux affinity API rejects CPU indices at or above INT_MAX.
     if (not isinstance(limits, dict) or set(limits) != {"memory_bytes", "cpu_seconds", "wall_seconds", "cpu_id"}
             or type(limits["cpu_id"]) is not int or not 0 <= limits["cpu_id"] < 2 ** 31 - 1):
@@ -55,20 +47,19 @@ def run_fitted_trial(inputs, inner, plan, execution, limits, progress):
     validate_execution_limits({name: value for name, value in limits.items() if name != "cpu_id"})
     forbid_fitting("run_fitted_trial")
     forbid_legacy_fitting("run_fitted_trial")
-    payload = canonical_json({"inputs": _fit_inputs(inputs, inner, plan, execution),
-                              "inner": inner, "plan": {"horizons": plan["horizons"]},
+    if not isinstance(source, dict) or set(source) != {"manifest", "inputs_id", "store_root"}:
+        raise fail("INVALID_EXPERIMENT_SPEC", "search execution requires an admitted cohort source")
+    payload = canonical_json({**source, "inner": inner, "plan": {"horizons": plan["horizons"]},
                               "execution": execution}).encode()
-    if len(payload) > MAX_BYTES:
-        raise fail("RESOURCE_LIMIT_EXCEEDED", "search execution input exceeds its byte limit")
     root = Path(__file__).resolve().parents[1]
     env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(root), "LANG": "C.UTF-8",
            "PYTHONDONTWRITEBYTECODE": "1", **{name: "1" for name in THREAD_VARIABLES}}
     try:
         with tempfile.TemporaryDirectory(prefix="magnitude-fit-") as scratch:
-            source = Path(scratch) / "inputs.json"
-            source.write_bytes(payload)
+            header = Path(scratch) / "header.json"
+            header.write_bytes(payload)
             with subprocess.Popen([sys.executable, "-m", "experiments.magnitude_search_worker",
-                    str(source), canonical_json(limits)], cwd=root, env=env, stdin=subprocess.PIPE,
+                    str(header), canonical_json(limits)], cwd=root, env=env, stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True) as child:
                 try:
                     result = _receive(child, limits["wall_seconds"], progress)
