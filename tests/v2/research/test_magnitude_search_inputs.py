@@ -193,5 +193,6 @@ def test_load_fit_inputs_refuses_a_wrong_id_a_v1_record_and_a_corrupt_shard(tmp_
     size = path.stat().st_size
     path.chmod(0o644)
     path.write_bytes(b"x" * size)
-    with pytest.raises(OpsError):
+    with pytest.raises(OpsError) as caught:
         load_fit_inputs(store, manifest, inputs_id, [], [1], ("x",))
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"

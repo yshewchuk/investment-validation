@@ -311,7 +311,9 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   evaluation events at the selected horizons, and opens no repository, catalog or validation
   target. A hash, shape or shard failure inside the child is an infrastructure failure
   (`RESOURCE_UNAVAILABLE`), since the parent just published and bound that manifest.
-  Transport memory is the projected fit rows plus one shard; there is no input byte cap, only
+  The child reads the header under the 16 MiB record cap (a manifest cannot exceed it); a
+  larger file ends as `resource_limit`.
+  Transport memory is the projected fit rows plus one shard; there is no cap on the rows, only
   the child's `RLIMIT_AS`. The child output cap stays 16 MiB.
 * Shards are published, outside the catalog transaction, before the manifest append,
   which is the commit point.
@@ -324,7 +326,8 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 
 * `magnitude_search_inputs.load_inputs(store, record, expected_id)` is the one loader every
   consumer (`_record`, reconcile, freeze, outer replay, `_validation`) reads
-  through. A record with the manifest schema is verified against `expected_id`, its sections
+  through; the one exception is the fit child, which calls `load_fit_inputs` (same verification
+  and reader, projected to the fit rows). A record with the manifest schema is verified against `expected_id`, its sections
   are streamed shard by shard and placed at their dotted paths beside the inline members, which
   are flat scalars keyed by dotted path (`preflight.count`); any other
   record is a v1 whole cohort whose id is its content hash. Both return the same inputs shape.
