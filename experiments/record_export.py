@@ -11,8 +11,8 @@ import json
 import os
 import re
 import resource
+import stat as stat_mod
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -37,10 +37,28 @@ def _dump(obj) -> bytes:
 
 def _read_capped(path: Path) -> bytes | None:
     try:
-        with open(path, "rb") as fh:
-            return fh.read(MAX_JSON_BYTES + 1)
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return None
+    try:
+        if not stat_mod.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks = []
+        total = 0
+        while total <= MAX_JSON_BYTES:
+            chunk = os.read(fd, MAX_JSON_BYTES + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _read_manifest(path: Path):
@@ -107,6 +125,20 @@ def _check_number_folder(folder: Path, exp_number: int, experiment_id):
         )
 
 
+def _bad(requested, experiment_id, why: str = ""):
+    msg = f"invalid --exp-number {requested!r} for {experiment_id}"
+    if why:
+        msg += f": {why}"
+    return fail("INVALID_EXPERIMENT_SPEC", msg)
+
+
+def _resolve_folder(root: Path, exp_number: int, slug: str) -> Path:
+    existing = _folders_with_number(root, exp_number)
+    if existing:
+        return existing[0]
+    return root / f"EXP-{exp_number:03d}_{slug}"
+
+
 def resolve_exp_number(experiments_root, experiment_id, requested, slug=None):
     """Resolve the EXP number for this run.
 
@@ -116,38 +148,33 @@ def resolve_exp_number(experiments_root, experiment_id, requested, slug=None):
     root = Path(experiments_root)
     req_int = None
     is_auto = False
-    if isinstance(requested, bool):
-        raise fail(
-            "INVALID_EXPERIMENT_SPEC",
-            f"invalid --exp-number {requested!r} for {experiment_id}",
-        )
+    if isinstance(requested, bool) or (
+        requested is not None and not isinstance(requested, (int, str))
+    ):
+        raise _bad(requested, experiment_id)
     if isinstance(requested, int):
         req_int = requested
     elif isinstance(requested, str):
         text = requested.strip()
         if text.lower() == "auto":
             is_auto = True
-        elif text.isdigit():
+        elif text.isdigit() and len(text) <= 9:
             req_int = int(text)
         else:
-            raise fail(
-                "INVALID_EXPERIMENT_SPEC",
-                f"invalid --exp-number {requested!r} for {experiment_id}",
-            )
-    elif requested is not None:
-        raise fail(
-            "INVALID_EXPERIMENT_SPEC",
-            f"invalid --exp-number {requested!r} for {experiment_id}",
-        )
+            raise _bad(requested, experiment_id)
     if req_int is not None and req_int < FIRST_NUMBER:
-        raise fail(
-            "INVALID_EXPERIMENT_SPEC",
-            f"invalid --exp-number {requested!r} for {experiment_id}: "
-            f"new experiments start at EXP-{FIRST_NUMBER}",
+        raise _bad(
+            requested, experiment_id, f"new experiments start at EXP-{FIRST_NUMBER}"
         )
 
     linked = _linked_number(root, experiment_id)
     if linked is not None:
+        if linked < FIRST_NUMBER:
+            raise _bad(
+                requested,
+                experiment_id,
+                f"linked number is below EXP-{FIRST_NUMBER}",
+            )
         if req_int is not None and req_int != linked:
             raise fail(
                 "EXPERIMENT_IDENTITY_CONFLICT",
@@ -169,6 +196,12 @@ def resolve_exp_number(experiments_root, experiment_id, requested, slug=None):
                     "RESOURCE_UNAVAILABLE",
                     f"cannot claim EXP-{n:03d} for {experiment_id}: {exc}",
                 )
+            if len(_folders_with_number(root, n)) > 1:
+                try:
+                    (root / f"EXP-{n:03d}_{exp_slug}").rmdir()
+                except OSError:
+                    pass
+                continue
             return n
         raise fail(
             "RESOURCE_UNAVAILABLE",
@@ -184,10 +217,7 @@ def resolve_exp_number(experiments_root, experiment_id, requested, slug=None):
     try:
         parse_experiment_id(f"EXP-{req_int:03d}")
     except ValueError as exc:
-        raise fail(
-            "INVALID_EXPERIMENT_SPEC",
-            f"invalid --exp-number {requested!r} for {experiment_id}: {exc}",
-        )
+        raise _bad(requested, experiment_id, str(exc))
     for folder in _folders_with_number(root, req_int):
         _check_number_folder(folder, req_int, experiment_id)
     return req_int
@@ -222,14 +252,16 @@ def _encode_doc(doc) -> tuple[bytes, bool]:
 
 def _write_bytes(path: Path, data: bytes) -> tuple[bytes, bool, bool]:
     """Create-only write; returns (bytes_on_disk, wrote_new, conflicted)."""
+    import sys
+
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         dir=str(path.parent), prefix=".record_export.", suffix=".tmp"
     )
     tmp_path = Path(tmp_name)
-    persisted = data
     wrote = False
     conflicted = False
+    persisted = data
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
@@ -239,53 +271,49 @@ def _write_bytes(path: Path, data: bytes) -> tuple[bytes, bool, bool]:
             os.link(tmp_path, path)
             wrote = True
         except FileExistsError:
-            existing = _read_capped(path)
-            if existing is not None and existing == data:
-                persisted = existing
-            else:
-                print(
-                    f"WARNING: record_export keeping existing {path} "
-                    f"({len(existing) if existing is not None else '?'} bytes) "
-                    f"would-be {len(data)} bytes",
-                    file=sys.stderr,
-                )
+            if path.name == "export_manifest.json":
                 conflicted = True
+                existing = _read_capped(path)
                 persisted = existing if existing is not None else data
+            else:
+                existing = _read_capped(path)
+                if existing is None or len(existing) > MAX_JSON_BYTES:
+                    raise fail(
+                        "EXPERIMENT_IDENTITY_CONFLICT",
+                        f"existing {path} is not a readable regular file "
+                        f"or exceeds {MAX_JSON_BYTES} bytes",
+                    )
+                if existing == data:
+                    persisted = existing
+                else:
+                    print(
+                        f"WARNING: record_export keeping existing {path} "
+                        f"({len(existing)} bytes) would-be {len(data)} bytes",
+                        file=sys.stderr,
+                    )
+                    conflicted = True
     finally:
         try:
             tmp_path.unlink()
         except OSError:
             pass
+        dfd = os.open(str(path.parent), os.O_RDONLY)
         try:
-            dfd = os.open(str(path.parent), os.O_RDONLY)
-            try:
-                os.fsync(dfd)
-            finally:
-                os.close(dfd)
-        except OSError:
-            pass
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
     return persisted, wrote, conflicted
 
 
-def _resolve_folder(root: Path, exp_number: int, slug: str) -> Path:
-    existing = _folders_with_number(root, exp_number)
-    if existing:
-        return existing[0]
-    return root / f"EXP-{exp_number:03d}_{slug}"
-
-
-def _status_line(outcome) -> str:
+def _report_md(exp_number: int, experiment_id, outcome, report_text) -> str:
+    status = "ran"
     if isinstance(outcome, dict):
         code = outcome.get("failure_code")
         if code:
-            return str(code)
-    return "ran"
-
-
-def _render_report(exp_number: int, experiment_id, outcome, report_text) -> str:
+            status = str(code)
     lines = [
         f"# EXP-{exp_number:03d} {experiment_id}",
-        f"Status: {_status_line(outcome)}",
+        f"Status: {status}",
     ]
     if report_text is not None:
         lines.append("")
@@ -309,7 +337,12 @@ def export_run_record(
     recording_mode,
 ):
     root = Path(experiments_root)
-    exp_number = int(exp_number)
+    if isinstance(exp_number, bool) or not isinstance(exp_number, int):
+        raise _bad(exp_number, experiment_id)
+    if exp_number < FIRST_NUMBER:
+        raise _bad(
+            exp_number, experiment_id, f"new experiments start at EXP-{FIRST_NUMBER}"
+        )
     for folder in _folders_with_number(root, exp_number):
         _check_number_folder(folder, exp_number, experiment_id)
     folder = _resolve_folder(root, exp_number, slugify(slug))
@@ -351,17 +384,14 @@ def export_run_record(
 
     report_path = folder / "REPORT.md"
     if not report_path.exists():
-        report_raw = _render_report(
+        report_raw = _report_md(
             exp_number, experiment_id, outcome, report_text
         ).encode("utf-8")
         _, wrote, conflict = _write_bytes(report_path, report_raw)
         wrote_any = wrote_any or wrote
         conflicted = conflicted or conflict
 
-    if conflicted:
-        status = "unchanged"
-    else:
-        status = "written" if wrote_any else "unchanged"
+    status = "unchanged" if conflicted else ("written" if wrote_any else "unchanged")
     return {"dir": str(folder), "status": status, "trimmed": trimmed}
 
 

@@ -429,18 +429,19 @@ Layout: `REPORT.md` (stub: ids, status, the success report text), and in `result
 refusal, replay flag, resource usage as elapsed seconds and peak RSS, snapshot id, commit id) and
 `export_manifest.json` (experiment_id, EXP number, recording mode, trimmed files).
 
-EXP numbers are chosen by the operator: `--exp-number N` or `--exp-number auto`. `auto` uses
-`lib.next_experiment_number` (never below `lib.FIRST_NUMBER`, 101) and claims the folder with an atomic
-`mkdir`, retrying on a race. An explicit N must be an integer at least `FIRST_NUMBER`. The manifest links
-`experiment_id` to the number. An experiment_id already linked reuses its number, so replay needs no flag.
-Files are created with a create-only link and a directory fsync, so a concurrent writer never replaces a record.
-Reads of existing manifests and files are capped at 1,000,000 bytes (an over-cap manifest counts as unreadable).
-Manifest hashes are of the bytes actually on disk.
+EXP numbers are chosen by the operator: `--exp-number N` or `--exp-number auto`. Numbers are never
+below `lib.FIRST_NUMBER` (101), whether requested, auto-allocated or already linked. `auto` allocates
+one number per experiment even under concurrent runs. The manifest links `experiment_id` to the number;
+an experiment_id already linked reuses its number, so replay needs no flag.
+Records are create-only: a concurrent writer never replaces one, and a publication or sync failure
+is an error. Existing files are read only as regular files, capped at 1,000,000 bytes. Manifest hashes
+describe the exact bytes on disk; an existing file over the cap is a conflict, never hashed.
 
 | Condition | Outcome |
 | --- | --- |
 | `run` with no number and no existing link | `INVALID_EXPERIMENT_SPEC` before any evaluation; `--no-record-export` skips export and prints a loud stderr warning. |
-| Malformed `--exp-number`, or a number below 101 | `INVALID_EXPERIMENT_SPEC` before any evaluation. |
+| Malformed `--exp-number` (non-digit, overlong, boolean), or any number below 101 | `INVALID_EXPERIMENT_SPEC` before any evaluation. |
+| Existing results file over 1,000,000 bytes, a symlink, or not a regular file | `EXPERIMENT_IDENTITY_CONFLICT`; no manifest is published. |
 | Number held by another experiment_id, or experiment_id linked to another number | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
 | JSON file over 1,000,000 bytes | Write a summary (original bytes, sha256, longest fitting list prefix) instead; list it under `trimmed`. |
 | Existing file with different bytes | Keep the first record, warn on stderr and report `unchanged`; files are never overwritten. |
@@ -665,7 +666,7 @@ existing catalog/store and explicit holdout month. It fingerprints its executing
 metadata-only. `read_native_registration` verifies the stored identity; run performs current
 admission before replay or evaluation; missing registration is R1. R3/R4/R5
 refusals use that admitted identity and never export a current-attempt report.
-R1/R2/R6 preserve private receipts only. Untyped evaluation/rendering errors use
+R1/R2/R6 preserve private receipts only. After any published or replayed outcome (refusal included) `run` also writes the private run record (see Private run-record export). Untyped evaluation/rendering errors use
 retryable `WORKER_FAILED`, never terminal outcomes or CSV rows. `--no-ledger`
 isolates smoke recording; otherwise `--ledger` is required. Completed `REPORT.md` is exported through the
 shared immutable outcome lifecycle; retries reuse the original result/date.

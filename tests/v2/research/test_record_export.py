@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
+import time
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -12,8 +14,10 @@ import pytest
 
 from checks.repo_hygiene import Report, check_path_policy
 from engine.v2.ops.errors import OpsError
+from experiments import lib
 from experiments.record_export import (
     MAX_JSON_BYTES,
+    export_native_run,
     export_run_record,
     resolve_exp_number,
 )
@@ -115,8 +119,15 @@ def test_sequential_auto_claims_distinct_empty_folders(tmp_path):
 
 
 def test_resolve_linked_id_reuses_number_with_request_none(tmp_path):
+    _write_manifest(tmp_path / "EXP-107_linked", "linked", 107)
+    assert resolve_exp_number(tmp_path, "linked", None) == 107
+
+
+def test_resolve_linked_number_below_first_is_invalid(tmp_path):
     _write_manifest(tmp_path / "EXP-007_linked", "linked", 7)
-    assert resolve_exp_number(tmp_path, "linked", None) == 7
+    with pytest.raises(OpsError) as exc:
+        resolve_exp_number(tmp_path, "linked", None)
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def test_resolve_accepts_digit_string(tmp_path):
@@ -127,6 +138,18 @@ def test_resolve_accepts_digit_string(tmp_path):
 def test_resolve_below_first_number_is_invalid(tmp_path, bad):
     with pytest.raises(OpsError) as exc:
         resolve_exp_number(tmp_path, "x", bad)
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_export_bool_exp_number_is_invalid(tmp_path):
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path, exp_number=True)
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_export_small_int_exp_number_is_invalid(tmp_path):
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path, exp_number=7)
     assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
@@ -161,6 +184,125 @@ def test_unmanifested_folder_conflicts_and_blocks_export(tmp_path):
         _export(tmp_path, exp_number=105, experiment_id="x")
     assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert not (results / "spec.json").exists()
+
+
+def test_resolve_long_digit_string_is_invalid(tmp_path):
+    with pytest.raises(OpsError) as exc:
+        resolve_exp_number(tmp_path, "x", "1" * 40)
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_preexisting_oversize_spec_conflicts_without_manifest(tmp_path):
+    results = tmp_path / "EXP-101_x" / "results"
+    results.mkdir(parents=True)
+    (results / "spec.json").write_bytes(b"x" * (MAX_JSON_BYTES + 1))
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path, exp_number=101, experiment_id="x")
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert not (results / "export_manifest.json").exists()
+
+
+def test_symlinked_existing_spec_conflicts(tmp_path):
+    results = tmp_path / "EXP-101_x" / "results"
+    results.mkdir(parents=True)
+    real = tmp_path / "real.json"
+    real.write_bytes(b'{"hypothesis": "h"}')
+    (results / "spec.json").symlink_to(real)
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path, exp_number=101, experiment_id="x")
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert not (results / "export_manifest.json").exists()
+
+
+def test_auto_retry_when_other_slug_claims_same_number(tmp_path, monkeypatch):
+    real = lib.next_experiment_number
+    calls = {"n": 0}
+
+    def fake_next(root=None):
+        calls["n"] += 1
+        return 101 if calls["n"] <= 2 else real(root)
+
+    monkeypatch.setattr(
+        "experiments.record_export.next_experiment_number",
+        fake_next,
+    )
+    first = resolve_exp_number(tmp_path, "alpha", "auto")
+    second = resolve_exp_number(tmp_path, "beta", "auto")
+    assert first == 101
+    assert second == 102
+    exp101 = [p.name for p in tmp_path.iterdir()
+              if p.name.startswith("EXP-101_")]
+    exp102 = [p.name for p in tmp_path.iterdir()
+              if p.name.startswith("EXP-102_")]
+    assert exp101 == ["EXP-101_alpha"]
+    assert exp102 == ["EXP-102_beta"]
+
+
+class _Registration:
+    def __init__(self, document):
+        self.document = document
+
+
+def test_export_native_run_independent_oracle(tmp_path):
+    registration = _Registration({
+        "execution_plan": {"experiment_id": "exp-x"},
+        "snapshot": {"snapshot_id": "snap-1"},
+        "event_ids": ["a", "b"],
+        "source_closure": {"f.py": "h"},
+        "environment": {"python": "3"},
+    })
+    saved = {
+        "outcome": {"failure_code": None},
+        "receipt": {"recording_mode": "smoke"},
+    }
+    result = export_native_run(
+        tmp_path,
+        registration,
+        {"hypothesis": "h"},
+        {"action": "run"},
+        saved,
+        exp_number=101,
+        replayed=True,
+        started=time.monotonic(),
+    )
+    folder = Path(result["dir"])
+    outcome = json.loads((folder / "results" / "outcome.json").read_bytes())
+    assert outcome["snapshot_id"] == "snap-1"
+    assert outcome["recording_mode"] == "smoke"
+    assert outcome["replayed"] is True
+    expected_hash = hashlib.sha256(
+        json.dumps({"f.py": "h"}, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    assert outcome["source_closure_hash"] == expected_hash
+    assert outcome["environment"] == {"python": "3"}
+    event_ids = json.loads((folder / "results" / "event_ids.json").read_bytes())
+    assert event_ids == ["a", "b"]
+
+
+def test_export_native_run_refusal_reports_failure_code(tmp_path):
+    registration = _Registration({
+        "execution_plan": {"experiment_id": "exp-x"},
+        "snapshot": {"snapshot_id": "snap-1"},
+        "event_ids": [],
+        "source_closure": {},
+        "environment": {},
+    })
+    saved = {
+        "outcome": {"failure_code": "HOLDOUT_ACCESS_DENIED"},
+        "receipt": {"recording_mode": "smoke"},
+    }
+    result = export_native_run(
+        tmp_path,
+        registration,
+        {"hypothesis": "h"},
+        {"action": "run"},
+        saved,
+        exp_number=101,
+        replayed=False,
+        started=time.monotonic(),
+    )
+    folder = Path(result["dir"])
+    assert "HOLDOUT_ACCESS_DENIED" in (folder / "REPORT.md").read_text()
 
 
 def test_oversize_manifest_is_ignored_as_unreadable(tmp_path):
@@ -238,11 +380,13 @@ def test_hygiene_pin_results_paths_and_report(tmp_path):
         )
         assert matched, rel
     repo_root = Path(__file__).resolve().parents[3]
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
         proc = subprocess.run(
             ["git", "check-ignore", "-q", "experiments/EXP-101_x/REPORT.md"],
             cwd=repo_root,
             capture_output=True,
+            env=env,
         )
     except (FileNotFoundError, OSError):
         pytest.skip("git is not available")
