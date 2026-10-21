@@ -8,6 +8,7 @@ import resource
 import stat
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, quote_plus, urlencode, urlparse
@@ -152,6 +153,17 @@ def _max_updated_massive(rows):
     return max(vals) if vals else None
 
 
+def _rows_and_max(provider, parsed):
+    rows = None
+    if isinstance(parsed, dict):
+        rows = parsed.get("data" if provider == "orats" else "results")
+    if not isinstance(rows, list):
+        rows = []
+    if provider == "orats":
+        return rows, _max_updated_orats(rows)
+    return rows, _max_updated_massive(rows)
+
+
 def _default_http_get(req):
     import requests
     headers = dict(req.get("headers") or {})
@@ -198,12 +210,18 @@ def capture(args_ns, http_get=None, now=None):
         unit_dir.relative_to(out_base)
     except ValueError:
         _fail("refusing to write outside the output directory", 2)
+    if (not getattr(args_ns, "replace", False)
+            and unit_dir.is_dir()
+            and any(unit_dir.glob("*.meta.json"))):
+        _fail("label already captured; pass --replace to overwrite", 2)
     _mkdirs(unit_dir)
+    run_id = uuid.uuid4().hex
     orats_planned = len(endpoints) * len(tickers)
     t_start = time.perf_counter()
     print(f"[capture] start units={orats_planned} label={label}", file=sys.stderr)
     total = not_ok = 0
     saw_massive = False
+    last_prog_t = time.perf_counter()
 
     def _progress(n, m=None):
         el = time.perf_counter() - t_start
@@ -216,7 +234,7 @@ def capture(args_ns, http_get=None, now=None):
             print(f"[capture] {n}/{m} units elapsed={int(el)}s rate={rate:.1f}/s eta={eta}s rss={rss:.1f}MB", file=sys.stderr)
 
     def store(provider, endpoint, ticker, page, req, url_redacted, key):
-        nonlocal total, not_ok, saw_massive
+        nonlocal total, not_ok, saw_massive, last_prog_t
         t0 = time.perf_counter()
         status, rhdrs, body, error = 0, {}, b"", None
         try:
@@ -232,18 +250,18 @@ def capture(args_ns, http_get=None, now=None):
         except Exception:
             parsed = None
         if isinstance(parsed, dict):
-            rows = parsed.get("data" if provider == "orats" else "results")
-            if not isinstance(rows, list): rows = []
+            rows, max_updated_at = _rows_and_max(provider, parsed)
             row_count = len(rows)
-            max_updated_at = _max_updated_orats(rows) if provider == "orats" else _max_updated_massive(rows)
             content_sha = _content_sha256(rows)
         truncated = False
+        has_next = False
         if provider == "massive":
             nu = parsed.get("next_url") if isinstance(parsed, dict) else None
-            if page == MAX_MASSIVE_PAGES - 1 and _massive_next_ok(nu):
+            has_next = _massive_next_ok(nu)
+            if page == MAX_MASSIVE_PAGES - 1 and has_next:
                 truncated = True
                 print(f"[capture] warning: truncated massive pagination for {ticker} after {MAX_MASSIVE_PAGES} pages", file=sys.stderr)
-            elif nu is not None and not _massive_next_ok(nu):
+            elif nu is not None and not has_next:
                 truncated = True
                 print(f"[capture] warning: non-massive next_url for {ticker} page {page}; marking truncated", file=sys.stderr)
         envelope_ok = isinstance(parsed, dict) and isinstance(parsed.get("data" if provider == "orats" else "results"), list)
@@ -254,8 +272,9 @@ def capture(args_ns, http_get=None, now=None):
             "ok": ok, "fetched_at_utc": now().isoformat(), "elapsed_ms": elapsed_ms,
             "headers": headers, "body_sha256": hashlib.sha256(body).hexdigest(),
             "body_bytes": len(body), "row_count": row_count, "max_updated_at": max_updated_at,
-            "content_sha256": content_sha, "hash_policy": HASH_POLICY,
+            "content_sha256": content_sha, "hash_policy": HASH_POLICY, "run_id": run_id,
         }
+        if provider == "massive": meta["has_next"] = has_next
         if truncated: meta["truncated"] = True
         if error is not None: meta["error"] = error
         if _leaks_key(key, meta, body):
@@ -269,7 +288,9 @@ def capture(args_ns, http_get=None, now=None):
         if provider == "massive": saw_massive = True
         c12 = content_sha[:12] if content_sha else None
         print(f"{label} {provider} {ticker} status={status} rows={row_count} max_updated_at={max_updated_at} content={c12}")
-        if total % 10 == 0:
+        now_t = time.perf_counter()
+        if now_t - last_prog_t >= 30.0:
+            last_prog_t = now_t
             _progress(total, None if provider == "massive" or orats_planned == 0 else orats_planned)
         return parsed, ok
 
@@ -459,6 +480,13 @@ def _read_meta(path):
     body = _verified_body(Path(path), obj)
     if body is None:
         return _skip(name, "body mismatch")
+    try:
+        parsed_body = json.loads(body)
+    except Exception:
+        parsed_body = None
+    _, calc_max = _rows_and_max(obj.get("provider"), parsed_body)
+    if calc_max != obj.get("max_updated_at"):
+        return _skip(name, "max_updated_at mismatch")
     sha, n_rows = _content_digest(obj.get("provider"), body)
     if sha != obj.get("content_sha256") or n_rows != obj.get("row_count"):
         return _skip(name, "content digest mismatch")
@@ -467,6 +495,16 @@ def _read_meta(path):
 
 def _composite(key, pages):
     ordered = sorted(pages, key=lambda r: int(r.get("page") or 0))
+    n = len(ordered)
+    nums = [int(r.get("page") or 0) for r in ordered]
+    runs = {r.get("run_id") for r in ordered}
+    last = ordered[-1]
+    complete = (nums == list(range(n))
+                and not last.get("has_next")
+                and not last.get("truncated")
+                and all(_meta_ok(r) for r in ordered)
+                and len(runs) == 1
+                and ordered[0].get("run_id") is not None)
     sha = hashlib.sha256("|".join(f"{int(r.get('page') or 0)}:{r.get('content_sha256')}" for r in ordered).encode("utf-8")).hexdigest()
     rcs = [r.get("row_count") for r in ordered if r.get("row_count") is not None]
     mus = [r.get("max_updated_at") for r in ordered if r.get("max_updated_at") is not None]
@@ -480,7 +518,7 @@ def _composite(key, pages):
         "fetched_at_utc": max(ordered, key=lambda r: _ts(r.get("fetched_at_utc")) or 0.0).get("fetched_at_utc"),
         "headers": next((r.get("headers") for r in ordered if int(r.get("page") or 0) == 0), ordered[0].get("headers")),
         "status": max(sts) if sts else 0,
-        "ok": all(_meta_ok(r) and not r.get("truncated") for r in ordered),
+        "ok": complete,
     })
     return base
 
@@ -543,7 +581,8 @@ def compare(args_ns):
             uvf.append(f"{r.get('label')}: n/a" if t0 is None or t1 is None else f"{r.get('label')}: {'yes' if t0 < t1 else 'no'} gap={t1 - t0:.3f}s")
         print(f"- stable_from: {stable}\n- changed_between: {changed}\n- updatedAt_vs_fetch: {'; '.join(uvf)}\n- Rule R: \"{rule}\"")
         print(f"- excluded_not_ok: [{', '.join(f'{lab}: {st}' for lab, st in bad)}]")
-        ht = {hn: _header_tracks(ok_rows, hn, composite=has_pages) for hn in ("etag", "last-modified")}
+        pages_hdr = any((r.get("pages") or 0) > 1 for r in rows)
+        ht = {hn: _header_tracks(ok_rows, hn, composite=pages_hdr) for hn in ("etag", "last-modified")}
         group_trk[key] = ht
         print(f"- header_tracking: etag={ht['etag']} last-modified={ht['last-modified']}")
         for i in range(n - 1):
@@ -569,6 +608,7 @@ def build_parser():
     cap.add_argument("--out", required=True)
     cap.add_argument("--orats-endpoints", default=DEFAULT_ORATS_ENDPOINTS)
     cap.add_argument("--massive", action="store_true")
+    cap.add_argument("--replace", action="store_true")
     cmp_ = sub.add_parser("compare")
     cmp_.add_argument("--out", required=True)
     cmp_.add_argument("--session", default=None)

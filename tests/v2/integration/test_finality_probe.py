@@ -11,7 +11,7 @@ import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, quote_plus, urlparse
 
 import pytest
 
@@ -27,11 +27,12 @@ ROWS = [
 ]
 MROWS = [{"day": {"last_updated": 1700000100}, "strike": 100}]
 NEXT1 = "https://api.massive.com/v3/snapshot/options/SPY?cursor=1"
+MP1_NAME = "massive__v3.snapshot.options__SPY__p1"
 
 
-def _ns(out, label="L1", session="2024-01-02", endpoints="hist/strikes", tickers="SPY", massive=False):
+def _ns(out, label="L1", session="2024-01-02", endpoints="hist/strikes", tickers="SPY", massive=False, replace=False):
     return argparse.Namespace(session=session, tickers=tickers, label=label, out=str(out),
-                              orats_endpoints=endpoints, massive=massive)
+                              orats_endpoints=endpoints, massive=massive, replace=replace)
 
 
 def _body(rows=None):
@@ -46,19 +47,28 @@ def _mbody(rows, next_url=None):
 
 def _mk_get(page0, page1):
     def http_get(req):
+        http_get.calls.append(req)
         return 200, {"content-type": "application/json"}, page1 if "cursor=1" in req["url"] else page0
+    http_get.calls = []
     return http_get
 
 
 def _fake_get(payload=None, headers=None):
     def http_get(req):
+        http_get.calls.append(req)
         return 200, headers or {"content-type": "application/json"}, payload if payload is not None else _body()
-
+    http_get.calls = []
     return http_get
 
 
 def _at(day):
     return lambda: datetime(2024, 1, day, tzinfo=timezone.utc)
+
+
+def _group_block(out, title):
+    parts = out.split(f"## {title}\n")
+    assert len(parts) == 2, title
+    return parts[1].split("\n## ", 1)[0]
 
 
 @pytest.fixture
@@ -75,7 +85,8 @@ def massive_key(orats_key, monkeypatch):
 
 
 def test_capture_writes_body_meta_redacts_token_and_fills_meta_fields(tmp_path, orats_key):
-    rc = finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    get = _fake_get()
+    rc = finality_probe.capture(_ns(tmp_path), http_get=get, now=_at(3))
     assert rc == 0
 
     unit = tmp_path / "2024-01-02" / "L1"
@@ -90,6 +101,8 @@ def test_capture_writes_body_meta_redacts_token_and_fills_meta_fields(tmp_path, 
     assert meta["ok"] is True
     assert meta["row_count"] == 2
     assert meta["max_updated_at"] == "1700000100"
+    assert meta["fetched_at_utc"] == datetime(2024, 1, 3, tzinfo=timezone.utc).isoformat()
+    assert isinstance(meta["run_id"], str) and len(meta["run_id"]) == 32
     rows_sorted = sorted(ROWS, key=lambda r: json.dumps(r, sort_keys=True, separators=(",", ":")))
     expected_sha = hashlib.sha256(json.dumps(rows_sorted, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     assert meta["content_sha256"] == expected_sha
@@ -98,12 +111,20 @@ def test_capture_writes_body_meta_redacts_token_and_fills_meta_fields(tmp_path, 
     assert "token=REDACTED" in url
     assert SENTINEL not in url
 
+    assert len(get.calls) == 1
+    u = urlparse(get.calls[0]["url"])
+    assert u.scheme == "https" and u.netloc == "api.orats.io"
+    assert u.path == "/datav2/hist/strikes"
+    assert get.calls[0]["params"]["tradeDate"] == "2024-01-02"
+    assert get.calls[0]["params"]["ticker"] == "SPY"
 
-def test_sentinel_leak_guard_refuses_raw_and_urlencoded_key(tmp_path, orats_key, monkeypatch):
+
+def test_sentinel_leak_guard_refuses_raw_and_urlencoded_key(tmp_path, orats_key, monkeypatch, capsys):
     leaky = json.dumps({"data": ROWS, "note": SENTINEL}).encode("utf-8")
     with pytest.raises(SystemExit) as exc:
         finality_probe.capture(_ns(tmp_path), http_get=_fake_get(leaky))
     assert exc.value.code == 2
+    assert "refusing to write provider record containing API key" in capsys.readouterr().err
     unit = tmp_path / "2024-01-02" / "L1"
     assert not list(unit.glob("*.body")) and not list(unit.glob("*.meta.json"))
 
@@ -114,7 +135,20 @@ def test_sentinel_leak_guard_refuses_raw_and_urlencoded_key(tmp_path, orats_key,
     with pytest.raises(SystemExit) as exc:
         finality_probe.capture(_ns(tmp_path, label="L2"), http_get=_fake_get(body))
     assert exc.value.code == 2
+    assert "refusing to write provider record containing API key" in capsys.readouterr().err
     unit = tmp_path / "2024-01-02" / "L2"
+    assert not list(unit.glob("*.body")) and not list(unit.glob("*.meta.json"))
+
+    key = "ab cd"
+    monkeypatch.setenv("ORATS_API_KEY", key)
+    body = json.dumps({"data": ROWS, "note": quote_plus(key)}).encode("utf-8")
+    assert key.encode("utf-8") not in body
+    assert quote_plus(key).encode("utf-8") in body
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path, label="L3"), http_get=_fake_get(body))
+    assert exc.value.code == 2
+    assert "refusing to write provider record containing API key" in capsys.readouterr().err
+    unit = tmp_path / "2024-01-02" / "L3"
     assert not list(unit.glob("*.body")) and not list(unit.glob("*.meta.json"))
 
 
@@ -142,15 +176,8 @@ def test_compare_counts_false_final_and_true_not_final(tmp_path, orats_key, caps
     finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
     out = capsys.readouterr().out
 
-    assert "pair L1->L2" in out
-    assert "pair L2->L3" in out
-    for line in out.splitlines():
-        if line.startswith("- pair L1->L2:"):
-            assert "false_final=True" in line
-            assert "true_not_final=False" in line
-        if line.startswith("- pair L2->L3:"):
-            assert "false_final=False" in line
-            assert "true_not_final=True" in line
+    assert "- pair L1->L2: R_declares_final_at_i=True false_final=True true_not_final=False" in out
+    assert "- pair L2->L3: R_declares_final_at_i=False false_final=False true_not_final=True" in out
     assert "- false_final: 1" in out
     assert "- true_not_final: 1" in out
 
@@ -169,9 +196,17 @@ def test_compare_keeps_two_sessions_in_separate_groups(tmp_path, orats_key, caps
 def test_status_500_excluded_from_stability_and_capture_exits_1(tmp_path, orats_key, capsys):
     finality_probe.capture(_ns(tmp_path, label="L1"), http_get=_fake_get(), now=_at(3))
     finality_probe.capture(_ns(tmp_path, label="L2"), http_get=_fake_get(), now=_at(4))
-    rc = finality_probe.capture(_ns(tmp_path, label="L3"),
-                                http_get=lambda req: (500, {"content-type": "application/json"}, _body()), now=_at(5))
+    calls = []
+
+    def http_get(req):
+        calls.append(req)
+        return 500, {"content-type": "application/json"}, _body()
+
+    rc = finality_probe.capture(_ns(tmp_path, label="L3"), http_get=http_get, now=_at(5))
     assert rc == 1
+    meta = json.loads((tmp_path / "2024-01-02" / "L3" / "orats__hist.strikes__SPY.meta.json").read_text())
+    assert meta["status"] == 500 and meta["ok"] is False
+    assert calls and calls[0]["params"]["tradeDate"] == "2024-01-02" and calls[0]["params"]["ticker"] == "SPY"
     capsys.readouterr()
     finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
     out = capsys.readouterr().out
@@ -186,24 +221,30 @@ def test_header_tracking_requires_every_group(tmp_path, orats_key, capsys):
     b = _body([{"updatedAt": "1700000000", "strike": 999}, {"updatedAt": "1700000100", "strike": 101}])
     finality_probe.capture(_ns(tmp_path, label="L1", tickers="SPY"), http_get=_fake_get(a, {"etag": "e1"}), now=_at(3))
     finality_probe.capture(_ns(tmp_path, label="L2", tickers="SPY"), http_get=_fake_get(b, {"etag": "e2"}), now=_at(4))
-    finality_probe.capture(_ns(tmp_path, label="L1", tickers="QQQ"), http_get=_fake_get(a, {"etag": "e1"}), now=_at(3))
-    finality_probe.capture(_ns(tmp_path, label="L2", tickers="QQQ"), http_get=_fake_get(b, {"etag": "e1"}), now=_at(4))
+    finality_probe.capture(_ns(tmp_path, label="L1", tickers="QQQ", replace=True), http_get=_fake_get(a, {"etag": "e1"}), now=_at(3))
+    finality_probe.capture(_ns(tmp_path, label="L2", tickers="QQQ", replace=True), http_get=_fake_get(b, {"etag": "e1"}), now=_at(4))
     capsys.readouterr()
     finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
     out = capsys.readouterr().out
-    assert "etag=yes" in out
-    assert "etag=no" in out
+    spy = _group_block(out, "2024-01-02 orats hist/strikes SPY page=None")
+    qqq = _group_block(out, "2024-01-02 orats hist/strikes QQQ page=None")
+    assert "- header_tracking: etag=yes" in spy
+    assert "- header_tracking: etag=no" in qqq
     assert "- header etag: header does not track content" in out
 
 
-def test_invalid_label_and_session_exit_2(tmp_path, orats_key):
-    for kwargs in ({"label": "../x"}, {"session": "2026-1-1"}):
-        with pytest.raises(SystemExit) as exc:
-            finality_probe.capture(_ns(tmp_path, **kwargs), http_get=_fake_get())
-        assert exc.value.code == 2
+def test_invalid_label_and_session_exit_2(tmp_path, orats_key, capsys):
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path, label="../x"), http_get=_fake_get())
+    assert exc.value.code == 2
+    assert "invalid label" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path, session="2026-1-1"), http_get=_fake_get())
+    assert exc.value.code == 2
+    assert "invalid session" in capsys.readouterr().err
 
 
-def test_invalid_calendar_session_exits_2_without_network_call(tmp_path, orats_key):
+def test_invalid_calendar_session_exits_2_without_network_call(tmp_path, orats_key, capsys):
     called = []
 
     def boom(req):
@@ -213,6 +254,7 @@ def test_invalid_calendar_session_exits_2_without_network_call(tmp_path, orats_k
     with pytest.raises(SystemExit) as exc:
         finality_probe.capture(_ns(tmp_path, session="2026-02-30"), http_get=boom)
     assert exc.value.code == 2
+    assert "invalid session" in capsys.readouterr().err
     assert called == []
     assert not (tmp_path / "2026-02-30").exists()
 
@@ -298,11 +340,9 @@ def test_massive_composite_capture_compare_oracle(tmp_path, massive_key, capsys)
     assert "pages=2" in out and "- groups: 1" in out
     assert "| 2 | 1700000400 |" in out
     assert "etag=n/a" in out and "last-modified=n/a" in out
-    for line in out.splitlines():
-        if line.startswith("- pair A->B:"):
-            assert "false_final=True" in line and "true_not_final=False" in line
-        if line.startswith("- pair B->C:"):
-            assert "false_final=False" in line and "true_not_final=True" in line
+    assert "- pair A->B: R_declares_final_at_i=True false_final=True true_not_final=False" in out
+    assert "- pair B->C: R_declares_final_at_i=False false_final=False true_not_final=True" in out
+    assert "- excluded_not_ok: []" in out
     assert "- false_final: 1" in out and "- true_not_final: 1" in out
 
 
@@ -366,7 +406,7 @@ def test_massive_retry_removes_stale_pages(tmp_path, massive_key, capsys):
     assert rc == 0
     unit = tmp_path / "2024-01-02" / "L1"
     assert (unit / "massive__v3.snapshot.options__SPY__p1.body").is_file()
-    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=_fake_get(_mbody(MROWS)), now=_at(4))
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True, replace=True), http_get=_fake_get(_mbody(MROWS)), now=_at(4))
     assert rc == 0
     assert (unit / "massive__v3.snapshot.options__SPY__p0.body").is_file()
     assert not (unit / "massive__v3.snapshot.options__SPY__p1.body").exists()
@@ -501,7 +541,7 @@ def test_massive_failed_rerun_keeps_prior_pages(tmp_path, massive_key):
     def boom(req):
         raise RuntimeError("fetch failed")
 
-    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=boom, now=_at(4))
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True, replace=True), http_get=boom, now=_at(4))
     assert rc == 1
     assert p1_body.is_file() and p1_body.read_bytes() == prior_body
     assert p1_meta.is_file() and p1_meta.read_bytes() == prior_meta
@@ -525,3 +565,92 @@ def test_massive_next_url_bad_path_or_api_key_marks_truncated(tmp_path, massive_
         assert not list(unit.glob("*__p1.*"))
         m = json.loads((unit / "massive__v3.snapshot.options__SPY__p0.meta.json").read_text())
         assert m.get("truncated") is True and m["ok"] is False
+
+
+def test_interrupted_massive_capture_excluded(tmp_path, massive_key, capsys):
+    p0 = _mbody(MROWS, NEXT1)
+
+    def interrupted(req):
+        if "cursor=1" in req["url"]:
+            raise SystemExit(130)
+        return 200, {"content-type": "application/json"}, p0
+
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=interrupted, now=_at(3))
+    assert exc.value.code == 130
+    unit = tmp_path / "2024-01-02" / "L1"
+    m0 = json.loads((unit / "massive__v3.snapshot.options__SPY__p0.meta.json").read_text())
+    assert m0.get("has_next") is True and m0["ok"] is True
+    assert not list(unit.glob("*__p1.*"))
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    assert "- excluded_not_ok: [L1: 200]" in out
+    assert "- pair " not in out
+
+
+def test_two_run_ids_composite_excluded(tmp_path, massive_key, capsys):
+    p0 = _mbody(MROWS, NEXT1)
+    p1 = _mbody([{"day": {"last_updated": 1700000300}, "strike": 102}])
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=_mk_get(p0, p1), now=_at(3))
+    assert rc == 0
+    meta_f = tmp_path / "2024-01-02" / "L1" / "massive__v3.snapshot.options__SPY__p1.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["run_id"] = "0" * 32
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    assert "- excluded_not_ok: [L1: 200]" in out
+    assert "- pair " not in out
+
+
+def test_one_page_massive_etag_tracks_content(tmp_path, massive_key, capsys):
+    a = _mbody(MROWS)
+    b = _mbody([{"day": {"last_updated": 1700000300}, "strike": 102}])
+    get = _fake_get(a, {"etag": "e1"})
+    rc = finality_probe.capture(_ns(tmp_path, label="A", endpoints="", massive=True), http_get=get, now=_at(3))
+    assert rc == 0
+    assert get.calls[0]["url"].startswith("https://api.massive.com/v3/snapshot/options/")
+    assert get.calls[0]["headers"]["Authorization"] == f"Bearer {SENTINEL}"
+    m = json.loads((tmp_path / "2024-01-02" / "A" / "massive__v3.snapshot.options__SPY__p0.meta.json").read_text())
+    assert m["status"] == 200 and m["ok"] is True
+    rc = finality_probe.capture(_ns(tmp_path, label="B", endpoints="", massive=True),
+                                 http_get=_fake_get(b, {"etag": "e2"}), now=_at(4))
+    assert rc == 0
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    block = _group_block(out, "2024-01-02 massive v3/snapshot/options SPY page=None")
+    assert "pages=1" in block
+    assert "- header_tracking: etag=yes" in block
+
+
+def test_tampered_max_updated_at_skipped(tmp_path, orats_key, capsys):
+    finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    meta_f = tmp_path / "2024-01-02" / "L1" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["max_updated_at"] = "1699999999"
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "max_updated_at mismatch" in captured.err
+    assert "- groups: 0" in captured.out
+
+
+def test_existing_label_refused_byte_identical_then_replace_succeeds(tmp_path, orats_key, capsys):
+    finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    unit = tmp_path / "2024-01-02" / "L1"
+    before = {f.name: f.read_bytes() for f in unit.iterdir()}
+    assert before
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(4))
+    assert exc.value.code == 2
+    assert "label already captured; pass --replace to overwrite" in capsys.readouterr().err
+    after = {f.name: f.read_bytes() for f in unit.iterdir()}
+    assert after == before
+    rc = finality_probe.capture(_ns(tmp_path, replace=True), http_get=_fake_get(), now=_at(4))
+    assert rc == 0
+    meta = json.loads((unit / "orats__hist.strikes__SPY.meta.json").read_text())
+    assert meta["fetched_at_utc"] == datetime(2024, 1, 4, tzinfo=timezone.utc).isoformat()
