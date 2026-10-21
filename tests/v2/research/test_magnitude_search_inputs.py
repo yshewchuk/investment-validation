@@ -115,3 +115,21 @@ def test_corrupt_shard_fails_closed(tmp_path):
     path.chmod(0o644)
     path.write_bytes(b"{}")
     _conflict(lambda: load_inputs(store, manifest, shards.manifest_id(manifest)))
+
+
+def test_extra_manifest_section_is_a_conflict(tmp_path):
+    store = ArtifactStore(tmp_path / "store")
+    manifest = _manifest(store)
+    extra = copy.deepcopy(manifest)
+    extra["sections"]["unlisted"] = extra["sections"]["features"]
+    _conflict(lambda: load_inputs(store, extra, shards.manifest_id(extra)))
+
+
+def test_malformed_keyless_wrapper_is_a_conflict(tmp_path):
+    store = ArtifactStore(tmp_path / "store")
+    manifest = _manifest(store)
+    bad = copy.deepcopy(manifest)
+    bad["sections"]["preflight.event_ids"] = shards.write_section(
+        store, "preflight.event_ids",
+        [{"position": 0, "row": "E1", "extra": 1}], lambda item: (item["position"],))
+    _conflict(lambda: load_inputs(store, bad, shards.manifest_id(bad)))
