@@ -53,7 +53,7 @@ Pick a recent normal full session `S` (not a half day). Eastern times:
 | `plus_1d` | S+2 (next trading day after S+1) 08:00 |
 
 ```
-TICKERS=SPY,AAPL,MSFT,NVDA,<one thin name>
+TICKERS=SPY,AAPL,MSFT,NVDA,THINNAME   # replace THINNAME with one low-volume ticker
 python3 tools/finality_probe.py capture --session S --tickers $TICKERS --label LABEL --out ~/finality-probe \
     --orats-endpoints hist/strikes,hist/summaries [--massive]
 python3 tools/finality_probe.py compare --out ~/finality-probe --session S

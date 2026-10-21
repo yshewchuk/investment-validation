@@ -315,6 +315,7 @@ def capture(args_ns, http_get=None, now=None):
     total = not_ok = 0
     saw_massive = False
     last_prog_t = time.perf_counter()
+    mpages = {"t0": None, "total": 0, "k": 0, "n": 0}
 
     def _progress(n, m=None):
         el = time.perf_counter() - t_start
@@ -384,12 +385,23 @@ def capture(args_ns, http_get=None, now=None):
             not_ok += 1
         if provider == "massive":
             saw_massive = True
+            mpages["total"] += 1
         c12 = content_sha[:12] if content_sha else None
         print(f"{label} {provider} {ticker} status={status} rows={row_count} max_updated_at={max_updated_at} content={c12}")
         now_t = time.perf_counter()
         if now_t - last_prog_t >= 30.0:
             last_prog_t = now_t
-            _progress(total, None if provider == "massive" or orats_planned == 0 else orats_planned)
+            if provider == "massive":
+                el = now_t - t_start
+                rate = total / el if el > 0 else 0.0
+                rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                avg_pg = ((now_t - mpages["t0"]) / mpages["total"]
+                          if mpages["t0"] is not None and mpages["total"] else 0.0)
+                eta_max = int(avg_pg * (MAX_MASSIVE_PAGES - (page + 1)))
+                tickers_left = max(0, mpages["n"] - mpages["k"] + 1)
+                print(f"[capture] {total} pages elapsed={int(el)}s rate={rate:.1f}/s eta_max={eta_max}s tickers_left={tickers_left} rss={rss:.1f}MB", file=sys.stderr)
+            else:
+                _progress(total, None if orats_planned == 0 else orats_planned)
         return parsed, ok
 
     for endpoint in endpoints:
@@ -401,7 +413,10 @@ def capture(args_ns, http_get=None, now=None):
     if want_massive:
         n_tickers = len(tickers)
         m_start = time.perf_counter()
+        mpages["n"] = n_tickers
+        mpages["t0"] = m_start
         for k, ticker in enumerate(tickers, 1):
+            mpages["k"] = k
             url, params = f"{MASSIVE_BASE}{ticker}", {"limit": "250"}
             pages_stored = 0
             ticker_ok = True

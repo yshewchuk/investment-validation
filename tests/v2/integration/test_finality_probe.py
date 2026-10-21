@@ -50,7 +50,15 @@ def _mbody(rows, next_url=None):
 def _mk_get(page0, page1):
     def http_get(req):
         http_get.calls.append(req)
-        return 200, {"content-type": "application/json"}, page1 if "cursor=1" in req["url"] else page0
+        u = req["url"]
+        if "cursor=" in u:
+            return 200, {"content-type": "application/json"}, page1
+        ticker = urlparse(u).path.rstrip("/").rsplit("/", 1)[-1]
+        d = json.loads(page0)
+        if isinstance(d.get("next_url"), str):
+            p = urlparse(d["next_url"])
+            d["next_url"] = p._replace(path=f"/v3/snapshot/options/{ticker}").geturl()
+        return 200, {"content-type": "application/json"}, json.dumps(d).encode("utf-8")
     http_get.calls = []
     return http_get
 
@@ -1193,3 +1201,141 @@ def test_massive_last_updated_bool_and_nonintegral_float_ignored(tmp_path, massi
         assert rc == 0
         meta = json.loads((tmp_path / "2024-01-02" / label / "massive__v3.snapshot.options__SPY__p0.meta.json").read_text())
         assert meta["max_updated_at"] is None
+
+
+def test_massive_periodic_progress_includes_eta_max_and_tickers_left(tmp_path, massive_key, monkeypatch, capsys):
+    class _StepTime:
+        def __init__(self):
+            self.t = 0.0
+
+        def perf_counter(self):
+            self.t += 31.0
+            return self.t
+
+    monkeypatch.setattr(finality_probe, "time", _StepTime())
+    p0 = _mbody(MROWS, NEXT1)
+    p1 = _mbody([{"day": {"last_updated": 1700000300}, "strike": 102}])
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True, tickers="SPY,QQQ"),
+                                http_get=_mk_get(p0, p1), now=_at(3))
+    assert rc == 0
+    err = capsys.readouterr().err
+    lines = [ln for ln in err.splitlines() if "eta_max=" in ln]
+    assert lines, err
+    assert any("tickers_left=2" in ln for ln in lines), err
+    assert any("tickers_left=1" in ln for ln in lines), err
+    assert "massive ticker 1/2" in err
+    assert "massive ticker 2/2" in err
+
+
+def test_default_http_get_kwargs_close_and_success(monkeypatch):
+    import requests
+
+    calls = {}
+
+    class FakeResp:
+        status_code = 201
+        headers = {"Content-Type": "application/json", "X-Mix": "Ab"}
+
+        def __init__(self):
+            self.closed = False
+
+        def iter_content(self, chunk_size):
+            yield b'{"data":[]}'
+
+        def close(self):
+            self.closed = True
+
+    holder = {}
+
+    def fake_get(url, **kwargs):
+        calls["url"] = url
+        calls["kwargs"] = kwargs
+        holder["r"] = FakeResp()
+        return holder["r"]
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    status, hdrs, body = finality_probe._default_http_get(
+        {"url": "https://example.com/x", "params": {"a": "1"},
+         "headers": {"Accept-Encoding": "identity"}})
+    assert calls["kwargs"]["allow_redirects"] is False
+    timeout = calls["kwargs"]["timeout"]
+    assert isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
+    assert calls["kwargs"]["stream"] is True
+    assert holder["r"].closed is True
+    assert status == 201
+    assert hdrs == {"content-type": "application/json", "x-mix": "Ab"}
+    assert body == b'{"data":[]}'
+
+
+def test_default_http_get_closes_when_body_cap_exceeded(monkeypatch):
+    import requests
+
+    monkeypatch.setattr(finality_probe, "MAX_BODY_BYTES", 10)
+
+    class BigResp:
+        status_code = 200
+        headers = {}
+
+        def __init__(self):
+            self.closed = False
+
+        def iter_content(self, chunk_size):
+            yield b"x" * 64
+
+        def close(self):
+            self.closed = True
+
+    holder = {}
+    monkeypatch.setattr(requests, "get", lambda *a, **k: holder.setdefault("r", BigResp()))
+    with pytest.raises(ValueError, match="BodyTooLarge"):
+        finality_probe._default_http_get({"url": "https://example.com/x"})
+    assert holder["r"].closed is True
+
+
+def test_ts_two_instants_one_hundred_seconds_apart():
+    pairs = [
+        (1700000000, 1700000100),
+        (1700000000000, 1700000100000),
+        (1700000000000000000, 1700000100000000000),
+        ("1700000000", "1700000100"),
+        ("1700000000000", "1700000100000"),
+        ("1700000000000000000", "1700000100000000000"),
+        ("2023-11-14T22:13:20Z", "2023-11-14T22:15:00Z"),
+    ]
+    for a, b in pairs:
+        ta, tb = finality_probe._ts(a), finality_probe._ts(b)
+        assert ta is not None and tb is not None, (a, b)
+        assert tb - ta == 100.0, (a, b, ta, tb)
+
+
+def test_capture_preflight_massive_key_ticker_endpoint_and_repo(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ORATS_API_KEY", SENTINEL)
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+    called = []
+
+    def boom(req):
+        called.append(req)
+        raise AssertionError("network must not be called")
+
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=boom)
+    assert exc.value.code == 2
+    assert "MASSIVE_API_KEY" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path, tickers="SP Y"), http_get=boom)
+    assert exc.value.code == 2
+    assert "invalid ticker" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path, endpoints="../x"), http_get=boom)
+    assert exc.value.code == 2
+    assert "invalid ORATS endpoint" in capsys.readouterr().err
+
+    repo_root = Path(__file__).resolve().parents[3]
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(repo_root / "tests"), http_get=boom)
+    assert exc.value.code == 2
+    assert "refusing to write provider data inside a repository" in capsys.readouterr().err
+
+    assert called == []
