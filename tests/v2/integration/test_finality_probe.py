@@ -222,8 +222,8 @@ def test_header_tracking_requires_every_group(tmp_path, orats_key, capsys):
     b = _body([{"updatedAt": "1700000000", "strike": 999}, {"updatedAt": "1700000100", "strike": 101}])
     finality_probe.capture(_ns(tmp_path, label="L1", tickers="SPY"), http_get=_fake_get(a, {"etag": "e1"}), now=_at(3))
     finality_probe.capture(_ns(tmp_path, label="L2", tickers="SPY"), http_get=_fake_get(b, {"etag": "e2"}), now=_at(4))
-    finality_probe.capture(_ns(tmp_path, label="L1", tickers="QQQ", replace=True), http_get=_fake_get(a, {"etag": "e1"}), now=_at(3))
-    finality_probe.capture(_ns(tmp_path, label="L2", tickers="QQQ", replace=True), http_get=_fake_get(b, {"etag": "e1"}), now=_at(4))
+    finality_probe.capture(_ns(tmp_path, label="L3", tickers="QQQ"), http_get=_fake_get(a, {"etag": "e1"}), now=_at(3))
+    finality_probe.capture(_ns(tmp_path, label="L4", tickers="QQQ"), http_get=_fake_get(b, {"etag": "e1"}), now=_at(4))
     capsys.readouterr()
     finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
     out = capsys.readouterr().out
@@ -534,7 +534,7 @@ def test_compare_rejects_bool_page_and_string_status(tmp_path, orats_key, capsys
     assert "- groups: 0" in captured.out
 
 
-def test_massive_failed_rerun_keeps_prior_pages(tmp_path, massive_key):
+def test_massive_failed_replace_rerun_invalidates_prior_pages(tmp_path, massive_key):
     p0 = _mbody(MROWS, NEXT1)
     p1 = _mbody([{"day": {"last_updated": 1700000300}, "strike": 102}])
     rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=_mk_get(p0, p1), now=_at(3))
@@ -542,15 +542,14 @@ def test_massive_failed_rerun_keeps_prior_pages(tmp_path, massive_key):
     unit = tmp_path / "2024-01-02" / "L1"
     p1_body = unit / "massive__v3.snapshot.options__SPY__p1.body"
     p1_meta = unit / "massive__v3.snapshot.options__SPY__p1.meta.json"
-    prior_body, prior_meta = p1_body.read_bytes(), p1_meta.read_bytes()
+    assert p1_body.is_file() and p1_meta.is_file()
 
     def boom(req):
         raise RuntimeError("fetch failed")
 
     rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True, replace=True), http_get=boom, now=_at(4))
     assert rc == 1
-    assert p1_body.is_file() and p1_body.read_bytes() == prior_body
-    assert p1_meta.is_file() and p1_meta.read_bytes() == prior_meta
+    assert not p1_body.exists() and not p1_meta.exists()
     m0 = json.loads((unit / "massive__v3.snapshot.options__SPY__p0.meta.json").read_text())
     assert m0.get("error") == "RuntimeError" and m0["ok"] is False
 
@@ -653,7 +652,7 @@ def test_existing_label_refused_byte_identical_then_replace_succeeds(tmp_path, o
     with pytest.raises(SystemExit) as exc:
         finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(4))
     assert exc.value.code == 2
-    assert "label already captured; pass --replace to overwrite" in capsys.readouterr().err
+    assert "label already captured; pass --replace to invalidate the prior capture" in capsys.readouterr().err
     after = {f.name: f.read_bytes() for f in unit.iterdir()}
     assert after == before
     rc = finality_probe.capture(_ns(tmp_path, replace=True), http_get=_fake_get(), now=_at(4))
@@ -814,3 +813,83 @@ def test_ts_units_and_garbage():
         assert finality_probe._ts(v) == expected, v
     for garbage in (None, "", "garbage", "not-a-time", "2023-99-99"):
         assert finality_probe._ts(garbage) is None, garbage
+
+
+def test_ok_receipt_mismatch_tamper_skipped(tmp_path, orats_key, capsys):
+    def five_hundred(req):
+        return 500, {"content-type": "application/json"}, _body()
+
+    rc = finality_probe.capture(_ns(tmp_path, label="L1"), http_get=five_hundred, now=_at(3))
+    assert rc == 1
+    meta_f = tmp_path / "2024-01-02" / "L1" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    assert m["status"] == 500 and m["ok"] is False
+    m["ok"] = True
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+
+    payload = json.dumps({"error": "x"}).encode("utf-8")
+    rc = finality_probe.capture(_ns(tmp_path, label="L2"), http_get=_fake_get(payload), now=_at(4))
+    assert rc == 1
+    meta_f = tmp_path / "2024-01-02" / "L2" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    assert m["status"] == 200 and m["ok"] is False
+    m["ok"] = True
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert captured.err.count("ok receipt mismatch") == 2
+    assert "skipped" in captured.err
+    assert "- groups: 0" in captured.out
+
+
+def test_massive_next_url_other_ticker_stops_paging(tmp_path, massive_key):
+    other = "https://api.massive.com/v3/snapshot/options/AAPL?cursor=x"
+
+    def http_get(req):
+        return 200, {"content-type": "application/json"}, _mbody(MROWS, other)
+
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=http_get, now=_at(3))
+    assert rc == 1
+    unit = tmp_path / "2024-01-02" / "L1"
+    assert not list(unit.glob("*__p1.*"))
+    m = json.loads((unit / "massive__v3.snapshot.options__SPY__p0.meta.json").read_text())
+    assert m.get("truncated") is True and m["ok"] is False
+
+
+def test_sentinel_leak_guard_refuses_lowercase_percent_encoding(tmp_path, monkeypatch, capsys):
+    key = "ab+cd/ef=="
+    monkeypatch.setenv("ORATS_API_KEY", key)
+    low = "ab%2bcd%2fef%3d%3d"
+    body = json.dumps({"data": ROWS, "note": low}).encode("utf-8")
+    assert key.encode("utf-8") not in body
+    assert quote(key, safe="").encode("utf-8") not in body
+    assert low.encode("utf-8") in body
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path), http_get=_fake_get(body))
+    assert exc.value.code == 2
+    assert "refusing to write provider record containing API key" in capsys.readouterr().err
+    unit = tmp_path / "2024-01-02" / "L1"
+    assert not list(unit.glob("*.body")) and not list(unit.glob("*.meta.json"))
+
+
+def test_replace_drops_unrequested_ticker_files(tmp_path, orats_key, capsys):
+    rc = finality_probe.capture(_ns(tmp_path, tickers="SPY,AAPL"), http_get=_fake_get(), now=_at(3))
+    assert rc == 0
+    unit = tmp_path / "2024-01-02" / "L1"
+    assert (unit / "orats__hist.strikes__SPY.body").is_file()
+    assert (unit / "orats__hist.strikes__AAPL.body").is_file()
+    assert (unit / "orats__hist.strikes__AAPL.meta.json").is_file()
+
+    rc = finality_probe.capture(_ns(tmp_path, tickers="SPY", replace=True), http_get=_fake_get(), now=_at(4))
+    assert rc == 0
+    assert (unit / "orats__hist.strikes__SPY.body").is_file()
+    assert (unit / "orats__hist.strikes__SPY.meta.json").is_file()
+    assert not (unit / "orats__hist.strikes__AAPL.body").exists()
+    assert not (unit / "orats__hist.strikes__AAPL.meta.json").exists()
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    assert "## 2024-01-02 orats hist/strikes SPY page=None" in out
+    assert "AAPL" not in out

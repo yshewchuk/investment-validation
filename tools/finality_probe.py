@@ -96,8 +96,9 @@ def _leaks_key(key, meta, body):
     if not key:
         return False
     meta_b = _canon(meta).encode("utf-8")
-    return any(v.encode("utf-8") in meta_b or v.encode("utf-8") in body
-               for v in (key, quote(key, safe=""), quote_plus(key)))
+    encoded = [quote(key, safe=""), quote_plus(key)]
+    variants = [key] + encoded + [re.sub(r"%[0-9A-F]{2}", lambda m: m.group(0).lower(), v) for v in encoded]
+    return any(v.encode("utf-8") in meta_b or v.encode("utf-8") in body for v in variants)
 
 
 _TMP_COUNTER = 0
@@ -152,11 +153,11 @@ def _max_updated_orats(rows):
     return max(vals) if vals else None
 
 
-def _massive_next_ok(url):
+def _massive_next_ok(url, ticker):
     if not (isinstance(url, str) and url.startswith("https://") and url.startswith(MASSIVE_ORIGIN)):
         return False
     u = urlparse(url)
-    if not u.path.startswith("/v3/snapshot/options/"):
+    if u.path != f"/v3/snapshot/options/{ticker}":
         return False
     return not any(k.lower() == "apikey" for k, _ in parse_qsl(u.query, keep_blank_values=True))
 
@@ -234,11 +235,25 @@ def capture(args_ns, http_get=None, now=None):
         unit_dir.relative_to(out_base)
     except ValueError:
         _fail("refusing to write outside the output directory", 2)
-    if (not getattr(args_ns, "replace", False)
+    replace = bool(getattr(args_ns, "replace", False))
+    if (not replace
             and unit_dir.is_dir()
             and any(unit_dir.glob("*.meta.json"))):
-        _fail("label already captured; pass --replace to overwrite", 2)
+        _fail("label already captured; pass --replace to invalidate the prior capture", 2)
     _mkdirs(unit_dir)
+    if replace and unit_dir.is_dir():
+        for entry in unit_dir.iterdir():
+            if not entry.name.endswith((".meta.json", ".body")):
+                continue
+            try:
+                st = entry.lstat()
+            except OSError as exc:
+                _fail_path(exc)
+            if stat.S_ISREG(st.st_mode):
+                try:
+                    entry.unlink()
+                except OSError as exc:
+                    _fail_path(exc)
     run_id = uuid.uuid4().hex
     orats_planned = len(endpoints) * len(tickers)
     t_start = time.perf_counter()
@@ -281,7 +296,7 @@ def capture(args_ns, http_get=None, now=None):
         has_next = False
         if provider == "massive":
             nu = parsed.get("next_url") if isinstance(parsed, dict) else None
-            has_next = _massive_next_ok(nu)
+            has_next = _massive_next_ok(nu, ticker)
             if page == MAX_MASSIVE_PAGES - 1 and has_next:
                 truncated = True
                 print(f"[capture] warning: truncated massive pagination for {ticker} after {MAX_MASSIVE_PAGES} pages", file=sys.stderr)
@@ -336,7 +351,7 @@ def capture(args_ns, http_get=None, now=None):
                 pages_stored = page + 1
                 if not page_ok: ticker_ok = False
                 next_url = parsed.get("next_url") if isinstance(parsed, dict) else None
-                if not _massive_next_ok(next_url):
+                if not _massive_next_ok(next_url, ticker):
                     break
                 url, params = next_url, None
             if ticker_ok and pages_stored:
@@ -524,20 +539,24 @@ def _read_meta(path, session_dir, label_dir):
         parsed_body = json.loads(body)
     except Exception:
         parsed_body = None
-    if obj.get("provider") == "massive":
+    provider = obj.get("provider")
+    expected_trunc = False
+    if provider == "massive":
         nu = parsed_body.get("next_url") if isinstance(parsed_body, dict) else None
-        derived_next = _massive_next_ok(nu)
+        derived_next = _massive_next_ok(nu, obj.get("ticker"))
         if nu is not None and not derived_next:
             expected_trunc = True
         elif derived_next and page is not None and page >= MAX_MASSIVE_PAGES - 1:
             expected_trunc = True
-        else:
-            expected_trunc = False
         stored_next = obj.get("has_next", False)
         stored_trunc = obj.get("truncated", False)
         if (not isinstance(stored_next, bool) or stored_next != derived_next
                 or not isinstance(stored_trunc, bool) or stored_trunc != expected_trunc):
             return _skip(name, "continuation mismatch")
+    envelope_ok = (isinstance(parsed_body, dict)
+                   and isinstance(parsed_body.get("data" if provider == "orats" else "results"), list))
+    if obj.get("ok") != (envelope_ok and 200 <= obj["status"] < 300 and not expected_trunc):
+        return _skip(name, "ok receipt mismatch")
     _, calc_max = _rows_and_max(obj.get("provider"), parsed_body)
     if calc_max != obj.get("max_updated_at"):
         return _skip(name, "max_updated_at mismatch")
