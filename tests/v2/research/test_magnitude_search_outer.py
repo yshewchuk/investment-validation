@@ -2,8 +2,10 @@
 import hashlib
 import math
 import shutil
+import tempfile
 from contextlib import contextmanager
 from functools import cache
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -178,7 +180,7 @@ def assert_fold_oracle(case, result, year):
     expected = {"schema_version": "magnitude_search_outer_result.v1",
         "outer_id": content_hash([case.plan["plan_id"], year]), "plan_id": case.plan["plan_id"],
         "outer_year": year, "candidate": candidate, "selection_id": content_hash(case.selected),
-        "inputs_id": publish_inputs(case.recorder.store, inputs)[1], "execution_id": content_hash(execution),
+        "inputs_id": expected_inputs_id(inputs), "execution_id": content_hash(execution),
         "validation_id": content_hash(validation), "training_inputs": inputs["training_inputs"],
         "evaluation_inputs": validation["evaluation_inputs"], "fit_attempt_count": 3,
         "event_count": {"2024": 8, "2025": 2}[year], "forecast_count": {"2024": 24, "2025": 6}[year],
@@ -210,10 +212,16 @@ def native_matrices(case, year="2024"):
     return result
 
 
+def expected_inputs_id(inputs):
+    """Publish into a fresh temporary store so a missing production shard is never masked."""
+    with tempfile.TemporaryDirectory() as tmp:
+        return publish_inputs(ArtifactStore(Path(tmp) / "store"), inputs)[1]
+
+
 def stored_inputs(case, inputs, year="2024"):
     """The stored outer manifest read back through the loader, bound to the expected inputs' manifest hash."""
     store = case.recorder.store
-    return load_inputs(store, slot(case, "inputs", year), publish_inputs(store, inputs)[1])
+    return load_inputs(store, slot(case, "inputs", year), expected_inputs_id(inputs))
 
 
 def expected_fits(case, year="2024"):
