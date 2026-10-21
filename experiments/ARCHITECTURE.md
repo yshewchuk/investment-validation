@@ -453,7 +453,9 @@ Manifest hashes describe the exact bytes on disk. Every conflict is detected bef
 | Existing file with different bytes (a replay, or a further arm sharing the experiment_id) | One record exists per experiment_id; the first record is kept, a stderr warning is printed and the result is `unchanged`. |
 | Existing result file whose bytes differ from the hash in its existing manifest, or a manifest missing a document hash | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
 | Non-finite number (NaN, Infinity) in a document | `INVALID_EXPERIMENT_SPEC`; exports are strict JSON. |
-| Symlinked run folder or `results/` | Refused during number resolution as well as export (`EXPERIMENT_IDENTITY_CONFLICT`), before any evaluation. |
+| Symlinked run folder or `results/` | Refused at export (`EXPERIMENT_IDENTITY_CONFLICT`); number resolution refuses it too when the followed manifest names the experiment or the explicit number matches the folder, before any evaluation. |
+| Direct export for an experiment_id already linked to another number | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
+| Outcome published by a CLI error path (a typed refusal raised during evaluation) | Not exported by that invocation; the next replay `run` exports it. |
 | Crash before the manifest is written | The folder has no manifest, so a retry refuses with the conflict above; partial exports are not auto-resumed (known limit). |
 | Report text over the cap | `REPORT.md` holds a truncated report plus a truncation line, so replay never exceeds the cap. |
 | Manifest whose `exp_number` differs from its folder number | `EXPERIMENT_IDENTITY_CONFLICT`. |
@@ -678,7 +680,7 @@ existing catalog/store and explicit holdout month. It fingerprints its executing
 metadata-only. `read_native_registration` verifies the stored identity; run performs current
 admission before replay or evaluation; missing registration is R1. R3/R4/R5
 refusals use that admitted identity and never export a current-attempt report.
-R1/R2/R6 preserve private receipts only. Unless `--no-record-export` is given, `run` also writes the private run record after a published or replayed outcome, refusals included (see Private run-record export). Untyped evaluation/rendering errors use
+R1/R2/R6 preserve private receipts only. Unless `--no-record-export` is given, `run` also writes the private run record after a published or replayed outcome on the normal path; a refusal published by the error path is exported by the next replay (see Private run-record export). Untyped evaluation/rendering errors use
 retryable `WORKER_FAILED`, never terminal outcomes or CSV rows. `--no-ledger`
 isolates smoke recording; otherwise `--ledger` is required. Completed `REPORT.md` is exported through the
 shared immutable outcome lifecycle; retries reuse the original result/date.

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import resource
 import subprocess
 import sys
 import time
@@ -80,6 +81,7 @@ def test_layout_writes_results_and_report(tmp_path):
         assert (results / name).is_file(), name
     report = (folder / "REPORT.md").read_text()
     assert "EXP-101 x" in report
+    assert "Status: ran" in report
     assert report_text in report
     man = json.loads((results / "export_manifest.json").read_bytes())
     assert man["experiment_id"] == "x"
@@ -95,6 +97,14 @@ def test_layout_writes_results_and_report(tmp_path):
     assert json.loads((results / "outcome.json").read_bytes()) == outcome
     assert result["status"] == "written"
     assert result["dir"] == str(folder)
+
+
+def test_direct_export_for_linked_id_with_other_number_conflicts(tmp_path):
+    _export(tmp_path, exp_number=101, experiment_id="x")
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path, exp_number=102, experiment_id="x")
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert not any(child.name.startswith("EXP-102_") for child in tmp_path.iterdir())
 
 
 def test_resolve_linked_number_from_manifest(tmp_path):
@@ -342,8 +352,10 @@ def test_export_native_run_independent_oracle(tmp_path):
     ).hexdigest()
     assert outcome["source_closure_hash"] == expected_hash
     assert outcome["environment"] == {"python": "3"}
-    assert outcome["elapsed_seconds"] >= 5.0
+    assert 5.0 <= outcome["elapsed_seconds"] < 65.0
     assert outcome["peak_rss_kb"] > 1000
+    sampled = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    assert 0 < outcome["peak_rss_kb"] <= sampled
     proc = subprocess.run(
         ["git", "-C", str(Path(__file__).resolve().parents[3]), "rev-parse", "HEAD"],
         capture_output=True,

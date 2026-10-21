@@ -816,6 +816,11 @@ def test_first_successful_run_exports_exp_record_and_report(source, capsys):
                  "request.json", "event_ids.json"):
         assert (results / name).is_file()
     assert (folders[0] / "REPORT.md").is_file()
+    exported = Path(output["record_export"]["dir"])
+    request = json.loads((exported / "results" / "request.json").read_text())
+    assert request == {"action": "run", "as_of_month": MONTH, "scope": "shadow",
+                       "event_ids": None, "no_ledger": True}
+    assert (exported / "REPORT.md").read_text().startswith("# EXP-101")
 
 
 def test_run_refuses_without_exp_number_then_auto_succeeds(source, capsys):

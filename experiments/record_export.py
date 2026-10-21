@@ -369,6 +369,13 @@ def export_run_record(
             f"experiment_id must be a string, got {type(experiment_id).__name__}",
         )
     _check_number(exp_number, experiment_id)
+    linked = _linked_number(root, experiment_id)
+    if linked is not None and linked != exp_number:
+        raise fail(
+            "EXPERIMENT_IDENTITY_CONFLICT",
+            f"{experiment_id} is linked to EXP-{linked:03d} "
+            f"but this export targets EXP-{exp_number:03d}",
+        )
     if report_text is not None:
         report_text = _cap_report(report_text)
     for folder in _folders_with_number(root, exp_number):
