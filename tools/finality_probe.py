@@ -2,6 +2,7 @@ import argparse
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import resource
@@ -34,6 +35,14 @@ ENDPOINT_RE = re.compile(r"^[a-z0-9_/]+$")
 def _fail(msg, code=2):
     print(msg, file=sys.stderr)
     raise SystemExit(code)
+
+
+def _boolable(v):
+    try:
+        bool(v)
+    except Exception:
+        return False
+    return True
 
 
 def _stem(provider, endpoint, ticker, page):
@@ -158,8 +167,19 @@ def _content_digest(provider, body):
 
 
 def _max_updated_orats(rows):
-    vals = [r.get("updatedAt") for r in rows if isinstance(r, dict) and isinstance(r.get("updatedAt"), str)]
-    return max(vals) if vals else None
+    best_val, best_ts = None, None
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        v = r.get("updatedAt")
+        if isinstance(v, bool) or not isinstance(v, (str, int, float)):
+            continue
+        t = _ts(v)
+        if t is None:
+            continue
+        if best_ts is None or t > best_ts:
+            best_val, best_ts = v, t
+    return best_val
 
 
 def _massive_next_ok(url, ticker):
@@ -222,12 +242,23 @@ def capture(args_ns, http_get=None, now=None):
     if now is None:
         def now():
             return datetime.now(timezone.utc)
-    session, label, out_dir = args_ns.session, args_ns.label, args_ns.out
+    session = getattr(args_ns, "session", None)
+    label = getattr(args_ns, "label", None)
+    out_dir = getattr(args_ns, "out", None)
+    tickers_arg = getattr(args_ns, "tickers", None)
+    endpoints_arg = getattr(args_ns, "orats_endpoints", DEFAULT_ORATS_ENDPOINTS)
+    massive_arg = getattr(args_ns, "massive", False)
+    replace_arg = getattr(args_ns, "replace", False)
+    if not (isinstance(session, str) and isinstance(label, str)
+            and isinstance(out_dir, str) and isinstance(tickers_arg, str)
+            and (endpoints_arg is None or isinstance(endpoints_arg, str))
+            and _boolable(massive_arg) and _boolable(replace_arg)):
+        _fail("invalid argument types", 2)
     if not _valid_session(session):
         _fail(f"invalid session {session!r}: expected YYYY-MM-DD", 2)
     if not LABEL_RE.match(label or "") or label in (".", ".."):
         _fail(f"invalid label {label!r}", 2)
-    tickers = [t.strip() for t in args_ns.tickers.split(",") if t.strip()]
+    tickers = [t.strip() for t in tickers_arg.split(",") if t.strip()]
     if not tickers:
         _fail("empty ticker list", 2)
     for t in tickers:
@@ -235,11 +266,11 @@ def capture(args_ns, http_get=None, now=None):
             _fail(f"invalid ticker {t!r}", 2)
     if len(set(tickers)) != len(tickers):
         _fail(f"duplicate tickers {tickers!r}", 2)
-    endpoints = [e.strip() for e in (getattr(args_ns, "orats_endpoints", DEFAULT_ORATS_ENDPOINTS) or "").split(",") if e.strip()]
+    endpoints = [e.strip() for e in (endpoints_arg or "").split(",") if e.strip()]
     for e in endpoints:
         if not ENDPOINT_RE.match(e) or ".." in e:
             _fail(f"invalid ORATS endpoint {e!r}", 2)
-    want_massive = bool(getattr(args_ns, "massive", False))
+    want_massive = bool(massive_arg)
     orats_key = os.environ.get("ORATS_API_KEY") or ""
     massive_key = os.environ.get("MASSIVE_API_KEY") or ""
     if endpoints and not orats_key:
@@ -253,7 +284,7 @@ def capture(args_ns, http_get=None, now=None):
         unit_dir.relative_to(out_base)
     except ValueError:
         _fail("refusing to write outside the output directory", 2)
-    replace = bool(getattr(args_ns, "replace", False))
+    replace = bool(replace_arg)
     if (not replace
             and unit_dir.is_dir()
             and any(unit_dir.glob("*.meta.json"))):
@@ -402,7 +433,7 @@ def capture(args_ns, http_get=None, now=None):
 
 
 def _ts(v):
-    if v is None:
+    if v is None or isinstance(v, bool):
         return None
     if isinstance(v, (int, float)):
         x = float(v)
@@ -412,9 +443,11 @@ def _ts(v):
             x = float(s)
         except ValueError:
             try:
-                return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+                x = datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
             except ValueError:
                 return None
+    if not math.isfinite(x):
+        return None
     a = abs(x)
     return x / (1e9 if a > 1e15 else 1e3 if a > 1e11 else 1)
 

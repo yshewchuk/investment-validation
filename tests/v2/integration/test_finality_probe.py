@@ -812,7 +812,9 @@ def test_ts_units_and_garbage():
               "1700000000", "1700000000000", "1700000000000000000",
               "2023-11-14T22:13:20Z"):
         assert finality_probe._ts(v) == expected, v
-    for garbage in (None, "", "garbage", "not-a-time", "2023-99-99"):
+    for garbage in (None, "", "garbage", "not-a-time", "2023-99-99",
+                    True, False, float("nan"), float("inf"), float("-inf"),
+                    "nan", "inf", "-inf"):
         assert finality_probe._ts(garbage) is None, garbage
 
 
@@ -1044,3 +1046,88 @@ def test_main_cli_dispatch_compare_and_capture_missing_key(tmp_path, orats_key, 
                              "--label", "L9", "--out", str(tmp_path)])
     assert exc.value.code == 2
     assert "missing ORATS_API_KEY" in capsys.readouterr().err
+
+
+def test_capture_invalid_argument_types_exit_2(tmp_path, orats_key, capsys):
+    for field, value in (("tickers", None), ("label", 5), ("out", None)):
+        ns = _ns(tmp_path)
+        setattr(ns, field, value)
+        with pytest.raises(SystemExit) as exc:
+            finality_probe.capture(ns, http_get=_fake_get())
+        assert exc.value.code == 2
+        assert "invalid argument types" in capsys.readouterr().err
+    assert not any(tmp_path.iterdir())
+
+
+def test_run_id_differs_across_captures(tmp_path, orats_key):
+    for i, label in enumerate(("L1", "L2")):
+        rc = finality_probe.capture(_ns(tmp_path, label=label), http_get=_fake_get(), now=_at(3 + i))
+        assert rc == 0
+    runs = []
+    for label in ("L1", "L2"):
+        meta_f = tmp_path / "2024-01-02" / label / "orats__hist.strikes__SPY.meta.json"
+        runs.append(json.loads(meta_f.read_text())["run_id"])
+    assert all(isinstance(r, str) and len(r) == 32 for r in runs)
+    assert runs[0] != runs[1]
+
+
+def test_elapsed_ms_measures_http_time(tmp_path, orats_key, monkeypatch):
+    class _StepTime:
+        def __init__(self):
+            self.t = 0.0
+
+        def perf_counter(self):
+            self.t += 0.25
+            return self.t
+
+    monkeypatch.setattr(finality_probe, "time", _StepTime())
+    rc = finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    assert rc == 0
+    meta = json.loads((tmp_path / "2024-01-02" / "L1" / "orats__hist.strikes__SPY.meta.json").read_text())
+    assert meta["elapsed_ms"] == 250
+
+
+def test_orats_numeric_updated_at_max_and_bool_nan_ignored(tmp_path, orats_key):
+    mixed = [{"updatedAt": "1700000000"}, {"updatedAt": 1700000100}, {"updatedAt": 1700000050.5}]
+    rc = finality_probe.capture(_ns(tmp_path, label="L1"), http_get=_fake_get(_body(mixed)), now=_at(3))
+    assert rc == 0
+    meta = json.loads((tmp_path / "2024-01-02" / "L1" / "orats__hist.strikes__SPY.meta.json").read_text())
+    assert meta["max_updated_at"] == 1700000100
+
+    junk = [{"updatedAt": True}, {"updatedAt": float("nan")}, {"updatedAt": "garbage"}]
+    rc = finality_probe.capture(_ns(tmp_path, label="L2"), http_get=_fake_get(_body(junk)), now=_at(4))
+    assert rc == 0
+    meta = json.loads((tmp_path / "2024-01-02" / "L2" / "orats__hist.strikes__SPY.meta.json").read_text())
+    assert meta["max_updated_at"] is None
+
+
+def test_header_secret_leak_refuses_and_sensitive_headers_dropped(tmp_path, orats_key, capsys):
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path), http_get=_fake_get(headers={"x-echo": SENTINEL}))
+    assert exc.value.code == 2
+    assert "refusing to write provider record containing API key" in capsys.readouterr().err
+    unit = tmp_path / "2024-01-02" / "L1"
+    assert not list(unit.glob("*.body")) and not list(unit.glob("*.meta.json"))
+
+    hdrs = {"content-type": "application/json", "Set-Cookie": "id=1",
+            "Authorization": "Bearer arbitrary", "x-echo": "fine"}
+    rc = finality_probe.capture(_ns(tmp_path, label="L2"), http_get=_fake_get(headers=hdrs), now=_at(4))
+    assert rc == 0
+    meta = json.loads((tmp_path / "2024-01-02" / "L2" / "orats__hist.strikes__SPY.meta.json").read_text())
+    assert "set-cookie" not in meta["headers"]
+    assert "authorization" not in meta["headers"]
+    assert meta["headers"]["content-type"] == "application/json"
+    assert meta["headers"]["x-echo"] == "fine"
+
+
+def test_header_tracking_last_modified_yes(tmp_path, orats_key, capsys):
+    a = _body()
+    b = _body([{"updatedAt": "1700000000", "strike": 999}, {"updatedAt": "1700000100", "strike": 101}])
+    finality_probe.capture(_ns(tmp_path, label="L1"), http_get=_fake_get(a, {"last-modified": "l1"}), now=_at(3))
+    finality_probe.capture(_ns(tmp_path, label="L2"), http_get=_fake_get(b, {"last-modified": "l2"}), now=_at(4))
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    block = _group_block(out, "2024-01-02 orats hist/strikes SPY page=None")
+    assert "last-modified=yes" in block
+    assert "- header last-modified: header tracks content" in out
