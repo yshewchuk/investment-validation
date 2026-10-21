@@ -104,7 +104,12 @@ def test_inclusive_boundaries_ticker_isolation_and_full_group_oracle(tmp_path, m
                 {"event_id": rolling["event_id"], "reasons": ["rolling"]}],
             "evaluation_event_ids": sorted([held["event_id"], right["event_id"]]),
             "coverage": {"development_groups": 7, "retained_groups": 3, "excluded_groups": 4, "evaluation_groups": 2}}
-        assert result == {**expected, "plan_id": content_hash(expected)}
+        expected = {**expected, "plan_id": content_hash(expected)}
+        assert result == expected
+        corrupted = deepcopy(result)
+        corrupted["coverage"]["retained_groups"] += 1
+        with pytest.raises(AssertionError):
+            assert corrupted == expected
         assert result == plan(repository, snapshot, groups, evaluation=[right["event_id"], held["event_id"]])
         assert groups == saved and conn.total_changes == changes
         result["groups"][0]["forecasts"].clear()
@@ -117,9 +122,13 @@ def test_inclusive_boundaries_ticker_isolation_and_full_group_oracle(tmp_path, m
 
 def test_policy_literal_identity_and_no_default():
     policy = eligibility.eligibility_policy(version=VERSION, embargo_days=30)
-    assert policy == {"schema_version": VERSION, "embargo_days": 30, "endpoints": "inclusive",
+    expected = {"schema_version": VERSION, "embargo_days": 30, "endpoints": "inclusive",
         "group_key": "event_id", "window_key": "ticker", "applies_to": "development",
         "evaluation": "preserve_membership", "policy_id": "sha256:dff629fde866872115a22f90305909b9f7176451439a3cc8f27e3e884c22376c"}
+    assert policy == expected
+    corrupted = {**policy, "embargo_days": 31}
+    with pytest.raises(AssertionError):
+        assert corrupted == expected
     with pytest.raises(TypeError):
         eligibility.eligibility_policy(version=VERSION)
 
@@ -425,6 +434,8 @@ def test_public_metadata_helpers_detach_and_refuse_invalid_contracts(tmp_path, m
             expected[name] = saved[name]
         pd.testing.assert_frame_equal(canonical, expected, check_like=True)
         canonical.loc[0, "ticker"] = "changed"
+        with pytest.raises(AssertionError):
+            pd.testing.assert_frame_equal(canonical, expected, check_like=True)
         pd.testing.assert_frame_equal(events, saved)
         for invalid in (None, replace(snapshot, snapshot_id=[]), replace(snapshot, snapshot_id=" ")):
             with refuses("SNAPSHOT_UNRESOLVED", "an exact native snapshot reference is required"):
@@ -584,5 +595,59 @@ def test_malformed_classifier_values_refuse_without_builtin_exception(tmp_path, 
         frame["event_id"] = pd.Series([["not", "scalar"]], dtype=object)
         with refuses("CONTRACT_MISMATCH", "canonical event metadata values are malformed"):
             eligibility.classify_events(frame, snapshot, as_of_month=MONTH)
+    finally:
+        conn.close()
+
+
+def test_supplied_metadata_nested_forecasts_detach_and_admissions_are_counted(tmp_path, monkeypatch):
+    event = history_event("2024-06-14")
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [event])
+    try:
+        policy = eligibility.eligibility_policy(version=VERSION, embargo_days=30)
+        metadata = seal(snapshot, policy, [group(event)])
+        saved = deepcopy(metadata)
+        resolved = []
+        original = repository.resolve
+        def resolve(key):
+            resolved.append(key)
+            return original(key)
+        monkeypatch.setattr(repository, "resolve", resolve)
+        result = eligibility.plan_eligibility(repository, snapshot, as_of_month=MONTH,
+            policy=policy, metadata=metadata, evaluation_event_ids=[])
+        assert result["groups"] == saved["groups"]
+        # Two public admissions plus this fixture's population-bound and scan validation.
+        assert resolved == [snapshot.snapshot_id] * 4
+        result["groups"][0]["forecasts"][0]["decision_date"] = "changed-output"
+        assert metadata == saved
+        metadata["groups"][0]["forecasts"][1]["source_session_ceiling"] = "changed-input"
+        assert result["groups"][0]["forecasts"][1] == saved["groups"][0]["forecasts"][1]
+    finally:
+        conn.close()
+
+
+def test_protected_window_merge_reports_bounded_progress(tmp_path, monkeypatch, capsys):
+    from itertools import count
+
+    held = [history_event(day, protected=True) for day in ("2024-06-14", "2024-07-01", "2024-11-01")]
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, held)
+    try:
+        real_progress = eligibility.progress.Progress
+        meters = []
+        def meter(name, total):
+            clock = count(0, 11)
+            value = real_progress(name, total, clock=lambda: next(clock))
+            meters.append(value)
+            return value
+        monkeypatch.setattr(eligibility.progress, "Progress", meter)
+        result = plan(repository, snapshot, [])
+        assert result["random_windows"] == [
+            {"ticker": "SYNTH", "start": "2024-05-15", "end": "2024-07-31"},
+            {"ticker": "SYNTH", "start": "2024-10-02", "end": "2024-12-01"}]
+        merging = [m for m in meters if m.name == "eligibility window merge"]
+        assert len(merging) == 1
+        assert (merging[0].total, merging[0].done, merging[0].lines) == (3, 3, 1)
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "[eligibility window merge] 3/3, 33s elapsed" in captured.err
     finally:
         conn.close()

@@ -26,9 +26,11 @@ write path.
 ## Responsibilities
 
 - Pure analysis cores moved verbatim from the legacy research tools.
-- One `resolve_pinned`/`resolve` call per run, with the resulting
-  `snapshot_id` threaded through every read and into the output, including
-  the experiment loader's explicit holdout context columns.
+- One pinned snapshot identity per run, threaded through every read and output,
+  including the experiment loader's explicit holdout context columns. Public
+  readers may revalidate that identity: the eligibility planner resolves it at
+  admission and again at the independently callable canonical reader boundary;
+  repository scan planning/validation also resolves the pinned identity.
 - Plan and price events against one resolved `SnapshotRef`, at a grid of fill
   alphas, with the same arithmetic the legacy replay uses.
 - Publish replay output as the `trades` table through the generic incremental
@@ -298,7 +300,6 @@ per horizon with `horizon_sessions`, `decision_date`, `source_session_ceiling`.
 Dates are canonical ISO calendar days. Producers must establish these bounds;
 missing bounds refuse. A caller's digest is not evidence of their truth.
 
-This is a metadata foundation only: no current runner uses it. Future consumers
-must bind and apply the same plan before imputation, scaling, feature selection,
-calibration and fitting, including comparison baselines. Evaluation IDs are
-preserved, not authorized for reading. Existing v1 behavior is unchanged.
+This is a metadata foundation only: no current runner uses it. Evaluation IDs
+are preserved, not authorized for reading. Existing v1 behavior is unchanged.
+Integration sequencing belongs to the [stage-2 design](../../../experiments/SUPER_SIZE/STAGE2_DESIGN.md).

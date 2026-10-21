@@ -110,6 +110,7 @@ def _windows(events, labels, width, ambiguous):
                 by_ticker.setdefault(event.ticker, []).append((day - delta, day + delta))
             meter.tick()
         merged = {}
+        merging = progress.Progress("eligibility window merge", sum(map(len, by_ticker.values())))
         for ticker, intervals in sorted(by_ticker.items()):
             union = []
             for start, end in sorted(intervals):
@@ -117,6 +118,7 @@ def _windows(events, labels, width, ambiguous):
                     union[-1] = (union[-1][0], max(end, union[-1][1]))
                 else:
                     union.append((start, end))
+                merging.tick()
             merged[ticker] = union
         return merged
     except (TypeError, ValueError, OverflowError):
