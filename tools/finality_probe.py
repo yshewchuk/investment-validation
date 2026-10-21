@@ -1,4 +1,5 @@
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -9,7 +10,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote, quote_plus, urlencode
+from urllib.parse import parse_qsl, quote, quote_plus, urlencode, urlparse
 
 DEFAULT_ORATS_ENDPOINTS = "hist/strikes,hist/summaries"
 ORATS_BASE = "https://api.orats.io/datav2/"
@@ -21,6 +22,8 @@ MAX_MASSIVE_PAGES = 20
 REQUEST_TIMEOUT_S = 30
 MAX_META_BYTES = 1024 * 1024
 MAX_BODY_BYTES = 64 * 1024 * 1024
+HASH_POLICY = "rows-sorted-canonical-json-v1"
+OPEN_RO_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 SESSION_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 TICKER_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -97,21 +100,26 @@ def _atomic_write(path, data):
         raise
 
 
-def _drop_keys(obj, keys):
-    if not keys: return obj
-    if isinstance(obj, dict): return {k: _drop_keys(v, keys) for k, v in obj.items() if k not in keys}
-    if isinstance(obj, list): return [_drop_keys(v, keys) for v in obj]
-    return obj
-
-
 def _canon(obj):
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def _content_sha256(rows, ignore_keys):
-    cleaned = [_drop_keys(r, ignore_keys) for r in rows]
-    order = sorted(range(len(cleaned)), key=lambda i: _canon(cleaned[i]))
-    return hashlib.sha256(_canon([cleaned[i] for i in order]).encode("utf-8")).hexdigest()
+def _content_sha256(rows):
+    order = sorted(range(len(rows)), key=lambda i: _canon(rows[i]))
+    return hashlib.sha256(_canon([rows[i] for i in order]).encode("utf-8")).hexdigest()
+
+
+def _content_digest(provider, body):
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return None, None
+    if not isinstance(parsed, dict):
+        return None, None
+    rows = parsed.get("data" if provider == "orats" else "results")
+    if not isinstance(rows, list):
+        rows = []
+    return _content_sha256(rows), len(rows)
 
 
 def _max_updated_orats(rows):
@@ -120,7 +128,12 @@ def _max_updated_orats(rows):
 
 
 def _massive_next_ok(url):
-    return isinstance(url, str) and url.startswith("https://") and url.startswith(MASSIVE_ORIGIN)
+    if not (isinstance(url, str) and url.startswith("https://") and url.startswith(MASSIVE_ORIGIN)):
+        return False
+    u = urlparse(url)
+    if not u.path.startswith("/v3/snapshot/options/"):
+        return False
+    return not any(k.lower() == "apikey" for k, _ in parse_qsl(u.query, keep_blank_values=True))
 
 
 def _max_updated_massive(rows):
@@ -174,7 +187,6 @@ def capture(args_ns, http_get=None, now=None):
     for e in endpoints:
         if not ENDPOINT_RE.match(e) or ".." in e: _fail(f"invalid ORATS endpoint {e!r}", 2)
     want_massive = bool(getattr(args_ns, "massive", False))
-    ignore_keys = [k.strip() for k in (getattr(args_ns, "ignore_keys", "") or "").split(",") if k.strip()]
     orats_key = os.environ.get("ORATS_API_KEY") or ""
     massive_key = os.environ.get("MASSIVE_API_KEY") or ""
     if endpoints and not orats_key: _fail("missing ORATS_API_KEY", 2)
@@ -224,7 +236,7 @@ def capture(args_ns, http_get=None, now=None):
             if not isinstance(rows, list): rows = []
             row_count = len(rows)
             max_updated_at = _max_updated_orats(rows) if provider == "orats" else _max_updated_massive(rows)
-            content_sha = _content_sha256(rows, ignore_keys)
+            content_sha = _content_sha256(rows)
         truncated = False
         if provider == "massive":
             nu = parsed.get("next_url") if isinstance(parsed, dict) else None
@@ -242,7 +254,7 @@ def capture(args_ns, http_get=None, now=None):
             "ok": ok, "fetched_at_utc": now().isoformat(), "elapsed_ms": elapsed_ms,
             "headers": headers, "body_sha256": hashlib.sha256(body).hexdigest(),
             "body_bytes": len(body), "row_count": row_count, "max_updated_at": max_updated_at,
-            "content_sha256": content_sha,
+            "content_sha256": content_sha, "hash_policy": HASH_POLICY,
         }
         if truncated: meta["truncated"] = True
         if error is not None: meta["error"] = error
@@ -259,7 +271,7 @@ def capture(args_ns, http_get=None, now=None):
         print(f"{label} {provider} {ticker} status={status} rows={row_count} max_updated_at={max_updated_at} content={c12}")
         if total % 10 == 0:
             _progress(total, None if provider == "massive" or orats_planned == 0 else orats_planned)
-        return parsed
+        return parsed, ok
 
     for endpoint in endpoints:
         for ticker in tickers:
@@ -268,18 +280,31 @@ def capture(args_ns, http_get=None, now=None):
             req = {"url": url, "params": params, "headers": {"Accept-Encoding": "identity"}, "timeout": REQUEST_TIMEOUT_S}
             store("orats", endpoint, ticker, None, req, _redacted_url(url, params), orats_key)
     if want_massive:
-        for ticker in tickers:
-            for pattern in (f"massive__*__{ticker}__p*.body", f"massive__*__{ticker}__p*.meta.json"):
-                for stale in unit_dir.glob(pattern):
-                    stale.unlink()
+        n_tickers = len(tickers)
+        m_start = time.perf_counter()
+        for k, ticker in enumerate(tickers, 1):
             url, params = f"{MASSIVE_BASE}{ticker}", {"limit": "250"}
+            pages_stored = 0
+            ticker_ok = True
             for page in range(MAX_MASSIVE_PAGES):
                 req = {"url": url, "params": params, "headers": {"Accept-Encoding": "identity", "Authorization": f"Bearer {massive_key}"}, "timeout": REQUEST_TIMEOUT_S}
-                parsed = store("massive", MASSIVE_ENDPOINT, ticker, page, req, _redacted_url(url, params), massive_key)
+                parsed, page_ok = store("massive", MASSIVE_ENDPOINT, ticker, page, req, _redacted_url(url, params), massive_key)
+                pages_stored = page + 1
+                if not page_ok: ticker_ok = False
                 next_url = parsed.get("next_url") if isinstance(parsed, dict) else None
                 if not _massive_next_ok(next_url):
                     break
                 url, params = next_url, None
+            if ticker_ok and pages_stored:
+                last = pages_stored - 1
+                for pattern in (f"massive__*__{ticker}__p*.body", f"massive__*__{ticker}__p*.meta.json"):
+                    for stale in unit_dir.glob(pattern):
+                        m = re.search(r"__p(\d+)\.(?:body|meta\.json)$", stale.name)
+                        if m and int(m.group(1)) > last:
+                            stale.unlink()
+            el = time.perf_counter() - m_start
+            eta = int(el / k * (n_tickers - k))
+            print(f"[capture] massive ticker {k}/{n_tickers} pages={pages_stored} elapsed={int(el)}s eta={eta}s", file=sys.stderr)
     _progress(total, None if saw_massive or orats_planned == 0 else orats_planned)
     el = time.perf_counter() - t_start
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
@@ -330,48 +355,74 @@ def _skip(name, reason):
     return None
 
 
-def _body_matches(meta_path, meta):
+def _open_ro(path):
+    return os.open(path, OPEN_RO_FLAGS)
+
+
+def _verified_body(meta_path, meta):
     name = meta_path.name
     if not name.endswith(".meta.json"):
-        return False
+        return None
     body_path = meta_path.with_name(name[: -len(".meta.json")] + ".body")
     try:
-        st = os.lstat(body_path)
+        fd = _open_ro(body_path)
     except OSError:
-        return False
-    if not stat.S_ISREG(st.st_mode):
-        return False
-    if st.st_size > MAX_BODY_BYTES:
-        return False
-    if meta.get("body_bytes") != st.st_size:
-        return False
+        return None
     try:
-        with open(body_path, "rb") as fh:
-            data = fh.read(MAX_BODY_BYTES + 1)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        if st.st_size > MAX_BODY_BYTES:
+            return None
+        if meta.get("body_bytes") != st.st_size:
+            return None
+        data = b""
+        while len(data) <= MAX_BODY_BYTES:
+            chunk = os.read(fd, min(65536, MAX_BODY_BYTES + 1 - len(data)))
+            if not chunk:
+                break
+            data += chunk
     except OSError:
-        return False
+        return None
+    finally:
+        os.close(fd)
     if len(data) != st.st_size:
-        return False
+        return None
     expected = meta.get("body_sha256")
-    return isinstance(expected, str) and hashlib.sha256(data).hexdigest() == expected
+    if not (isinstance(expected, str) and hashlib.sha256(data).hexdigest() == expected):
+        return None
+    return data
 
 
 def _read_meta(path):
     name = str(path)
     try:
-        st = os.lstat(path)
+        fd = _open_ro(path)
     except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            try:
+                if stat.S_ISLNK(os.lstat(path).st_mode):
+                    return _skip(name, "symlink")
+            except OSError:
+                pass
         return _skip(name, exc.strerror or exc)
-    if not stat.S_ISREG(st.st_mode):
-        reason = "symlink" if stat.S_ISLNK(st.st_mode) else "directory" if stat.S_ISDIR(st.st_mode) else "fifo" if stat.S_ISFIFO(st.st_mode) else "not a regular file"
-        return _skip(name, reason)
-    if st.st_size > MAX_META_BYTES:
-        return _skip(name, "larger than 1 MiB")
     try:
-        with open(path, "rb") as fh:
-            data = fh.read(MAX_META_BYTES + 1)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            reason = "directory" if stat.S_ISDIR(st.st_mode) else "fifo" if stat.S_ISFIFO(st.st_mode) else "not a regular file"
+            return _skip(name, reason)
+        if st.st_size > MAX_META_BYTES:
+            return _skip(name, "larger than 1 MiB")
+        data = b""
+        while len(data) <= MAX_META_BYTES:
+            chunk = os.read(fd, min(65536, MAX_META_BYTES + 1 - len(data)))
+            if not chunk:
+                break
+            data += chunk
     except OSError as exc:
         return _skip(name, exc.strerror or exc)
+    finally:
+        os.close(fd)
     if len(data) > MAX_META_BYTES:
         return _skip(name, "larger than 1 MiB")
     try:
@@ -380,17 +431,37 @@ def _read_meta(path):
         return _skip(name, f"invalid JSON: {exc}")
     if not isinstance(obj, dict):
         return _skip(name, "not a JSON object")
+    if obj.get("hash_policy") != HASH_POLICY:
+        return _skip(name, "hash policy mismatch")
     page = obj.get("page")
-    if page is not None and not isinstance(page, int):
+    if page is not None and (not isinstance(page, int) or isinstance(page, bool)):
         return _skip(name, "invalid page")
     if not isinstance(obj.get("label"), str):
         return _skip(name, "invalid label")
     if not isinstance(obj.get("session"), str):
         return _skip(name, "invalid session")
+    if not isinstance(obj.get("status"), int) or isinstance(obj.get("status"), bool):
+        return _skip(name, "invalid status")
+    row_count = obj.get("row_count")
+    if row_count is not None and (not isinstance(row_count, int) or isinstance(row_count, bool)):
+        return _skip(name, "invalid row_count")
+    fetched = obj.get("fetched_at_utc")
+    if not isinstance(fetched, str) or _ts(fetched) is None:
+        return _skip(name, "invalid fetched_at_utc")
+    if "ok" in obj and not isinstance(obj["ok"], bool):
+        return _skip(name, "invalid ok")
+    if not isinstance(obj.get("body_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", obj.get("body_sha256")):
+        return _skip(name, "invalid body_sha256")
+    if not isinstance(obj.get("body_bytes"), int) or isinstance(obj.get("body_bytes"), bool):
+        return _skip(name, "invalid body_bytes")
     if not isinstance(obj.get("headers"), dict):
         obj["headers"] = {}
-    if not _body_matches(Path(path), obj):
+    body = _verified_body(Path(path), obj)
+    if body is None:
         return _skip(name, "body mismatch")
+    sha, n_rows = _content_digest(obj.get("provider"), body)
+    if sha != obj.get("content_sha256") or n_rows != obj.get("row_count"):
+        return _skip(name, "content digest mismatch")
     return obj
 
 
@@ -498,7 +569,6 @@ def build_parser():
     cap.add_argument("--out", required=True)
     cap.add_argument("--orats-endpoints", default=DEFAULT_ORATS_ENDPOINTS)
     cap.add_argument("--massive", action="store_true")
-    cap.add_argument("--ignore-keys", default="")
     cmp_ = sub.add_parser("compare")
     cmp_.add_argument("--out", required=True)
     cmp_.add_argument("--session", default=None)

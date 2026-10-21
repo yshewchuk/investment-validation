@@ -18,7 +18,7 @@ So the native side has nothing to reuse. If the probe supports a rule, the rule 
 
 A refetch at T+X whose content hash equals the fetch at T, with max(`updatedAt`) at T earlier than T, counts as final at T.
 
-Terms: content hash is the sha256 of the response rows sorted canonically, so row order does not count. Only metadata, never the bodies, goes into reports. For Massive, `max_updated_at` is the larger of `day.last_updated` and `last_quote.last_updated` over the results. Comparisons are per trade date, and only successful captures (HTTP 2xx with a JSON body) count; failed ones are listed as `excluded_not_ok`.
+Terms: content hash is the sha256 of the response rows sorted canonically (policy `rows-sorted-canonical-json-v1`; no field is excluded), so row order does not count. `compare` recomputes it from each stored body and skips captures whose digest or policy does not match. Only metadata, never the bodies, goes into reports. For Massive, `max_updated_at` is the larger of `day.last_updated` and `last_quote.last_updated` over the results. Comparisons are per trade date, and only successful captures (HTTP 2xx with a JSON body) count; failed ones are listed as `excluded_not_ok`.
 
 ## Evidence that R is sufficient, or not
 

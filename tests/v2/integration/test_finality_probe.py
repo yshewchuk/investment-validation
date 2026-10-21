@@ -31,7 +31,7 @@ NEXT1 = "https://api.massive.com/v3/snapshot/options/SPY?cursor=1"
 
 def _ns(out, label="L1", session="2024-01-02", endpoints="hist/strikes", tickers="SPY", massive=False):
     return argparse.Namespace(session=session, tickers=tickers, label=label, out=str(out),
-                              orats_endpoints=endpoints, massive=massive, ignore_keys="")
+                              orats_endpoints=endpoints, massive=massive)
 
 
 def _body(rows=None):
@@ -425,7 +425,7 @@ def test_default_http_get_enforces_body_cap(monkeypatch):
             return None
 
     monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResp())
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="BodyTooLarge"):
         finality_probe._default_http_get({"url": "https://example.com/x"})
 
 
@@ -439,3 +439,89 @@ def test_massive_next_url_off_origin_stops_paging(tmp_path, massive_key):
     assert not list(unit.glob("*__p1.*"))
     m = json.loads((unit / "massive__v3.snapshot.options__SPY__p0.meta.json").read_text())
     assert m.get("truncated") is True and m["ok"] is False
+
+
+def test_compare_skips_tampered_content_digest(tmp_path, orats_key, capsys):
+    finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    meta_f = tmp_path / "2024-01-02" / "L1" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["content_sha256"] = "0" * 64
+    meta_f.write_text(json.dumps(m))
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "content digest mismatch" in captured.err
+    assert "- groups: 0" in captured.out
+
+
+def test_compare_skips_mismatched_hash_policy(tmp_path, orats_key, capsys):
+    finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    meta_f = tmp_path / "2024-01-02" / "L1" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    assert m["hash_policy"] == "rows-sorted-canonical-json-v1"
+    m["hash_policy"] = "rows-sorted-canonical-json-v0"
+    meta_f.write_text(json.dumps(m))
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "hash policy mismatch" in captured.err
+    assert "- groups: 0" in captured.out
+
+
+def test_compare_rejects_bool_page_and_string_status(tmp_path, orats_key, capsys):
+    finality_probe.capture(_ns(tmp_path, label="L1"), http_get=_fake_get(), now=_at(3))
+    finality_probe.capture(_ns(tmp_path, label="L2"), http_get=_fake_get(), now=_at(4))
+    unit = tmp_path / "2024-01-02"
+    meta_f = unit / "L1" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["page"] = True
+    meta_f.write_text(json.dumps(m))
+    meta_f = unit / "L2" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["status"] = "200"
+    meta_f.write_text(json.dumps(m))
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "invalid page" in captured.err
+    assert "invalid status" in captured.err
+    assert "- groups: 0" in captured.out
+
+
+def test_massive_failed_rerun_keeps_prior_pages(tmp_path, massive_key):
+    p0 = _mbody(MROWS, NEXT1)
+    p1 = _mbody([{"day": {"last_updated": 1700000300}, "strike": 102}])
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=_mk_get(p0, p1), now=_at(3))
+    assert rc == 0
+    unit = tmp_path / "2024-01-02" / "L1"
+    p1_body = unit / "massive__v3.snapshot.options__SPY__p1.body"
+    p1_meta = unit / "massive__v3.snapshot.options__SPY__p1.meta.json"
+    prior_body, prior_meta = p1_body.read_bytes(), p1_meta.read_bytes()
+
+    def boom(req):
+        raise RuntimeError("fetch failed")
+
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=boom, now=_at(4))
+    assert rc == 1
+    assert p1_body.is_file() and p1_body.read_bytes() == prior_body
+    assert p1_meta.is_file() and p1_meta.read_bytes() == prior_meta
+    m0 = json.loads((unit / "massive__v3.snapshot.options__SPY__p0.meta.json").read_text())
+    assert m0.get("error") == "RuntimeError" and m0["ok"] is False
+
+
+def test_massive_next_url_bad_path_or_api_key_marks_truncated(tmp_path, massive_key):
+    cases = ("https://api.massive.com/other?cursor=1",
+             "https://api.massive.com/v3/snapshot/options/SPY?apiKey=x")
+    for i, nu in enumerate(cases):
+        label = f"L{i}"
+
+        def http_get(req, nu=nu):
+            return 200, {"content-type": "application/json"}, _mbody(MROWS, nu)
+
+        rc = finality_probe.capture(_ns(tmp_path, label=label, endpoints="", massive=True),
+                                    http_get=http_get, now=_at(3 + i))
+        assert rc == 1
+        unit = tmp_path / "2024-01-02" / label
+        assert not list(unit.glob("*__p1.*"))
+        m = json.loads((unit / "massive__v3.snapshot.options__SPY__p0.meta.json").read_text())
+        assert m.get("truncated") is True and m["ok"] is False
