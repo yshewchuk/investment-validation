@@ -14,7 +14,7 @@ import pytest
 
 from checks.repo_hygiene import Report, check_path_policy
 from engine.v2.ops.errors import OpsError
-from experiments import lib
+from experiments import lib, record_export
 from experiments.record_export import (
     MAX_JSON_BYTES,
     export_native_run,
@@ -299,7 +299,7 @@ def test_export_native_run_independent_oracle(tmp_path):
         saved,
         exp_number=101,
         replayed=True,
-        started=time.monotonic(),
+        started=time.monotonic() - 5.0,
     )
     folder = Path(result["dir"])
     outcome = json.loads((folder / "results" / "outcome.json").read_bytes())
@@ -311,16 +311,17 @@ def test_export_native_run_independent_oracle(tmp_path):
     ).hexdigest()
     assert outcome["source_closure_hash"] == expected_hash
     assert outcome["environment"] == {"python": "3"}
-    assert isinstance(outcome["elapsed_seconds"], (int, float))
-    assert outcome["elapsed_seconds"] >= 0
-    assert isinstance(outcome["peak_rss_kb"], int)
-    assert outcome["peak_rss_kb"] > 0
-    commit = outcome["commit_id"]
-    assert commit is None or (
-        isinstance(commit, str)
-        and len(commit) == 40
-        and all(c in "0123456789abcdef" for c in commit)
+    assert outcome["elapsed_seconds"] >= 5.0
+    assert outcome["peak_rss_kb"] > 1000
+    proc = subprocess.run(
+        ["git", "-C", str(Path(__file__).resolve().parents[3]), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
     )
+    if proc.returncode == 0:
+        assert outcome["commit_id"] == proc.stdout.strip()
+    else:
+        assert outcome["commit_id"] is None
     event_ids = json.loads((folder / "results" / "event_ids.json").read_bytes())
     assert event_ids == ["a", "b"]
 
@@ -380,7 +381,12 @@ def test_large_report_is_truncated_and_replay_unchanged(tmp_path):
     report_md = folder / "REPORT.md"
     assert first["status"] == "written"
     assert report_md.stat().st_size <= MAX_JSON_BYTES
-    assert "[report truncated" in report_md.read_text()
+    report_md_text = report_md.read_text()
+    assert report_md_text.startswith("# EXP-101")
+    report_bytes = report.read_bytes()
+    report_prefix = report_bytes[:100].decode("utf-8", errors="ignore")
+    assert report_prefix in report_md_text
+    assert "[report truncated" in report_md_text
     second = export_native_run(
         tmp_path,
         registration,
@@ -393,6 +399,26 @@ def test_large_report_is_truncated_and_replay_unchanged(tmp_path):
         report_path=report,
     )
     assert second["status"] == "unchanged"
+
+
+def test_partial_write_leaves_manifestless_folder_and_retry_refuses(tmp_path, monkeypatch):
+    real_write_new = record_export._write_new
+    calls = {"n": 0}
+
+    def flaky_write_new(path, data):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise OSError("simulated partial write")
+        return real_write_new(path, data)
+
+    monkeypatch.setattr(record_export, "_write_new", flaky_write_new)
+    with pytest.raises(OSError):
+        _export(tmp_path, exp_number=101, experiment_id="x")
+    assert not (tmp_path / "EXP-101_x" / "results" / "export_manifest.json").exists()
+    monkeypatch.setattr(record_export, "_write_new", real_write_new)
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path, exp_number=101, experiment_id="x")
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_manifest_number_mismatch_is_identity_conflict(tmp_path):

@@ -94,7 +94,7 @@ def main(argv=None):
                 except (OpsError, OSError, ValueError):
                     print(json.dumps({"refused": "record_export_failed"}))
                     return 2
-            print(json.dumps({"refused": saved["outcome"]["failure_code"], "replayed": True,
+            print(json.dumps({"refused": saved["outcome"]["failure_code"], "replayed": replayed,
                               "record_export": record}))
             return 2
         path = outcomes.export_native_report(conn, store, registration, **recording)
