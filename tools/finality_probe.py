@@ -634,7 +634,7 @@ def _read_meta(path, session_dir, label_dir):
         return _skip(name, "identity does not match filename")
     if obj.get("provider") == "orats" and page is not None:
         return _skip(name, "invalid page")
-    if obj.get("provider") == "massive" and (page is None or page < 0):
+    if obj.get("provider") == "massive" and (page is None or page < 0 or page >= MAX_MASSIVE_PAGES):
         return _skip(name, "invalid page")
     if obj.get("label") != label_dir:
         return _skip(name, "label mismatch")
@@ -701,6 +701,8 @@ def _composite(key, pages):
     complete = (nums == list(range(n))
                 and not last.get("has_next")
                 and not last.get("truncated")
+                and n <= MAX_MASSIVE_PAGES
+                and all(r.get("has_next") for r in ordered[:-1])
                 and all(_meta_ok(r) for r in ordered)
                 and len(runs) == 1
                 and ordered[0].get("run_id") is not None)

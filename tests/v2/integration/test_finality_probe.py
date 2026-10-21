@@ -1271,6 +1271,7 @@ def test_default_http_get_kwargs_close_and_success(monkeypatch):
     assert calls["kwargs"]["params"] == {"ticker": "SPY", "tradeDate": "2024-01-02", "token": SENTINEL}
     timeout = calls["kwargs"]["timeout"]
     assert isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
+    assert timeout > 0
     assert timeout <= 60
     assert calls["kwargs"]["allow_redirects"] is False
     assert calls["kwargs"]["stream"] is True
@@ -1486,3 +1487,46 @@ def test_post_lock_label_recheck_removes_lock(tmp_path, orats_key, monkeypatch, 
     assert exc.value.code == 2
     assert "label already captured; pass --replace to invalidate the prior capture" in capsys.readouterr().err
     assert not (unit / ".capture.lock").exists()
+
+
+def _page_rec(i, has_next, run="r1", sha=None):
+    return {"page": i, "run_id": run, "has_next": has_next, "truncated": False, "ok": True,
+            "status": 200, "content_sha256": sha or f"{i:064x}", "row_count": 1,
+            "max_updated_at": 1700000000 + i, "fetched_at_utc": "2024-01-02T21:00:00Z", "headers": {}}
+
+
+KEY = ("2024-01-02", "massive", "v3.snapshot.options", "SPY", "L1")
+
+
+def test_composite_complete_and_sha_oracle():
+    import hashlib
+    recs = [_page_rec(0, True), _page_rec(1, True), _page_rec(2, False)]
+    comp = finality_probe._composite(KEY, recs)
+    expected = hashlib.sha256("|".join(f"{i}:{i:064x}" for i in range(3)).encode()).hexdigest()
+    assert comp["ok"] is True
+    assert comp["content_sha256"] == expected
+    assert comp["row_count"] == 3 and comp["max_updated_at"] == 1700000002 and comp["pages"] == 3
+
+
+def test_composite_rejects_page_beyond_cap_and_missing_continuation():
+    n = finality_probe.MAX_MASSIVE_PAGES
+    full = [_page_rec(i, i < n - 1) for i in range(n)]
+    assert finality_probe._composite(KEY, full)["ok"] is True
+    extra = full[:-1] + [_page_rec(n - 1, True), _page_rec(n, False)]
+    assert finality_probe._composite(KEY, extra)["ok"] is False
+    mid_no_next = [_page_rec(0, True), _page_rec(1, False), _page_rec(2, False)]
+    assert finality_probe._composite(KEY, mid_no_next)["ok"] is False
+    mixed_run = [_page_rec(0, True), _page_rec(1, False, run="r2")]
+    assert finality_probe._composite(KEY, mixed_run)["ok"] is False
+
+
+def test_header_tracking_missing_etag_not_tracking(tmp_path, orats_key, capsys):
+    a = _body()
+    b = _body([{"updatedAt": "1700000000", "strike": 999}, {"updatedAt": "1700000100", "strike": 101}])
+    finality_probe.capture(_ns(tmp_path, label="L1", tickers="SPY"), http_get=_fake_get(a, {"etag": "e1"}), now=_at(3))
+    finality_probe.capture(_ns(tmp_path, label="L2", tickers="SPY"), http_get=_fake_get(b), now=_at(4))
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    block = _group_block(out, "2024-01-02 orats hist/strikes SPY page=None")
+    assert "- header_tracking: etag=yes" not in block
