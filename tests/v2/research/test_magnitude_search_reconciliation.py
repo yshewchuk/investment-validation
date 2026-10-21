@@ -274,7 +274,7 @@ def test_valid_hash_mutations_cannot_authorize_reconciliation(native, monkeypatc
             elif slot == "inputs":
                 body["inputs_id"] = "wrong"
             else:
-                body["training"][0]["absolute_move_pct"] = 99.0
+                body["sections"]["training"]["row_count"] = 99
         persisted = append(name, body, **kwargs)
         return original_body if slot == "validation" else persisted
 

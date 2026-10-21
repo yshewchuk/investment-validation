@@ -30,7 +30,7 @@ from experiments.magnitude_search_execution import (
     run_fitted_trial,
     validate_execution_limits,
 )
-from experiments.magnitude_search_inputs import load_inputs
+from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import read_search_plan
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 
@@ -118,7 +118,7 @@ class SearchTrials:
         """Admit each cohort once per instance; failures are never memoised."""
         if cohort not in self._memo:
             inputs = self._inputs(inner)
-            self._memo[cohort] = (inputs, content_hash(inputs))
+            self._memo[cohort] = inputs
         return self._memo[cohort]
 
     def _cohort(self, admitted):
@@ -148,8 +148,10 @@ class SearchTrials:
         if execution is not None:
             self._append("execution-start:" + key, execution, replay=False)
         cohort = content_hash([plan["plan_id"], outer_year, inner_year])
-        inputs, inputs_id = self._cohort_inputs(cohort, inner)
-        self._append("cohort:" + cohort, inputs)
+        inputs = self._cohort_inputs(cohort, inner)
+        # Shards first (outside the catalog transaction); the manifest append is the commit point.
+        manifest, inputs_id = publish_inputs(self.store, inputs)
+        self._append("cohort:" + cohort, manifest)
         self._append("inputs:" + key, {"cohort": cohort, "inputs_id": inputs_id})
         # Callers may mutate their copy; the memo stays private.
         return {**started, "inputs": copy.deepcopy(inputs)}
@@ -362,7 +364,7 @@ class SearchTrials:
                 stored = self._cohort(admitted)
             except ValueError:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start") from None
-            if canonical_json(self._cohort_inputs(admitted["cohort"], inner)[0]) != canonical_json(stored):
+            if canonical_json(self._cohort_inputs(admitted["cohort"], inner)) != canonical_json(stored):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start")
             binding = self.registration.document
             labels = load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),
