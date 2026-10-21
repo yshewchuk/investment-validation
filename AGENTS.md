@@ -33,4 +33,5 @@
 
 ## Conventions
 
+- Gate reviewers and owners apply `ARCHITECTURE.md` §6, "Performance review: repeated work and safe reuse," alongside correctness review. Use its caller/evidence, safe-reuse and scope criteria; retain the existing gate tiers and owner workflow.
 - Progress logging: new or changed long-running code (loops over events, tickers, rows or files; jobs, CLIs and nightly steps expected to run more than about a minute) logs to stderr at a bounded cadence, never per item: stage start and end with elapsed time; periodic done/total, rate and ETA (style of the nightly scorer's `[score] N/M events, ... ETA`); main control decisions (branch taken, items skipped or refused and why, batch sizes); RSS at stage boundaries. stdout stays for machine-readable results. This is the minimum for new code; the stricter operating guidance in `guides/README.md` (a line per minute on any job over 3-4 seconds) still applies to ad-hoc runs. The merge gate checks this (probe P19), rated by consequence.
