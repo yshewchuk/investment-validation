@@ -31,10 +31,13 @@ def test_performance_guide_is_loaded_and_referenced():
     assert "(docs/performance_review.md)" in read_policy(ROOT / "AGENTS.md")
     guide = " ".join(read_policy(ROOT / "docs/performance_review.md").split())
     for criterion in (
+        "its caller/loop and plausible input size or call count before raising a finding",
         "repeated full-inventory scans or identical pinned reads",
         "holiday calendars; repeated sorting, JSON normalization or array conversion",
         "not permission to skip fresh integrity checks on later replay or recovery calls",
         "verify actual immutable identity, not just a caller-declared hash",
+        "separate snapshots, sessions and requests as required",
+        "Check entry/byte bounds, retained-object memory, mutation safety, eviction and concurrency",
         "cold-start validation/allocation costs and realistic reuse frequency",
         "not extrapolate a helper speedup into a whole-nightly or whole-experiment claim",
         "Performance is not a blanket reason to block a PR",
@@ -45,8 +48,10 @@ def test_performance_guide_is_loaded_and_referenced():
 
 def test_policy_reader_accepts_limit_and_refuses_larger_input(tmp_path):
     policy = tmp_path / "policy.md"
-    policy.write_bytes(b"a" * POLICY_LIMIT)
-    assert read_policy(policy) == "a" * POLICY_LIMIT
+    payload = ("aéZ\n".encode("utf-8") * (POLICY_LIMIT // 5)
+               + b"!" * (POLICY_LIMIT % 5))
+    policy.write_bytes(payload)
+    assert read_policy(policy) == payload.decode("utf-8")
     with policy.open("ab") as stream:
         stream.write(b"b")
     with pytest.raises(AssertionError, match="policy test input exceeds 262144 bytes"):
