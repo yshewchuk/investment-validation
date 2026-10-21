@@ -1,5 +1,6 @@
 """Real pipe protocol, resource isolation and cleanup controls for the fixed child."""
 import json
+import shutil
 import signal
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import pytest
 
 from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_execution as execution
+from tests.v2.research.magnitude_search_fit_source import fit_source
 from tests.v2.research.test_magnitude_search_execution import LIMITS
 
 STUB_SOURCE = {"manifest": {"stub": True}, "inputs_id": "sha256:" + "0" * 64, "store_root": "/nonexistent-store"}
@@ -256,6 +258,16 @@ def test_real_worker_accepts_a_header_of_exactly_the_cap(tmp_path):
 def test_real_worker_reports_a_loader_failure_as_unavailable(tmp_path):
     header = json.dumps({"manifest": {"stub": True}, "inputs_id": "sha256:" + "0" * 64,
                          "store_root": str(tmp_path), "inner": {"evaluation_event_ids": []},
+                         "plan": {"horizons": [1]}, "execution": {"features": []}}).encode()
+    result = _run_real_worker(header, tmp_path)
+    assert result == {"event": "unavailable"}
+
+
+def test_real_worker_reports_a_missing_shard_store_as_unavailable(tmp_path):
+    source = fit_source({"features": [], "training": [{"event_id": "a", "absolute_move_pct": 1.0}]},
+                        tmp_path / "store")
+    shutil.rmtree(tmp_path / "store" / "objects")
+    header = json.dumps({**source, "inner": {"evaluation_event_ids": []},
                          "plan": {"horizons": [1]}, "execution": {"features": []}}).encode()
     result = _run_real_worker(header, tmp_path)
     assert result == {"event": "unavailable"}

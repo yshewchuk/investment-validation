@@ -4,7 +4,7 @@ import copy
 import pytest
 
 from engine.v2.foundation import ArtifactStore, content_hash
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_inputs as inputs_module
 from experiments import magnitude_search_shards as shards
 from experiments.magnitude_search_inputs import load_fit_inputs, load_inputs, publish_inputs
@@ -185,10 +185,13 @@ def test_load_fit_inputs_refuses_a_wrong_id_a_v1_record_and_a_corrupt_shard(tmp_
     cohort, events = _fit_cohort(4)
     store = ArtifactStore(tmp_path)
     manifest, inputs_id = publish_inputs(store, cohort)
-    for record, expected in ((manifest, "sha256:" + "0" * 64), (cohort, content_hash(cohort))):
+    for record, expected, message in ((manifest, "sha256:" + "0" * 64,
+                                       "search cohort manifest differs from its binding"),
+                                      (cohort, content_hash(cohort),
+                                       "search cohort record is invalid")):
         with pytest.raises(OpsError) as caught:
             load_fit_inputs(store, record, expected, [], [1], ("x",))
-        assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", message).problem
     ref = manifest["sections"]["features"]["shards"][0]["ref"]
     path = store.root / ref["storage_key"]
     size = path.stat().st_size
@@ -196,7 +199,8 @@ def test_load_fit_inputs_refuses_a_wrong_id_a_v1_record_and_a_corrupt_shard(tmp_
     path.write_bytes(b"x" * size)
     with pytest.raises(OpsError) as caught:
         load_fit_inputs(store, manifest, inputs_id, [], [1], ("x",))
-    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem == fail(
+        "EXPERIMENT_IDENTITY_CONFLICT", "search cohort shard could not be read").problem
 
 
 def test_load_fit_inputs_refuses_inline_paths_that_collide_with_sections(tmp_path):
@@ -208,7 +212,8 @@ def test_load_fit_inputs_refuses_inline_paths_that_collide_with_sections(tmp_pat
         record_id = shards.manifest_id(record)
         with pytest.raises(OpsError) as caught:
             load_fit_inputs(store, record, record_id, [], [1], ("x",))
-        assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert caught.value.problem == fail(
+            "EXPERIMENT_IDENTITY_CONFLICT", "search cohort manifest does not fit its sections").problem
 
 
 def test_load_fit_inputs_reads_one_shard_at_a_time(tmp_path, monkeypatch):
@@ -240,3 +245,25 @@ def test_load_fit_inputs_reads_one_shard_at_a_time(tmp_path, monkeypatch):
     assert at_row == sorted(at_row)
     assert at_row[0] == len(manifest["sections"]["training"]["shards"]) + 1
     assert at_row[0] < at_row[-1]
+
+
+def test_load_fit_inputs_refuses_non_sequence_projection_arguments(tmp_path):
+    cohort, _ = _fit_cohort(2)
+    store = ArtifactStore(tmp_path)
+    manifest, inputs_id = publish_inputs(store, cohort)
+    for args in ((None, [1], ("x",)), ([], None, ("x",)), ([], [1], None)):
+        with pytest.raises(OpsError) as caught:
+            load_fit_inputs(store, manifest, inputs_id, *args)
+        assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC",
+                                            "search fit projection arguments are invalid").problem
+
+
+def test_load_fit_inputs_missing_requested_column_raises_keyerror(tmp_path):
+    cohort, _ = _fit_cohort(2)
+    store = ArtifactStore(tmp_path)
+    manifest, inputs_id = publish_inputs(store, cohort)
+    with pytest.raises(KeyError):
+        load_fit_inputs(store, manifest, inputs_id, [], [1], ("not_a_column",))
+    projected = load_fit_inputs(store, manifest, inputs_id, [], [1], ("y",))
+    assert projected["features"] and all(set(row) == {"event_id", "context_id", "horizon_sessions", "y"}
+                                         for row in projected["features"])

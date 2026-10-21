@@ -50,6 +50,20 @@ def _place(inputs, path, value):
     target[leaf] = value
 
 
+def _admit_manifest(record, expected_id):
+    """Verify a manifest record against its id and its section/inline shape; return its sections."""
+    verify_manifest(record, expected_id)
+    sections = record["sections"]
+    if set(sections) != {member["section"] for member in LIST_MEMBERS}:
+        raise fail(_CONFLICT, "search cohort manifest sections are invalid")
+    shape = {}
+    for path, value in record["inline"].items():
+        _place(shape, path, value)
+    for member in LIST_MEMBERS:
+        _place(shape, member["section"], None)
+    return sections
+
+
 def load_inputs(store, record, expected_id):
     """Return the cohort inputs of a stored record, bound to ``expected_id``.
 
@@ -64,10 +78,7 @@ def load_inputs(store, record, expected_id):
         if content_hash(record) != expected_id:
             raise fail(_CONFLICT, "search cohort differs from its binding")
         return record
-    verify_manifest(record, expected_id)
-    sections = record["sections"]
-    if set(sections) != {member["section"] for member in LIST_MEMBERS}:
-        raise fail(_CONFLICT, "search cohort manifest sections are invalid")
+    sections = _admit_manifest(record, expected_id)
     inputs = {}
     for path, value in record["inline"].items():
         _place(inputs, path, value)
@@ -86,19 +97,15 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
     *feature_columns), in stored order. A manifest, hash, shard or inline-path mismatch is
     EXPERIMENT_IDENTITY_CONFLICT (retryable store errors propagate); a row missing a
     requested column raises KeyError, and the fit child reports any loader failure as
-    unavailable. Inline paths are admitted with the same shape check as ``load_inputs``.
+    unavailable. Both loaders share ``_admit_manifest``; projection arguments must be
+    lists or tuples (INVALID_EXPERIMENT_SPEC otherwise).
     """
     if not isinstance(manifest, dict) or manifest.get("schema_version") != MANIFEST_SCHEMA:
         raise fail(_CONFLICT, "search cohort record is invalid")
-    verify_manifest(manifest, expected_id)
-    sections = manifest["sections"]
-    if set(sections) != {member["section"] for member in LIST_MEMBERS}:
-        raise fail(_CONFLICT, "search cohort manifest sections are invalid")
-    shape = {}
-    for path, value in manifest["inline"].items():
-        _place(shape, path, value)
-    for member in LIST_MEMBERS:
-        _place(shape, member["section"], None)
+    if (not isinstance(evaluation_event_ids, (list, tuple)) or not isinstance(horizons, (list, tuple))
+            or not isinstance(feature_columns, (list, tuple))):
+        raise fail("INVALID_EXPERIMENT_SPEC", "search fit projection arguments are invalid")
+    sections = _admit_manifest(manifest, expected_id)
     members = {member["section"]: member for member in LIST_MEMBERS}
     training = [{name: row[name] for name in ("event_id", "absolute_move_pct")}
                 for row in _iter_rows(store, members["training"], sections["training"])]
