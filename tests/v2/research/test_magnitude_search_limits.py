@@ -217,3 +217,14 @@ def test_fixed_worker_observes_all_thread_and_resource_limits(monkeypatch, tmp_p
     assert actual["threads"] == dict.fromkeys(THREAD_VARIABLES, "1")
     assert actual["memory"] == [limits["memory_bytes"]] * 2
     assert actual["cpu"] == [limits["cpu_seconds"], limits["cpu_seconds"] + 1]
+
+
+@pytest.mark.parametrize("source", [None, {}, {"manifest": {}, "inputs_id": "x"},
+                                    {"manifest": {}, "inputs_id": "x", "store_root": "/s", "extra": 1}])
+def test_public_fit_helper_refuses_a_malformed_source_before_effects(monkeypatch, source):
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("bad source launched child"))
+    monkeypatch.setattr(execution.tempfile, "TemporaryDirectory", lambda *a, **k: pytest.fail("bad source made scratch"))
+    with pytest.raises(OpsError) as caught:
+        execution.run_fitted_trial(source, {}, {"horizons": []}, {}, {**LIMITS, "cpu_id": 0}, None)
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC",
+        "search execution requires an admitted cohort source").problem

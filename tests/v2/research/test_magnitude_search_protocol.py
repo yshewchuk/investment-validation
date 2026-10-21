@@ -230,13 +230,32 @@ def test_parent_affinity_oserror_is_typed(monkeypatch):
         "RESOURCE_UNAVAILABLE", "search execution requires Linux resource containment").problem
 
 
-def test_real_worker_refuses_an_oversized_header_as_resource_limit(tmp_path):
+def _run_real_worker(header_bytes, tmp_path):
+    """Run the real worker on ``header_bytes``; return its parsed stdout JSON."""
     header = tmp_path / "header.json"
-    header.write_bytes(b" " * (execution.MAX_BYTES + 1))
+    header.write_bytes(header_bytes)
     done = subprocess.run([sys.executable, "-m", "experiments.magnitude_search_worker", str(header),
                            json.dumps(execution.execution_limits(LIMITS))],
                           cwd=Path(execution.__file__).resolve().parents[1],
                           env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(Path(execution.__file__).resolve().parents[1])},
                           capture_output=True, timeout=120)
     assert done.returncode == 0
-    assert json.loads(done.stdout) == {"event": "resource_limit"}
+    return json.loads(done.stdout)
+
+
+def test_real_worker_refuses_an_oversized_header_as_resource_limit(tmp_path):
+    result = _run_real_worker(b" " * (execution.MAX_BYTES + 1), tmp_path)
+    assert result == {"event": "resource_limit"}
+
+
+def test_real_worker_accepts_a_header_of_exactly_the_cap(tmp_path):
+    result = _run_real_worker(b" " * execution.MAX_BYTES, tmp_path)
+    assert result == {"event": "unavailable"}
+
+
+def test_real_worker_reports_a_loader_failure_as_unavailable(tmp_path):
+    header = json.dumps({"manifest": {"stub": True}, "inputs_id": "sha256:" + "0" * 64,
+                         "store_root": str(tmp_path), "inner": {"evaluation_event_ids": []},
+                         "plan": {"horizons": [1]}, "execution": {"features": []}}).encode()
+    result = _run_real_worker(header, tmp_path)
+    assert result == {"event": "unavailable"}

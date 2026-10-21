@@ -83,8 +83,10 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
     ``features`` sections, shard by shard. Returns ``{"features", "training"}``: training rows
     reduced to (event_id, absolute_move_pct); feature rows kept for training or evaluation
     events at the selected horizons, reduced to (event_id, context_id, horizon_sessions,
-    *feature_columns), in stored order. Any mismatch is EXPERIMENT_IDENTITY_CONFLICT.
-    Inline paths are admitted with the same shape check as ``load_inputs``.
+    *feature_columns), in stored order. A manifest, hash, shard or inline-path mismatch is
+    EXPERIMENT_IDENTITY_CONFLICT (retryable store errors propagate); a row missing a
+    requested column raises KeyError, and the fit child reports any loader failure as
+    unavailable. Inline paths are admitted with the same shape check as ``load_inputs``.
     """
     if not isinstance(manifest, dict) or manifest.get("schema_version") != MANIFEST_SCHEMA:
         raise fail(_CONFLICT, "search cohort record is invalid")
