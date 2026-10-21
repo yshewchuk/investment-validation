@@ -71,7 +71,7 @@ def history_model_args(source, action, *extra):
         "--magnitude-model", "history_mean", "--magnitude-feature-snapshot-id",
         source.feature_snapshot.snapshot_id, "--magnitude-history-start", HISTORY, *map(str, extra)]
     if action == "run":
-        argv += ["--exp-number", "auto", "--experiments-root", str(source.root / "experiments")]
+        argv += ["--exp-number", "101", "--experiments-root", str(source.root / "experiments")]
     return argv
 
 

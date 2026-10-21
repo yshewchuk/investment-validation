@@ -297,7 +297,7 @@ def test_earlier_nonroster_arm_stays_independent_after_sealing(source, monkeypat
     spec_path.write_text(canonical_json(asdict(spec)))
     args = ["run", "--spec", str(spec_path), "--catalog", str(source.root / "catalog.sqlite"),
             "--store-root", str(source.store.root), "--as-of-month", MONTH, "--no-ledger",
-            "--exp-number", "auto", "--experiments-root", str(source.root / "experiments")]
+            "--exp-number", "101", "--experiments-root", str(source.root / "experiments")]
     assert gate_cli.main(args) == 0
     output = json.loads(capsys.readouterr().out)
     assert output["variant_id"] == registered.variant_id and output["recording_mode"] == "smoke"
@@ -338,7 +338,7 @@ def test_pre_sweep_gate_binding_replays_without_rewriting_identity(source, tmp_p
     monkeypatch.setattr(gate_report, "gate_result", _forbid)
     args = ["run", "--spec", str(spec_path), "--catalog", str(source.root / "catalog.sqlite"),
             "--store-root", str(source.store.root), "--as-of-month", MONTH, "--no-ledger",
-            "--exp-number", "auto", "--experiments-root", str(source.root / "experiments")]
+            "--exp-number", "101", "--experiments-root", str(source.root / "experiments")]
     assert gate_cli.main(args) == 0
     output = json.loads(capsys.readouterr().out)
     assert output["variant_id"] == registered.variant_id and output["recording_mode"] == "smoke"

@@ -95,7 +95,7 @@ def _args(source, action, *extra):
         "--target", "absolute_move", "--magnitude-training-start", START,
         "--magnitude-labels-before", CUTOFF, *map(str, extra)]
     if action == "run":
-        argv += ["--exp-number", "auto", "--experiments-root", str(source.root / "experiments")]
+        argv += ["--exp-number", "101", "--experiments-root", str(source.root / "experiments")]
     return argv
 
 

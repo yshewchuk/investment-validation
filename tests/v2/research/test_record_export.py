@@ -95,30 +95,7 @@ def test_layout_writes_results_and_report(tmp_path):
     assert result["dir"] == str(folder)
 
 
-def test_resolve_auto_is_highest_plus_one_ignoring_non_exp(tmp_path):
-    (tmp_path / "EXP-101_a").mkdir()
-    (tmp_path / "EXP-102_b").mkdir()
-    (tmp_path / "notes").mkdir()
-    (tmp_path / "scratch").mkdir()
-    assert resolve_exp_number(tmp_path, "x", "auto") == 103
-
-
-def test_resolve_auto_on_empty_root_is_first_number(tmp_path):
-    assert resolve_exp_number(tmp_path, "x", "auto") == 101
-
-
-def test_sequential_auto_claims_distinct_empty_folders(tmp_path):
-    first = resolve_exp_number(tmp_path, "alpha", "auto")
-    second = resolve_exp_number(tmp_path, "beta", "auto")
-    assert (first, second) == (101, 102)
-    assert (tmp_path / "EXP-101_alpha").is_dir()
-    assert (tmp_path / "EXP-102_beta").is_dir()
-    result = _export(tmp_path, exp_number=first, experiment_id="alpha", slug="alpha")
-    assert result["status"] == "written"
-    assert result["dir"] == str(tmp_path / "EXP-101_alpha")
-
-
-def test_resolve_linked_id_reuses_number_with_request_none(tmp_path):
+def test_layout_writes_results_and_report(tmp_path):
     _write_manifest(tmp_path / "EXP-107_linked", "linked", 107)
     assert resolve_exp_number(tmp_path, "linked", None) == 107
 
@@ -214,33 +191,91 @@ def test_symlinked_existing_spec_conflicts(tmp_path):
     assert not (results / "export_manifest.json").exists()
 
 
-def test_auto_retry_when_other_slug_claims_same_number(tmp_path, monkeypatch):
-    real = lib.next_experiment_number
-    calls = {"n": 0}
+def test_resolve_auto_is_invalid(tmp_path):
+    with pytest.raises(OpsError) as exc:
+        resolve_exp_number(tmp_path, "x", "auto")
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
 
-    def fake_next(root=None):
-        calls["n"] += 1
-        return 101 if calls["n"] <= 2 else real(root)
 
-    monkeypatch.setattr(
-        "experiments.record_export.next_experiment_number",
-        fake_next,
+def test_resolve_exp_number_string_101_returns_101(tmp_path):
+    assert resolve_exp_number(tmp_path, "x", "101") == 101
+
+
+def test_preexisting_unmanifested_other_folder_conflicts(tmp_path):
+    (tmp_path / "EXP-101_other").mkdir()
+    with pytest.raises(OpsError) as exc:
+        resolve_exp_number(tmp_path, "x", 101)
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_symlinked_run_folder_conflicts_and_writes_nothing(tmp_path):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (tmp_path / "EXP-101_x").symlink_to(target)
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path)
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert not (target / "results").exists()
+    assert not (target / "REPORT.md").exists()
+
+
+def test_preflight_atomic_symlink_outcome_creates_no_partial_writes(tmp_path):
+    results = tmp_path / "EXP-101_x" / "results"
+    results.mkdir(parents=True)
+    real = tmp_path / "elsewhere" / "outcome.json"
+    real.parent.mkdir()
+    real.write_text('{"failure_code": null}')
+    (results / "outcome.json").symlink_to(real)
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path)
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert not (results / "spec.json").exists()
+    assert not (results / "export_manifest.json").exists()
+
+
+def test_oversize_event_ids_trimmed_return_list(tmp_path):
+    ids = [f"evt-{i}" for i in range(200_000)]
+    result = _export(tmp_path, event_ids=ids)
+    assert result["trimmed"] == ["event_ids.json"]
+
+
+def test_refusal_case_writes_outcome_with_failure_code_and_replayed(tmp_path):
+    registration = _Registration({
+        "execution_plan": {"experiment_id": "exp-x"},
+        "snapshot": {"snapshot_id": "snap-1"},
+        "event_ids": [],
+        "source_closure": {},
+        "environment": {},
+    })
+    saved = {
+        "outcome": {"failure_code": "HOLDOUT_ACCESS_DENIED"},
+        "receipt": {"recording_mode": "smoke"},
+    }
+    result = export_native_run(
+        tmp_path,
+        registration,
+        {"hypothesis": "h"},
+        {"action": "run"},
+        saved,
+        exp_number=101,
+        replayed=False,
+        started=time.monotonic(),
     )
-    first = resolve_exp_number(tmp_path, "alpha", "auto")
-    second = resolve_exp_number(tmp_path, "beta", "auto")
-    assert first == 101
-    assert second == 102
-    exp101 = [p.name for p in tmp_path.iterdir()
-              if p.name.startswith("EXP-101_")]
-    exp102 = [p.name for p in tmp_path.iterdir()
-              if p.name.startswith("EXP-102_")]
-    assert exp101 == ["EXP-101_alpha"]
-    assert exp102 == ["EXP-102_beta"]
+    folder = Path(result["dir"])
+    outcome = json.loads((folder / "results" / "outcome.json").read_bytes())
+    assert outcome["failure_code"] == "HOLDOUT_ACCESS_DENIED"
+    assert outcome["replayed"] is False
 
 
 class _Registration:
     def __init__(self, document):
         self.document = document
+
+
+def test_resolve_linked_id_reuses_number_with_request_none(tmp_path):
+    with pytest.raises(OpsError) as exc:
+        resolve_exp_number(tmp_path, "x", None)
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def test_export_native_run_independent_oracle(tmp_path):

@@ -69,7 +69,7 @@ def _args(source, action, *extra):
             "--store-root", str(source.store.root),
             "--as-of-month", MONTH, *map(str, extra)]
     if action == "run":
-        argv += ["--exp-number", "auto", "--experiments-root", str(source.root / "experiments")]
+        argv += ["--exp-number", "101", "--experiments-root", str(source.root / "experiments")]
     return argv
 
 
@@ -834,6 +834,21 @@ def test_run_refuses_without_exp_number_then_auto_succeeds(source, capsys):
     assert "native_smoke" not in evidence and "native_outcome" not in evidence
     output = _invoke(source, capsys, "run", "--no-ledger")
     assert output["record_export"]["status"] == "written"
+
+
+def test_run_auto_exp_number_refused_invalid_experiment_spec(source, capsys):
+    _invoke(source, capsys, "register")
+    argv = ["run", "--spec", str(source.spec_path),
+            "--catalog", str(source.root / "catalog.sqlite"),
+            "--store-root", str(source.store.root), "--as-of-month", MONTH,
+            "--no-ledger", "--experiments-root", str(source.root / "experiments"),
+            "--exp-number", "auto"]
+    assert cli.main(argv) == 2
+    captured = capsys.readouterr()
+    assert not captured.err
+    response = json.loads(captured.out)
+    assert response["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert not (source.root / "experiments").exists()
 
 
 def test_no_record_export_skips_export_with_warning(source, capsys):

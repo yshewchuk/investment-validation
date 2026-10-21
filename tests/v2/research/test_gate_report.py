@@ -150,7 +150,7 @@ def _invoke(source, capsys, action, spec=None, *extra, status=0):
     arguments = [action, "--spec", str(path), "--catalog", str(source.root / "catalog.sqlite"),
                  "--store-root", str(source.store.root), "--as-of-month", MONTH, *map(str, extra)]
     if action == "run":
-        arguments += ["--exp-number", "auto", "--experiments-root", str(source.root / "experiments")]
+        arguments += ["--exp-number", "101", "--experiments-root", str(source.root / "experiments")]
     assert cli.main(arguments) == status
     captured = capsys.readouterr()
     err = "\n".join(line for line in captured.err.splitlines()
