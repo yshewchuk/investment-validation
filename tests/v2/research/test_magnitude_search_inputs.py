@@ -26,6 +26,8 @@ COHORT = {
         "qualified_event_ids": _ids("E1"),
         "read_inputs": [{"event_id": "E1", "fragment_id": "f", "object_id": "o", "content_hash": "h"}],
         "omitted_labels": [{"event_id": "E2", "reason": "late"}],
+        "target_recipe": {"secondary_diagnostics": _ids("mae", "quantile_calibration")},
+        "holdout_exclusions": [],
         "rows": 1,
     },
     "training": [{"event_id": "E1", "absolute_move_pct": 1.5}],
