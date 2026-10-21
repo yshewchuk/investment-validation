@@ -29,6 +29,7 @@ from engine.v2.research.magnitude_history_store import read_stored
 from experiments import magnitude_search_outer as outer
 from experiments import magnitude_search_trials as trials
 from experiments.magnitude_search_plan import seal_search_plan
+from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from tests.v2.models.training.test_magnitude_estimators import FEATURES
 from tests.v2.research.magnitude_trial_support import (
     ROOT,
@@ -169,7 +170,7 @@ def assert_fold_oracle(case, result, year):
         "prospective_candidate_id": case.selected["prospective_candidate_id"]}
     assert canonical_json(started) == canonical_json(expected_start)
     inputs, validation = expected_input_receipts(case, year)
-    assert canonical_json(slot(case, "inputs", year)) == canonical_json(inputs)
+    assert canonical_json(stored_inputs(case, inputs, year)) == canonical_json(inputs)
     assert slot(case, "validation", year) == validation
     execution = slot(case, "execution", year)
     assert execution["fits"] == expected_fits(case, year)
@@ -177,7 +178,7 @@ def assert_fold_oracle(case, result, year):
     expected = {"schema_version": "magnitude_search_outer_result.v1",
         "outer_id": content_hash([case.plan["plan_id"], year]), "plan_id": case.plan["plan_id"],
         "outer_year": year, "candidate": candidate, "selection_id": content_hash(case.selected),
-        "inputs_id": content_hash(inputs), "execution_id": content_hash(execution),
+        "inputs_id": publish_inputs(case.recorder.store, inputs)[1], "execution_id": content_hash(execution),
         "validation_id": content_hash(validation), "training_inputs": inputs["training_inputs"],
         "evaluation_inputs": validation["evaluation_inputs"], "fit_attempt_count": 3,
         "event_count": {"2024": 8, "2025": 2}[year], "forecast_count": {"2024": 24, "2025": 6}[year],
@@ -209,10 +210,16 @@ def native_matrices(case, year="2024"):
     return result
 
 
+def stored_inputs(case, inputs, year="2024"):
+    """The stored outer manifest read back through the loader, bound to the expected inputs' manifest hash."""
+    store = case.recorder.store
+    return load_inputs(store, slot(case, "inputs", year), publish_inputs(store, inputs)[1])
+
+
 def expected_fits(case, year="2024"):
     """Pin journal inputs and fit identities to independently read native evidence."""
     inputs, _ = expected_input_receipts(case, year)
-    assert canonical_json(slot(case, "inputs", year)) == canonical_json(inputs)
+    assert canonical_json(stored_inputs(case, inputs, year)) == canonical_json(inputs)
     fold = next(item["outer"] for item in case.plan["folds"] if item["outer"]["year"] == year)
     train = fold["training_candidate_event_ids"]
     assert inputs["training"] == [{"event_id": event, "absolute_move_pct": known_targets()[event]} for event in train]

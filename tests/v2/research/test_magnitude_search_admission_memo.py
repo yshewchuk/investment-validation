@@ -5,6 +5,7 @@ import pytest
 from engine.v2.foundation import canonical_json, content_hash
 from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_trials as trials
+from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from tests.v2.research.magnitude_trial_support import trial_cases, trial_forecasts
 from tests.v2.research.test_magnitude_search_plan import source as base_source  # noqa: F401
 from tests.v2.research.test_magnitude_search_trials import case  # noqa: F401
@@ -39,10 +40,12 @@ def test_memoised_slots_match_uncached_admission(case):
         cohort = content_hash([case.plan["plan_id"], outer_year, inner_year])
         fresh = trials.admit_fold_inputs(case.source.repository, case.source.registration.document, inner,
             history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "x"))
-        assert canonical_json(case.recorder._read("cohort:" + cohort)) == canonical_json(fresh)
         key = trials.SearchTrials._trial(case.plan, outer_year, inner_year,
                                          case.plan["candidates"][0]["candidate_id"])[0]
-        assert case.recorder._read("inputs:" + key)["inputs_id"] == content_hash(fresh)
+        inputs_id = case.recorder._read("inputs:" + key)["inputs_id"]
+        stored = load_inputs(case.recorder.store, case.recorder._read("cohort:" + cohort), inputs_id)
+        assert canonical_json(stored) == canonical_json(fresh)
+        assert inputs_id == publish_inputs(case.recorder.store, fresh)[1]
 
 
 def test_start_returns_detached_inputs_copy(case):
@@ -51,9 +54,9 @@ def test_start_returns_detached_inputs_copy(case):
     started = case.recorder.start(*args)
     cohort = content_hash([case.plan["plan_id"], args[0], args[1]])
     started["inputs"]["features"].clear()
-    assert case.recorder._memo[cohort][0]["features"]
+    assert case.recorder._memo[cohort]["features"]
     resumed = case.recorder.start(*second)
-    assert canonical_json(resumed["inputs"]) == canonical_json(case.recorder._memo[cohort][0])
+    assert canonical_json(resumed["inputs"]) == canonical_json(case.recorder._memo[cohort])
 
 
 def test_failed_admission_is_not_memoised(case, monkeypatch):
@@ -77,5 +80,4 @@ def test_failed_admission_is_not_memoised(case, monkeypatch):
     assert cohort not in case.recorder._memo
     admitted = case.recorder._cohort_inputs(cohort, inner)
     assert admitted == case.recorder._memo[cohort]
-    assert admitted[1] == content_hash(admitted[0])
-    assert canonical_json(admitted[0]) == canonical_json(original(inner))
+    assert canonical_json(admitted) == canonical_json(original(inner))

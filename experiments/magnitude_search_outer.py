@@ -21,7 +21,7 @@ from experiments.magnitude_search_execution import (
     run_fitted_trial,
     validate_execution_limits,
 )
-from experiments.magnitude_search_inputs import load_inputs
+from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import read_search_plan
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_trials import SearchTrials
@@ -171,7 +171,8 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     resolved = execution_limits(limits)
     append("start", started)
     inputs = _inputs(repository, binding, fold)
-    append("inputs", inputs)
+    manifest, inputs_id = publish_inputs(store, inputs)
+    append("inputs", manifest)
     expected = fit_evidence(inputs, fold, plan, execution)
     fits, pending = [], []
     def progress(state, fit):
@@ -205,7 +206,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
                   "targets": labels[["event_id", "absolute_move_pct"]].to_dict("records")}
     _validate_targets(inputs, validation, fold)
     append("validation", validation)
-    append("terminal", _result(started, inputs, content_hash(inputs), receipt, forecasts, validation, fold, plan["horizons"]))
+    append("terminal", _result(started, inputs, inputs_id, receipt, forecasts, validation, fold, plan["horizons"]))
     return _replay(saved, store, started, fold, plan, execution)
 
 
