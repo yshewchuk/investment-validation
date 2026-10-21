@@ -416,6 +416,33 @@ from verified bytes; malformed metadata refuses before ledger or catalog effects
 
 Pre-admission receipts cannot invent admission; rejected-request ledger identities belong to the runner.
 
+## Private run-record export
+
+`record_export.export_run_record` copies one run's private record to
+`experiments/EXP-NNN_<slug>/` so `tools/private_mirror.py` backs it up. The
+gate and prediction CLIs call it after `run`; it adds no catalog table and does not
+change outcome identity. Every data file sits under `results/`, which
+`checks/repo_hygiene.py` blocks (`BLOCKED_SEGMENTS`) and `.gitignore` ignores; `REPORT.md` is
+ignored by default-deny. The mirror already includes both. This feature does not weaken
+that policy; a test pins it.
+
+Layout: `REPORT.md` (stub: ids, status, the success report text), and in `results/`
+`spec.json`, `request.json`, `event_ids.json`, `outcome.json` (result or typed
+refusal, replay flag, resource usage as elapsed seconds and peak RSS, snapshot id, commit id) and
+`export_manifest.json` (experiment_id, EXP number, recording mode, trimmed files).
+
+EXP numbers are chosen by the operator: `--exp-number N` or `--exp-number auto` (one above the
+highest existing `EXP-*` folder). The manifest links `experiment_id` to the number.
+An experiment_id already linked reuses its number, so replay needs no flag.
+
+| Condition | Outcome |
+| --- | --- |
+| `run` with no number and no existing link | `INVALID_EXPERIMENT_SPEC` before any evaluation; `--no-record-export` skips export and prints a loud stderr warning. |
+| Number held by another experiment_id, or experiment_id linked to another number | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
+| JSON file over 1,000,000 bytes | Write a summary (original bytes, sha256, longest fitting list prefix) instead; list it under `trimmed`. |
+| Existing file with different bytes | Keep the first record, warn on stderr and report `unchanged`; files are never overwritten. |
+| Export fails after the outcome was published | Outcome stays valid; CLI exits 2 with `record_export_failed`, and a rerun replays then exports. |
+
 ## Reconstructed gate evaluation
 
 `python -m experiments.v2_gate register|run` evaluates one preregistered arm.

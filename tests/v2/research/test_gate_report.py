@@ -149,9 +149,13 @@ def _invoke(source, capsys, action, spec=None, *extra, status=0):
     path.write_text(json.dumps(asdict(spec or build_gate_spec())))
     arguments = [action, "--spec", str(path), "--catalog", str(source.root / "catalog.sqlite"),
                  "--store-root", str(source.store.root), "--as-of-month", MONTH, *map(str, extra)]
+    if action == "run":
+        arguments += ["--exp-number", "auto", "--experiments-root", str(source.root / "experiments")]
     assert cli.main(arguments) == status
     captured = capsys.readouterr()
-    assert captured.err == ""
+    err = "\n".join(line for line in captured.err.splitlines()
+                    if not line.startswith("WARNING: record_export"))
+    assert err == ""
     return json.loads(captured.out)
 
 
@@ -264,7 +268,9 @@ def test_two_real_cli_arms_consume_distinct_fill_record_and_replay_once(source, 
     before = ledger.read_bytes()
     monkeypatch.setattr(gate, "gate_result", _forbid)
     for spec, output in zip((build_gate_spec(), build_gate_spec(1.0, "control")), outputs, strict=True):
-        assert _invoke(source, capsys, "run", spec, "--ledger", ledger) == output
+        replayed = _invoke(source, capsys, "run", spec, "--ledger", ledger)
+        assert {key: value for key, value in replayed.items() if key != "record_export"} == {
+            key: value for key, value in output.items() if key != "record_export"}
     assert ledger.read_bytes() == before
 
 
@@ -376,7 +382,9 @@ def test_missing_evaluation_quotes_records_one_failed_attempt_and_replay_does_no
         monkeypatch.setattr(gate, "gate_result", _forbid)
         before = ledger.read_bytes()
         replayed = _invoke(source, capsys, "run", None, "--ledger", ledger, status=2)
-        assert replayed == {"refused": "EXPERIMENT_VARIANT_FAILED", "replayed": True}
+        assert replayed["refused"] == "EXPERIMENT_VARIANT_FAILED"
+        assert replayed["replayed"] is True
+        assert replayed["record_export"]["status"] == "written"
         assert ledger.read_bytes() == before
     finally:
         source.conn.close()
@@ -592,8 +600,10 @@ def test_plan_and_fold_failures_record_one_failed_attempt_without_partial_report
         assert not list(source.root.rglob("REPORT.md"))
         before = ledger.read_bytes()
         monkeypatch.setattr(gate, "gate_result", _forbid)
-        assert _invoke(source, capsys, "run", spec, "--ledger", ledger, status=2) == {
-            "refused": "EXPERIMENT_VARIANT_FAILED", "replayed": True}
+        replayed = _invoke(source, capsys, "run", spec, "--ledger", ledger, status=2)
+        assert replayed["refused"] == "EXPERIMENT_VARIANT_FAILED"
+        assert replayed["replayed"] is True
+        assert replayed["record_export"]["status"] == "written"
         assert ledger.read_bytes() == before
     finally:
         source.conn.close()

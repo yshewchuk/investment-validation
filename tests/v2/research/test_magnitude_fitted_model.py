@@ -398,7 +398,9 @@ def _invoke(source, kind, capsys, action, *extra):
     arguments[arguments.index("--magnitude-model") + 1] = kind
     assert cli.main(arguments) == 0
     captured = capsys.readouterr()
-    assert all(line.startswith("  [") for line in captured.err.splitlines()) and "Traceback" not in captured.out
+    err_lines = [line for line in captured.err.splitlines()
+                 if not line.startswith("WARNING: record_export")]
+    assert all(line.startswith("  [") for line in err_lines) and "Traceback" not in captured.out
     return json.loads(captured.out)
 
 
@@ -457,7 +459,9 @@ def test_cli_register_smoke_record_and_replay_never_refits_or_duplicates_ledger(
         monkeypatch.setattr(fitted, "fit_magnitude_predictions", forbid_access)
         monkeypatch.setattr(training, "fit_magnitude_predictions", forbid_access)
         set_outcome_clock(monkeypatch, "2026-02-10")
-        assert _invoke(source, kind, capsys, "run", "--no-ledger") == smoke
+        smoke_replay = _invoke(source, kind, capsys, "run", "--no-ledger")
+        assert {key: value for key, value in smoke_replay.items() if key != "record_export"} == {
+            key: value for key, value in smoke.items() if key != "record_export"}
         assert _invoke(source, kind, capsys, "run", "--ledger", ledger) == recorded
         assert (catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()) == before
     finally:

@@ -65,17 +65,22 @@ def _fallback_source(tmp_path):
 
 
 def history_model_args(source, action, *extra):
-    return [action, "--spec", str(source.spec_path), "--catalog", str(source.root / "catalog.sqlite"),
+    argv = [action, "--spec", str(source.spec_path), "--catalog", str(source.root / "catalog.sqlite"),
         "--store-root", str(source.store.root), "--as-of-month", MONTH, "--target", "absolute_move",
         "--magnitude-training-start", START, "--magnitude-labels-before", CUTOFF,
         "--magnitude-model", "history_mean", "--magnitude-feature-snapshot-id",
         source.feature_snapshot.snapshot_id, "--magnitude-history-start", HISTORY, *map(str, extra)]
+    if action == "run":
+        argv += ["--exp-number", "auto", "--experiments-root", str(source.root / "experiments")]
+    return argv
 
 
 def _invoke(source, capsys, action, *extra, status=0):
     assert cli.main(history_model_args(source, action, *extra)) == status
     captured = capsys.readouterr()
-    assert all(line.startswith("  [") for line in captured.err.splitlines()) and "Traceback" not in captured.out
+    err_lines = [line for line in captured.err.splitlines()
+                 if not line.startswith("WARNING: record_export")]
+    assert all(line.startswith("  [") for line in err_lines) and "Traceback" not in captured.out
     return json.loads(captured.out)
 
 
@@ -799,7 +804,9 @@ def test_native_build_cli_register_smoke_record_and_replay_without_rebuilding(tm
         before = catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()
         set_outcome_clock(monkeypatch, "2026-02-10")
         forbid_history_model_payloads(monkeypatch)
-        assert _invoke(source, capsys, "run", "--no-ledger") == smoke
+        smoke_replay = _invoke(source, capsys, "run", "--no-ledger")
+        assert {key: value for key, value in smoke_replay.items() if key != "record_export"} == {
+            key: value for key, value in smoke.items() if key != "record_export"}
         assert _invoke(source, capsys, "run", "--ledger", ledger) == recorded
         assert (catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()) == before
     finally:

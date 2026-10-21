@@ -2,6 +2,8 @@
 import argparse
 import json
 import sqlite3
+import sys
+import time
 from pathlib import Path
 
 from engine.v2 import foundation
@@ -14,6 +16,7 @@ from experiments import magnitude_history_report, magnitude_report
 from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
 from experiments import prediction_report as prediction
+from experiments import record_export
 from experiments.magnitude_inputs import admit_magnitude_inputs
 
 
@@ -33,6 +36,9 @@ def main(argv=None):
     parser.add_argument("--magnitude-feature-snapshot-id")
     parser.add_argument("--magnitude-history-start")
     parser.add_argument("--max-registration-bytes", type=int, default=native.MAX_NATIVE_EVIDENCE_BYTES)
+    parser.add_argument("--exp-number", default=None)
+    parser.add_argument("--experiments-root", type=Path, default=Path(__file__).resolve().parent)
+    parser.add_argument("--no-record-export", action="store_true")
     args = parser.parse_args(argv)
     if not native.valid_registration_read_budget(args.max_registration_bytes):
         parser.error("--max-registration-bytes must be a positive SQLite-safe byte budget")
@@ -50,7 +56,8 @@ def main(argv=None):
     store, conn, registration, attempted = None, None, None, False
     try:
         store = foundation.ArtifactStore(args.store_root)
-        spec = experiment_spec_from_document(json.loads(Path(args.spec).read_text()))
+        spec_document = json.loads(Path(args.spec).read_text())
+        spec = experiment_spec_from_document(spec_document)
         reporter.validate_prediction_spec(spec)
         if args.action == "run" and not args.no_ledger and args.ledger is None:
             raise fail("INVALID_EXPERIMENT_SPEC", "recorded execution requires --ledger")
@@ -74,19 +81,56 @@ def main(argv=None):
             registration, _ = admit_magnitude_inputs(conn, store, repository, spec, **binding)
         else:
             registration = native.require_native_registration(conn, store, repository, spec, expected=registration, **binding)
+        exp_number = None
+        if args.no_record_export:
+            print("WARNING: no EXP number; run record NOT exported", file=sys.stderr)
+        else:
+            experiment_id = registration.document["execution_plan"]["experiment_id"]
+            exp_number = record_export.resolve_exp_number(
+                args.experiments_root, experiment_id, args.exp_number)
         recording = dict(no_ledger=args.no_ledger, ledger_path=args.ledger)
+        started = time.monotonic()
         saved = outcomes.replay_native_outcome(conn, store, registration, **recording)
+        replayed = saved is not None
         if saved is None:
             attempted = True
             result = reporter.prediction_result(repository, registration)
             report = reporter.render_prediction_report(registration, result, spec=spec, no_ledger=args.no_ledger)
             saved = outcomes.publish_native_outcome(conn, store, registration, report=report, attempted=True, **recording)
+        request_dict = {
+            "action": args.action,
+            "as_of_month": args.as_of_month,
+            "scope": args.scope,
+            "event_ids": args.event_id,
+            "no_ledger": args.no_ledger,
+        }
         if saved["outcome"]["failure_code"]:
-            print(json.dumps({"refused": saved["outcome"]["failure_code"], "receipt_ref": saved["receipt_ref"]}))
+            record = "skipped"
+            if exp_number is not None:
+                try:
+                    record = record_export.export_native_run(
+                        args.experiments_root, registration, spec_document, request_dict,
+                        saved, exp_number, replayed, started, report_path=None)
+                except (OpsError, OSError, ValueError):
+                    print(json.dumps({"refused": "record_export_failed"}))
+                    return 2
+            print(json.dumps({"refused": saved["outcome"]["failure_code"],
+                              "receipt_ref": saved["receipt_ref"],
+                              "record_export": record}))
             return 2
         report_path = outcomes.export_native_report(conn, store, registration, **recording)
+        record = "skipped"
+        if exp_number is not None:
+            try:
+                record = record_export.export_native_run(
+                    args.experiments_root, registration, spec_document, request_dict,
+                    saved, exp_number, replayed, started, report_path=report_path or None)
+            except (OpsError, OSError, ValueError):
+                print(json.dumps({"refused": "record_export_failed"}))
+                return 2
         print(json.dumps({"report": str(report_path), "variant_id": registration.variant_id,
-                          "recording_mode": saved["receipt"]["recording_mode"]}))
+                          "recording_mode": saved["receipt"]["recording_mode"],
+                          "record_export": record}))
         return 0
     except (OpsError, DataError, foundation.ArtifactError, ValueError, TypeError, KeyError,
             OSError, sqlite3.Error, RuntimeError) as error:

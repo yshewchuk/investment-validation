@@ -65,15 +65,20 @@ def source(tmp_path):
 
 
 def _args(source, action, *extra):
-    return [action, "--spec", str(source.spec_path), "--catalog", str(source.root / "catalog.sqlite"),
+    argv = [action, "--spec", str(source.spec_path), "--catalog", str(source.root / "catalog.sqlite"),
             "--store-root", str(source.store.root),
             "--as-of-month", MONTH, *map(str, extra)]
+    if action == "run":
+        argv += ["--exp-number", "auto", "--experiments-root", str(source.root / "experiments")]
+    return argv
 
 
 def _invoke(source, capsys, action, *extra, status=0):
     assert cli.main(_args(source, action, *extra)) == status
     captured = capsys.readouterr()
-    assert not captured.err
+    err = "\n".join(line for line in captured.err.splitlines()
+                    if not line.startswith("WARNING: record_export"))
+    assert not err
     assert "Traceback" not in captured.out
     return json.loads(captured.out)
 
@@ -338,9 +343,11 @@ def test_injected_r3_and_r4_at_prediction_input_boundary_are_recorded_and_replay
     ledger_bytes = None if smoke else ledger.read_bytes()
     monkeypatch.setattr(prediction, "load_prediction_targets", _forbid)
     replayed = _invoke(source, capsys, "run", *recording, status=2)
-    assert replayed == {"refused": expected, "receipt_ref": evidence[key + "_receipt"]}
+    assert replayed["refused"] == expected
+    assert replayed["receipt_ref"] == evidence[key + "_receipt"]
+    assert replayed["record_export"]["status"] == "written"
     assert catalog_rows(source.conn) == catalog and artifact_object_bytes(source.store) == objects
-    assert not list(source.root.rglob("REPORT.md"))
+    assert not [path for path in source.root.rglob("REPORT.md") if "experiments" not in path.parts]
     if smoke:
         assert not ledger.parent.exists()
     else:
@@ -794,3 +801,47 @@ def test_untyped_execution_errors_stay_private_and_retry_same_registration(
     else:
         assert len(read_ledger_rows(ledger)) == 1
         assert read_ledger_rows(ledger)[0]["stage"] == "ran"
+
+
+def test_first_successful_run_exports_exp_record_and_report(source, capsys):
+    _invoke(source, capsys, "register")
+    output = _invoke(source, capsys, "run", "--no-ledger")
+    assert output["record_export"]["status"] == "written"
+    export_root = source.root / "experiments"
+    folders = [child for child in export_root.iterdir()
+               if child.is_dir() and child.name.startswith("EXP-001_")]
+    assert len(folders) == 1
+    results = folders[0] / "results"
+    for name in ("export_manifest.json", "outcome.json", "spec.json",
+                 "request.json", "event_ids.json"):
+        assert (results / name).is_file()
+    assert (folders[0] / "REPORT.md").is_file()
+
+
+def test_run_refuses_without_exp_number_then_auto_succeeds(source, capsys):
+    _invoke(source, capsys, "register")
+    argv = ["run", "--spec", str(source.spec_path),
+            "--catalog", str(source.root / "catalog.sqlite"),
+            "--store-root", str(source.store.root), "--as-of-month", MONTH,
+            "--no-ledger", "--experiments-root", str(source.root / "experiments")]
+    assert cli.main(argv) == 2
+    captured = capsys.readouterr()
+    assert not captured.err
+    response = json.loads(captured.out)
+    assert response["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert not (source.root / "experiments").exists()
+    evidence = _evidence(source)
+    assert "native_smoke" not in evidence and "native_outcome" not in evidence
+    output = _invoke(source, capsys, "run", "--no-ledger")
+    assert output["record_export"]["status"] == "written"
+
+
+def test_no_record_export_skips_export_with_warning(source, capsys):
+    _invoke(source, capsys, "register")
+    argv = _args(source, "run", "--no-ledger", "--no-record-export")
+    assert cli.main(argv) == 0
+    captured = capsys.readouterr()
+    assert "no EXP number" in captured.err
+    response = json.loads(captured.out)
+    assert response["record_export"] == "skipped"
+    assert not (source.root / "experiments").exists()

@@ -90,16 +90,21 @@ def baseline_evidence(source):
 
 
 def _args(source, action, *extra):
-    return [action, "--spec", str(source.spec_path), "--catalog", str(source.root / "catalog.sqlite"),
+    argv = [action, "--spec", str(source.spec_path), "--catalog", str(source.root / "catalog.sqlite"),
         "--store-root", str(source.store.root), "--as-of-month", MONTH,
         "--target", "absolute_move", "--magnitude-training-start", START,
         "--magnitude-labels-before", CUTOFF, *map(str, extra)]
+    if action == "run":
+        argv += ["--exp-number", "auto", "--experiments-root", str(source.root / "experiments")]
+    return argv
 
 
 def _invoke(source, capsys, action, *extra, status=0):
     assert cli.main(_args(source, action, *extra)) == status
     captured = capsys.readouterr()
-    assert not captured.err and "Traceback" not in captured.out
+    err = "\n".join(line for line in captured.err.splitlines()
+                    if not line.startswith("WARNING: record_export"))
+    assert not err and "Traceback" not in captured.out
     return json.loads(captured.out)
 
 
@@ -424,7 +429,9 @@ def test_cli_metadata_registration_then_durable_smoke_never_touches_ledger(tmp_p
         before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         with monkeypatch.context() as patch:
             _metadata_only(patch)
-            assert _invoke(source, capsys, "run", "--no-ledger") == output
+            replayed = _invoke(source, capsys, "run", "--no-ledger")
+        assert {key: value for key, value in replayed.items() if key != "record_export"} == {
+            key: value for key, value in output.items() if key != "record_export"}
         assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     finally:
         source.conn.close()
