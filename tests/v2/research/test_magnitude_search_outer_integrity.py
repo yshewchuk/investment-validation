@@ -334,9 +334,9 @@ def test_valid_hash_outer_evidence_tampering_refuses_replay(outer_case, monkeypa
                 body.pop("outer_year")
         if name.startswith("outer-inputs:"):
             if mutation == "inputs_features":
-                body["features"][0]["n_prior"] += 1
+                body["sections"]["features"]["row_count"] += 1
             if mutation == "inputs_training":
-                body["training"][0]["absolute_move_pct"] += 1
+                body["sections"]["training"]["row_count"] += 1
         if name.startswith("outer-fit-started:") and mutation == "fit_started":
             body["prediction_matrix_id"] = "wrong"
         if name.startswith("outer-fit-completed:") and mutation == "fit_completed":

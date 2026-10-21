@@ -17,6 +17,7 @@ from tests.v2.research.test_magnitude_search_trial_integrity import (
     expected_problem,
     journal,  # noqa: F401
     native_inputs,
+    native_inputs_id,
     prepare_recording,
     rows,
     validation_evidence,
@@ -44,9 +45,9 @@ def track(recorder, monkeypatch):
 def expected_terminal(inputs, forecasts):
     # Independent fixture contract, never a result returned by the recorder.
     validation = validation_evidence()
-    validation["inputs_id"] = content_hash(inputs)
+    validation["inputs_id"] = native_inputs_id(inputs)
     errors = [row["predicted_absolute_move_pct"] - 4.0 for row in forecasts]
-    return {"status": "succeeded", "inputs_id": content_hash(inputs),
+    return {"status": "succeeded", "inputs_id": native_inputs_id(inputs),
         "validation_id": content_hash(validation), "evaluation_inputs": validation["evaluation_inputs"],
         "predictions": [{**row, "absolute_move_pct": 4.0} for row in forecasts],
         "metrics": {"count": 3, "rmse": pytest.approx(sqrt(sum(error ** 2 for error in errors) / 3), rel=1e-14, abs=1e-14),

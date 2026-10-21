@@ -29,6 +29,7 @@ from engine.v2.research.magnitude_history_store import read_stored
 from experiments import magnitude_search_evidence as evidence
 from experiments import magnitude_search_trials as trials
 from experiments import native_registration as native
+from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import seal_search_plan
 from tests.v2.research.magnitude_trial_support import (
     CUTOFF,
@@ -159,8 +160,9 @@ def test_shared_training_cohort_and_forecasts_committed_before_validation(case, 
         row for row in stored["rows"] if row["event_id"] in participant_ids]}
     assert _hash(one["inputs"]) != _hash(full_cohort), "projected cohorts need their own content identity"
     admitted = case.recorder._read("inputs:" + one["trial_id"])
-    assert admitted["inputs_id"] == _hash(one["inputs"])
-    assert case.recorder._read("cohort:" + admitted["cohort"]) == one["inputs"]
+    assert admitted["inputs_id"] == publish_inputs(case.recorder.store, one["inputs"])[1]
+    stored_cohort = case.recorder._read("cohort:" + admitted["cohort"])
+    assert load_inputs(case.recorder.store, stored_cohort, admitted["inputs_id"]) == one["inputs"]
     original = trials.load_magnitude_targets
     def labels(*a, **kw):
         committed = case.recorder._read("forecasts:" + one["trial_id"])
@@ -171,7 +173,7 @@ def test_shared_training_cohort_and_forecasts_committed_before_validation(case, 
     monkeypatch.setattr(trials, "load_magnitude_targets", labels)
     result = case.recorder.record(*args, forecasts=trial_forecasts(case, args))
     assert result["evaluation_inputs"]["labels_before"] == "2024-01-01"
-    assert result["inputs_id"] == _hash(one["inputs"])
+    assert result["inputs_id"] == admitted["inputs_id"]
 
 
 @pytest.mark.parametrize("state", ["missing", "started", "submitted"])
