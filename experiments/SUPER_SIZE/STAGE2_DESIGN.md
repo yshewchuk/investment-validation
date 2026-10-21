@@ -256,20 +256,22 @@ gain/promotion rule is a separate future decision; this run reports evidence onl
 
 ## 5. Small PR sequence and acceptance
 
-Each runtime PR targets <=400 added production lines and <=120 documentation lines;
+Each runtime PR targets <=400 added non-test code lines and <=120 documentation lines;
 split add/wire changes again if needed. Tests accompany the contract they exercise.
-Estimates exclude real full-universe jobs and review queue time.
+Estimates exclude real full-universe jobs and review queue time. Line ranges count
+additions (code / tests / docs), not deletions or a waiver of the repository limits.
+Re-estimate before each PR; split further if its actual scope exceeds those limits.
 
-| Order | PR / dependency | Acceptance | Rough effort |
-| --- | --- | --- | --- |
-| 0 | This design + SPEC link | Design reviewed before code | This PR |
-| 1 | Versioned panel schema + metadata-only plan | Closed dictionary, protected fragment refusal, identity tests | 0.5 day |
-| 2 | Batched causal feature materializer / 1 | Horizon/availability, poisoned future/protected rows, batch invariance, read-count tests | 1 day |
-| 3 | Stored reader + snapshot join / 2 | Missingness/coverage and mismatch refusal; no runtime build | 0.5 day |
-| 4 | ElasticNet recipe + subset identity / 3 | Train-only preprocessing, convergence/failure, sparse selection tests | 0.5 day |
-| 5 | v2 bounded planner/executor wiring / 4 | Exact 33/603 counts, temporal rejection, immutable replay | 0.5–1 day |
-| 6 | Causal legacy comparison adapter / 3 | Pinned recipe parity, same clocks, protected implied history | 0.5–1 day |
-| 7 | Matched report + request fixture / 5,6 | Paired membership/weights, bootstrap determinism, coverage, receipt checks | 0.5 day |
+| Order | PR / dependency | Acceptance | Added lines: code / tests / docs | Rough effort |
+| --- | --- | --- | --- | --- |
+| 0 | This design + SPEC link | Design reviewed before code | 0 / 0 / 280–290 | This PR |
+| 1 | Versioned panel schema + metadata-only plan | Closed dictionary, protected fragment refusal, identity tests | 220–340 / 250–400 / 30–60 | 0.5 day |
+| 2 | Batched causal feature materializer / 1 | Horizon/availability, poisoned future/protected rows, batch invariance, read-count tests | 300–400 / 350–550 / 40–70 | 1 day |
+| 3 | Stored reader + snapshot join / 2 | Missingness/coverage and mismatch refusal; no runtime build | 200–320 / 250–400 / 30–60 | 0.5 day |
+| 4 | ElasticNet recipe + subset identity / 3 | Train-only preprocessing, convergence/failure, sparse selection tests | 160–280 / 200–350 / 25–50 | 0.5 day |
+| 5 | v2 bounded planner/executor wiring / 4 | Exact 33/603 counts, temporal rejection, immutable replay | 280–400 / 300–500 / 40–80 | 0.5–1 day |
+| 6 | Causal legacy comparison adapter / 3 | Pinned recipe parity, same clocks, protected implied history | 250–380 / 300–500 / 35–70 | 0.5–1 day |
+| 7 | Matched report + request fixture / 5,6 | Paired membership/weights, bootstrap determinism, coverage, receipt checks | 220–350 / 250–400 / 40–80 | 0.5 day |
 
 PRs 2 and 6 are the primary schedule risks. If either exceeds its slice, narrow optional
 feature blocks before sealing; keep causality and the legacy comparison mandatory.
