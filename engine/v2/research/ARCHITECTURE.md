@@ -135,6 +135,8 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 | Invalid holdout context, unknown requested ID, excluded/ambiguous requested event, or empty explicit population (R5) | `HOLDOUT_ACCESS_DENIED` before target scans; no metrics or report. |
 | Empty bulk canonical calendar | `POPULATION_COLLAPSED`; no empty success. |
 | Missing, skipped, non-finite target, non-date outcome key or invalid target availability (R4) | `EXPERIMENT_VARIANT_FAILED`; no partial returned frame. |
+| `omit_not_computed=True` and a row is `skipped` | Event omitted, object still bound in `consumed_inputs`, listed in `omitted_labels`; other events returned. |
+| `omit_not_computed=True` and every planned label is `skipped` | `POPULATION_COLLAPSED`; no frame. |
 | Cache, retry, transaction, partial write, replay | No cache or automatic retry; read-only, no writes; complete scans precede return; identical pinned inputs return identical rows (R6). |
 
 These readers preserve no economic variant identity and cannot authorize the
@@ -232,9 +234,8 @@ non-finite labels refuse the whole call, with zero remaining a valid value.
 Exception, opt-in only: `omit_not_computed=True` (used by the magnitude search's inner and outer
 evaluation reads) treats a row the writer marked `skipped` (v5 `not_computed_reason`, e.g. `not_orats`)
 exactly as `qualify_magnitude_training_targets` does: it is omitted, never parsed, and listed in the
-frame attrs and receipt as `omitted_labels` (`[{"event_id", "reason": "skipped"}]`, event-id order).
-Registration is metadata-only and cannot see such rows, so refusing after seal would burn it. The
-receipt carries `omitted_labels` only when non-empty (receipts with none are byte-identical to before).
+frame attrs and receipt as `omitted_labels` (`[{"event_id", "reason": "skipped"}]`, sorted by event ID).
+`omit_not_computed` must be a `bool` (`CONTRACT_MISMATCH` otherwise). The receipt carries `omitted_labels` only when non-empty (receipts with none are byte-identical to before).
 Every other refusal above is unchanged; only `skipped=true` is omitted, never null/late availability.
 Forecasts for omitted events are made but not scored; `event_count` counts scored events.
 Earlier events with late availability can be decoded to check their recorded

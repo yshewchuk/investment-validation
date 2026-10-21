@@ -95,6 +95,8 @@ def _object_input(event, record):
 def load_magnitude_targets(repository, snapshot, *, as_of_month, labels_before,
                            purpose="selection", event_ids=None, omit_not_computed=False):
     """Admit metadata and every physical object before reading any magnitude label."""
+    if type(omit_not_computed) is not bool:
+        raise errors.fail("CONTRACT_MISMATCH", "omit_not_computed must be a boolean")
     cutoff = _label_cutoff(labels_before)
     population, eligible, rows, plans = _candidate_plans(
         repository, snapshot, as_of_month, purpose, event_ids, cutoff)
@@ -126,7 +128,7 @@ def load_magnitude_targets(repository, snapshot, *, as_of_month, labels_before,
         "target_recipe_id": content_hash(recipe), "consumed_inputs": consumed,
         "excluded_future_events": sorted(population.loc[~eligible, "event_id"].tolist())}
     if omitted:
-        identity["omitted_labels"] = omitted
+        identity["omitted_labels"] = sorted(omitted, key=lambda item: item["event_id"])
     rows.attrs.update(identity, inputs_id=content_hash(identity))
     return rows
 

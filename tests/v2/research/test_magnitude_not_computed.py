@@ -32,15 +32,22 @@ def test_skipped_row_refuses_by_default(tmp_path):
 
 
 def test_omit_flag_drops_skipped_event_and_binds_its_object(tmp_path):
-    kept, skipped = history_event("2024-01-04"), history_event("2024-03-05")
+    skipped = history_event("2024-01-04")
+    kept_first, kept_second = history_event("2024-02-05"), history_event("2024-03-05")
     conn, repository, snapshot = commit_event_history(
-        tmp_path, [kept, skipped], [outcome_move(kept), _skipped(skipped)])
+        tmp_path, [skipped, kept_first, kept_second],
+        [_skipped(skipped), outcome_move(kept_first), outcome_move(kept_second)])
     try:
         result = _load(repository, snapshot, omit_not_computed=True)
-        assert result.event_id.tolist() == [kept["event_id"]]
+        assert result.event_id.tolist() == [kept_first["event_id"], kept_second["event_id"]]
         assert result.attrs["omitted_labels"] == [{"event_id": skipped["event_id"], "reason": "skipped"}]
-        assert [row["event_id"] for row in result.attrs["consumed_inputs"]] == [kept["event_id"], skipped["event_id"]]
-        assert result.target_object_id.tolist() == [result.attrs["consumed_inputs"][0]["object_id"]]
+        assert [row["event_id"] for row in result.attrs["consumed_inputs"]] == [
+            skipped["event_id"], kept_first["event_id"], kept_second["event_id"]]
+        by_event = {row["event_id"]: row["object_id"] for row in result.attrs["consumed_inputs"]}
+        assert result.target_object_id.tolist() == [
+            by_event[kept_first["event_id"]], by_event[kept_second["event_id"]]]
+        assert result.realized_move_pct.tolist() == [2.0, 2.0]
+        assert result.absolute_move_pct.tolist() == [2.0, 2.0]
     finally:
         conn.close()
 
@@ -51,6 +58,45 @@ def test_no_omitted_key_when_nothing_skipped(tmp_path):
     try:
         result = _load(repository, snapshot, omit_not_computed=True)
         assert "omitted_labels" not in result.attrs
+        assert result.attrs["inputs_id"] == content_hash({
+            key: value for key, value in result.attrs.items()
+            if key not in ("inputs_id", "holdout_exclusions")})
+    finally:
+        conn.close()
+
+
+def test_omitted_labels_are_sorted_by_event_id_not_date_order(tmp_path):
+    later_aaa, earlier_zzz = history_event("2024-05-06", ticker="AAA"), history_event("2024-01-04", ticker="ZZZ")
+    kept = history_event("2024-03-05")
+    conn, repository, snapshot = commit_event_history(
+        tmp_path, [kept, later_aaa, earlier_zzz],
+        [outcome_move(kept), _skipped(later_aaa), _skipped(earlier_zzz)])
+    try:
+        result = _load(repository, snapshot, omit_not_computed=True)
+        assert result.event_id.tolist() == [kept["event_id"]]
+        labels = [item["event_id"] for item in result.attrs["omitted_labels"]]
+        assert labels == sorted(labels) == [later_aaa["event_id"], earlier_zzz["event_id"]]
+    finally:
+        conn.close()
+
+
+def test_all_skipped_events_collapse_the_population(tmp_path):
+    first, second = history_event("2024-01-04"), history_event("2024-03-05")
+    conn, repository, snapshot = commit_event_history(
+        tmp_path, [first, second], [_skipped(first), _skipped(second)])
+    try:
+        with pytest.raises(DataError, match="POPULATION_COLLAPSED"):
+            _load(repository, snapshot, omit_not_computed=True)
+    finally:
+        conn.close()
+
+
+def test_non_boolean_omit_flag_refuses(tmp_path):
+    event = history_event("2024-05-06")
+    conn, repository, snapshot = commit_event_history(tmp_path, [event], [outcome_move(event)])
+    try:
+        with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+            _load(repository, snapshot, omit_not_computed="false")
     finally:
         conn.close()
 
