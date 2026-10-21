@@ -273,7 +273,9 @@ both flag states publish/verify the same plan and never write a ledger.
 
 The rows above, and the 16 MiB cohort record and child payload cap, describe the
 whole-cohort (v1) format; this section states the sharded (v2) contract that the one
-loader reads alongside it (#991 fix 4). Cohort rows (`features`, `training`, preflight
+loader reads alongside it. The shard module and the loader implement the read side only:
+the cohort and outer-input writers, the child transport and the outer result binding below
+stay on the whole-cohort format and follow this contract when they publish manifests. Cohort rows (`features`, `training`, preflight
 `planned_inputs`, and the same rows in `outer-inputs:<id>`) are ordered sections of
 content-addressed shards, not one record or payload. Population-sized receipt lists
 (`training_inputs` candidate, qualified, read and omitted event lists, and preflight
@@ -330,6 +332,7 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 | A row above 8 MiB or more than 8192 shards | Nonretryable `RESOURCE_LIMIT_EXCEEDED` before the manifest append; published shards stay unreferenced. A stored manifest or section listing more than 8192 shards is `EXPERIMENT_IDENTITY_CONFLICT`. |
 | Writer given a row whose sort key is missing, not a tuple of strings/integers, or not strictly above the previous key, or a row that is not canonical JSON or uses the reserved `__nonfinite__` key, or a manifest builder given a malformed manifest or section | `INVALID_EXPERIMENT_SPEC` before that shard is published. |
 | Read-time `UNSAFE_PATH` (for example a symlink) on a syntactically valid shard ref | Retryable `RESOURCE_UNAVAILABLE`, like a missing shard; invalid ref syntax stays a conflict. |
+| Loader given a manifest with a missing or extra inventory section, an inline member colliding with a section path, or a keyless-section row that is not exactly `{position, row}` with consecutive positions from 0; or a record that is not a dict | `EXPERIMENT_IDENTITY_CONFLICT`; no rows used. |
 | Whole-cohort record whose content hash differs from the expected `inputs_id` | `EXPERIMENT_IDENTITY_CONFLICT`; no rewrite or migration. |
 
 Registration, snapshot, plan and execution-spec bindings are unchanged; `inputs:<trial>`

@@ -190,8 +190,9 @@ class SearchTrials:
                 or (not succeeded and (len(pending) != 1 or set(result) != {"event"}))):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit completion differs from admitted attempts")
         # run_fitted_trial has returned only after checking exit and reaping the child.
-        self._append("execution-result:" + key, {"attempt": attempt, "inputs_id": content_hash(inputs),
-                     "result": result}, replay=False)
+        # Bind the admitted id (a manifest hash for sharded cohorts), the id reconcile compares.
+        self._append("execution-result:" + key, {"attempt": attempt,
+                     "inputs_id": self._read("inputs:" + key)["inputs_id"], "result": result}, replay=False)
         evidence = {"attempt": attempt, "fit_attempt_count": len(fits) + len(pending),
                     "completed_fit_count": len(fits), "fits": fits, "status": result["event"],
                     "forecasts_id": content_hash(result["forecasts"]) if succeeded else None}
