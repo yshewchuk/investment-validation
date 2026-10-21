@@ -80,17 +80,30 @@ def validate_targets(preflight, fold, evaluation_inputs, targets, *, strict_json
     ordered = [row["event_id"] for row in consumed]
     if len(ordered) != len(events) or set(ordered) != events:
         raise ValueError
+    omitted = evaluation_inputs.get("omitted_labels", []) if isinstance(evaluation_inputs, dict) else []
+    if not isinstance(omitted, list):
+        raise ValueError
+    omitted_ids = []
+    for row in omitted:
+        if (not isinstance(row, dict) or set(row) != {"event_id", "reason"}
+                or row["reason"] != "skipped" or row["event_id"] not in events):
+            raise ValueError
+        omitted_ids.append(row["event_id"])
+    if omitted_ids != sorted(omitted_ids) or len(set(omitted_ids)) != len(omitted_ids):
+        raise ValueError
     recipe = magnitude_recipe()
     receipt = {"schema_version": "research_magnitude_targets.v1",
         **{name: preflight[name] for name in ("snapshot_id", "holdout_as_of_month", "random_membership_version",
             "rolling_membership_version", "population_use", "purpose", "computed_moves_version")},
         "labels_before": fold["evaluation_labels_before"], "target_recipe": recipe,
         "target_recipe_id": content_hash(recipe), "consumed_inputs": consumed, "excluded_future_events": []}
+    if omitted:
+        receipt["omitted_labels"] = omitted
     expected = {**receipt, "inputs_id": content_hash(receipt), "holdout_exclusions": []}
     same = (canonical_json(evaluation_inputs) == canonical_json(expected)) if strict_json else evaluation_inputs == expected
     if not same:
         raise ValueError
-    if [row["event_id"] for row in targets] != ordered:
+    if [row["event_id"] for row in targets] != [event for event in ordered if event not in set(omitted_ids)]:
         raise ValueError
     for row in targets:
         value = row["absolute_move_pct"]

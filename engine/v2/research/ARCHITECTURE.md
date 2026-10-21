@@ -229,6 +229,14 @@ remaining objects pass `event_history`'s shared singleton preflight before
 any is opened; mixed inherited snapshots refuse. Decoded label availability
 must be strictly before `labels_before`; missing, skipped, malformed or
 non-finite labels refuse the whole call, with zero remaining a valid value.
+Exception, opt-in only: `omit_not_computed=True` (used by the magnitude search's inner and outer
+evaluation reads) treats a row the writer marked `skipped` (v5 `not_computed_reason`, e.g. `not_orats`)
+exactly as `qualify_magnitude_training_targets` does: it is omitted, never parsed, and listed in the
+frame attrs and receipt as `omitted_labels` (`[{"event_id", "reason": "skipped"}]`, event-id order).
+Registration is metadata-only and cannot see such rows, so refusing after seal would burn it. The
+receipt carries `omitted_labels` only when non-empty (receipts with none are byte-identical to before).
+Every other refusal above is unchanged; only `skipped=true` is omitted, never null/late availability.
+Forecasts for omitted events are made but not scored; `event_count` counts scored events.
 Earlier events with late availability can be decoded to check their recorded
 date; this is reconstructed availability, not verified publication evidence.
 Output rows carry target/object identity; frame attributes bind recipe,
