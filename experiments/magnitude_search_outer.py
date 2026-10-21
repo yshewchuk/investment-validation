@@ -21,6 +21,7 @@ from experiments.magnitude_search_execution import (
     run_fitted_trial,
     validate_execution_limits,
 )
+from experiments.magnitude_search_inputs import load_inputs, stored_id
 from experiments.magnitude_search_plan import read_search_plan
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_trials import SearchTrials
@@ -81,13 +82,13 @@ def _validate_targets(inputs, validation, fold):
         raise _conflict() from None
 
 
-def _result(started, inputs, execution, forecasts, validation, fold, horizons):
+def _result(started, inputs, inputs_id, execution, forecasts, validation, fold, horizons):
     _validate_targets(inputs, validation, fold)
     targets = {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]}
     predictions = [{**row, "absolute_move_pct": targets[row["event_id"]]} for row in forecasts]
     result = {"schema_version": "magnitude_search_outer_result.v1", "outer_id": started["outer_id"],
         "plan_id": started["plan_id"], "outer_year": fold["year"], "candidate": started["candidate"],
-        "selection_id": started["selection_id"], "inputs_id": content_hash(inputs),
+        "selection_id": started["selection_id"], "inputs_id": inputs_id,
         "execution_id": content_hash(execution), "validation_id": content_hash(validation),
         "training_inputs": inputs["training_inputs"], "evaluation_inputs": validation["evaluation_inputs"],
         "fit_attempt_count": execution["fit_attempt_count"], "event_count": len(targets),
@@ -100,10 +101,12 @@ def _result(started, inputs, execution, forecasts, validation, fold, horizons):
     return {**result, "result_id": content_hash(result)}
 
 
-def _replay(read, started, fold, plan, execution):
+def _replay(read, store, started, fold, plan, execution):
     try:
         _equal(read("start"), started)
-        inputs = read("inputs")
+        record = read("inputs")
+        inputs_id = stored_id(record)
+        inputs = load_inputs(store, record, inputs_id)
         fits = fit_evidence(inputs, fold, plan, execution)
         forecasts = _forecasts(read("forecasts"), fold, plan["horizons"])
         receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
@@ -112,7 +115,7 @@ def _replay(read, started, fold, plan, execution):
         for fit in fits:
             for state in ("started", "completed"):
                 _equal(read("fit-" + state + ":" + str(fit["horizon_sessions"])), fit)
-        result = _result(started, inputs, receipt, forecasts, read("validation"), fold, plan["horizons"])
+        result = _result(started, inputs, inputs_id, receipt, forecasts, read("validation"), fold, plan["horizons"])
         _equal(read("terminal"), result)
         return result
     except (KeyError, TypeError, ValueError, OverflowError):
@@ -156,7 +159,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         return append_record(conn, store, registration.run_id, "outer-" + slot + ":" + key, body, replay=False)
     execution = {**binding["magnitude_execution"], "fit_recipe": candidate["recipe"]}
     if replay_only or saved("terminal") is not None:
-        return _replay(saved, started, fold, plan, execution)
+        return _replay(saved, store, started, fold, plan, execution)
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
     resolved = execution_limits(limits)
@@ -196,8 +199,8 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
                   "targets": labels[["event_id", "absolute_move_pct"]].to_dict("records")}
     _validate_targets(inputs, validation, fold)
     append("validation", validation)
-    append("terminal", _result(started, inputs, receipt, forecasts, validation, fold, plan["horizons"]))
-    return _replay(saved, started, fold, plan, execution)
+    append("terminal", _result(started, inputs, content_hash(inputs), receipt, forecasts, validation, fold, plan["horizons"]))
+    return _replay(saved, store, started, fold, plan, execution)
 
 
 def collect_outer_results(conn, store, repository, registration, request, plan_ref):

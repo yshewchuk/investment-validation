@@ -30,6 +30,7 @@ from experiments.magnitude_search_execution import (
     run_fitted_trial,
     validate_execution_limits,
 )
+from experiments.magnitude_search_inputs import load_inputs
 from experiments.magnitude_search_plan import read_search_plan
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 
@@ -119,6 +120,19 @@ class SearchTrials:
             inputs = self._inputs(inner)
             self._memo[cohort] = (inputs, content_hash(inputs))
         return self._memo[cohort]
+
+    def _cohort(self, admitted):
+        """Load a stored cohort (v2 manifest or v1 whole record) bound to its admitted id."""
+        record = self._read("cohort:" + admitted["cohort"])
+        if record is None:
+            raise ValueError
+        try:
+            return load_inputs(self.store, record, admitted["inputs_id"])
+        except OpsError as error:
+            if error.problem.retryable:
+                raise
+            # Identity conflicts take each caller's own evidence-chain message.
+            raise ValueError from None
 
     def start(self, outer_year, inner_year, candidate_id):
         """Claim once, then bind native inputs; interrupted starts cannot be restarted."""
@@ -215,9 +229,9 @@ class SearchTrials:
                 raise ValueError
             admitted = self._read("inputs:" + key)
             cohort_key = content_hash([plan["plan_id"], outer_year, inner_year])
-            inputs = self._read("cohort:" + cohort_key)
-            if admitted != {"cohort": cohort_key, "inputs_id": content_hash(inputs)} or inputs is None:
+            if not isinstance(admitted, dict) or set(admitted) != {"cohort", "inputs_id"} or admitted["cohort"] != cohort_key:
                 raise ValueError
+            inputs = self._cohort(admitted)
             durable = self._read("execution-result:" + key)
             if (not isinstance(durable, dict) or set(durable) != {"attempt", "inputs_id", "result"}
                     or canonical_json(durable["attempt"]) != canonical_json(attempt)
@@ -352,7 +366,7 @@ class SearchTrials:
             validation = {"inputs_id": admitted["inputs_id"], "evaluation_inputs": dict(labels.attrs),
                           "targets": labels[["event_id", "absolute_move_pct"]].to_dict("records")}
         try:
-            self._validation(inner, admitted, self._read("cohort:" + admitted["cohort"]), validation)
+            self._validation(inner, admitted, self._cohort(admitted), validation)
         except (ValueError, TypeError, KeyError, OverflowError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search validation evidence differs") from None
         validation = self._append("validation:" + admitted["cohort"], validation)
@@ -369,13 +383,12 @@ class SearchTrials:
         return self._append("terminal:" + key, terminal)
 
     @staticmethod
-    def _validation(inner, admitted, cohort, validation):
+    def _validation(inner, admitted, inputs, validation):
         """Check a native-derived shared target authority against the admitted preflight."""
-        if (cohort is None or content_hash(cohort) != admitted["inputs_id"]
-                or set(validation) != {"inputs_id", "evaluation_inputs", "targets"}
+        if (set(validation) != {"inputs_id", "evaluation_inputs", "targets"}
                 or validation["inputs_id"] != admitted["inputs_id"]):
             raise ValueError
-        validate_targets(cohort["preflight"], inner, validation["evaluation_inputs"], validation["targets"])
+        validate_targets(inputs["preflight"], inner, validation["evaluation_inputs"], validation["targets"])
 
     def _terminal(self, plan, outer_year, inner_year, candidate_id):
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
@@ -392,10 +405,9 @@ class SearchTrials:
             admitted = self._read("inputs:" + key)
             if admitted is None or set(admitted) != {"cohort", "inputs_id"}:
                 raise ValueError
-            cohort = self._read("cohort:" + admitted["cohort"])
-            if (admitted["cohort"] != content_hash([plan["plan_id"], outer_year, inner_year])
-                    or cohort is None or content_hash(cohort) != admitted["inputs_id"]):
+            if admitted["cohort"] != content_hash([plan["plan_id"], outer_year, inner_year]):
                 raise ValueError
+            cohort = self._cohort(admitted)
             submitted = self._read("forecasts:" + key)
             if submitted is not None:
                 try:

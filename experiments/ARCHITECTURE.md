@@ -309,6 +309,16 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   increasing sort key carries a `problem` note and no key function; the writer takes a
   caller-supplied key and does not consult the inventory, so callers must not write such a member.
 
+* `magnitude_search_inputs.load_inputs(store, record, expected_id)` is the one loader every
+  consumer (`_record`, reconcile, freeze, outer replay, `_validation`, `fit_evidence`) reads
+  through. A record with the manifest schema is verified against `expected_id`, its sections
+  are streamed shard by shard and placed at their dotted paths in the inline document; any other
+  record is a v1 whole cohort whose id is its content hash. Both return the same inputs shape.
+  A section without a sort key stores rows `{position, row}` (position 0, 1, ...; the loader
+  checks it is consecutive and unwraps `row`), so every section has a strictly increasing key.
+  A manifest must carry exactly the `LIST_MEMBERS` sections. The loader is wired before any writer
+  publishes shards, so no stored record changes until activation.
+
 | Condition | Outcome |
 |---|---|
 | Shard missing or `OSError` | Retryable `RESOURCE_UNAVAILABLE`; no association change or candidate failure. |

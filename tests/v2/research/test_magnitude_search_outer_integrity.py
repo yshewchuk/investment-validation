@@ -243,9 +243,9 @@ def test_collection_rechecks_later_fold_sources_and_evidence(outer_case, monkeyp
         run(case, "2025")
     assert all(slot(case, "terminal", year) is not None for year in ("2024", "2025"))
     replay, seen = outer._replay, []
-    def replayed(read, started, fold, plan, execution):
+    def replayed(read, store, started, fold, plan, execution):
         seen.append(fold["year"])
-        return replay(read, started, fold, plan, execution)
+        return replay(read, store, started, fold, plan, execution)
     monkeypatch.setattr(outer, "_replay", replayed)
     forbid_work(monkeypatch)
     forbidden = Mock(side_effect=AssertionError("corrupt collection published evidence"))
