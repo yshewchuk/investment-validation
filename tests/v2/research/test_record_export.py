@@ -84,6 +84,7 @@ def test_layout_writes_results_and_report(tmp_path):
     man = json.loads((results / "export_manifest.json").read_bytes())
     assert man["experiment_id"] == "x"
     assert man["exp_number"] == 101
+    assert man["recording_mode"] == "ledger"
     assert man["trimmed"] == []
     assert set(man["files"]) == {"spec.json", "request.json", "event_ids.json", "outcome.json"}
     for name in man["files"]:
@@ -238,6 +239,11 @@ def test_oversize_event_ids_trimmed_return_list(tmp_path):
     ids = [f"evt-{i}" for i in range(200_000)]
     result = _export(tmp_path, event_ids=ids)
     assert result["trimmed"] == ["event_ids.json"]
+    doc = json.loads((tmp_path / "EXP-101_x" / "results" / "event_ids.json").read_bytes())
+    kept = doc["kept"]
+    assert isinstance(kept, list)
+    assert len(kept) > 0
+    assert kept == ids[:len(kept)]
 
 
 def test_refusal_case_writes_outcome_with_failure_code_and_replayed(tmp_path):
@@ -317,6 +323,7 @@ def test_export_native_run_independent_oracle(tmp_path):
         ["git", "-C", str(Path(__file__).resolve().parents[3]), "rev-parse", "HEAD"],
         capture_output=True,
         text=True,
+        env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
     )
     if proc.returncode == 0:
         assert outcome["commit_id"] == proc.stdout.strip()
@@ -399,6 +406,53 @@ def test_large_report_is_truncated_and_replay_unchanged(tmp_path):
         report_path=report,
     )
     assert second["status"] == "unchanged"
+
+
+def test_direct_api_oversized_report_truncated_then_unchanged(tmp_path):
+    first = _export(tmp_path, report_text="a" * 2_000_000)
+    report_md = tmp_path / "EXP-101_x" / "REPORT.md"
+    assert report_md.stat().st_size <= MAX_JSON_BYTES
+    text = report_md.read_text()
+    assert "[report truncated" in text
+    assert first["status"] == "written"
+    second = _export(tmp_path, report_text="a" * 2_000_000)
+    assert second["status"] == "unchanged"
+
+
+def test_bogus_git_dir_env_still_gets_real_commit_id(tmp_path, monkeypatch):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    proc = subprocess.run(
+        ["git", "-C", str(Path(__file__).resolve().parents[3]), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    expected = proc.stdout.strip() if proc.returncode == 0 else None
+    monkeypatch.setenv("GIT_DIR", "/nonexistent/bogus-git-dir")
+    registration = _Registration({
+        "execution_plan": {"experiment_id": "exp-x"},
+        "snapshot": {"snapshot_id": "snap-1"},
+        "event_ids": [],
+        "source_closure": {},
+        "environment": {},
+    })
+    saved = {
+        "outcome": {"failure_code": None},
+        "receipt": {"recording_mode": "smoke"},
+    }
+    result = export_native_run(
+        tmp_path,
+        registration,
+        {"hypothesis": "h"},
+        {"action": "run"},
+        saved,
+        exp_number=101,
+        replayed=False,
+        started=time.monotonic(),
+    )
+    folder = Path(result["dir"])
+    outcome = json.loads((folder / "results" / "outcome.json").read_bytes())
+    assert outcome["commit_id"] == expected
 
 
 def test_partial_write_leaves_manifestless_folder_and_retry_refuses(tmp_path, monkeypatch):

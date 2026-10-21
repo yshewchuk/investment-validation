@@ -157,6 +157,15 @@ def _resolve_folder(root: Path, exp_number: int, slug: str) -> Path:
     return existing[0] if existing else root / f"EXP-{exp_number:03d}_{slug}"
 
 
+def _check_number(value, experiment_id):
+    """Validate an EXP number boundary; raise INVALID_EXPERIMENT_SPEC."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _bad(value, experiment_id)
+    if value < FIRST_NUMBER:
+        raise _bad(value, experiment_id, f"new experiments start at EXP-{FIRST_NUMBER}")
+    return value
+
+
 def resolve_exp_number(experiments_root, experiment_id, requested):
     """Resolve the operator-supplied EXP number: None/int/digit-string only.
 
@@ -177,10 +186,8 @@ def resolve_exp_number(experiments_root, experiment_id, requested):
             req_int = int(text)
         else:
             raise _bad(requested, experiment_id)
-    if req_int is not None and req_int < FIRST_NUMBER:
-        raise _bad(
-            requested, experiment_id, f"new experiments start at EXP-{FIRST_NUMBER}"
-        )
+    if req_int is not None:
+        _check_number(req_int, experiment_id)
 
     linked = _linked_number(root, experiment_id)
     if linked is not None:
@@ -274,6 +281,16 @@ def _write_new(path: Path, data: bytes) -> None:
             os.close(dfd)
 
 
+def _cap_report(text):
+    """Cap report text to MAX_JSON_BYTES-8192 bytes and mark truncation."""
+    encoded = str(text).encode("utf-8")
+    limit = MAX_JSON_BYTES - 8192
+    capped = encoded[:limit].decode("utf-8", errors="ignore")
+    if len(encoded) > limit:
+        capped += "\n[report truncated to fit the 1 MB export cap]"
+    return capped
+
+
 def _report_md(exp_number: int, experiment_id, outcome, report_text) -> str:
     """Render the REPORT.md stub (ids, status, optional success report text)."""
     status = str(outcome.get("failure_code") or "ran") if isinstance(outcome, dict) else "ran"
@@ -320,10 +337,9 @@ def export_run_record(
             "INVALID_EXPERIMENT_SPEC",
             f"experiment_id must be a string, got {type(experiment_id).__name__}",
         )
-    if isinstance(exp_number, bool) or not isinstance(exp_number, int):
-        raise _bad(exp_number, experiment_id)
-    if exp_number < FIRST_NUMBER:
-        raise _bad(exp_number, experiment_id, f"new experiments start at EXP-{FIRST_NUMBER}")
+    _check_number(exp_number, experiment_id)
+    if report_text is not None:
+        report_text = _cap_report(report_text)
     for folder in _folders_with_number(root, exp_number):
         _check_number_folder(folder, exp_number, experiment_id)
     folder = _resolve_folder(root, exp_number, slugify(slug))
@@ -462,12 +478,14 @@ def export_run_record(
 def _git_commit_id() -> str | None:
     """Current git HEAD commit id, or None if unavailable."""
     repo_root = Path(__file__).resolve().parents[1]
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
         proc = subprocess.run(
             ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             timeout=10,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -500,11 +518,7 @@ def export_native_run(
     if saved["outcome"]["failure_code"] is None and report_path is not None:
         report_raw = _read_capped(Path(report_path))
         if report_raw is not None:
-            limit = MAX_JSON_BYTES - 8192
-            text = report_raw[:limit].decode("utf-8", errors="ignore")
-            if len(report_raw) > limit:
-                text += "\n[report truncated to fit the 1 MB export cap]"
-            report_text = text
+            report_text = report_raw.decode("utf-8", errors="ignore")
     closure = document.get("source_closure")
     source_closure_hash = hashlib.sha256(
         json.dumps(closure, sort_keys=True).encode("utf-8")
