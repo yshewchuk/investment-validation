@@ -41,18 +41,33 @@ def _path_value(inputs, path):
     return value
 
 
+def _scalars(value, prefix, skip, out):
+    for name, item in value.items():
+        path = prefix + name
+        if path in skip:
+            continue
+        if isinstance(item, dict):
+            _scalars(item, path + ".", skip, out)
+        else:
+            out[path] = item
+
+
+def _position(item):
+    return (item["position"],)
+
+
 def _manifest(store, cohort=COHORT):
-    inline, sections = copy.deepcopy(cohort), {}
+    sections = {}
     for member in shards.LIST_MEMBERS:
         path = member["section"]
         rows = _path_value(cohort, path)
         key = member["key"]
         if key is None:
             rows = [{"position": index, "row": item} for index, item in enumerate(rows)]
-            key = lambda item: (item["position"],)
+            key = _position
         sections[path] = shards.write_section(store, path, rows, key)
-        *parents, leaf = path.split(".")
-        _path_value(inline, ".".join(parents)).pop(leaf) if parents else inline.pop(leaf)
+    inline = {}
+    _scalars(cohort, "", set(sections), inline)
     return shards.build_manifest(inline, sections)
 
 
@@ -95,7 +110,7 @@ def test_inline_member_colliding_with_a_section_is_a_conflict(tmp_path):
     store = ArtifactStore(tmp_path / "store")
     manifest = _manifest(store)
     clash = copy.deepcopy(manifest)
-    clash["inline"]["training"] = []
+    clash["inline"]["training"] = 1
     _conflict(lambda: load_inputs(store, clash, shards.manifest_id(clash)))
 
 
@@ -105,7 +120,7 @@ def test_keyless_section_positions_must_be_consecutive(tmp_path):
     gapped = copy.deepcopy(manifest)
     gapped["sections"]["preflight.event_ids"] = shards.write_section(
         store, "preflight.event_ids",
-        [{"position": 0, "row": "E1"}, {"position": 2, "row": "E2"}], lambda item: (item["position"],))
+        [{"position": 0, "row": "E1"}, {"position": 2, "row": "E2"}], _position)
     _conflict(lambda: load_inputs(store, gapped, shards.manifest_id(gapped)))
 
 
@@ -133,5 +148,5 @@ def test_malformed_keyless_wrapper_is_a_conflict(tmp_path):
     bad = copy.deepcopy(manifest)
     bad["sections"]["preflight.event_ids"] = shards.write_section(
         store, "preflight.event_ids",
-        [{"position": 0, "row": "E1", "extra": 1}], lambda item: (item["position"],))
+        [{"position": 0, "row": "E1", "extra": 1}], _position)
     _conflict(lambda: load_inputs(store, bad, shards.manifest_id(bad)))

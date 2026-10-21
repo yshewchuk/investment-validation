@@ -290,7 +290,10 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   16 MiB record cap), so equal rows give equal shards; a row or count above the
   maxima is `RESOURCE_LIMIT_EXCEEDED`.
 * `cohort:<id>` and `outer-inputs:<id>` hold a small manifest (inline scalar members plus,
-  per section, `row_count` and ordered `{ref, rows, first_key, last_key}`). `inputs_id`
+  per section, `row_count` and ordered `{ref, rows, first_key, last_key}`).
+  `magnitude_search_shards` requires inline values to be JSON scalars (str, int, float,
+  bool, None); a list or dict value is refused (`INVALID_EXPERIMENT_SPEC` at build,
+  `EXPERIMENT_IDENTITY_CONFLICT` at verify). `inputs_id`
   is `content_hash(manifest)`. A whole-cohort record is read through the loader's v1
   adapter, bound by its content hash; none is rewritten.
 * One streaming reader serves parent and child: each shard is `read_verified` (size is
@@ -306,7 +309,7 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   validation target. Transport memory is one shard plus the manifest.
 * Shards are published, outside the catalog transaction, before the manifest append,
   which is the commit point.
-* The manifest hash is a Merkle `inputs_id`, and every cohort shards, however small.
+* The manifest hash is a Merkle `inputs_id`, and every cohort is sharded, including empty and one-row cohorts.
 * `magnitude_search_shards` implements the cut rule, writer, manifest hash and verified reader
   and lists the list-valued members (`LIST_MEMBERS`) as data. A member without a strictly
   increasing sort key carries a `problem` note and no key function; the writer takes a
@@ -316,7 +319,8 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 * `magnitude_search_inputs.load_inputs(store, record, expected_id)` is the one loader every
   consumer (`_record`, reconcile, freeze, outer replay, `_validation`) reads
   through. A record with the manifest schema is verified against `expected_id`, its sections
-  are streamed shard by shard and placed at their dotted paths in the inline document; any other
+  are streamed shard by shard and placed at their dotted paths beside the inline members, which
+  are flat scalars keyed by dotted path (`preflight.count`); any other
   record is a v1 whole cohort whose id is its content hash. Both return the same inputs shape.
   A section without a sort key stores rows `{position, row}` (position 0, 1, ...; the loader
   checks it is consecutive and unwraps `row`), so every section has a strictly increasing key.
@@ -326,7 +330,7 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 | Condition | Outcome |
 |---|---|
 | Shard missing or `OSError` | Retryable `RESOURCE_UNAVAILABLE`; no association change or candidate failure. |
-| Hash/size mismatch, wrong schema or section, count or boundary-key disagreement, duplicate key, invalid or unsafe ref syntax, manifest hash differing from `inputs_id` (parent or child) | `EXPERIMENT_IDENTITY_CONFLICT`; no rows used. |
+| Hash/size mismatch, wrong schema or section, count or boundary-key disagreement, duplicate key, invalid or unsafe ref syntax, manifest hash differing from `inputs_id` (parent or child), a manifest `inline` value that is a list or dict | `EXPERIMENT_IDENTITY_CONFLICT`; no rows used. |
 | Crash after some shards, before the manifest | Orphan shards confer no authority and are reclaimable by the store owner; the immutable claim stays unfinished. |
 | Manifest committed, later shard lost or corrupted | Fails closed as above on every read. |
 | Same slot, different manifest | `EXPERIMENT_IDENTITY_CONFLICT`. |

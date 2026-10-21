@@ -41,11 +41,13 @@ class Once:
 
 
 @contextmanager
-def refusal(code, retryable):
+def refusal(code, retryable, message=None):
     with pytest.raises(OpsError) as caught:
         yield
     assert caught.value.problem.code == code
     assert caught.value.problem.retryable is retryable
+    if message is not None:
+        assert caught.value.problem.message == message
 
 
 def reference(entry):
@@ -244,6 +246,19 @@ def test_duplicate_and_out_of_order_keys_refuse_while_writing(tmp_path):
         shards.write_section(store, "features", [row("E001"), row("E001")], key)
 
 
+@pytest.mark.parametrize("sort_key, batch, message", [
+    (lambda item: (item["nope"],), [row("E001")], "search cohort section key is invalid"),
+    (lambda item: (True,), [row("E001")], "search cohort section key is invalid"),
+    (lambda item: item["event_id"], [row("E001")], "search cohort section key is invalid"),
+    (lambda item: ("a", 1) if item["event_id"] == "E001" else ("a", "b"),
+     [row("E001"), row("E002")], "search cohort section keys must strictly increase"),
+], ids=["missing_field", "bool_part", "non_tuple", "strictly_increase"])
+def test_writer_sort_key_refusals(tmp_path, sort_key, batch, message):
+    store = ArtifactStore(tmp_path / "store")
+    with refusal("INVALID_EXPERIMENT_SPEC", False, message):
+        shards.write_section(store, "features", batch, sort_key)
+
+
 def test_build_manifest_shard_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(shards, "MAX_SHARDS", 2)
     store = ArtifactStore(tmp_path / "store")
@@ -392,6 +407,15 @@ def test_verify_manifest_refuses_values_std_json_cannot_store(inline):
     manifest = {"schema_version": shards.MANIFEST_SCHEMA, "inline": inline, "sections": {}}
     expected_id = shards.manifest_id(manifest)
     with refusal("EXPERIMENT_IDENTITY_CONFLICT", False):
+        shards.verify_manifest(manifest, expected_id)
+
+
+@pytest.mark.parametrize("inline", [{"x": [1]}, {"x": {"a": 1}}],
+                         ids=["list_inline", "dict_inline"])
+def test_verify_manifest_refuses_container_inline_values(inline):
+    manifest = {"schema_version": shards.MANIFEST_SCHEMA, "inline": inline, "sections": {}}
+    expected_id = shards.manifest_id(manifest)
+    with refusal("EXPERIMENT_IDENTITY_CONFLICT", False, "search cohort manifest is invalid"):
         shards.verify_manifest(manifest, expected_id)
 
 
@@ -616,6 +640,20 @@ def test_features_key_returns_pair_and_refuses_missing_field():
 def test_build_manifest_invalid_inputs_are_invalid_spec(inline, sections):
     with refusal("INVALID_EXPERIMENT_SPEC", False):
         shards.build_manifest(inline, sections)
+
+
+@pytest.mark.parametrize("inline", [{"x": [1]}, {"x": {"a": 1}}],
+                         ids=["list_inline", "dict_inline"])
+def test_build_manifest_refuses_container_inline_values(inline):
+    with refusal("INVALID_EXPERIMENT_SPEC", False, "search cohort manifest is invalid"):
+        shards.build_manifest(inline, {})
+
+
+def test_inline_scalar_types_are_accepted():
+    inline = {"s": "a", "i": 1, "f": 1.5, "b": True, "n": None}
+    manifest = shards.build_manifest(inline, {})
+    assert manifest["inline"] == inline
+    assert shards.verify_manifest(manifest, shards.manifest_id(manifest)) == manifest
 
 
 def test_build_manifest_snapshots_caller_inputs(tmp_path):

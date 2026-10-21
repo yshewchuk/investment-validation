@@ -2,8 +2,6 @@
 
 Contract: experiments/ARCHITECTURE.md, "Sharded cohort inputs" (#991 fix 4).
 """
-import copy
-
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from experiments.magnitude_search_shards import (
@@ -32,22 +30,25 @@ def _section_rows(store, member, entry):
     return rows
 
 
-def _place(inputs, path, rows):
+def _place(inputs, path, value):
     *parents, leaf = path.split(".")
     target = inputs
     for name in parents:
-        target = target.get(name) if isinstance(target, dict) else None
-    if not isinstance(target, dict) or leaf in target:
+        target = target.setdefault(name, {})
+        if not isinstance(target, dict):
+            raise fail(_CONFLICT, "search cohort manifest does not fit its sections")
+    if leaf in target:
         raise fail(_CONFLICT, "search cohort manifest does not fit its sections")
-    target[leaf] = rows
+    target[leaf] = value
 
 
 def load_inputs(store, record, expected_id):
     """Return the cohort inputs of a stored record, bound to ``expected_id``.
 
     A manifest-schema record is verified, then its sections are streamed shard by
-    shard into the inline document. Any other dict is a v1 whole cohort whose id is
-    its content hash. Both yield the same inputs shape; any mismatch is a conflict.
+    shard onto the inline members, which are flat scalars keyed by dotted path. Any
+    other dict is a v1 whole cohort whose id is its content hash. Both yield the same
+    inputs shape; any mismatch is a conflict.
     """
     if not isinstance(record, dict):
         raise fail(_CONFLICT, "search cohort record is invalid")
@@ -59,7 +60,9 @@ def load_inputs(store, record, expected_id):
     sections = record["sections"]
     if set(sections) != {member["section"] for member in LIST_MEMBERS}:
         raise fail(_CONFLICT, "search cohort manifest sections are invalid")
-    inputs = copy.deepcopy(record["inline"])
+    inputs = {}
+    for path, value in record["inline"].items():
+        _place(inputs, path, value)
     for member in LIST_MEMBERS:
         _place(inputs, member["section"], _section_rows(store, member, sections[member["section"]]))
     return inputs
