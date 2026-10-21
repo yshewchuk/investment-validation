@@ -287,7 +287,10 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   16 MiB record cap), so equal rows give equal shards; a row or count above the
   maxima is `RESOURCE_LIMIT_EXCEEDED`.
 * `cohort:<id>` and `outer-inputs:<id>` hold a small manifest (inline scalar members plus,
-  per section, `row_count` and ordered `{ref, rows, first_key, last_key}`). `inputs_id`
+  per section, `row_count` and ordered `{ref, rows, first_key, last_key}`).
+  `magnitude_search_shards` requires inline values to be JSON scalars (str, int, float,
+  bool, None); a list or dict value is refused (`INVALID_EXPERIMENT_SPEC` at build,
+  `EXPERIMENT_IDENTITY_CONFLICT` at verify). `inputs_id`
   is `content_hash(manifest)`. Older whole-cohort records refuse
   `EXPERIMENT_IDENTITY_CONFLICT`; none is rewritten.
 * One streaming reader serves parent and child: each shard is `read_verified` (size is
@@ -303,7 +306,7 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   validation target. Transport memory is one shard plus the manifest.
 * Shards are published, outside the catalog transaction, before the manifest append,
   which is the commit point.
-* The manifest hash is a Merkle `inputs_id`, and every cohort shards, however small.
+* The manifest hash is a Merkle `inputs_id`, and every cohort is sharded, including empty and one-row cohorts.
 * `magnitude_search_shards` implements the cut rule, writer, manifest hash and verified reader
   and lists the list-valued members (`LIST_MEMBERS`) as data. A member without a strictly
   increasing sort key carries a `problem` note and no key function; the writer takes a
