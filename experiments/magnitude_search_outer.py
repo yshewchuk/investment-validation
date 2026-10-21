@@ -186,7 +186,8 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
             pending.append(fit)
         else:
             fits.append(pending.pop())
-    result = run_fitted_trial(inputs, fold, plan, execution, resolved, progress)
+    source = {"manifest": manifest, "inputs_id": inputs_id, "store_root": str(store.root)}
+    result = run_fitted_trial(source, fold, plan, execution, resolved, progress)
     succeeded = result.get("event") == "succeeded"
     if ((succeeded and (pending or len(fits) != len(expected) or set(result) != {"event", "forecasts"}))
             or (not succeeded and (result != {"event": "failed"} or len(pending) != 1))):

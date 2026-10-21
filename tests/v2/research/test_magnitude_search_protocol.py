@@ -1,14 +1,19 @@
 """Real pipe protocol, resource isolation and cleanup controls for the fixed child."""
 import json
+import shutil
 import signal
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_execution as execution
+from tests.v2.research.magnitude_search_fit_source import fit_source
 from tests.v2.research.test_magnitude_search_execution import LIMITS
+
+STUB_SOURCE = {"manifest": {"stub": True}, "inputs_id": "sha256:" + "0" * 64, "store_root": "/nonexistent-store"}
 
 
 def wire_child(monkeypatch, script):
@@ -26,8 +31,7 @@ def wire_child(monkeypatch, script):
 
 
 def run_wire(progress=lambda *args: None):
-    return execution.run_fitted_trial({"features": [], "training": [], "preflight": "not child data",
-        "training_inputs": "not child data", "stored_inputs_id": "not child data"}, {},
+    return execution.run_fitted_trial(STUB_SOURCE, {},
         {"horizons": [1]}, {}, execution.execution_limits(LIMITS), progress)
 
 
@@ -55,12 +59,11 @@ def test_child_protocol_refuses_exactly_and_removes_scratch(monkeypatch, script,
     assert not scratch.exists()
 
 
-def test_child_receives_only_fit_inputs_and_success_removes_scratch(monkeypatch):
+def test_child_receives_only_a_header_and_success_removes_scratch(monkeypatch):
     observed = wire_child(monkeypatch, "print('{\"event\":\"succeeded\",\"forecasts\":[]}')")
     assert run_wire() == {"event": "succeeded", "forecasts": []}
     child, scratch, request = observed[0]
-    assert request == {"inputs": {"features": [], "training": []}, "inner": {},
-                       "plan": {"horizons": [1]}, "execution": {}}
+    assert request == {**STUB_SOURCE, "inner": {}, "plan": {"horizons": [1]}, "execution": {}}
     assert child.returncode == 0
     assert not scratch.exists()
 
@@ -161,30 +164,15 @@ def test_exited_child_still_requires_unexpired_deadline(monkeypatch, remaining, 
     assert not scratch.exists()
 
 
-def test_input_cap_precedes_launch(monkeypatch):
-    monkeypatch.setattr(execution, "MAX_BYTES", 1)
-    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("launched oversized input"))
-    with pytest.raises(OpsError) as caught:
-        run_wire()
-    assert caught.value.problem == fail("RESOURCE_LIMIT_EXCEEDED", "search execution input exceeds its byte limit").problem
-
-
-def test_fixed_worker_independently_rejects_grown_input(monkeypatch):
-    original = subprocess.Popen
-    observed = []
-    def launch(args, **kwargs):
-        source = Path(args[3])
-        source.write_bytes(b" " * (execution.MAX_BYTES + 1))
-        child = original(args, **kwargs)
-        observed.append((child, source.parent))
-        return child
-    monkeypatch.setattr(execution.subprocess, "Popen", launch)
-    with pytest.raises(OpsError) as caught:
-        run_wire()
-    assert caught.value.problem == fail("RESOURCE_LIMIT_EXCEEDED", "search execution exceeded its resource limits").problem
-    child, scratch = observed[0]
-    assert child.poll() is not None
-    assert not scratch.exists()
+def test_header_is_not_capped_and_only_output_is(monkeypatch):
+    """The removed input cap: a header above MAX_BYTES launches; the output cap still applies."""
+    monkeypatch.setattr(execution, "MAX_BYTES", 600)
+    big = {**STUB_SOURCE, "manifest": {"stub": "x" * 5000}}
+    observed = wire_child(monkeypatch, "print('{\"event\":\"succeeded\",\"forecasts\":[]}')")
+    result = execution.run_fitted_trial(big, {}, {"horizons": [1]}, {}, execution.execution_limits(LIMITS),
+                                        lambda *args: None)
+    assert result == {"event": "succeeded", "forecasts": []}
+    assert observed[0][2]["manifest"] == {"stub": "x" * 5000}
 
 
 def test_parent_progress_failure_kills_and_reaps_child_before_removing_scratch(monkeypatch):
@@ -242,3 +230,44 @@ def test_parent_affinity_oserror_is_typed(monkeypatch):
         execution.execution_limits(LIMITS)
     assert caught.value.problem == fail(
         "RESOURCE_UNAVAILABLE", "search execution requires Linux resource containment").problem
+
+
+def _run_real_worker(header_bytes, tmp_path):
+    """Run the real worker on ``header_bytes``; return its parsed stdout JSON."""
+    header = tmp_path / "header.json"
+    header.write_bytes(header_bytes)
+    done = subprocess.run([sys.executable, "-m", "experiments.magnitude_search_worker", str(header),
+                           json.dumps(execution.execution_limits(LIMITS))],
+                          cwd=Path(execution.__file__).resolve().parents[1],
+                          env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(Path(execution.__file__).resolve().parents[1])},
+                          capture_output=True, timeout=120)
+    assert done.returncode == 0
+    return json.loads(done.stdout)
+
+
+def test_real_worker_refuses_an_oversized_header_as_resource_limit(tmp_path):
+    result = _run_real_worker(b" " * (execution.MAX_BYTES + 1), tmp_path)
+    assert result == {"event": "resource_limit"}
+
+
+def test_real_worker_accepts_a_header_of_exactly_the_cap(tmp_path):
+    result = _run_real_worker(b" " * execution.MAX_BYTES, tmp_path)
+    assert result == {"event": "unavailable"}
+
+
+def test_real_worker_reports_a_loader_failure_as_unavailable(tmp_path):
+    header = json.dumps({"manifest": {"stub": True}, "inputs_id": "sha256:" + "0" * 64,
+                         "store_root": str(tmp_path), "inner": {"evaluation_event_ids": []},
+                         "plan": {"horizons": [1]}, "execution": {"features": []}}).encode()
+    result = _run_real_worker(header, tmp_path)
+    assert result == {"event": "unavailable"}
+
+
+def test_real_worker_reports_a_missing_shard_store_as_unavailable(tmp_path):
+    source = fit_source({"features": [], "training": [{"event_id": "a", "absolute_move_pct": 1.0}]},
+                        tmp_path / "store")
+    shutil.rmtree(tmp_path / "store" / "objects")
+    header = json.dumps({**source, "inner": {"evaluation_event_ids": []},
+                         "plan": {"horizons": [1]}, "execution": {"features": []}}).encode()
+    result = _run_real_worker(header, tmp_path)
+    assert result == {"event": "unavailable"}

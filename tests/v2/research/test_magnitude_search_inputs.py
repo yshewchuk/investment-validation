@@ -4,9 +4,10 @@ import copy
 import pytest
 
 from engine.v2.foundation import ArtifactStore, content_hash
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
+from experiments import magnitude_search_inputs as inputs_module
 from experiments import magnitude_search_shards as shards
-from experiments.magnitude_search_inputs import load_inputs
+from experiments.magnitude_search_inputs import load_fit_inputs, load_inputs, publish_inputs
 
 
 def _ids(*names):
@@ -152,3 +153,117 @@ def test_malformed_keyless_wrapper_is_a_conflict(tmp_path):
         store, "preflight.event_ids",
         [{"position": 0, "row": "E1", "extra": 1}], _position)
     _conflict(lambda: load_inputs(store, bad, shards.manifest_id(bad)))
+
+
+def _fit_cohort(count):
+    events = [f"E{index:03d}" for index in range(count)]
+    cohort = copy.deepcopy(COHORT)
+    cohort["training"] = [{"event_id": event, "absolute_move_pct": 1.0 + index, "extra": "dropped"}
+                          for index, event in enumerate(events[:3])]
+    cohort["features"] = [{"event_id": event, "context_id": "c", "horizon_sessions": horizon, "x": 0.5, "y": 2.0,
+                           "unused": "dropped"} for event in events for horizon in (1, 3, 5)]
+    return cohort, events
+
+
+def test_load_fit_inputs_streams_many_shards_and_projects_only_fit_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(shards, "TARGET_BYTES", 300)
+    monkeypatch.setattr(shards, "MAX_SHARD_BYTES", 600)
+    cohort, events = _fit_cohort(12)
+    store = ArtifactStore(tmp_path)
+    manifest, inputs_id = publish_inputs(store, cohort)
+    assert len(manifest["sections"]["features"]["shards"]) > 3
+    evaluation = [events[7], events[9]]
+    loaded = load_fit_inputs(store, manifest, inputs_id, evaluation, [1, 5], ("x",))
+    wanted = set(events[:3]) | set(evaluation)
+    assert loaded["training"] == [{"event_id": row["event_id"], "absolute_move_pct": row["absolute_move_pct"]}
+                                  for row in cohort["training"]]
+    assert loaded["features"] == [{"event_id": event, "context_id": "c", "horizon_sessions": horizon, "x": 0.5}
+                                  for event in events if event in wanted for horizon in (1, 5)]
+
+
+def test_load_fit_inputs_refuses_a_wrong_id_a_v1_record_and_a_corrupt_shard(tmp_path):
+    cohort, events = _fit_cohort(4)
+    store = ArtifactStore(tmp_path)
+    manifest, inputs_id = publish_inputs(store, cohort)
+    for record, expected, message in ((manifest, "sha256:" + "0" * 64,
+                                       "search cohort manifest differs from its binding"),
+                                      (cohort, content_hash(cohort),
+                                       "search cohort record is invalid")):
+        with pytest.raises(OpsError) as caught:
+            load_fit_inputs(store, record, expected, [], [1], ("x",))
+        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", message).problem
+    ref = manifest["sections"]["features"]["shards"][0]["ref"]
+    path = store.root / ref["storage_key"]
+    size = path.stat().st_size
+    path.chmod(0o644)
+    path.write_bytes(b"x" * size)
+    with pytest.raises(OpsError) as caught:
+        load_fit_inputs(store, manifest, inputs_id, [], [1], ("x",))
+    assert caught.value.problem == fail(
+        "EXPERIMENT_IDENTITY_CONFLICT", "search cohort shard could not be read").problem
+
+
+def test_load_fit_inputs_refuses_inline_paths_that_collide_with_sections(tmp_path):
+    store = ArtifactStore(tmp_path)
+    cohort, _ = _fit_cohort(2)
+    manifest, _ = publish_inputs(store, cohort)
+    for bad_inline in ({**manifest["inline"], "training": 1}, {**manifest["inline"], "preflight": 1}):
+        record = {**manifest, "inline": bad_inline}
+        record_id = shards.manifest_id(record)
+        with pytest.raises(OpsError) as caught:
+            load_fit_inputs(store, record, record_id, [], [1], ("x",))
+        assert caught.value.problem == fail(
+            "EXPERIMENT_IDENTITY_CONFLICT", "search cohort manifest does not fit its sections").problem
+
+
+def test_load_fit_inputs_reads_one_shard_at_a_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(shards, "TARGET_BYTES", 300)
+    monkeypatch.setattr(shards, "MAX_SHARD_BYTES", 600)
+    cohort, _ = _fit_cohort(12)
+    store = ArtifactStore(tmp_path)
+    manifest, inputs_id = publish_inputs(store, cohort)
+    reads = []
+    real_read = store.read_verified
+
+    def counting_read(ref):
+        reads.append(ref)
+        return real_read(ref)
+
+    store.read_verified = counting_read
+    at_row = []
+    original = inputs_module.iter_section
+
+    def spy(store_, section, entry, key):
+        for row in original(store_, section, entry, key):
+            if section == "features":
+                at_row.append(len(reads))
+            yield row
+
+    monkeypatch.setattr(inputs_module, "iter_section", spy)
+    load_fit_inputs(store, manifest, inputs_id, [], [1], ("x",))
+    assert len(reads) > 3
+    assert at_row == sorted(at_row)
+    assert at_row[0] == len(manifest["sections"]["training"]["shards"]) + 1
+    assert at_row[0] < at_row[-1]
+
+
+def test_load_fit_inputs_refuses_non_sequence_projection_arguments(tmp_path):
+    cohort, _ = _fit_cohort(2)
+    store = ArtifactStore(tmp_path)
+    manifest, inputs_id = publish_inputs(store, cohort)
+    for args in ((None, [1], ("x",)), ([], None, ("x",)), ([], [1], None)):
+        with pytest.raises(OpsError) as caught:
+            load_fit_inputs(store, manifest, inputs_id, *args)
+        assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC",
+                                            "search fit projection arguments are invalid").problem
+
+
+def test_load_fit_inputs_missing_requested_column_raises_keyerror(tmp_path):
+    cohort, _ = _fit_cohort(2)
+    store = ArtifactStore(tmp_path)
+    manifest, inputs_id = publish_inputs(store, cohort)
+    with pytest.raises(KeyError):
+        load_fit_inputs(store, manifest, inputs_id, [], [1], ("not_a_column",))
+    projected = load_fit_inputs(store, manifest, inputs_id, [], [1], ("y",))
+    assert projected["features"] and all(set(row) == {"event_id", "context_id", "horizon_sessions", "y"}
+                                         for row in projected["features"])
