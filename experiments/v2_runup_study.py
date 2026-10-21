@@ -63,7 +63,7 @@ def main(argv=None):
         comparison_request(spec, args.event_id)
         conn = _catalog(args.catalog)
         store = ArtifactStore(args.store_root)
-        repository = Repository(conn, store)
+        repository = Repository(conn, store, pin_snapshots=True)
         binding = dict(snapshot=repository.resolve(args.snapshot_id), scope=args.scope,
                        as_of_month=args.as_of_month, event_ids=args.event_id)
         with redirect_stdout(sys.stderr):
