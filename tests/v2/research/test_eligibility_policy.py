@@ -1,4 +1,5 @@
 """Metadata-only shared admission: no caller-supplied membership is trusted."""
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 
@@ -17,6 +18,14 @@ from tests.v2.research.magnitude_trial_support import (
 
 MONTH = "2026-01"
 VERSION = "grouped_ticker_embargo.v1"
+
+
+@contextmanager
+def refuses(code, message):
+    with pytest.raises(DataError) as caught:
+        yield
+    assert caught.value.code == code
+    assert caught.value.problem.message == message
 
 
 def group(event, *, start=None, end=None, decision=None, source=None):
@@ -118,13 +127,13 @@ def test_policy_literal_identity_and_no_default():
 @pytest.mark.parametrize("days", [-1, True, 30.0, float("nan"), float("inf"), None, "30"])
 def test_bad_policy_width(days):
     assert eligibility.eligibility_policy(version=VERSION, embargo_days=0)["embargo_days"] == 0
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with refuses("CONTRACT_MISMATCH", "explicit supported policy and nonnegative integer days required"):
         eligibility.eligibility_policy(version=VERSION, embargo_days=days)
 
 
 def test_unknown_version():
     assert eligibility.eligibility_policy(version=VERSION, embargo_days=30)["schema_version"] == VERSION
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with refuses("CONTRACT_MISMATCH", "explicit supported policy and nonnegative integer days required"):
         eligibility.eligibility_policy(version="v2", embargo_days=30)
 
 
@@ -180,6 +189,7 @@ def test_one_horizon_or_label_overlap_excludes_whole_event(tmp_path, monkeypatch
     lambda m: m["groups"][0].update(label_end="2024-05-01"),
     lambda m: m["groups"][0].update(label_end="2024-06-14T00:00:00Z"),
     lambda m: m["groups"][0]["forecasts"].pop(),
+    lambda m: m["groups"][0]["forecasts"][0].update(horizon_sessions=True),
     lambda m: m["groups"][0]["forecasts"][0].update(decision_date="2024-06-15"),
     lambda m: m["groups"][0]["forecasts"][0].update(source_session_ceiling="2024-06-15"),
     lambda m: m["groups"][0].update(random_held=False),
@@ -194,7 +204,7 @@ def test_closed_metadata_refuses_before_scans(tmp_path, monkeypatch, mutation):
         repository.scans.clear()
         mutation(metadata)
         metadata["metadata_id"] = content_hash({k: v for k, v in metadata.items() if k != "metadata_id"})
-        with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        with refuses("CONTRACT_MISMATCH", "invalid or stale eligibility policy/group metadata"):
             eligibility.plan_eligibility(repository, snapshot, as_of_month=MONTH, policy=policy,
                                         metadata=metadata, evaluation_event_ids=[])
         assert repository.scans == []
@@ -211,10 +221,10 @@ def test_hash_and_snapshot_refusal(tmp_path, monkeypatch):
         assert plan(repository, snapshot, [group(event)])["retained_event_ids"] == [event["event_id"]]
         repository.scans.clear()
         metadata["metadata_id"] = "sha256:stale"
-        with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        with refuses("CONTRACT_MISMATCH", "invalid or stale eligibility policy/group metadata"):
             eligibility.plan_eligibility(repository, snapshot, as_of_month=MONTH, policy=policy,
                                         metadata=metadata, evaluation_event_ids=[])
-        with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
+        with refuses("SNAPSHOT_UNRESOLVED", "snapshot differs from its committed identity"):
             plan(repository, replace(snapshot, calendar_version="stale"), [group(event)])
         assert repository.scans == []
     finally:
@@ -231,7 +241,7 @@ def test_canonical_population_not_caller_claim(tmp_path, monkeypatch, field, val
         valid = plan(repository, snapshot, [row])
         assert valid["exclusions"][0]["event_id"] == event["event_id"]
         row[field] = value
-        with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+        with refuses("HOLDOUT_ACCESS_DENIED", "group identity differs from canonical population"):
             plan(repository, snapshot, [row])
     finally:
         conn.close()
@@ -250,7 +260,7 @@ def test_independent_window_and_evaluation_refusals(tmp_path, monkeypatch, case)
                 rows.loc[0, "date_conflict"] = True
                 return rows
             monkeypatch.setattr(eligibility, "canonical_events", ambiguous)
-        with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+        with refuses("HOLDOUT_ACCESS_DENIED", ("evaluation membership cannot be resolved" if case == "evaluation" else "random holdout window bounds cannot be established")):
             plan(repository, snapshot, [], evaluation=["missing"] if case == "evaluation" else [],
                  days=10**20 if case == "overflow" else 30)
     finally:
@@ -265,7 +275,7 @@ def test_malformed_evaluation_ids_are_not_silently_dropped(tmp_path, monkeypatch
         assert plan(repository, snapshot, [group(event)])["retained_event_ids"] == [event["event_id"]]
         repository.scans.clear()
         policy = eligibility.eligibility_policy(version=VERSION, embargo_days=30)
-        with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        with refuses("CONTRACT_MISMATCH", "explicit unique evaluation event IDs required"):
             eligibility.plan_eligibility(repository, snapshot, as_of_month=MONTH, policy=policy,
                 metadata=seal(snapshot, policy, [group(event)]), evaluation_event_ids=value)
         assert repository.scans == []
@@ -281,7 +291,7 @@ def test_policy_hash_tampering_and_unknown_fields(tmp_path, monkeypatch):
         repository.scans.clear()
         original = eligibility.eligibility_policy(version=VERSION, embargo_days=30)
         for policy in ({**original, "policy_id": "wrong"}, {**original, "unknown": True}, None):
-            with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+            with refuses("CONTRACT_MISMATCH", "invalid or stale eligibility policy/group metadata"):
                 eligibility.plan_eligibility(repository, snapshot, as_of_month=MONTH, policy=policy,
                     metadata=seal(snapshot, original, [group(event)]), evaluation_event_ids=[])
         assert repository.scans == []
@@ -300,7 +310,7 @@ def test_canonical_collision_refuses(tmp_path, monkeypatch):
             rows = original(repository, snapshot)
             return pd.concat([rows, rows], ignore_index=True)
         monkeypatch.setattr(eligibility, "canonical_events", collision)
-        with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+        with refuses("HOLDOUT_ACCESS_DENIED", "canonical event identities collide or are invalid"):
             plan(repository, snapshot, [group(event)])
     finally:
         conn.close()
@@ -318,7 +328,7 @@ def test_malformed_canonical_date_is_typed_refusal(tmp_path, monkeypatch):
             rows.loc[0, "event_date"] = pd.NaT
             return rows
         monkeypatch.setattr(eligibility, "canonical_events", invalid)
-        with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+        with refuses("HOLDOUT_ACCESS_DENIED", "group identity differs from canonical population"):
             plan(repository, snapshot, [group(event)])
     finally:
         conn.close()
@@ -352,7 +362,7 @@ def test_snapshot_refusals_are_typed_and_precede_scans(tmp_path, monkeypatch, ca
             "blank": replace(snapshot, snapshot_id=" "), "wrong_type": replace(snapshot, snapshot_id=[]),
             "subclass": ForeignSnapshot(**snapshot.__dict__)}[kind]
         policy = eligibility.eligibility_policy(version=VERSION, embargo_days=30)
-        with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
+        with refuses("SNAPSHOT_UNRESOLVED", ("the requested snapshot cannot be resolved" if kind == "unknown" else "an exact native snapshot reference is required")):
             eligibility.plan_eligibility(repository, invalid, as_of_month=MONTH, policy=policy,
                 metadata=seal(snapshot, policy, [group(event)]), evaluation_event_ids=[])
         assert repository.scans == []
@@ -385,7 +395,7 @@ def test_refusal_telemetry_and_membership_cadence(tmp_path, monkeypatch, capsys)
         assert "ETA 0s" in captured.err
         row = group(event)
         row["forecasts"][0]["source_session_ceiling"] = "2024-06-15"
-        with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        with refuses("CONTRACT_MISMATCH", "invalid or stale eligibility policy/group metadata"):
             plan(repository, snapshot, [row])
         captured = capsys.readouterr()
         assert captured.out == ""
@@ -408,15 +418,171 @@ def test_public_metadata_helpers_detach_and_refuse_invalid_contracts(tmp_path, m
         assert context == {"snapshot_id": snapshot.snapshot_id, "holdout_as_of_month": MONTH,
             "random_membership_version": "canonical-event-sha256.v1",
             "rolling_membership_version": "calendar-months.v1"}
+        expected = saved[["event_id", "ticker", "event_date"]].copy()
+        expected["canonical_date"] = saved["event_date"]
+        expected["canonical_ticker"] = saved["ticker"]
+        for name in ("date_conflict", "event_cluster_id", "session"):
+            expected[name] = saved[name]
+        pd.testing.assert_frame_equal(canonical, expected, check_like=True)
         canonical.loc[0, "ticker"] = "changed"
         pd.testing.assert_frame_equal(events, saved)
         for invalid in (None, replace(snapshot, snapshot_id=[]), replace(snapshot, snapshot_id=" ")):
-            with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
+            with refuses("SNAPSHOT_UNRESOLVED", "an exact native snapshot reference is required"):
                 eligibility.classify_events(events, invalid, as_of_month=MONTH)
-            with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
+            with refuses("SNAPSHOT_UNRESOLVED", "an exact native snapshot reference is required"):
                 eligibility.canonical_events(repository, invalid)
         for invalid in (None, events.drop(columns="event_id"), pd.concat([events, events], axis=1)):
-            with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+            with refuses("CONTRACT_MISMATCH", "canonical event metadata columns required"):
                 eligibility.classify_events(invalid, snapshot, as_of_month=MONTH)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("field,value", [("snapshot_id", "unknown"), ("calendar_version", "stale"),
+    ("manifest_hash", "sha256:stale"), ("table_versions", {})])
+def test_public_reader_requires_exact_commit_before_scanning(tmp_path, monkeypatch, field, value):
+    event = history_event("2024-06-14")
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [event])
+    try:
+        assert eligibility.canonical_events(repository, snapshot).event_id.tolist() == [event["event_id"]]
+        repository.scans.clear()
+        message = ("the requested snapshot cannot be resolved" if field == "snapshot_id"
+                   else "snapshot differs from its committed identity")
+        with refuses("SNAPSHOT_UNRESOLVED", message):
+            eligibility.canonical_events(repository, replace(snapshot, **{field: value}))
+        assert repository.scans == []
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("code", ["OBJECT_CORRUPT", "MANIFEST_CORRUPT", "CONTRACT_MISMATCH"])
+def test_admission_preserves_native_integrity_problem(tmp_path, monkeypatch, code):
+    from engine.v2.data import errors
+
+    event = history_event("2024-06-14")
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [event])
+    try:
+        assert plan(repository, snapshot, [group(event)])["retained_event_ids"] == [event["event_id"]]
+        assert eligibility.canonical_events(repository, snapshot).event_id.tolist() == [event["event_id"]]
+        repository.scans.clear()
+        original = errors.fail(code, "native repository refusal", stage="resolve", details={"sentinel": True})
+        def refuse(_):
+            raise original
+        monkeypatch.setattr(repository, "resolve", refuse)
+        for call in (lambda: eligibility.canonical_events(repository, snapshot),
+                     lambda: plan(repository, snapshot, [group(event)])):
+            with pytest.raises(DataError) as caught:
+                call()
+            assert caught.value is original
+            assert caught.value.problem.message == "native repository refusal"
+            assert caught.value.problem.details == {"sentinel": True}
+        assert repository.scans == []
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("case", ["event_id", "cluster", "session"])
+def test_classifier_structural_duplicates_are_not_future_membership(tmp_path, monkeypatch, case):
+    import pandas as pd
+
+    events = [history_event("2024-06-14"), history_event("2024-07-15")]
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, events)
+    try:
+        frame = eligibility.canonical_events(repository, snapshot)
+        _, labels, structural, _ = eligibility.classify_events(frame, snapshot, as_of_month=MONTH)
+        assert labels == {} and structural == set()
+        if case == "event_id":
+            frame = pd.concat([frame.iloc[:1], frame.iloc[:1]], ignore_index=True)
+        elif case == "cluster":
+            frame["event_cluster_id"] = "same-cluster"
+        else:
+            frame["event_date"] = frame.iloc[0].event_date
+            frame["session"] = "AMC"
+        expected_ids = set(frame.event_id)
+        canonical, labels, structural, _ = eligibility.classify_events(frame, snapshot, as_of_month=MONTH)
+        assert structural == expected_ids
+        assert labels == {key: {"ambiguous"} for key in expected_ids}
+        assert canonical.event_id.tolist() == frame.event_id.tolist()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("horizons", [[], [0, 3, 5], [-1, 3, 5], [True, 3, 5], [1, 1, 5], [5, 3, 1]])
+def test_horizon_declaration_guard_independent_of_matching_forecasts(tmp_path, monkeypatch, horizons):
+    event = history_event("2024-06-14")
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [event])
+    try:
+        assert plan(repository, snapshot, [group(event)])["retained_event_ids"] == [event["event_id"]]
+        repository.scans.clear()
+        policy = eligibility.eligibility_policy(version=VERSION, embargo_days=30)
+        row = group(event)
+        template = row["forecasts"][0]
+        row["forecasts"] = [{**template, "horizon_sessions": h} for h in horizons]
+        # Empty groups isolate envelope guards from all forecast guards.
+        assert plan(repository, snapshot, [])["groups"] == []
+        empty = seal(snapshot, policy, [], horizons=horizons)
+        with refuses("CONTRACT_MISMATCH", "invalid or stale eligibility policy/group metadata"):
+            eligibility.plan_eligibility(repository, snapshot, as_of_month=MONTH, policy=policy,
+                                        metadata=empty, evaluation_event_ids=[])
+        repository.scans.clear()
+        metadata = seal(snapshot, policy, [row], horizons=horizons)
+        with refuses("CONTRACT_MISMATCH", "invalid or stale eligibility policy/group metadata"):
+            eligibility.plan_eligibility(repository, snapshot, as_of_month=MONTH, policy=policy,
+                                        metadata=metadata, evaluation_event_ids=[])
+        assert repository.scans == []
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("month,expected", [("2025-12", {"rolling"}), ("2026-01", set())])
+def test_asof_month_changes_both_public_classification_paths(tmp_path, monkeypatch, month, expected):
+    event = history_event("2025-07-15")
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [event])
+    try:
+        frame = eligibility.canonical_events(repository, snapshot)
+        _, labels, structural, context = eligibility.classify_events(frame, snapshot, as_of_month=month)
+        assert labels == ({event["event_id"]: expected} if expected else {})
+        assert structural == set() and context["holdout_as_of_month"] == month
+        policy = eligibility.eligibility_policy(version=VERSION, embargo_days=30)
+        metadata = seal(snapshot, policy, [group(event)], holdout_as_of_month=month)
+        result = eligibility.plan_eligibility(repository, snapshot, as_of_month=month, policy=policy,
+                                             metadata=metadata, evaluation_event_ids=[])
+        assert result["holdout_as_of_month"] == month
+        assert result["exclusions"] == ([{"event_id": event["event_id"], "reasons": ["rolling"]}] if expected else [])
+        assert result["retained_event_ids"] == ([] if expected else [event["event_id"]])
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("month", [None, "2026-13", "9999-01"])
+def test_invalid_asof_month_refuses_both_paths(tmp_path, monkeypatch, month):
+    event = history_event("2024-06-14")
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [event])
+    try:
+        frame = eligibility.canonical_events(repository, snapshot)
+        assert eligibility.classify_events(frame, snapshot, as_of_month=MONTH)[1] == {}
+        assert plan(repository, snapshot, [group(event)])["retained_event_ids"] == [event["event_id"]]
+        policy = eligibility.eligibility_policy(version=VERSION, embargo_days=30)
+        metadata = seal(snapshot, policy, [group(event)], holdout_as_of_month=month)
+        for call in (lambda: eligibility.classify_events(frame, snapshot, as_of_month=month),
+                     lambda: eligibility.plan_eligibility(repository, snapshot, as_of_month=month,
+                                policy=policy, metadata=metadata, evaluation_event_ids=[])):
+            with refuses("HOLDOUT_ACCESS_DENIED", "explicit valid holdout context is required"):
+                call()
+    finally:
+        conn.close()
+
+
+def test_malformed_classifier_values_refuse_without_builtin_exception(tmp_path, monkeypatch):
+    import pandas as pd
+
+    event = history_event("2024-06-14")
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [event])
+    try:
+        frame = eligibility.canonical_events(repository, snapshot)
+        assert eligibility.classify_events(frame, snapshot, as_of_month=MONTH)[1] == {}
+        frame["event_id"] = pd.Series([["not", "scalar"]], dtype=object)
+        with refuses("CONTRACT_MISMATCH", "canonical event metadata values are malformed"):
+            eligibility.classify_events(frame, snapshot, as_of_month=MONTH)
     finally:
         conn.close()

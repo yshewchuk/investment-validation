@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from engine.v2.contracts.data import SnapshotRef
 from engine.v2.data import errors
 from engine.v2.foundation import SystemClock
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.research import progress
 from engine.v2.research._trades_publish import read_event_rows, read_existing_trades
 from engine.v2.research._trades_revisions import PROVENANCE
+from engine.v2.research.snapshot_inputs import snapshot_reference
 
 __all__ = ["PROVENANCE", "load_trades", "classify_events"]
 
@@ -187,15 +187,16 @@ def classify_events(events, snapshot, *, as_of_month):
     Return merged canonical rows, membership labels, structural ambiguous IDs,
     and pinned context. Input frames are detached; malformed columns refuse.
     """
-    if (type(snapshot) is not SnapshotRef or type(snapshot.snapshot_id) is not str
-            or not snapshot.snapshot_id.strip()):
-        raise errors.fail("SNAPSHOT_UNRESOLVED", "canonical membership needs a snapshot reference")
+    snapshot_reference(snapshot)
     required = {"event_id", "ticker", "event_date", "session", "date_conflict", "event_cluster_id"}
     if not isinstance(events, pd.DataFrame) or not required <= set(events.columns) or not events.columns.is_unique:
         raise errors.fail("CONTRACT_MISMATCH", "canonical event metadata columns required")
     policy, context = _holdout_context(snapshot, as_of_month, "selection", None)
     ambiguous = set()
-    canonical, labels = _membership_labels(events[["event_id", "ticker", "event_date"]].copy(),
-        events[list(sorted(required))].copy(), policy,
-        meter=progress.Progress("eligibility membership", len(events)), structural=ambiguous)
+    try:
+        canonical, labels = _membership_labels(events[["event_id", "ticker", "event_date"]].copy(),
+            events[list(sorted(required))].copy(), policy,
+            meter=progress.Progress("eligibility membership", len(events)), structural=ambiguous)
+    except (TypeError, ValueError):
+        raise errors.fail("CONTRACT_MISMATCH", "canonical event metadata values are malformed") from None
     return canonical, labels, ambiguous, context

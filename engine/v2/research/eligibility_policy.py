@@ -5,13 +5,13 @@ from bisect import bisect_right
 from copy import deepcopy
 from datetime import timedelta
 
-from engine.v2.contracts.data import SnapshotRef
 from engine.v2.data import errors
 from engine.v2.foundation import content_hash, to_document
 from engine.v2.foundation.experiment_holdouts import calendar_date
 from engine.v2.research import progress
 from engine.v2.research.experiment_population import canonical_events
 from engine.v2.research.experiment_trades import classify_events
+from engine.v2.research.snapshot_inputs import admit_snapshot
 
 
 def eligibility_policy(*, version, embargo_days):
@@ -165,17 +165,7 @@ def plan_eligibility(repository, snapshot, *, as_of_month, policy, metadata, eva
     Existing consumers are unchanged; neither a hash nor this plan authorizes IO.
     """
     with progress.stage("eligibility admission", report_refusals=True):
-        if (type(snapshot) is not SnapshotRef or type(snapshot.snapshot_id) is not str
-                or not snapshot.snapshot_id.strip()):
-            raise errors.fail("SNAPSHOT_UNRESOLVED", "eligibility needs an exact committed snapshot")
-        try:
-            resolved = repository.resolve(snapshot.snapshot_id)
-        except errors.DataError as exc:
-            if exc.code != "SNAPSHOT_NOT_FOUND":
-                raise
-            raise errors.fail("SNAPSHOT_UNRESOLVED", "eligibility snapshot cannot be resolved") from None
-        if resolved != snapshot:
-            raise errors.fail("SNAPSHOT_UNRESOLVED", "eligibility snapshot differs from committed identity")
+        admit_snapshot(repository, snapshot)
         policy, groups, metadata_id = _metadata(snapshot, as_of_month, policy, metadata)
         try:
             evaluation = _ids(evaluation_event_ids)

@@ -47,6 +47,9 @@ These CLI files sit outside `checks/import_layers.py`'s hook (it only parses
 `engine*` importers), so no `engine` package is recorded as importing this
 one; the library entrypoints below are this package's real public interface:
 
+`eligibility_policy.eligibility_policy`, `eligibility_policy.plan_eligibility`,
+`experiment_population.canonical_events`, `experiment_trades.classify_events`,
+`snapshot_inputs.snapshot_reference`, `snapshot_inputs.admit_snapshot`,
 `signal_screen.run`, `fill_quality.run`, `polygon_fills.run`, `replay.replay`,
 `replay.replay_one`, `replay.ALPHA_GRID`, `_replay_run.run`,
 `_replay_run.events_frame`, `_plan.plan_events`, `_chains.ChainIndex`,
@@ -682,8 +685,10 @@ The original full-row `read_stored` API and its returned envelope remain unchang
 `eligibility_policy.eligibility_policy` declares an explicit supported version and
 nonnegative integer calendar-day width. `plan_eligibility` is metadata-only and
 opt-in; existing consumers are unchanged. It uses `experiment_population.canonical_events`
-for the six-column canonical metadata projection and `experiment_trades.classify_events`
-for detached membership/structural ambiguity labels and pinned context.
+for exact committed-snapshot admission and the six-column metadata projection and `experiment_trades.classify_events`
+for detached membership/structural ambiguity labels and caller-pinned context.
+Shared `snapshot_inputs` validates reference shape and exact committed identity;
+the pure classifier checks shape only, without claiming repository commitment.
 
 The closed producer envelope binds snapshot/month/policy and event groups with
 explicit label bounds and every declared horizon's decision/source ceiling.
@@ -704,8 +709,8 @@ and planning refusals report only the native error code, not row values.
 | --- | --- |
 | Unknown, malformed or mismatched snapshot reference | `SNAPSHOT_UNRESOLVED` |
 | Repository integrity failure other than unknown snapshot | Original native error propagates |
-| Unsupported policy, stale digest/envelope, malformed bounds or evaluation IDs | `CONTRACT_MISMATCH` |
-| Invalid as-of month, unknown/colliding group or evaluation identity | `HOLDOUT_ACCESS_DENIED` |
+| Unsupported policy, stale digest/envelope, malformed bounds, duplicate declared group IDs or malformed/duplicate evaluation IDs | `CONTRACT_MISMATCH` |
+| Invalid as-of month, unknown group/evaluation identity or colliding canonical population IDs | `HOLDOUT_ACCESS_DENIED` |
 | Ambiguous random-event identity or overflowing window bounds | `HOLDOUT_ACCESS_DENIED` |
 | Valid protected/overlapping development group | Excluded whole event with reasons; evaluation IDs preserved |
 
