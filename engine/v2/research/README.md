@@ -54,6 +54,14 @@ write path.
 
 ## Public interface
 
+`eligibility_policy.eligibility_policy` validates an explicit version/width;
+`eligibility_policy.plan_eligibility` returns the opt-in metadata-only plan described below.
+`experiment_population.canonical_events` reads the six canonical metadata columns
+and flags same-ticker/date conflicts. `experiment_trades.classify_events` accepts
+that frame, snapshot and explicit as-of month; it returns detached canonical rows,
+membership labels, structurally ambiguous IDs and pinned holdout context.
+Neither helper grants payload access or accepts caller-provided membership labels.
+
 `progress.Progress`, `progress.stage` and `progress.decision` provide shared stderr telemetry:
 bounded-cadence ticks, stage timing/RSS, optional native refusal codes (no message text) and aggregate decisions.
 
@@ -268,3 +276,26 @@ chains, snapshot pinning, and the refusal paths.
 `tests/test_v2_research_reconcile_trades.py` covers the canonical-event prune:
 non-canonical rows tombstoned, everything else byte-identical, the pinned
 snapshot recorded, and an explicit `--snapshot-id` honoured.
+
+## Opt-in grouped eligibility
+
+`eligibility_policy.eligibility_policy(version=..., embargo_days=...)` declares
+`grouped_ticker_embargo.v1`; whole calendar-day width is explicit, not globally 30.
+`eligibility_policy.plan_eligibility` rederives random/rolling membership from
+pinned canonical event metadata and returns a content-addressed development
+exclusion plan with retained IDs, reasons, coverage and separate evaluation IDs.
+It merges same-ticker random windows and uses inclusive interval overlap;
+one overlapping horizon excludes the whole event, not individual price bars.
+
+The closed `event_group_bounds.v1` input binds the full `source_snapshot`,
+`holdout_as_of_month`, `policy_id`, sorted positive `horizons`, `groups`, and
+`metadata_id` (native content hash of the other fields). Each group declares
+`event_id`, `ticker`, `event_date`, `label_start`, `label_end`, and one forecast
+per horizon with `horizon_sessions`, `decision_date`, `source_session_ceiling`.
+Dates are canonical ISO calendar days. Producers must establish these bounds;
+missing bounds refuse. A caller's digest is not evidence of their truth.
+
+This is a metadata foundation only: no current runner uses it. Future consumers
+must bind and apply the same plan before imputation, scaling, feature selection,
+calibration and fitting, including comparison baselines. Evaluation IDs are
+preserved, not authorized for reading. Existing v1 behavior is unchanged.

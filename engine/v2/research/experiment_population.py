@@ -8,6 +8,14 @@ from engine.v2.research._scan import read_table
 from engine.v2.research.experiment_trades import _exclude_holdouts, _holdout_context
 
 
+def canonical_events(repository, snapshot):
+    """Read the six canonical metadata columns from a native snapshot reference."""
+    if (type(snapshot) is not SnapshotRef or type(snapshot.snapshot_id) is not str
+            or not snapshot.snapshot_id.strip()):
+        raise errors.fail("SNAPSHOT_UNRESOLVED", "canonical metadata needs a snapshot reference")
+    return _canonical_events(repository, snapshot)
+
+
 def _canonical_events(repository, snapshot):
     """Canonical event metadata with same-ticker/date duplicates flagged; shared with the final reader."""
     events = read_table(repository, snapshot, "earnings_events", (

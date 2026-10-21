@@ -677,6 +677,42 @@ memory still scales with metadata and selected rows, with no fixed overall byte 
 A prior successful read never substitutes for fresh validation.
 The original full-row `read_stored` API and its returned envelope remain unchanged.
 
+## Opt-in eligibility policy boundary
+
+`eligibility_policy.eligibility_policy` declares an explicit supported version and
+nonnegative integer calendar-day width. `plan_eligibility` is metadata-only and
+opt-in; existing consumers are unchanged. It uses `experiment_population.canonical_events`
+for the six-column canonical metadata projection and `experiment_trades.classify_events`
+for detached membership/structural ambiguity labels and pinned context.
+
+The closed producer envelope binds snapshot/month/policy and event groups with
+explicit label bounds and every declared horizon's decision/source ceiling.
+Bounds contain the event, with source ceiling <= decision <= event. These are
+producer declarations, not proof of price-bracketing or publication times.
+No calendar guessing, outcome/feature decoding, write, registration or fit occurs.
+
+Random-held windows are merged per ticker. Inclusive event/label interval or
+forecast-point overlap excludes an entire development group; shared random,
+rolling and ambiguous labels also exclude it. Results bind sorted groups, policy,
+metadata identity, merged windows, retained IDs, reasons, coverage and a separately
+preserved evaluation manifest into `plan_id`. Supplied documents are detached.
+There are no retries, persistence, cache or partial results. Bounded membership,
+metadata, window and group progress plus stage timing/RSS go to stderr; admission
+and planning refusals report only the native error code, not row values.
+
+| Condition | Outcome |
+| --- | --- |
+| Unknown, malformed or mismatched snapshot reference | `SNAPSHOT_UNRESOLVED` |
+| Repository integrity failure other than unknown snapshot | Original native error propagates |
+| Unsupported policy, stale digest/envelope, malformed bounds or evaluation IDs | `CONTRACT_MISMATCH` |
+| Invalid as-of month, unknown/colliding group or evaluation identity | `HOLDOUT_ACCESS_DENIED` |
+| Ambiguous random-event identity or overflowing window bounds | `HOLDOUT_ACCESS_DENIED` |
+| Valid protected/overlapping development group | Excluded whole event with reasons; evaluation IDs preserved |
+
+This is neither a physical-read capability nor a statistical isolation guarantee.
+Long-memory/cross-ticker effects remain; chronological and random holdouts are
+complementary, not interchangeable.
+
 ## External systems and libraries
 
 Direct libraries include pandas/numpy for tabular/numerical work and pyarrow
