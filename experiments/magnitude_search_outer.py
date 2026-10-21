@@ -21,7 +21,7 @@ from experiments.magnitude_search_execution import (
     run_fitted_trial,
     validate_execution_limits,
 )
-from experiments.magnitude_search_inputs import load_inputs, stored_id
+from experiments.magnitude_search_inputs import load_inputs
 from experiments.magnitude_search_plan import read_search_plan
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_trials import SearchTrials
@@ -105,7 +105,7 @@ def _replay(read, store, started, fold, plan, execution):
     try:
         _equal(read("start"), started)
         record = read("inputs")
-        inputs_id = stored_id(record)
+        inputs_id = read("terminal")["inputs_id"]
         try:
             inputs = load_inputs(store, record, inputs_id)
         except OpsError as error:

@@ -309,10 +309,11 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 * `magnitude_search_shards` implements the cut rule, writer, manifest hash and verified reader
   and lists the list-valued members (`LIST_MEMBERS`) as data. A member without a strictly
   increasing sort key carries a `problem` note and no key function; the writer takes a
-  caller-supplied key and does not consult the inventory, so callers must not write such a member.
+  caller-supplied key and does not consult the inventory; keyless members are written as
+  `{position, row}` rows below.
 
 * `magnitude_search_inputs.load_inputs(store, record, expected_id)` is the one loader every
-  consumer (`_record`, reconcile, freeze, outer replay, `_validation`, `fit_evidence`) reads
+  consumer (`_record`, reconcile, freeze, outer replay, `_validation`) reads
   through. A record with the manifest schema is verified against `expected_id`, its sections
   are streamed shard by shard and placed at their dotted paths in the inline document; any other
   record is a v1 whole cohort whose id is its content hash. Both return the same inputs shape.

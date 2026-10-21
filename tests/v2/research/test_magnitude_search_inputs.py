@@ -68,6 +68,8 @@ def test_v2_manifest_loads_to_the_same_inputs_as_the_v1_record(tmp_path):
     manifest = _manifest(store)
     inputs = load_inputs(store, manifest, stored_id(manifest))
     assert inputs == COHORT
+    assert inputs is not manifest["inline"]
+    assert "features" not in manifest["inline"] and manifest["sections"]["features"]["row_count"] == 2
     assert stored_id(manifest) == shards.manifest_id(manifest)
     assert load_inputs(store, COHORT, content_hash(COHORT)) == COHORT
     assert stored_id(COHORT) == content_hash(COHORT)
@@ -79,6 +81,8 @@ def test_expected_id_must_match_for_both_formats(tmp_path):
     _conflict(lambda: load_inputs(store, manifest, "0" * 64))
     _conflict(lambda: load_inputs(store, COHORT, "0" * 64))
     _conflict(lambda: load_inputs(store, None, "0" * 64))
+    _conflict(lambda: load_inputs(store, manifest, content_hash({"other": 1})))
+    _conflict(lambda: load_inputs(store, COHORT, content_hash({"other": 1})))
 
 
 def test_manifest_must_carry_exactly_the_inventory_sections(tmp_path):
