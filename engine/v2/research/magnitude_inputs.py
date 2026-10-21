@@ -202,3 +202,8 @@ def qualify_magnitude_training_targets(repository, snapshot, *, as_of_month, lab
     rows["target_object_id"] = [read_inputs[index]["object_id"] for index in positions]
     rows.attrs.update(identity, inputs_id=content_hash(identity))
     return rows.reset_index(drop=True)
+
+
+def target_object_identity(event, record):
+    """Detach the admitted event/fragment identity without reading target values."""
+    return _object_input(event, record)

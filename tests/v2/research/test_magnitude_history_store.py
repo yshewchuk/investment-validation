@@ -1415,3 +1415,8 @@ def test_scan_row_coverage_guard_prevents_a_partial_stored_result(source, monkey
     monkeypatch.setattr(stored, "_scan", truncated)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         _read(source, output)
+
+
+def history_source(tmp_path, **kwargs):
+    """Shared synthetic committed history source; no private or provider inputs."""
+    return _source(tmp_path, **kwargs)

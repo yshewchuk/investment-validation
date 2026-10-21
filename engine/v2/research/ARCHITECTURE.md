@@ -27,6 +27,46 @@ read the committed `trades` version
 Completed experiments need not remain runnable;
 their historical wrappers are not a supported experiment execution boundary.
 
+## Stage-2 magnitude panel foundation
+
+`magnitude_panel_table` uses native `TableContract`/`ColumnContract`, standard JSON
+and canonical hashing. Its immutable v1 event/context/horizon key has an ordered
+H/HM/HMO raw dictionary, excluding learned Tier4 outputs and current-event outcomes.
+Rows require exact cohort coverage, finite typed values, missing/quote status,
+and per-observation date, knowledge mode, row/fragment identity and content digest.
+The context is reconstructed-only; historical inputs cannot be relabeled observed.
+Each source `content_hash` is the canonical SHA-256 of that contributing observation.
+Pure validation checks digest syntax/binding, not source membership or value equality.
+
+`magnitude_panel_plan` reconstructs protected population/calendar metadata and checks
+exact history receipts and isolated history/prior-outcome fragments without payloads.
+Its context binds snapshots, history identity, dictionary, producer/environment,
+and the complete observed forecast calendar with its separately bound source metadata.
+Detached validation checks JSON types, closed event/request/recipe/producer schemas,
+native-derived folds, fragment lists and calendar-source consistency; repository
+preflight still authenticates membership and source truth.
+Detached validation reconstructs each
+horizon cutoff through `magnitude_inputs.forecast_cutoff`; hashes alone are insufficient.
+Public history interfaces `validate_context_identity`, `validate_event_forecasts`,
+`preflight_source` and `validate_features` share existing validation without new authority.
+`magnitude_features.calendar_input` exposes session metadata;
+`magnitude_inputs.target_object_identity` detaches admitted event/fragment IDs.
+`magnitude_panel_table.canonical_day` accepts only canonical date strings, otherwise
+refusing with `CONTRACT_MISMATCH`. No raw payload permission is issued;
+raw-source protected-event policy is not implemented by this plan. There is no writer,
+materializer, CLI, model or registration integration.
+
+| Condition | Outcome |
+| --- | --- |
+| Invalid detached panel identity/schema, dictionary, calendar, cutoff, row or missingness | `CONTRACT_MISMATCH` |
+| Malformed or forged direct calendar snapshot | `SNAPSHOT_UNRESOLVED` |
+| Empty native observed session calendar | `CALENDAR_UNAVAILABLE` |
+| History digest, snapshot binding or recomputed admission differs | `IDENTITY_CONFLICT` |
+| Protected requested event or unprovable physical isolation | `HOLDOUT_ACCESS_DENIED` |
+| Snapshot ID is absent from the native catalog | `SNAPSHOT_NOT_FOUND` |
+| Catalog snapshot/manifest identity is inconsistent | `MANIFEST_CORRUPT` |
+| Admitted temporal population lacks required training/evaluation coverage | `POPULATION_COLLAPSED` |
+
 ## Primary contracts and public interfaces
 
 CLI leaves (`tools/`, one process per run, each takes `--catalog`,
@@ -565,7 +605,7 @@ contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`,
 `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
 `engine.v2.features.panel_math` (`history_features`),
 `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`, `iter_canonical_json`,
-`content_hash`, `to_document`, `market_calendar`, `experiment_exits.valid_exit_recipe`,
+`content_hash`, `from_document`, `to_document`, `market_calendar`, `experiment_exits.valid_exit_recipe`,
 `experiment_holdouts.calendar_date` (canonical days for IV input/anchor/clock validation), plus
 `final_holdout.request_from_document` and `typed.to_document` for `_final_population`) — the package's own
 lower-layer dependencies, consistent with the generic "may import anything

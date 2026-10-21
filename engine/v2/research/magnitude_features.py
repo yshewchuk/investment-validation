@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 
+from engine.v2.contracts.data import SnapshotRef
 from engine.v2.data import errors
 from engine.v2.foundation import content_hash, market_calendar
 from engine.v2.foundation.experiment_holdouts import _calendar_date
@@ -62,3 +63,13 @@ def load_magnitude_history(repository, snapshot, *, event_id, as_of_month,
             "basis": "reconstructed_date_bounds", "event_schedule_as_known": "unverified",
             "source_publication": "unverified"}}
     return {**identity, "inputs_id": content_hash(identity)}
+
+
+def calendar_input(repository, snapshot):
+    """Return observed session metadata only for an exact committed snapshot."""
+    if (not isinstance(snapshot, SnapshotRef) or not isinstance(snapshot.snapshot_id, str)
+            or not snapshot.snapshot_id.strip()):
+        raise errors.fail("SNAPSHOT_UNRESOLVED", "an exact committed calendar snapshot is required")
+    if repository.resolve(snapshot.snapshot_id) != snapshot:
+        raise errors.fail("SNAPSHOT_UNRESOLVED", "calendar snapshot differs from committed identity")
+    return _calendar_input(repository, snapshot)
