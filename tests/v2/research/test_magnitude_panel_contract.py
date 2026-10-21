@@ -1006,3 +1006,77 @@ def test_public_history_identity_serialization_failure_is_typed(native):
     binding["producer"]["environment"]["unsupported"] = Unsupported()
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         history.validate_context_identity(binding)
+
+
+def _refresh_fold_memberships(temporal):
+    # Preserve derived membership order, so order/uniqueness controls cannot fail on stale folds.
+    for fold in temporal["folds"]:
+        fold["training_candidate_event_ids"] = [event["event_id"] for event in temporal["events"]
+            if event["event_date"] < fold["training_labels_before"]]
+        fold["evaluation_event_ids"] = [event["event_id"] for event in temporal["events"]
+            if event["event_date"][:4] == fold["year"]]
+
+
+@pytest.mark.parametrize("kind", ["history_window", "event_order", "declared_window", "duplicate_event"])
+def test_isolated_temporal_guards_with_consistent_folds(native, kind):
+    context = copy.deepcopy(native[-1])
+    binding = context["history_context"]
+    temporal = binding["temporal_plan"]
+    if kind == "history_window":
+        # Every cutoff remains native and causal; only the history start is too late.
+        binding["history_start"] = temporal["events"][0]["event_date"]
+    elif kind == "event_order":
+        temporal["events"].reverse()
+    elif kind == "declared_window":
+        # A valid training date before the evaluation year, but after an included event.
+        temporal["training_start"] = temporal["events"][0]["event_date"][:4] + "-02-01"
+    else:
+        temporal["events"].insert(0, copy.deepcopy(temporal["events"][0]))
+    _refresh_fold_memberships(temporal)
+    _context_hash(context)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        plan.validate_context(context)
+
+
+@pytest.mark.parametrize("kind", ["unknown_key", "missing_interior_session"])
+def test_isolated_calendar_structure_and_session_contents(native, kind):
+    context = copy.deepcopy(native[-1])
+    calendar = context["forecast_calendar"]
+    if kind == "unknown_key":
+        calendar["extra"] = True
+    else:
+        # Modify actual calendar contents, not just a digest. All declared calendar IDs agree.
+        event = context["history_context"]["temporal_plan"]["events"][0]
+        calendar["days"].remove(event["forecasts"][1]["source_session_ceiling"])
+        calendar_id = content_hash(calendar)
+        for event in context["history_context"]["temporal_plan"]["events"]:
+            for cutoff in event["forecasts"]:
+                cutoff["calendar_id"] = calendar_id
+    _context_hash(context)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        plan.validate_context(context)
+
+
+@pytest.mark.parametrize("boundary", ["validate_context", "validate_rows", "preflight_context", "build_context"])
+def test_excessive_document_depth_is_a_typed_public_refusal(native, boundary):
+    import sys
+
+    source, output, binding, producer, original = native
+    nested = leaf = {}
+    for _ in range(sys.getrecursionlimit() + 100):
+        leaf["next"] = {}
+        leaf = leaf["next"]
+    context = copy.deepcopy(original)
+    context["producer"]["environment"]["nested"] = nested
+    producer = copy.deepcopy(producer)
+    producer["environment"]["nested"] = nested
+    # Deliberately neither deepcopy nor hash the over-depth document at the test boundary.
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        if boundary == "validate_context":
+            plan.validate_context(context)
+        elif boundary == "validate_rows":
+            table.validate_rows([], context)
+        elif boundary == "preflight_context":
+            plan.preflight_context(source.repository, source.snapshot, output, context)
+        else:
+            plan.build_context(source.repository, source.snapshot, output, binding, producer=producer)

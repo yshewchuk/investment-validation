@@ -606,7 +606,8 @@ contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`,
 `engine.v2.features.panel_math` (`history_features`),
 `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`, `iter_canonical_json`,
 `content_hash`, `from_document`, `to_document`, `market_calendar`, `experiment_exits.valid_exit_recipe`,
-`experiment_holdouts.calendar_date` (canonical days for IV input/anchor/clock validation), plus
+`experiment_holdouts.calendar_date` (canonical days for IV input/anchor/clock validation),
+`experiment_holdouts.ExperimentHoldouts` (panel membership-policy versions), plus
 `final_holdout.request_from_document` and `typed.to_document` for `_final_population`) — the package's own
 lower-layer dependencies, consistent with the generic "may import anything
 at a lower layer" rule (`only_imports` is unset for this package in

@@ -232,7 +232,7 @@ def validate_context(context):
         for key in ("source_snapshot", "history_snapshot"):
             from_document(SnapshotRef, context[key])
         _identity_parts(context)
-    except (KeyError, TypeError, ValueError, AttributeError, OverflowError, errors.DataError):
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError, errors.DataError):
         raise errors.fail("CONTRACT_MISMATCH", "invalid research panel context") from None
 
 
@@ -246,7 +246,7 @@ def build_context(repository, source_snapshot, history_snapshot, history_context
     try:
         _json_document(producer)
         _producer(producer)
-    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):
         raise errors.fail("CONTRACT_MISMATCH", "invalid panel producer metadata") from None
     if (not isinstance(source_snapshot, SnapshotRef) or not isinstance(history_snapshot, SnapshotRef)
             or type(history_context) is not dict):
