@@ -109,6 +109,7 @@ __all__ = [
     "Scorer",
     "score",
     "score_calendar",
+    "board_chain_keys",
     "DISABLED_STRATEGIES",
     "FLAGS",
 ]
@@ -1526,6 +1527,15 @@ class Scorer:
         memprobe.watch("scorer.payoffs", self, "_payoffs")
         memprobe.watch("scorer.models", self, "_models")
         memprobe.watch("scorer.serving_models", self, "_serving_models")
+
+    def release_score_caches(self) -> None:
+        """Drop memoized live_features results and free pages.
+
+        The cache is pure memoization — live_features recomputes the same
+        value — so clearing it is safe.
+        """
+        self._live_features_cache.clear()
+        _release_free_pages()
 
     # -- setup -------------------------------------------------------------
 
@@ -4883,6 +4893,64 @@ def unscorable_result(
     return result
 
 
+def board_chain_keys(
+    events: pd.DataFrame,
+    strategies: Sequence[str],
+    decision_offsets: Mapping[str, int | None],
+    *,
+    calendar,
+    as_of,
+    quote_max_age_sessions: int | None = 5,
+) -> set[tuple[str, pd.Timestamp]]:
+    """Gather the (ticker, chain_date) keys one pre-loaded index must cover.
+
+    Extracted from :func:`score_calendar` so the strike ladder can build the
+    same index once instead of per request. One pass to learn which chains the
+    whole board needs.
+    """
+    keys: set[tuple[str, pd.Timestamp]] = set()
+    for strategy in strategies:
+        if strategy in DISABLED_STRATEGIES:
+            continue
+        structure = with_decision_offset(
+            STRUCTURES[strategy](), decision_offsets.get(strategy)
+        )
+        plan = plan_events(structure, events, calendar=calendar)
+        keys |= plan.chain_keys
+    if quote_max_age_sessions is not None:
+        # Every row whose entry has not happened is priced off the newest chain
+        # we hold, so those have to be in the index too — otherwise the board
+        # falls back to a chain it never loaded and reports NO_CHAIN anyway.
+        from engine.replay import latest_chain_date
+
+        for ticker in events["ticker"].astype(str).unique():
+            try:
+                newest = latest_chain_date(ticker, as_of)
+            except MemoryError:
+                raise
+            except Exception:
+                continue
+            if newest is not None:
+                keys.add((ticker, pd.Timestamp(newest).normalize()))
+        # The scorer's stale-quote fallback anchors on the DECISION/ENTRY date
+        # (`_fresh_quote_date`), not on `as_of`. A row whose entry has already
+        # passed with no chain that day (STR-RUNUP) needs the newest chain at
+        # or before THAT date; without it in the index the board reported
+        # NO_CHAIN while an on-demand re-score (selfcheck) priced the row.
+        # Never past `as_of`: that chain did not exist on the night.
+        ceiling = pd.Timestamp(as_of).normalize()
+        for ticker, day in sorted(keys):
+            try:
+                older = latest_chain_date(ticker, day)
+            except MemoryError:
+                raise
+            except Exception:
+                continue
+            if older is not None and pd.Timestamp(older).normalize() <= ceiling:
+                keys.add((ticker, pd.Timestamp(older).normalize()))
+    return keys
+
+
 def score_calendar(
     as_of=None,
     *,
@@ -4932,46 +5000,14 @@ def score_calendar(
     print(f"  [score] {len(events):,} events in {as_of.date()} → {horizon.date()}", flush=True)
 
     # One pass to learn which chains the whole board needs.
-    keys: set[tuple[str, pd.Timestamp]] = set()
-    for strategy in strategies:
-        if strategy in DISABLED_STRATEGIES:
-            continue
-        structure = with_decision_offset(
-            STRUCTURES[strategy](), offsets_by_strategy.get(strategy)
-        )
-        plan = plan_events(structure, events, calendar=engine.calendar)
-        keys |= plan.chain_keys
-    if quote_max_age_sessions is not None:
-        # Every row whose entry has not happened is priced off the newest chain
-        # we hold, so those have to be in the index too — otherwise the board
-        # falls back to a chain it never loaded and reports NO_CHAIN anyway.
-        from engine.replay import latest_chain_date
-
-        for ticker in events["ticker"].astype(str).unique():
-            try:
-                newest = latest_chain_date(ticker, as_of)
-            except MemoryError:
-                raise
-            except Exception:
-                continue
-            if newest is not None:
-                keys.add((ticker, pd.Timestamp(newest).normalize()))
-        # The scorer's stale-quote fallback anchors on the DECISION/ENTRY date
-        # (`_fresh_quote_date`), not on `as_of`. A row whose entry has already
-        # passed with no chain that day (STR-RUNUP) needs the newest chain at
-        # or before THAT date; without it in the index the board reported
-        # NO_CHAIN while an on-demand re-score (selfcheck) priced the row.
-        # Never past `as_of`: that chain did not exist on the night.
-        ceiling = pd.Timestamp(as_of).normalize()
-        for ticker, day in sorted(keys):
-            try:
-                older = latest_chain_date(ticker, day)
-            except MemoryError:
-                raise
-            except Exception:
-                continue
-            if older is not None and pd.Timestamp(older).normalize() <= ceiling:
-                keys.add((ticker, pd.Timestamp(older).normalize()))
+    keys = board_chain_keys(
+        events,
+        strategies,
+        offsets_by_strategy,
+        calendar=engine.calendar,
+        as_of=as_of,
+        quote_max_age_sessions=quote_max_age_sessions,
+    )
     index = load_chain_index(keys, progress_every=0) if keys else ChainIndex({})
     memprobe.snapshot("score_calendar chain index loaded")
 

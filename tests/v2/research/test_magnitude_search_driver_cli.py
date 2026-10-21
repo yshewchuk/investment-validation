@@ -70,7 +70,8 @@ def source(tmp_path, monkeypatch):
         state.registration_budgets.append(max_evidence_bytes)
         return state.registration
 
-    def repository(connection, artifact_store):
+    def repository(connection, artifact_store, *, pin_snapshots):
+        assert pin_snapshots is True
         assert connection is state.connections[-1]
         assert artifact_store.root == store
         return state.repository
@@ -432,7 +433,7 @@ def test_collect_requires_its_exact_driver_seal_before_reading_results(
         source.connections.append(connection)
         return case.registration
     monkeypatch.setattr(cli, "read_native_registration", registration)
-    monkeypatch.setattr(cli, "Repository", lambda *args: None)
+    monkeypatch.setattr(cli, "Repository", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "collect_outer_results", _raising(AssertionError("unadmitted collection")))
     before = snapshot(case)
     result, stderr = _invoke(source, capsys, status=2)

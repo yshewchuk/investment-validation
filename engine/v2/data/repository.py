@@ -53,17 +53,12 @@ Judgement calls (task brief decision 1, P2-4):
   ``data_snapshot_heads``, so such a value is simply an unknown
   ``snapshot_id`` and already gets ``SNAPSHOT_NOT_FOUND`` from the existing
   code below.
-* fragments are read in ``manifests.py``'s own membership order (ascending
-  ``partition_key``, and — per the ``data_version_fragments`` ``ordinal``
-  column — ascending within a partition too, whatever a partition's fragment
-  count) and merged into one global order via a streaming ``heapq.merge`` on
-  each row's full primary key, not a sort of the whole result: this is
-  correct whether a logical partition holds one fragment or several, and it
-  is what makes §8.2 step 7's "process fragments in manifest key-range
-  order; never sort an unbounded result in memory" hold even when a query's
-  primary key does not happen to be partition-aligned (e.g. a table
-  partitioned by year but keyed leading-column by ticker). The merge only
-  ever buffers one pending row per still-open fragment.
+* manifest-proven disjoint full-primary-key ranges are streamed in key order,
+  one overlapping range group at a time. ``heapq.merge`` still handles every
+  group (or all fragments when bounds are unknown), including tables whose
+  partition order differs from primary-key order. Only fragment metadata is
+  sorted, never result rows. Each active fragment retains a decoded batch,
+  so disjoint fragments must not all be primed by one global merge.
 * the merged stream's own strictly-increasing, unique order is verified end
   to end (across fragment boundaries, not only within one) before each row
   is even appended to a pending batch — the literal implementation of §8.2
@@ -74,9 +69,8 @@ Judgement calls (task brief decision 1, P2-4):
   duplicate ``event_id`` therefore already surfaces as ``MANIFEST_CORRUPT``
   by the time ``events.get_event`` sees its rows, through this path rather
   than a second check of its own.
-* the stat-tuple verification cache §8.2 step 6 describes is DEFERRED
-  (tech debt TD-1, task brief): every object open re-hashes via
-  ``objects.verify_object_path``, unconditionally.
+* default scans use ``objects.verify_object_path``'s stat-tuple cache;
+  byte-bounded scans always re-hash the exact returned immutable bytes.
 * "deadline exceeded" is its own registered code, ``DEADLINE_EXCEEDED``
   (task 2 review fix) — resource category, retryable (a caller may simply
   retry with a later deadline).
@@ -295,18 +289,25 @@ class Repository:
     # P2-4: scan — §8.2
     # ----------------------------------------------------------------------
 
-    def scan(self, query: DataQuery, *, table_name: str):
+    def scan(self, query: DataQuery, *, table_name: str, max_object_bytes: int | None = None):
         """A bounded Arrow scan over one table's pinned fragments, per §8.2's
         nine ordered steps. Never a convenience ``read_table()``: this always
         yields batches, never a combined frame."""
+        if max_object_bytes is not None:
+            objects.validate_max_object_bytes(max_object_bytes)
         if self._store is None:
             raise RuntimeError("Repository.scan requires an ArtifactStore for object reads")
         validated = self._validated_query(query)
         snap = self.resolve(validated.snapshot_id)
-        contract, records = self._table_records(snap, table_name, validated.table_contract_ref)
+        if self._pin_snapshots:
+            contract, records = self._table_records(
+                snap, table_name, validated.table_contract_ref, validated.key_filter)
+        else:
+            contract, records = self._table_records(
+                snap, table_name, validated.table_contract_ref)
         query_mod.validate_query(contract, validated)
         self.read_counters.add(contract.table_name, scans=1)
-        yield from self._execute_scan(contract, records, validated)
+        yield from self._execute_scan(contract, records, validated, max_object_bytes)
 
     def _validated_query(self, query: DataQuery) -> DataQuery:
         """§8.2 step 1: strict structural decode (limits, deadline, bounded-
@@ -318,10 +319,21 @@ class Repository:
             raise errors.fail("QUERY_NOT_BOUNDED", f"{exc.code} at {exc.path}: {exc}") from exc
 
     def _table_records(self, snap: SnapshotRef, table_name: str,
-                       table_contract_ref: TableContractRef) -> tuple[TableContract, list]:
+                       table_contract_ref: TableContractRef,
+                       key_filter=()) -> tuple[TableContract, list]:
         """§8.2 step 2: resolve ``table_name`` under ``snap`` and verify the
         caller's ``table_contract_ref`` pins the same version, then fetch the
-        full ordered fragment membership (§8.2 step 4 — never a glob)."""
+        full ordered fragment membership (§8.2 step 4 — never a glob).
+
+        Pinned mode only: the first fetch for a table validates every
+        fragment's primary-key bounds (``query_mod.fragment_key_bounds``,
+        refusing ``MANIFEST_CORRUPT`` exactly as the planner does — a failure
+        caches nothing) and stores a ``partition_key -> ascending record
+        indices`` index with the pinned entry; a ``key_filter`` predicate on
+        a partition column then returns just that partition's records, in
+        original order, as a fresh list (the planner still runs on whatever
+        list this returns). Unpinned mode never builds or consults an index.
+        """
         if table_name not in snap.table_versions:
             raise errors.fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
                       details={"table_name": table_name})
@@ -332,15 +344,43 @@ class Repository:
                       details={"table_name": table_name})
         pin_key = (dvr.dataset_version_id, dvr.table_contract_ref.contract_id)
         if self._pin_snapshots and pin_key in self._pinned_tables:
-            pinned_contract, pinned_records = self._pinned_tables[pin_key]
-            return pinned_contract, list(pinned_records)
+            pinned_contract, pinned_records, by_partition = self._pinned_tables[pin_key]
+            return pinned_contract, self._partition_subset(
+                pinned_contract, pinned_records, by_partition, key_filter)
         with _read_only(self._conn) as conn:
             contract = self._full_contract(conn, dvr.table_contract_ref.contract_id)
             records = self._records(conn, dvr.dataset_version_id, dvr.table_contract_ref)
         if self._pin_snapshots:
-            self._pinned_tables[pin_key] = (contract, records)
-            return contract, list(records)
+            grouped: dict[str, list[int]] = {}
+            for index, record in enumerate(records):
+                query_mod.fragment_key_bounds(record, contract)
+                grouped.setdefault(record.partition_key, []).append(index)
+            by_partition = {key: tuple(indices) for key, indices in grouped.items()}
+            self._pinned_tables[pin_key] = (contract, records, by_partition)
+            return contract, self._partition_subset(contract, records, by_partition, key_filter)
         return contract, records
+
+    def _partition_subset(self, contract: TableContract, records: list,
+                          by_partition: dict[str, tuple[int, ...]], key_filter) -> list:
+        """Pinned-mode partition pruning: the records whose ``partition_key``
+        satisfies every partition-column predicate of ``key_filter`` — the
+        exact keep-rule of ``query._partition_may_match`` (a record survives
+        iff its key is in ``{str(v) for v in predicate.values}`` for each
+        such predicate, so several predicates intersect) — in original
+        record order, as a fresh list; no partition predicate returns a fresh
+        copy of the full membership."""
+        if not contract.partition_columns:
+            return list(records)
+        selected: set[int] | None = None
+        for predicate in query_mod.decode_predicates(key_filter):
+            if predicate.column in contract.partition_columns:
+                matched: set[int] = set()
+                for value in predicate.values:
+                    matched.update(by_partition.get(str(value), ()))
+                selected = matched if selected is None else selected & matched
+        if selected is None:
+            return list(records)
+        return [records[i] for i in sorted(selected)]
 
     def _full_contract(self, conn: sqlite3.Connection, contract_id: str) -> TableContract:
         row = conn.execute("SELECT definition_json FROM data_contracts WHERE contract_id = ?",
@@ -384,22 +424,66 @@ class Repository:
             max_batch_rows=batch, max_result_rows=result)
 
     def _execute_scan(self, contract: TableContract, records: list[FragmentRecord],
-                      query: DataQuery):
+                      query: DataQuery, max_object_bytes=None):
         population = query_mod.plan_scan_population(
             contract, records, key_filter=query.key_filter, time_interval=query.time_interval)
         self._check_population_bound(query, population)
+        if max_object_bytes is not None and any(r.object_ref.byte_size > max_object_bytes
+                                               for r in population.records):
+            raise errors.fail("RESULT_LIMIT_EXCEEDED", "object exceeds max_object_bytes")
+        bounds = {r.fragment_id: query_mod.fragment_key_bounds(r, contract)
+                  for r in population.records}
         needed = tuple(dict.fromkeys((*query.columns, *contract.primary_key, *self._hidden_columns(query))))
         batch_cap = min(query.max_batch_rows, contract.maximum_batch_rows)
-        streams = [self._fragment_rows(r, contract, needed, query, batch_cap)
-                   for r in population.records]
-        merged = heapq.merge(*streams, key=lambda item: item[0])
+        merged = self._grouped_fragment_rows(
+            population.records, bounds, contract, needed, query, batch_cap, max_object_bytes)
         try:
             yield from self._yield_batches(merged, contract, query, batch_cap)
         finally:
-            for stream in streams:
-                stream.close()
+            merged.close()
         if query.deadline is not None:
             self._check_deadline(query.deadline)
+
+    def _fragment_groups(self, records, bounds):
+        """Only metadata is sorted; missing bounds conservatively overlap all."""
+        if any(bounds[record.fragment_id] is None for record in records):
+            yield records
+            return
+        ordered = sorted(records, key=lambda record: bounds[record.fragment_id][0])
+        group, upper = [], None
+        for record in ordered:
+            lo, hi = bounds[record.fragment_id]
+            if group and lo > upper:
+                yield group
+                group, upper = [], None
+            group.append(record)
+            upper = hi if upper is None else max(upper, hi)
+        if group:
+            yield group
+
+    def _grouped_fragment_rows(self, records, bounds, contract, needed, query, batch_cap, max_object_bytes=None):
+        for group in self._fragment_groups(records, bounds):
+            streams = [self._range_checked_rows(
+                record, bounds[record.fragment_id], contract, needed, query, batch_cap, max_object_bytes)
+                for record in group]
+            try:
+                yield from heapq.merge(*streams, key=lambda item: item[0])
+            finally:
+                for stream in streams:
+                    stream.close()
+
+    def _range_checked_rows(self, record, bounds, contract, needed, query, batch_cap, max_object_bytes=None):
+        stream = (self._fragment_rows(record, contract, needed, query, batch_cap)
+                  if max_object_bytes is None else self._bounded_fragment_rows(
+                      record, contract, needed, query, batch_cap, max_object_bytes))
+        try:
+            for key, row in stream:
+                if bounds is not None and not bounds[0] <= key <= bounds[1]:
+                    raise errors.fail("MANIFEST_CORRUPT", "scan key is outside fragment bounds",
+                                      details={"fragment_id": record.fragment_id})
+                yield key, row
+        finally:
+            stream.close()
 
     def _hidden_columns(self, query: DataQuery) -> tuple:
         """Every ``key_filter``/``time_interval`` column ``query.columns``
@@ -439,6 +523,24 @@ class Repository:
             size = path.stat().st_size
         except Exception:
             size = 0
+        yield from self._decoded_fragment_rows(record, contract, needed, query, batch_cap,
+                                               parquet_file, size, opened_at)
+
+    def _bounded_fragment_rows(self, record, contract, needed, query, batch_cap, max_object_bytes):
+        """Hash bounded immutable bytes and bound all row groups before any decode."""
+        opened_at = read_counters.clock()
+        payload = objects.read_verified_bytes(self._store, record.object_ref, max_bytes=max_object_bytes)
+        with pa.BufferReader(payload) as source:
+            with self._open_parquet(source, thrift_string_size_limit=min(max_object_bytes, 2**31 - 1),
+                                    thrift_container_size_limit=min(max_object_bytes, 2**31 - 1)) as parquet_file:
+                expanded = sum(parquet_file.metadata.row_group(i).total_byte_size
+                               for i in range(parquet_file.metadata.num_row_groups))
+                if expanded > max_object_bytes:
+                    raise errors.fail("RESULT_LIMIT_EXCEEDED", "parquet exceeds max_object_bytes when uncompressed")
+                yield from self._decoded_fragment_rows(record, contract, needed, query, batch_cap,
+                                                       parquet_file, len(payload), opened_at)
+
+    def _decoded_fragment_rows(self, record, contract, needed, query, batch_cap, parquet_file, size, opened_at):
         self.read_counters.add(contract.table_name, fragments_opened=1, bytes_read=size,
                                seconds=read_counters.clock() - opened_at)
         # Slice A (PR 360): footer-vs-manifest row-count integrity, decided
@@ -493,9 +595,9 @@ class Repository:
                 columns[name] = query_mod.null_array_for(physical, batch.num_rows)
         return batch.filter(batch_matcher(columns, batch.num_rows))
 
-    def _open_parquet(self, path) -> pq.ParquetFile:
+    def _open_parquet(self, path, **limits) -> pq.ParquetFile:
         try:
-            return pq.ParquetFile(path)
+            return pq.ParquetFile(path, **limits)
         except (OSError, pa.ArrowException) as exc:
             raise errors.fail("OBJECT_CORRUPT", "parquet footer could not be read") from exc
 
@@ -754,7 +856,8 @@ class Repository:
         a smaller limit stays unchanged, and a zero-row membership admits a
         zero limit with a positive batch size."""
         snap = self.resolve(snapshot_id)
-        contract, records = self._table_records(snap, table_name, table_contract_ref)
+        contract, records = self._table_records(
+            snap, table_name, table_contract_ref, key_filter if self._pin_snapshots else ())
         population = query_mod.plan_scan_population(
             contract, records, key_filter=key_filter, time_interval=time_interval)
         return population.row_count

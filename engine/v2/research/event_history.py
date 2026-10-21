@@ -3,21 +3,42 @@ from __future__ import annotations
 
 from engine.v2.data import errors
 from engine.v2.data import query as query_planner
-from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.features.panel_math import history_features
 from engine.v2.foundation import content_hash
-from engine.v2.foundation.experiment_holdouts import _calendar_date
+from engine.v2.foundation.experiment_holdouts import calendar_date
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.prediction_inputs import _parse_target, _target_filters, _target_query
+from engine.v2.research.progress import Progress, stage
 
 _CONTEXT = ("snapshot_id", "holdout_as_of_month", "random_membership_version",
             "rolling_membership_version", "population_use")
+POPULATION_CONTEXT_COLUMNS = _CONTEXT
+
+
+def plan_event_targets(repository, snapshot, candidates, contract, *, columns=None):
+    """Prove singleton object membership for already holdout-admitted candidates.
+
+    Metadata only; callers still own population admission and payload validation.
+    """
+    with stage("plan event targets"):
+        try:
+            if not {"ticker", "event_date"}.issubset(candidates.columns):
+                raise ValueError
+            for event in candidates.itertuples(index=False):
+                if (not isinstance(event.ticker, str) or not event.ticker.strip()
+                        or event.ticker != event.ticker.strip()
+                        or calendar_date(event.event_date) != event.event_date.date()):
+                    raise ValueError
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+            raise errors.fail("CONTRACT_MISMATCH", "event target candidates are malformed") from None
+        return _plans(repository, snapshot, candidates, contract, columns=columns)
 
 
 def _window(history_start, decision_session):
     """Normalize explicit calendar days without silently selecting a cutoff."""
     try:
-        start, decision = _calendar_date(history_start), _calendar_date(decision_session)
+        start, decision = calendar_date(history_start), calendar_date(decision_session)
         if start > decision:
             raise ValueError
     except (ValueError, TypeError, OverflowError):
@@ -26,15 +47,11 @@ def _window(history_start, decision_session):
 
 
 def _canonical_interval(record):
-    """Index only bounds whose pruning cannot hide an earlier planner error."""
-    if record.primary_key_min is not None and not all(
-            isinstance(key, (tuple, list)) and key and isinstance(key[0], str)
-            for key in (record.primary_key_min, record.primary_key_max)):
-        return None
+    """Index only time bounds with the planner's canonical calendar ordering."""
     lo, hi = record.time_min, record.time_max
     try:
         if (not all(isinstance(value, str) and value[:4] >= "1000"
-                    and _calendar_date(value).isoformat() == value for value in (lo, hi)) or lo > hi):
+                    and calendar_date(value).isoformat() == value for value in (lo, hi)) or lo > hi):
             return None
     except (ValueError, TypeError, OverflowError):
         return None
@@ -74,10 +91,17 @@ def _point_entries(node, day):
         yield from by_start
 
 
-def _record_index(records):
-    """One metadata pass; uncertain bounds retain their conservative fallback."""
-    partitions = {}
+def _record_index(records, contract=COMPUTED_MOVES_CONTRACT):
+    """One metadata pass; invalid keys survive even partition/time pruning."""
+    partitions, invalid = {}, []
     for ordinal, record in enumerate(records):
+        try:
+            query_planner.fragment_key_bounds(record, contract)
+        except errors.DataError:
+            # Defer refusal to the planner: query validation and earlier
+            # membership failures must still win in their original order.
+            invalid.append((ordinal, record))
+            continue
         entries, fallback, all_records = partitions.setdefault(record.partition_key, ([], [], []))
         all_records.append((ordinal, record))
         bounds = _canonical_interval(record)
@@ -85,23 +109,28 @@ def _record_index(records):
             fallback.append((ordinal, record))
         else:
             entries.append((*bounds, ordinal, record))
-    return {key: (_interval_node(sorted(entries, key=lambda entry: entry[0])), fallback, all_records)
-            for key, (entries, fallback, all_records) in partitions.items()}
+    return ({key: (_interval_node(sorted(entries, key=lambda entry: entry[0])), fallback, all_records)
+             for key, (entries, fallback, all_records) in partitions.items()}, invalid)
 
 
 def _indexed_records(index, ticker, day):
     """Restore manifest order before the unchanged planner validates survivors."""
-    node, fallback, all_records = index.get(ticker, (None, (), ()))
+    partitions, invalid = index
+    node, fallback, all_records = partitions.get(ticker, (None, (), ()))
     if day[:4] < "1000":  # Platform timestamp normalization may not zero-pad these years.
-        return [record for _, record in all_records]
-    selected = [*fallback, *((ordinal, record) for _, _, ordinal, record in _point_entries(node, day))]
+        selected = [*invalid, *all_records]
+    else:
+        selected = [*invalid, *fallback,
+                    *((ordinal, record) for _, _, ordinal, record in _point_entries(node, day))]
     return [record for _, record in sorted(selected, key=lambda entry: entry[0])]
 
 
-def _plans(repository, snapshot, candidates, contract):
+def _plans(repository, snapshot, candidates, contract, *, columns=None):
     """Shared history/target guard: prove all object membership before any opens."""
-    index = _record_index(repository.fragment_records(snapshot, "computed_moves"))
+    projection = {} if columns is None else {"columns": columns}
+    index = _record_index(repository.fragment_records(snapshot, contract.table_name), contract)
     plans = []
+    progress = Progress("plan history candidates", len(candidates))
     for event in candidates.itertuples(index=False):
         keys, interval = _target_filters(event)
         day = event.event_date.date().isoformat()
@@ -116,8 +145,9 @@ def _plans(repository, snapshot, candidates, contract):
                 or record.time_min != day or record.time_max != day):
             raise errors.fail("HOLDOUT_ACCESS_DENIED", "research outcome isolation cannot be proven")
         request = _target_query(repository, snapshot, contract, event,
-                                population_bound=population.row_count)
+                                population_bound=population.row_count, **projection)
         plans.append((event, request, record))
+        progress.tick()
     return plans
 
 
@@ -131,7 +161,7 @@ def _historical_target(rows, event, decision):
     if row["available_as_of_date"] is None:
         return None, "unavailable"
     try:
-        available = _calendar_date(row["available_as_of_date"])
+        available = calendar_date(row["available_as_of_date"])
         if available <= event.event_date.date():
             raise ValueError
     except (ValueError, TypeError, OverflowError):
@@ -156,7 +186,7 @@ def load_event_history(repository, snapshot, *, event_id, as_of_month,
         & (population.event_date.dt.date < min(event_day, decision))]
     candidates = candidates.sort_values(["event_date", "event_id"])
     contract = repository.table_contract(snapshot, "computed_moves")
-    if contract != COMPUTED_MOVES_CONTRACT:
+    if contract not in (COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT):
         raise errors.fail("CONTRACT_MISMATCH", "history requires the native computed-moves contract")
     plans = _plans(repository, snapshot, candidates, contract)
 

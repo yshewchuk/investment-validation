@@ -198,7 +198,7 @@ def main(argv=None):
                 conn = connect(args.catalog, must_exist=True)
             store = ArtifactStore(args.store_root)
             registration = read_native_registration(conn, store, spec, max_evidence_bytes=args.max_registration_bytes)
-            repository = Repository(conn, store)
+            repository = Repository(conn, store, pin_snapshots=True)
             context = (conn, store, repository, registration, request, reference)
             if args.action == "seal":
                 result = seal_search_run(*context, clock=SystemClock())

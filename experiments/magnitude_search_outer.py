@@ -21,6 +21,7 @@ from experiments.magnitude_search_execution import (
     run_fitted_trial,
     validate_execution_limits,
 )
+from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import read_search_plan
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_trials import SearchTrials
@@ -81,13 +82,14 @@ def _validate_targets(inputs, validation, fold):
         raise _conflict() from None
 
 
-def _result(started, inputs, execution, forecasts, validation, fold, horizons):
+def _result(started, inputs, inputs_id, execution, forecasts, validation, fold, horizons):
     _validate_targets(inputs, validation, fold)
     targets = {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]}
-    predictions = [{**row, "absolute_move_pct": targets[row["event_id"]]} for row in forecasts]
+    predictions = [{**row, "absolute_move_pct": targets[row["event_id"]]}
+                   for row in forecasts if row["event_id"] in targets]
     result = {"schema_version": "magnitude_search_outer_result.v1", "outer_id": started["outer_id"],
         "plan_id": started["plan_id"], "outer_year": fold["year"], "candidate": started["candidate"],
-        "selection_id": started["selection_id"], "inputs_id": content_hash(inputs),
+        "selection_id": started["selection_id"], "inputs_id": inputs_id,
         "execution_id": content_hash(execution), "validation_id": content_hash(validation),
         "training_inputs": inputs["training_inputs"], "evaluation_inputs": validation["evaluation_inputs"],
         "fit_attempt_count": execution["fit_attempt_count"], "event_count": len(targets),
@@ -100,10 +102,17 @@ def _result(started, inputs, execution, forecasts, validation, fold, horizons):
     return {**result, "result_id": content_hash(result)}
 
 
-def _replay(read, started, fold, plan, execution):
+def _replay(read, store, started, fold, plan, execution):
     try:
         _equal(read("start"), started)
-        inputs = read("inputs")
+        record = read("inputs")
+        inputs_id = read("terminal")["inputs_id"]
+        try:
+            inputs = load_inputs(store, record, inputs_id)
+        except OpsError as error:
+            if error.problem.retryable:
+                raise
+            raise _conflict() from None
         fits = fit_evidence(inputs, fold, plan, execution)
         forecasts = _forecasts(read("forecasts"), fold, plan["horizons"])
         receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
@@ -112,7 +121,7 @@ def _replay(read, started, fold, plan, execution):
         for fit in fits:
             for state in ("started", "completed"):
                 _equal(read("fit-" + state + ":" + str(fit["horizon_sessions"])), fit)
-        result = _result(started, inputs, receipt, forecasts, read("validation"), fold, plan["horizons"])
+        result = _result(started, inputs, inputs_id, receipt, forecasts, read("validation"), fold, plan["horizons"])
         _equal(read("terminal"), result)
         return result
     except (KeyError, TypeError, ValueError, OverflowError):
@@ -156,13 +165,14 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         return append_record(conn, store, registration.run_id, "outer-" + slot + ":" + key, body, replay=False)
     execution = {**binding["magnitude_execution"], "fit_recipe": candidate["recipe"]}
     if replay_only or saved("terminal") is not None:
-        return _replay(saved, started, fold, plan, execution)
+        return _replay(saved, store, started, fold, plan, execution)
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
     resolved = execution_limits(limits)
     append("start", started)
     inputs = _inputs(repository, binding, fold)
-    append("inputs", inputs)
+    manifest, inputs_id = publish_inputs(store, inputs)
+    append("inputs", manifest)
     expected = fit_evidence(inputs, fold, plan, execution)
     fits, pending = [], []
     def progress(state, fit):
@@ -176,7 +186,8 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
             pending.append(fit)
         else:
             fits.append(pending.pop())
-    result = run_fitted_trial(inputs, fold, plan, execution, resolved, progress)
+    source = {"manifest": manifest, "inputs_id": inputs_id, "store_root": str(store.root)}
+    result = run_fitted_trial(source, fold, plan, execution, resolved, progress)
     succeeded = result.get("event") == "succeeded"
     if ((succeeded and (pending or len(fits) != len(expected) or set(result) != {"event", "forecasts"}))
             or (not succeeded and (result != {"event": "failed"} or len(pending) != 1))):
@@ -191,13 +202,13 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     # All predictions and successful fit accounting are durable before any outer target opens.
     labels = load_magnitude_targets(repository, from_document(SnapshotRef, binding["snapshot"]),
         as_of_month=binding["holdouts"]["holdout_as_of_month"], labels_before=fold["evaluation_labels_before"],
-        event_ids=fold["evaluation_event_ids"])
+        event_ids=fold["evaluation_event_ids"], omit_not_computed=True)
     validation = {"evaluation_inputs": dict(labels.attrs),
                   "targets": labels[["event_id", "absolute_move_pct"]].to_dict("records")}
     _validate_targets(inputs, validation, fold)
     append("validation", validation)
-    append("terminal", _result(started, inputs, receipt, forecasts, validation, fold, plan["horizons"]))
-    return _replay(saved, started, fold, plan, execution)
+    append("terminal", _result(started, inputs, inputs_id, receipt, forecasts, validation, fold, plan["horizons"]))
+    return _replay(saved, store, started, fold, plan, execution)
 
 
 def collect_outer_results(conn, store, repository, registration, request, plan_ref):

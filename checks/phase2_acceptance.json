@@ -47,20 +47,20 @@
     },
     "D11": {
       "tier": 1,
-      "tests": ["tests/test_v2_data_atomicity.py", "tests/test_v2_data_import.py",
+      "tests": ["tests/test_v2_data_atomicity.py", "tests/v2/data/test_v2_data_import.py",
                 "tests/test_checks_phase2_fault_matrix.py"],
       "evidence_fields": ["fault_matrix_ref"]
     },
     "D12": {
       "tier": 1,
-      "tests": ["tests/test_v2_data_commit.py", "tests/test_v2_data_import.py"]
+      "tests": ["tests/test_v2_data_commit.py", "tests/v2/data/test_v2_data_import.py"]
     },
     "D13": {
       "tier": 1,
-      "tests": ["tests/test_v2_data_legacy_materialization.py",
+      "tests": ["tests/v2/data/test_legacy_materialization.py",
                 "tests/v2/ops/test_v2_ops_snapshot_stages.py",
-                "tests/test_v2_data_reference_inputs.py",
-                "tests/test_v2_data_tier4_coverage.py",
+                "tests/v2/data/test_v2_data_reference_inputs.py",
+                "tests/v2/data/test_tier4_coverage.py",
                 "tests/v2/ops/test_v2_ops_tier4_coverage.py",
                 "tests/test_v2_ops_fingerprints_code_assets.py",
                 "tests/v2/ops/test_v2_ops_fingerprints_model_scan.py",
@@ -70,10 +70,10 @@
     },
     "D14": {
       "tier": 1,
-      "tests": ["tests/test_v2_data_legacy_materialization.py",
+      "tests": ["tests/v2/data/test_legacy_materialization.py",
                 "tests/v2/ops/test_v2_ops_snapshot_stages.py",
-                "tests/test_v2_data_reference_inputs.py",
-                "tests/test_checks_phase2_corpus_parity.py"],
+                "tests/v2/data/test_v2_data_reference_inputs.py",
+                "tests/v2/integration/test_checks_phase2_corpus_parity.py"],
       "evidence_fields": ["corpus_comparison_receipt_ref"]
     },
     "D15": {
@@ -84,7 +84,7 @@
     },
     "D16": {
       "tier": 2,
-      "tests": ["tests/test_v2_data_import.py", "tests/test_v2_data_rebuild_rollback.py"],
+      "tests": ["tests/v2/data/test_v2_data_import.py", "tests/v2/data/test_rebuild_rollback.py"],
       "evidence_fields": ["rollback_receipt_ref"]
     },
     "D17": {

@@ -1,8 +1,8 @@
 {
   "schema_version": "phase2_coverage.v1.0",
-  "suite_version": "phase2_coverage_suite:41d5881061353297d37e06599adeec4ae5c3d1efe7ae89c92e259e123dc1d451",
+  "suite_version": "phase2_coverage_suite:7ae743b96f5398e1a4cfbb1f88d6bf811af0ca4aaf785f3ece4b2f1d8431fd4d",
   "test_files": [
-    "tests/test_checks_phase2_corpus_parity.py",
+    "tests/v2/integration/test_checks_phase2_corpus_parity.py",
     "tests/test_checks_phase2_fault_matrix.py",
     "tests/test_checks_phase2_render_memory.py",
     "tests/test_checks_phase2_render_parity.py",
@@ -13,19 +13,19 @@
     "tests/test_v2_data_commit.py",
     "tests/test_v2_data_contracts.py",
     "tests/test_v2_data_events_chains.py",
-    "tests/test_v2_data_import.py",
+    "tests/v2/data/test_v2_data_import.py",
     "tests/test_v2_data_legacy_adapter.py",
-    "tests/test_v2_data_legacy_materialization.py",
+    "tests/v2/data/test_legacy_materialization.py",
     "tests/test_v2_data_manifests.py",
     "tests/test_v2_data_objects.py",
     "tests/test_v2_data_partitions.py",
     "tests/v2/data/test_price_downloads.py",
     "tests/test_v2_data_query.py",
-    "tests/test_v2_data_rebuild_rollback.py",
-    "tests/test_v2_data_reference_inputs.py",
+    "tests/v2/data/test_rebuild_rollback.py",
+    "tests/v2/data/test_v2_data_reference_inputs.py",
     "tests/test_v2_data_repository.py",
     "tests/test_v2_data_roundtrip.py",
-    "tests/test_v2_data_tier4_coverage.py",
+    "tests/v2/data/test_tier4_coverage.py",
     "tests/test_v2_ops_decision_validation_order.py",
     "tests/test_v2_ops_fingerprints_code_assets.py",
     "tests/v2/ops/test_v2_ops_fingerprints_model_scan.py",
@@ -329,115 +329,115 @@
   },
   "test_outcomes": [
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_identical_results_agree",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_identical_results_agree",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_planted_field_difference_is_localized_and_redacted",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_planted_field_difference_is_localized_and_redacted",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_missing_analog_slice_control_localizes_to_analogs",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_missing_analog_slice_control_localizes_to_analogs",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_missing_analog_control_fails_when_findings_are_not_localized",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_missing_analog_control_fails_when_findings_are_not_localized",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_receipt_passes_evidence_validator_corpus_kind_and_binding",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_receipt_passes_evidence_validator_corpus_kind_and_binding",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_missing_diagnostic_ref_gives_corpus_binding_missing",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_missing_diagnostic_ref_gives_corpus_binding_missing",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_legacy_free_text_diagnostic_ref_gives_corpus_binding_missing",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_legacy_free_text_diagnostic_ref_gives_corpus_binding_missing",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_tampered_binding_bytes_give_corpus_binding_hash_mismatch",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_tampered_binding_bytes_give_corpus_binding_hash_mismatch",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_malformed_binding_shape_gives_corpus_binding_shape_invalid",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_malformed_binding_shape_gives_corpus_binding_shape_invalid",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_corpus_hash_not_equal_source_hash_gives_source_mismatch",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_corpus_hash_not_equal_source_hash_gives_source_mismatch",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_corpus_hash_not_equal_index_snapshot_gives_index_mismatch",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_corpus_hash_not_equal_index_snapshot_gives_index_mismatch",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_control_receipt_is_refused_as_d14_evidence",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_control_receipt_is_refused_as_d14_evidence",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_corpus_receipt_verdict_not_agree_is_refused",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_corpus_receipt_verdict_not_agree_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_corpus_snapshot_mismatch_refused_before_any_job_submitted",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_corpus_snapshot_mismatch_refused_before_any_job_submitted",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_corpus_snapshot_match_allows_import_to_proceed",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_corpus_snapshot_match_allows_import_to_proceed",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_root_inside_source_root_refused",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_root_inside_source_root_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_legacy_store_snapshot_hash_reads_the_stamped_value",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_legacy_store_snapshot_hash_reads_the_stamped_value",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_filtered_legacy_root_drops_only_the_named_tickers_trades_rows",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_filtered_legacy_root_drops_only_the_named_tickers_trades_rows",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_default_run_key_is_scope_plus_implementation_ref_and_changes_with_code",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_default_run_key_is_scope_plus_implementation_ref_and_changes_with_code",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_run_corpus_same_code_rerun_is_idempotent_same_jobs",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_run_corpus_same_code_rerun_is_idempotent_same_jobs",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_run_corpus_explicit_run_key_gets_new_jobs_and_reuses_materialization",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_run_corpus_explicit_run_key_gets_new_jobs_and_reuses_materialization",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_import_corpus_default_key_is_scope_plus_implementation_ref",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_import_corpus_default_key_is_scope_plus_implementation_ref",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_run_key_cli_flag_overrides_the_default",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_run_key_cli_flag_overrides_the_default",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_run_key_cli_flag_defaults_to_none",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_run_key_cli_flag_defaults_to_none",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_run_result_records_implementation_ref_and_job_ids",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_run_result_records_implementation_ref_and_job_ids",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_corpus_snapshot_binding_records_run_provenance",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_corpus_snapshot_binding_records_run_provenance",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_build_receipt_refuses_stale_run_code",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_build_receipt_refuses_stale_run_code",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_checks_phase2_corpus_parity.py::test_build_receipt_refuses_missing_run_code",
+      "nodeid": "tests/v2/integration/test_checks_phase2_corpus_parity.py::test_build_receipt_refuses_missing_run_code",
       "outcome": "passed"
     },
     {
@@ -1205,47 +1205,47 @@
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_import.py::test_plan_import_enumerates_declared_files",
+      "nodeid": "tests/v2/data/test_v2_data_import.py::test_plan_import_enumerates_declared_files",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_import.py::test_plan_import_refuses_stray_file",
+      "nodeid": "tests/v2/data/test_v2_data_import.py::test_plan_import_refuses_stray_file",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_import.py::test_plan_import_refuses_symlinked_part",
+      "nodeid": "tests/v2/data/test_v2_data_import.py::test_plan_import_refuses_symlinked_part",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_import.py::test_plan_import_refuses_missing_table",
+      "nodeid": "tests/v2/data/test_v2_data_import.py::test_plan_import_refuses_missing_table",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_import.py::test_plan_import_refuses_bad_snapshot_shape",
+      "nodeid": "tests/v2/data/test_v2_data_import.py::test_plan_import_refuses_bad_snapshot_shape",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_import.py::test_snapshot_import_end_to_end",
+      "nodeid": "tests/v2/data/test_v2_data_import.py::test_snapshot_import_end_to_end",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_import.py::test_source_modified_after_planning_fails_input_changed",
+      "nodeid": "tests/v2/data/test_v2_data_import.py::test_source_modified_after_planning_fails_input_changed",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_import.py::test_coordinator_fault_then_clean_retry_reuses_objects",
+      "nodeid": "tests/v2/data/test_v2_data_import.py::test_coordinator_fault_then_clean_retry_reuses_objects",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_import.py::test_import_keeps_its_lease_per_object_and_never_restreams",
+      "nodeid": "tests/v2/data/test_v2_data_import.py::test_import_keeps_its_lease_per_object_and_never_restreams",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_import.py::test_tampered_bytes_are_still_refused_at_publish",
+      "nodeid": "tests/v2/data/test_v2_data_import.py::test_tampered_bytes_are_still_refused_at_publish",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_import.py::test_import_that_loses_its_lease_recovers_and_resubmits_cleanly",
+      "nodeid": "tests/v2/data/test_v2_data_import.py::test_import_that_loses_its_lease_recovers_and_resubmits_cleanly",
       "outcome": "passed"
     },
     {
@@ -1341,187 +1341,187 @@
       "outcome": "skipped"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_round_trip_through_legacy_readers",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_round_trip_through_legacy_readers",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_tree_contains_only_declared_paths_and_is_read_only",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_tree_contains_only_declared_paths_and_is_read_only",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_materialize_declares_every_written_px_file_and_verify_root_passes",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_materialize_declares_every_written_px_file_and_verify_root_passes",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_verify_root_refuses_a_tampered_px_file",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_verify_root_refuses_a_tampered_px_file",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_verify_root_refuses_an_extra_undeclared_px_file",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_verify_root_refuses_an_extra_undeclared_px_file",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_request_mismatches_admits_expected_px_and_flags_wrong_ones",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_request_mismatches_admits_expected_px_and_flags_wrong_ones",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_identical_request_yields_identical_hash_and_manifest",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_identical_request_yields_identical_hash_and_manifest",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_model_output_reference_inputs_materialize_at_their_legacy_paths",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_model_output_reference_inputs_materialize_at_their_legacy_paths",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_changing_scope_or_refs_changes_request_hash",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_changing_scope_or_refs_changes_request_hash",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_changing_a_column_set_changes_request_hash",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_changing_a_column_set_changes_request_hash",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_evidence_scope_widens_the_analog_pool_table_scan",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_evidence_scope_widens_the_analog_pool_table_scan",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_read_plan_incomplete_when_a_table_query_or_ref_is_missing",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_read_plan_incomplete_when_a_table_query_or_ref_is_missing",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_narrower_evidence_than_direct_scope_is_incomplete",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_narrower_evidence_than_direct_scope_is_incomplete",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_refuses_a_non_empty_dest_root",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_refuses_a_non_empty_dest_root",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_refuses_a_dest_root_inside_the_object_store",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_refuses_a_dest_root_inside_the_object_store",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_refuses_a_symlinked_dest_root",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_refuses_a_symlinked_dest_root",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_query_exceeding_contract_limits_propagates_the_repository_code",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_query_exceeding_contract_limits_propagates_the_repository_code",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_format_and_parse_pinned_ref_round_trip",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_format_and_parse_pinned_ref_round_trip",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_format_pinned_ref_rejects_a_separator_in_the_path",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_format_pinned_ref_rejects_a_separator_in_the_path",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_parse_pinned_ref_rejects_malformed_strings",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_parse_pinned_ref_rejects_malformed_strings",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_refuses_a_dest_root_that_is_a_regular_file",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_refuses_a_dest_root_that_is_a_regular_file",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_coerce_failure_surfaces_as_contract_mismatch",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_coerce_failure_surfaces_as_contract_mismatch",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_materialized_chains_readable_by_legacy_load_chain_index",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_materialized_chains_readable_by_legacy_load_chain_index",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_whole_table_interval_has_no_sentinel_bound",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_whole_table_interval_has_no_sentinel_bound",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_trades_span_outside_evidence_scope_is_accepted_when_daily_market_is_whole_table",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_trades_span_outside_evidence_scope_is_accepted_when_daily_market_is_whole_table",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_trades_span_inside_evidence_scope_is_accepted",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_trades_span_inside_evidence_scope_is_accepted",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_row_scoped_daily_market_excluding_a_trades_ticker_is_refused",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_row_scoped_daily_market_excluding_a_trades_ticker_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_row_scoped_daily_market_narrower_years_is_refused_by_count",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_row_scoped_daily_market_narrower_years_is_refused_by_count",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_missing_pinned_ref_is_refused",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_missing_pinned_ref_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_pinned_ref_with_wrong_hash_is_refused",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_pinned_ref_with_wrong_hash_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_legacy_adapter_ledger_has_one_entry_per_exact_symbol",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_legacy_adapter_ledger_has_one_entry_per_exact_symbol",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_daily_market_is_whole_table_covering_the_tier4_cache_miss_window",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_daily_market_is_whole_table_covering_the_tier4_cache_miss_window",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_narrowed_whole_table_query_never_silently_copies_the_whole_table",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_narrowed_whole_table_query_never_silently_copies_the_whole_table",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_ceiling_below_actual_rows_is_refused_not_clamped",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_ceiling_below_actual_rows_is_refused_not_clamped",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_whole_table_copy_eligible_rejects_a_narrower_projection",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_whole_table_copy_eligible_rejects_a_narrower_projection",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_whole_table_copy_eligible_rejects_a_narrower_time_interval",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_whole_table_copy_eligible_rejects_a_narrower_time_interval",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_interval_covers_direct_cases",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_interval_covers_direct_cases",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_whole_table_outputs_are_byte_identical_verified_copies",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_whole_table_outputs_are_byte_identical_verified_copies",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_materialized_panel_hash_equals_source_panel_object_hash",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_materialized_panel_hash_equals_source_panel_object_hash",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_tier4_cache_ref_naming_an_unpublished_object_is_refused",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_tier4_cache_ref_naming_an_unpublished_object_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_tier4_cache_ref_with_wrong_panel_hash_prefix_is_stale",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_tier4_cache_ref_with_wrong_panel_hash_prefix_is_stale",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_tampered_object_byte_is_refused_with_nothing_left_writable",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_tampered_object_byte_is_refused_with_nothing_left_writable",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_copy_source_object_unreadable_is_refused",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_copy_source_object_unreadable_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_multi_fragment_feature_panel_falls_back_to_rewrite_and_skips_tier4_cache_check",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_multi_fragment_feature_panel_falls_back_to_rewrite_and_skips_tier4_cache_check",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_pinned_ref_object_corrupted_between_build_and_materialize_is_refused",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_pinned_ref_object_corrupted_between_build_and_materialize_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_tier4_cache_hash_prefix_ignores_a_malformed_filename",
+      "nodeid": "tests/v2/data/test_legacy_materialization.py::test_tier4_cache_hash_prefix_ignores_a_malformed_filename",
       "outcome": "passed"
     },
     {
@@ -2069,99 +2069,99 @@
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_rebuild_rollback.py::test_candidate_writes_stay_under_its_own_root",
+      "nodeid": "tests/v2/data/test_rebuild_rollback.py::test_candidate_writes_stay_under_its_own_root",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_rebuild_rollback.py::test_candidate_write_outside_root_is_refused",
+      "nodeid": "tests/v2/data/test_rebuild_rollback.py::test_candidate_write_outside_root_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_rebuild_rollback.py::test_candidate_promotion_and_rollback",
+      "nodeid": "tests/v2/data/test_rebuild_rollback.py::test_candidate_promotion_and_rollback",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_rebuild_rollback.py::test_comparison_receipt_on_unready_candidate_raises_typed_snapshot_not_ready",
+      "nodeid": "tests/v2/data/test_rebuild_rollback.py::test_comparison_receipt_on_unready_candidate_raises_typed_snapshot_not_ready",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_reference_input_paths_equal_their_legacy_constants",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_reference_input_paths_equal_their_legacy_constants",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_kind_for_path_classifies_every_declared_input",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_kind_for_path_classifies_every_declared_input",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_plan_pins_exactly_the_reference_files_and_excludes_a_stale_cache",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_plan_pins_exactly_the_reference_files_and_excludes_a_stale_cache",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_missing_registry_referenced_artifact_is_refused",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_missing_registry_referenced_artifact_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_missing_exact_reference_input_is_refused",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_missing_exact_reference_input_is_refused",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_missing_model_output_reference_input_is_refused[pnl_sim_history]",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_missing_model_output_reference_input_is_refused[pnl_sim_history]",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_missing_model_output_reference_input_is_refused[recalibration_pairs]",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_missing_model_output_reference_input_is_refused[recalibration_pairs]",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_tier4_champion_without_a_cache_for_this_panel_is_stale",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_tier4_champion_without_a_cache_for_this_panel_is_stale",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_bad_registry_or_artifact_is_a_contract_mismatch",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_bad_registry_or_artifact_is_a_contract_mismatch",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_import_records_exactly_the_expected_refs_per_receipt",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_import_records_exactly_the_expected_refs_per_receipt",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_fold_is_the_snapshot_data_session_not_the_import_clock",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_fold_is_the_snapshot_data_session_not_the_import_clock",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_fold_is_identical_across_reimports_with_different_clocks",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_fold_is_identical_across_reimports_with_different_clocks",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_model_only_change_reuses_the_snapshot_and_records_new_refs",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_model_only_change_reuses_the_snapshot_and_records_new_refs",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_v5_v6_migrations_are_checksummed_idempotent_and_append_only",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_v5_v6_migrations_are_checksummed_idempotent_and_append_only",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_pinned_materialization_refs_accepts_a_complete_set",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_pinned_materialization_refs_accepts_a_complete_set",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_pinned_materialization_refs_refuses_without_either_model_output[pnl_sim_history]",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_pinned_materialization_refs_refuses_without_either_model_output[pnl_sim_history]",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_pinned_materialization_refs_refuses_without_either_model_output[recalibration_pairs]",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_pinned_materialization_refs_refuses_without_either_model_output[recalibration_pairs]",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_pnl_sim_trailing_cutoff_ignores_rows_on_or_after_as_of",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_pnl_sim_trailing_cutoff_ignores_rows_on_or_after_as_of",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_fit_recalibration_restricts_pairs_to_events_closed_before_the_decision_date",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_fit_recalibration_restricts_pairs_to_events_closed_before_the_decision_date",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_reference_inputs.py::test_import_plan_submit_materializes_reference_files_byte_identical",
+      "nodeid": "tests/v2/data/test_v2_data_reference_inputs.py::test_import_plan_submit_materializes_reference_files_byte_identical",
       "outcome": "passed"
     },
     {
@@ -2221,75 +2221,75 @@
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_champion_producer_models_keeps_only_tier4_producers",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_champion_producer_models_keeps_only_tier4_producers",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-01-15-2026-01-10]",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-01-15-2026-01-10]",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-02-03-2026-01-28]",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-02-03-2026-01-28]",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-03-01-2026-03-01]",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-03-01-2026-03-01]",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2025-12-20-2026-01-05]",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2025-12-20-2026-01-05]",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_required_serving_triples_crosses_events_with_every_producer",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_required_serving_triples_crosses_events_with_every_producer",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_required_serving_triples_dedupes_repeated_event_as_of_pairs",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_required_serving_triples_dedupes_repeated_event_as_of_pairs",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_covered_triple_launches_clean",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_covered_triple_launches_clean",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_missing_reason_absent_when_nothing_is_pinned",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_missing_reason_absent_when_nothing_is_pinned",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_missing_reason_fold_mismatch_for_a_new_month_beyond_pinned_folds",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_missing_reason_fold_mismatch_for_a_new_month_beyond_pinned_folds",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_missing_reason_panel_mismatch_when_header_disagrees_with_filename",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_missing_reason_panel_mismatch_when_header_disagrees_with_filename",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_missing_reason_features_mismatch",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_missing_reason_features_mismatch",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_multiple_misses_are_all_listed",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_multiple_misses_are_all_listed",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_oversized_cache_file_is_never_unpickled",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_oversized_cache_file_is_never_unpickled",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_serving_header_accessor_returns_none_past_the_cap",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_serving_header_accessor_returns_none_past_the_cap",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_serving_header_accessor_returns_none_on_hash_mismatch",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_serving_header_accessor_returns_none_on_hash_mismatch",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_serving_header_accessor_returns_none_for_a_missing_file",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_serving_header_accessor_returns_none_for_a_missing_file",
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_serving_header_accessor_reads_plain_fields_not_the_estimator",
+      "nodeid": "tests/v2/data/test_tier4_coverage.py::test_serving_header_accessor_reads_plain_fields_not_the_estimator",
       "outcome": "passed"
     },
     {

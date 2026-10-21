@@ -288,13 +288,13 @@ bug before it lands.
 
 `-n auto --dist loadgroup` is recommended ONLY for `tests/v2/ops/
 tests/v2/integration/test_checks_phase2_gate.py` above. The LEGACY suite
-(`tests/test_calendar.py`, `tests/test_dashboard.py`, `tests/test_features.py`;
+(`tests/test_calendar.py`, `tests/v2/dashboard/test_dashboard.py`, `tests/test_features.py`;
 274 tests, ~100s serial, per main's committed data) runs SERIALLY, full
 stop -- it is not part of the v2 command above, needs the real data trees
 (`earnings_predictions/`, `polygon_cache/`) a bare worktree checkout does
 not have, and a spot check under real data found a genuine parallel-safety
 bug: `python3 -m pytest -q -n auto --dist loadgroup tests/test_calendar.py
-tests/test_features.py tests/test_dashboard.py`, from a real data checkout,
+tests/test_features.py tests/v2/dashboard/test_dashboard.py`, from a real data checkout,
 hung for 22+ minutes (vs ~100s serial) before being killed. Bisected to
 `tests/test_features.py`: 2+ real xdist workers each independently loading
 the real feature panel reliably crashed a worker on this RAM-constrained
@@ -308,7 +308,7 @@ nothing to stop a DIFFERENT worker from loading the same real panel again
 at the same time from a different legacy test file, which is the same
 memory pressure by another name. Run the legacy suite as
 `python3 -m pytest -q tests/test_calendar.py tests/test_features.py
-tests/test_dashboard.py` (plain serial; main's committed count is 274
+tests/v2/dashboard/test_dashboard.py` (plain serial; main's committed count is 274
 passed) until someone actually re-verifies parallel safety end to end
 against real data, not just against this data-less worktree.
 

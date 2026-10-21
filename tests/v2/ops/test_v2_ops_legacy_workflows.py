@@ -125,7 +125,7 @@ def test_graph_is_topological_and_serialized_selfcheck_is_real():
 
 
 def test_allowlisted_legacy_dag_submits_with_real_dependencies(tmp_path):
-    plan = build_nightly_plan(str(Path(__file__).resolve().parents[1]), "2026-09-12")
+    plan = build_nightly_plan(str(Path(__file__).resolve().parents[3]), "2026-09-12")
     requests = build_legacy_job_requests(plan, tickers=("FAKE",),
                                          year_start=2025, year_end=2026)
     assert [request.job.kind for request in requests] == [
@@ -307,7 +307,7 @@ def test_o16_whole_legacy_nightly_is_not_an_adapter_entry(tmp_path):
     # process-wide side effect and never restores it -- even on the refusal
     # path exercised here. Left alone, that leaks this test's tmp_path into
     # engine.paths.ROOT for whatever module imports it next in the same
-    # process (see tests/test_v2_data_reference_inputs.py, which reads
+    # process (see tests/v2/data/test_v2_data_reference_inputs.py, which reads
     # engine.models.registry's own paths.ROOT and failed exactly this way
     # when this test ran first in a land sweep). Save/restore here, the same
     # pattern tests/conftest.py's tmp_root fixture uses.

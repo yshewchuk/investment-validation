@@ -214,7 +214,7 @@ def pytest_runtest_teardown(item, nextitem):
 #
 # NOT grouped, and why: the ~30 other tests that launch a real worker
 # subprocess through `Service`/`tests.ops_support.TEST_POLICY` (in
-# test_v2_data_import.py, test_v2_data_rebuild_rollback.py,
+# tests/v2/data/test_v2_data_import.py, tests/v2/data/test_rebuild_rollback.py,
 # test_v2_ops_store_barrier.py, test_v2_ops_supervised_legacy.py,
 # tests/v2/ops/test_v2_ops_nightly_completion.py, and the rest of test_v2_ops_runtime.py
 # and test_v2_ops_executor_faults.py already covered above) each use their
@@ -234,7 +234,7 @@ def pytest_runtest_teardown(item, nextitem):
 #   which reliably crashed a worker (`[gwN] node down: Not properly
 #   terminated`) and then hung xdist's crashed-worker replacement --
 #   `python3 -m pytest -q -n auto --dist loadgroup tests/test_calendar.py
-#   tests/test_features.py tests/test_dashboard.py` never returned in 22+
+#   tests/test_features.py tests/v2/dashboard/test_dashboard.py` never returned in 22+
 #   minutes (vs ~100s serial) before being killed. Bisected file-by-file:
 #   test_calendar.py and test_dashboard.py are each independently
 #   parallel-safe; only test_features.py reproduces it, and only at 2+

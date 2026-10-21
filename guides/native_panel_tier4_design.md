@@ -35,7 +35,16 @@ here; there is no `orats` table), `earnings_events`, `computed_moves`
 (realised/implied history), `price_history` (adjusted-close run-up) and the
 calendar in bounded batches (ticker groups, one year
 partition at a time; peak memory is a function of the batch, never of the
-table) and publishes `feature_panel` as a new dataset version of the same
+table; slice 2 sets a hard rows-and-bytes cap per group or partition, splits an
+oversized one into sub-batches instead of loading it whole, and its memory test
+covers that case). Rolling and history features (`panel_math`, `regime`,
+`runup_math`) stay continuous across sub-batch boundaries. Finite-lookback
+features read an overlap of prior history at least as long as the lookback
+(overlap rows are not emitted twice). Expanding or recursive history (counts,
+means, seeded EMAs, uncapped streaks) cannot be recovered from a bounded
+overlap and carries explicit prefix state into the next sub-batch. A
+boundary test compares capped output with an uncapped reference. The job
+publishes `feature_panel` as a new dataset version of the same
 snapshot lineage. Row math is `panel_math`, `regime` and `runup_math` only;
 `scan_panel_row` and the batch share them, so a forward row equals the stored
 row for the same event and the same `decision_session` and `history_start`
@@ -67,7 +76,10 @@ A historical event's value may come only from a release whose
 member cutoff is not after the event's decision date. The member cutoff is
 the producing model's own training cutoff (exclusive, `M_end + 1 day`):
 a carried member keeps its prior cutoff (models §2.3), so it is read from the
-member, not from the release-level `sources.retrain_cutoff`, and a pool-only
+member, not from the release-level `sources.retrain_cutoff`. `ArtifactMember` /
+`ModelBinding` expose no such field today and `resolve_release` only resolves
+a supplied id, so slice 3 must define the authoritative cutoff field and how
+the pinned candidate release set supplies it before the resolver is built. A pool-only
 release does not re-stamp an unchanged model, matching the existing `fold_start <= as_of` guard.
 Options for history before the first eligible release:
 
@@ -117,8 +129,10 @@ session, whose release should exist, is a scoring refusal:
 `native_score_batch` refuses it with the existing `MODEL_NOT_READY` code,
 names the reason in `details`, and the parity report counts it as a native
 refusal (a visible, not hidden, class). The nightly's other jobs continue.
-A refusal is correct only when the release truly is absent; #782 tracks
-whether today's 101 refusals are that case.
+Per the rule above, a forward event of the scored session is correctly
+refused whenever no member is eligible, not only when the release is absent
+(historical events stay null, section 3); #782 tracks which of today's 101
+refusals fall under that rule.
 
 ## 5. Qualification replaces parity
 
@@ -152,9 +166,14 @@ version instead of the latest `finality`/`features` job.
 Estimates are added lines (code / test / doc); each slice is its own PR.
 
 1. This design and the contract text (docs only): 0 / 0 / ~190.
-2. Native panel producer: batch job, shared-math equality test, bounded memory
-   test on a synthetic wide snapshot, publish as a dataset version (add):
-   ~380 / ~300 / ~30.
+2. Native panel producer (add), split at design time (user decision B,
+   2026-10-19: output is bounded too, so `engine/v2/data` gains a streaming
+   whole-table writer; the generic candidate path takes the whole incoming set):
+   - 2a. Streaming whole-table writer in `engine/v2/data`
+     (`generic_streaming.py`), unit and memory tests: ~200 / ~200 / ~50.
+   - 2b. Batch producer in `engine.v2.ops` on that writer, shared-math equality
+     test, sub-batch boundary test (capped vs uncapped output), bounded-memory
+     test on a synthetic wide snapshot: ~380 / ~300 / ~30.
 3. Tier-4 coverage table and resolver, per member, with the section 4
    semantics (add): ~300 / ~250 / ~30.
 4. Wire scoring and training to the native tables and the coverage resolver;

@@ -338,3 +338,228 @@ def test_features_stage_is_a_cross_check_stage_and_launches_as_finality_check():
     assert launch_mode(legacy_spec) == "legacy"
 
     assert "features" in nightly.CROSS_CHECK_STAGES
+
+
+_H1, _H2 = "a" * 64, "b" * 64
+
+
+def _stamped(stamps):
+    df = _frame(len(stamps))
+    df["tier3_snapshot"] = pd.Series(stamps, dtype="string")
+    return df
+
+
+def _tier4_pair(tmp_path, rebuilt, pinned):
+    _write(tmp_path / "r.parquet", rebuilt)
+    _write(tmp_path / "p.parquet", pinned)
+    return compare_tables("tier4", tmp_path / "r.parquet", tmp_path / "p.parquet")
+
+
+def test_carried_stamp_rows_with_older_valid_hash_match(tmp_path):
+    out = _tier4_pair(tmp_path, _stamped(["0123456789abcdef" * 4] * 6),
+                      _stamped([_H2, _H2, _H2, _H1, _H1, _H1]))
+    assert out == {"verdict": "match", "mismatches": [], "max_abs_diff": 0.0,
+                   "max_rel_diff": 0.0, "n_columns_differing": 0}
+
+
+def test_numeric_difference_still_fails_next_to_a_carried_stamp(tmp_path):
+    rebuilt = _stamped([_H1] * 6)
+    rebuilt.loc[2, "pred_abs_move"] += 1.0
+    out = _tier4_pair(tmp_path, rebuilt, _stamped([_H2] * 6))
+    assert out["verdict"] == "mismatch"
+    assert out["n_columns_differing"] == 1
+    assert out["max_abs_diff"] == pytest.approx(1.0)
+    assert [(m["reason"], m["column"], m["n_rows"]) for m in out["mismatches"]] == [
+        ("float_beyond_tolerance", "pred_abs_move", 1)]
+
+
+@pytest.mark.parametrize("side", ["rebuilt", "pinned"])
+@pytest.mark.parametrize("bad", [None, "not-a-hash", "A" * 64, "a" * 63, "a" * 64 + "x", "g" * 64])
+def test_invalid_or_null_stamp_fails_on_either_side(tmp_path, side, bad):
+    good = _stamped([_H1] * 6)
+    broken = _stamped([_H1, bad, _H1, bad, _H1, _H1])
+    rebuilt, pinned = (broken, good) if side == "rebuilt" else (good, broken)
+    out = _tier4_pair(tmp_path, rebuilt, pinned)
+    assert out["verdict"] == "mismatch"
+    assert out["mismatches"] == [{"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 2}]
+
+
+def test_invalid_stamps_on_both_sides_are_summed(tmp_path):
+    out = _tier4_pair(tmp_path, _stamped([_H1, "bad", _H1, _H1, _H1, _H1]),
+                      _stamped([_H1, "bad", "bad", _H1, _H1, _H1]))
+    assert out["mismatches"] == [{"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 3}]
+
+
+def test_compare_identical_checks_only_stamps_and_counts_once_per_side(tmp_path):
+    from engine.v2.ops.features_compare import compare_identical
+
+    ok = tmp_path / "ok.parquet"
+    _write(ok, _stamped([_H1, _H2, _H1, _H1, _H1, _H1]))
+    assert compare_identical("tier4", ok) == {"verdict": "match", "mismatches": [], "max_abs_diff": 0.0, "max_rel_diff": 0.0, "n_columns_differing": 0}
+    bad = tmp_path / "bad.parquet"
+    _write(bad, _stamped([_H1, "bad", "bad", _H1, _H1, _H1]))
+    assert compare_identical("tier4", bad)["mismatches"] == [
+        {"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 4}]
+    assert compare_identical("panel", ok) == {"verdict": "match", "mismatches": [], "max_abs_diff": 0.0, "max_rel_diff": 0.0, "n_columns_differing": 0}
+
+
+@pytest.mark.parametrize("stamps,verdict", [([_H1, _H2, _H1, _H1, _H1, _H1], "match"),
+                                            ([_H1, "bad", _H1, _H1, _H1, _H1], "mismatch")])
+def test_byte_identical_tier4_goes_through_the_stamp_check_in_the_features_action(
+        tmp_path, monkeypatch, stamps, verdict):
+    from engine import paths as paths_module
+    from engine.data import rebuild
+    import engine.v2.ops.features_compare as fc
+
+    def no_full_compare(*args, **kwargs):
+        raise AssertionError("byte-identical tables must not take the full compare path")
+
+    monkeypatch.setattr(fc, "compare_tables", no_full_compare)
+
+    st, mat = tmp_path / "st", tmp_path / "mat"
+    for root in (st, mat):
+        _write(root / "data" / "features" / "panel.parquet", _frame())
+        _write(root / "data" / "features" / "tier4_forecasts.parquet", _stamped(stamps))
+    monkeypatch.setattr(paths_module, "ROOT", st)
+    monkeypatch.setattr(paths_module, "PANEL", st / "data" / "features" / "panel.parquet")
+    monkeypatch.setattr(paths_module, "TIER4", st / "data" / "features" / "tier4_forecasts.parquet")
+    monkeypatch.setattr(rebuild, "build_panel_table", lambda: {"rows": 6})
+    monkeypatch.setattr(rebuild, "build_tier4_table", lambda since=None: {"rows": 6})
+    _action_features({}, st, cross_check={"materialization_root": str(mat)})
+    receipt = json.loads((st / "features.json").read_text())
+    assert receipt["verdict"] == verdict
+    assert receipt["tables"]["panel"] == {"verdict": "match", "mismatches": [], "max_abs_diff": 0.0, "max_rel_diff": 0.0, "n_columns_differing": 0}
+    if verdict == "mismatch":
+        assert receipt["tables"]["tier4"]["mismatches"] == [
+            {"reason": "provenance_stamp", "column": "tier3_snapshot", "n_rows": 2}]
+
+
+def test_compare_identical_reads_only_the_stamp_column(tmp_path, monkeypatch):
+    import engine.v2.ops.features_compare as fc
+
+    path = tmp_path / "t.parquet"
+    _write(path, _stamped([_H1] * 6))
+    seen = []
+    real = fc.pd.read_parquet
+
+    def spy(p, *args, **kwargs):
+        seen.append(kwargs.get("columns"))
+        return real(p, *args, **kwargs)
+
+    monkeypatch.setattr(fc.pd, "read_parquet", spy)
+    assert fc.compare_identical("tier4", path)["verdict"] == "match"
+    assert seen == [["tier3_snapshot"]]
+
+
+def test_compare_identical_refuses_a_table_over_the_row_cap_without_decoding(tmp_path, monkeypatch):
+    import engine.v2.ops.features_compare as fc
+
+    path = tmp_path / "t.parquet"
+    _write(path, _stamped([_H1] * 6))
+    monkeypatch.setattr(fc, "STAMP_MAX_ROWS", 5)
+
+    def no_decode(*args, **kwargs):
+        raise AssertionError("must not decode")
+
+    monkeypatch.setattr(fc.pd, "read_parquet", no_decode)
+    out = fc.compare_identical("tier4", path)
+    assert out["verdict"] == "mismatch"
+    assert out["mismatches"] == [{"reason": "stamp_rows_over_cap", "n_rows": 6}]
+
+
+def test_compare_identical_row_cap_boundary_and_panel_exemption(tmp_path, monkeypatch):
+    import engine.v2.ops.features_compare as fc
+
+    path = tmp_path / "t.parquet"
+    _write(path, _stamped([_H1] * 6))
+    monkeypatch.setattr(fc, "STAMP_MAX_ROWS", 6)
+    assert fc.compare_identical("tier4", path)["verdict"] == "match"      # exactly at the cap
+    monkeypatch.setattr(fc, "STAMP_MAX_ROWS", 5)
+    assert fc.compare_identical("tier4", path)["verdict"] == "mismatch"   # one over
+    assert fc.compare_identical("panel", path)["verdict"] == "match"      # panel has no stamp columns
+
+
+def test_compare_identical_refuses_oversized_stamp_bytes_without_decoding(tmp_path, monkeypatch):
+    import engine.v2.ops.features_compare as fc
+
+    path = tmp_path / "t.parquet"
+    _write(path, _stamped(["a" * 5000] * 6))      # few rows, huge values
+    monkeypatch.setattr(fc, "STAMP_MAX_BYTES", 1000)
+
+    def no_decode(*args, **kwargs):
+        raise AssertionError("must not decode")
+
+    monkeypatch.setattr(fc.pd, "read_parquet", no_decode)
+    out = fc.compare_identical("tier4", path)
+    assert out["verdict"] == "mismatch"
+    assert out["mismatches"][0]["reason"] == "stamp_bytes_over_cap"
+    assert out["mismatches"][0]["column"] == "tier3_snapshot"
+    assert out["mismatches"][0]["n_bytes"] > 1000
+
+    monkeypatch.setattr(fc, "STAMP_MAX_BYTES", 10**9)
+    monkeypatch.undo()
+    _write(tmp_path / "ok.parquet", _stamped([_H1] * 6))
+    assert fc.compare_identical("tier4", tmp_path / "ok.parquet")["verdict"] == "match"
+
+
+def test_compare_identical_byte_cap_boundary_and_exact_size(tmp_path, monkeypatch):
+    import pyarrow.parquet as pq
+    import engine.v2.ops.features_compare as fc
+
+    path = tmp_path / "t.parquet"
+    _write(path, _stamped([_H1] * 6))
+    md = pq.ParquetFile(path).metadata
+    size = sum(md.row_group(i).column(j).total_uncompressed_size
+               for i in range(md.num_row_groups) for j in range(md.num_columns)
+               if md.row_group(i).column(j).path_in_schema == "tier3_snapshot")
+    assert size > 0
+    monkeypatch.setattr(fc, "STAMP_MAX_BYTES", size)
+    assert fc.compare_identical("tier4", path)["verdict"] == "match"       # exactly at the cap
+    monkeypatch.setattr(fc, "STAMP_MAX_BYTES", size - 1)
+    assert fc.compare_identical("tier4", path)["mismatches"] == [
+        {"reason": "stamp_bytes_over_cap", "column": "tier3_snapshot", "n_bytes": size}]
+
+
+def test_compare_identical_tier4_without_a_stamp_column_matches(tmp_path):
+    from engine.v2.ops.features_compare import compare_identical
+
+    path = tmp_path / "t.parquet"
+    _write(path, _frame())          # no tier3_snapshot column
+    assert compare_identical("tier4", path) == {
+        "verdict": "match", "mismatches": [], "max_abs_diff": 0.0, "max_rel_diff": 0.0,
+        "n_columns_differing": 0}
+
+
+@pytest.mark.parametrize("side", ["rebuilt", "pinned"])
+def test_compare_tables_refuses_an_over_cap_stamp_column_on_either_side(tmp_path, monkeypatch, side):
+    import engine.v2.ops.features_compare as fc
+
+    big, small = _stamped([_H1] * 6), _stamped([_H1] * 3)
+    rebuilt, pinned = (big, small) if side == "rebuilt" else (small, big)
+    _write(tmp_path / "r.parquet", rebuilt)
+    _write(tmp_path / "p.parquet", pinned)
+    monkeypatch.setattr(fc, "STAMP_MAX_ROWS", 5)
+    out = fc.compare_tables("tier4", tmp_path / "r.parquet", tmp_path / "p.parquet")
+    assert out["verdict"] == "mismatch"
+    assert out["mismatches"] == [{"reason": "stamp_rows_over_cap", "n_rows": 6, "side": side}]
+
+
+def test_footer_cap_boundary_refuses_before_parsing_the_footer(tmp_path, monkeypatch):
+    import pyarrow.parquet as pq
+    import engine.v2.ops.features_compare as fc
+
+    path = tmp_path / "t.parquet"
+    _write(path, _stamped([_H1] * 6))
+    footer = fc._footer_length(path)
+    assert footer > 0
+    monkeypatch.setattr(fc, "STAMP_MAX_FOOTER_BYTES", footer)
+    assert fc.compare_identical("tier4", path)["verdict"] == "match"      # exactly at the cap
+    monkeypatch.setattr(fc, "STAMP_MAX_FOOTER_BYTES", footer - 1)
+
+    def no_parse(*args, **kwargs):
+        raise AssertionError("footer must not be parsed")
+
+    monkeypatch.setattr(pq, "ParquetFile", no_parse)
+    out = fc.compare_identical("tier4", path)
+    assert out["mismatches"] == [{"reason": "stamp_footer_over_cap", "n_bytes": footer}]
+    assert fc.compare_identical("panel", path)["verdict"] == "match"      # no stamp columns: footer never read

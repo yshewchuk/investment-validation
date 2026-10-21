@@ -215,7 +215,7 @@ def main(argv=None):
         conn = connect(args.catalog, must_exist=True)
         store = ArtifactStore(args.store_root)
         action = register_sweep if args.action == "register" else submit_sweep
-        result = action(conn, store, Repository(conn, store), document,
+        result = action(conn, store, Repository(conn, store, pin_snapshots=True), document,
             code_root=Path(args.code_root), as_of_month=args.as_of_month,
             scope=args.scope, event_ids=args.event_id)
         print(json.dumps({"roster": result} if args.action == "register" else

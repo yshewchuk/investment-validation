@@ -37,15 +37,15 @@ other piece of its machinery (dest_root safety, Parquet writing, hashing,
 row comparison, lock-down) already lives in ``legacy_materialization.py``.
 
 Layer 1 of ``system_rearchitecture.md`` §4.1: besides the declared legacy
-edges, this module imports only its own package's ``errors`` and
-``legacy_materialization`` (both reached through one relative-import edge)
+edges, this module imports only its own package's ``errors``,
+``legacy_materialization`` and ``materialize_progress``
+(all reached through one relative-import edge)
 — never ``engine.v2.contracts``, ``engine.v2.foundation`` or
-``engine.v2.ops``. §4.3 fan-out: 6 distinct modules (``engine.data.schemas``,
+``engine.v2.ops``. §4.3 fan-out: 6 distinct modules —
 ``engine.data.features.panel``, ``engine.data.features.tier4``,
-``engine.data.store``, ``shutil`` — review round 4, the ``materialize()``
-cleanup-on-failure below — and ``"."``), plus ``engine.paths`` and
-``engine.models.registry`` for the reference-input path accessors: 8, exactly
-the budget.
+``engine.data.schemas``, ``engine.data.store``, ``engine.paths``,
+``engine.models.registry`` — plus ``"."`` (errors + legacy_materialization +
+materialize_progress) and ``shutil``, 8, exactly the budget.
 
 P2-C02: :func:`legacy_serving_fold` and :func:`legacy_tier4_serving_header`
 add two exact legacy symbols (``engine.data.features.tier4.serving_fold``,
@@ -69,7 +69,7 @@ from engine.data.store import _read_part as _legacy_read_part
 from engine.models.registry import ARTIFACT_DIR, REGISTRY_PATH
 from engine.paths import DATA, FEATURES, GSPC_DAILY, ROOT, SNAPSHOT_FILE
 
-from . import errors, legacy_materialization
+from . import errors, legacy_materialization, materialize_progress
 
 __all__ = [
     "coerce_legacy",
@@ -173,7 +173,7 @@ def legacy_tier4_serving_header(path, *, expected_sha256_hex: str, max_bytes: in
 # task). All four sit beside a constant that is imported here (or, for
 # ``pnl_sim_history.parquet``, are typed verbatim — ``HISTORY_PATH`` is
 # already the exact root-relative POSIX string, not a ``Path`` built from an
-# imported root), and a tier-0 test in ``tests/test_v2_data_reference_inputs.py``
+# imported root), and a tier-0 test in ``tests/v2/data/test_v2_data_reference_inputs.py``
 # pins each one to its real legacy constant.
 
 
@@ -314,9 +314,20 @@ def materialize(repository, store, request, dest_root) -> dict[str, str]:
     re-raising — there is no terminal state between "nothing written" and
     "the full tree, locked down": a caller can never observe a partial,
     writable materialization and mistake it for a valid one.
+
+    Emits bounded [materialize] progress on stderr (#1018): a start line per
+    phase, then one line at most every 30 s for ``tables written`` and
+    ``tables validated``, plus a final tick line per phase (always at
+    ``done == total``), and a ``done in`` line with peak RSS per phase.
     """
     try:
-        tree = legacy_materialization.materialize_tree(repository, store, request, dest_root)
+        write_progress = materialize_progress.TableProgress(
+            len(request.table_queries), "tables written")
+        tree = legacy_materialization.materialize_tree(
+            repository, store, request, dest_root, progress=write_progress.tick)
+        write_progress.finish()
+        validate_progress = materialize_progress.TableProgress(
+            len(tree.curated_files) + len(tree.single_files), "tables validated")
         for table_name, year_paths in tree.curated_files.items():
             if table_name in tree.copied_tables:
                 _validate_copied_curated_table(year_paths, table_name)
@@ -324,11 +335,14 @@ def materialize(repository, store, request, dest_root) -> dict[str, str]:
                 contract = repository.table_contract(request.snapshot_ref, table_name)
                 _validate_curated_table(repository, request.table_queries[table_name], table_name,
                                         contract, year_paths)
+            validate_progress.tick()
         for table_name, path in tree.single_files.items():
             if table_name in tree.copied_tables:
                 read_legacy_part(path, columns=None)  # proves the unchanged reader opens it; no coerce()
             else:                                     # feature_panel/tier4_forecasts (no legacy schema)
                 _validate_single_file(repository, request.table_queries[table_name], table_name, path)
+            validate_progress.tick()
+        validate_progress.finish()
         px_tickers = legacy_materialization.px_series_tickers(request)
         if px_tickers and legacy_materialization.PRICE_HISTORY_TABLE_NAME in request.snapshot_ref.table_versions:
             # Older snapshots (imported before price_history joined the

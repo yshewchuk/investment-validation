@@ -2,15 +2,16 @@
 
 Real SQLite catalog, real ``ArtifactStore``, real ``Service`` under
 ``tests.ops_support.TEST_POLICY``, against a synthetic on-disk legacy tree
-(``tests.test_v2_data_import.build_legacy_store``) and a tiny synthetic
+(``tests.v2.data.test_v2_data_import.build_legacy_store``) and a tiny synthetic
 tier-0 corpus (this module's own ``build_corpus``). ``snapshot_import`` and
 ``legacy_materialize`` run their real worker subprocess end to end; the
 ``legacy_score_requests`` worker is swapped for a canned-record stub via the
-SAME argv-swap seam ``tests/test_v2_ops_snapshot_stages.py`` already uses for
+SAME argv-swap seam ``tests/v2/ops/test_v2_ops_snapshot_stages.py`` already uses for
 ``legacy_score`` -- the real legacy ``Scorer`` needs a real market panel this
 synthetic tree does not carry, exactly the limitation that module's own
 docstring records.
 """
+# packages: engine.v2.contracts, engine.v2.data, engine.v2.diagnosis, engine.v2.foundation, engine.v2.ops
 from __future__ import annotations
 
 import dataclasses
@@ -21,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 import checks.rearchitecture_phase2_corpus_parity as corpus_parity  # noqa: E402
@@ -56,7 +57,7 @@ from engine.v2.ops.snapshot_roots import default_materialization_base, materiali
 from engine.v2.ops.snapshot_stages import MANIFEST_OUTPUT  # noqa: E402
 from engine.v2.ops.submission import NamespacePolicy  # noqa: E402
 from tests.ops_support import TEST_POLICY, run_until  # noqa: E402
-from tests.test_v2_data_import import build_legacy_store  # noqa: E402
+from tests.v2.data.test_v2_data_import import build_legacy_store  # noqa: E402
 
 POLICY = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
 YEAR = 2024
@@ -592,7 +593,7 @@ def test_filtered_legacy_root_drops_only_the_named_tickers_trades_rows(tmp_path)
 
 def _stats(root: Path) -> dict:
     """A file-content-change fingerprint (inode + mtime), same technique
-    ``tests/test_v2_ops_snapshot_stages.py`` uses to prove a materialization
+    ``tests/v2/ops/test_v2_ops_snapshot_stages.py`` uses to prove a materialization
     root was reused rather than rewritten."""
     return {str(p.relative_to(root)): (p.stat().st_ino, p.stat().st_mtime_ns)
             for p in root.rglob("*") if p.is_file()}

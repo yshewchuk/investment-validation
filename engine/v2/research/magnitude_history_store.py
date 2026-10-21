@@ -1,16 +1,25 @@
 """Protected build-time history and stored-only reads through native snapshots."""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+from contextlib import closing
+from itertools import zip_longest
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from engine.v2.contracts.data import DataQuery, KeyPredicate, ObjectRef, TableContractRef
 from engine.v2.data import catalog, errors, manifests, objects, query
-from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
-from engine.v2.foundation import SystemClock, canonical_json, content_hash, to_document
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
+from engine.v2.foundation import (
+    SystemClock,
+    canonical_json,
+    content_hash,
+    iter_canonical_json,
+    to_document,
+)
 from engine.v2.research import event_history
 from engine.v2.research._snapshot import artifact_store, catalog_connection
 from engine.v2.research.experiment_population import load_population
@@ -23,6 +32,7 @@ from engine.v2.research.magnitude_history_table import (
     TABLE,
     feature_recipe,
 )
+from engine.v2.research.progress import Progress, stage
 
 
 def build_context(repository, snapshot, *, producer, history_start, **request):
@@ -105,7 +115,7 @@ def _preflight_source(repository, snapshot, context):
     candidates = population[(days >= context["history_start"])
         & (days < population.ticker.map(ceilings).fillna(""))]
     contract = repository.table_contract(snapshot, "computed_moves")
-    if contract != COMPUTED_MOVES_CONTRACT:
+    if contract not in (COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT):
         raise errors.fail("CONTRACT_MISMATCH", "history requires native computed moves")
     plans = event_history._plans(repository, snapshot,
         candidates.sort_values(["event_date", "event_id"]), contract)
@@ -114,7 +124,8 @@ def _preflight_source(repository, snapshot, context):
 
 def _prepare_history(repository, snapshot, context):
     """Lazily decode at most one row per admitted candidate; no cross-build cache."""
-    population, plans = _preflight_source(repository, snapshot, context)
+    with stage("history preflight"):
+        population, plans = _preflight_source(repository, snapshot, context)
     decoded, by_ticker = {}, {}
     for event, request, record in plans:
         by_ticker.setdefault(event.ticker, []).append((event, request, record))
@@ -156,21 +167,26 @@ def materialize(repository, snapshot, context):
     if existing is not None:
         read_stored(repository, existing, context)
         return existing
-    prepared = _prepare_history(repository, snapshot, context)
+    with stage("history prepare"):
+        prepared = _prepare_history(repository, snapshot, context)
     store, records = artifact_store(repository), []
     ref = TableContractRef(contract_id=CONTRACT.contract_id, definition_hash=CONTRACT.definition_hash)
     schema = pa.schema([pa.field(c.name, query.arrow_type_for(c.physical_type), nullable=c.nullable)
                         for c in CONTRACT.columns])
-    for event in sorted(context["temporal_plan"]["events"], key=lambda e: e["event_id"]):
-        sink = pa.BufferOutputStream()
-        rows = _event_rows(repository, snapshot, context, event, prepared)
-        pq.write_table(pa.Table.from_pylist(rows, schema=schema), sink)
-        published = store.publish_bytes(sink.getvalue().to_pybytes(), schema_ref="parquet_fragment.v1")
-        obj = ObjectRef(kind="parquet_fragment", object_id=published.artifact_id,
-                        content_hash=published.content_hash, byte_size=published.byte_size)
-        inspection = objects.inspect_fragment(store, obj, CONTRACT, ref, context["context_id"])
-        records.append(manifests.fragment_record(inspection, ref, input_receipt_refs=(),
-                                                import_request_hash=context["context_id"]))
+    ordered = sorted(context["temporal_plan"]["events"], key=lambda e: e["event_id"])
+    progress = Progress("history events", len(ordered))
+    with stage("history materialize"):
+        for event in ordered:
+            sink = pa.BufferOutputStream()
+            rows = _event_rows(repository, snapshot, context, event, prepared)
+            pq.write_table(pa.Table.from_pylist(rows, schema=schema), sink)
+            published = store.publish_bytes(sink.getvalue().to_pybytes(), schema_ref="parquet_fragment.v1")
+            obj = ObjectRef(kind="parquet_fragment", object_id=published.artifact_id,
+                            content_hash=published.content_hash, byte_size=published.byte_size)
+            inspection = objects.inspect_fragment(store, obj, CONTRACT, ref, context["context_id"])
+            records.append(manifests.fragment_record(inspection, ref, input_receipt_refs=(),
+                                                    import_request_hash=context["context_id"]))
+            progress.tick()
     partition_hash = objects.partition_logical_hash(store, [r.object_ref for r in records],
                                                     CONTRACT, ref, context["context_id"])
     manifest = manifests.dataset_manifest(ref, records, knowledge_mode="reconstructed",
@@ -266,13 +282,21 @@ def _validate_features(row, count):
             raise errors.fail("CONTRACT_MISMATCH", "stored history feature or missingness is invalid")
 
 
-def read_stored(repository, snapshot, context):
-    """Globally admit metadata, then decode stored columns without outcome reads."""
+def preflight_stored(repository, snapshot, context):
+    """Admit receipt, contract and complete event isolation without opening payloads.
+
+    Return the ordered event/cutoff pairs shared by full and projected readers.
+    """
     if _existing(repository, context) != snapshot or set(snapshot.table_versions) != {TABLE}:
         raise errors.fail("IDENTITY_CONFLICT", "feature snapshot is not the committed context output")
     if repository.table_contract(snapshot, TABLE) != CONTRACT:
         raise errors.fail("CONTRACT_MISMATCH", "stored history contract differs")
-    expected = _preflight_features(repository, snapshot, context)
+    return _preflight_features(repository, snapshot, context)
+
+
+def read_stored(repository, snapshot, context):
+    """Globally admit metadata, then decode stored columns without outcome reads."""
+    expected = preflight_stored(repository, snapshot, context)
     metadata = _scan(repository, snapshot, context, METADATA, len(expected))
     if len(metadata) != len(expected):
         raise errors.fail("CONTRACT_MISMATCH", "stored history row coverage differs")
@@ -286,3 +310,79 @@ def read_stored(repository, snapshot, context):
         _validate_features(row, count)
     identity = {"context": context, "feature_snapshot": to_document(snapshot), "rows": rows}
     return {**identity, "inputs_id": content_hash(identity)}
+
+
+def _stream_rows(repository, snapshot, context, columns, count):
+    """Bound decoded lineage to one three-horizon event batch, never the universe."""
+    request = DataQuery(snapshot_id=snapshot.snapshot_id,
+        table_contract_ref=snapshot.table_versions[TABLE].table_contract_ref, columns=tuple(columns),
+        key_filter=(KeyPredicate(column="context_id", operator="eq", values=(context["context_id"],)),),
+        order_by=CONTRACT.primary_key, max_batch_rows=3, max_result_rows=count)
+    with closing(repository.scan(request, table_name=TABLE)) as batches:
+        for batch in batches:
+            yield from batch.to_pylist()
+
+
+def _stream_identity(context, snapshot, rows):
+    """Hash the original envelope; existing canonical serialization owns all values."""
+    digest = hashlib.sha256()
+    digest.update(b'{"context":')
+    for name, value in (("context", context), ("feature_snapshot", to_document(snapshot))):
+        if name != "context":
+            digest.update(b',"feature_snapshot":')
+        for chunk in iter_canonical_json(value):
+            digest.update(chunk.encode("utf-8"))
+    digest.update(b',"rows":[')
+    for index, row in enumerate(rows):
+        if index:
+            digest.update(b",")
+        for chunk in iter_canonical_json(row):
+            digest.update(chunk.encode("utf-8"))
+    digest.update(b"]}")
+    return "sha256:" + digest.hexdigest()
+
+
+def read_stored_for_events(repository, snapshot, context, *, event_ids, columns):
+    """Validate/hash every full row; retain only requested identity/numeric columns.
+
+    The returned inputs_id identifies the complete original read_stored envelope,
+    not its projected rows. Memory retains context/manifest and one digest/count
+    per source row, selected slim rows, and a constant number of event-sized batches.
+    Every call repeats both scans; no cross-call validation or outcome cache.
+    """
+    expected = preflight_stored(repository, snapshot, context)
+    if any(not isinstance(group, (list, tuple, set, frozenset))
+           or any(not isinstance(value, str) for value in group) for group in (event_ids, columns)):
+        raise errors.fail("CONTRACT_MISMATCH", "stored history projection differs from its context")
+    selected = set(event_ids)
+    if (not selected <= {event["event_id"] for event, _ in expected}
+            or not set(columns) <= set(FEATURES) or len(set(columns)) != len(columns)):
+        raise errors.fail("CONTRACT_MISMATCH", "stored history projection differs from its context")
+    admitted = []
+    with closing(_stream_rows(repository, snapshot, context, METADATA, len(expected))) as metadata:
+        for row, pair in zip_longest(metadata, expected):
+            if row is None or pair is None:
+                raise errors.fail("CONTRACT_MISMATCH", "stored history row coverage differs")
+            count = _metadata(row, context, *pair)
+            admitted.append((content_hash(row), count))
+    retained = []
+    keys = (*CONTRACT.primary_key, *columns)
+
+    def validated():
+        stream = _stream_rows(repository, snapshot, context, (*METADATA, *FEATURES), len(expected))
+        with closing(stream) as rows:
+            for row, admission in zip_longest(rows, admitted):
+                if row is None or admission is None:
+                    raise errors.fail("CONTRACT_MISMATCH", "stored history row count changed")
+                fingerprint, count = admission
+                if content_hash({key: row[key] for key in METADATA}) != fingerprint:
+                    raise errors.fail("CONTRACT_MISMATCH", "stored history count or metadata changed")
+                _validate_features(row, count)
+                if row["event_id"] in selected:
+                    retained.append({key: row[key] for key in keys})
+                yield row
+
+    with closing(validated()) as rows:
+        inputs_id = _stream_identity(context, snapshot, rows)
+    return {"context": context, "feature_snapshot": to_document(snapshot),
+            "rows": retained, "inputs_id": inputs_id}

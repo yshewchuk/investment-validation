@@ -38,7 +38,7 @@ def ready(native, monkeypatch, request):
         second["outer"]["year"] = "2025"
         native.plan["folds"].append(second)
     inputs = r._inputs(None)
-    inputs["training_inputs"] = {"synthetic": "prior training only"}
+    inputs["training_inputs"]["synthetic"] = "prior training only"
     monkeypatch.setattr(driver, "read_search_plan", lambda *a: native.plan)
     monkeypatch.setattr(driver, "SearchTrials", lambda *a: r)
     monkeypatch.setattr(outer, "SearchTrials", lambda *a: r)

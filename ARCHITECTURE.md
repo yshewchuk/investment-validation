@@ -474,8 +474,8 @@ Only a tracked path absent from the worktree reads as empty.
 
 - **Legacy nightly — `engine.dashboard.nightly`.** The board in production
   today. Its own module docstring states the load-bearing order: refresh →
-  validate → score → ledger → render → selfcheck → publish → flags → backup,
-  each step gating the next. It stays unchanged until Phase 7 cutover. See
+  validate → warm Tier-4 serving models → score → ledger → render → selfcheck → publish → flags → backup,
+  each step gating the next. See
   `engine/dashboard/ARCHITECTURE.md` for the full per-step detail.
 - **v2 supervisor — `python3 -m engine.v2.ops`.** The operator interface is
   the versioned command protocol `engine/v2/ops/cli.py` exposes; see
@@ -492,7 +492,7 @@ Only a tracked path absent from the worktree reads as empty.
   order from it, and `build_nightly_plan` stamps that order into every
   plan's `"order"` field. The only function that walks the *whole* graph
   inline, including `native_parity`, is `run_shadow_nightly` — it has no
-  production caller, only `tests/test_v2_ops_legacy_workflows.py` and
+  production caller, only `tests/v2/ops/test_v2_ops_legacy_workflows.py` and
   `tests/v2/ops/test_native_shadow_render.py` call it. Production job
   **submission** (`build_legacy_job_requests`) does not walk `GRAPH` at
   all: its only production caller, `cli.py`, always passes

@@ -49,7 +49,7 @@ def main() -> None:
 
     conn = open_catalog(args.catalog, clock=SystemClock())
     try:
-        repository = Repository(conn, ArtifactStore(args.store_root))
+        repository = Repository(conn, ArtifactStore(args.store_root), pin_snapshots=True)
         snapshot = repository.resolve(snapshot_id)
         events = _replay_run.events_frame(repository, snapshot)
     finally:

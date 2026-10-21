@@ -78,7 +78,7 @@ def price_candidate_grid(
     started = time.time()
     conn = open_catalog(Path(catalog), clock=SystemClock())
     try:
-        repository = Repository(conn, ArtifactStore(Path(store_root)))
+        repository = Repository(conn, ArtifactStore(Path(store_root)), pin_snapshots=True)
         snapshot = repository.resolve(snapshot_id)
         calendar = trading_calendar_from_snapshot(repository, snapshot)
         probe = STRUCTURES[strategy](steps=int(steps[0]))

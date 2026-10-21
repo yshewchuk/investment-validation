@@ -15,23 +15,107 @@ identity chain (`objects.py`, `manifests.py`); atomic snapshot commit with
 idempotent inserts and a compare-and-swap head (`catalog.py`); the
 incremental-refresh merge policy shared by every EOD table family
 (`incremental_tables.py`, `incremental.py` for `daily_market`,
-`generic_incremental.py` for any registered `TableContract`); bounded,
+`generic_incremental.py` for any registered `TableContract`;
+`generic_streaming.py` is the separate whole-table replacement route); bounded,
 exact reads over a committed snapshot (`repository.py`, `query.py`,
 `events.py`, `chains.py`, `price_history_query.py`); the one legacy-touching
 seam (`legacy_adapter.py`) and what is built on it read-only (table
 mapping, pinned reference-input resolution, snapshot-import planning,
-legacy-tree materialization); two legacy-free table families
-(`computed_moves*`, bitemporal `price_history*`); the data-owner catalog
+legacy-tree materialization); legacy-free table families
+(`computed_moves*`, bitemporal `price_history*`, pure `iv_crush*` targets); the data-owner catalog
 schema (`schema.py`, colocated with ops/ledger under migration owner
 `"data"`); pure coverage checks (`eod_inventory.py`, `event_revisions.py`);
 and a Tier-4 serving-cache coverage check (`tier4_coverage.py` — not pure,
 not legacy-free) gating a scoring launch from `engine.v2.ops`.
 
+Tier-4 coverage contract (#1047): the scorer serves each event at
+`min(event_fold, fold(decision_date))`, and `decision_date` is per
+(event, strategy), so a score window can reach the NEXT month's fold.
+`required_serving_triples` therefore requires, per (event, producer), every
+monthly fold from the earlier of `serving_fold(event_date, as_of)` and the
+month before the event (a strategy may decide before the session), up to the
+event's own fold. The post-attempt materialization-root fingerprint check
+remains a separate backstop.
+
+| Condition | Outcome |
+|---|---|
+| a required `(model_id, fold, panel_sha)` has no pinned, matching serving cache | refuse before launch: `TIER4_CACHE_MISSING` (validation, not retryable); `details.missing` lists every triple |
+
 Non-responsibilities: never computes a trading verdict (`engine/v2/scoring`)
 or promotes a champion (`engine/v2/models/training`); never decides *what* to
 fetch or *when* to run a job (`engine/v2/ops`, a caller, owns that).
 
+Repository scans merge one transitively overlapping full-primary-key range group at
+a time. Disjoint inspected fragment ranges therefore keep one active fragment stream;
+unknown bounds retain the full merge fallback. Bounds, timestamp predicates and decoded
+rows share the same typed key ordering. Stored unpadded low-year spellings must round-trip exactly through
+the shared formatter; admission never rewrites their content identities.
+Shared bound admission precedes pruning in scan, population-bound,
+dependency and pure query planning. Null-bearing keys prove no range: they
+retain the full merge fallback and downstream row validation. Object verification,
+footer counts, strict global order and result limits remain mandatory; batches are provisional until exhaustion.
+
+`Repository.scan(..., max_object_bytes=None)` preserves path-based reads by default.
+Both byte-read boundaries share `objects.validate_max_object_bytes` admission below.
+With a cap, `objects.read_verified_bytes` hashes bounded immutable bytes without cache
+reuse; PyArrow checks all row-group uncompressed sizes before decoding. Thrift limits
+are capped at the library's 32-bit maximum even for larger Python integers. Buffers
+close on completion, errors or generator closure; existing row/integrity checks remain.
+
+| Byte-read condition | Outcome |
+|---|---|
+| Positive integer cap (not bool); all declared sizes and total uncompressed bytes fit | Verified bounded scan; exact byte/expansion equality is admitted |
+| None passed to scan / to read_verified_bytes | Default path scan / `QUERY_NOT_BOUNDED` |
+| Other invalid cap (zero, negative, bool, non-integer) | `QUERY_NOT_BOUNDED` before object access |
+| Any surviving declared object / total uncompressed row groups exceed cap | `RESULT_LIMIT_EXCEEDED` before any object read / before batch decode |
+| Missing, unsafe, mutated or grown backing object | `OBJECT_CORRUPT`; no path/cache fallback |
+
 ## Primary contracts and public interfaces
+
+**IV-crush target construction.** `iv_crush.build_rows` is a pure, bounded,
+single-ticker builder for `iv_crush_table.IV_CRUSH_CONTRACT`
+(`iv_crush_targets.v2`). It consumes caller-supplied event date/session and
+daily date/IV30 projections, never a panel forecast or a store. Callers must
+supply IV30 in vol points expressed as percent (50 for 50% IV); the builder
+does not normalize or validate scale. Canonical and unique event/daily dates
+are mandatory; unordered inputs sort deterministically. AMC selects the last
+daily row on/before the event; BMO selects the last strictly before it. Post is
+the immediately following row, including when its IV is missing. No search for
+a later valid IV, forward fill, inferred holiday session or warm-up filter occurs.
+The existing target is signed `100*(post_iv30/pre_iv30-1)`, a relative percentage
+change, not a vol-point difference; anchor compatibility and skips are below.
+For a computable label, `available_as_of_date` is post-close date plus one
+calendar day, the native computed-moves day-clock convention. It is a modeled
+availability floor, not evidence of actual source publication or finality.
+Training/research consumers must separately admit holdouts and enforce their
+label clock.
+`input_hash` binds the actual typed projections (including invalid IV scalars),
+while `source_id` is only a caller declaration, never verified provenance.
+The builder neither reads/writes files nor registers/publishes a snapshot;
+physical event isolation, source verification, feature reconstruction and
+registered evaluation are outside the builder. There is no production caller.
+Text columns carry no `null_policy`; null and provenance rules for them live in
+the table-level `coverage_semantics` and `provenance_semantics`.
+`RESULT_LIMIT_EXCEEDED` and `CONTRACT_MISMATCH` conditions are in the failure
+table. No cache, retries or transactions.
+
+Builder outcomes below are checked in order. Skips have `skipped=true` and null
+target/availability, never imputed zeros; selected dates and finite IV values
+remain diagnostic. Success has `skipped=false` and `skip_reason=null`.
+
+| Condition | Outcome / skip reason |
+|---|---|
+| No supplied events, with otherwise valid bounded inputs | Empty list; daily input still validated |
+| Null / other unrecognized session | `missing_session` / `unknown_session`; session and all anchors null |
+| No pre row (including empty daily input) / no post row | `missing_pre` / `missing_post`; existing opposite anchor retained |
+| Adjacent dates more than five calendar days apart | `gap_exceeds_limit`; gap exactly five is admitted |
+| Pre-IV missing, nonnumeric, nonfinite or nonpositive | `invalid_pre_iv30`; nonpositive finite value retained diagnostically |
+| Post-IV missing, nonnumeric or nonfinite | `invalid_post_iv30`; finite zero/negative post-IV is admitted as in the existing recipe, without endorsing its quality |
+| Finite valid anchors overflow the ratio calculation | `nonfinite_target`; finite anchors retained |
+| Computable signed label | Finite target, post-date plus one calendar day availability |
+
+Both public refusals carry fixed redacted messages, empty details, no stage,
+and the category/retryability in the failure table; no partial list is returned.
 
 **Massive reconstruction.** `massive_daily` owns `massive_daily.v1`; `massive_actions`
 owns `massive_splits.v1` and `massive_dividends.v1`, with original page provenance.
@@ -84,10 +168,10 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   planned-unit key validation, `normalizer_id` versioning, coverage
   completeness, and mcap carry-forward.
 - **Snapshot resolution and bounded reads** — `repository.Repository`:
-  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`; opt-in `pin_snapshots=True` memoises per instance `resolve` by snapshot id and the scan/bound path's table contract and membership by `(dataset_version_id, contract_id)`, not `fragment_records`, default off, a failure is never cached, each call returns an independent copy), a bounded Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/`get_close`, and `explain_dependencies`.
+  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`; opt-in `pin_snapshots=True` memoises per instance `resolve` by snapshot id and the scan/bound path's table contract and membership by `(dataset_version_id, contract_id)`, not `fragment_records`, default off, a failure is never cached; a pinned `scan` or `scan_population_bound` whose `key_filter` names a partition column plans only the matching partitions' fragments (invalid key bounds in any fragment, including unselected fragments, refuse every pinned scan or bound lookup), each call returns an independent copy), a bounded Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/`get_close`, and `explain_dependencies`.
   Metadata-only `scan_population_bound` sums recorded counts of surviving
   fragments of the supplied snapshot, with no head fallback or object reads,
-  through the same membership-bound planner behind `scan` and
+  with the same strict predicate refusals and membership-bound semantics as `scan` and
   `explain_dependencies`. That summed manifest-footer count is the
   authoritative selected-population bound: both paths check a request's
   `max_result_rows` against it before row streaming. A query-level limit
@@ -158,7 +242,8 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   importing legacy `engine.*` code (17 declared, read-only entries). Built
   on it, read-only: `legacy_mapping.py` (table mapping);
   `legacy_materialization.py`/`legacy_nightly_read_plan.py` (materialization
-  and nightly barrier plans, neither importing legacy `engine.*` directly);
+  and nightly barrier plans, neither importing legacy `engine.*` directly;
+  `materialize_tree(..., progress=None)` calls `progress(done)` after each written table, and `materialize_progress.TableProgress.tick` turns that into at most one stderr line per 30 s plus a final line);
   `reference_inputs.py`/`reference_catalog.py` (pinned reference-input
   resolution, the latter legacy-free); `import_snapshot.py`; `tier4_coverage.py`.
 - **`computed_moves`/`price_history`** — pure math + each family's
@@ -241,6 +326,57 @@ The optional `record_receipt(record)` callback runs after fencing and insertion
 inside that same transaction, including verified replay. Its failure rolls back
 both the new receipt and caller-owned occurrence; raw content identity is unchanged.
 
+**Streaming table writer (`generic_streaming.py`).** A second,
+additive route to a table's new dataset version for producers whose output must
+not be held in memory. `StreamingTableWriter(store, parent, table_name, attempt_id,
+coverage)` accepts rows in batches and `finish()` returns a
+`GenericTableCandidate` that the unchanged `commit_generic_table_candidate`
+commits.
+- *Scope:* a whole-table contract only (`partition_columns == ()`); any other
+  contract refuses `UNSUPPORTED_CONTRACT`. The result is one fragment that
+  REPLACES the whole table: every partition the parent holds for the table (an
+  imported table's single partition is `all`, a generic one `__whole__`) is
+  removed, and the new fragment takes the parent's partition key when all prior
+  fragments share one, else `__whole__`. No prior rows are read, no per-row
+  revisions or `RowChange`s are recorded; the changeset is `changed` for the
+  replaced and new partitions, `normalized_payloads` = row count, disposition
+  `conservative_full` (no row-level changes recorded).
+- *Provenance and coverage:* the new version carries the caller's `knowledge_mode`
+  (default `reconstructed`) and `availability_evidence_refs` (default none), only
+  the current coverage receipt and the parent version id as lineage, nothing
+  inherited from the parent. Another table's coverage refuses `CONTRACT_MISMATCH`.
+- *Order and validity:* each accepted row is copied (later caller mutation cannot
+  change it) and must satisfy the contract: known columns only, every column present
+  unless nullable, no null in a non-nullable column, and a value of the column's
+  physical type (float64 finite, timestamps timezone-naive, a missing nullable value
+  `None`); primary-key values must be present. The physical-type map
+  `ARROW_TYPES` (including `date32`) is defined once in `query` and re-exported by
+  `generic_incremental`. Rows arrive in strictly increasing
+  primary-key order across and within batches (the caller orders batches). Shape,
+  nulls, types and key order are checked at `append_rows`, Arrow conversion at the
+  row-group write, `knowledge_mode` and evidence refs (observed and attested modes
+  need evidence) at construction. Any violation or
+  unconvertible value refuses `CONTRACT_MISMATCH`, never repaired. A staging-file
+  I/O failure propagates as an `OSError` after cleanup. `append_rows` after
+  `finish`/`abort`/failure refuses `INPUT_CHANGED`.
+- *Memory:* one pending buffer of at most `ROW_GROUP_ROWS` (50,000) rows plus the
+  caller's batch, and 65,536-row inspection batches at `finish`. Row groups are
+  exactly `ROW_GROUP_ROWS` (the last shorter), so the hash depends only on the
+  rows; the staged file is streamed into the store and inspected unmaterialised.
+- *Failure semantics:*
+
+  | R | Rule |
+  | --- | --- |
+  | R1 | Contract, coverage (`complete`) and parent table are checked at construction; rows at append; refusals above |
+  | R2 | No cache; each writer owns one uniquely named staging file |
+  | R3 | Any failure makes the writer terminal (`failed`); a new attempt starts over |
+  | R4 | Nothing is visible to the catalog until the one `commit_generic_table_candidate` |
+  | R5 | A failure, `abort()` or `__exit__` on an open writer removes the staging file; a crash leaves the staging file in the attempt's staging directory (reclaimed by the attempt-staging policy, not by this writer), and a published-but-uncommitted object stays unreferenced |
+  | R6 | The same ordered rows, contract, parent snapshot and coverage id give the same object and dataset version hash; other rows give another |
+
+  Zero rows at `finish` refuse `CONTRACT_MISMATCH` (an empty table is not
+  published silently).
+
 **Original panel COPY identity.** Offline size-fold authoring uses `Repository`
 and the existing object verifier to bind the named committed snapshot's
 `feature_panel` dataset version to one original object and full byte hash.
@@ -317,13 +453,61 @@ and never computed per run by a reader:
 | duplicate or unsorted event dates, or duplicate or unsorted `daily_market` dates, for a ticker | `build_rows` raises `CONTRACT_MISMATCH`; the refresh fails before any catalog commit, surfaced by the store as `OpsError` `INPUT_CHANGED` (`details.data_code` = the data code) |
 | the `daily_market` frame, empty or not, lacks `date`, `implied_move` or `src_iv` | `build_rows` raises `CONTRACT_MISMATCH` (the store's own scan refuses a missing table column first, per the ops doc) |
 | no `src_iv` row before an event | `implied_move_pct` null, no contribution to the aggregate |
+| `daily_market` calendar days unsorted or duplicated for a ticker | `build_rows` raises `CONTRACT_MISMATCH` (via `AsofSeries`) before any row is built |
 
-A refresh over a parent that still holds v3 partitions refuses `VALIDATION_FAILED`
-("full rebuild required", ops doc) when it neither rewrites nor attempts every non-v4
-partition, or produces no v4 rows at all; v3 records are never carried.
+The ops store now commits v5. A refresh over a parent that still holds v3 or v4
+partitions refuses `VALIDATION_FAILED` ("full rebuild required", ops doc) when it
+leaves any non-v5 partition neither rewritten nor attempted, or when the run produces
+no v5 rows; older records are never carried.
 
 `computed_at` and `retrieved_at` never order or filter anything here. The builder
 imports `event_history` from this same package (no new cross-component dependency).
+
+**`computed_moves.v5` — one row per considered event, with a reason (issue #966).**
+Status: the ops capture (`run_computed_moves_refresh`) commits `computed_moves.v5` through
+`build_event_rows`; v4 is no longer written and survives only as a readable contract.
+Contract `computed_moves.v5` / `5.0.0` (`COMPUTED_MOVES_V5_CONTRACT`) and the pure
+`build_event_rows` / `classify_event_reasons` sit beside v4, which stays pinned and
+readable (no migration, dual read or backfill; the standard capture rewrites
+partitions). In a v5 dataset version the builder, not a reader, decides which events
+computed moves omits and records that decision on the event's own row, so every
+considered event has exactly one single-row fragment and the research isolation guard
+is unchanged: a candidate with no fragment is still a refusal. Nothing is written to
+`earnings_events`. The ops store commits `computed_moves.v5` (ops doc); v4 is readable but no longer written.
+- New column `not_computed_reason` string nullable. Null exactly when the row is a
+  computed outcome (`skipped` false). Non-null exactly when `skipped` is true and
+  `realized_move_pct` and `available_as_of_date` are null. Closed set:
+  `not_orats` (no ORATS confirmation, e.g. a `forward_claim` phantom), `no_session`
+  (confirmed, session null), `no_price_window` (the v4 skipped case: missing close or
+  a P→Q gap over `MAX_GAP_CALENDAR_DAYS`), `no_price_history` (the ticker's close
+  series is empty), `ticker_too_few_events` (fewer than `MIN_SCOREABLE`
+  past ORATS-confirmed sessioned events, or fewer than `ADMISSION_EVENTS` computable
+  ones). Ticker-level reasons apply to every event of that ticker. A caller that skips
+  loading prices for a ticker below `MIN_SCOREABLE` passes `prices_known=False`: the
+  ticker classifies `ticker_too_few_events` (never `no_price_history`), and the builder
+  refuses `CONTRACT_MISMATCH` at or above `MIN_SCOREABLE` confirmed events.
+- Considered events: every `earnings_events` row of a ticker dated before `as_of`.
+  The v4 omissions (non-ORATS event, ticker below the bars, ticker without prices)
+  become rows; the whole-ticker empty return is gone.
+- Counting stays on confirmed events: `event_ordinal` counts earlier ORATS-confirmed
+  sessioned events; on a row whose reason is `not_orats`, `no_session` or ticker-level,
+  `admitted` is false, `implied_move_pct` and `mean_prior_or_implied` are null and
+  `n_prior_implied` is 0. `no_price_window` rows keep v4 semantics. A phantom never
+  shifts a real event's ordinal or prior mean.
+- Readers must not treat a row as a scoreable event unless `not_computed_reason` is
+  null or `no_price_window`; each history feature decides explicitly how every reason
+  counts.
+
+| Condition | Outcome |
+|---|---|
+| a considered event | exactly one row, `(ticker, event_date)` unique |
+| a ticker with no earnings events | no rows |
+| same-ticker same-date `earnings_events` rows | one row; a confirmed row wins over an unconfirmed one, else the first in input order |
+| an empty event list with valid inputs | no rows; the input refusals below still apply first |
+| reason precedence for one event | per-event `not_orats`, then `no_session`; ticker-level overrides every event: with `prices_known=False` `ticker_too_few_events`, else `no_price_history` (no closes, checked first), else `ticker_too_few_events`; otherwise a confirmed event with no bracketing window is `no_price_window`, else null |
+| event dates not strictly ascending after the same-date collapse, or `sd` not non-decreasing | `CONTRACT_MISMATCH` from both entry points, whatever the ticker-level outcome |
+| a malformed `min_scoreable`, event frame, price series or `daily` frame (both v5 entry points refuse alike, except that only `build_event_rows` takes and validates `daily`; per-branch detail lives in code docstrings and tests) | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
+| `prices_known` not a `bool`, or `prices_known=False` with `MIN_SCOREABLE` or more confirmed events (both entry points) | `CONTRACT_MISMATCH`; with `prices_known=False` and fewer, every event is `ticker_too_few_events` whatever `sd`/`sc` hold |
 
 **`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
 no clock. A feature declares its parameters; none is hard-coded in the module.
@@ -342,7 +526,8 @@ no clock. A feature declares its parameters; none is hard-coded in the module.
 - Dates are canonical `YYYY-MM-DD` data dates only; `retrieved_at` and
   `computed_at` are provenance and never filter or order.
 - The module only computes from the inputs it is given; it stores nothing. Its
-  one production caller is `computed_moves.build_rows` (`computed_moves.v4`).
+  production caller is `computed_moves.build_event_rows` (`computed_moves.v5`), which
+  reaches these primitives through `build_rows` over the confirmed-only frame.
 
 | Condition | Outcome |
 |---|---|
@@ -366,7 +551,7 @@ never imports this package (root doc §3).
 the Phase 1 fence, snapshot import/promotion, nightly barrier read plans,
 `daily_market`/`computed_moves`/`price_history` refresh submission (`forward_calendar_store.py`
 supplies a candidate `fence_check`; Massive acquisition fences raw receipts). `engine.v2.serving`
-(7.0) imports `repository.Repository`. `engine.v2.research` (6.0/7.0) reads
+(7.0) imports `repository.Repository`. `engine.v2.research` (7.0) reads
 pinned snapshots and calls `generic_incremental.commit_generic_table_candidate`
 (no `fence_check`) and `incremental_tables.revision_hash`/`GenericRevision`.
 `engine.v2.models.training` uses `errors`, `Repository`, `reference_catalog` and
@@ -404,15 +589,17 @@ directly, without conversion to `DataError`.
 | `SNAPSHOT_UNRESOLVED` | dependency | no | experiment input reader cannot verify the supplied exact committed snapshot |
 | `SNAPSHOT_NOT_READY` | dependency | yes | scope has no committed head yet |
 | `SNAPSHOT_CONFLICT` | dependency | yes | head-fence or compare-and-swap mismatch |
-| `CONTRACT_MISMATCH` | validation | no | a table, pin or selection violates the snapshot's contract, including malformed timestamp key-predicate strings, non-string timestamp predicate values, or predicate scalars incompatible with fragment key bounds |
+| `CONTRACT_MISMATCH` | validation | no | a table, pin or selection violates the snapshot's contract, including malformed timestamp key-predicate strings, non-string timestamp predicate values, or predicate scalars incompatible with fragment key bounds; IV-crush rejects malformed/missing projection fields, noncanonical dates, duplicate dates, ticker mismatch, unsupported scalar types, strings over 256 characters, invalid ticker/source text, nonpositive/noninteger row caps or unrepresentable next-day availability |
 | `QUERY_NOT_BOUNDED` | validation | no | a malformed planning selection or an unbounded `DataQuery`/`ChainQuery` |
-| `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds the query's `max_result_rows` |
+| `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds the query's `max_result_rows`; either IV-crush event or daily projection exceeds its independent `max_rows` cap (default 10,000), without truncation |
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |
 | `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty; in `daily_market` a response labeled `complete` that omits an expected key is refused before it is cached, while omissions on a `partial` response after the provider's bounded retry are committed as typed `missing` coverage outcomes |
 | `SOURCE_NOT_FINAL` | source | yes | a `daily_market` refresh unit has expected keys but the response is a `legitimate_empty`; the data layer refuses before caching the response, leaving no receipt, coverage, or snapshot write |
 | `INPUT_CHANGED` | integrity | yes | coverage incomplete, a candidate built from a now-stale input, expected keys missing/malformed/empty at the normalization boundary, or a planned unit whose `expected_keys` field is missing, malformed or empty refused at refresh acquisition (Invariants) |
 | `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash, or the file keeps changing while it is verified |
 | `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row, or a fragment count is invalid or differs from its footer |
+| `MANIFEST_CORRUPT` | integrity | no | a fragment key-bound pair has one missing endpoint, wrong arity/type, nonfinite values or reversed order; all planning paths refuse before pruning, even if the fragment would be excluded |
+| `MANIFEST_CORRUPT` | integrity | no | a returned scan key lies outside its admitted full-primary-key range |
 | `IDENTITY_CONFLICT` | validation | no | an existing row's payload disagrees with a new one under the same id; also a `daily_market` revision tie (Invariants) |
 | `UNSUPPORTED_CONTRACT` | validation | no | an operation on a table contract this code path does not implement |
 | `EVENT_NOT_FOUND` | dependency | no | `events.get_event` for an unknown key |
@@ -516,10 +703,20 @@ Idempotency: (1) insert-level payload match (`IDENTITY_CONFLICT` otherwise
 — a fragment match ignores its two non-identity provenance columns, so a
 corrected re-ingest reuses the existing fragment); (2) a receipt-level
 replay shortcut keyed on `request_hash`/`attempt_id`/`fence`/`scope`/
-`snapshot_id` — through the composed fence, reachable only for a no-op or
-that candidate's own already-applied effect; a direct caller with a
+`snapshot_id` — through the composed fence, reachable only for a no-op, that
+candidate's own already-applied effect, or its pending head CAS (table below); a direct caller with a
 head-blind `fence_check` gets a weaker guarantee (a matching replay returns
-the prior receipt even if the head moved since).
+the prior receipt even if the head moved since). A replay whose head still
+equals the caller's expected snapshot and generation applies the head CAS under
+the existing receipt, in the same transaction:
+
+| Replay condition | Outcome |
+|---|---|
+| Head equals expected snapshot and generation, receipt snapshot differs | Head CAS to the receipt snapshot, generation + 1 |
+| Head already equals the receipt snapshot | No write |
+| Head differs from the expectation | Prior receipt returned, head untouched |
+
+Every `commit_snapshot` caller inherits this.
 
 **`repository.py` reads (summary).** Missing input maps to the codes above;
 a corrupt id is `MANIFEST_CORRUPT`; a re-hash mismatch is `OBJECT_CORRUPT`.

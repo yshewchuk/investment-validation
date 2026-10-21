@@ -274,7 +274,7 @@ def test_valid_hash_mutations_cannot_authorize_reconciliation(native, monkeypatc
             elif slot == "inputs":
                 body["inputs_id"] = "wrong"
             else:
-                body["training"][0]["absolute_move_pct"] = 99.0
+                body["sections"]["training"]["row_count"] = 99
         persisted = append(name, body, **kwargs)
         return original_body if slot == "validation" else persisted
 
@@ -325,6 +325,7 @@ def test_reconciliation_rechecks_seal_trial_and_limit_identity(native, monkeypat
 @pytest.mark.parametrize("code", ["RESOURCE_UNAVAILABLE", "RESOURCE_LIMIT_EXCEEDED", "EXPERIMENT_VARIANT_FAILED"])
 def test_reconciliation_never_reclassifies_shared_or_resource_failures(native, monkeypatch, stage, code):
     interrupt(monkeypatch, native.recorder, "execution", after=True)
+    native.recorder._memo.clear()
     no_launch(monkeypatch)
     original = fail(code, "synthetic shared or scoring refusal")
 
@@ -388,6 +389,7 @@ def test_real_fixed_child_is_reaped_before_result_becomes_recoverable(native, mo
 
 def test_reconciliation_checks_current_inputs_before_first_validation_read(native, monkeypatch):
     interrupt(monkeypatch, native.recorder, "execution", after=True)
+    native.recorder._memo.clear()
     no_launch(monkeypatch)
     monkeypatch.setattr(native.recorder, "_inputs", lambda *a: {"changed": True})
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("changed inputs opened labels"))

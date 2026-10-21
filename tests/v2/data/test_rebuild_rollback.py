@@ -5,7 +5,7 @@ Real-data runs of ``engine.data.rebuild.rebuild`` are a later, approved heavy
 session (task brief "out of scope"). This module's "tiny monkeypatchable
 builder path" (task brief's own phrase) is
 ``engine.v2.ops.snapshot_import.run_legacy_rebuild``, monkeypatched to write
-the SAME synthetic store ``tests.test_v2_data_import.build_legacy_store``
+the SAME synthetic store ``tests.v2.data.test_v2_data_import.build_legacy_store``
 already builds, instead of shelling out to the real legacy rebuild against
 real raw data. Every other piece of the pipeline — inspection, publish,
 commit, comparison, promotion, rollback — is the real production code.
@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import RollbackReceipt  # noqa: E402
@@ -58,8 +58,8 @@ from tests.data_scan_support import (  # noqa: E402
     publish_and_inspect,
 )
 from tests.ops_support import TEST_POLICY  # noqa: E402
-from tests.test_v2_data_import import _run_until_terminal, _submit_and_run, build_legacy_store  # noqa: E402
-from tests.test_v2_data_legacy_materialization import PANEL_ROWS, TIER4_ROWS  # noqa: E402
+from tests.v2.data.test_v2_data_import import _run_until_terminal, _submit_and_run, build_legacy_store  # noqa: E402
+from tests.v2.data.test_legacy_materialization import PANEL_ROWS, TIER4_ROWS  # noqa: E402
 
 POLICY = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
 

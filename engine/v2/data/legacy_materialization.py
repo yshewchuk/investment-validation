@@ -790,10 +790,12 @@ class MaterializedTree:
 
 
 def materialize_tree(repository, store, request: LegacyMaterializationRequest,
-                     dest_root) -> MaterializedTree:
+                     dest_root, *, progress=None) -> MaterializedTree:
     """Write every declared path under ``dest_root``. Never chmods (decision
     3: lock-down is a separate, later step) and never opens a legacy
-    ``engine.*`` symbol."""
+    ``engine.*`` symbol. ``progress``, when given, is called as
+    ``progress(done)`` after each table is written (#1018); the caller owns
+    cadence and formatting."""
     dest_root = Path(dest_root)
     _check_dest_root(store, dest_root)
     _check_daily_market_covers_trades(repository, request)
@@ -803,7 +805,7 @@ def materialize_tree(repository, store, request: LegacyMaterializationRequest,
     single_files: dict[str, Path] = {}
     copied_tables: set[str] = set()
     row_counts: dict[str, int] = {}
-    for table_name, query in request.table_queries.items():
+    for index, (table_name, query) in enumerate(request.table_queries.items(), start=1):
         contract = repository.table_contract(request.snapshot_ref, table_name)
         eligible = (table_name not in _EVIDENCE_SCOPED_TABLES
                    and _whole_table_copy_eligible(repository, request.snapshot_ref, table_name,
@@ -824,6 +826,8 @@ def materialize_tree(repository, store, request: LegacyMaterializationRequest,
         row_counts[table_name] = rows
         if copied:
             copied_tables.add(table_name)
+        if progress is not None:
+            progress(index)
     from . import reference_inputs  # call-time import: see _tier4_cache_dir
 
     snapshot_rel = reference_inputs.LEGACY_SNAPSHOT_PATH

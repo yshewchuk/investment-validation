@@ -11,7 +11,7 @@ import pytest
 from engine.data import store as legacy_store
 from engine.v2.data import legacy_adapter
 from engine.v2.data.repository import Repository
-from tests.test_v2_data_legacy_materialization import (
+from tests.v2.data.test_legacy_materialization import (
     _build_request,
     _build_snapshot,
     _snapshot_object_ref,

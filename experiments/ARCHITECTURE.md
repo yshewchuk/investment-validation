@@ -224,6 +224,7 @@ both flag states publish/verify the same plan and never write a ledger.
 
 | Condition | Enforced outcome |
 |---|---|
+| Experiment CLI or helper reads one fixed snapshot | Its `Repository` is built with `pin_snapshots=True`: scans reuse table membership cached per instance by immutable ids; output is identical to an unpinned read. |
 | Request shape | `magnitude_search_request.v1`: explicit `inner_years`, `space`, `max_candidates`, `max_fits`; Ridge `alpha` and/or HGB `learning_rate`, `max_iter`, `max_leaf_nodes`, `min_samples_leaf`, `l2_regularization` axes. |
 | Valid fitted anchor and closed request | Return detached canonical plan bytes binding request, anchor, installed sources/environment, full recipes/hashes, grouped event/horizon metadata, count limits and recorded selection policy. No estimator construction, fitting, labels, features, repository scans or results. |
 | Missing/extra fields, invalid or unordered axes/years, or candidate count outside 2..`max_candidates` (itself 2..4096) | Nonretryable `INVALID_EXPERIMENT_SPEC` before search-plan artifact access/expansion; CLI registration metadata may already be read. Ridge alpha and all five HGB axes are explicit; no inferred knobs. |
@@ -242,7 +243,7 @@ both flag states publish/verify the same plan and never write a ledger.
 
 ## Recorded magnitude-search selection
 
-`magnitude_search_trials.SearchTrials` exposes the journal API composed by the serial CLI. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies include contracts, foundation, ops migrations/catalog/fingerprints/errors, research target reads and `magnitude_search_evidence`. That shared helper owns native admission through `magnitude_history_inputs.history_binding` and research stored-history/target reads; `magnitude_search_plan.read_search_plan` owns plan admission. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. Public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE.
+`magnitude_search_trials.SearchTrials` exposes the journal API composed by the serial CLI. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies include contracts, foundation, ops migrations/catalog/fingerprints/errors, research target reads, `magnitude_search_evidence` and the `magnitude_search_inputs` cohort loader. That shared helper owns native admission through `magnitude_history_inputs.history_binding` and research stored-history/target reads; `magnitude_search_plan.read_search_plan` owns plan admission. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. Public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE. One `SearchTrials` instance admits each (plan, outer year, inner year) cohort once and shares the admitted inputs across that cohort's trials; `start` returns detached inputs (deep copies of the memoised ones). The in-memory memo holds one entry per cohort (bounded by the number of distinct (outer year, inner year) cohorts in the sealed plan), is never persisted and never holds a failed admission. Drift between instances is detected on re-admission by a fresh instance (see Input drift below); within one instance it is not re-read.
 
 | Condition | Outcome |
 |---|---|
@@ -257,6 +258,7 @@ both flag states publish/verify the same plan and never write a ledger.
 | Explicit `EXPERIMENT_VARIANT_FAILED` fit failure after input admission; defensive local scoring refusal | Record a candidate terminal. An initial scoring refusal raises its original error; a failed terminal write is chained as its cause, leaving an unfinished claim. No other stage creates automatic candidate refusals. |
 | `record(failure=...)` receives a registered non-candidate Problem | Raise its sanitized registered policy without a terminal; retain the unfinished claim. Unregistered/non-Problem values refuse `INVALID_EXPERIMENT_SPEC`. |
 | Any shared native-input/label admission failure | Propagate the original exception, including native `DataError` or binding `OpsError`; preserve the unfinished attempt and block selection regardless of error code. Public `start` and `record` refuse restart or forecast resubmission, even for a retryable resource Problem. Native `reconcile` may idempotently reuse the exact committed forecasts only after verifying the durable child result and original admission; it never restarts fitting or replaces forecasts. |
+| Input drift between instances | A new `SearchTrials` instance re-admits each cohort and refuses changed inputs with `EXPERIMENT_IDENTITY_CONFLICT` "trial native inputs changed after start" before the first validation read, unless durable validation is reused. Within one instance the memoised admission is reused, so drift is not re-read. |
 | Durable journal write; raw SQLite error in migration checks, reference reads or transactions | Publish artifacts before catalog commits; a failed commit may leave an unreferenced object, never admitted evidence. Raw `sqlite3.Error` propagates unchanged, except as the chained cause of a refusal-persistence failure; failed transactions roll back. SQLite failure never becomes a candidate terminal. Records are capped at 16 MiB and cannot be updated, deleted or replaced. |
 | `freeze()` with every planned candidate/inner-fold attempt terminal | Exclude a candidate's entire outer score after any failed/refused inner fold; pool all successful event/horizon errors, break exact RMSE ties by candidate ID, and freeze every outer choice plus the latest-outer prospective candidate. Admitted successful folds have nonempty evaluation rows. A pooled-scoring refusal propagates `EXPERIMENT_VARIANT_FAILED` for the whole freeze, with no selection or candidate exclusion. |
 | Missing/started-only attempt or outer fold without a successful candidate | Refuse `EXPERIMENT_VARIANT_FAILED`; publish no selection. |
@@ -266,6 +268,94 @@ both flag states publish/verify the same plan and never write a ledger.
 | Invalid stored-path syntax or reference; publication `UNSAFE_PATH` | Refuse `EXPERIMENT_IDENTITY_CONFLICT`; invalid reference syntax is rejected before artifact access. Content/hash mismatch during verified reads remains an identity conflict. |
 | Journal payload exceeds 16 MiB | Refuse nonretryable `RESOURCE_LIMIT_EXCEEDED` before publishing that record; incomplete attempts remain unfinished and block selection. |
 | Submitted-forecast selection | These submission/selection methods do not fit or authenticate estimator execution; wholesale fabrication of matching evidence is outside their consistency guarantee. Native fitting is separately described under [bounded inner-trial execution](#bounded-inner-trial-execution). Neither path grants outer evaluation, deployment, ledger or final-read authority. |
+
+## Sharded cohort inputs
+
+The rows above describe the journal; this section states the sharded (v2) contract for cohort
+inputs. Implemented: the shard module, the loader, the cohort and outer-input writers
+(`_start` publishes `cohort:<id>` and the outer writer `outer-inputs:<id>`, each as shards plus a
+manifest) and the manifest bindings of `inputs:<trial>`, `execution-result:<trial>` and the outer
+result, and the child transport (below). A whole-cohort (v1) record still reads through the
+loader's adapter, but only for replay: a new fit always publishes and streams a manifest. Cohort rows (`features`, `training`, preflight
+`planned_inputs`, and the same rows in `outer-inputs:<id>`) are ordered sections of
+content-addressed shards, not one record or payload. Population-sized receipt lists
+(`training_inputs` candidate, qualified, read and omitted event lists, and preflight
+`event_ids`) are sections too; only fixed-size scalars stay inline in the manifest.
+
+* A shard is canonical JSON `{schema_version: magnitude_search_shard.v1, section, rows}`
+  published with `ArtifactStore.publish_bytes`; its `ArtifactRef` is its address and it
+  names no cohort or position. Rows keep the admitted order. The cut is deterministic
+  (target 4 MiB; hard maximum 8 MiB; at most 8192 shards in total across all sections of
+  one manifest, so a manifest of ~0.5 KB entries stays under ~4 MiB, well below the
+  16 MiB record cap), so equal rows give equal shards; a row or count above the
+  maxima is `RESOURCE_LIMIT_EXCEEDED`.
+* `cohort:<id>` and `outer-inputs:<id>` hold a small manifest (inline scalar members plus,
+  per section, `row_count` and ordered `{ref, rows, first_key, last_key}`).
+  `magnitude_search_shards` requires inline values to be JSON scalars (str, int, float,
+  bool, None); a list or dict value is refused (`INVALID_EXPERIMENT_SPEC` at build,
+  `EXPERIMENT_IDENTITY_CONFLICT` at verify). `inputs_id`
+  is `content_hash(manifest)`. A whole-cohort record is read through the loader's v1
+  adapter, bound by its content hash; none is rewritten.
+* One streaming reader serves parent and child: each shard is `read_verified` (size is
+  the allocation bound) and checked for schema, section, row count and boundary keys;
+  totals equal `row_count`. Each section has one key comparator (the row's sort key):
+  within a shard keys strictly increase, and across shards the previous `last_key` is
+  strictly below the next `first_key`, so out-of-order or overlapping shards are refused.
+  An empty section has `row_count` 0, an empty shard list and no keys; any shard listed
+  for it, or a nonzero count with an empty list, is a count disagreement. Parent and
+  child apply the same rule. Matrix evidence keeps today's training / evaluation list
+  order. The child transport supplies a header with the inner fold, horizons, execution spec,
+  manifest, expected `inputs_id` and store root; limits remain a separate argument and no
+  input rows are sent. The child (`load_fit_inputs`) verifies the manifest against the
+  expected id, reads only the `training` and `features` sections through the reader above,
+  and returns projected training rows and feature rows limited to training or evaluation
+  events at the selected horizons. It opens no repository, catalog or validation target.
+  Manifest, hash, shape and shard failures in the child are infrastructure failures
+  (`RESOURCE_UNAVAILABLE`); a header above the 16 MiB record cap ends as `resource_limit`.
+  Transport memory is the projected fit rows plus one shard, bounded by the child's
+  `RLIMIT_AS`; child output remains capped at 16 MiB.
+* Shards are published, outside the catalog transaction, before the manifest append,
+  which is the commit point.
+* The manifest hash is a Merkle `inputs_id`, and every cohort is sharded, including empty and one-row cohorts.
+* `magnitude_search_shards` implements the cut rule, writer, manifest hash and verified reader
+  and lists the list-valued members (`LIST_MEMBERS`) as data. A member without a strictly
+  increasing sort key carries a `problem` note and no key function; the writer takes a
+  caller-supplied key and does not consult the inventory; keyless members are written as
+  `{position, row}` rows below.
+
+* `magnitude_search_inputs.load_inputs(store, record, expected_id)` is the one loader every
+  consumer (`_record`, reconcile, freeze, outer replay, `_validation`) reads
+  through; the one exception is the fit child, which calls `load_fit_inputs` (same verification
+  and reader, projected to the fit rows). A record with the manifest schema is verified against `expected_id`, its sections
+  are streamed shard by shard and placed at their dotted paths beside the inline members, which
+  are flat scalars keyed by dotted path (`preflight.count`); any other
+  record is a v1 whole cohort whose id is its content hash. Both return the same inputs shape.
+  A section without a sort key stores rows `{position, row}` (position 0, 1, ...; the loader
+  checks it is consecutive and unwraps `row`), so every section has a strictly increasing key.
+  A manifest must carry exactly the `LIST_MEMBERS` sections. Non-retryable loader conflicts
+  surface as each caller's own evidence-chain refusal; retryable errors propagate unchanged.
+
+| Condition | Outcome |
+|---|---|
+| Shard missing or `OSError` | Retryable `RESOURCE_UNAVAILABLE`; no association change or candidate failure. |
+| Hash/size mismatch, wrong schema or section, count or boundary-key disagreement, duplicate key, invalid or unsafe ref syntax, manifest hash differing from `inputs_id` (parent or child), a manifest `inline` value that is a list or dict | `EXPERIMENT_IDENTITY_CONFLICT`; no rows used. Inside the fit child every loader failure (conflict, retryable store error, invalid projection arguments, a row missing a requested column) is instead reported as `unavailable`, so the parent refuses `RESOURCE_UNAVAILABLE`; only `MemoryError` (including an oversized header) is `resource_limit` (see the execution table). |
+| Crash after some shards, before the manifest | Orphan shards confer no authority and are reclaimable by the store owner; the immutable claim stays unfinished. |
+| Manifest committed, later shard lost or corrupted | Fails closed as above on every read. |
+| Same slot, different manifest | `EXPERIMENT_IDENTITY_CONFLICT`. |
+| Same slot, same manifest (retry after an ambiguous append) | No-op success; shards are content-addressed, so republishing is harmless, and no cache entry depends on the attempt. |
+| A row above 8 MiB or more than 8192 shards | Nonretryable `RESOURCE_LIMIT_EXCEEDED` before the manifest append; published shards stay unreferenced. A stored manifest or section listing more than 8192 shards is `EXPERIMENT_IDENTITY_CONFLICT`. |
+| Writer given a row whose sort key is missing, not a tuple of strings/integers, or not strictly above the previous key, or a row that is not canonical JSON or uses the reserved `__nonfinite__` key, or a manifest builder given a malformed manifest or section | `INVALID_EXPERIMENT_SPEC` before that shard is published. |
+| Read-time `UNSAFE_PATH` (for example a symlink) on a syntactically valid shard ref | Retryable `RESOURCE_UNAVAILABLE`, like a missing shard; invalid ref syntax stays a conflict. |
+| Loader given a manifest with a missing or extra inventory section, an inline member colliding with a section path, or a keyless-section row that is not exactly `{position, row}` with consecutive positions from 0; or a record that is not a dict | `EXPERIMENT_IDENTITY_CONFLICT`; no rows used. |
+| Whole-cohort record whose content hash differs from the expected `inputs_id` | `EXPERIMENT_IDENTITY_CONFLICT`; no rewrite or migration. |
+
+Registration, snapshot, plan and execution-spec bindings are unchanged. `inputs:<trial>`,
+`execution-result:<trial>` and the outer result bind the manifest hash, so every shard. Outer
+replay takes the expected id from the stored terminal and the loader verifies the manifest against
+it before reading any shard. Source closures include the shard module, so seals change. Journals
+written before activation (smoke and test runs) bound the whole-cohort hash and stop replaying;
+this is accepted. A `cohort:` or `outer-inputs:` slot already holding a different record is
+`EXPERIMENT_IDENTITY_CONFLICT`. Replay identity holds within one format version.
 
 ## Stored research-history entrypoint
 
@@ -575,8 +665,11 @@ The source seal explicitly includes the fixed child and its transitive fitting s
 | Missing/extra limit keys, Boolean/noninteger/nonpositive or platform-unrepresentable values | `INVALID_EXPERIMENT_SPEC` before a claim or subprocess launch. |
 | Direct `run_fitted_trial` call | Requires exactly those three resource keys plus an integer `cpu_id` in `[0, 2**31 - 1)`, excluding Boolean values. Revalidates all limits before input access, scratch creation or launch; malformed resolved limits refuse `INVALID_EXPERIMENT_SPEC`. CPU availability is still enforced by child setup, not reserved by this pure check. |
 | Parent Linux affinity query unavailable or empty | `RESOURCE_UNAVAILABLE` before a claim or subprocess launch. Child limit/affinity setup failure instead preserves the post-claim unfinished attempt and refuses `RESOURCE_UNAVAILABLE`. |
-| Serialized input or a buffered child-output record exceeds 16 MiB | `RESOURCE_LIMIT_EXCEEDED`; preserve the unfinished claim, publish no candidate failure and block freeze. |
-| Started trial with admitted cohort | A fixed fit-only subprocess receives stored features and qualified training targets, never a repository, catalog or validation targets. Every horizon uses the existing fresh-fit pipeline and declared candidate recipe. |
+| `run_fitted_trial` source is not exactly `{manifest, inputs_id, store_root}` | `INVALID_EXPERIMENT_SPEC` before scratch creation or launch. |
+| The child header exceeds 16 MiB | The child emits `resource_limit`; `RESOURCE_LIMIT_EXCEEDED`. |
+| The child's manifest check, shard read, hash, shape or ordering fails, or a projection row lacks a fit column | The child emits `unavailable`; `RESOURCE_UNAVAILABLE` (infrastructure failure, unfinished claim kept). The loader itself raises `EXPERIMENT_IDENTITY_CONFLICT` (retryable store errors propagate); the child maps every loader error to `unavailable`. Inline paths colliding with a section or each other are refused like `load_inputs` does. |
+| A buffered child-output record exceeds 16 MiB, or the child exhausts `RLIMIT_AS` loading its rows | `RESOURCE_LIMIT_EXCEEDED`; preserve the unfinished claim, publish no candidate failure and block freeze. The input is not serialized and has no byte cap. |
+| Started trial with admitted cohort | A fixed fit-only subprocess streams stored features and qualified training targets from the manifest, never a repository, catalog or validation targets. Every horizon uses the existing fresh-fit pipeline and declared candidate recipe. |
 | Child reaches a horizon fit | Parent independently reconstructs its matrix/event evidence and commits a non-replayable fit admission before acknowledging. Completion is separately acknowledged only after its immutable evidence commits. Counts distinguish admitted fit attempts from completed fits; an interrupted admission does not prove the estimator was entered. |
 | Child returns a checked result after exit and reap | Commit immutable `execution-result:<trial_id>` with the exact native result, original attempt/limits and admitted input hash before execution/forecast/scoring publication. Successful fits publish complete forecasts before validation labels open; original scoring policy applies. Public `record` cannot finish an unfinished native attempt. |
 | Candidate scoring refuses after successful native fits | Preserve the successful execution receipt and durable `refused` terminal. Initial scoring propagates `EXPERIMENT_VARIANT_FAILED`; replay returns the intact receipt without refitting or rescoring, and freeze excludes that candidate while retaining successful peers. |
@@ -708,6 +801,16 @@ validation reconstructs the protected receipt from admitted physical preflight.
 Static imports include these helpers in recorder and outer source bindings.
 Completed replay verifies the complete evidence chain without native payloads or fitting.
 
+Fresh inner/outer admission streams complete validation, retaining only fold participants'
+primary keys and registered numeric features. Full stored `inputs_id`, matrices and fits are preserved.
+Slim cohort documents have their own honest content hashes: their journal/result IDs
+are not the old full-row hashes. Changed producer/recorder closures require fresh build contexts and seals; old sealed
+runs fail closed, and no historical receipt or artifact is rewritten. The child
+projects qualified training/evaluation rows and selected horizons/columns while streaming
+shards. Child output and the journal retain their 16 MiB limits; the input cap is removed,
+so a large fold is bounded by the child's memory limit. No scale is inferred
+from event counts; scientific selection and cutoff rules are unchanged.
+
 | Condition | Enforced outcome |
 |---|---|
 | Invalid outer year or limits | `INVALID_EXPERIMENT_SPEC`; no outer claim or payload access. Limit admission precedes journal/plan checks. |
@@ -733,7 +836,7 @@ returned result dictionaries carry their IDs and selected summaries, not all jou
 payloads. Collection does not persist a report artifact, export or ledger row.
 No holdout evaluation, final read, release or deployment authority is added.
 Research remains reconstructed, not observed point-in-time. Direct dependencies are
-the search plan/journal/trial/execution/evidence modules, contracts, foundation,
+the search plan/journal/trial/execution/evidence/inputs (cohort loader) modules, contracts, foundation,
 ops migrations/fingerprints/errors, both no-fit guards, `engine.v2.research.magnitude_inputs.load_magnitude_targets`
 for outer label reads and `magnitude_report.magnitude_metrics` for fold/aggregate scoring.
 The evidence helper separately consumes native history admission and research stored-history/target APIs; no new scheduler, parser, estimator implementation or third-party dependency is needed.

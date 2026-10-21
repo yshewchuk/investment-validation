@@ -2,7 +2,9 @@
 import copy
 import json
 import sqlite3
+import tempfile
 from fractions import Fraction
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -27,6 +29,7 @@ from engine.v2.research.magnitude_inputs import magnitude_recipe
 from experiments import magnitude_search_records as records
 from experiments import magnitude_search_trials as trials
 from experiments.magnitude_report import magnitude_metrics
+from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 
 
 @pytest.fixture
@@ -58,7 +61,17 @@ def native_inputs():
         "population_use": "research", "purpose": "selection", "computed_moves_version": "moves",
         "event_ids": ["event"], "planned_inputs": [{"event_id": "event", "fragment_id": "fragment",
             "object_id": "object", "content_hash": "hash"}]}
-    return {"preflight": {**preflight, "preflight_id": content_hash(preflight)}}
+    return {"preflight": {**preflight, "preflight_id": content_hash(preflight)},
+            "training_inputs": {"candidate_event_ids": [], "qualified_event_ids": [], "read_inputs": [],
+                                "omitted_labels": [], "target_recipe": {"secondary_diagnostics": []},
+                                "holdout_exclusions": []},
+            "training": [], "features": []}
+
+
+def native_inputs_id(inputs=None):
+    """The manifest hash of a cohort (shards are content-addressed, so any store gives the same id)."""
+    with tempfile.TemporaryDirectory() as root:
+        return publish_inputs(ArtifactStore(Path(root) / "store"), native_inputs() if inputs is None else inputs)[1]
 
 
 def validation_evidence(value=4.0):
@@ -69,7 +82,7 @@ def validation_evidence(value=4.0):
             "rolling_membership_version", "population_use", "purpose", "computed_moves_version")},
         "labels_before": "2024-01-01", "target_recipe": recipe, "target_recipe_id": content_hash(recipe),
         "consumed_inputs": preflight["planned_inputs"], "excluded_future_events": []}
-    return {"inputs_id": content_hash(native_inputs()),
+    return {"inputs_id": native_inputs_id(),
             "evaluation_inputs": {**receipt, "inputs_id": content_hash(receipt), "holdout_exclusions": []},
             "targets": [{"event_id": "event", "absolute_move_pct": value}]}
 
@@ -98,14 +111,15 @@ def forge_complete(journal, mutation=None, *, validation_override=None):
     cohort = content_hash(["plan", "2024", "2023"])
     inputs = native_inputs()
     validation = validation_evidence() if validation_override is None else validation_override
+    manifest, inputs_id = publish_inputs(journal.store, inputs)
     if mutation != "missing_cohort":
-        journal.recorder._append("cohort:" + cohort, inputs)
+        journal.recorder._append("cohort:" + cohort, manifest)
     if mutation not in ("missing_validation", "refused_missing_validation"):
         journal.recorder._append("validation:" + cohort, validation)
     for candidate in journal.plan["candidates"]:
         key = content_hash(["plan", "2024", "2023", candidate["candidate_id"]])
         started = {"trial_id": key, "outer_year": "2024", "inner_year": "2023", "candidate": candidate}
-        admitted = {"cohort": cohort, "inputs_id": content_hash(inputs)}
+        admitted = {"cohort": cohort, "inputs_id": inputs_id}
         submitted = rows()
         predictions = [{**row, "absolute_move_pct": 4.0} for row in submitted]
         terminal = {"status": "succeeded", "inputs_id": admitted["inputs_id"],
@@ -190,7 +204,7 @@ def test_self_consistent_stored_forecasts_require_valid_values(journal, monkeypa
     assert submitted == rows(-1 if mutation else 7)
     assert terminal["predictions"] == [{**row, "absolute_move_pct": 4.0} for row in submitted]
     assert terminal["metrics"] == magnitude_metrics(terminal["predictions"])
-    assert journal.recorder._read("cohort:" + cohort) == native_inputs()
+    assert load_inputs(journal.store, journal.recorder._read("cohort:" + cohort), native_inputs_id()) == native_inputs()
     assert journal.recorder._read("validation:" + cohort) == validation_evidence()
     monkeypatch.setattr(journal.recorder, "_inputs", lambda *a: pytest.fail("native inputs reopened"))
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("labels reopened"))
@@ -261,12 +275,12 @@ def test_valid_hash_cohort_link_requires_the_exact_fold(journal, monkeypatch, cr
         journal.recorder.record(year, "2023", "a-first", forecasts=rows())
     assert own_cohort != other_cohort
     for year, cohort in (("2024", own_cohort), ("2025", other_cohort)):
-        assert journal.recorder._read("cohort:" + cohort) == native_inputs()
+        assert load_inputs(journal.store, journal.recorder._read("cohort:" + cohort), native_inputs_id()) == native_inputs()
         validation = validation_evidence()
         validation["evaluation_inputs"] = dict(labels(labels_before=year + "-01-01").attrs)
         assert journal.recorder._read("validation:" + cohort) == validation
     assert journal.recorder._read("inputs:" + key) == {
-        "cohort": other_cohort if cross_fold else own_cohort, "inputs_id": content_hash(native_inputs())}
+        "cohort": other_cohort if cross_fold else own_cohort, "inputs_id": native_inputs_id()}
     before = durable_evidence(journal)
     monkeypatch.setattr(journal.recorder, "_inputs", lambda *a: pytest.fail("native inputs reopened"))
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("labels reopened"))
@@ -315,7 +329,6 @@ def test_stored_evidence_read_failure_retains_resource_policy(journal, monkeypat
 def test_cohort_byte_limit_preserves_unfinished_claim(journal, monkeypatch):
     original_limit = records.MAX_BYTES
     monkeypatch.setattr(records, "MAX_BYTES", 1024)
-    monkeypatch.setattr(journal.recorder, "_inputs", lambda inner: {"features": "é" * 1024})
     with pytest.raises(OpsError) as caught:
         journal.recorder.start("2024", "2023", "z-last")
     assert caught.value.problem == fail("RESOURCE_LIMIT_EXCEEDED", "search journal record exceeds its byte limit").problem
@@ -359,7 +372,9 @@ def test_source_closure_failure_is_exact_identity_refusal_before_sealing(journal
 
 def test_changed_shared_cohort_blocks_selection_instead_of_excluding_candidate(journal, monkeypatch):
     journal.recorder.start("2024", "2023", "z-last")
-    monkeypatch.setattr(journal.recorder, "_inputs", lambda inner: {"native_inputs": "changed"})
+    journal.recorder._memo.clear()
+    journal.recorder._published.clear()
+    monkeypatch.setattr(journal.recorder, "_inputs", lambda inner: {**native_inputs(), "native_inputs": "changed"})
     with pytest.raises(OpsError) as caught:
         journal.recorder.start("2024", "2023", "a-first")
     assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed").problem
@@ -857,7 +872,7 @@ def test_interleaved_writers_cannot_establish_different_validation_authorities(j
     def interleave(store, payload, *, schema_ref):
         nonlocal pending
         ref = publish(store, payload, schema_ref=schema_ref)
-        if pending and json.loads(payload)["slot"] == slot:
+        if pending and json.loads(payload).get("slot") == slot:
             pending = False
             assert not journal.conn.in_transaction
             records.append_record(peer, journal.store, "run", slot, validation_evidence(other_value))
@@ -887,6 +902,7 @@ def test_shared_admission_refusal_never_becomes_candidate_terminal(journal, monk
         raise original
     if phase != "start":
         journal.recorder.start("2024", "2023", "z-last")
+        journal.recorder._memo.clear()
     monkeypatch.setattr(trials if phase == "labels" else journal.recorder,
                         "load_magnitude_targets" if phase == "labels" else "_inputs", refused)
     with pytest.raises(DataError) as caught:

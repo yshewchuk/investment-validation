@@ -13,17 +13,24 @@ from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.executor import THREAD_VARIABLES
 from experiments import magnitude_search_execution as execution
+from tests.v2.research.magnitude_search_fit_source import fit_source
 
 LIMITS = {"memory_bytes": 2 * 1024 ** 3, "cpu_seconds": 30, "wall_seconds": 60}
 SMALL_CAP = 512
 SUCCESS = {"event": "succeeded", "forecasts": []}
+STATE = {}
+
+
+@pytest.fixture(autouse=True)
+def _store(tmp_path):
+    STATE["root"] = tmp_path / "fit-store"
 
 
 def request(policy=None):
     # No estimator is needed to observe the worker's containment and wire limits.
     return {"inputs": {"features": [], "training": [{"event_id": "train", "absolute_move_pct": 2}]},
             "inner": {"evaluation_event_ids": []}, "plan": {"horizons": []},
-            "execution": {} if policy is None else policy}
+            "execution": {"features": []} if policy is None else policy}
 
 
 def json_bytes(value):
@@ -32,12 +39,13 @@ def json_bytes(value):
 
 def run(policy=None, limits=None):
     payload = request(policy)
-    return execution.run_fitted_trial(payload["inputs"], payload["inner"], payload["plan"],
+    source = fit_source(payload["inputs"], STATE["root"])
+    return execution.run_fitted_trial(source, payload["inner"], payload["plan"],
         payload["execution"], execution.execution_limits(LIMITS) if limits is None else limits,
         lambda *args: pytest.fail("an empty horizon plan emitted fit progress"))
 
 
-def observe_launch(monkeypatch, *, grow_input=None, instrumentation=""):
+def observe_launch(monkeypatch, *, instrumentation=""):
     """Keep production launch/containment; optionally observe the worker's emitter."""
     original = execution.subprocess.Popen
     observed = []
@@ -48,44 +56,20 @@ def observe_launch(monkeypatch, *, grow_input=None, instrumentation=""):
     def launch(args, **kwargs):
         assert args[1:3] == ["-m", "experiments.magnitude_search_worker"]
         source = Path(args[3])
-        if grow_input is not None:
-            payload = source.read_bytes()
-            assert len(payload) < grow_input
-            source.write_bytes(payload + b" " * (grow_input - len(payload)))
-        size = source.stat().st_size
         command = [args[0], "-c", script, *args[2:]] if instrumentation else args
         child = original(command, **kwargs)
-        observed.append((child, source.parent, size))
+        observed.append((child, source.parent))
         return child
 
     monkeypatch.setattr(execution.subprocess, "Popen", launch)
     return observed
 
 
-def assert_cleaned(observed, size):
+def assert_cleaned(observed):
     assert len(observed) == 1
-    child, scratch, actual_size = observed[0]
-    assert actual_size == size
+    child, scratch = observed[0]
     assert child.poll() is not None
     assert not scratch.exists()
-
-
-@pytest.mark.parametrize("extra", [0, 1], ids=["exact-cap", "cap-plus-one"])
-def test_parent_payload_cap_is_inclusive_before_launch(monkeypatch, extra):
-    monkeypatch.setattr(execution, "MAX_BYTES", SMALL_CAP)
-    policy = {"padding": ""}
-    policy["padding"] = "x" * (SMALL_CAP + extra - len(json_bytes(request(policy))))
-    assert len(json_bytes(request(policy))) == SMALL_CAP + extra
-    observed = observe_launch(monkeypatch)
-    if extra:
-        with pytest.raises(OpsError) as caught:
-            run(policy)
-        assert caught.value.problem == fail(
-            "RESOURCE_LIMIT_EXCEEDED", "search execution input exceeds its byte limit").problem
-        assert observed == []
-    else:
-        assert run(policy) == SUCCESS
-        assert_cleaned(observed, SMALL_CAP)
 
 
 @pytest.mark.parametrize("extra", [0, 1], ids=["exact-cap", "cap-plus-one"])
@@ -112,23 +96,7 @@ worker.emit = emit
             "RESOURCE_LIMIT_EXCEEDED", "search execution output exceeds its byte limit").problem
     else:
         assert run() == result
-    assert_cleaned(observed, len(json_bytes(request())))
-
-
-@pytest.mark.parametrize("extra", [0, 1], ids=["exact-cap", "cap-plus-one"])
-def test_fixed_worker_independently_admits_exact_input_cap(monkeypatch, extra):
-    # Grow a valid request only after the parent's byte check. JSON whitespace
-    # preserves its meaning at the real worker cap, without patching the worker.
-    size = execution.MAX_BYTES + extra
-    observed = observe_launch(monkeypatch, grow_input=size)
-    if extra:
-        with pytest.raises(OpsError) as caught:
-            run()
-        assert caught.value.problem == fail(
-            "RESOURCE_LIMIT_EXCEEDED", "search execution exceeded its resource limits").problem
-    else:
-        assert run() == SUCCESS
-    assert_cleaned(observed, size)
+    assert_cleaned(observed)
 
 
 @pytest.mark.parametrize("value", [1, sys.maxsize - 1], ids=["minimum", "maximum"])
@@ -187,14 +155,12 @@ def test_public_fit_helper_revalidates_each_resource_before_effects(monkeypatch,
 
 @pytest.mark.parametrize("cpu_id", [0, 2 ** 31 - 2])
 @pytest.mark.parametrize("value", [1, sys.maxsize - 1])
-def test_public_fit_helper_accepts_exact_resolved_endpoints_before_input_admission(monkeypatch, cpu_id, value):
-    class Inputs:
-        def __getitem__(self, name):
-            raise LookupError("input admission reached")
-
+def test_public_fit_helper_accepts_exact_resolved_endpoints_before_source_admission(monkeypatch, cpu_id, value):
     monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("endpoint probe launched child"))
-    with pytest.raises(LookupError, match="input admission reached"):
-        execution.run_fitted_trial(Inputs(), None, None, None, {**dict.fromkeys(LIMITS, value), "cpu_id": cpu_id}, None)
+    with pytest.raises(OpsError) as caught:
+        execution.run_fitted_trial(None, None, None, None, {**dict.fromkeys(LIMITS, value), "cpu_id": cpu_id}, None)
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC",
+        "search execution requires an admitted cohort source").problem
 
 
 @pytest.mark.parametrize("guard, error", [(no_fit_guard, RuntimeFitForbidden), (legacy_guard, LegacyRuntimeFitForbidden)])
@@ -230,7 +196,7 @@ worker.emit = emit
 """)
     assert run(limits=limits) == SUCCESS
     assert os.sched_getaffinity(0) == allowed
-    assert_cleaned(observed, len(json_bytes(request())))
+    assert_cleaned(observed)
     return json.loads(observation.read_text()), expected
 
 
@@ -251,3 +217,14 @@ def test_fixed_worker_observes_all_thread_and_resource_limits(monkeypatch, tmp_p
     assert actual["threads"] == dict.fromkeys(THREAD_VARIABLES, "1")
     assert actual["memory"] == [limits["memory_bytes"]] * 2
     assert actual["cpu"] == [limits["cpu_seconds"], limits["cpu_seconds"] + 1]
+
+
+@pytest.mark.parametrize("source", [None, {}, {"manifest": {}, "inputs_id": "x"},
+                                    {"manifest": {}, "inputs_id": "x", "store_root": "/s", "extra": 1}])
+def test_public_fit_helper_refuses_a_malformed_source_before_effects(monkeypatch, source):
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("bad source launched child"))
+    monkeypatch.setattr(execution.tempfile, "TemporaryDirectory", lambda *a, **k: pytest.fail("bad source made scratch"))
+    with pytest.raises(OpsError) as caught:
+        execution.run_fitted_trial(source, {}, {"horizons": []}, {}, {**LIMITS, "cpu_id": 0}, None)
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC",
+        "search execution requires an admitted cohort source").problem

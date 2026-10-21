@@ -21,7 +21,7 @@ from engine.v2.contracts import (
     RevisionCandidate,
     TableContract,
 )
-from engine.v2.data import catalog, errors, manifests, objects
+from engine.v2.data import catalog, errors, manifests, objects, query
 from engine.v2.data import incremental_tables as tables
 from engine.v2.foundation import (
     CONTENT_HASH_PREFIX,
@@ -36,12 +36,24 @@ from engine.v2.foundation import (
 )
 
 __all__ = [
+    "ARROW_TYPES",
     "GenericTableCandidate",
     "build_generic_table_candidate",
     "commit_generic_table_candidate",
     "decode_row",
     "load_generic_revisions",
+    "table_contract",
+    "table_records",
+    "replace_manifest",
+    "replace_records",
+    "sort_value",
 ]
+
+#: Re-export of the one shared physical-type map, defined in ``query``
+#: (including ``date32``), used when this module and ``generic_streaming``
+#: write a parquet fragment — so the staged and merged writers and a scan can
+#: never drift apart on a physical type.
+ARROW_TYPES: dict[str, pa.DataType] = query.ARROW_TYPES
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -534,15 +546,19 @@ def _sort_value(value):
 
 
 def _parquet_bytes(contract, rows):
-    types = {"string": pa.string(), "float64": pa.float64(), "int64": pa.int64(),
-             "bool": pa.bool_(), "timestamp[ns]": pa.timestamp("ns"),
-             "timestamp[us]": pa.timestamp("us"), "date32": pa.date32()}
     arrays = {}
     for column in contract.columns:
-        arrow_type = types.get(column.physical_type)
+        arrow_type = ARROW_TYPES.get(column.physical_type)
         if arrow_type is None:
             raise errors.fail("UNSUPPORTED_CONTRACT", "table physical type is unsupported")
         arrays[column.name] = pa.array([row.get(column.name) for row in rows], type=arrow_type)
     sink = pa.BufferOutputStream()
     pq.write_table(pa.table(arrays), sink)
     return sink.getvalue().to_pybytes()
+
+
+table_contract = _contract
+table_records = _table_records
+replace_manifest = _replace_manifest
+replace_records = _replace_records
+sort_value = _sort_value

@@ -8,6 +8,7 @@ unmapped-path and unsafe-path failure, and a cache regression. Ratchet: R1-R6.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -173,6 +174,62 @@ def test_phase1_baseline_inventory_matches_active_suite():
     assert resolved <= set(phase1_suite(ROOT))
 
 
+_COVERAGE_RELOCATIONS = (
+    ("tests/test_v2_data_legacy_materialization.py", "tests/v2/data/test_legacy_materialization.py", (1, 2)),
+    ("tests/test_v2_data_rebuild_rollback.py", "tests/v2/data/test_rebuild_rollback.py", (1, 2)),
+    ("tests/test_v2_data_import.py", "tests/v2/data/test_v2_data_import.py", (1, 2)),
+    ("tests/test_v2_data_reference_inputs.py", "tests/v2/data/test_v2_data_reference_inputs.py", (1, 2)),
+    ("tests/test_checks_phase2_corpus_parity.py", "tests/v2/integration/test_checks_phase2_corpus_parity.py", (2,)),
+    ("tests/test_v2_ops_legacy_workflows.py", "tests/v2/ops/test_v2_ops_legacy_workflows.py", (1,)),
+    ("tests/test_v2_ops_computed_moves_store.py",
+     "tests/v2/ops/test_v2_ops_computed_moves_store.py", (1,)),
+    ("tests/test_v2_data_tier4_coverage.py", "tests/v2/data/test_tier4_coverage.py", (1, 2)),
+)
+
+
+@pytest.mark.parametrize("phase, expected_version", [
+    (1, "phase1_coverage_suite.v18"),
+    (2, "phase2_coverage_suite:7ae743b96f5398e1a4cfbb1f88d6bf811af0ca4aaf785f3ece4b2f1d8431fd4d"),
+])
+def test_test_layout_moves_refresh_both_coverage_inventories(phase, expected_version):
+    from checks import v2_coverage_ratchet as coverage
+
+    baseline = json.loads((ROOT / f"checks/v2_coverage_ratchet_phase{phase}_baseline.json").read_text())
+    active = coverage.phase1_suite() if phase == 1 else coverage.phase2_suite()
+    assert baseline["suite_version"] == expected_version
+    for old, new, phases in _COVERAGE_RELOCATIONS:
+        assert (new in baseline["test_files"]) == (phase in phases)
+        assert (new in active) == (phase in phases)
+        assert old not in baseline["test_files"] and old not in active
+    if phase == 1:
+        assert coverage.PHASE1_SUITE_VERSION == expected_version
+    else:
+        # Independent identity oracle: do not call the production hash helper.
+        digest = hashlib.sha256("\0".join(sorted(baseline["test_files"])).encode()).hexdigest()
+        assert expected_version == "phase2_coverage_suite:" + digest
+
+
+@pytest.mark.parametrize("phase, old_version, original_digest", [
+    (1, "phase1_coverage_suite.v14",
+     "6869954b1b13ff8966faf36e3c4e4fbeced38498f3733865194fcea69a1ffe8d"),
+    (2, "phase2_coverage_suite:41d5881061353297d37e06599adeec4ae5c3d1efe7ae89c92e259e123dc1d451",
+     "a8f009eb0687b65b502d6b9e4f2e0b9e4677073c66487d23dd7ef8184a1c3205"),
+])
+def test_test_layout_moves_preserve_historical_coverage(phase, old_version, original_digest):
+    """Reverse only the relocations and compare the entire historical artifact.
+
+    Literal digests pin the pre-move baselines at 9d754db3, including package
+    counts, percentages, source hashes, serial mode and every Phase 2 outcome.
+    """
+    raw = (ROOT / f"checks/v2_coverage_ratchet_phase{phase}_baseline.json").read_text()
+    for old, new, _phases in _COVERAGE_RELOCATIONS:
+        raw = raw.replace(new, old)
+    restored = json.loads(raw)
+    restored["suite_version"] = old_version
+    canonical = json.dumps(restored, sort_keys=True, separators=(",", ":")).encode()
+    assert hashlib.sha256(canonical).hexdigest() == original_digest
+
+
 def test_phase1_measurement_identity_is_checked_on_measurement_evidence():
     """Current-source identity applies to measurement evidence, not the baseline."""
     from checks.layer_map import PACKAGES
@@ -252,7 +309,8 @@ def test_phase1_suite_raises_for_a_missing_extra_test(tmp_path):
 
 
 def test_phase1_suite_resolves_every_real_baseline_test():
-    from checks.v2_coverage_ratchet import ROOT as RATCHET_ROOT, phase1_suite
+    from checks.v2_coverage_ratchet import ROOT as RATCHET_ROOT
+    from checks.v2_coverage_ratchet import phase1_suite
 
     suite = phase1_suite()
     assert suite == sorted(set(suite))

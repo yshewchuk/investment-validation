@@ -20,6 +20,7 @@ __all__ = [
     "logical_key_for_row",
     "revision_hash",
     "merge_table_rows",
+    "validate_columns",
 ]
 
 
@@ -213,3 +214,6 @@ def _revision_document(revision):
     return {"candidate": to_document(revision.candidate), "row": dict(revision.row)
             if revision.row is not None else None, "deleted": revision.deleted,
             "partition_key": revision.partition_key}
+
+
+validate_columns = _validate_columns

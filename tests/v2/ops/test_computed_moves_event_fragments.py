@@ -7,14 +7,14 @@ import pytest
 
 from engine.v2.contracts import DataQuery, KeyPredicate, TimeInterval
 from engine.v2.data import manifests, objects
-from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_V5_CONTRACT as COMPUTED_MOVES_CONTRACT
 from engine.v2.data.errors import DataError, fail
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore
 from engine.v2.ops import computed_moves_store as producer
 from tests.data_scan_support import contract_ref_for, publish_and_inspect
 from tests.ops_support import catalog
-from tests.test_v2_ops_computed_moves_store import (
+from tests.v2.ops.test_v2_ops_computed_moves_store import (
     _AS_OF,
     _EVENT_DAYS,
     _build_parent,
@@ -26,6 +26,14 @@ from tests.test_v2_ops_computed_moves_store import (
     _series_csv,
     _write_input,
 )
+
+
+@pytest.fixture(autouse=True)
+def _small_fixture_bar(monkeypatch):
+    """The fixtures carry 8-ish events per ticker: lower the store's one bar to the old
+    effective admission bar (5) so they classify as computed outcomes."""
+    from engine.v2.ops import computed_moves_store as _store
+    monkeypatch.setattr(_store, "MIN_SCOREABLE", 5)
 
 
 @pytest.fixture

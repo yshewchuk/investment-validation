@@ -50,7 +50,7 @@ def main(argv=None):
                                      uri=True, isolation_level=None)
         connection.row_factory = sqlite3.Row
         try:
-            repository = Repository(connection, ArtifactStore(args.store_root))
+            repository = Repository(connection, ArtifactStore(args.store_root), pin_snapshots=True)
             with redirect_stdout(sys.stderr):
                 result = compare_runup_exits(repository, repository.resolve(args.snapshot_id),
                                             as_of_month=args.as_of_month, document=request)

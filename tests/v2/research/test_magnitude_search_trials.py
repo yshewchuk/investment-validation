@@ -29,6 +29,7 @@ from engine.v2.research.magnitude_history_store import read_stored
 from experiments import magnitude_search_evidence as evidence
 from experiments import magnitude_search_trials as trials
 from experiments import native_registration as native
+from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import seal_search_plan
 from tests.v2.research.magnitude_trial_support import (
     CUTOFF,
@@ -148,10 +149,20 @@ def test_shared_training_cohort_and_forecasts_committed_before_validation(case, 
     assert one["inputs"]["training"] == [
         {"event_id": event_id, "absolute_move_pct": 2.0} for event_id in training_ids]
     stored = read_stored(case.source.repository, case.source.feature_snapshot, case.source.build["context"])
-    expected_features = [row for row in stored["rows"] if row["event_id"] in participant_ids]
+    columns = ("event_id", "context_id", "horizon_sessions",
+               *case.source.registration.document["magnitude_execution"]["features"])
+    expected_features = [{name: row[name] for name in columns}
+                         for row in stored["rows"] if row["event_id"] in participant_ids]
     assert len(expected_features) == 18 < len(stored["rows"])
     assert one["inputs"]["features"] == expected_features
     assert one["inputs"]["stored_inputs_id"] == stored["inputs_id"]
+    full_cohort = {**one["inputs"], "features": [
+        row for row in stored["rows"] if row["event_id"] in participant_ids]}
+    assert _hash(one["inputs"]) != _hash(full_cohort), "projected cohorts need their own content identity"
+    admitted = case.recorder._read("inputs:" + one["trial_id"])
+    assert admitted["inputs_id"] == publish_inputs(case.recorder.store, one["inputs"])[1]
+    stored_cohort = case.recorder._read("cohort:" + admitted["cohort"])
+    assert load_inputs(case.recorder.store, stored_cohort, admitted["inputs_id"]) == one["inputs"]
     original = trials.load_magnitude_targets
     def labels(*a, **kw):
         committed = case.recorder._read("forecasts:" + one["trial_id"])
@@ -162,7 +173,7 @@ def test_shared_training_cohort_and_forecasts_committed_before_validation(case, 
     monkeypatch.setattr(trials, "load_magnitude_targets", labels)
     result = case.recorder.record(*args, forecasts=trial_forecasts(case, args))
     assert result["evaluation_inputs"]["labels_before"] == "2024-01-01"
-    assert result["inputs_id"] == _hash(one["inputs"])
+    assert result["inputs_id"] == admitted["inputs_id"]
 
 
 @pytest.mark.parametrize("state", ["missing", "started", "submitted"])
@@ -195,6 +206,24 @@ def test_empty_outer_folds_refuse_freeze_before_native_payloads_or_selection(cas
         recorder.freeze()
     assert trial_slots(case) == before
     assert all(slot != "selection" for slot, _ in before)
+
+
+@pytest.mark.parametrize("path", ["engine/v2/data/repository.py",
+    "engine/v2/research/magnitude_history_store.py", "experiments/magnitude_search_execution.py"])
+def test_changed_scaling_source_refuses_existing_seal_before_claim_or_inputs(case, monkeypatch, path):
+    original = trials.source_closure
+
+    def changed(*args, **kwargs):
+        sources = original(*args, **kwargs)
+        assert path in sources
+        return {**sources, path: "sha256:" + "0" * 64}
+
+    before = trial_slots(case)
+    monkeypatch.setattr(trials, "source_closure", changed)
+    monkeypatch.setattr(case.recorder, "_inputs", lambda *args: pytest.fail("changed seal opened inputs"))
+    with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search recording requires its exact sealed plan"):
+        case.recorder.start(*trial_cases(case)[0])
+    assert trial_slots(case) == before
 
 
 def test_failure_excludes_entire_candidate_and_redacts_diagnostics(case):
@@ -284,6 +313,7 @@ def test_source_and_plan_drift_refuse_before_native_payloads(case, monkeypatch):
 def test_native_input_drift_blocks_selection_without_excluding_candidate(case, monkeypatch):
     args = trial_cases(case)[0]
     started = case.recorder.start(*args)
+    case.recorder._memo.clear()
     original = case.recorder._inputs
     monkeypatch.setattr(case.recorder, "_inputs", lambda fold: {**original(fold), "stored_inputs_id": "changed"})
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("validation opened"))
@@ -297,6 +327,7 @@ def test_native_input_drift_blocks_selection_without_excluding_candidate(case, m
 def test_native_history_binding_drift_refuses_exactly_before_readmission(case, monkeypatch):
     args = trial_cases(case)[0]
     started = case.recorder.start(*args)
+    case.recorder._memo.clear()
     changed = {**case.source.registration.document["magnitude_history"], "unexpected_identity": "changed"}
     monkeypatch.setattr(evidence, "history_binding", lambda *a, **k: changed)
     monkeypatch.setattr(evidence, "preflight_magnitude_targets", lambda *a, **k: pytest.fail("preflight opened"))
