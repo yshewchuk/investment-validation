@@ -305,9 +305,8 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   An empty section has `row_count` 0, an empty shard list and no keys; any shard listed
   for it, or a nonzero count with an empty list, is a count disagreement. Parent and
   child apply the same rule. Matrix evidence keeps today's training / evaluation list
-  order. Not yet implemented (split PR 4): the child gets a header (limits, fold, horizons, execution spec, manifest,
-  expected `inputs_id`, store root) and checks the manifest hash against it, reads only manifest-named objects and opens no repository, catalog or
-  validation target. Transport memory is one shard plus the manifest.
+  order. The child-transport header design lives in split PR 4's Spec (issue #1092), not here.
+  Today the whole-payload limit still applies.
 * Shards are published, outside the catalog transaction, before the manifest append,
   which is the commit point.
 * The manifest hash is a Merkle `inputs_id`, and every cohort is sharded, including empty and one-row cohorts.
