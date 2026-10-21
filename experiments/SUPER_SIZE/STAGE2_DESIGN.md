@@ -9,9 +9,8 @@ retains the deferred work below and freezes neither a dataset nor a resource bud
 
 ## Priority and evidence
 
-The first milestone is a useful, bounded mean-magnitude comparison, not an exhaustive
-model zoo. Target roughly one engineering week for the core below, conditional on
-source provenance and review; estimates are sizing guidance, not a delivery promise.
+Target roughly one engineering week for a bounded mean-magnitude comparison,
+conditional on source provenance and review; estimates are not a delivery promise.
 If causal input or baseline work exceeds that budget, ship the safe foundations and
 postpone the search rather than relax admission or substitute a weaker comparison.
 
@@ -20,8 +19,7 @@ sealed requests and serial execution. These are infrastructure, not evidence of 
 winning model. The October 21 feedback reports 498 matched events: legacy MAE 2.79,
 history Ridge 2.97, paired difference +0.19, 95% interval [+0.10, +0.28]. These
 are separately reported rounded figures; raw estimates were not checked. It also
-reports a 2,014-event
-single-arm resource/replay run and approximately 0.17 seconds/event history build
+reports a 2,014-event single-arm resource/replay run and ~0.17 seconds/event history build
 (118k events: about 5.6 hours). None was independently reproduced for this design;
 none substitutes for the prospective nested comparison.
 
@@ -114,10 +112,15 @@ state. Advance causal prefixes/search indices across horizons and events. Reuse 
 existing immutable history artifact; do not call its producer inside the panel loop
 or repeat feature production per candidate/fold. Preserve prefix state across batch
 boundaries without retaining the full universe in memory. Reuse an exact successful
-receipt; verify bindings before reuse, with no silent source refresh. Batch source
-processing, not blindly physical output: the current history store isolates each event
-in its own fragment. Panel output may coalesce only where whole-fragment protected
-read admission remains provable; otherwise retain per-event isolation.
+receipt; verify bindings before reuse, with no silent source refresh. Publish immutable
+objects first, then atomically commit the complete validated manifest/snapshot, success
+receipt and context head via catalog.commit_snapshot. Failed batches/transactions leave
+no admissible snapshot or success receipt; unreferenced objects are never reusable rows.
+No automatic retry/resume or new context on failure; check the exact committed receipt
+after an uncertain commit before any separately authorized rebuild of the same context.
+Exact successful replay verifies identity without rebuilding; conflicts never overwrite.
+Batch source processing, not blindly physical output: retain per-event fragments unless
+whole-fragment protected-read admission is proven for coalesced output.
 
 Acceptance uses synthetic access counters: bounded source scans per ticker/batch,
 not per event, candidate or horizon; identical rows/digests across batch sizes,
@@ -189,7 +192,13 @@ All snapshot/hash fields are immutable resolved references, never "latest". `spa
 contains exactly the three family grids above; `feature_sets` contains H/HM/HMO.
 The anchor registration separately binds population, target, holdouts and clocks.
 Unknown keys, missing axes, duplicated configurations or disagreement with that
-anchor refuse before outcome reads. Each comparison arm has its own sealed identity.
+anchor refuse before outcome reads. Registration/search/comparison remain no-ledger,
+using the existing native catalog, not legacy LEDGER.csv. Each arm reserves
+run_id = "native_" + content_hash({experiment_id, arm}) without the sha256 prefix.
+The transaction admits only exact canonical-binding replay; changed bindings, existing
+spec reservations or key collisions refuse without overwrite. One plan per anchor and
+(run_id, slot) journal keys bind the v2 request/plan hash and limits. Artifact publication
+precedes catalog commit; orphan bytes confer no reservation. Replay never restarts fits.
 
 Proposed development schedule: outer_years [2022, 2023, 2024]; inner_years
 {"2022": [2020, 2021], "2023": [2021, 2022], "2024": [2022, 2023]}.
@@ -269,7 +278,7 @@ Re-estimate before each PR; split further if its actual scope exceeds those limi
 
 | Order | PR / dependency | Acceptance | Added lines: code / tests / docs | Rough effort |
 | --- | --- | --- | --- | --- |
-| 0 | This design + SPEC link | Design reviewed before code | 0 / 0 / 280–290 | This PR |
+| 0 | This design + SPEC link | Design reviewed before code | 0 / 0 / 280–300 | This PR |
 | 1 | Versioned panel schema + metadata-only plan | Closed dictionary, protected fragment refusal, identity tests | 220–340 / 250–400 / 30–60 | 0.5 day |
 | 2 | Batched causal feature materializer / 1 | Horizon/availability, poisoned future/protected rows, batch invariance, read-count tests | 300–400 / 350–550 / 40–70 | 1 day |
 | 3 | Stored reader + snapshot join / 2 | Missingness/coverage and mismatch refusal; no runtime build | 200–320 / 250–400 / 30–60 | 0.5 day |
