@@ -18,32 +18,38 @@ import time
 from pathlib import Path
 
 from engine.v2.ops.errors import fail
+from experiments.lib import (
+    FIRST_NUMBER,
+    experiment_dirs,
+    next_experiment_number,
+    parse_experiment_id,
+    slugify,
+)
 
 MAX_JSON_BYTES = 1_000_000
 
-_EXP_DIR_RE = re.compile(r"^EXP-(\d+)")
-_EXP_NUM_DIR_RE = re.compile(r"^EXP-(\d+)_")
-_SLUG_BAD_RE = re.compile(r"[^a-z0-9_]+")
-_SLUG_MULTI_UNDER_RE = re.compile(r"_+")
+_NUM_DIR_RE = re.compile(r"^EXP-(\d+)_")
 
 
 def _dump(obj) -> bytes:
     return (json.dumps(obj, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
 
-def _sanitize_slug(slug) -> str:
-    s = _SLUG_BAD_RE.sub("_", str(slug or "").lower())
-    s = _SLUG_MULTI_UNDER_RE.sub("_", s).strip("_")
-    if not s:
-        s = "run"
-    return s[:40]
+def _read_capped(path: Path) -> bytes | None:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(MAX_JSON_BYTES + 1)
+    except OSError:
+        return None
 
 
 def _read_manifest(path: Path):
+    raw = _read_capped(path)
+    if raw is None or len(raw) > MAX_JSON_BYTES:
+        return None
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            doc = json.load(fh)
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        doc = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     return doc if isinstance(doc, dict) else None
 
@@ -52,60 +58,64 @@ def _manifest_for(folder: Path):
     return _read_manifest(folder / "results" / "export_manifest.json")
 
 
-def _iter_exp_dirs(root: Path):
-    if not root.is_dir():
-        return
-    for child in sorted(root.iterdir()):
-        if child.is_dir() and _EXP_DIR_RE.match(child.name):
-            yield child
+def _is_empty_claim(folder: Path) -> bool:
+    if _manifest_for(folder) is not None:
+        return False
+    results = folder / "results"
+    try:
+        return not results.is_dir() or not any(results.iterdir())
+    except OSError:
+        return False
 
 
 def _linked_number(root: Path, experiment_id):
-    for folder in _iter_exp_dirs(root):
+    for num, folder in experiment_dirs(root).items():
         man = _manifest_for(folder)
-        if man is None:
-            continue
-        if man.get("experiment_id") == experiment_id:
-            m = _EXP_DIR_RE.match(folder.name)
-            if m:
-                return int(m.group(1))
-            num = man.get("exp_number")
-            if isinstance(num, int):
-                return num
+        if man is not None and man.get("experiment_id") == experiment_id:
+            return num
     return None
 
 
-def _highest_exp_number(root: Path) -> int:
-    highest = 0
-    for folder in _iter_exp_dirs(root):
-        m = _EXP_DIR_RE.match(folder.name)
-        if m:
-            highest = max(highest, int(m.group(1)))
-    return highest
-
-
-def _folders_with_number(root: Path, n: int):
-    out = []
+def _folders_with_number(root: Path, n: int) -> list[Path]:
     if not root.is_dir():
-        return out
+        return []
+    out = []
     for child in sorted(root.iterdir()):
         if not child.is_dir():
             continue
-        m = _EXP_NUM_DIR_RE.match(child.name)
+        m = _NUM_DIR_RE.match(child.name)
         if m and int(m.group(1)) == n:
             out.append(child)
     return out
 
 
-def resolve_exp_number(experiments_root, experiment_id, requested):
+def _check_number_folder(folder: Path, exp_number: int, experiment_id):
+    man = _manifest_for(folder)
+    if man is None:
+        if _is_empty_claim(folder):
+            return
+        raise fail(
+            "EXPERIMENT_IDENTITY_CONFLICT",
+            f"EXP-{exp_number:03d} in {folder.name} has no export manifest "
+            f"(legacy/unlinked folder), not linked to {experiment_id!r}",
+        )
+    if man.get("experiment_id") != experiment_id:
+        raise fail(
+            "EXPERIMENT_IDENTITY_CONFLICT",
+            f"EXP-{exp_number:03d} in {folder.name} already belongs to "
+            f"{man.get('experiment_id')!r}, not {experiment_id!r}",
+        )
+
+
+def resolve_exp_number(experiments_root, experiment_id, requested, slug=None):
     """Resolve the EXP number for this run.
 
     ``requested`` is None, an int, or \"auto\" (digit strings are accepted).
+    The auto case atomically claims an empty EXP-###_<slug>/ folder.
     """
     root = Path(experiments_root)
-    linked = _linked_number(root, experiment_id)
-
     req_int = None
+    is_auto = False
     if isinstance(requested, bool):
         raise fail(
             "INVALID_EXPERIMENT_SPEC",
@@ -116,7 +126,7 @@ def resolve_exp_number(experiments_root, experiment_id, requested):
     elif isinstance(requested, str):
         text = requested.strip()
         if text.lower() == "auto":
-            req_int = None
+            is_auto = True
         elif text.isdigit():
             req_int = int(text)
         else:
@@ -124,7 +134,19 @@ def resolve_exp_number(experiments_root, experiment_id, requested):
                 "INVALID_EXPERIMENT_SPEC",
                 f"invalid --exp-number {requested!r} for {experiment_id}",
             )
+    elif requested is not None:
+        raise fail(
+            "INVALID_EXPERIMENT_SPEC",
+            f"invalid --exp-number {requested!r} for {experiment_id}",
+        )
+    if req_int is not None and req_int < FIRST_NUMBER:
+        raise fail(
+            "INVALID_EXPERIMENT_SPEC",
+            f"invalid --exp-number {requested!r} for {experiment_id}: "
+            f"new experiments start at EXP-{FIRST_NUMBER}",
+        )
 
+    linked = _linked_number(root, experiment_id)
     if linked is not None:
         if req_int is not None and req_int != linked:
             raise fail(
@@ -134,30 +156,40 @@ def resolve_exp_number(experiments_root, experiment_id, requested):
             )
         return linked
 
-    if req_int is None:
-        if requested is None:
-            raise fail(
-                "INVALID_EXPERIMENT_SPEC",
-                f"run has no EXP number: {experiment_id} is not linked under "
-                f"{root} and --exp-number was not given",
-            )
-        return 1 + _highest_exp_number(root)
+    if is_auto:
+        exp_slug = slugify(slug if slug is not None else experiment_id, width=40)
+        for _ in range(50):
+            n = next_experiment_number(root)
+            try:
+                (root / f"EXP-{n:03d}_{exp_slug}").mkdir(parents=True)
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                raise fail(
+                    "RESOURCE_UNAVAILABLE",
+                    f"cannot claim EXP-{n:03d} for {experiment_id}: {exc}",
+                )
+            return n
+        raise fail(
+            "RESOURCE_UNAVAILABLE",
+            f"could not claim an EXP number for {experiment_id} after 50 tries",
+        )
 
-    existing = _folders_with_number(root, req_int)
-    for folder in existing:
-        man = _manifest_for(folder)
-        if man is None:
-            raise fail(
-                "EXPERIMENT_IDENTITY_CONFLICT",
-                f"EXP-{req_int:03d} in {folder.name} has no export manifest "
-                f"(legacy/unlinked folder), not linked to {experiment_id!r}",
-            )
-        if man.get("experiment_id") != experiment_id:
-            raise fail(
-                "EXPERIMENT_IDENTITY_CONFLICT",
-                f"EXP-{req_int:03d} in {folder.name} already belongs to "
-                f"{man.get('experiment_id')!r}, not {experiment_id!r}",
-            )
+    if req_int is None:
+        raise fail(
+            "INVALID_EXPERIMENT_SPEC",
+            f"run has no EXP number: {experiment_id} is not linked under "
+            f"{root} and --exp-number was not given",
+        )
+    try:
+        parse_experiment_id(f"EXP-{req_int:03d}")
+    except ValueError as exc:
+        raise fail(
+            "INVALID_EXPERIMENT_SPEC",
+            f"invalid --exp-number {requested!r} for {experiment_id}: {exc}",
+        )
+    for folder in _folders_with_number(root, req_int):
+        _check_number_folder(folder, req_int, experiment_id)
     return req_int
 
 
@@ -188,40 +220,51 @@ def _encode_doc(doc) -> tuple[bytes, bool]:
     return _dump(stub), True
 
 
-def _write_bytes(path: Path, data: bytes) -> tuple[bool, bool]:
-    """Atomically write ``data``; returns (wrote_new, conflicted)."""
-    if path.exists():
-        try:
-            existing = path.read_bytes()
-        except OSError:
-            existing = None
-        if existing == data:
-            return False, False
-        print(
-            f"WARNING: record_export keeping existing {path} "
-            f"({len(existing) if existing is not None else '?'} bytes) "
-            f"would-be {len(data)} bytes",
-            file=sys.stderr,
-        )
-        return False, True
+def _write_bytes(path: Path, data: bytes) -> tuple[bytes, bool, bool]:
+    """Create-only write; returns (bytes_on_disk, wrote_new, conflicted)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         dir=str(path.parent), prefix=".record_export.", suffix=".tmp"
     )
     tmp_path = Path(tmp_name)
+    persisted = data
+    wrote = False
+    conflicted = False
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp_path, path)
-    except BaseException:
+        try:
+            os.link(tmp_path, path)
+            wrote = True
+        except FileExistsError:
+            existing = _read_capped(path)
+            if existing is not None and existing == data:
+                persisted = existing
+            else:
+                print(
+                    f"WARNING: record_export keeping existing {path} "
+                    f"({len(existing) if existing is not None else '?'} bytes) "
+                    f"would-be {len(data)} bytes",
+                    file=sys.stderr,
+                )
+                conflicted = True
+                persisted = existing if existing is not None else data
+    finally:
         try:
             tmp_path.unlink()
         except OSError:
             pass
-        raise
-    return True, False
+        try:
+            dfd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
+    return persisted, wrote, conflicted
 
 
 def _resolve_folder(root: Path, exp_number: int, slug: str) -> Path:
@@ -268,20 +311,8 @@ def export_run_record(
     root = Path(experiments_root)
     exp_number = int(exp_number)
     for folder in _folders_with_number(root, exp_number):
-        man = _manifest_for(folder)
-        if man is None:
-            raise fail(
-                "EXPERIMENT_IDENTITY_CONFLICT",
-                f"EXP-{exp_number:03d} in {folder.name} has no export manifest "
-                f"(legacy/unlinked folder), not linked to {experiment_id!r}",
-            )
-        if man.get("experiment_id") != experiment_id:
-            raise fail(
-                "EXPERIMENT_IDENTITY_CONFLICT",
-                f"EXP-{exp_number:03d} in {folder.name} already belongs to "
-                f"{man.get('experiment_id')!r}, not {experiment_id!r}",
-            )
-    folder = _resolve_folder(root, exp_number, _sanitize_slug(slug))
+        _check_number_folder(folder, exp_number, experiment_id)
+    folder = _resolve_folder(root, exp_number, slugify(slug))
     results = folder / "results"
     results.mkdir(parents=True, exist_ok=True)
 
@@ -300,10 +331,10 @@ def export_run_record(
         raw, was_trimmed = _encode_doc(doc)
         if was_trimmed and name not in trimmed:
             trimmed.append(name)
-        wrote, conflict = _write_bytes(results / name, raw)
+        persisted, wrote, conflict = _write_bytes(results / name, raw)
         wrote_any = wrote_any or wrote
         conflicted = conflicted or conflict
-        file_hashes[name] = hashlib.sha256(raw).hexdigest()
+        file_hashes[name] = hashlib.sha256(persisted).hexdigest()
 
     manifest = {
         "experiment_id": experiment_id,
@@ -312,8 +343,9 @@ def export_run_record(
         "trimmed": trimmed,
         "files": file_hashes,
     }
-    man_raw = _dump(manifest)
-    wrote, conflict = _write_bytes(results / "export_manifest.json", man_raw)
+    _, wrote, conflict = _write_bytes(
+        results / "export_manifest.json", _dump(manifest)
+    )
     wrote_any = wrote_any or wrote
     conflicted = conflicted or conflict
 
@@ -322,7 +354,7 @@ def export_run_record(
         report_raw = _render_report(
             exp_number, experiment_id, outcome, report_text
         ).encode("utf-8")
-        wrote, conflict = _write_bytes(report_path, report_raw)
+        _, wrote, conflict = _write_bytes(report_path, report_raw)
         wrote_any = wrote_any or wrote
         conflicted = conflicted or conflict
 
@@ -367,7 +399,11 @@ def export_native_run(
     snapshot_id = snapshot.get("snapshot_id") if isinstance(snapshot, dict) else None
     report_text = None
     if saved["outcome"]["failure_code"] is None and report_path is not None:
-        report_text = Path(report_path).read_text()
+        report_raw = _read_capped(Path(report_path))
+        if report_raw is not None:
+            report_text = report_raw[:MAX_JSON_BYTES].decode(
+                "utf-8", errors="replace"
+            )
     closure = document.get("source_closure")
     source_closure_hash = hashlib.sha256(
         json.dumps(closure, sort_keys=True).encode("utf-8")

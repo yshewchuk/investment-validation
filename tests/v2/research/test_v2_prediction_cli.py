@@ -809,7 +809,7 @@ def test_first_successful_run_exports_exp_record_and_report(source, capsys):
     assert output["record_export"]["status"] == "written"
     export_root = source.root / "experiments"
     folders = [child for child in export_root.iterdir()
-               if child.is_dir() and child.name.startswith("EXP-001_")]
+               if child.is_dir() and child.name.startswith("EXP-101_")]
     assert len(folders) == 1
     results = folders[0] / "results"
     for name in ("export_manifest.json", "outcome.json", "spec.json",
@@ -845,3 +845,20 @@ def test_no_record_export_skips_export_with_warning(source, capsys):
     response = json.loads(captured.out)
     assert response["record_export"] == "skipped"
     assert not (source.root / "experiments").exists()
+
+
+def test_record_export_failure_keeps_outcome_and_rerun_exports(source, monkeypatch, capsys):
+    _invoke(source, capsys, "register")
+
+    def broken(*_args, **_kwargs):
+        raise fail("RESOURCE_UNAVAILABLE", "synthetic record export failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cli.record_export, "export_native_run", broken)
+        response = _invoke(source, capsys, "run", "--no-ledger", status=2)
+    assert response == {"refused": "record_export_failed"}
+    evidence = _evidence(source)
+    assert "native_smoke" in evidence
+    assert _document(source, evidence["native_smoke"])["failure_code"] is None
+    output = _invoke(source, capsys, "run", "--no-ledger")
+    assert output["record_export"]["status"] == "written"

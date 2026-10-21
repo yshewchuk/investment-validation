@@ -431,16 +431,22 @@ Layout: `REPORT.md` (stub: ids, status, the success report text), and in `result
 refusal, replay flag, resource usage as elapsed seconds and peak RSS, snapshot id, commit id) and
 `export_manifest.json` (experiment_id, EXP number, recording mode, trimmed files).
 
-EXP numbers are chosen by the operator: `--exp-number N` or `--exp-number auto` (one above the
-highest existing `EXP-*` folder). The manifest links `experiment_id` to the number.
-An experiment_id already linked reuses its number, so replay needs no flag.
+EXP numbers are chosen by the operator: `--exp-number N` or `--exp-number auto`. `auto` uses
+`lib.next_experiment_number` (never below `lib.FIRST_NUMBER`, 101) and claims the folder with an atomic
+`mkdir`, retrying on a race. An explicit N must be an integer at least `FIRST_NUMBER`. The manifest links
+`experiment_id` to the number. An experiment_id already linked reuses its number, so replay needs no flag.
+Files are created with a create-only link and a directory fsync, so a concurrent writer never replaces a record.
+Reads of existing manifests and files are capped at 1,000,000 bytes (an over-cap manifest counts as unreadable).
+Manifest hashes are of the bytes actually on disk.
 
 | Condition | Outcome |
 | --- | --- |
 | `run` with no number and no existing link | `INVALID_EXPERIMENT_SPEC` before any evaluation; `--no-record-export` skips export and prints a loud stderr warning. |
+| Malformed `--exp-number`, or a number below 101 | `INVALID_EXPERIMENT_SPEC` before any evaluation. |
 | Number held by another experiment_id, or experiment_id linked to another number | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
 | JSON file over 1,000,000 bytes | Write a summary (original bytes, sha256, longest fitting list prefix) instead; list it under `trimmed`. |
 | Existing file with different bytes | Keep the first record, warn on stderr and report `unchanged`; files are never overwritten. |
+| Crash between data files and manifest | The folder has no manifest. An explicit-number retry for the same number refuses `EXPERIMENT_IDENTITY_CONFLICT`; the operator removes the folder or picks another number (recorded as a known limit, not auto-resumed). |
 | Export fails after the outcome was published | Outcome stays valid; CLI exits 2 with `record_export_failed`, and a rerun replays then exports. |
 
 ## Reconstructed gate evaluation
