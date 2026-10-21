@@ -36,6 +36,13 @@ def _fail(msg, code=2):
     raise SystemExit(code)
 
 
+def _stem(provider, endpoint, ticker, page):
+    stem = f"{provider}__{endpoint.replace('/', '.')}__{ticker}"
+    if page is not None:
+        stem = f"{stem}__p{page}"
+    return stem
+
+
 def _valid_session(s):
     if not isinstance(s, str) or not SESSION_RE.match(s): return False
     try: datetime.strptime(s, "%Y-%m-%d"); return True
@@ -296,8 +303,7 @@ def capture(args_ns, http_get=None, now=None):
         if error is not None: meta["error"] = error
         if _leaks_key(key, meta, body):
             _fail("refusing to write provider record containing API key", 2)
-        stem = f"{provider}__{endpoint.replace('/', '.')}__{ticker}"
-        if page is not None: stem = f"{stem}__p{page}"
+        stem = _stem(provider, endpoint, ticker, page)
         _atomic_write(unit_dir / f"{stem}.body", body)
         _atomic_write(unit_dir / f"{stem}.meta.json", (json.dumps(meta, sort_keys=True, indent=2) + "\n").encode("utf-8"))
         total += 1
@@ -485,6 +491,9 @@ def _read_meta(path, session_dir, label_dir):
     page = obj.get("page")
     if page is not None and (not isinstance(page, int) or isinstance(page, bool)):
         return _skip(name, "invalid page")
+    file_stem = Path(path).name[: -len(".meta.json")]
+    if _stem(obj.get("provider"), endpoint, obj.get("ticker"), page) != file_stem:
+        return _skip(name, "identity does not match filename")
     if obj.get("label") != label_dir:
         return _skip(name, "label mismatch")
     session = obj.get("session")
@@ -518,10 +527,16 @@ def _read_meta(path, session_dir, label_dir):
     if obj.get("provider") == "massive":
         nu = parsed_body.get("next_url") if isinstance(parsed_body, dict) else None
         derived_next = _massive_next_ok(nu)
+        if nu is not None and not derived_next:
+            expected_trunc = True
+        elif derived_next and page is not None and page >= MAX_MASSIVE_PAGES - 1:
+            expected_trunc = True
+        else:
+            expected_trunc = False
         stored_next = obj.get("has_next", False)
         stored_trunc = obj.get("truncated", False)
         if (not isinstance(stored_next, bool) or stored_next != derived_next
-                or not isinstance(stored_trunc, bool)):
+                or not isinstance(stored_trunc, bool) or stored_trunc != expected_trunc):
             return _skip(name, "continuation mismatch")
     _, calc_max = _rows_and_max(obj.get("provider"), parsed_body)
     if calc_max != obj.get("max_updated_at"):

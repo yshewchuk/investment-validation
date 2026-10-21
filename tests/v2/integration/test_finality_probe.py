@@ -260,13 +260,14 @@ def test_invalid_calendar_session_exits_2_without_network_call(tmp_path, orats_k
     assert not (tmp_path / "2026-02-30").exists()
 
 
-def test_compare_session_traversal_exits_2(tmp_path):
+def test_compare_session_traversal_exits_2(tmp_path, capsys):
     with pytest.raises(SystemExit) as exc:
         finality_probe.compare(argparse.Namespace(out=str(tmp_path), session="../x"))
     assert exc.value.code == 2
+    assert "invalid session" in capsys.readouterr().err
 
 
-def test_duplicate_tickers_exit_2_without_network_call(tmp_path, orats_key):
+def test_duplicate_tickers_exit_2_without_network_call(tmp_path, orats_key, capsys):
     called = []
 
     def boom(req):
@@ -276,6 +277,7 @@ def test_duplicate_tickers_exit_2_without_network_call(tmp_path, orats_key):
     with pytest.raises(SystemExit) as exc:
         finality_probe.capture(_ns(tmp_path, tickers="SPY,SPY"), http_get=boom)
     assert exc.value.code == 2
+    assert "duplicate tickers" in capsys.readouterr().err
     assert called == []
     assert not any(tmp_path.iterdir())
 
@@ -316,13 +318,14 @@ def test_missing_env_key_exits_2_without_network_call(tmp_path, monkeypatch, cap
     assert capsys.readouterr().err == "missing ORATS_API_KEY\n"
 
 
-def test_refuses_out_dir_inside_repo(tmp_path, monkeypatch):
+def test_refuses_out_dir_inside_repo(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("ORATS_API_KEY", SENTINEL)
     repo_root = Path(__file__).resolve().parents[3]
     assert (repo_root / ".git").exists() or (repo_root / ".git").is_symlink()
     with pytest.raises(SystemExit) as exc:
         finality_probe.capture(_ns(repo_root / "tests"), http_get=_fake_get())
     assert exc.value.code == 2
+    assert "refusing to write provider data inside a repository" in capsys.readouterr().err
 
 
 def test_massive_composite_capture_compare_oracle(tmp_path, massive_key, capsys):
@@ -374,10 +377,12 @@ def test_compare_session_selection_and_stable_from(tmp_path, orats_key, capsys):
     assert "- stable_from: Y2" in out
 
 
-def test_empty_tickers_oversized_body_and_file_modes(tmp_path, orats_key):
+def test_empty_tickers_oversized_body_and_file_modes(tmp_path, orats_key, capsys):
     with pytest.raises(SystemExit) as exc:
         finality_probe.capture(_ns(tmp_path, tickers=" , "), http_get=_fake_get())
-    assert exc.value.code == 2 and not any(tmp_path.iterdir())
+    assert exc.value.code == 2
+    assert "empty ticker list" in capsys.readouterr().err
+    assert not any(tmp_path.iterdir())
 
     def too_big(req):
         raise ValueError("BodyTooLarge")
@@ -698,6 +703,68 @@ def test_identity_tamper_skipped_compare_succeeds(tmp_path, orats_key, capsys):
     assert "invalid run_id" in captured.err
     assert "session mismatch" in captured.err
     assert "- groups: 1" in captured.out
+
+
+def test_identity_fields_must_match_filename_stem(tmp_path, orats_key, capsys):
+    for lab in ("A", "B", "C"):
+        finality_probe.capture(_ns(tmp_path, label=lab), http_get=_fake_get(), now=_at(3))
+    unit = tmp_path / "2024-01-02"
+    meta_f = unit / "A" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["ticker"] = "QQQ"
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+    meta_f = unit / "B" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["provider"] = "massive"
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+    meta_f = unit / "C" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["page"] = 0
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert captured.err.count("identity does not match filename") == 3
+    assert "- groups: 0" in captured.out
+
+
+def test_truncated_tamper_on_complete_last_page_skipped(tmp_path, massive_key, capsys):
+    p0 = _mbody(MROWS, NEXT1)
+    p1 = _mbody([{"day": {"last_updated": 1700000300}, "strike": 102}])
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=_mk_get(p0, p1), now=_at(3))
+    assert rc == 0
+    meta_f = tmp_path / "2024-01-02" / "L1" / "massive__v3.snapshot.options__SPY__p1.meta.json"
+    m = json.loads(meta_f.read_text())
+    assert "truncated" not in m and m["has_next"] is False
+    m["truncated"] = True
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "continuation mismatch" in captured.err
+    after = json.loads(meta_f.read_text())
+    assert after["has_next"] is False
+    assert "- excluded_not_ok: [L1: 200]" in captured.out
+
+
+def test_truncated_tamper_on_foreign_next_url_skipped(tmp_path, massive_key, capsys):
+    def http_get(req):
+        return 200, {"content-type": "application/json"}, _mbody(MROWS, "https://evil.example/x")
+
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=http_get, now=_at(3))
+    assert rc == 1
+    meta_f = tmp_path / "2024-01-02" / "L1" / "massive__v3.snapshot.options__SPY__p0.meta.json"
+    m = json.loads(meta_f.read_text())
+    assert m.get("truncated") is True and m["has_next"] is False
+    m["truncated"] = False
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "continuation mismatch" in captured.err
+    after = json.loads(meta_f.read_text())
+    assert after["has_next"] is False
+    assert "- groups: 0" in captured.out
 
 
 def test_unusable_output_path_exits_2_without_traceback(tmp_path, orats_key, capsys):
