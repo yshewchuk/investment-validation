@@ -303,16 +303,23 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   validation target. Transport memory is one shard plus the manifest.
 * Shards are published, outside the catalog transaction, before the manifest append,
   which is the commit point.
+* The manifest hash is a Merkle `inputs_id`, and every cohort shards, however small.
+* `magnitude_search_shards` implements the cut rule, writer, manifest hash and verified reader
+  and lists the list-valued members (`LIST_MEMBERS`) as data. A member without a strictly
+  increasing sort key carries a `problem` note and no key function; the writer takes a
+  caller-supplied key and does not consult the inventory, so callers must not write such a member.
 
 | Condition | Outcome |
 |---|---|
 | Shard missing or `OSError` | Retryable `RESOURCE_UNAVAILABLE`; no association change or candidate failure. |
-| Hash/size mismatch, wrong schema or section, count or boundary-key disagreement, duplicate key, unsafe ref, manifest hash differing from `inputs_id` (parent or child) | `EXPERIMENT_IDENTITY_CONFLICT`; no rows used. |
+| Hash/size mismatch, wrong schema or section, count or boundary-key disagreement, duplicate key, invalid or unsafe ref syntax, manifest hash differing from `inputs_id` (parent or child) | `EXPERIMENT_IDENTITY_CONFLICT`; no rows used. |
 | Crash after some shards, before the manifest | Orphan shards confer no authority and are reclaimable by the store owner; the immutable claim stays unfinished. |
 | Manifest committed, later shard lost or corrupted | Fails closed as above on every read. |
 | Same slot, different manifest | `EXPERIMENT_IDENTITY_CONFLICT`. |
 | Same slot, same manifest (retry after an ambiguous append) | No-op success; shards are content-addressed, so republishing is harmless, and no cache entry depends on the attempt. |
-| A row above 8 MiB or more than 8192 shards | Nonretryable `RESOURCE_LIMIT_EXCEEDED` before the manifest append; published shards stay unreferenced. |
+| A row above 8 MiB or more than 8192 shards | Nonretryable `RESOURCE_LIMIT_EXCEEDED` before the manifest append; published shards stay unreferenced. A stored manifest or section listing more than 8192 shards is `EXPERIMENT_IDENTITY_CONFLICT`. |
+| Writer given a row whose sort key is missing, not a tuple of strings/integers, or not strictly above the previous key, or a row that is not canonical JSON or uses the reserved `__nonfinite__` key, or a manifest builder given a malformed manifest or section | `INVALID_EXPERIMENT_SPEC` before that shard is published. |
+| Read-time `UNSAFE_PATH` (for example a symlink) on a syntactically valid shard ref | Retryable `RESOURCE_UNAVAILABLE`, like a missing shard; invalid ref syntax stays a conflict. |
 | Older whole-cohort record read by sharded code | `EXPERIMENT_IDENTITY_CONFLICT`; no rewrite or migration. |
 
 Registration, snapshot, plan and execution-spec bindings are unchanged; `inputs:<trial>`
