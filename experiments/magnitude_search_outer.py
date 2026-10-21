@@ -85,7 +85,8 @@ def _validate_targets(inputs, validation, fold):
 def _result(started, inputs, inputs_id, execution, forecasts, validation, fold, horizons):
     _validate_targets(inputs, validation, fold)
     targets = {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]}
-    predictions = [{**row, "absolute_move_pct": targets[row["event_id"]]} for row in forecasts]
+    predictions = [{**row, "absolute_move_pct": targets[row["event_id"]]}
+                   for row in forecasts if row["event_id"] in targets]
     result = {"schema_version": "magnitude_search_outer_result.v1", "outer_id": started["outer_id"],
         "plan_id": started["plan_id"], "outer_year": fold["year"], "candidate": started["candidate"],
         "selection_id": started["selection_id"], "inputs_id": inputs_id,
@@ -199,7 +200,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     # All predictions and successful fit accounting are durable before any outer target opens.
     labels = load_magnitude_targets(repository, from_document(SnapshotRef, binding["snapshot"]),
         as_of_month=binding["holdouts"]["holdout_as_of_month"], labels_before=fold["evaluation_labels_before"],
-        event_ids=fold["evaluation_event_ids"])
+        event_ids=fold["evaluation_event_ids"], omit_not_computed=True)
     validation = {"evaluation_inputs": dict(labels.attrs),
                   "targets": labels[["event_id", "absolute_move_pct"]].to_dict("records")}
     _validate_targets(inputs, validation, fold)

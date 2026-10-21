@@ -367,7 +367,7 @@ class SearchTrials:
             binding = self.registration.document
             labels = load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),
                 as_of_month=binding["holdouts"]["holdout_as_of_month"], labels_before=inner["evaluation_labels_before"],
-                event_ids=inner["evaluation_event_ids"])
+                event_ids=inner["evaluation_event_ids"], omit_not_computed=True)
             validation = {"inputs_id": admitted["inputs_id"], "evaluation_inputs": dict(labels.attrs),
                           "targets": labels[["event_id", "absolute_move_pct"]].to_dict("records")}
         try:
@@ -376,7 +376,8 @@ class SearchTrials:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search validation evidence differs") from None
         validation = self._append("validation:" + admitted["cohort"], validation)
         targets = {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]}
-        scored = [{**row, "absolute_move_pct": targets[row["event_id"]]} for row in submitted]
+        scored = [{**row, "absolute_move_pct": targets[row["event_id"]]}
+                  for row in submitted if row["event_id"] in targets]
         try:
             terminal = {"status": "succeeded", "inputs_id": admitted["inputs_id"],
                         "validation_id": content_hash(validation), "evaluation_inputs": validation["evaluation_inputs"],
@@ -426,12 +427,15 @@ class SearchTrials:
                     raise ValueError
                 forecasts = [{name: row[name] for name in ("event_id", "horizon_sessions", "predicted_absolute_move_pct")}
                              for row in record["predictions"]]
-                if (submitted is None or record["inputs_id"] != admitted["inputs_id"] or forecasts != submitted
+                targets = {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]}
+                scored_forecasts = ([row for row in submitted if row["event_id"] in targets]
+                                    if submitted is not None else None)
+                if (submitted is None or record["inputs_id"] != admitted["inputs_id"]
+                        or forecasts != scored_forecasts
                         or record["validation_id"] != content_hash(validation)
                         or record["evaluation_inputs"] != validation["evaluation_inputs"]):
                     raise ValueError
-                targets = {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]}
-                expected_rows = [{**row, "absolute_move_pct": targets[row["event_id"]]} for row in submitted]
+                expected_rows = [{**row, "absolute_move_pct": targets[row["event_id"]]} for row in scored_forecasts]
                 if canonical_json(record["predictions"]) != canonical_json(expected_rows):
                     raise ValueError
                 try:
