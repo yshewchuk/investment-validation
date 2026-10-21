@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import resource
 import stat
 import sys
 import time
@@ -118,6 +119,10 @@ def _max_updated_orats(rows):
     return max(vals) if vals else None
 
 
+def _massive_next_ok(url):
+    return isinstance(url, str) and url.startswith("https://") and url.startswith(MASSIVE_ORIGIN)
+
+
 def _max_updated_massive(rows):
     vals = []
     for r in rows:
@@ -190,11 +195,13 @@ def capture(args_ns, http_get=None, now=None):
 
     def _progress(n, m=None):
         el = time.perf_counter() - t_start
+        rate = n / el if el > 0 else 0.0
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
         if m is None:
-            print(f"[capture] {n} units elapsed={int(el)}s", file=sys.stderr)
+            print(f"[capture] {n} units elapsed={int(el)}s rate={rate:.1f}/s rss={rss:.1f}MB", file=sys.stderr)
         else:
             eta = int(el / n * (m - n)) if n else 0
-            print(f"[capture] {n}/{m} units elapsed={int(el)}s eta={eta}s", file=sys.stderr)
+            print(f"[capture] {n}/{m} units elapsed={int(el)}s rate={rate:.1f}/s eta={eta}s rss={rss:.1f}MB", file=sys.stderr)
 
     def store(provider, endpoint, ticker, page, req, url_redacted, key):
         nonlocal total, not_ok, saw_massive
@@ -221,13 +228,14 @@ def capture(args_ns, http_get=None, now=None):
         truncated = False
         if provider == "massive":
             nu = parsed.get("next_url") if isinstance(parsed, dict) else None
-            if page == MAX_MASSIVE_PAGES - 1 and isinstance(nu, str) and nu.startswith(MASSIVE_ORIGIN):
+            if page == MAX_MASSIVE_PAGES - 1 and _massive_next_ok(nu):
                 truncated = True
                 print(f"[capture] warning: truncated massive pagination for {ticker} after {MAX_MASSIVE_PAGES} pages", file=sys.stderr)
-            elif nu is not None and (not isinstance(nu, str) or not nu.startswith(MASSIVE_ORIGIN)):
+            elif nu is not None and not _massive_next_ok(nu):
                 truncated = True
                 print(f"[capture] warning: non-massive next_url for {ticker} page {page}; marking truncated", file=sys.stderr)
-        ok = isinstance(parsed, dict) and 200 <= status < 300 and not truncated
+        envelope_ok = isinstance(parsed, dict) and isinstance(parsed.get("data" if provider == "orats" else "results"), list)
+        ok = envelope_ok and 200 <= status < 300 and not truncated
         meta = {
             "provider": provider, "endpoint": endpoint, "ticker": ticker, "session": session,
             "label": label, "page": page, "url_redacted": url_redacted, "status": status,
@@ -261,15 +269,21 @@ def capture(args_ns, http_get=None, now=None):
             store("orats", endpoint, ticker, None, req, _redacted_url(url, params), orats_key)
     if want_massive:
         for ticker in tickers:
+            for pattern in (f"massive__*__{ticker}__p*.body", f"massive__*__{ticker}__p*.meta.json"):
+                for stale in unit_dir.glob(pattern):
+                    stale.unlink()
             url, params = f"{MASSIVE_BASE}{ticker}", {"limit": "250"}
             for page in range(MAX_MASSIVE_PAGES):
                 req = {"url": url, "params": params, "headers": {"Accept-Encoding": "identity", "Authorization": f"Bearer {massive_key}"}, "timeout": REQUEST_TIMEOUT_S}
                 parsed = store("massive", MASSIVE_ENDPOINT, ticker, page, req, _redacted_url(url, params), massive_key)
                 next_url = parsed.get("next_url") if isinstance(parsed, dict) else None
-                if not isinstance(next_url, str) or not next_url.startswith(MASSIVE_ORIGIN):
+                if not _massive_next_ok(next_url):
                     break
                 url, params = next_url, None
     _progress(total, None if saw_massive or orats_planned == 0 else orats_planned)
+    el = time.perf_counter() - t_start
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    print(f"[capture] end units={total} elapsed={el:.1f}s rss={rss:.1f}MB", file=sys.stderr)
     return 1 if total == 0 or not_ok else 0
 
 
@@ -292,20 +306,54 @@ def _meta_ok(m):
     return m.get("status") == 200 and m.get("content_sha256") is not None
 
 
-def _header_tracks(ok_rows, hn):
-    if len(ok_rows) < 2: return "n/a"
+def _header_tracks(ok_rows, hn, composite=False):
+    if composite or len(ok_rows) < 2:
+        return "n/a"
+    pairs = []
     for i in range(len(ok_rows) - 1):
         h0 = (ok_rows[i].get("headers") or {}).get(hn)
         h1 = (ok_rows[i + 1].get("headers") or {}).get(hn)
-        if h0 is None or h1 is None: return "no"
         c0, c1 = ok_rows[i].get("content_sha256"), ok_rows[i + 1].get("content_sha256")
-        if (h0 != h1) != (c0 != c1): return "no"
+        pairs.append((h0, h1, c0 != c1))
+    if not any(content_diff for _, _, content_diff in pairs):
+        return "n/a"
+    for h0, h1, content_diff in pairs:
+        if h0 is None or h1 is None:
+            return "no"
+        if (h0 != h1) != content_diff:
+            return "no"
     return "yes"
 
 
 def _skip(name, reason):
     print(f"skipped {name}: {reason}", file=sys.stderr)
     return None
+
+
+def _body_matches(meta_path, meta):
+    name = meta_path.name
+    if not name.endswith(".meta.json"):
+        return False
+    body_path = meta_path.with_name(name[: -len(".meta.json")] + ".body")
+    try:
+        st = os.lstat(body_path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    if st.st_size > MAX_BODY_BYTES:
+        return False
+    if meta.get("body_bytes") != st.st_size:
+        return False
+    try:
+        with open(body_path, "rb") as fh:
+            data = fh.read(MAX_BODY_BYTES + 1)
+    except OSError:
+        return False
+    if len(data) != st.st_size:
+        return False
+    expected = meta.get("body_sha256")
+    return isinstance(expected, str) and hashlib.sha256(data).hexdigest() == expected
 
 
 def _read_meta(path):
@@ -332,6 +380,17 @@ def _read_meta(path):
         return _skip(name, f"invalid JSON: {exc}")
     if not isinstance(obj, dict):
         return _skip(name, "not a JSON object")
+    page = obj.get("page")
+    if page is not None and not isinstance(page, int):
+        return _skip(name, "invalid page")
+    if not isinstance(obj.get("label"), str):
+        return _skip(name, "invalid label")
+    if not isinstance(obj.get("session"), str):
+        return _skip(name, "invalid session")
+    if not isinstance(obj.get("headers"), dict):
+        obj["headers"] = {}
+    if not _body_matches(Path(path), obj):
+        return _skip(name, "body mismatch")
     return obj
 
 
@@ -385,7 +444,7 @@ def compare(args_ns):
     ff = tnf = 0
     group_trk = {}
     print("# finality compare")
-    print("- evaluated headers: etag, last-modified (age, date, content-length are displayed only)")
+    print("- evaluated headers: etag, last-modified — yes only when some pair has a content change and header-differs equals content-differs with headers present in every pair; n/a when content never changed or on composite multi-page groups (only page 0 headers kept); age, date, content-length are displayed only")
     for key in sorted(groups, key=lambda k: tuple(str(x) for x in k)):
         rows = sorted(groups[key], key=lambda r: _ts(r.get("fetched_at_utc")) or 0.0)
         ok_rows = [r for r in rows if _meta_ok(r)]
@@ -413,7 +472,7 @@ def compare(args_ns):
             uvf.append(f"{r.get('label')}: n/a" if t0 is None or t1 is None else f"{r.get('label')}: {'yes' if t0 < t1 else 'no'} gap={t1 - t0:.3f}s")
         print(f"- stable_from: {stable}\n- changed_between: {changed}\n- updatedAt_vs_fetch: {'; '.join(uvf)}\n- Rule R: \"{rule}\"")
         print(f"- excluded_not_ok: [{', '.join(f'{lab}: {st}' for lab, st in bad)}]")
-        ht = {hn: _header_tracks(ok_rows, hn) for hn in ("etag", "last-modified")}
+        ht = {hn: _header_tracks(ok_rows, hn, composite=has_pages) for hn in ("etag", "last-modified")}
         group_trk[key] = ht
         print(f"- header_tracking: etag={ht['etag']} last-modified={ht['last-modified']}")
         for i in range(n - 1):

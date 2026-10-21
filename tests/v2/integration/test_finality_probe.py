@@ -90,7 +90,9 @@ def test_capture_writes_body_meta_redacts_token_and_fills_meta_fields(tmp_path, 
     assert meta["ok"] is True
     assert meta["row_count"] == 2
     assert meta["max_updated_at"] == "1700000100"
-    assert isinstance(meta["content_sha256"], str) and len(meta["content_sha256"]) == 64
+    rows_sorted = sorted(ROWS, key=lambda r: json.dumps(r, sort_keys=True, separators=(",", ":")))
+    expected_sha = hashlib.sha256(json.dumps(rows_sorted, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    assert meta["content_sha256"] == expected_sha
 
     url = meta["url_redacted"]
     assert "token=REDACTED" in url
@@ -282,8 +284,8 @@ def test_refuses_out_dir_inside_repo(tmp_path, monkeypatch):
 
 def test_massive_composite_capture_compare_oracle(tmp_path, massive_key, capsys):
     p0 = _mbody(MROWS, NEXT1)
-    p1 = _mbody([{"day": {"last_updated": 1700000300}, "strike": 102}])
-    p1c = _mbody([{"day": {"last_updated": 1700000300}, "strike": 999}])
+    p1 = _mbody([{"day": {"last_updated": 1700000300}, "last_quote": {"last_updated": 1700000400}, "strike": 102}])
+    p1c = _mbody([{"day": {"last_updated": 1700000300}, "last_quote": {"last_updated": 1700000400}, "strike": 999}])
     for i, (lab, pg1) in enumerate((("A", p1), ("B", p1), ("C", p1c))):
         rc = finality_probe.capture(_ns(tmp_path, label=lab, endpoints="", massive=True),
                                     http_get=_mk_get(p0, pg1), now=_at(3 + i))
@@ -294,6 +296,8 @@ def test_massive_composite_capture_compare_oracle(tmp_path, massive_key, capsys)
     assert out.count("## 2024-01-02 massive v3/snapshot/options SPY page=None") == 1
     assert "page=0" not in out and "page=1" not in out
     assert "pages=2" in out and "- groups: 1" in out
+    assert "| 2 | 1700000400 |" in out
+    assert "etag=n/a" in out and "last-modified=n/a" in out
     for line in out.splitlines():
         if line.startswith("- pair A->B:"):
             assert "false_final=True" in line and "true_not_final=False" in line
@@ -343,3 +347,95 @@ def test_empty_tickers_oversized_body_and_file_modes(tmp_path, orats_key):
     assert stat.S_IMODE((tmp_path / "2024-01-02").stat().st_mode) == 0o700
     assert stat.S_IMODE(unit.stat().st_mode) == 0o700
     assert all(stat.S_IMODE(f.stat().st_mode) == 0o600 for f in unit.iterdir())
+
+
+def test_header_tracking_na_when_content_never_changes(tmp_path, orats_key, capsys):
+    finality_probe.capture(_ns(tmp_path, label="L1"), http_get=_fake_get(_body(), {"etag": "e1"}), now=_at(3))
+    finality_probe.capture(_ns(tmp_path, label="L2"), http_get=_fake_get(_body(), {"etag": "e1"}), now=_at(4))
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    assert "etag=n/a" in out
+    assert "last-modified=n/a" in out
+
+
+def test_massive_retry_removes_stale_pages(tmp_path, massive_key, capsys):
+    p0 = _mbody(MROWS, NEXT1)
+    p1 = _mbody([{"day": {"last_updated": 1700000300}, "strike": 102}])
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=_mk_get(p0, p1), now=_at(3))
+    assert rc == 0
+    unit = tmp_path / "2024-01-02" / "L1"
+    assert (unit / "massive__v3.snapshot.options__SPY__p1.body").is_file()
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=_fake_get(_mbody(MROWS)), now=_at(4))
+    assert rc == 0
+    assert (unit / "massive__v3.snapshot.options__SPY__p0.body").is_file()
+    assert not (unit / "massive__v3.snapshot.options__SPY__p1.body").exists()
+    assert not (unit / "massive__v3.snapshot.options__SPY__p1.meta.json").exists()
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    assert "pages=1" in out and "pages=2" not in out
+
+
+def test_compare_skips_tampered_body(tmp_path, orats_key, capsys):
+    finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    (tmp_path / "2024-01-02" / "L1" / "orats__hist.strikes__SPY.body").write_bytes(b"tampered")
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "body mismatch" in captured.err
+    assert "- groups: 0" in captured.out
+
+
+def test_error_envelope_marked_not_ok(tmp_path, orats_key):
+    payload = json.dumps({"error": "x"}).encode("utf-8")
+    rc = finality_probe.capture(_ns(tmp_path), http_get=_fake_get(payload), now=_at(3))
+    assert rc == 1
+    meta = json.loads((tmp_path / "2024-01-02" / "L1" / "orats__hist.strikes__SPY.meta.json").read_text())
+    assert meta["status"] == 200 and meta["ok"] is False
+
+
+def test_invalid_page_meta_skipped_compare_succeeds(tmp_path, orats_key, capsys):
+    finality_probe.capture(_ns(tmp_path, label="L1"), http_get=_fake_get(), now=_at(3))
+    finality_probe.capture(_ns(tmp_path, label="L2"), http_get=_fake_get(), now=_at(4))
+    meta_f = tmp_path / "2024-01-02" / "L2" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["page"] = "x"
+    meta_f.write_text(json.dumps(m))
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "skipped" in captured.err and "invalid page" in captured.err
+    assert "- groups: 1" in captured.out
+
+
+def test_default_http_get_enforces_body_cap(monkeypatch):
+    import requests
+    monkeypatch.setattr(finality_probe, "MAX_BODY_BYTES", 100)
+
+    class FakeResp:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def iter_content(self, chunk_size):
+            yield b"a" * 60
+            yield b"b" * 60
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResp())
+    with pytest.raises(ValueError):
+        finality_probe._default_http_get({"url": "https://example.com/x"})
+
+
+def test_massive_next_url_off_origin_stops_paging(tmp_path, massive_key):
+    def http_get(req):
+        return 200, {"content-type": "application/json"}, _mbody(MROWS, "https://evil.example/x")
+
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=http_get, now=_at(3))
+    assert rc == 1
+    unit = tmp_path / "2024-01-02" / "L1"
+    assert not list(unit.glob("*__p1.*"))
+    m = json.loads((unit / "massive__v3.snapshot.options__SPY__p0.meta.json").read_text())
+    assert m.get("truncated") is True and m["ok"] is False
