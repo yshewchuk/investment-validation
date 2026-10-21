@@ -1,8 +1,11 @@
 # SUPER SIZE stage 2: causal panel features and bounded magnitude search
 
-Status: proposed design, not implemented or preregistered. Check this document in
-before runtime changes. [Current executable contract](SPEC.md) remains authoritative.
-This design freezes neither a dataset nor permission to read protected outcomes.
+Status: core scope and causal legacy-refit baseline accepted by the owner on
+October 21, 2026. Implementation remains pending; nothing is preregistered.
+Owner acceptance is not gate/review approval or authority for actual registration,
+private-data reads, experiment runs or merging. Check this document in before code.
+[Current executable contract](SPEC.md) remains authoritative. The accepted scope
+retains the deferred work below and freezes neither a dataset nor a resource budget.
 
 ## Priority and evidence
 
@@ -249,8 +252,10 @@ row bootstrap or claim that intervals account for every prior adaptive design ch
 A negative difference favors the challenger. No significance-driven stopping,
 deployment, final holdout read or release follows automatically from this experiment.
 
-Before sealing, owner confirms exact immutable inputs, coverage/year feasibility,
-resource limits and the baseline reproduction contract. RMSE remains primary unless
+The owner accepted the core and causal legacy-refit approach on October 21. Before
+sealing, still confirm exact immutable inputs, coverage/year feasibility and numeric
+resource limits, and verify the implementation matches the accepted baseline contract.
+RMSE remains primary unless
 an explicit scientific amendment is registered before outcomes. A practical minimum
 gain/promotion rule is a separate future decision; this run reports evidence only.
 
