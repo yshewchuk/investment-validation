@@ -41,7 +41,7 @@ Require exactly one row for each admitted event and each horizon, including rows
 with unavailable optional inputs. Never silently complete-case filter the cohort.
 
 The context binds source snapshot/closure, exact history snapshot, selected-event
-manifest, holdout month and membership versions, target/clock/availability policies,
+manifest, holdout month/membership versions, eligibility policy ID, target/clock/availability policies,
 training/history start, evaluation years, feature dictionary and producer/environment
 hashes. Each row retains cutoff ID, source-session ceiling, block source date and
 availability/knowledge mode, consumed source row/fragment identities, missingness
@@ -81,14 +81,17 @@ below may add its audited input aliases without exposing them as search predicto
 ### Admission before data and values
 
 Owner clarification (October 21): the holdouts are complementary, not interchangeable.
-The recent-month chronological block is the primary forward-time confirmation; none
-of it enters training, tuning, feature selection or calibration. Random-event holdouts
-check broader historical event/regime robustness, not regime independence or temporal
-isolation on their own. They cannot replace the time block. Report layers separately;
-preregister the joint interpretation/decision rule before either is opened.
+Recent-month chronological holdout is primary forward confirmation: no training, tuning, selection or calibration.
+Random events check historical event/regime robustness, not independence or standalone temporal isolation.
+They cannot replace time holdouts. Report layers separately; preregister the joint decision before opening either.
 
-Use a fixed inclusive ±30-calendar-day window around each random-held event date for
-that ticker. Exclude a whole development event (all 1/3/5-session horizons) if its
+Platform ownership: a reusable versioned eligibility policy in `engine/v2/research`,
+not a SUPER SIZE filter. New consumers bind sealed policy IDs/parameters and exclusion
+manifests into run identity/coverage. Existing v1 consumers remain unchanged; adoption
+requires explicit versioned migration, never retroactive filtering. Cross-consumer tests
+must prove identical grouped admission and refusal on missing/conflicting policy identities.
+SUPER SIZE preregisters 30 days (not a platform constant): an inclusive ±30-calendar-day window for
+each random-held event's ticker/date. Exclude a whole development event (all 1/3/5-session horizons) if its
 label interval, event date or any forecast decision/source-session ceiling overlaps
 any such window. Apply the same metadata-first exclusion before preprocessing,
 selection, calibration and fits, including the legacy baseline; preserve protected
@@ -103,8 +106,7 @@ rows, but numerical predictors use only causal prefixes through each source-sess
 ceiling and declared availability cutoff. Physical decoding proves neither numerical eligibility nor publication.
 Long-memory price/IV features and cross-ticker correlations can retain event effects
 beyond 30 days; the embargo does not erase those effects or prove random-layer isolation.
-The separate chronological check addresses forward-time evidence, not a guarantee of
-regime independence. Enforce declared availability/strict prior-label cutoffs and frozen missing policies;
+Chronological evidence does not guarantee regime independence. Enforce availability/strict prior-label cutoffs and frozen missing policies;
 never backdate known-late inputs into an observed-PIT claim. This policy clarification
 is no authority for private reads, opening either holdout, registration or execution.
 Slice 1 metadata admission alone still grants no raw-payload access.
@@ -152,12 +154,10 @@ Do not use coefficients from all data to preselect inner-fold features.
 Cross each of H/HM/HMO with Ridge alpha [0.1, 1, 10], ElasticNet's six combinations,
 and two HGB configurations: current fixed defaults with max_leaf_nodes [7, 15].
 All remaining HGB knobs stay fixed as in SPEC. This yields **33 candidates**.
-Candidate identity binds family, subset's ordered dictionary hash, all parameters,
-preprocessing, seed 0, projection and feature/source identities. No greedy subset
+Candidate identity binds family, ordered dictionary hash, all parameters, preprocessing, seed 0, projection and feature/source identities. No greedy subset
 search, recursive elimination, global importance screen or outer-score tuning.
 
-Inner years must be earlier than the outer year and their labels complete before
-its fit cutoff. Expanding training uses only earlier, strictly available labels;
+Inner years/complete labels precede the outer fit cutoff; expanding training uses earlier, strictly available labels;
 keep all horizons of an event together and preserve existing label-window purging.
 Select once per outer year by pooled inner event/horizon RMSE, exact ties by canonical
 candidate ID. Fit the selected recipe on outer training only; outer outcomes never
@@ -190,7 +190,7 @@ schema dependency does not replace temporal/identity/budget checks.
 
 The proposed request has required keys:
 `schema_version=magnitude_search_request.v2`, `feature_snapshot_id`,
-`history_snapshot_id`, `feature_dictionary_hash`, `feature_sets`, `space`,
+`history_snapshot_id`, `feature_dictionary_hash`, `eligibility_policy_ref`, `feature_sets`, `space`,
 `outer_years`, `inner_years`, `max_candidates`, `max_fits`, `comparison`, `limits`.
 All snapshot/hash fields are immutable resolved references, never "latest". `space`
 contains exactly the three family grids above; `feature_sets` contains H/HM/HMO.
@@ -272,23 +272,23 @@ gain/promotion rule is a separate future decision; this run reports evidence onl
 
 ## 5. Small PR sequence and acceptance
 
-Each runtime PR targets <=400 added non-test code lines and <=120 documentation lines;
-split add/wire changes again if needed. Tests accompany the contract they exercise.
+Each runtime PR targets <=400 added non-test code lines/<=120 doc lines; split add/wire further as needed with contract tests.
 Estimates exclude full-universe jobs/review queues. Ranges count added code/tests/docs, not deletions.
 Re-estimate before each PR and split at repository limits; these estimates grant no waiver.
 
 | Order | PR / dependency | Acceptance | Added lines: code / tests / docs | Rough effort |
 | --- | --- | --- | --- | --- |
 | 0 | This design + SPEC link | Design reviewed before code | 0 / 0 / 280–300 | This PR |
+| P | Shared versioned eligibility policy / 0 | Grouped ticker/time exclusions, stable eval membership, cross-consumer identity/admission tests; no v1 migration | 200–320 / 250–400 / 35–60 | 0.5 day |
 | 1 | Versioned panel schema + metadata-only plan | Closed dictionary, protected fragment refusal, identity tests | 220–340 / 250–400 / 30–60 | 0.5 day |
-| 2 | Batched causal feature materializer / 1 | Horizon/availability, poisoned future/protected rows, batch invariance, read-count tests | 300–400 / 350–550 / 40–70 | 1 day |
+| 2 | Batched causal feature materializer / 1,P | Horizon/availability, poisoned future/protected rows, batch invariance, read-count tests | 300–400 / 350–550 / 40–70 | 1 day |
 | 3 | Stored reader + snapshot join / 2 | Missingness/coverage and mismatch refusal; no runtime build | 200–320 / 250–400 / 30–60 | 0.5 day |
 | 4 | ElasticNet recipe + subset identity / 3 | Train-only preprocessing, convergence/failure, sparse selection tests | 160–280 / 200–350 / 25–50 | 0.5 day |
-| 5 | v2 bounded planner/executor wiring / 4 | Exact 33/603 counts, temporal rejection, immutable replay | 280–400 / 300–500 / 40–80 | 0.5–1 day |
+| 5 | v2 bounded planner/executor wiring / 4,P | Exact 33/603 counts, temporal rejection, immutable replay | 280–400 / 300–500 / 40–80 | 0.5–1 day |
 | 6 | Causal legacy comparison adapter / 3 | Pinned recipe parity, same clocks, protected implied history | 250–380 / 300–500 / 35–70 | 0.5–1 day |
 | 7 | Matched report + request fixture / 5,6 | Paired membership/weights, bootstrap determinism, coverage, receipt checks | 220–350 / 250–400 / 40–80 | 0.5 day |
 
-PRs 2 and 6 are the primary schedule risks. If either exceeds its slice, narrow optional
+PRs P, 2 and 6 are schedule risks. If they exceed their slices, narrow optional
 feature blocks before sealing; keep causality and the legacy comparison mandatory.
 After code/review: authorized metadata/pilot checks, publish the concrete request for
 review, then separately register and let the user run locally. No actual data read,
