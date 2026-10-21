@@ -270,6 +270,8 @@ def capture(args_ns, http_get=None, now=None):
     for e in endpoints:
         if not ENDPOINT_RE.match(e) or ".." in e:
             _fail(f"invalid ORATS endpoint {e!r}", 2)
+    if len(set(endpoints)) != len(endpoints):
+        _fail(f"duplicate ORATS endpoints {endpoints!r}", 2)
     want_massive = bool(massive_arg)
     orats_key = os.environ.get("ORATS_API_KEY") or ""
     massive_key = os.environ.get("MASSIVE_API_KEY") or ""
@@ -289,162 +291,185 @@ def capture(args_ns, http_get=None, now=None):
             and unit_dir.is_dir()
             and any(unit_dir.glob("*.meta.json"))):
         _fail("label already captured; pass --replace to invalidate the prior capture", 2)
-    _mkdirs(unit_dir)
-    if replace and unit_dir.is_dir():
-        for entry in unit_dir.iterdir():
-            if not entry.name.endswith((".meta.json", ".body")):
-                continue
-            try:
-                st = entry.lstat()
-            except OSError as exc:
-                _fail_path(exc)
-            if stat.S_ISREG(st.st_mode):
+    try:
+        _mkdirs(unit_dir)
+    except OSError as exc:
+        _fail_path(exc)
+    lock_path = unit_dir / ".capture.lock"
+    try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        _fail("label is locked by another capture (remove .capture.lock if stale)", 2)
+    try:
+        os.write(lock_fd, str(os.getpid()).encode("utf-8"))
+        os.close(lock_fd)
+        lock_fd = None
+        if replace and unit_dir.is_dir():
+            for entry in unit_dir.iterdir():
+                if entry.name == lock_path.name or not entry.name.endswith((".meta.json", ".body")):
+                    continue
                 try:
-                    entry.unlink()
+                    st = entry.lstat()
                 except OSError as exc:
                     _fail_path(exc)
-    run_id = uuid.uuid4().hex
-    orats_planned = len(endpoints) * len(tickers)
-    start_units, massive_note = orats_planned, ""
-    if orats_planned == 0 and want_massive:
-        start_units = len(tickers)
-        massive_note = f" massive_tickers={start_units}"
-    t_start = time.perf_counter()
-    start_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-    print(f"[capture] start units={start_units}{massive_note} label={label} elapsed=0 rss={start_rss:.1f}MB", file=sys.stderr)
-    total = not_ok = 0
-    saw_massive = False
-    last_prog_t = time.perf_counter()
-    mpages = {"t0": None, "total": 0, "k": 0, "n": 0}
+                if stat.S_ISREG(st.st_mode):
+                    try:
+                        entry.unlink()
+                    except OSError as exc:
+                        _fail_path(exc)
+        run_id = uuid.uuid4().hex
+        orats_planned = len(endpoints) * len(tickers)
+        start_units, massive_note = orats_planned, ""
+        if orats_planned == 0 and want_massive:
+            start_units = len(tickers)
+            massive_note = f" massive_tickers={start_units}"
+        t_start = time.perf_counter()
+        start_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        print(f"[capture] start units={start_units}{massive_note} label={label} elapsed=0 rss={start_rss:.1f}MB", file=sys.stderr)
+        total = not_ok = 0
+        saw_massive = False
+        last_prog_t = time.perf_counter()
+        mpages = {"t0": None, "total": 0, "k": 0, "n": 0}
 
-    def _progress(n, m=None):
-        el = time.perf_counter() - t_start
-        rate = n / el if el > 0 else 0.0
-        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-        if m is None:
-            print(f"[capture] {n} units elapsed={int(el)}s rate={rate:.1f}/s rss={rss:.1f}MB", file=sys.stderr)
-        else:
-            eta = int(el / n * (m - n)) if n else 0
-            print(f"[capture] {n}/{m} units elapsed={int(el)}s rate={rate:.1f}/s eta={eta}s rss={rss:.1f}MB", file=sys.stderr)
-
-    def store(provider, endpoint, ticker, page, req, url_redacted, key):
-        nonlocal total, not_ok, saw_massive, last_prog_t
-        t0 = time.perf_counter()
-        status, rhdrs, body, error = 0, {}, b"", None
-        try:
-            status, rhdrs, body = http_get(req)
-            body, status = bytes(body), int(status)
-        except Exception as exc:
-            error, status, rhdrs, body = type(exc).__name__, 0, {}, b""
-        elapsed_ms = int((time.perf_counter() - t0) * 1000)
-        headers = {str(k).lower(): v for k, v in (rhdrs or {}).items() if str(k).lower() not in DROP_HEADERS}
-        row_count = max_updated_at = content_sha = parsed = None
-        try:
-            parsed = json.loads(body)
-        except Exception:
-            parsed = None
-        env_rows = _envelope_rows(provider, parsed)
-        if env_rows is not None:
-            rows, max_updated_at = _rows_and_max(provider, parsed)
-            row_count = len(rows)
-            content_sha = _content_sha256(rows)
-        truncated = False
-        has_next = False
-        if provider == "massive":
-            nu = parsed.get("next_url") if isinstance(parsed, dict) else None
-            has_next = _massive_next_ok(nu, ticker)
-            if page == MAX_MASSIVE_PAGES - 1 and has_next:
-                truncated = True
-                print(f"[capture] warning: truncated massive pagination for {ticker} after {MAX_MASSIVE_PAGES} pages", file=sys.stderr)
-            elif nu is not None and not has_next:
-                truncated = True
-                print(f"[capture] warning: non-massive next_url for {ticker} page {page}; marking truncated", file=sys.stderr)
-        envelope_ok = env_rows is not None
-        ok = envelope_ok and 200 <= status < 300 and not truncated
-        meta = {
-            "provider": provider, "endpoint": endpoint, "ticker": ticker, "session": session,
-            "label": label, "page": page, "url_redacted": url_redacted, "status": status,
-            "ok": ok, "fetched_at_utc": now().isoformat(), "elapsed_ms": elapsed_ms,
-            "headers": headers, "body_sha256": hashlib.sha256(body).hexdigest(),
-            "body_bytes": len(body), "row_count": row_count, "max_updated_at": max_updated_at,
-            "content_sha256": content_sha, "hash_policy": HASH_POLICY, "run_id": run_id,
-        }
-        if provider == "massive":
-            meta["has_next"] = has_next
-        if truncated:
-            meta["truncated"] = True
-        if error is not None:
-            meta["error"] = error
-        if _leaks_key(key, meta, body):
-            _fail("refusing to write provider record containing API key", 2)
-        stem = _stem(provider, endpoint, ticker, page)
-        _atomic_write(unit_dir / f"{stem}.body", body)
-        _atomic_write(unit_dir / f"{stem}.meta.json", (json.dumps(meta, sort_keys=True, indent=2) + "\n").encode("utf-8"))
-        total += 1
-        if not ok:
-            not_ok += 1
-        if provider == "massive":
-            saw_massive = True
-            mpages["total"] += 1
-        c12 = content_sha[:12] if content_sha else None
-        print(f"{label} {provider} {ticker} status={status} rows={row_count} max_updated_at={max_updated_at} content={c12}")
-        now_t = time.perf_counter()
-        if now_t - last_prog_t >= 30.0:
-            last_prog_t = now_t
-            if provider == "massive":
-                el = now_t - t_start
-                rate = total / el if el > 0 else 0.0
-                rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-                avg_pg = ((now_t - mpages["t0"]) / mpages["total"]
-                          if mpages["t0"] is not None and mpages["total"] else 0.0)
-                eta_max = int(avg_pg * (MAX_MASSIVE_PAGES - (page + 1)))
-                tickers_left = max(0, mpages["n"] - mpages["k"] + 1)
-                print(f"[capture] {total} pages elapsed={int(el)}s rate={rate:.1f}/s eta_max={eta_max}s tickers_left={tickers_left} rss={rss:.1f}MB", file=sys.stderr)
+        def _progress(n, m=None):
+            el = time.perf_counter() - t_start
+            rate = n / el if el > 0 else 0.0
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            if m is None:
+                print(f"[capture] {n} units elapsed={int(el)}s rate={rate:.1f}/s rss={rss:.1f}MB", file=sys.stderr)
             else:
-                _progress(total, None if orats_planned == 0 else orats_planned)
-        return parsed, ok
+                eta = int(el / n * (m - n)) if n else 0
+                print(f"[capture] {n}/{m} units elapsed={int(el)}s rate={rate:.1f}/s eta={eta}s rss={rss:.1f}MB", file=sys.stderr)
 
-    for endpoint in endpoints:
-        for ticker in tickers:
-            params = {"ticker": ticker, "tradeDate": session, "token": orats_key}
-            url = f"{ORATS_BASE}{endpoint}"
-            req = {"url": url, "params": params, "headers": {"Accept-Encoding": "identity"}, "timeout": REQUEST_TIMEOUT_S}
-            store("orats", endpoint, ticker, None, req, _redacted_url(url, params), orats_key)
-    if want_massive:
-        n_tickers = len(tickers)
-        m_start = time.perf_counter()
-        mpages["n"] = n_tickers
-        mpages["t0"] = m_start
-        for k, ticker in enumerate(tickers, 1):
-            mpages["k"] = k
-            url, params = f"{MASSIVE_BASE}{ticker}", {"limit": "250"}
-            pages_stored = 0
-            ticker_ok = True
-            for page in range(MAX_MASSIVE_PAGES):
-                req = {"url": url, "params": params, "headers": {"Accept-Encoding": "identity", "Authorization": f"Bearer {massive_key}"}, "timeout": REQUEST_TIMEOUT_S}
-                parsed, page_ok = store("massive", MASSIVE_ENDPOINT, ticker, page, req, _redacted_url(url, params), massive_key)
-                pages_stored = page + 1
-                if not page_ok:
-                    ticker_ok = False
-                next_url = parsed.get("next_url") if isinstance(parsed, dict) else None
-                if not _massive_next_ok(next_url, ticker):
-                    break
-                url, params = next_url, None
-            if ticker_ok and pages_stored:
-                last = pages_stored - 1
-                for pattern in (f"massive__*__{ticker}__p*.body", f"massive__*__{ticker}__p*.meta.json"):
-                    for stale in unit_dir.glob(pattern):
-                        m = re.search(r"__p(\d+)\.(?:body|meta\.json)$", stale.name)
-                        if m and int(m.group(1)) > last:
-                            stale.unlink()
-            el = time.perf_counter() - m_start
-            eta = int(el / k * (n_tickers - k))
-            print(f"[capture] massive ticker {k}/{n_tickers} pages={pages_stored} elapsed={int(el)}s eta={eta}s", file=sys.stderr)
-    _progress(total, None if saw_massive or orats_planned == 0 else orats_planned)
-    el = time.perf_counter() - t_start
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-    print(f"[capture] end units={total} elapsed={el:.1f}s rss={rss:.1f}MB", file=sys.stderr)
-    return 1 if total == 0 or not_ok else 0
+        def store(provider, endpoint, ticker, page, req, url_redacted, key):
+            nonlocal total, not_ok, saw_massive, last_prog_t
+            t0 = time.perf_counter()
+            status, rhdrs, body, error = 0, {}, b"", None
+            try:
+                status, rhdrs, body = http_get(req)
+                body, status = bytes(body), int(status)
+            except Exception as exc:
+                error, status, rhdrs, body = type(exc).__name__, 0, {}, b""
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            fetched_at = now().isoformat()
+            headers = {str(k).lower(): v for k, v in (rhdrs or {}).items() if str(k).lower() not in DROP_HEADERS}
+            row_count = max_updated_at = content_sha = parsed = None
+            try:
+                parsed = json.loads(body)
+            except Exception:
+                parsed = None
+            env_rows = _envelope_rows(provider, parsed)
+            if env_rows is not None:
+                rows, max_updated_at = _rows_and_max(provider, parsed)
+                row_count = len(rows)
+                content_sha = _content_sha256(rows)
+            truncated = False
+            has_next = False
+            if provider == "massive":
+                nu = parsed.get("next_url") if isinstance(parsed, dict) else None
+                has_next = _massive_next_ok(nu, ticker)
+                if page == MAX_MASSIVE_PAGES - 1 and has_next:
+                    truncated = True
+                    print(f"[capture] warning: truncated massive pagination for {ticker} after {MAX_MASSIVE_PAGES} pages", file=sys.stderr)
+                elif nu is not None and not has_next:
+                    truncated = True
+                    print(f"[capture] warning: non-massive next_url for {ticker} page {page}; marking truncated", file=sys.stderr)
+            envelope_ok = env_rows is not None
+            ok = envelope_ok and 200 <= status < 300 and not truncated
+            meta = {
+                "provider": provider, "endpoint": endpoint, "ticker": ticker, "session": session,
+                "label": label, "page": page, "url_redacted": url_redacted, "status": status,
+                "ok": ok, "fetched_at_utc": fetched_at, "elapsed_ms": elapsed_ms,
+                "headers": headers, "body_sha256": hashlib.sha256(body).hexdigest(),
+                "body_bytes": len(body), "row_count": row_count, "max_updated_at": max_updated_at,
+                "content_sha256": content_sha, "hash_policy": HASH_POLICY, "run_id": run_id,
+            }
+            if provider == "massive":
+                meta["has_next"] = has_next
+            if truncated:
+                meta["truncated"] = True
+            if error is not None:
+                meta["error"] = error
+            if _leaks_key(key, meta, body):
+                _fail("refusing to write provider record containing API key", 2)
+            stem = _stem(provider, endpoint, ticker, page)
+            _atomic_write(unit_dir / f"{stem}.body", body)
+            _atomic_write(unit_dir / f"{stem}.meta.json", (json.dumps(meta, sort_keys=True, indent=2) + "\n").encode("utf-8"))
+            total += 1
+            if not ok:
+                not_ok += 1
+            if provider == "massive":
+                saw_massive = True
+                mpages["total"] += 1
+            c12 = content_sha[:12] if content_sha else None
+            print(f"{label} {provider} {ticker} status={status} rows={row_count} max_updated_at={max_updated_at} content={c12}")
+            now_t = time.perf_counter()
+            if now_t - last_prog_t >= 30.0:
+                last_prog_t = now_t
+                if provider == "massive":
+                    el = now_t - t_start
+                    rate = total / el if el > 0 else 0.0
+                    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                    avg_pg = ((now_t - mpages["t0"]) / mpages["total"]
+                              if mpages["t0"] is not None and mpages["total"] else 0.0)
+                    eta_max = int(avg_pg * (MAX_MASSIVE_PAGES - (page + 1)))
+                    tickers_left = max(0, mpages["n"] - mpages["k"] + 1)
+                    print(f"[capture] {total} pages elapsed={int(el)}s rate={rate:.1f}/s eta_max={eta_max}s tickers_left={tickers_left} rss={rss:.1f}MB", file=sys.stderr)
+                else:
+                    _progress(total, None if orats_planned == 0 else orats_planned)
+            return parsed, ok
+
+        for endpoint in endpoints:
+            for ticker in tickers:
+                params = {"ticker": ticker, "tradeDate": session, "token": orats_key}
+                url = f"{ORATS_BASE}{endpoint}"
+                req = {"url": url, "params": params, "headers": {"Accept-Encoding": "identity"}, "timeout": REQUEST_TIMEOUT_S}
+                store("orats", endpoint, ticker, None, req, _redacted_url(url, params), orats_key)
+        if want_massive:
+            n_tickers = len(tickers)
+            m_start = time.perf_counter()
+            mpages["n"] = n_tickers
+            mpages["t0"] = m_start
+            for k, ticker in enumerate(tickers, 1):
+                mpages["k"] = k
+                url, params = f"{MASSIVE_BASE}{ticker}", {"limit": "250"}
+                pages_stored = 0
+                ticker_ok = True
+                for page in range(MAX_MASSIVE_PAGES):
+                    req = {"url": url, "params": params, "headers": {"Accept-Encoding": "identity", "Authorization": f"Bearer {massive_key}"}, "timeout": REQUEST_TIMEOUT_S}
+                    parsed, page_ok = store("massive", MASSIVE_ENDPOINT, ticker, page, req, _redacted_url(url, params), massive_key)
+                    pages_stored = page + 1
+                    if not page_ok:
+                        ticker_ok = False
+                    next_url = parsed.get("next_url") if isinstance(parsed, dict) else None
+                    if not _massive_next_ok(next_url, ticker):
+                        break
+                    url, params = next_url, None
+                if ticker_ok and pages_stored:
+                    last = pages_stored - 1
+                    for pattern in (f"massive__*__{ticker}__p*.body", f"massive__*__{ticker}__p*.meta.json"):
+                        for stale in unit_dir.glob(pattern):
+                            m = re.search(r"__p(\d+)\.(?:body|meta\.json)$", stale.name)
+                            if m and int(m.group(1)) > last:
+                                stale.unlink()
+                el = time.perf_counter() - m_start
+                eta = int(el / k * (n_tickers - k))
+                print(f"[capture] massive ticker {k}/{n_tickers} pages={pages_stored} elapsed={int(el)}s eta={eta}s", file=sys.stderr)
+        _progress(total, None if saw_massive or orats_planned == 0 else orats_planned)
+        el = time.perf_counter() - t_start
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        print(f"[capture] end units={total} elapsed={el:.1f}s rss={rss:.1f}MB", file=sys.stderr)
+        return 1 if total == 0 or not_ok else 0
+    finally:
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
 
 
 def _ts(v):

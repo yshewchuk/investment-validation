@@ -1221,6 +1221,15 @@ def test_massive_periodic_progress_includes_eta_max_and_tickers_left(tmp_path, m
     err = capsys.readouterr().err
     lines = [ln for ln in err.splitlines() if "eta_max=" in ln]
     assert lines, err
+    page_budget = finality_probe.MAX_MASSIVE_PAGES
+    pages_per_ticker = 2 if json.loads(p0).get("next_url") else 1
+    for ln in lines:
+        total = int(ln.split("[capture] ")[1].split(" pages")[0])
+        el = int(ln.split("elapsed=")[1].split("s")[0])
+        page = (total - 1) % pages_per_ticker
+        expected_eta = int((el - 62) / total * (page_budget - (page + 1)))
+        actual_eta = int(ln.split("eta_max=")[1].split("s")[0])
+        assert actual_eta == expected_eta, ln
     assert any("tickers_left=2" in ln for ln in lines), err
     assert any("tickers_left=1" in ln for ln in lines), err
     assert "massive ticker 1/2" in err
@@ -1255,11 +1264,15 @@ def test_default_http_get_kwargs_close_and_success(monkeypatch):
 
     monkeypatch.setattr(requests, "get", fake_get)
     status, hdrs, body = finality_probe._default_http_get(
-        {"url": "https://example.com/x", "params": {"a": "1"},
-         "headers": {"Accept-Encoding": "identity"}})
-    assert calls["kwargs"]["allow_redirects"] is False
+        {"url": "https://api.orats.io/datav2/hist/strikes",
+         "params": {"ticker": "SPY", "tradeDate": "2024-01-02", "token": SENTINEL},
+         "headers": {"Accept-Encoding": "identity"}, "timeout": 30})
+    assert calls["url"] == "https://api.orats.io/datav2/hist/strikes"
+    assert calls["kwargs"]["params"] == {"ticker": "SPY", "tradeDate": "2024-01-02", "token": SENTINEL}
     timeout = calls["kwargs"]["timeout"]
     assert isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
+    assert timeout <= 60
+    assert calls["kwargs"]["allow_redirects"] is False
     assert calls["kwargs"]["stream"] is True
     assert holder["r"].closed is True
     assert status == 201
@@ -1306,6 +1319,96 @@ def test_ts_two_instants_one_hundred_seconds_apart():
         ta, tb = finality_probe._ts(a), finality_probe._ts(b)
         assert ta is not None and tb is not None, (a, b)
         assert tb - ta == 100.0, (a, b, ta, tb)
+
+
+def test_capture_preflight_duplicate_endpoints_exits_2_before_dirs(tmp_path, orats_key, capsys):
+    called = []
+
+    def boom(req):
+        called.append(req)
+        raise AssertionError("network must not be called")
+
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path, endpoints="hist/strikes,hist/strikes"), http_get=boom)
+    assert exc.value.code == 2
+    assert "duplicate ORATS endpoints" in capsys.readouterr().err
+    assert called == []
+    assert not any(tmp_path.iterdir())
+
+
+def test_capture_lock_preexisting_refuses_and_writes_nothing(tmp_path, orats_key, capsys):
+    unit = tmp_path / "2024-01-02" / "L1"
+    unit.mkdir(parents=True, mode=0o700)
+    lock = unit / ".capture.lock"
+    lock.write_text("99999", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    assert exc.value.code == 2
+    assert "locked by another capture" in capsys.readouterr().err
+    assert not list(unit.glob("*.body"))
+    assert not list(unit.glob("*.meta.json"))
+    assert lock.read_text(encoding="utf-8") == "99999"
+
+
+def test_capture_lock_removed_after_normal_and_failed_capture(tmp_path, orats_key, capsys):
+    unit = tmp_path / "2024-01-02" / "L1"
+    rc = finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    assert rc == 0
+    assert not (unit / ".capture.lock").exists()
+
+    leaky = json.dumps({"data": ROWS, "note": SENTINEL}).encode("utf-8")
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path, label="L2"), http_get=_fake_get(leaky))
+    assert exc.value.code == 2
+    capsys.readouterr()
+    assert not (tmp_path / "2024-01-02" / "L2" / ".capture.lock").exists()
+
+
+def test_compare_ignores_stale_capture_lock(tmp_path, orats_key, capsys):
+    finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    unit = tmp_path / "2024-01-02" / "L1"
+    (unit / ".capture.lock").write_text("12345", encoding="utf-8")
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "capture.lock" not in captured.out
+    assert "capture.lock" not in captured.err
+    assert "- groups: 1" in captured.out
+    assert "## 2024-01-02 orats hist/strikes SPY page=None" in captured.out
+
+
+def test_fetch_time_taken_immediately_after_http_get_returns(tmp_path, orats_key):
+    class _Clock:
+        def __init__(self):
+            self.n = 0
+
+        def now(self):
+            v = datetime(2024, 1, 3, 0, 0, self.n, tzinfo=timezone.utc)
+            self.n += 1
+            return v
+
+    clock = _Clock()
+    state = {"before": None}
+
+    def http_get(req):
+        state["before"] = clock.n
+        return 200, {"content-type": "application/json"}, _body()
+
+    finality_probe.capture(_ns(tmp_path), http_get=http_get, now=clock.now)
+    assert state["before"] == 0
+    meta = json.loads((tmp_path / "2024-01-02" / "L1" / "orats__hist.strikes__SPY.meta.json").read_text())
+    assert meta["fetched_at_utc"] == datetime(2024, 1, 3, 0, 0, 0, tzinfo=timezone.utc).isoformat()
+
+
+def test_compare_never_prints_response_body_marker(tmp_path, orats_key, capsys):
+    rows = [{"updatedAt": "1700000000", "strike": 100, "note": "BODYMARKER-123"}]
+    finality_probe.capture(_ns(tmp_path), http_get=_fake_get(_body(rows)), now=_at(3))
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "BODYMARKER-123" not in captured.out
+    assert "BODYMARKER-123" not in captured.err
+    assert "- groups: 1" in captured.out
 
 
 def test_capture_preflight_massive_key_ticker_endpoint_and_repo(tmp_path, monkeypatch, capsys):

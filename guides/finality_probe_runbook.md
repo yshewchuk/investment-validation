@@ -53,11 +53,16 @@ Pick a recent normal full session `S` (not a half day). Eastern times:
 | `plus_1d` | S+2 (next trading day after S+1) 08:00 |
 
 ```
-TICKERS=SPY,AAPL,MSFT,NVDA,THINNAME   # replace THINNAME with one low-volume ticker
-python3 tools/finality_probe.py capture --session S --tickers $TICKERS --label LABEL --out ~/finality-probe \
-    --orats-endpoints hist/strikes,hist/summaries [--massive]
-python3 tools/finality_probe.py compare --out ~/finality-probe --session S
+S=2026-10-16                              # the session date, YYYY-MM-DD
+LABEL=close_plus_15m                      # one of the four labels above
+TICKERS=SPY,AAPL,MSFT,NVDA,THINNAME       # replace THINNAME with one low-volume ticker
+EXTRA=""                                  # set EXTRA="--massive" to add the Massive snapshot
+python3 tools/finality_probe.py capture --session "$S" --tickers "$TICKERS" --label "$LABEL" \
+    --out ~/finality-probe --orats-endpoints hist/strikes,hist/summaries $EXTRA
+python3 tools/finality_probe.py compare --out ~/finality-probe --session "$S"
 ```
+
+Replace `S` with the real session for each series, and use `--replace` on `capture` only to redo a label.
 
 Repeat for at least 3 sessions (one capture series each). `--massive` adds the option chain snapshot, which is a current-state endpoint: it can only show `day.last_updated` and `last_quote.last_updated` freezing after the close (`compare` uses the larger of the two; all pages of a ticker are compared as one snapshot, so an added or changed page counts as a content change), so run it on the same schedule but treat it as secondary. If the Massive units come back with HTTP status 401 or 403 (the plan does not include the endpoint), record those statuses and drop `--massive` from later runs; the probe has no separate plan-error code. Post the `compare` output (metadata only) to #877.
 
