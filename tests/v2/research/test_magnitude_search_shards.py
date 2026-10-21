@@ -647,6 +647,13 @@ def test_build_manifest_refuses_container_inline_values(inline):
         shards.build_manifest(inline, {})
 
 
+def test_inline_scalar_types_are_accepted():
+    inline = {"s": "a", "i": 1, "f": 1.5, "b": True, "n": None}
+    manifest = shards.build_manifest(inline, {})
+    assert manifest["inline"] == inline
+    assert shards.verify_manifest(manifest, shards.manifest_id(manifest)) == manifest
+
+
 def test_build_manifest_snapshots_caller_inputs(tmp_path):
     store = ArtifactStore(tmp_path / "store")
     entry = shards.write_section(store, "features", rows(2), key)

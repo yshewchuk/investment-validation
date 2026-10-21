@@ -315,7 +315,7 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 | Condition | Outcome |
 |---|---|
 | Shard missing or `OSError` | Retryable `RESOURCE_UNAVAILABLE`; no association change or candidate failure. |
-| Hash/size mismatch, wrong schema or section, count or boundary-key disagreement, duplicate key, invalid or unsafe ref syntax, manifest hash differing from `inputs_id` (parent or child) | `EXPERIMENT_IDENTITY_CONFLICT`; no rows used. |
+| Hash/size mismatch, wrong schema or section, count or boundary-key disagreement, duplicate key, invalid or unsafe ref syntax, manifest hash differing from `inputs_id` (parent or child), a manifest `inline` value that is a list or dict | `EXPERIMENT_IDENTITY_CONFLICT`; no rows used. |
 | Crash after some shards, before the manifest | Orphan shards confer no authority and are reclaimable by the store owner; the immutable claim stays unfinished. |
 | Manifest committed, later shard lost or corrupted | Fails closed as above on every read. |
 | Same slot, different manifest | `EXPERIMENT_IDENTITY_CONFLICT`. |
