@@ -373,6 +373,7 @@ def test_source_closure_failure_is_exact_identity_refusal_before_sealing(journal
 def test_changed_shared_cohort_blocks_selection_instead_of_excluding_candidate(journal, monkeypatch):
     journal.recorder.start("2024", "2023", "z-last")
     journal.recorder._memo.clear()
+    journal.recorder._published.clear()
     monkeypatch.setattr(journal.recorder, "_inputs", lambda inner: {**native_inputs(), "native_inputs": "changed"})
     with pytest.raises(OpsError) as caught:
         journal.recorder.start("2024", "2023", "a-first")

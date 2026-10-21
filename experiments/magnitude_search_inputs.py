@@ -102,7 +102,7 @@ def publish_inputs(store, inputs):
         rows = _path_value(inputs, path)
         key = member["key"]
         if key is None:
-            rows = [{"position": index, "row": item} for index, item in enumerate(rows)]
+            rows = ({"position": index, "row": item} for index, item in enumerate(rows))
             key = _position_key
         sections[path] = write_section(store, path, rows, key)
     inline = {}

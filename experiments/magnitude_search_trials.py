@@ -56,6 +56,7 @@ class SearchTrials:
         self.conn, self.store, self.repository = conn, store, repository
         self.registration, self.plan_ref = registration, plan_ref
         self._memo = {}
+        self._published = {}  # cohort -> (manifest, inputs_id) of this instance's successful publication.
         try:
             self.request = json.loads(json.dumps(request, allow_nan=False))
             if self.request != request:
@@ -150,7 +151,9 @@ class SearchTrials:
         cohort = content_hash([plan["plan_id"], outer_year, inner_year])
         inputs = self._cohort_inputs(cohort, inner)
         # Shards first (outside the catalog transaction); the manifest append is the commit point.
-        manifest, inputs_id = publish_inputs(self.store, inputs)
+        if cohort not in self._published:
+            self._published[cohort] = publish_inputs(self.store, inputs)
+        manifest, inputs_id = self._published[cohort]
         self._append("cohort:" + cohort, manifest)
         self._append("inputs:" + key, {"cohort": cohort, "inputs_id": inputs_id})
         # Callers may mutate their copy; the memo stays private.
