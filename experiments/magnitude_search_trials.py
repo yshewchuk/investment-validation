@@ -357,7 +357,11 @@ class SearchTrials:
         self._append("forecasts:" + key, submitted, replay=reconcile, absent=("terminal:" + key,))
         validation = self._read("validation:" + admitted["cohort"]) if reconcile else None
         if validation is None:
-            if self._cohort_inputs(admitted["cohort"], inner)[1] != admitted["inputs_id"]:
+            try:
+                stored = self._cohort(admitted)
+            except ValueError:
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start") from None
+            if canonical_json(self._cohort_inputs(admitted["cohort"], inner)[0]) != canonical_json(stored):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start")
             binding = self.registration.document
             labels = load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),

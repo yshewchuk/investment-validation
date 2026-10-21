@@ -106,7 +106,12 @@ def _replay(read, store, started, fold, plan, execution):
         _equal(read("start"), started)
         record = read("inputs")
         inputs_id = stored_id(record)
-        inputs = load_inputs(store, record, inputs_id)
+        try:
+            inputs = load_inputs(store, record, inputs_id)
+        except OpsError as error:
+            if error.problem.retryable:
+                raise
+            raise _conflict() from None
         fits = fit_evidence(inputs, fold, plan, execution)
         forecasts = _forecasts(read("forecasts"), fold, plan["horizons"])
         receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),

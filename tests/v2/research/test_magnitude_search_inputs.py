@@ -60,6 +60,7 @@ def _conflict(call):
     with pytest.raises(OpsError) as caught:
         call()
     assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.retryable is False
 
 
 def test_v2_manifest_loads_to_the_same_inputs_as_the_v1_record(tmp_path):
@@ -110,6 +111,7 @@ def test_corrupt_shard_fails_closed(tmp_path):
     store = ArtifactStore(tmp_path / "store")
     manifest = _manifest(store)
     ref = manifest["sections"]["features"]["shards"][0]["ref"]
-    (tmp_path / "store" / ref["storage_key"]).write_bytes(b"{}")
-    with pytest.raises(OpsError):
-        load_inputs(store, manifest, shards.manifest_id(manifest))
+    path = tmp_path / "store" / ref["storage_key"]
+    path.chmod(0o644)
+    path.write_bytes(b"{}")
+    _conflict(lambda: load_inputs(store, manifest, shards.manifest_id(manifest)))

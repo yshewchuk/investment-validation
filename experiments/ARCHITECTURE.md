@@ -243,7 +243,7 @@ both flag states publish/verify the same plan and never write a ledger.
 
 ## Recorded magnitude-search selection
 
-`magnitude_search_trials.SearchTrials` exposes the journal API composed by the serial CLI. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies include contracts, foundation, ops migrations/catalog/fingerprints/errors, research target reads and `magnitude_search_evidence`. That shared helper owns native admission through `magnitude_history_inputs.history_binding` and research stored-history/target reads; `magnitude_search_plan.read_search_plan` owns plan admission. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. Public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE. One `SearchTrials` instance admits each (plan, outer year, inner year) cohort once and shares the admitted inputs and their hash across that cohort's trials; `start` returns detached inputs (deep copies of the memoised ones). The in-memory memo holds one entry per cohort (bounded by the number of distinct (outer year, inner year) cohorts in the sealed plan), is never persisted and never holds a failed admission. Drift between instances is detected on re-admission by a fresh instance (see Input drift below); within one instance it is not re-read.
+`magnitude_search_trials.SearchTrials` exposes the journal API composed by the serial CLI. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies include contracts, foundation, ops migrations/catalog/fingerprints/errors, research target reads, `magnitude_search_evidence` and the `magnitude_search_inputs` cohort loader. That shared helper owns native admission through `magnitude_history_inputs.history_binding` and research stored-history/target reads; `magnitude_search_plan.read_search_plan` owns plan admission. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. Public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE. One `SearchTrials` instance admits each (plan, outer year, inner year) cohort once and shares the admitted inputs and their hash across that cohort's trials; `start` returns detached inputs (deep copies of the memoised ones). The in-memory memo holds one entry per cohort (bounded by the number of distinct (outer year, inner year) cohorts in the sealed plan), is never persisted and never holds a failed admission. Drift between instances is detected on re-admission by a fresh instance (see Input drift below); within one instance it is not re-read.
 
 | Condition | Outcome |
 |---|---|
@@ -269,11 +269,11 @@ both flag states publish/verify the same plan and never write a ledger.
 | Journal payload exceeds 16 MiB | Refuse nonretryable `RESOURCE_LIMIT_EXCEEDED` before publishing that record; incomplete attempts remain unfinished and block selection. |
 | Submitted-forecast selection | These submission/selection methods do not fit or authenticate estimator execution; wholesale fabrication of matching evidence is outside their consistency guarantee. Native fitting is separately described under [bounded inner-trial execution](#bounded-inner-trial-execution). Neither path grants outer evaluation, deployment, ledger or final-read authority. |
 
-## Sharded cohort inputs (accepted contract, not yet enforced)
+## Sharded cohort inputs
 
-The rows above, and the current 16 MiB cohort record and child payload, are enforced
-as described until the implementation lands (#991 fix 4); this section states the
-accepted replacement contract. Cohort rows (`features`, `training`, preflight
+The rows above, and the 16 MiB cohort record and child payload cap, describe the
+whole-cohort (v1) format; this section states the sharded (v2) contract that the one
+loader reads alongside it (#991 fix 4). Cohort rows (`features`, `training`, preflight
 `planned_inputs`, and the same rows in `outer-inputs:<id>`) are ordered sections of
 content-addressed shards, not one record or payload. Population-sized receipt lists
 (`training_inputs` candidate, qualified, read and omitted event lists, and preflight
@@ -288,8 +288,8 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   maxima is `RESOURCE_LIMIT_EXCEEDED`.
 * `cohort:<id>` and `outer-inputs:<id>` hold a small manifest (inline scalar members plus,
   per section, `row_count` and ordered `{ref, rows, first_key, last_key}`). `inputs_id`
-  is `content_hash(manifest)`. Older whole-cohort records refuse
-  `EXPERIMENT_IDENTITY_CONFLICT`; none is rewritten.
+  is `content_hash(manifest)`. A whole-cohort record is read through the loader's v1
+  adapter, bound by its content hash; none is rewritten.
 * One streaming reader serves parent and child: each shard is `read_verified` (size is
   the allocation bound) and checked for schema, section, row count and boundary keys;
   totals equal `row_count`. Each section has one key comparator (the row's sort key):
@@ -316,8 +316,8 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   record is a v1 whole cohort whose id is its content hash. Both return the same inputs shape.
   A section without a sort key stores rows `{position, row}` (position 0, 1, ...; the loader
   checks it is consecutive and unwraps `row`), so every section has a strictly increasing key.
-  A manifest must carry exactly the `LIST_MEMBERS` sections. The loader is wired before any writer
-  publishes shards, so no stored record changes until activation.
+  A manifest must carry exactly the `LIST_MEMBERS` sections. Non-retryable loader conflicts
+  surface as each caller's own evidence-chain refusal; retryable errors propagate unchanged.
 
 | Condition | Outcome |
 |---|---|
@@ -330,7 +330,7 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 | A row above 8 MiB or more than 8192 shards | Nonretryable `RESOURCE_LIMIT_EXCEEDED` before the manifest append; published shards stay unreferenced. A stored manifest or section listing more than 8192 shards is `EXPERIMENT_IDENTITY_CONFLICT`. |
 | Writer given a row whose sort key is missing, not a tuple of strings/integers, or not strictly above the previous key, or a row that is not canonical JSON or uses the reserved `__nonfinite__` key, or a manifest builder given a malformed manifest or section | `INVALID_EXPERIMENT_SPEC` before that shard is published. |
 | Read-time `UNSAFE_PATH` (for example a symlink) on a syntactically valid shard ref | Retryable `RESOURCE_UNAVAILABLE`, like a missing shard; invalid ref syntax stays a conflict. |
-| Older whole-cohort record read by sharded code | `EXPERIMENT_IDENTITY_CONFLICT`; no rewrite or migration. |
+| Whole-cohort record whose content hash differs from the expected `inputs_id` | `EXPERIMENT_IDENTITY_CONFLICT`; no rewrite or migration. |
 
 Registration, snapshot, plan and execution-spec bindings are unchanged; `inputs:<trial>`
 binds the manifest hash and so every shard. The outer result record that today binds the
@@ -776,7 +776,7 @@ returned result dictionaries carry their IDs and selected summaries, not all jou
 payloads. Collection does not persist a report artifact, export or ledger row.
 No holdout evaluation, final read, release or deployment authority is added.
 Research remains reconstructed, not observed point-in-time. Direct dependencies are
-the search plan/journal/trial/execution/evidence modules, contracts, foundation,
+the search plan/journal/trial/execution/evidence/inputs (cohort loader) modules, contracts, foundation,
 ops migrations/fingerprints/errors, both no-fit guards, `engine.v2.research.magnitude_inputs.load_magnitude_targets`
 for outer label reads and `magnitude_report.magnitude_metrics` for fold/aggregate scoring.
 The evidence helper separately consumes native history admission and research stored-history/target APIs; no new scheduler, parser, estimator implementation or third-party dependency is needed.
