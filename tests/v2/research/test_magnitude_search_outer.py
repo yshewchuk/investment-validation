@@ -344,9 +344,9 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
         trace.append(("inner", *args))
         assert kwargs == {"limits": LIMITS}
         return execute(self, *args, **kwargs)
-    def replayed(read, started, fold, plan, execution):
+    def replayed(read, store, started, fold, plan, execution):
         trace.append(("outer", fold["year"]))
-        return replay(read, started, fold, plan, execution)
+        return replay(read, store, started, fold, plan, execution)
     monkeypatch.setattr(trials.SearchTrials, "freeze", frozen)
     monkeypatch.setattr(trials.SearchTrials, "execute", executed)
     monkeypatch.setattr(outer, "_replay", replayed)

@@ -564,6 +564,8 @@ def test_inventory_sections_are_unique_and_keyed_or_flagged():
         "training_inputs.qualified_event_ids": ("event_id",),
         "training_inputs.read_inputs": ("event_id", "fragment_id", "object_id", "content_hash"),
         "training_inputs.omitted_labels": ("event_id", "reason"),
+        "training_inputs.target_recipe.secondary_diagnostics": ("diagnostic",),
+        "training_inputs.holdout_exclusions": ("exclusion",),
     }
     members = shards.LIST_MEMBERS
     assert [member["section"] for member in members] == list(expected)

@@ -89,6 +89,18 @@ LIST_MEMBERS = (
         "problem": "no strictly increasing key: omitted rows keep the plan's "
                    "(event_date, event_id) order",
     },
+    {
+        "section": "training_inputs.target_recipe.secondary_diagnostics",
+        "rows": ("diagnostic",),
+        "key": None,
+        "problem": "no strictly increasing key: bare diagnostic names keep the recipe's order",
+    },
+    {
+        "section": "training_inputs.holdout_exclusions",
+        "rows": ("exclusion",),
+        "key": None,
+        "problem": "no strictly increasing key: exclusion evidence keeps the population's order",
+    },
 )
 
 
