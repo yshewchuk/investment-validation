@@ -191,6 +191,8 @@ def classify_events(events, snapshot, *, as_of_month):
     required = {"event_id", "ticker", "event_date", "session", "date_conflict", "event_cluster_id"}
     if not isinstance(events, pd.DataFrame) or not required <= set(events.columns) or not events.columns.is_unique:
         raise errors.fail("CONTRACT_MISMATCH", "canonical event metadata columns required")
+    if any(type(key) is not str or not key or key != key.strip() for key in events.event_id):
+        raise errors.fail("CONTRACT_MISMATCH", "canonical event metadata values are malformed")
     policy, context = _holdout_context(snapshot, as_of_month, "selection", None)
     ambiguous = set()
     try:

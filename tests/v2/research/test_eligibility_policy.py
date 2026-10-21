@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
+from datetime import date
 
 import pytest
 
@@ -202,6 +203,13 @@ def test_one_horizon_or_label_overlap_excludes_whole_event(tmp_path, monkeypatch
     lambda m: m["groups"][0]["forecasts"][0].update(decision_date="2024-06-15"),
     lambda m: m["groups"][0]["forecasts"][0].update(source_session_ceiling="2024-06-15"),
     lambda m: m["groups"][0].update(random_held=False),
+    lambda m: m["groups"][0].update(ticker=" padded"),
+    lambda m: m["groups"][0].update(ticker=""),
+    lambda m: m["groups"][0].update(ticker=123),
+    lambda m: m["groups"][0]["forecasts"][0].update(unknown=True),
+    lambda m: m["groups"][0].update(label_start=date(2024, 6, 14)),
+    lambda m: m["groups"][0]["forecasts"][0].update(
+        source_session_ceiling="2024-06-13", decision_date="2024-06-12"),
 ])
 def test_closed_metadata_refuses_before_scans(tmp_path, monkeypatch, mutation):
     event = history_event("2024-06-14")
@@ -584,7 +592,8 @@ def test_invalid_asof_month_refuses_both_paths(tmp_path, monkeypatch, month):
         conn.close()
 
 
-def test_malformed_classifier_values_refuse_without_builtin_exception(tmp_path, monkeypatch):
+@pytest.mark.parametrize("bad_id", [["not", "scalar"], " padded", "", None, 17])
+def test_malformed_classifier_values_refuse_without_builtin_exception(tmp_path, monkeypatch, bad_id):
     import pandas as pd
 
     event = history_event("2024-06-14")
@@ -592,7 +601,7 @@ def test_malformed_classifier_values_refuse_without_builtin_exception(tmp_path, 
     try:
         frame = eligibility.canonical_events(repository, snapshot)
         assert eligibility.classify_events(frame, snapshot, as_of_month=MONTH)[1] == {}
-        frame["event_id"] = pd.Series([["not", "scalar"]], dtype=object)
+        frame["event_id"] = pd.Series([bad_id], dtype=object)
         with refuses("CONTRACT_MISMATCH", "canonical event metadata values are malformed"):
             eligibility.classify_events(frame, snapshot, as_of_month=MONTH)
     finally:
@@ -649,5 +658,61 @@ def test_protected_window_merge_reports_bounded_progress(tmp_path, monkeypatch, 
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "[eligibility window merge] 3/3, 33s elapsed" in captured.err
+    finally:
+        conn.close()
+
+
+def test_spanning_label_and_touching_protected_windows(tmp_path, monkeypatch):
+    # Jun 14 +30 and Aug 13 -30 both land on Jul 14.
+    held = [history_event(day, protected=True) for day in ("2024-06-14", "2024-08-13")]
+    dev = history_event("2024-10-01")
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [*held, dev])
+    try:
+        clear = plan(repository, snapshot, [group(dev)])
+        assert clear["retained_event_ids"] == [dev["event_id"]]
+        assert clear["random_windows"] == [{"ticker": "SYNTH", "start": "2024-05-15", "end": "2024-09-12"}]
+        row = group(dev, start="2024-05-14")
+        result = plan(repository, snapshot, [row])
+        assert result["retained_event_ids"] == []
+        assert result["exclusions"] == [{"event_id": dev["event_id"], "reasons": ["embargo_label_window"]}]
+        assert result["random_windows"] == clear["random_windows"]
+        assert result["groups"] == [row]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("field", ["event_date", "session"])
+def test_scalar_date_and_session_ambiguity_is_not_a_classifier_refusal(tmp_path, monkeypatch, field):
+    import pandas as pd
+
+    event = history_event("2024-06-14")
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [event])
+    try:
+        rows = eligibility.canonical_events(repository, snapshot)
+        assert eligibility.classify_events(rows, snapshot, as_of_month=MONTH)[1:3] == ({}, set())
+        rows[field] = pd.NaT if field == "event_date" else "invalid"
+        canonical, labels, structural, _ = eligibility.classify_events(rows, snapshot, as_of_month=MONTH)
+        assert labels == {event["event_id"]: {"ambiguous"}}
+        assert structural == {event["event_id"]}
+        assert canonical.event_id.tolist() == [event["event_id"]]
+    finally:
+        conn.close()
+
+
+def test_unsorted_valid_forecasts_normalize_without_mutating_metadata(tmp_path, monkeypatch):
+    event = history_event("2024-06-14")
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [event])
+    try:
+        policy = eligibility.eligibility_policy(version=VERSION, embargo_days=30)
+        row = group(event)
+        expected = deepcopy(row)
+        row["forecasts"] = [row["forecasts"][2], row["forecasts"][0], row["forecasts"][1]]
+        metadata = seal(snapshot, policy, [row])
+        saved = deepcopy(metadata)
+        result = eligibility.plan_eligibility(repository, snapshot, as_of_month=MONTH, policy=policy,
+                                             metadata=metadata, evaluation_event_ids=[])
+        assert result["groups"] == [expected]
+        assert [f["horizon_sessions"] for f in result["groups"][0]["forecasts"]] == [1, 3, 5]
+        assert metadata == saved
     finally:
         conn.close()

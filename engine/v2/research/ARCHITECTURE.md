@@ -710,7 +710,8 @@ and planning refusals report only the native error code, not row values.
 | Unknown, malformed or mismatched snapshot reference | `SNAPSHOT_UNRESOLVED` |
 | Repository integrity failure other than unknown snapshot | Original native error propagates |
 | Unsupported policy, stale digest/envelope, malformed bounds, duplicate declared group IDs or malformed/duplicate evaluation IDs | `CONTRACT_MISMATCH` |
-| Missing/duplicate classifier columns or malformed classifier metadata values | `CONTRACT_MISMATCH` |
+| Missing/duplicate classifier columns, malformed event IDs or metadata values that prevent classification | `CONTRACT_MISMATCH` |
+| Invalid scalar dates/sessions or structural collisions handled by membership classification | Successful classification with `ambiguous` membership; structural ambiguity IDs returned |
 | Invalid as-of month, unknown group/evaluation identity or colliding canonical population IDs | `HOLDOUT_ACCESS_DENIED` |
 | Ambiguous random-event identity or overflowing window bounds | `HOLDOUT_ACCESS_DENIED` |
 | Valid protected/overlapping development group | Excluded whole event with reasons; evaluation IDs preserved |

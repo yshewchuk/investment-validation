@@ -61,7 +61,8 @@ write path.
 `experiment_population.canonical_events` reads the six canonical metadata columns
 after exact committed-snapshot admission, and flags same-ticker/date conflicts. `experiment_trades.classify_events` accepts
 that frame, snapshot and explicit as-of month; it returns detached canonical rows,
-membership labels, structurally ambiguous IDs and pinned holdout context.
+membership labels, structurally ambiguous IDs and pinned holdout context. Malformed
+event IDs refuse; invalid scalar dates/sessions are classified as ambiguous.
 `snapshot_inputs.snapshot_reference` checks native reference shape only;
 `admit_snapshot` additionally resolves and compares the complete committed identity.
 The pure classifier checks shape, not commitment of its caller-supplied context.
