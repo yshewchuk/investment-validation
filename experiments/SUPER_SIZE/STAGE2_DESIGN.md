@@ -11,21 +11,17 @@ retains the deferred work below and freezes neither a dataset nor a resource bud
 
 Target roughly one engineering week for a bounded mean-magnitude comparison,
 conditional on source provenance and review; estimates are not a delivery promise.
-If causal input or baseline work exceeds that budget, ship the safe foundations and
-postpone the search rather than relax admission or substitute a weaker comparison.
+If causal input/baseline work exceeds budget, ship foundations and postpone search; never relax admission.
 
-Main already has eleven stored history inputs, Ridge/HGB, nested annual selection,
-sealed requests and serial execution. These are infrastructure, not evidence of a
-winning model. The October 21 feedback reports 498 matched events: legacy MAE 2.79,
+Main has eleven history inputs, Ridge/HGB, nested annual selection, sealing and serial execution, not a proven winner. The October 21 feedback reports 498 matched events: legacy MAE 2.79,
 history Ridge 2.97, paired difference +0.19, 95% interval [+0.10, +0.28]. These
 are separately reported rounded figures; raw estimates were not checked. It also
 reports a 2,014-event single-arm resource/replay run and ~0.17 seconds/event history build
 (118k events: about 5.6 hours). None was independently reproduced for this design;
 none substitutes for the prospective nested comparison.
 
-The October 10 original proposal explicitly chose conditional mean and RMSE, with
-MAE and quantiles secondary. Retain that decision: target and 5/3/1-session clocks
-are unchanged; do not optimize MAE and call the output a conditional mean.
+Retain the October 10 proposal: conditional mean/RMSE primary, MAE/quantiles secondary.
+Target and 5/3/1 clocks stay unchanged; do not call an MAE-optimal output a conditional mean.
 
 ## 1. Stored causal research panel (core, highest priority)
 
@@ -50,9 +46,8 @@ training/history start, evaluation years, feature dictionary and producer/enviro
 hashes. Each row retains cutoff ID, source-session ceiling, block source date and
 availability/knowledge mode, consumed source row/fragment identities, missingness
 reason, and a digest. Preserve individual lag anchors, not only their maximum.
-Unknown columns/versions, duplicate keys, context mismatch and ambiguous lineage
-refuse. Missing optional values are null, not invented zeros or silently backfilled.
-A changed recipe or source produces a new immutable identity, never an overwrite.
+Refuse unknown columns/versions, duplicate keys, context mismatch or ambiguous lineage.
+Optional missing values stay null; changed recipes/sources get new immutable identities, never overwrite.
 
 ### Feature dictionary and subsets
 
@@ -72,9 +67,8 @@ remains history-only. These are not extra search axes. A zero implied
 quote means unavailable, while a genuine zero target remains valid. Missing market
 cap or late capture stays missing; do not use the earliest later retrieval as causal.
 
-Daily-state 1/5/10-row differences, ratios/interactions and sector context are deferred
-until their exact source/availability mappings are proven. Row lags are not calendar
-lags. No point-in-time sector mapping is established by this audit; do not join today's
+Defer daily-state lags, ratios/interactions and sector context pending exact source/availability maps.
+Row lags are not calendar lags. No point-in-time sector mapping is established by this audit; do not join today's
 sector classification backward. Existing options-derived daily fields are in core;
 new option-chain surfaces, interpolation and liquidity engineering are not.
 
@@ -86,24 +80,34 @@ below may add its audited input aliases without exposing them as search predicto
 
 ### Admission before data and values
 
-Extend metadata-first event-history preflight, not production `scan_panel_row`.
-Classify the random/rolling union before decoding outcome payloads; fail closed for
-mixed outcome fragments. Protected labels and explicit protected-event returns stay
-excluded from prior-event statistics, fitting and selection; targets use a separate reader.
-No executable protected-price-window policy is established by current membership rules.
-Raw-price/market read authority is unresolved and requires owner approval before the
-materializer: distinguish whole-file decoding from causal numerical prefixes, decide
-whether rolling aggregates may cross protected earnings, and freeze the knowledge lane.
-Stricter physical isolation/window embargo may require storage redesign. Neither policy
-is approved here; slice 1 metadata admission grants no raw-payload access authority.
+Owner clarification (October 21): the holdouts are complementary, not interchangeable.
+The recent-month chronological block is the primary forward-time confirmation; none
+of it enters training, tuning, feature selection or calibration. Random-event holdouts
+check broader historical event/regime robustness, not regime independence or temporal
+isolation on their own. They cannot replace the time block. Report layers separately;
+preregister the joint interpretation/decision rule before either is opened.
 
-For every contributing observation enforce the source-session ceiling and declared
-availability cutoff, plus strictly prior event/label availability where applicable.
-Retain schedule/availability reconstruction warnings: a source date is not proof of
-historical publication. Never upgrade reconstructed data to observed point-in-time.
-A later replacement/capture must not make an earlier row eligible in a strict lane.
-If existing sources cannot establish the declared lane, refuse or mark unavailable
-according to the frozen field policy; report coverage, never weaken policy mid-run.
+Use a fixed inclusive ±30-calendar-day window around each random-held event date for
+that ticker. Exclude a whole development event (all 1/3/5-session horizons) if its
+label interval, event date or any forecast decision/source-session ceiling overlaps
+any such window. Apply the same metadata-first exclusion before preprocessing,
+selection, calibration and fits, including the legacy baseline; preserve protected
+evaluation membership. Freeze the window/manifest before outcomes, with no tuning.
+This excludes examples, not individual price bars; do not alter rolling formulas.
+
+Extend protected event-outcome preflight, not production `scan_panel_row`: classify
+the random/rolling union before outcome payloads; refuse mixed outcome fragments.
+Protected labels/explicit event returns never enter development history or fitting.
+The intended reconstructed loader may decode whole-ticker raw files containing later
+rows, but numerical predictors use only causal prefixes through each source-session
+ceiling and declared availability cutoff. Physical decoding proves neither numerical eligibility nor publication.
+Long-memory price/IV features and cross-ticker correlations can retain event effects
+beyond 30 days; the embargo does not erase those effects or prove random-layer isolation.
+The separate chronological check addresses forward-time evidence, not a guarantee of
+regime independence. Enforce declared availability/strict prior-label cutoffs and frozen missing policies;
+never backdate known-late inputs into an observed-PIT claim. This policy clarification
+is no authority for private reads, opening either holdout, registration or execution.
+Slice 1 metadata admission alone still grants no raw-payload access.
 
 ### Bounded construction, not another per-event history build
 
@@ -133,9 +137,8 @@ scales multiplicatively, block full-universe execution and fix batching first.
 
 ## 2. Models and inner-only selection (core)
 
-Use installed sklearn Pipeline, SimpleImputer, MissingIndicator, StandardScaler,
-Ridge, ElasticNet and HistGradientBoostingRegressor; no new ML dependency or custom
-optimizer. Reuse current preprocessing contracts. Every fresh inner/outer fit learns
+Use installed sklearn Pipeline, SimpleImputer, MissingIndicator, StandardScaler, Ridge,
+ElasticNet and HistGradientBoostingRegressor; reuse preprocessing, no new dependency/optimizer. Every fresh inner/outer fit learns
 imputation and scaling only from its qualified training rows. Freeze all-null columns
 and indicator layout deterministically; no global preprocessing or target transform.
 Project finite point predictions to nonnegative values as the current recipes do.
@@ -239,9 +242,8 @@ legacy estimator does; do not silently apply the challenger's zero projection. R
 incumbent inputs at the same 5/3/1 cutoffs, including audited implied-history,
 quote-presence and absolute aliases. Its historical-implied aggregate needs its own
 protected/availability-qualified prefix, not the production reader's aggregate.
-No old fitted weights, historical panel forecasts or latest Tier4 release are reused.
-If exact causal inputs are unavailable, report abstention; never call a different
-recipe "legacy reproduction" or replace it with history mean. This is a protocol-
+No old weights/panel forecasts/latest Tier4 release are reused. If causal inputs are unavailable,
+report abstention; never relabel a different recipe or substitute history mean. This is a protocol-
 matched reproduction, not a claim to reproduce the reported 498-event result.
 
 Freeze a common eligible event manifest before labels. Store forecasts before
@@ -265,17 +267,15 @@ deployment, final holdout read or release follows automatically from this experi
 The owner accepted the core and causal legacy-refit approach on October 21. Before
 sealing, still confirm exact immutable inputs, coverage/year feasibility and numeric
 resource limits, and verify the implementation matches the accepted baseline contract.
-RMSE remains primary unless
-an explicit scientific amendment is registered before outcomes. A practical minimum
+RMSE remains primary unless explicitly amended before outcomes. A practical minimum
 gain/promotion rule is a separate future decision; this run reports evidence only.
 
 ## 5. Small PR sequence and acceptance
 
 Each runtime PR targets <=400 added non-test code lines and <=120 documentation lines;
 split add/wire changes again if needed. Tests accompany the contract they exercise.
-Estimates exclude real full-universe jobs and review queue time. Line ranges count
-additions (code / tests / docs), not deletions or a waiver of the repository limits.
-Re-estimate before each PR; split further if its actual scope exceeds those limits.
+Estimates exclude full-universe jobs/review queues. Ranges count added code/tests/docs, not deletions.
+Re-estimate before each PR and split at repository limits; these estimates grant no waiver.
 
 | Order | PR / dependency | Acceptance | Added lines: code / tests / docs | Rough effort |
 | --- | --- | --- | --- | --- |
