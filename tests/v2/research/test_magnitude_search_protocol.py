@@ -2,6 +2,7 @@
 import json
 import signal
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -227,3 +228,15 @@ def test_parent_affinity_oserror_is_typed(monkeypatch):
         execution.execution_limits(LIMITS)
     assert caught.value.problem == fail(
         "RESOURCE_UNAVAILABLE", "search execution requires Linux resource containment").problem
+
+
+def test_real_worker_refuses_an_oversized_header_as_resource_limit(tmp_path):
+    header = tmp_path / "header.json"
+    header.write_bytes(b" " * (execution.MAX_BYTES + 1))
+    done = subprocess.run([sys.executable, "-m", "experiments.magnitude_search_worker", str(header),
+                           json.dumps(execution.execution_limits(LIMITS))],
+                          cwd=Path(execution.__file__).resolve().parents[1],
+                          env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(Path(execution.__file__).resolve().parents[1])},
+                          capture_output=True, timeout=120)
+    assert done.returncode == 0
+    assert json.loads(done.stdout) == {"event": "resource_limit"}

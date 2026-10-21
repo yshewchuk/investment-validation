@@ -5,6 +5,7 @@ import pytest
 
 from engine.v2.foundation import ArtifactStore, content_hash
 from engine.v2.ops.errors import OpsError
+from experiments import magnitude_search_inputs as inputs_module
 from experiments import magnitude_search_shards as shards
 from experiments.magnitude_search_inputs import load_fit_inputs, load_inputs, publish_inputs
 
@@ -196,3 +197,46 @@ def test_load_fit_inputs_refuses_a_wrong_id_a_v1_record_and_a_corrupt_shard(tmp_
     with pytest.raises(OpsError) as caught:
         load_fit_inputs(store, manifest, inputs_id, [], [1], ("x",))
     assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_load_fit_inputs_refuses_inline_paths_that_collide_with_sections(tmp_path):
+    store = ArtifactStore(tmp_path)
+    cohort, _ = _fit_cohort(2)
+    manifest, _ = publish_inputs(store, cohort)
+    for bad_inline in ({**manifest["inline"], "training": 1}, {**manifest["inline"], "preflight": 1}):
+        record = {**manifest, "inline": bad_inline}
+        record_id = shards.manifest_id(record)
+        with pytest.raises(OpsError) as caught:
+            load_fit_inputs(store, record, record_id, [], [1], ("x",))
+        assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_load_fit_inputs_reads_one_shard_at_a_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(shards, "TARGET_BYTES", 300)
+    monkeypatch.setattr(shards, "MAX_SHARD_BYTES", 600)
+    cohort, _ = _fit_cohort(12)
+    store = ArtifactStore(tmp_path)
+    manifest, inputs_id = publish_inputs(store, cohort)
+    reads = []
+    real_read = store.read_verified
+
+    def counting_read(ref):
+        reads.append(ref)
+        return real_read(ref)
+
+    store.read_verified = counting_read
+    at_row = []
+    original = inputs_module.iter_section
+
+    def spy(store_, section, entry, key):
+        for row in original(store_, section, entry, key):
+            if section == "features":
+                at_row.append(len(reads))
+            yield row
+
+    monkeypatch.setattr(inputs_module, "iter_section", spy)
+    load_fit_inputs(store, manifest, inputs_id, [], [1], ("x",))
+    assert len(reads) > 3
+    assert at_row == sorted(at_row)
+    assert at_row[0] == len(manifest["sections"]["training"]["shards"]) + 1
+    assert at_row[0] < at_row[-1]

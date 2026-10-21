@@ -84,6 +84,7 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
     reduced to (event_id, absolute_move_pct); feature rows kept for training or evaluation
     events at the selected horizons, reduced to (event_id, context_id, horizon_sessions,
     *feature_columns), in stored order. Any mismatch is EXPERIMENT_IDENTITY_CONFLICT.
+    Inline paths are admitted with the same shape check as ``load_inputs``.
     """
     if not isinstance(manifest, dict) or manifest.get("schema_version") != MANIFEST_SCHEMA:
         raise fail(_CONFLICT, "search cohort record is invalid")
@@ -91,6 +92,11 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
     sections = manifest["sections"]
     if set(sections) != {member["section"] for member in LIST_MEMBERS}:
         raise fail(_CONFLICT, "search cohort manifest sections are invalid")
+    shape = {}
+    for path, value in manifest["inline"].items():
+        _place(shape, path, value)
+    for member in LIST_MEMBERS:
+        _place(shape, member["section"], None)
     members = {member["section"]: member for member in LIST_MEMBERS}
     training = [{name: row[name] for name in ("event_id", "absolute_move_pct")}
                 for row in _iter_rows(store, members["training"], sections["training"])]
