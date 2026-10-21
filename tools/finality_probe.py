@@ -30,6 +30,12 @@ def _fail(msg, code=2):
     raise SystemExit(code)
 
 
+def _valid_session(s):
+    if not isinstance(s, str) or not SESSION_RE.match(s): return False
+    try: datetime.strptime(s, "%Y-%m-%d"); return True
+    except ValueError: return False
+
+
 def _refuse_repo(out_dir):
     path = Path(out_dir).resolve()
     for base in (path, *path.parents):
@@ -128,11 +134,12 @@ def capture(args_ns, http_get=None, now=None):
     if http_get is None: http_get = _default_http_get
     if now is None: now = lambda: datetime.now(timezone.utc)
     session, label, out_dir = args_ns.session, args_ns.label, args_ns.out
-    if not SESSION_RE.match(session or ""): _fail(f"invalid session {session!r}: expected YYYY-MM-DD", 2)
+    if not _valid_session(session): _fail(f"invalid session {session!r}: expected YYYY-MM-DD", 2)
     if not LABEL_RE.match(label or "") or label in (".", ".."): _fail(f"invalid label {label!r}", 2)
     tickers = [t.strip() for t in args_ns.tickers.split(",") if t.strip()]
     for t in tickers:
         if not TICKER_RE.match(t): _fail(f"invalid ticker {t!r}", 2)
+    if len(set(tickers)) != len(tickers): _fail(f"duplicate tickers {tickers!r}", 2)
     endpoints = [e.strip() for e in (getattr(args_ns, "orats_endpoints", DEFAULT_ORATS_ENDPOINTS) or "").split(",") if e.strip()]
     for e in endpoints:
         if not ENDPOINT_RE.match(e) or ".." in e: _fail(f"invalid ORATS endpoint {e!r}", 2)
@@ -303,13 +310,17 @@ def _read_meta(path):
 def compare(args_ns):
     rule = "a refetch at T+X whose content hash equals the fetch at T, with max(updatedAt) at T earlier than T, counts as final at T"
     hdrs = ("etag", "last-modified", "age", "date", "content-length")
-    root = Path(args_ns.out)
+    if args_ns.session is not None and not _valid_session(args_ns.session): _fail(f"invalid session {args_ns.session!r}: expected YYYY-MM-DD", 2)
+    root = Path(args_ns.out).resolve()
     sessions = [args_ns.session] if args_ns.session else (sorted(p.name for p in root.iterdir() if p.is_dir()) if root.is_dir() else [])
     metas = []
     for s in sessions:
         sdir = root / s
+        if not sdir.resolve().is_relative_to(root): _skip(s, "outside output root"); continue
         if not sdir.is_dir(): continue
         for f in sorted(sdir.glob("*/*.meta.json")):
+            if not f.parent.resolve().is_relative_to(root): _skip(str(f.parent), "outside output root"); continue
+            if not f.resolve().is_relative_to(root): _skip(str(f), "outside output root"); continue
             m = _read_meta(f)
             if m is not None: metas.append(m)
     groups = {}
@@ -319,6 +330,7 @@ def compare(args_ns):
     ff = tnf = 0
     group_trk = {}
     print("# finality compare")
+    print("- evaluated headers: etag, last-modified (age, date, content-length are displayed only)")
     for key in sorted(groups, key=lambda k: tuple(str(x) for x in k)):
         rows = sorted(groups[key], key=lambda r: _ts(r.get("fetched_at_utc")) or 0.0)
         ok_rows = [r for r in rows if _meta_ok(r)]
@@ -351,8 +363,10 @@ def compare(args_ns):
             ff += ff_i; tnf += tnf_i
             print(f"- pair {ok_rows[i].get('label')}->{ok_rows[i + 1].get('label')}: R_declares_final_at_i={decl} false_final={ff_i} true_not_final={tnf_i}")
     print(f"\n## Overall\n- groups: {len(groups)}\n- false_final: {ff}\n- true_not_final: {tnf}")
-    for hn in ("etag", "last-modified"):
-        print(f"- header {hn}: {'header tracks content' if all(group_trk[k][hn] == 'yes' for k in group_trk) else 'header does not track content'}")
+    if not groups: print("- header: inconclusive (no captures)")
+    else:
+        for hn in ("etag", "last-modified"):
+            print(f"- header {hn}: {'header tracks content' if all(group_trk[k][hn] == 'yes' for k in group_trk) else 'header does not track content'}")
 
 
 def build_parser():

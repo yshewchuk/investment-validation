@@ -33,7 +33,7 @@ Not sufficient:
 - Stability only on the evening labels but a revision on the next day (a restatement window): R cannot certify a same-day verdict.
 - Fewer than 3 sessions: report "inconclusive", not "sufficient".
 
-A header counts as a completion marker only if every group reports `header_tracking: yes` for it (the overall line then says "header tracks content"; a group with no usable pair counts as not tracking), or the row count is the same at every label and differs from a known-incomplete capture. Otherwise report it as not a marker.
+Only `etag` and `last-modified` are evaluated as marker candidates (`age`, `date` and `content-length` are displayed only). A header counts as a completion marker only if every group reports `header_tracking: yes` for it (the overall line then says "header tracks content"; a group with no usable pair counts as not tracking), or the row count is the same at every label and differs from a known-incomplete capture. Otherwise report it as not a marker.
 
 Limit: a sample cannot prove the provider never revises. A pass supports R as an evidence-backed heuristic for admission, and the design must still record the revision window it observed.
 

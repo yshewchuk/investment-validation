@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from datetime import datetime, timezone
@@ -61,6 +62,9 @@ def test_capture_writes_body_meta_redacts_token_and_fills_meta_fields(tmp_path, 
     assert body_f.is_file() and meta_f.is_file() and body_f.read_bytes() == _body()
 
     meta = json.loads(meta_f.read_text())
+    body_bytes = body_f.read_bytes()
+    assert meta["body_sha256"] == hashlib.sha256(body_bytes).hexdigest()
+    assert meta["body_bytes"] == len(body_bytes)
     assert meta["status"] == 200
     assert meta["ok"] is True
     assert meta["row_count"] == 2
@@ -174,6 +178,47 @@ def test_invalid_label_and_session_exit_2(tmp_path, orats_key):
         with pytest.raises(SystemExit) as exc:
             finality_probe.capture(_ns(tmp_path, **kwargs), http_get=_fake_get())
         assert exc.value.code == 2
+
+
+def test_invalid_calendar_session_exits_2_without_network_call(tmp_path, orats_key):
+    called = []
+
+    def boom(req):
+        called.append(req)
+        raise AssertionError("network must not be called")
+
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path, session="2026-02-30"), http_get=boom)
+    assert exc.value.code == 2
+    assert called == []
+    assert not (tmp_path / "2026-02-30").exists()
+
+
+def test_compare_session_traversal_exits_2(tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.compare(argparse.Namespace(out=str(tmp_path), session="../x"))
+    assert exc.value.code == 2
+
+
+def test_duplicate_tickers_exit_2_without_network_call(tmp_path, orats_key):
+    called = []
+
+    def boom(req):
+        called.append(req)
+        raise AssertionError("network must not be called")
+
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path, tickers="SPY,SPY"), http_get=boom)
+    assert exc.value.code == 2
+    assert called == []
+    assert not any(tmp_path.iterdir())
+
+
+def test_compare_empty_dir_prints_inconclusive(tmp_path, capsys):
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    assert "- header: inconclusive (no captures)" in out
+    assert "header tracks content" not in out
 
 
 def test_compare_skips_symlink_and_oversized_meta(tmp_path, orats_key, capsys):
