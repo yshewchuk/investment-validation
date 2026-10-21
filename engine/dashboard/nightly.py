@@ -831,7 +831,8 @@ def _refuse(report: NightlyReport, step: str, detail: str) -> NightlyStop:
 def _log_rss(stage: str) -> None:
     """Print current and peak RSS to stderr for a stage boundary.
 
-    memprobe returns 0 when a reading is unreadable, so this never raises.
+    An unreadable proc file reads as 0; a MemoryError or a failing stderr
+    write still propagates.
     """
     rss = memprobe.rss_bytes()
     peak = memprobe.peak_rss_bytes()
@@ -1884,6 +1885,9 @@ def run_nightly(
         report.flags.append(calib_flag)
 
     report.mark("backfill", started=started)
+    if backfill and hasattr(engine, "release_score_caches"):
+        engine.release_score_caches()
+    _log_rss("backfill done")
     # -- 4c. model evidence — rebuilt only when a champion changed -----------
     # render copies data/features/model_evidence.json into the bundle verbatim,
     # and the file is keyed by the champions' artifact fingerprint. Nothing
