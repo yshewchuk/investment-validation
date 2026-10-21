@@ -273,6 +273,8 @@ def capture(args_ns, http_get=None, now=None):
     if len(set(endpoints)) != len(endpoints):
         _fail(f"duplicate ORATS endpoints {endpoints!r}", 2)
     want_massive = bool(massive_arg)
+    if not endpoints and not want_massive:
+        _fail("no provider selected", 2)
     orats_key = os.environ.get("ORATS_API_KEY") or ""
     massive_key = os.environ.get("MASSIVE_API_KEY") or ""
     if endpoints and not orats_key:
@@ -300,6 +302,16 @@ def capture(args_ns, http_get=None, now=None):
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
         _fail("label is locked by another capture (remove .capture.lock if stale)", 2)
+    if not replace and any(unit_dir.glob("*.meta.json")):
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+        _fail("label already captured; pass --replace to invalidate the prior capture", 2)
     try:
         os.write(lock_fd, str(os.getpid()).encode("utf-8"))
         os.close(lock_fd)
@@ -348,6 +360,8 @@ def capture(args_ns, http_get=None, now=None):
             try:
                 status, rhdrs, body = http_get(req)
                 body, status = bytes(body), int(status)
+                if len(body) > MAX_BODY_BYTES:
+                    raise ValueError("BodyTooLarge")
             except Exception as exc:
                 error, status, rhdrs, body = type(exc).__name__, 0, {}, b""
             elapsed_ms = int((time.perf_counter() - t0) * 1000)

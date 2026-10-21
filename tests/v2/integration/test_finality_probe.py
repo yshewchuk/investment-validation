@@ -1442,3 +1442,47 @@ def test_capture_preflight_massive_key_ticker_endpoint_and_repo(tmp_path, monkey
     assert "refusing to write provider data inside a repository" in capsys.readouterr().err
 
     assert called == []
+
+
+def test_injected_oversized_body_never_persisted(tmp_path, orats_key, monkeypatch):
+    monkeypatch.setattr(finality_probe, "MAX_BODY_BYTES", 50)
+    big = json.dumps({"data": [{"updatedAt": "1700000000", "strike": "x" * 200}]}).encode("utf-8")
+    assert len(big) > finality_probe.MAX_BODY_BYTES
+    rc = finality_probe.capture(_ns(tmp_path), http_get=_fake_get(big), now=_at(3))
+    assert rc == 1
+    unit = tmp_path / "2024-01-02" / "L1"
+    meta = json.loads((unit / "orats__hist.strikes__SPY.meta.json").read_text())
+    assert meta["status"] == 0
+    assert meta["error"] == "ValueError"
+    assert meta["ok"] is False
+    assert meta["body_bytes"] == 0
+    assert (unit / "orats__hist.strikes__SPY.body").read_bytes() == b""
+
+
+def test_capture_no_provider_selected_exits_2_before_dirs(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path, endpoints="", massive=False), http_get=_fake_get())
+    assert exc.value.code == 2
+    assert "no provider selected" in capsys.readouterr().err
+    assert not any(tmp_path.iterdir())
+
+
+def test_post_lock_label_recheck_removes_lock(tmp_path, orats_key, monkeypatch, capsys):
+    unit = tmp_path / "2024-01-02" / "L1"
+    real_open = finality_probe.os.open
+    seen = []
+
+    def fake_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if not seen and str(path).endswith(".capture.lock"):
+            seen.append(True)
+            unit.mkdir(parents=True, exist_ok=True)
+            (unit / "x.meta.json").write_text("{}", encoding="utf-8")
+        return fd
+
+    monkeypatch.setattr(finality_probe.os, "open", fake_open)
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    assert exc.value.code == 2
+    assert "label already captured; pass --replace to invalidate the prior capture" in capsys.readouterr().err
+    assert not (unit / ".capture.lock").exists()
