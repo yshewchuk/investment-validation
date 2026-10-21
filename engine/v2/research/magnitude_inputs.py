@@ -114,15 +114,14 @@ def load_magnitude_targets(repository, snapshot, *, as_of_month, labels_before,
         signed.append(value)
         available.append(known)
         positions.append(index)
-    rows = rows.iloc[positions].reset_index(drop=True)
-    if rows.empty:
-        raise errors.fail("POPULATION_COLLAPSED", "every planned magnitude label was skipped")
+    candidates = rows
+    rows = candidates.iloc[positions].reset_index(drop=True)
     rows["realized_move_pct"], rows["absolute_move_pct"] = signed, [abs(value) for value in signed]
     rows["target_available_on"] = available
     rows["target_object_id"] = [consumed[index]["object_id"] for index in positions]
     recipe = magnitude_recipe()
     identity = {"schema_version": "research_magnitude_targets.v1",
-        **{name: rows.iloc[0][name] for name in _CONTEXT}, "purpose": purpose,
+        **{name: candidates.iloc[0][name] for name in _CONTEXT}, "purpose": purpose,
         "computed_moves_version": snapshot.table_versions["computed_moves"].dataset_version_id,
         "labels_before": cutoff.isoformat(), "target_recipe": recipe,
         "target_recipe_id": content_hash(recipe), "consumed_inputs": consumed,

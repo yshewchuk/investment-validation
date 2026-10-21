@@ -44,6 +44,12 @@ def test_omit_flag_drops_skipped_event_and_binds_its_object(tmp_path):
         assert [row["event_id"] for row in result.attrs["consumed_inputs"]] == [
             skipped["event_id"], kept_first["event_id"], kept_second["event_id"]]
         by_event = {row["event_id"]: row["object_id"] for row in result.attrs["consumed_inputs"]}
+        records = {record.time_min: record for record in repository.fragment_records(snapshot, "computed_moves")}
+        record = records[skipped["event_date"].date().isoformat()]
+        omitted_entry = next(row for row in result.attrs["consumed_inputs"]
+                             if row["event_id"] == skipped["event_id"])
+        assert omitted_entry == {"event_id": skipped["event_id"], "fragment_id": record.fragment_id,
+            "object_id": record.object_ref.object_id, "content_hash": record.object_ref.content_hash}
         assert result.target_object_id.tolist() == [
             by_event[kept_first["event_id"]], by_event[kept_second["event_id"]]]
         assert result.realized_move_pct.tolist() == [2.0, 2.0]
@@ -80,13 +86,17 @@ def test_omitted_labels_are_sorted_by_event_id_not_date_order(tmp_path):
         conn.close()
 
 
-def test_all_skipped_events_collapse_the_population(tmp_path):
+def test_all_skipped_events_yield_empty_result_with_omissions(tmp_path):
     first, second = history_event("2024-01-04"), history_event("2024-03-05")
     conn, repository, snapshot = commit_event_history(
         tmp_path, [first, second], [_skipped(first), _skipped(second)])
     try:
-        with pytest.raises(DataError, match="POPULATION_COLLAPSED"):
-            _load(repository, snapshot, omit_not_computed=True)
+        result = _load(repository, snapshot, omit_not_computed=True)
+        assert len(result) == 0
+        labels = [item["event_id"] for item in result.attrs["omitted_labels"]]
+        assert labels == sorted([first["event_id"], second["event_id"]])
+        assert [row["event_id"] for row in result.attrs["consumed_inputs"]] == [
+            first["event_id"], second["event_id"]]
     finally:
         conn.close()
 
@@ -144,6 +154,7 @@ def test_validate_targets_accepts_omitted_label_receipt():
     [{"event_id": "event-c", "reason": "skipped"}],
     [{"event_id": "event-b", "reason": "unavailable"}],
     [{"event_id": "event-b", "reason": "skipped"}, {"event_id": "event-a", "reason": "skipped"}],
+    [{"event_id": "event-b", "reason": "skipped"}, {"event_id": "event-b", "reason": "skipped"}],
 ])
 def test_validate_targets_rejects_bad_omitted_labels(omitted):
     with pytest.raises(ValueError):

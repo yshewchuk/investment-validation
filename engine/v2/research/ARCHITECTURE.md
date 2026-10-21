@@ -136,7 +136,8 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 | Empty bulk canonical calendar | `POPULATION_COLLAPSED`; no empty success. |
 | Missing, skipped, non-finite target, non-date outcome key or invalid target availability (R4) | `EXPERIMENT_VARIANT_FAILED`; no partial returned frame. |
 | `omit_not_computed=True` and a row is `skipped` | Event omitted, object still bound in `consumed_inputs`, listed in `omitted_labels`; other events returned. |
-| `omit_not_computed=True` and every planned label is `skipped` | `POPULATION_COLLAPSED`; no frame. |
+| `omit_not_computed=True` and every planned label is `skipped` | Empty frame whose attrs list every event in `omitted_labels`; scoring then refuses `EXPERIMENT_VARIANT_FAILED` ("require scored rows"), which the inner search records as a refused terminal. |
+| `omit_not_computed` is not a `bool` | `CONTRACT_MISMATCH` before any repository access. |
 | Cache, retry, transaction, partial write, replay | No cache or automatic retry; read-only, no writes; complete scans precede return; identical pinned inputs return identical rows (R6). |
 
 These readers preserve no economic variant identity and cannot authorize the
