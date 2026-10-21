@@ -87,6 +87,17 @@ anon/file/shmem, the pyarrow pool (backend, allocated, max; `_TRIM` also
 calls `release_unused()`), the largest mappings, untracked numpy arrays
 found via their holders, and gc object counts by type.
 
+### Post-score memory release
+
+After `score_calendar` returns, `run_nightly` calls
+`Scorer.release_score_caches()`, which empties the `live_features` cache
+(a pure memoization: a later call recomputes the same value) and returns freed
+pages to the OS, before ledger replay and settle. Every stage boundary from
+score through selfcheck logs `[nightly-mem] <stage> rss=<G> peak=<G>` to
+stderr, independent of the opt-in memprobe flags. Nothing the later steps need
+is dropped; the trades frame and chain indexes stay (ladder, replay and
+selfcheck read them).
+
 ## Inputs
 
 Tier-1/2 fetch data (via the quota-guarded fetch wrapper), the shared

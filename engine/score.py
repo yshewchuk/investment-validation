@@ -1528,6 +1528,15 @@ class Scorer:
         memprobe.watch("scorer.models", self, "_models")
         memprobe.watch("scorer.serving_models", self, "_serving_models")
 
+    def release_score_caches(self) -> None:
+        """Drop memoized live_features results and free pages.
+
+        The cache is pure memoization — live_features recomputes the same
+        value — so clearing it is safe.
+        """
+        self._live_features_cache.clear()
+        _release_free_pages()
+
     # -- setup -------------------------------------------------------------
 
     def _enrich(self, trades: pd.DataFrame) -> pd.DataFrame:
