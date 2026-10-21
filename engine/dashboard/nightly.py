@@ -828,6 +828,21 @@ def _refuse(report: NightlyReport, step: str, detail: str) -> NightlyStop:
     return NightlyStop(step, detail)
 
 
+def _log_rss(stage: str) -> None:
+    """Print current and peak RSS to stderr for a stage boundary.
+
+    An unreadable proc file reads as 0; a MemoryError or a failing stderr
+    write still propagates.
+    """
+    rss = memprobe.rss_bytes()
+    peak = memprobe.peak_rss_bytes()
+    print(
+        f"[nightly-mem] {stage} rss={rss / 1e9:.2f}G peak={peak / 1e9:.2f}G",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def _repair_failed(report: NightlyReport, exc: Exception) -> NightlyStop:
     """The typed stop for a Tier-4 repair that raised or failed to finalize."""
     from engine.dashboard.model_evidence import sanitize_reason
@@ -1744,6 +1759,10 @@ def run_nightly(
     board_scores = scores
 
     report.mark("score", started=started)
+    _log_rss("score done")
+    if hasattr(engine, "release_score_caches"):
+        engine.release_score_caches()
+    _log_rss("score caches released")
     # -- 4. ledger, BEFORE rendering — the frozen record is the point --------
     # The ledger records the ATM board only: the ladder rows are EXTRAPOLATED
     # views of the same decision, and freezing them would inflate the
@@ -1753,6 +1772,7 @@ def run_nightly(
     )
 
     report.mark("ledger", started=started)
+    _log_rss("ledger done")
     # -- 4a. SETTLE what has already happened --------------------------------
     # The nightly wrote predictions for six nights and settled none of them,
     # because nothing ever called this. A frozen prediction with no outcome is
@@ -1774,6 +1794,7 @@ def run_nightly(
         })
 
     report.mark("settle", started=started)
+    _log_rss("settle done")
     # -- 3b. the strike ladder, for the explorer -------------------------------
     ladder = strike_ladder(
         board_scores, scorer=engine, alt_strikes=alt_strikes, as_of=as_of
@@ -1794,6 +1815,7 @@ def run_nightly(
     }
 
     report.mark("ladder", started=started)
+    _log_rss("ladder done")
     # -- 4b. honest backfill of missed nights --------------------------------
     late_as_ofs: list[str] = []
     skipped_closed: list[str] = []
@@ -1863,6 +1885,9 @@ def run_nightly(
         report.flags.append(calib_flag)
 
     report.mark("backfill", started=started)
+    if backfill and hasattr(engine, "release_score_caches"):
+        engine.release_score_caches()
+    _log_rss("backfill done")
     # -- 4c. model evidence — rebuilt only when a champion changed -----------
     # render copies data/features/model_evidence.json into the bundle verbatim,
     # and the file is keyed by the champions' artifact fingerprint. Nothing
@@ -1946,6 +1971,7 @@ def run_nightly(
 
     report.mark("render", started=started)
     # -- 5b. selfcheck — any mismatch stops the publish -----------------------
+    _log_rss("selfcheck start")
     check = selfcheck(bundle_dir, scorer=engine)
     report.steps["selfcheck"] = check.as_dict()
     if not check.ok:
@@ -1968,6 +1994,7 @@ def run_nightly(
         raise NightlyStop("selfcheck", check.detail)
 
     report.mark("selfcheck", started=started)
+    _log_rss("selfcheck done")
     # -- 6. publish atomically -------------------------------------------------
     if publish:
         try:
