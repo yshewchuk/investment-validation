@@ -182,5 +182,5 @@ def validate_rows(rows, context):
                 progress.tick()
             if seen != set(expected):
                 raise ValueError
-    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):
         raise errors.fail("CONTRACT_MISMATCH", "research panel rows differ from their closed contract") from None

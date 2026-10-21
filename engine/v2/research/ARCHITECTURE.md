@@ -58,7 +58,7 @@ materializer, CLI, model or registration integration.
 
 | Condition | Outcome |
 | --- | --- |
-| Invalid detached panel identity/schema, dictionary, calendar, cutoff, row or missingness | `CONTRACT_MISMATCH` |
+| Invalid panel identity/schema, snapshot, dictionary, calendar, cutoff, row or missingness | `CONTRACT_MISMATCH` |
 | Malformed or forged direct calendar snapshot | `SNAPSHOT_UNRESOLVED` |
 | Empty native observed session calendar | `CALENDAR_UNAVAILABLE` |
 | History digest, snapshot binding or recomputed admission differs | `IDENTITY_CONFLICT` |

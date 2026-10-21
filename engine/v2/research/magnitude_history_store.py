@@ -392,7 +392,7 @@ def validate_context_identity(context):
     """Validate a detached history identity; this grants no repository read authority."""
     try:
         _names(context)
-    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):
         raise errors.fail("CONTRACT_MISMATCH", "invalid detached history identity") from None
 
 
@@ -419,7 +419,7 @@ def preflight_source(repository, snapshot, context):
             event_ids=[event["event_id"] for event in plan["events"]])
         if context != expected:
             raise ValueError
-    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):
         raise errors.fail("IDENTITY_CONFLICT", "history binding differs from source metadata") from None
     return _preflight_source(repository, snapshot, context)
 

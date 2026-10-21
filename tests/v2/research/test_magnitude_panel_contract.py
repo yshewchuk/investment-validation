@@ -1080,3 +1080,74 @@ def test_excessive_document_depth_is_a_typed_public_refusal(native, boundary):
             plan.preflight_context(source.repository, source.snapshot, output, context)
         else:
             plan.build_context(source.repository, source.snapshot, output, binding, producer=producer)
+
+
+@pytest.mark.parametrize("boundary,code", [("identity", "CONTRACT_MISMATCH"),
+    ("preflight", "IDENTITY_CONFLICT"), ("panel_builder", "IDENTITY_CONFLICT")])
+def test_deep_history_producer_is_a_typed_public_refusal(native, boundary, code):
+    import sys
+
+    source, output, original, producer, _ = native
+    binding = copy.deepcopy(original)
+    leaf = binding["producer"]["environment"]
+    for _ in range(sys.getrecursionlimit() + 100):
+        leaf["nested"] = {}
+        leaf = leaf["nested"]
+    # The independent panel producer remains valid; only the history binding is deep.
+    with pytest.raises(DataError, match=code):
+        if boundary == "identity":
+            history.validate_context_identity(binding)
+        elif boundary == "preflight":
+            history.preflight_source(source.repository, source.snapshot, binding)
+        else:
+            plan.build_context(source.repository, source.snapshot, output, binding, producer=producer)
+
+
+def test_deep_lineage_json_is_a_typed_public_refusal(native):
+    import sys
+
+    rows = _rows(native[-1])
+    assert table.validate_rows(rows, native[-1]) is None
+    depth = sys.getrecursionlimit() + 100
+    nested_json = '{"nested":' * depth + 'null' + '}' * depth
+    rows[0]["lineage"] = rows[0]["lineage"].replace('"synthetic-history"', nested_json, 1)
+    # Keep the closed root blocks: recursion occurs canonicalizing decoded lineage,
+    # not an earlier unknown-key refusal or hashing a Python container.
+    _hash(rows[0], "row_id")
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        table.validate_rows(rows, native[-1])
+
+
+@pytest.mark.parametrize("serializer", ["canonical_json", "content_hash"])
+def test_builder_final_serialization_depth_failure_is_typed(native, monkeypatch, serializer):
+    source, output, binding, producer, _ = native
+    original = getattr(plan, serializer)
+    reached = []
+
+    def fail_final_panel_identity(document):
+        if isinstance(document, dict) and document.get("schema_version") == "magnitude_panel_context.v1":
+            reached.append(document["schema_version"])
+            raise RecursionError("injected final serialization depth failure")
+        return original(document)
+
+    # Fault injection isolates the final serialization catch, not a platform-dependent depth threshold.
+    monkeypatch.setattr(plan, serializer, fail_final_panel_identity)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        plan.build_context(source.repository, source.snapshot, output, binding, producer=producer)
+    assert reached == ["magnitude_panel_context.v1"]
+
+
+@pytest.mark.parametrize("snapshot_argument", ["source", "history"])
+def test_preflight_snapshot_document_depth_is_a_typed_refusal(native, snapshot_argument):
+    import sys
+
+    source, output, _, _, context = native
+    nested = leaf = {}
+    for _ in range(sys.getrecursionlimit() + 100):
+        leaf["nested"] = {}
+        leaf = leaf["nested"]
+    snapshots = {"source": source.snapshot, "history": output}
+    snapshots[snapshot_argument] = replace(snapshots[snapshot_argument], table_versions=nested)
+    # Context validation remains valid; only serialization of the explicit snapshot is deep.
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        plan.preflight_context(source.repository, snapshots["source"], snapshots["history"], context)

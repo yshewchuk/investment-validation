@@ -275,8 +275,11 @@ def build_context(repository, source_snapshot, history_snapshot, history_context
         "forecast_calendar": to_document(calendar), "forecast_calendar_source": calendar_source}
     # Detach nested caller objects: mutating a request cannot mutate a returned identity.
 
-    identity = json.loads(canonical_json(identity))
-    context = {**identity, "context_id": content_hash(identity)}
+    try:
+        identity = json.loads(canonical_json(identity))
+        context = {**identity, "context_id": content_hash(identity)}
+    except RecursionError:
+        raise errors.fail("CONTRACT_MISMATCH", "panel metadata nesting exceeds serialization limits") from None
     validate_context(context)
     return context
 
@@ -286,9 +289,12 @@ def preflight_context(repository, source_snapshot, history_snapshot, context):
     validate_context(context)
     if not all(isinstance(value, SnapshotRef) for value in (source_snapshot, history_snapshot)):
         raise errors.fail("CONTRACT_MISMATCH", "explicit panel snapshot types required")
-    if (context["source_snapshot"] != to_document(source_snapshot)
-            or context["history_snapshot"] != to_document(history_snapshot)):
-        raise errors.fail("IDENTITY_CONFLICT", "panel snapshots differ from context")
+    try:
+        if (context["source_snapshot"] != to_document(source_snapshot)
+                or context["history_snapshot"] != to_document(history_snapshot)):
+            raise errors.fail("IDENTITY_CONFLICT", "panel snapshots differ from context")
+    except RecursionError:
+        raise errors.fail("CONTRACT_MISMATCH", "panel snapshot nesting exceeds serialization limits") from None
     expected = build_context(repository, source_snapshot, history_snapshot, context["history_context"],
         producer=context["producer"], availability_lane=context["availability_lane"])
     if expected != context:
