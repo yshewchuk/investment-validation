@@ -6,7 +6,7 @@ import pytest
 from engine.v2.foundation import ArtifactStore, content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import magnitude_search_shards as shards
-from experiments.magnitude_search_inputs import load_inputs, stored_id
+from experiments.magnitude_search_inputs import load_inputs
 
 
 def _ids(*names):
@@ -66,13 +66,11 @@ def _conflict(call):
 def test_v2_manifest_loads_to_the_same_inputs_as_the_v1_record(tmp_path):
     store = ArtifactStore(tmp_path / "store")
     manifest = _manifest(store)
-    inputs = load_inputs(store, manifest, stored_id(manifest))
+    inputs = load_inputs(store, manifest, shards.manifest_id(manifest))
     assert inputs == COHORT
     assert inputs is not manifest["inline"]
     assert "features" not in manifest["inline"] and manifest["sections"]["features"]["row_count"] == 2
-    assert stored_id(manifest) == shards.manifest_id(manifest)
     assert load_inputs(store, COHORT, content_hash(COHORT)) == COHORT
-    assert stored_id(COHORT) == content_hash(COHORT)
 
 
 def test_expected_id_must_match_for_both_formats(tmp_path):

@@ -10,7 +10,6 @@ from experiments.magnitude_search_shards import (
     LIST_MEMBERS,
     MANIFEST_SCHEMA,
     iter_section,
-    manifest_id,
     verify_manifest,
 )
 
@@ -41,13 +40,6 @@ def _place(inputs, path, rows):
     if not isinstance(target, dict) or leaf in target:
         raise fail(_CONFLICT, "search cohort manifest does not fit its sections")
     target[leaf] = rows
-
-
-def stored_id(record):
-    """The inputs_id a stored cohort record binds to: manifest hash (v2) or content hash (v1)."""
-    if isinstance(record, dict) and record.get("schema_version") == MANIFEST_SCHEMA:
-        return manifest_id(record)
-    return content_hash(record)
 
 
 def load_inputs(store, record, expected_id):

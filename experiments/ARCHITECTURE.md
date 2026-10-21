@@ -273,9 +273,10 @@ both flag states publish/verify the same plan and never write a ledger.
 
 The rows above, and the 16 MiB cohort record and child payload cap, describe the
 whole-cohort (v1) format; this section states the sharded (v2) contract that the one
-loader reads alongside it. The shard module and the loader implement the read side only:
-the cohort and outer-input writers, the child transport and the outer result binding below
-stay on the whole-cohort format and follow this contract when they publish manifests. Cohort rows (`features`, `training`, preflight
+loader reads alongside it. Implemented: the shard module and the loader (read side).
+Not implemented: the cohort and outer-input writers, the child transport and the manifest
+bindings of `inputs:<trial>` and the outer result below, which stay on the whole-cohort
+format. Cohort rows (`features`, `training`, preflight
 `planned_inputs`, and the same rows in `outer-inputs:<id>`) are ordered sections of
 content-addressed shards, not one record or payload. Population-sized receipt lists
 (`training_inputs` candidate, qualified, read and omitted event lists, and preflight
@@ -336,11 +337,12 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 | Loader given a manifest with a missing or extra inventory section, an inline member colliding with a section path, or a keyless-section row that is not exactly `{position, row}` with consecutive positions from 0; or a record that is not a dict | `EXPERIMENT_IDENTITY_CONFLICT`; no rows used. |
 | Whole-cohort record whose content hash differs from the expected `inputs_id` | `EXPERIMENT_IDENTITY_CONFLICT`; no rewrite or migration. |
 
-Registration, snapshot, plan and execution-spec bindings are unchanged; `inputs:<trial>`
-binds the manifest hash and so every shard. The outer result record that today binds the
-hash of the `outer-inputs:<id>` document binds that manifest's hash instead, and outer
-activation and replay verify it before reading any shard. Source closures include the shard module, so
-seals change. Replay identity holds within one format version.
+Registration, snapshot, plan and execution-spec bindings are unchanged. Today `inputs:<trial>`
+and the outer result bind the hash of the whole-cohort document. Outer replay takes the
+expected id from the stored terminal and the loader verifies a manifest against it before
+reading any shard; a manifest-bound `inputs:<trial>` and outer result bind the manifest hash
+and so every shard. Source closures include the shard module, so seals change. Replay
+identity holds within one format version.
 
 ## Stored research-history entrypoint
 
