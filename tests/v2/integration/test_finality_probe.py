@@ -27,6 +27,7 @@ ROWS = [
 ]
 MROWS = [{"day": {"last_updated": 1700000100}, "strike": 100}]
 NEXT1 = "https://api.massive.com/v3/snapshot/options/SPY?cursor=1"
+NEXT2 = "https://api.massive.com/v3/snapshot/options/SPY?cursor=2"
 MP1_NAME = "massive__v3.snapshot.options__SPY__p1"
 
 
@@ -654,3 +655,95 @@ def test_existing_label_refused_byte_identical_then_replace_succeeds(tmp_path, o
     assert rc == 0
     meta = json.loads((unit / "orats__hist.strikes__SPY.meta.json").read_text())
     assert meta["fetched_at_utc"] == datetime(2024, 1, 4, tzinfo=timezone.utc).isoformat()
+
+
+def test_continuation_metadata_tamper_skipped(tmp_path, massive_key, capsys):
+    p0 = _mbody(MROWS, NEXT1)
+    p1 = _mbody([{"day": {"last_updated": 1700000300}, "strike": 102}])
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=_mk_get(p0, p1), now=_at(3))
+    assert rc == 0
+    meta_f = tmp_path / "2024-01-02" / "L1" / "massive__v3.snapshot.options__SPY__p0.meta.json"
+    m = json.loads(meta_f.read_text())
+    assert m["has_next"] is True
+    m["has_next"] = False
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "continuation mismatch" in captured.err
+    assert "- excluded_not_ok: [L1: 200]" in captured.out
+    assert "- pair " not in captured.out
+
+
+def test_identity_tamper_skipped_compare_succeeds(tmp_path, orats_key, capsys):
+    for lab in ("A", "B", "C", "D"):
+        finality_probe.capture(_ns(tmp_path, label=lab), http_get=_fake_get(), now=_at(3))
+    unit = tmp_path / "2024-01-02"
+    meta_f = unit / "A" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["ticker"] = ["SPY"]
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+    meta_f = unit / "B" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["run_id"] = ["not-a-str"]
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+    meta_f = unit / "C" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["session"] = "2024-01-03"
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "invalid ticker" in captured.err
+    assert "invalid run_id" in captured.err
+    assert "session mismatch" in captured.err
+    assert "- groups: 1" in captured.out
+
+
+def test_unusable_output_path_exits_2_without_traceback(tmp_path, orats_key, capsys):
+    bad = tmp_path / "regular-file"
+    bad.write_text("not a directory")
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(bad), http_get=_fake_get())
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "cannot use output path:" in err
+    assert "Traceback" not in err
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.compare(argparse.Namespace(out=str(bad), session=None))
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "cannot use output path:" in err
+    assert "Traceback" not in err
+
+
+def test_massive_missing_middle_page_excluded(tmp_path, massive_key, capsys):
+    p0 = _mbody(MROWS, NEXT1)
+    p1 = _mbody([{"day": {"last_updated": 1700000300}, "strike": 102}], NEXT2)
+    p2 = _mbody([{"day": {"last_updated": 1700000500}, "strike": 103}])
+
+    def get(req):
+        u = req["url"]
+        body = p2 if "cursor=2" in u else p1 if "cursor=1" in u else p0
+        return 200, {"content-type": "application/json"}, body
+
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True), http_get=get, now=_at(3))
+    assert rc == 0
+    unit = tmp_path / "2024-01-02" / "L1"
+    for ext in ("body", "meta.json"):
+        (unit / f"massive__v3.snapshot.options__SPY__p1.{ext}").unlink()
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    assert "- excluded_not_ok: [L1: 200]" in out
+    assert "- pair " not in out
+
+
+def test_ts_units_and_garbage():
+    expected = 1700000000.0
+    for v in (1700000000, 1700000000000, 1700000000000000000,
+              "1700000000", "1700000000000", "1700000000000000000",
+              "2023-11-14T22:13:20Z"):
+        assert finality_probe._ts(v) == expected, v
+    for garbage in (None, "", "garbage", "not-a-time", "2023-99-99"):
+        assert finality_probe._ts(garbage) is None, garbage

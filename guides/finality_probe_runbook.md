@@ -18,7 +18,7 @@ So the native side has nothing to reuse. If the probe supports a rule, the rule 
 
 A refetch at T+X whose content hash equals the fetch at T, with max(`updatedAt`) at T earlier than T, counts as final at T.
 
-Terms: content hash is the sha256 of the response rows sorted canonically (policy `rows-sorted-canonical-json-v1`; no field is excluded), so row order does not count. `compare` recomputes it from each stored body and skips captures whose digest or policy does not match. Only metadata, never the bodies, goes into reports. For Massive, `max_updated_at` is the larger of `day.last_updated` and `last_quote.last_updated` over the results. Comparisons are per trade date, and only successful captures (HTTP 2xx with a JSON body) count; failed ones are listed as `excluded_not_ok`.
+Terms: content hash is the sha256 of the response rows sorted canonically (policy `rows-sorted-canonical-json-v1`; no field is excluded), so row order does not count. `compare` recomputes it from each stored body and skips captures whose digest or policy does not match. Only metadata, never the bodies, goes into reports. For Massive, `max_updated_at` is the larger of `day.last_updated` and `last_quote.last_updated` over the results. Comparisons are per trade date, and only successful captures count (HTTP 2xx, a JSON object with the expected `data` list for ORATS or `results` list for Massive, and for Massive a complete page set); failed ones are listed as `excluded_not_ok`.
 
 ## Evidence that R is sufficient, or not
 
@@ -33,7 +33,9 @@ Not sufficient:
 - Stability only on the evening labels but a revision on the next day (a restatement window): R cannot certify a same-day verdict.
 - Fewer than 3 sessions: report "inconclusive", not "sufficient".
 
-Only `etag` and `last-modified` are evaluated as marker candidates (`age`, `date` and `content-length` are displayed only). A header counts as a completion marker only if every group reports `header_tracking: yes` for it (the overall line then says "header tracks content"; a group with no usable pair counts as not tracking), or the row count is the same at every label and differs from a known-incomplete capture. Otherwise report it as not a marker.
+Only `etag` and `last-modified` are evaluated as marker candidates (`age`, `date` and `content-length` are displayed only). A header counts as a completion marker only if every group reports `header_tracking: yes` for it (the overall line then says "header tracks content"; a group with no usable pair counts as not tracking). Otherwise report it as not a marker.
+
+The record count is judged separately and by hand from the `row_count` column, not by `compare`: it is a marker candidate only if it is the same at every label of a session and differs from a capture known to be incomplete. Otherwise report it as not a marker.
 
 Limit: a sample cannot prove the provider never revises. A pass supports R as an evidence-backed heuristic for admission, and the design must still record the revision window it observed.
 

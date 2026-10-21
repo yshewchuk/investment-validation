@@ -42,23 +42,40 @@ def _valid_session(s):
     except ValueError: return False
 
 
+def _errno_name(exc):
+    eno = getattr(exc, "errno", None)
+    if isinstance(eno, int) and eno in errno.errorcode:
+        return errno.errorcode[eno]
+    return getattr(exc, "strerror", None) or type(exc).__name__
+
+
+def _fail_path(exc):
+    _fail(f"cannot use output path: {_errno_name(exc)}", 2)
+
+
 def _refuse_repo(out_dir):
-    path = Path(out_dir).resolve()
-    for base in (path, *path.parents):
-        if (base / ".git").exists() or (base / ".git").is_symlink():
-            _fail("refusing to write provider data inside a repository", 2)
+    try:
+        path = Path(out_dir).resolve()
+        for base in (path, *path.parents):
+            if (base / ".git").exists() or (base / ".git").is_symlink():
+                _fail("refusing to write provider data inside a repository", 2)
+    except OSError as exc:
+        _fail_path(exc)
 
 
 def _mkdirs(path):
-    missing, cur = [], Path(path)
-    while not cur.exists():
-        missing.append(cur)
-        if cur.parent == cur:
-            break
-        cur = cur.parent
-    for d in reversed(missing):
-        d.mkdir(mode=0o700)
-        os.chmod(d, 0o700)
+    try:
+        missing, cur = [], Path(path)
+        while not cur.exists():
+            missing.append(cur)
+            if cur.parent == cur:
+                break
+            cur = cur.parent
+        for d in reversed(missing):
+            d.mkdir(mode=0o700)
+            os.chmod(d, 0o700)
+    except OSError as exc:
+        _fail_path(exc)
 
 
 def _redacted_url(url, params):
@@ -415,7 +432,7 @@ def _verified_body(meta_path, meta):
     return data
 
 
-def _read_meta(path):
+def _read_meta(path, session_dir, label_dir):
     name = str(path)
     try:
         fd = _open_ro(path)
@@ -454,13 +471,27 @@ def _read_meta(path):
         return _skip(name, "not a JSON object")
     if obj.get("hash_policy") != HASH_POLICY:
         return _skip(name, "hash policy mismatch")
+    if obj.get("provider") not in ("orats", "massive"):
+        return _skip(name, "invalid provider")
+    endpoint = obj.get("endpoint")
+    if (not isinstance(endpoint, str) or not re.fullmatch(r"[a-z0-9_/.]+", endpoint)
+            or any(seg == ".." for seg in endpoint.split("/"))):
+        return _skip(name, "invalid endpoint")
+    if not isinstance(obj.get("ticker"), str) or not TICKER_RE.match(obj.get("ticker")):
+        return _skip(name, "invalid ticker")
+    run_id = obj.get("run_id")
+    if run_id is not None and not isinstance(run_id, str):
+        return _skip(name, "invalid run_id")
     page = obj.get("page")
     if page is not None and (not isinstance(page, int) or isinstance(page, bool)):
         return _skip(name, "invalid page")
-    if not isinstance(obj.get("label"), str):
-        return _skip(name, "invalid label")
-    if not isinstance(obj.get("session"), str):
+    if obj.get("label") != label_dir:
+        return _skip(name, "label mismatch")
+    session = obj.get("session")
+    if not isinstance(session, str) or not _valid_session(session):
         return _skip(name, "invalid session")
+    if session != session_dir:
+        return _skip(name, "session mismatch")
     if not isinstance(obj.get("status"), int) or isinstance(obj.get("status"), bool):
         return _skip(name, "invalid status")
     row_count = obj.get("row_count")
@@ -484,6 +515,14 @@ def _read_meta(path):
         parsed_body = json.loads(body)
     except Exception:
         parsed_body = None
+    if obj.get("provider") == "massive":
+        nu = parsed_body.get("next_url") if isinstance(parsed_body, dict) else None
+        derived_next = _massive_next_ok(nu)
+        stored_next = obj.get("has_next", False)
+        stored_trunc = obj.get("truncated", False)
+        if (not isinstance(stored_next, bool) or stored_next != derived_next
+                or not isinstance(stored_trunc, bool)):
+            return _skip(name, "continuation mismatch")
     _, calc_max = _rows_and_max(obj.get("provider"), parsed_body)
     if calc_max != obj.get("max_updated_at"):
         return _skip(name, "max_updated_at mismatch")
@@ -527,8 +566,12 @@ def compare(args_ns):
     rule = "a refetch at T+X whose content hash equals the fetch at T, with max(updatedAt) at T earlier than T, counts as final at T"
     hdrs = ("etag", "last-modified", "age", "date", "content-length")
     if args_ns.session is not None and not _valid_session(args_ns.session): _fail(f"invalid session {args_ns.session!r}: expected YYYY-MM-DD", 2)
-    root = Path(args_ns.out).resolve()
-    sessions = [args_ns.session] if args_ns.session else (sorted(p.name for p in root.iterdir() if p.is_dir()) if root.is_dir() else [])
+    try:
+        root = Path(args_ns.out).resolve()
+        root_dirs = sorted(p.name for p in root.iterdir() if p.is_dir())
+    except OSError as exc:
+        _fail_path(exc)
+    sessions = [args_ns.session] if args_ns.session else root_dirs
     metas = []
     for s in sessions:
         sdir = root / s
@@ -537,7 +580,7 @@ def compare(args_ns):
         for f in sorted(sdir.glob("*/*.meta.json")):
             if not f.parent.resolve().is_relative_to(root): _skip(str(f.parent), "outside output root"); continue
             if not f.resolve().is_relative_to(root): _skip(str(f), "outside output root"); continue
-            m = _read_meta(f)
+            m = _read_meta(f, sdir.name, f.parent.name)
             if m is not None: metas.append(m)
     plain, by_page_label = [], {}
     for m in metas:
