@@ -431,7 +431,7 @@ gate and prediction CLIs call it after `run`; it adds no catalog table and does 
 change outcome identity. Every data file sits under `results/`, which
 `checks/repo_hygiene.py` blocks (`BLOCKED_SEGMENTS`) and `.gitignore` ignores; `REPORT.md` is
 ignored by default-deny. The mirror already includes both. This feature does not weaken
-that policy; a test pins it.
+that policy.
 
 Layout: `REPORT.md` (stub: ids, status, the success report text), and in `results/`
 `spec.json`, `request.json`, `event_ids.json`, `outcome.json` (result or typed
@@ -451,6 +451,9 @@ Manifest hashes describe the exact bytes on disk. Every conflict is detected bef
 | Existing results file that is over the cap, a symlink or not a regular file; folder or `results/` that is a symlink | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
 | JSON over the cap | A summary (original bytes, sha256, longest fitting list prefix) is written instead and listed under `trimmed`. |
 | Existing file with different bytes (a replay) | The first record is kept, a stderr warning is printed and the result is `unchanged`. |
+| Existing result file whose bytes differ from the hash in its existing manifest, or a manifest missing a document hash | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
+| Non-finite number (NaN, Infinity) in a document | `INVALID_EXPERIMENT_SPEC`; exports are strict JSON. |
+| Symlinked run folder or `results/` | Refused during number resolution as well as export (`EXPERIMENT_IDENTITY_CONFLICT`), before any evaluation. |
 | Crash before the manifest is written | The folder has no manifest, so a retry refuses with the conflict above; partial exports are not auto-resumed (known limit). |
 | Report text over the cap | `REPORT.md` holds a truncated report plus a truncation line, so replay never exceeds the cap. |
 | Manifest whose `exp_number` differs from its folder number | `EXPERIMENT_IDENTITY_CONFLICT`. |

@@ -15,11 +15,12 @@ from engine.v2.data import objects
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import from_document
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import ExperimentSpec
 from experiments import gate_report as gate
 from experiments import native_outcomes, native_registration
 from experiments import v2_gate as cli
+from experiments.record_export import export_native_run
 from tests.data_scan_support import (
     catalog_and_store,
     commit_tables,
@@ -607,6 +608,18 @@ def test_plan_and_fold_failures_record_one_failed_attempt_without_partial_report
         assert ledger.read_bytes() == before
     finally:
         source.conn.close()
+
+
+def test_record_export_failure_refuses_run_and_second_run_succeeds(source, capsys, monkeypatch):
+    _invoke(source, capsys, "register")
+    def boom(*args, **kwargs):
+        raise fail("RESOURCE_UNAVAILABLE", "x")
+    monkeypatch.setattr(cli.record_export, "export_native_run", boom)
+    response = _invoke(source, capsys, "run", None, "--no-ledger", status=2)
+    assert response["refused"] == "record_export_failed"
+    monkeypatch.setattr(cli.record_export, "export_native_run", export_native_run)
+    output = _invoke(source, capsys, "run", None, "--no-ledger")
+    assert output["record_export"]["status"] == "written"
 
 
 def test_registered_holdout_request_records_refusal_without_attempt_or_partial_report(source, capsys, monkeypatch):

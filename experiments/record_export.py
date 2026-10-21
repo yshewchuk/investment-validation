@@ -28,7 +28,9 @@ _NUM_DIR_RE = re.compile(r"^EXP-(\d+)_")
 
 
 def _dump(obj) -> bytes:
-    return (json.dumps(obj, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    return (
+        json.dumps(obj, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    ).encode("utf-8")
 
 
 def _read_capped(path: Path) -> bytes | None:
@@ -71,6 +73,9 @@ def _read_manifest(path: Path):
 
 
 def _manifest_for(folder: Path):
+    """Export manifest for folder; None for a symlinked folder/results dir."""
+    if folder.is_symlink() or (folder / "results").is_symlink():
+        return None
     return _read_manifest(folder / "results" / "export_manifest.json")
 
 
@@ -96,7 +101,7 @@ def _folders_with_number(root: Path, n: int) -> list[Path]:
         return []
     out = []
     for child in sorted(root.iterdir()):
-        if child.is_dir():
+        if child.is_symlink() or child.is_dir():
             m = _NUM_DIR_RE.match(child.name)
             if m and int(m.group(1)) == n:
                 out.append(child)
@@ -104,7 +109,19 @@ def _folders_with_number(root: Path, n: int) -> list[Path]:
 
 
 def _check_number_folder(folder: Path, exp_number: int, experiment_id):
-    """Reject manifestless folder or one linked to a different experiment_id."""
+    """Reject a symlinked folder/results dir, manifestless folder, or one
+    linked to a different experiment_id."""
+    if folder.is_symlink():
+        raise fail(
+            "EXPERIMENT_IDENTITY_CONFLICT",
+            f"folder {folder.name} is a symlink; refusing to treat it as EXP-{exp_number:03d}",
+        )
+    if (folder / "results").is_symlink():
+        raise fail(
+            "EXPERIMENT_IDENTITY_CONFLICT",
+            f"results folder in {folder.name} is a symlink; refusing to "
+            f"treat it as EXP-{exp_number:03d}",
+        )
     man = _manifest_for(folder)
     if man is None:
         raise fail(
@@ -286,6 +303,8 @@ def export_run_record(
 
     Folder/results symlinks and manifestless folders raise before any write.
     Unreadable/non-regular/oversized existing targets raise before any write.
+    An existing manifest must replay: its files hashes must cover the four
+    docs and match the persisted bytes, else EXPERIMENT_IDENTITY_CONFLICT.
     Existing targets with different bytes are kept (stderr warning, status
     unchanged); manifest hashes describe the proposed bytes, which equal the
     bytes on disk for every file this call writes.
@@ -360,13 +379,19 @@ def export_run_record(
         persisted[path] = existing
 
     manifest_path = results / "export_manifest.json"
-    manifest_data = _manifest_bytes(
-        experiment_id,
-        exp_number,
-        recording_mode,
-        trimmed,
-        {name: persisted[results / name] for name in docs},
-    )
+    try:
+        manifest_data = _manifest_bytes(
+            experiment_id,
+            exp_number,
+            recording_mode,
+            trimmed,
+            {name: persisted[results / name] for name in docs},
+        )
+    except (TypeError, ValueError) as exc:
+        raise fail(
+            "INVALID_EXPERIMENT_SPEC",
+            f"cannot JSON-encode export_manifest.json: {exc}",
+        ) from exc
     if not os.path.lexists(manifest_path):
         persisted[manifest_path] = manifest_data
     else:
@@ -376,6 +401,43 @@ def export_run_record(
                 "EXPERIMENT_IDENTITY_CONFLICT",
                 f"existing {manifest_path} is unreadable, not a regular file, or oversized",
             )
+        try:
+            manifest_doc = json.loads(existing)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise fail(
+                "EXPERIMENT_IDENTITY_CONFLICT",
+                f"existing {manifest_path} is not valid JSON: {exc}",
+            ) from exc
+        if not isinstance(manifest_doc, dict):
+            raise fail(
+                "EXPERIMENT_IDENTITY_CONFLICT",
+                f"existing {manifest_path} is not a JSON object",
+            )
+        manifest_files = manifest_doc.get("files")
+        if not isinstance(manifest_files, dict):
+            raise fail(
+                "EXPERIMENT_IDENTITY_CONFLICT",
+                f"existing {manifest_path} has no files object",
+            )
+        for name in docs:
+            if name not in manifest_files:
+                raise fail(
+                    "EXPERIMENT_IDENTITY_CONFLICT",
+                    f"existing {manifest_path} does not list {name}",
+                )
+            doc_path = results / name
+            if not os.path.lexists(doc_path):
+                raise fail(
+                    "EXPERIMENT_IDENTITY_CONFLICT",
+                    f"existing {manifest_path} lists {name} but {doc_path} is missing",
+                )
+            digest = hashlib.sha256(persisted[doc_path]).hexdigest()
+            if digest != manifest_files[name]:
+                raise fail(
+                    "EXPERIMENT_IDENTITY_CONFLICT",
+                    f"replay mismatch for {doc_path}: persisted sha256 {digest} "
+                    f"!= manifest {manifest_files[name]!r}",
+                )
         if existing != manifest_data:
             kept_differing = True
             print(

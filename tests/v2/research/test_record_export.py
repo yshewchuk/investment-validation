@@ -78,10 +78,6 @@ def test_layout_writes_results_and_report(tmp_path):
     results = folder / "results"
     for name in RESULT_NAMES:
         assert (results / name).is_file(), name
-    assert json.loads((results / "spec.json").read_bytes()) == spec
-    assert json.loads((results / "request.json").read_bytes()) == request
-    assert json.loads((results / "event_ids.json").read_bytes()) == event_ids
-    assert json.loads((results / "outcome.json").read_bytes()) == outcome
     report = (folder / "REPORT.md").read_text()
     assert "EXP-101 x" in report
     assert report_text in report
@@ -89,8 +85,13 @@ def test_layout_writes_results_and_report(tmp_path):
     assert man["experiment_id"] == "x"
     assert man["exp_number"] == 101
     assert man["trimmed"] == []
-    for name, digest in man["files"].items():
-        assert digest == hashlib.sha256((results / name).read_bytes()).hexdigest(), name
+    assert set(man["files"]) == {"spec.json", "request.json", "event_ids.json", "outcome.json"}
+    for name in man["files"]:
+        assert man["files"][name] == hashlib.sha256((results / name).read_bytes()).hexdigest(), name
+    assert json.loads((results / "spec.json").read_bytes()) == spec
+    assert json.loads((results / "request.json").read_bytes()) == request
+    assert json.loads((results / "event_ids.json").read_bytes()) == event_ids
+    assert json.loads((results / "outcome.json").read_bytes()) == outcome
     assert result["status"] == "written"
     assert result["dir"] == str(folder)
 
@@ -469,6 +470,49 @@ def test_identical_second_export_is_unchanged(tmp_path):
     second = _export(tmp_path)
     assert first["status"] == "written"
     assert second["status"] == "unchanged"
+
+
+def test_replay_tamper_with_spec_bytes_is_identity_conflict(tmp_path):
+    _export(tmp_path)
+    results = tmp_path / "EXP-101_x" / "results"
+    (results / "spec.json").write_bytes(b'{"tampered": true}\n')
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path)
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_nan_spec_is_invalid_spec(tmp_path):
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path, spec={"x": float("nan")})
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_oversize_mapping_spec_is_trimmed_without_kept(tmp_path):
+    result = _export(tmp_path, spec={"k": "x" * 1_200_000})
+    assert result["trimmed"] == ["spec.json"]
+    raw = (tmp_path / "EXP-101_x" / "results" / "spec.json").read_bytes()
+    assert len(raw) <= 1_000_000
+    doc = json.loads(raw)
+    assert doc["trimmed"] is True
+    assert "original_bytes" in doc
+    assert "sha256" in doc
+    assert "kept" not in doc
+
+
+def test_symlinked_folder_resolution_conflicts(tmp_path):
+    target = tmp_path / "target"
+    (target / "results").mkdir(parents=True)
+    (target / "results" / "export_manifest.json").write_text(json.dumps({
+        "experiment_id": "x",
+        "exp_number": 101,
+        "recording_mode": "ledger",
+        "trimmed": [],
+        "files": {},
+    }))
+    (tmp_path / "EXP-101_x").symlink_to(target)
+    with pytest.raises(OpsError) as exc:
+        resolve_exp_number(tmp_path, "x", 101)
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_different_outcome_keeps_first_outcome_bytes(tmp_path):
