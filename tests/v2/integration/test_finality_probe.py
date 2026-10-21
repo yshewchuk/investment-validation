@@ -42,7 +42,8 @@ def _body(rows=None):
 
 def _mbody(rows, next_url=None):
     d = {"results": rows}
-    if next_url: d["next_url"] = next_url
+    if next_url:
+        d["next_url"] = next_url
     return json.dumps(d).encode("utf-8")
 
 
@@ -906,3 +907,140 @@ def test_compare_corrupt_meta_reports_invalid_json_with_relative_name(tmp_path, 
     assert "2024-01-02/L1/orats__hist.strikes__QQQ.meta.json" in captured.err
     assert str(tmp_path) not in captured.err
     assert "Expecting" not in captured.err
+
+
+def test_endpoint_with_dot_edited_skipped(tmp_path, orats_key, capsys):
+    finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    meta_f = tmp_path / "2024-01-02" / "L1" / "orats__hist.strikes__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["endpoint"] = "hist.strikes"
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "invalid endpoint" in captured.err
+    assert "2024-01-02/L1/orats__hist.strikes__SPY.meta.json" in captured.err
+    assert str(tmp_path) not in captured.err
+    assert "- groups: 0" in captured.out
+
+
+def test_massive_null_page_edited_skipped(tmp_path, massive_key, capsys):
+    rc = finality_probe.capture(_ns(tmp_path, endpoints="", massive=True),
+                                http_get=_fake_get(_mbody(MROWS)), now=_at(3))
+    assert rc == 0
+    unit = tmp_path / "2024-01-02" / "L1"
+    body_f = unit / "massive__v3.snapshot.options__SPY__p0.body"
+    meta_f = unit / "massive__v3.snapshot.options__SPY__p0.meta.json"
+    body_f.rename(unit / "massive__v3.snapshot.options__SPY.body")
+    meta_f.rename(unit / "massive__v3.snapshot.options__SPY.meta.json")
+    meta_f = unit / "massive__v3.snapshot.options__SPY.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["page"] = None
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "invalid page" in captured.err
+    assert "2024-01-02/L1/massive__v3.snapshot.options__SPY.meta.json" in captured.err
+    assert str(tmp_path) not in captured.err
+    assert "- groups: 0" in captured.out
+
+
+def test_orats_page_zero_edited_skipped(tmp_path, orats_key, capsys):
+    finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    unit = tmp_path / "2024-01-02" / "L1"
+    body_f = unit / "orats__hist.strikes__SPY.body"
+    meta_f = unit / "orats__hist.strikes__SPY.meta.json"
+    body_f.rename(unit / "orats__hist.strikes__SPY__p0.body")
+    meta_f.rename(unit / "orats__hist.strikes__SPY__p0.meta.json")
+    meta_f = unit / "orats__hist.strikes__SPY__p0.meta.json"
+    m = json.loads(meta_f.read_text())
+    m["page"] = 0
+    meta_f.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "invalid page" in captured.err
+    assert "2024-01-02/L1/orats__hist.strikes__SPY__p0.meta.json" in captured.err
+    assert str(tmp_path) not in captured.err
+    assert "- groups: 0" in captured.out
+
+
+def test_rule_r_strict_boundary_max_updated_equals_fetch(tmp_path, orats_key, capsys):
+    epoch = int(datetime(2024, 1, 3, tzinfo=timezone.utc).timestamp())
+    rows = {
+        "SPY": [{"updatedAt": str(epoch), "strike": 1}],
+        "QQQ": [{"updatedAt": str(epoch - 1), "strike": 1}],
+    }
+
+    def http_get(req):
+        return 200, {"content-type": "application/json"}, _body(rows[req["params"]["ticker"]])
+
+    for i, label in enumerate(("A", "B")):
+        rc = finality_probe.capture(_ns(tmp_path, label=label, tickers="SPY,QQQ"),
+                                    http_get=http_get, now=_at(3 + i))
+        assert rc == 0
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    spy = _group_block(out, "2024-01-02 orats hist/strikes SPY page=None")
+    qqq = _group_block(out, "2024-01-02 orats hist/strikes QQQ page=None")
+    assert "- pair A->B: R_declares_final_at_i=False" in spy
+    assert "- pair A->B: R_declares_final_at_i=True" in qqq
+
+
+def _mk_get3(page0, page1, page2):
+    def http_get(req):
+        u = req["url"]
+        body = page2 if "cursor=2" in u else page1 if "cursor=1" in u else page0
+        return 200, {"content-type": "application/json"}, body
+    return http_get
+
+
+def test_composite_digest_last_and_middle_page_changes(tmp_path, massive_key, capsys):
+    p0 = _mbody(MROWS, NEXT1)
+    p1 = _mbody([{"day": {"last_updated": 1700000300}, "strike": 102}], NEXT2)
+    p2 = _mbody([{"day": {"last_updated": 1700000500}, "strike": 103}])
+    p1c = _mbody([{"day": {"last_updated": 1700000300}, "strike": 999}], NEXT2)
+    p2c = _mbody([{"day": {"last_updated": 1700000500}, "strike": 999}])
+    variants = (("A", p1, p2), ("B", p1, p2), ("C", p1, p2c), ("D", p1c, p2))
+    for i, (lab, pg1, pg2) in enumerate(variants):
+        rc = finality_probe.capture(_ns(tmp_path, label=lab, endpoints="", massive=True),
+                                    http_get=_mk_get3(p0, pg1, pg2), now=_at(3 + i))
+        assert rc == 0
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    assert "- pair A->B: R_declares_final_at_i=True false_final=True true_not_final=False" in out
+    assert "- pair B->C: R_declares_final_at_i=False false_final=False true_not_final=True" in out
+    assert "- pair C->D: R_declares_final_at_i=False false_final=False true_not_final=True" in out
+    block = _group_block(out, "2024-01-02 massive v3/snapshot/options SPY page=None")
+    shas = {}
+    for line in block.splitlines():
+        if not line.startswith("| "):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 8 and cells[0] in ("A", "B", "C", "D") and cells[7] == "pages=3":
+            shas[cells[0]] = cells[6]
+    assert shas["A"] == shas["B"]
+    assert shas["C"] != shas["A"]
+    assert shas["D"] != shas["A"]
+
+
+def test_main_cli_dispatch_compare_and_capture_missing_key(tmp_path, orats_key, capsys, monkeypatch):
+    rc = finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    assert rc == 0
+    capsys.readouterr()
+    finality_probe.main(["compare", "--out", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "# finality compare" in out
+    assert "## 2024-01-02 orats hist/strikes SPY page=None" in out
+    assert "- groups: 1" in out
+
+    monkeypatch.delenv("ORATS_API_KEY", raising=False)
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.main(["capture", "--session", "2024-01-02", "--tickers", "SPY",
+                             "--label", "L9", "--out", str(tmp_path)])
+    assert exc.value.code == 2
+    assert "missing ORATS_API_KEY" in capsys.readouterr().err

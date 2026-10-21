@@ -532,8 +532,7 @@ def _read_meta(path, session_dir, label_dir):
     if obj.get("provider") not in ("orats", "massive"):
         return _skip(name, "invalid provider")
     endpoint = obj.get("endpoint")
-    if (not isinstance(endpoint, str) or not re.fullmatch(r"[a-z0-9_/.]+", endpoint)
-            or any(seg == ".." for seg in endpoint.split("/"))):
+    if not isinstance(endpoint, str) or not ENDPOINT_RE.match(endpoint):
         return _skip(name, "invalid endpoint")
     if not isinstance(obj.get("ticker"), str) or not TICKER_RE.match(obj.get("ticker")):
         return _skip(name, "invalid ticker")
@@ -546,6 +545,10 @@ def _read_meta(path, session_dir, label_dir):
     file_stem = Path(path).name[: -len(".meta.json")]
     if _stem(obj.get("provider"), endpoint, obj.get("ticker"), page) != file_stem:
         return _skip(name, "identity does not match filename")
+    if obj.get("provider") == "orats" and page is not None:
+        return _skip(name, "invalid page")
+    if obj.get("provider") == "massive" and (page is None or page < 0):
+        return _skip(name, "invalid page")
     if obj.get("label") != label_dir:
         return _skip(name, "label mismatch")
     session = obj.get("session")
