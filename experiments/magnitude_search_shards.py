@@ -200,13 +200,25 @@ def _builder_shard_total(sections):
         raise fail(_INVALID_SPEC, "search cohort manifest is invalid") from None
 
 
+def _strict_values(manifest):
+    """Admit only values stdlib JSON can store without non-finite literals.
+
+    ``canonical_json``/``content_hash`` accept far more than strict JSON: a
+    non-finite float becomes a ``{"__nonfinite__": ...}`` tag and any other
+    object is stringified, so shape checks and the hash binding alone would
+    pass a manifest ``build_manifest`` refuses to build. Builder and verifier
+    run this one admission so written and verified manifests match.
+    """
+    json.dumps(manifest, allow_nan=False)
+
+
 def build_manifest(inline, sections):
     """Bind inline scalars and section entries into one cohort manifest."""
     if _builder_shard_total(sections) > MAX_SHARDS:
         raise fail("RESOURCE_LIMIT_EXCEEDED", "search cohort manifest exceeds its shard limit")
     manifest = {"schema_version": MANIFEST_SCHEMA, "inline": inline, "sections": sections}
     try:
-        json.dumps(manifest, allow_nan=False)
+        _strict_values(manifest)
         manifest = json.loads(canonical_json(manifest))
         _manifest_shape(manifest)
     except (OpsError, TypeError, ValueError, OverflowError, RecursionError):
@@ -325,6 +337,10 @@ def _manifest_shape(manifest):
 def verify_manifest(manifest, expected_id):
     """Shape-check a manifest and bind it to the expected inputs_id."""
     _manifest_shape(manifest)
+    try:
+        _strict_values(manifest)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        raise fail(_CONFLICT, "search cohort manifest is invalid") from None
     if manifest_id(manifest) != expected_id:
         raise fail(_CONFLICT, "search cohort manifest differs from its binding")
     return manifest

@@ -386,6 +386,15 @@ def test_verify_manifest_shape_and_hash():
         shards.verify_manifest(broken, shards.manifest_id(broken))
 
 
+@pytest.mark.parametrize("inline", [{"x": float("nan")}, {"x": object()}],
+                         ids=["nonfinite", "non_json"])
+def test_verify_manifest_refuses_values_std_json_cannot_store(inline):
+    manifest = {"schema_version": shards.MANIFEST_SCHEMA, "inline": inline, "sections": {}}
+    expected_id = shards.manifest_id(manifest)
+    with refusal("EXPERIMENT_IDENTITY_CONFLICT", False):
+        shards.verify_manifest(manifest, expected_id)
+
+
 def _tampered(store):
     entry = shards.write_section(store, "features", rows(1), key)
     path = store.root / reference(entry["shards"][0]).storage_key
@@ -582,7 +591,14 @@ def test_wire_constants_are_literal():
 
 def test_features_key_returns_pair_and_refuses_missing_field():
     feature = next(member for member in shards.LIST_MEMBERS if member["section"] == "features")
-    assert feature["key"]({"event_id": "E007", "horizon_sessions": 3}) == ("E007", 3)
+    items = [{"event_id": "E007", "horizon_sessions": 3},
+             {"event_id": "E002", "horizon_sessions": 12},
+             {"event_id": "E002", "horizon_sessions": 1},
+             {"event_id": "E010", "horizon_sessions": 6}]
+    keys = [feature["key"](item) for item in items]
+    assert keys == [(item["event_id"], item["horizon_sessions"]) for item in items]
+    assert all(isinstance(value, tuple) and len(value) == 2 for value in keys)
+    assert sorted(keys) == [("E002", 1), ("E002", 12), ("E007", 3), ("E010", 6)]
     with pytest.raises(KeyError):
         feature["key"]({"event_id": "E007"})
 
@@ -594,8 +610,9 @@ def test_features_key_returns_pair_and_refuses_missing_field():
     ({}, {"features": {"row_count": 1, "shards": [{"bad": 1}]}}),
     ({}, {"features": {"row_count": 1, "shards": "nope"}}),
     ({"x": object()}, {}),
+    ({"x": float("nan")}, {}),
 ], ids=["inline_none", "sections_none", "section_not_dict", "shard_not_dict", "shards_not_list",
-        "non_canonical_inline"])
+        "non_canonical_inline", "nonfinite_inline"])
 def test_build_manifest_invalid_inputs_are_invalid_spec(inline, sections):
     with refusal("INVALID_EXPERIMENT_SPEC", False):
         shards.build_manifest(inline, sections)
