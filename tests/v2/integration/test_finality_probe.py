@@ -893,3 +893,16 @@ def test_replace_drops_unrequested_ticker_files(tmp_path, orats_key, capsys):
     out = capsys.readouterr().out
     assert "## 2024-01-02 orats hist/strikes SPY page=None" in out
     assert "AAPL" not in out
+
+
+def test_compare_corrupt_meta_reports_invalid_json_with_relative_name(tmp_path, orats_key, capsys):
+    finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    meta_f = tmp_path / "2024-01-02" / "L1" / "orats__hist.strikes__QQQ.meta.json"
+    meta_f.write_bytes(b"not json at all")
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "invalid JSON" in captured.err
+    assert "2024-01-02/L1/orats__hist.strikes__QQQ.meta.json" in captured.err
+    assert str(tmp_path) not in captured.err
+    assert "Expecting" not in captured.err

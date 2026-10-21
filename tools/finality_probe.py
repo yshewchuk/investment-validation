@@ -44,9 +44,13 @@ def _stem(provider, endpoint, ticker, page):
 
 
 def _valid_session(s):
-    if not isinstance(s, str) or not SESSION_RE.match(s): return False
-    try: datetime.strptime(s, "%Y-%m-%d"); return True
-    except ValueError: return False
+    if not isinstance(s, str) or not SESSION_RE.match(s):
+        return False
+    try:
+        datetime.strptime(s, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
 
 
 def _errno_name(exc):
@@ -213,24 +217,35 @@ def _default_http_get(req):
 
 
 def capture(args_ns, http_get=None, now=None):
-    if http_get is None: http_get = _default_http_get
-    if now is None: now = lambda: datetime.now(timezone.utc)
+    if http_get is None:
+        http_get = _default_http_get
+    if now is None:
+        def now():
+            return datetime.now(timezone.utc)
     session, label, out_dir = args_ns.session, args_ns.label, args_ns.out
-    if not _valid_session(session): _fail(f"invalid session {session!r}: expected YYYY-MM-DD", 2)
-    if not LABEL_RE.match(label or "") or label in (".", ".."): _fail(f"invalid label {label!r}", 2)
+    if not _valid_session(session):
+        _fail(f"invalid session {session!r}: expected YYYY-MM-DD", 2)
+    if not LABEL_RE.match(label or "") or label in (".", ".."):
+        _fail(f"invalid label {label!r}", 2)
     tickers = [t.strip() for t in args_ns.tickers.split(",") if t.strip()]
-    if not tickers: _fail("empty ticker list", 2)
+    if not tickers:
+        _fail("empty ticker list", 2)
     for t in tickers:
-        if not TICKER_RE.match(t): _fail(f"invalid ticker {t!r}", 2)
-    if len(set(tickers)) != len(tickers): _fail(f"duplicate tickers {tickers!r}", 2)
+        if not TICKER_RE.match(t):
+            _fail(f"invalid ticker {t!r}", 2)
+    if len(set(tickers)) != len(tickers):
+        _fail(f"duplicate tickers {tickers!r}", 2)
     endpoints = [e.strip() for e in (getattr(args_ns, "orats_endpoints", DEFAULT_ORATS_ENDPOINTS) or "").split(",") if e.strip()]
     for e in endpoints:
-        if not ENDPOINT_RE.match(e) or ".." in e: _fail(f"invalid ORATS endpoint {e!r}", 2)
+        if not ENDPOINT_RE.match(e) or ".." in e:
+            _fail(f"invalid ORATS endpoint {e!r}", 2)
     want_massive = bool(getattr(args_ns, "massive", False))
     orats_key = os.environ.get("ORATS_API_KEY") or ""
     massive_key = os.environ.get("MASSIVE_API_KEY") or ""
-    if endpoints and not orats_key: _fail("missing ORATS_API_KEY", 2)
-    if want_massive and not massive_key: _fail("missing MASSIVE_API_KEY", 2)
+    if endpoints and not orats_key:
+        _fail("missing ORATS_API_KEY", 2)
+    if want_massive and not massive_key:
+        _fail("missing MASSIVE_API_KEY", 2)
     out_base = Path(out_dir).resolve()
     unit_dir = (Path(out_dir) / session / label).resolve()
     _refuse_repo(unit_dir)
@@ -322,17 +337,22 @@ def capture(args_ns, http_get=None, now=None):
             "body_bytes": len(body), "row_count": row_count, "max_updated_at": max_updated_at,
             "content_sha256": content_sha, "hash_policy": HASH_POLICY, "run_id": run_id,
         }
-        if provider == "massive": meta["has_next"] = has_next
-        if truncated: meta["truncated"] = True
-        if error is not None: meta["error"] = error
+        if provider == "massive":
+            meta["has_next"] = has_next
+        if truncated:
+            meta["truncated"] = True
+        if error is not None:
+            meta["error"] = error
         if _leaks_key(key, meta, body):
             _fail("refusing to write provider record containing API key", 2)
         stem = _stem(provider, endpoint, ticker, page)
         _atomic_write(unit_dir / f"{stem}.body", body)
         _atomic_write(unit_dir / f"{stem}.meta.json", (json.dumps(meta, sort_keys=True, indent=2) + "\n").encode("utf-8"))
         total += 1
-        if not ok: not_ok += 1
-        if provider == "massive": saw_massive = True
+        if not ok:
+            not_ok += 1
+        if provider == "massive":
+            saw_massive = True
         c12 = content_sha[:12] if content_sha else None
         print(f"{label} {provider} {ticker} status={status} rows={row_count} max_updated_at={max_updated_at} content={c12}")
         now_t = time.perf_counter()
@@ -358,7 +378,8 @@ def capture(args_ns, http_get=None, now=None):
                 req = {"url": url, "params": params, "headers": {"Accept-Encoding": "identity", "Authorization": f"Bearer {massive_key}"}, "timeout": REQUEST_TIMEOUT_S}
                 parsed, page_ok = store("massive", MASSIVE_ENDPOINT, ticker, page, req, _redacted_url(url, params), massive_key)
                 pages_stored = page + 1
-                if not page_ok: ticker_ok = False
+                if not page_ok:
+                    ticker_ok = False
                 next_url = parsed.get("next_url") if isinstance(parsed, dict) else None
                 if not _massive_next_ok(next_url, ticker):
                     break
@@ -381,21 +402,28 @@ def capture(args_ns, http_get=None, now=None):
 
 
 def _ts(v):
-    if v is None: return None
-    if isinstance(v, (int, float)): x = float(v)
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        x = float(v)
     else:
         s = str(v).strip()
-        try: x = float(s)
+        try:
+            x = float(s)
         except ValueError:
-            try: return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
-            except ValueError: return None
+            try:
+                return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return None
     a = abs(x)
     return x / (1e9 if a > 1e15 else 1e3 if a > 1e11 else 1)
 
 
 def _meta_ok(m):
-    if not isinstance(m, dict): return False
-    if "ok" in m: return bool(m["ok"])
+    if not isinstance(m, dict):
+        return False
+    if "ok" in m:
+        return bool(m["ok"])
     return m.get("status") == 200 and m.get("content_sha256") is not None
 
 
@@ -463,7 +491,7 @@ def _verified_body(meta_path, meta):
 
 
 def _read_meta(path, session_dir, label_dir):
-    name = str(path)
+    name = f"{session_dir}/{label_dir}/{Path(path).name}"
     try:
         fd = _open_ro(path)
     except OSError as exc:
@@ -473,7 +501,7 @@ def _read_meta(path, session_dir, label_dir):
                     return _skip(name, "symlink")
             except OSError:
                 pass
-        return _skip(name, exc.strerror or exc)
+        return _skip(name, _errno_name(exc))
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
@@ -488,15 +516,15 @@ def _read_meta(path, session_dir, label_dir):
                 break
             data += chunk
     except OSError as exc:
-        return _skip(name, exc.strerror or exc)
+        return _skip(name, _errno_name(exc))
     finally:
         os.close(fd)
     if len(data) > MAX_META_BYTES:
         return _skip(name, "larger than 1 MiB")
     try:
         obj = json.loads(data)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        return _skip(name, f"invalid JSON: {exc}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _skip(name, "invalid JSON")
     if not isinstance(obj, dict):
         return _skip(name, "not a JSON object")
     if obj.get("hash_policy") != HASH_POLICY:
@@ -607,7 +635,8 @@ def _composite(key, pages):
 def compare(args_ns):
     rule = "a refetch at T+X whose content hash equals the fetch at T, with max(updatedAt) at T earlier than T, counts as final at T"
     hdrs = ("etag", "last-modified", "age", "date", "content-length")
-    if args_ns.session is not None and not _valid_session(args_ns.session): _fail(f"invalid session {args_ns.session!r}: expected YYYY-MM-DD", 2)
+    if args_ns.session is not None and not _valid_session(args_ns.session):
+        _fail(f"invalid session {args_ns.session!r}: expected YYYY-MM-DD", 2)
     try:
         root = Path(args_ns.out).resolve()
         root_dirs = sorted(p.name for p in root.iterdir() if p.is_dir())
@@ -617,13 +646,21 @@ def compare(args_ns):
     metas = []
     for s in sessions:
         sdir = root / s
-        if not sdir.resolve().is_relative_to(root): _skip(s, "outside output root"); continue
-        if not sdir.is_dir(): continue
+        if not sdir.resolve().is_relative_to(root):
+            _skip(s, "outside output root")
+            continue
+        if not sdir.is_dir():
+            continue
         for f in sorted(sdir.glob("*/*.meta.json")):
-            if not f.parent.resolve().is_relative_to(root): _skip(str(f.parent), "outside output root"); continue
-            if not f.resolve().is_relative_to(root): _skip(str(f), "outside output root"); continue
+            if not f.parent.resolve().is_relative_to(root):
+                _skip(f"{sdir.name}/{f.parent.name}", "outside output root")
+                continue
+            if not f.resolve().is_relative_to(root):
+                _skip(f"{sdir.name}/{f.parent.name}/{f.name}", "outside output root")
+                continue
             m = _read_meta(f, sdir.name, f.parent.name)
-            if m is not None: metas.append(m)
+            if m is not None:
+                metas.append(m)
     plain, by_page_label = [], {}
     for m in metas:
         if m.get("page") is None:
@@ -648,17 +685,22 @@ def compare(args_ns):
         present = [h for h in hdrs if any((r.get("headers") or {}).get(h) is not None for r in rows)]
         has_pages = any("pages" in r for r in rows)
         cols = ["label", "ok", "fetched_at_utc", "status", "row_count", "max_updated_at", "content_sha256[:12]"]
-        if has_pages: cols.append("pages")
+        if has_pages:
+            cols.append("pages")
         print(f"\n## {session} {provider} {endpoint} {ticker} page={page}\n| " + " | ".join(cols + present) + " |\n| " + " | ".join(["---"] * (len(cols) + len(present))) + " |")
         for r in rows:
             h, sha = r.get("headers") or {}, r.get("content_sha256")
             cells = [str(r.get("label")), "yes" if _meta_ok(r) else "no", str(r.get("fetched_at_utc")), str(r.get("status")), str(r.get("row_count")), str(r.get("max_updated_at")), sha[:12] if sha else ""]
-            if has_pages: cells.append(f"pages={r.get('pages', '')}")
+            if has_pages:
+                cells.append(f"pages={r.get('pages', '')}")
             cells.extend(str(h.get(c, "")) for c in present)
             print("| " + " | ".join(cells) + " |")
-        if n <= 1: stable = "n/a"
-        elif shas[-1] != shas[-2]: stable = "never"
-        else: stable = next((str(ok_rows[i].get("label")) for i in range(n) if all(shas[i] == shas[j] for j in range(i + 1, n))), "never")
+        if n <= 1:
+            stable = "n/a"
+        elif shas[-1] != shas[-2]:
+            stable = "never"
+        else:
+            stable = next((str(ok_rows[i].get("label")) for i in range(n) if all(shas[i] == shas[j] for j in range(i + 1, n))), "never")
         changed = [(ok_rows[i].get("label"), ok_rows[i + 1].get("label")) for i in range(n - 1) if shas[i] != shas[i + 1]]
         uvf = []
         for r in ok_rows:
@@ -674,10 +716,12 @@ def compare(args_ns):
             ti, tf = _ts(ok_rows[i].get("max_updated_at")), _ts(ok_rows[i].get("fetched_at_utc"))
             decl = shas[i] == shas[i + 1] and ti is not None and tf is not None and ti < tf
             ff_i, tnf_i = decl and any(shas[j] != shas[i] for j in range(i + 2, n)), shas[i] != shas[i + 1]
-            ff += ff_i; tnf += tnf_i
+            ff += ff_i
+            tnf += tnf_i
             print(f"- pair {ok_rows[i].get('label')}->{ok_rows[i + 1].get('label')}: R_declares_final_at_i={decl} false_final={ff_i} true_not_final={tnf_i}")
     print(f"\n## Overall\n- groups: {len(groups)}\n- false_final: {ff}\n- true_not_final: {tnf}")
-    if not groups: print("- header: inconclusive (no captures)")
+    if not groups:
+        print("- header: inconclusive (no captures)")
     else:
         for hn in ("etag", "last-modified"):
             print(f"- header {hn}: {'header tracks content' if all(group_trk[k][hn] == 'yes' for k in group_trk) else 'header does not track content'}")
