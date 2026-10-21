@@ -304,17 +304,16 @@ content-addressed shards, not one record or payload. Population-sized receipt li
   An empty section has `row_count` 0, an empty shard list and no keys; any shard listed
   for it, or a nonzero count with an empty list, is a count disagreement. Parent and
   child apply the same rule. Matrix evidence keeps today's training / evaluation list
-  order. The child transport: the child gets a header file (inner fold, horizons, execution spec,
-  manifest, expected `inputs_id`, store root; limits stay an argument) and no input rows. It calls
-  `load_fit_inputs`, which checks the manifest hash against the header, streams only the
-  `training` and `features` sections through the reader above, keeps the training and
-  evaluation events at the selected horizons, and opens no repository, catalog or validation
-  target. A hash, shape or shard failure inside the child is an infrastructure failure
-  (`RESOURCE_UNAVAILABLE`), since the parent just published and bound that manifest.
-  The child reads the header under the 16 MiB record cap (a manifest cannot exceed it); a
-  larger file ends as `resource_limit`.
-  Transport memory is the projected fit rows plus one shard; there is no cap on the rows, only
-  the child's `RLIMIT_AS`. The child output cap stays 16 MiB.
+  order. The child transport supplies a header with the inner fold, horizons, execution spec,
+  manifest, expected `inputs_id` and store root; limits remain a separate argument and no
+  input rows are sent. The child (`load_fit_inputs`) verifies the manifest against the
+  expected id, reads only the `training` and `features` sections through the reader above,
+  and returns projected training rows and feature rows limited to training or evaluation
+  events at the selected horizons. It opens no repository, catalog or validation target.
+  Manifest, hash, shape and shard failures in the child are infrastructure failures
+  (`RESOURCE_UNAVAILABLE`); a header above the 16 MiB record cap ends as `resource_limit`.
+  Transport memory is the projected fit rows plus one shard, bounded by the child's
+  `RLIMIT_AS`; child output remains capped at 16 MiB.
 * Shards are published, outside the catalog transaction, before the manifest append,
   which is the commit point.
 * The manifest hash is a Merkle `inputs_id`, and every cohort is sharded, including empty and one-row cohorts.
