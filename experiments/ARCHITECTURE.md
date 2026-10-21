@@ -762,6 +762,11 @@ submission semantics; outer wrappers require JSON-native numeric types. Target
 validation reconstructs the protected receipt from admitted physical preflight.
 Static imports include these helpers in recorder and outer source bindings.
 Completed replay verifies the complete evidence chain without native payloads or fitting.
+Native execution and reconciliation responses require valid terminal and durable
+execution evidence bound to the caller's exact attempt/limits. Completed replay
+is read-only and launch-free; each separate call observes current journal integrity.
+Freeze and submitted recording also require valid native evidence when present.
+No journal verification is cached across calls.
 
 Fresh inner/outer admission streams complete validation, retaining only fold participants'
 primary keys and registered numeric features. Full stored `inputs_id`, matrices and fits are preserved.
