@@ -86,15 +86,16 @@ below may add its audited input aliases without exposing them as search predicto
 
 ### Admission before data and values
 
-Extend the history store's metadata-first protected-population preflight, not the
-production `scan_panel_row` reader unchanged. Classify the random/rolling union
-before any historical outcomes or mixed-fragment payloads are decoded. Restrict
-physical reads to admitted identities; fail closed if a fragment cannot be isolated.
-Exclude protected outcomes from every prior-event statistic, fold, calibration and
-selection. Price-derived history/runup must follow the existing protected-window
-rules; do not reconstruct a forbidden event move from raw prices as a workaround.
-Raw market state needs its own explicit permitted-read contract, not blanket access
-because it is called a predictor. Current-event targets remain a separate reader.
+Extend metadata-first event-history preflight, not production `scan_panel_row`.
+Classify the random/rolling union before decoding outcome payloads; fail closed for
+mixed outcome fragments. Protected labels and explicit protected-event returns stay
+excluded from prior-event statistics, fitting and selection; targets use a separate reader.
+No executable protected-price-window policy is established by current membership rules.
+Raw-price/market read authority is unresolved and requires owner approval before the
+materializer: distinguish whole-file decoding from causal numerical prefixes, decide
+whether rolling aggregates may cross protected earnings, and freeze the knowledge lane.
+Stricter physical isolation/window embargo may require storage redesign. Neither policy
+is approved here; slice 1 metadata admission grants no raw-payload access authority.
 
 For every contributing observation enforce the source-session ceiling and declared
 availability cutoff, plus strictly prior event/label availability where applicable.
@@ -124,7 +125,7 @@ whole-fragment protected-read admission is proven for coalesced output.
 
 Acceptance uses synthetic access counters: bounded source scans per ticker/batch,
 not per event, candidate or horizon; identical rows/digests across batch sizes,
-no future/protected payload reads, and replay without a build. A later authorized
+no protected outcome reads or future numerical use, raw-policy compliance, and replay. A later authorized
 same-cohort pilot records incremental wall/CPU/RSS/read counts separately from
 history build, with explicit limits and bounded stderr progress/ETA. The 0.17-second
 history figure is a reported reference, not an accepted panel budget. If panel cost
