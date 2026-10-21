@@ -1,5 +1,4 @@
-"""tools.finality_probe: capture redacts keys, content hashes are order-stable,
-and compare classifies false-final / true-not-final pairs.
+"""Capture redacts keys; compare classifies false-final / true-not-final pairs.
 
 # packages: foundation
 """
@@ -8,7 +7,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -24,27 +25,24 @@ ROWS = [
 ]
 
 
-def _ns(out, label="L1", session="2024-01-02", endpoints="hist/strikes"):
-    return argparse.Namespace(
-        session=session,
-        tickers="SPY",
-        label=label,
-        out=str(out),
-        orats_endpoints=endpoints,
-        massive=False,
-        ignore_keys="",
-    )
+def _ns(out, label="L1", session="2024-01-02", endpoints="hist/strikes", tickers="SPY"):
+    return argparse.Namespace(session=session, tickers=tickers, label=label, out=str(out),
+                              orats_endpoints=endpoints, massive=False, ignore_keys="")
 
 
 def _body(rows=None):
     return json.dumps({"data": rows if rows is not None else ROWS}).encode("utf-8")
 
 
-def _fake_get(payload=None):
+def _fake_get(payload=None, headers=None):
     def http_get(req):
-        return 200, {"content-type": "application/json"}, payload if payload is not None else _body()
+        return 200, headers or {"content-type": "application/json"}, payload if payload is not None else _body()
 
     return http_get
+
+
+def _at(day):
+    return lambda: datetime(2024, 1, day, tzinfo=timezone.utc)
 
 
 @pytest.fixture
@@ -55,68 +53,66 @@ def orats_key(monkeypatch):
 
 
 def test_capture_writes_body_meta_redacts_token_and_fills_meta_fields(tmp_path, orats_key):
-    fixed_now = lambda: __import__("datetime").datetime(2024, 1, 3, tzinfo=__import__("datetime").timezone.utc)
-    rc = finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=fixed_now)
+    rc = finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
     assert rc == 0
 
     unit = tmp_path / "2024-01-02" / "L1"
-    body_f = unit / "orats__hist.strikes__SPY.body"
-    meta_f = unit / "orats__hist.strikes__SPY.meta.json"
-    assert body_f.is_file() and meta_f.is_file()
-    assert body_f.read_bytes() == _body()
+    body_f, meta_f = unit / "orats__hist.strikes__SPY.body", unit / "orats__hist.strikes__SPY.meta.json"
+    assert body_f.is_file() and meta_f.is_file() and body_f.read_bytes() == _body()
 
     meta = json.loads(meta_f.read_text())
+    assert meta["status"] == 200
+    assert meta["ok"] is True
     assert meta["row_count"] == 2
     assert meta["max_updated_at"] == 1700000100
     assert isinstance(meta["content_sha256"], str) and len(meta["content_sha256"]) == 64
-    assert meta["status"] == 200
 
     url = meta["url_redacted"]
-    assert "REDACTED" in url
+    assert "token=REDACTED" in url
     assert SENTINEL not in url
 
 
-def test_sentinel_key_never_appears_in_any_written_file(tmp_path, orats_key):
-    finality_probe.capture(_ns(tmp_path), http_get=_fake_get())
-    files = [p for p in tmp_path.rglob("*") if p.is_file()]
-    assert files, "capture must write at least one file"
-    needle = SENTINEL.encode("utf-8")
-    for p in files:
-        assert needle not in p.read_bytes(), f"API key leaked into {p}"
+def test_sentinel_leak_guard_refuses_raw_and_urlencoded_key(tmp_path, orats_key, monkeypatch):
+    leaky = json.dumps({"data": ROWS, "note": SENTINEL}).encode("utf-8")
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path), http_get=_fake_get(leaky))
+    assert exc.value.code == 2
+    unit = tmp_path / "2024-01-02" / "L1"
+    assert not list(unit.glob("*.body")) and not list(unit.glob("*.meta.json"))
+
+    key = "ab+cd/ef=="
+    monkeypatch.setenv("ORATS_API_KEY", key)
+    body = json.dumps({"data": ROWS, "note": quote(key, safe="")}).encode("utf-8")
+    assert key.encode("utf-8") not in body
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path, label="L2"), http_get=_fake_get(body))
+    assert exc.value.code == 2
+    unit = tmp_path / "2024-01-02" / "L2"
+    assert not list(unit.glob("*.body")) and not list(unit.glob("*.meta.json"))
 
 
-def test_content_sha256_ignores_row_order_but_not_value_changes():
-    rows_a = [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
-    rows_b = [{"a": 3, "b": 4}, {"a": 1, "b": 2}]
-    rows_c = [{"a": 1, "b": 99}, {"a": 3, "b": 4}]
-    sha_a = finality_probe._content_sha256(rows_a, [])
-    sha_b = finality_probe._content_sha256(rows_b, [])
-    sha_c = finality_probe._content_sha256(rows_c, [])
-    assert sha_a == sha_b
-    assert sha_a != sha_c
+def test_content_sha256_order_invariance_via_captures(tmp_path, orats_key):
+    rows_a = [{"updatedAt": 1700000000, "x": 1}, {"updatedAt": 1700000001, "x": 2}]
+    rows_b = list(reversed(rows_a))
+    rows_c = [{"updatedAt": 1700000000, "x": 99}, {"updatedAt": 1700000001, "x": 2}]
+    shas = []
+    for i, (label, rows) in enumerate((("L1", rows_a), ("L2", rows_b), ("L3", rows_c))):
+        finality_probe.capture(_ns(tmp_path, label=label), http_get=_fake_get(_body(rows)), now=_at(3 + i))
+        meta_f = tmp_path / "2024-01-02" / label / "orats__hist.strikes__SPY.meta.json"
+        shas.append(json.loads(meta_f.read_text())["content_sha256"])
+    assert shas[0] == shas[1]
+    assert shas[0] != shas[2]
 
 
 def test_compare_counts_false_final_and_true_not_final(tmp_path, orats_key, capsys):
-    from datetime import datetime, timezone
-
     same = _body()
     changed = _body([{"updatedAt": 1700000000, "strike": 999}, {"updatedAt": 1700000100, "strike": 101}])
-    times = {
-        "L1": lambda: datetime(2024, 1, 3, tzinfo=timezone.utc),
-        "L2": lambda: datetime(2024, 1, 4, tzinfo=timezone.utc),
-        "L3": lambda: datetime(2024, 1, 5, tzinfo=timezone.utc),
-    }
     payloads = {"L1": same, "L2": same, "L3": changed}
-    for label in ("L1", "L2", "L3"):
-        finality_probe.capture(
-            _ns(tmp_path, label=label),
-            http_get=_fake_get(payloads[label]),
-            now=times[label],
-        )
+    for i, label in enumerate(("L1", "L2", "L3")):
+        finality_probe.capture(_ns(tmp_path, label=label), http_get=_fake_get(payloads[label]), now=_at(3 + i))
 
     capsys.readouterr()
-    args = argparse.Namespace(out=str(tmp_path), session=None)
-    finality_probe.compare(args)
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
     out = capsys.readouterr().out
 
     assert "pair L1->L2" in out
@@ -132,6 +128,67 @@ def test_compare_counts_false_final_and_true_not_final(tmp_path, orats_key, caps
     assert "- true_not_final: 1" in out
 
 
+def test_compare_keeps_two_sessions_in_separate_groups(tmp_path, orats_key, capsys):
+    for i, session in enumerate(("2024-01-02", "2024-01-03")):
+        finality_probe.capture(_ns(tmp_path, session=session), http_get=_fake_get(), now=_at(3 + i))
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    assert "## 2024-01-02 orats hist/strikes SPY page=None" in out
+    assert "## 2024-01-03 orats hist/strikes SPY page=None" in out
+    assert "- groups: 2" in out
+
+
+def test_status_500_excluded_from_stability_and_capture_exits_1(tmp_path, orats_key, capsys):
+    finality_probe.capture(_ns(tmp_path, label="L1"), http_get=_fake_get(), now=_at(3))
+    finality_probe.capture(_ns(tmp_path, label="L2"), http_get=_fake_get(), now=_at(4))
+    rc = finality_probe.capture(_ns(tmp_path, label="L3"),
+                                http_get=lambda req: (500, {"content-type": "application/json"}, _body()), now=_at(5))
+    assert rc == 1
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    assert "- excluded_not_ok: [L3: 500]" in out
+    assert "pair L1->L2" in out
+    assert "pair L1->L3" not in out
+    assert "pair L2->L3" not in out
+
+
+def test_header_tracking_requires_every_group(tmp_path, orats_key, capsys):
+    a = _body()
+    b = _body([{"updatedAt": 1700000000, "strike": 999}, {"updatedAt": 1700000100, "strike": 101}])
+    finality_probe.capture(_ns(tmp_path, label="L1", tickers="SPY"), http_get=_fake_get(a, {"etag": "e1"}), now=_at(3))
+    finality_probe.capture(_ns(tmp_path, label="L2", tickers="SPY"), http_get=_fake_get(b, {"etag": "e2"}), now=_at(4))
+    finality_probe.capture(_ns(tmp_path, label="L1", tickers="QQQ"), http_get=_fake_get(a, {"etag": "e1"}), now=_at(3))
+    finality_probe.capture(_ns(tmp_path, label="L2", tickers="QQQ"), http_get=_fake_get(b, {"etag": "e1"}), now=_at(4))
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    out = capsys.readouterr().out
+    assert "etag=yes" in out
+    assert "etag=no" in out
+    assert "- header etag: header does not track content" in out
+
+
+def test_invalid_label_and_session_exit_2(tmp_path, orats_key):
+    for kwargs in ({"label": "../x"}, {"session": "2026-1-1"}):
+        with pytest.raises(SystemExit) as exc:
+            finality_probe.capture(_ns(tmp_path, **kwargs), http_get=_fake_get())
+        assert exc.value.code == 2
+
+
+def test_compare_skips_symlink_and_oversized_meta(tmp_path, orats_key, capsys):
+    finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=_at(3))
+    unit = tmp_path / "2024-01-02" / "L1"
+    (unit / "orats__hist.strikes__QQQ.meta.json").symlink_to(tmp_path / "missing.json")
+    (unit / "orats__hist.strikes__ZZZ.meta.json").write_bytes(b"x" * (1024 * 1024 + 1))
+    capsys.readouterr()
+    finality_probe.compare(argparse.Namespace(out=str(tmp_path), session=None))
+    captured = capsys.readouterr()
+    assert "skipped" in captured.err and "symlink" in captured.err
+    assert "larger than 1 MiB" in captured.err
+    assert "- groups: 1" in captured.out
+
+
 def test_missing_env_key_exits_2_without_network_call(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("ORATS_API_KEY", raising=False)
     monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
@@ -145,7 +202,7 @@ def test_missing_env_key_exits_2_without_network_call(tmp_path, monkeypatch, cap
         finality_probe.capture(_ns(tmp_path), http_get=boom)
     assert exc.value.code == 2
     assert called == []
-    assert "missing ORATS_API_KEY" in capsys.readouterr().err
+    assert capsys.readouterr().err == "missing ORATS_API_KEY\n"
 
 
 def test_refuses_out_dir_inside_repo(tmp_path, monkeypatch):
