@@ -210,7 +210,9 @@ Training begins at the anchor's explicit training_start, before the first inner 
 These are prospective choices, not verified coverage. Metadata-only admission must
 confirm source coverage and holdout eligibility before sealing; insufficient years
 block rather than silently disappear. Any amended years/grid require a new request
-before the new evaluation. Prior development reuse must be disclosed, not described
+and a new experiment ID, because the reservation identity omits the request hash,
+before the new evaluation. The runtime PR must accept `--no-ledger` and refuse any
+ledger write as an explicit acceptance criterion. Prior development reuse must be disclosed, not described
 as untouched confirmation. Protected holdouts never become substitute years.
 
 Set max_candidates=33 and search max_fits=603:
