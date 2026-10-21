@@ -1131,3 +1131,65 @@ def test_header_tracking_last_modified_yes(tmp_path, orats_key, capsys):
     block = _group_block(out, "2024-01-02 orats hist/strikes SPY page=None")
     assert "last-modified=yes" in block
     assert "- header last-modified: header tracks content" in out
+
+
+def test_capture_direct_arg_type_validation_exit_2_no_files(tmp_path, orats_key, capsys):
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path), http_get=_fake_get(), now=0)
+    assert exc.value.code == 2
+    assert "invalid argument types" in capsys.readouterr().err
+    assert not any(tmp_path.iterdir())
+
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(tmp_path), http_get="x", now=_at(3))
+    assert exc.value.code == 2
+    assert "invalid argument types" in capsys.readouterr().err
+    assert not any(tmp_path.iterdir())
+
+    ns = _ns(tmp_path)
+    ns.replace = "false"
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(ns, http_get=_fake_get(), now=_at(3))
+    assert exc.value.code == 2
+    assert "invalid argument types" in capsys.readouterr().err
+    assert not any(tmp_path.iterdir())
+
+    ns = _ns(tmp_path)
+    ns.massive = 1
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(ns, http_get=_fake_get(), now=_at(3))
+    assert exc.value.code == 2
+    assert "invalid argument types" in capsys.readouterr().err
+    assert not any(tmp_path.iterdir())
+
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.capture(_ns(str(tmp_path) + "\x00"), http_get=_fake_get(), now=_at(3))
+    assert exc.value.code == 2
+    assert "invalid argument types" in capsys.readouterr().err
+    assert not any(tmp_path.iterdir())
+
+
+def test_compare_direct_arg_type_validation_exit_2(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.compare(argparse.Namespace(out=None, session=None))
+    assert exc.value.code == 2
+    assert "invalid argument types" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.compare(argparse.Namespace(out=str(tmp_path) + "\x00", session=None))
+    assert exc.value.code == 2
+    assert "invalid argument types" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc:
+        finality_probe.compare(argparse.Namespace(out=str(tmp_path), session="2024-01-02\x00"))
+    assert exc.value.code == 2
+    assert "invalid argument types" in capsys.readouterr().err
+
+
+def test_massive_last_updated_bool_and_nonintegral_float_ignored(tmp_path, massive_key):
+    for i, lu in enumerate((True, 12.5)):
+        label = f"L{i}"
+        rc = finality_probe.capture(_ns(tmp_path, label=label, endpoints="", massive=True),
+                                    http_get=_fake_get(_mbody([{"day": {"last_updated": lu}, "strike": 1}])),
+                                    now=_at(3 + i))
+        assert rc == 0
+        meta = json.loads((tmp_path / "2024-01-02" / label / "massive__v3.snapshot.options__SPY__p0.meta.json").read_text())
+        assert meta["max_updated_at"] is None

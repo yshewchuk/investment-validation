@@ -28,7 +28,7 @@ Neither candidate currently supplies native `option_chains` bytes.
   `option_chains` table is produced by legacy code (`engine/data/normalize/n_chains.py`, fed by
   `strikes` pulls) and reaches v2 through legacy materialization.
 - Massive pinned acquisitions (`massive_plan.DATASETS = ("daily", "splits", "dividends")`) are stock
-  daily aggregates and corporate actions. Massive has no option-chain acquisition in this repo. A recorded probe (2026-08-30, Polygon naming,
+  daily aggregates and corporate actions. Massive has no pinned option-chain acquisition in this repo's production path; the only option-chain fetch is the manual measurement probe `tools/finality_probe.py` (see `guides/finality_probe_runbook.md`), which stores private captures outside the repository and feeds no table. A recorded probe (2026-08-30, Polygon naming,
   `engine/data/normalize/n_option_daily.py`) found the plan covers option daily aggregates,
   reference and snapshots, while trades, quotes and intraday bars return NOT_AUTHORIZED, so
   there is no bid/ask. Whether the current Massive account matches that probe is unconfirmed.

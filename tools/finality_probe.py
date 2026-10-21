@@ -37,14 +37,6 @@ def _fail(msg, code=2):
     raise SystemExit(code)
 
 
-def _boolable(v):
-    try:
-        bool(v)
-    except Exception:
-        return False
-    return True
-
-
 def _stem(provider, endpoint, ticker, page):
     stem = f"{provider}__{endpoint.replace('/', '.')}__{ticker}"
     if page is not None:
@@ -200,8 +192,11 @@ def _max_updated_massive(rows):
             c = r.get(ck)
             if not isinstance(c, dict) or c.get("last_updated") is None:
                 continue
+            v = c["last_updated"]
+            if isinstance(v, bool) or (isinstance(v, float) and not v.is_integer()):
+                continue
             try:
-                vals.append(int(c["last_updated"]))
+                vals.append(int(v))
             except (TypeError, ValueError):
                 pass
     return max(vals) if vals else None
@@ -237,11 +232,6 @@ def _default_http_get(req):
 
 
 def capture(args_ns, http_get=None, now=None):
-    if http_get is None:
-        http_get = _default_http_get
-    if now is None:
-        def now():
-            return datetime.now(timezone.utc)
     session = getattr(args_ns, "session", None)
     label = getattr(args_ns, "label", None)
     out_dir = getattr(args_ns, "out", None)
@@ -249,11 +239,21 @@ def capture(args_ns, http_get=None, now=None):
     endpoints_arg = getattr(args_ns, "orats_endpoints", DEFAULT_ORATS_ENDPOINTS)
     massive_arg = getattr(args_ns, "massive", False)
     replace_arg = getattr(args_ns, "replace", False)
-    if not (isinstance(session, str) and isinstance(label, str)
-            and isinstance(out_dir, str) and isinstance(tickers_arg, str)
+    if not ((now is None or callable(now))
+            and (http_get is None or callable(http_get))
+            and isinstance(session, str) and "\x00" not in session
+            and isinstance(label, str) and "\x00" not in label
+            and isinstance(out_dir, str) and "\x00" not in out_dir
+            and isinstance(tickers_arg, str) and "\x00" not in tickers_arg
             and (endpoints_arg is None or isinstance(endpoints_arg, str))
-            and _boolable(massive_arg) and _boolable(replace_arg)):
+            and isinstance(massive_arg, bool)
+            and isinstance(replace_arg, bool)):
         _fail("invalid argument types", 2)
+    if http_get is None:
+        http_get = _default_http_get
+    if now is None:
+        def now():
+            return datetime.now(timezone.utc)
     if not _valid_session(session):
         _fail(f"invalid session {session!r}: expected YYYY-MM-DD", 2)
     if not LABEL_RE.match(label or "") or label in (".", ".."):
@@ -671,14 +671,19 @@ def _composite(key, pages):
 def compare(args_ns):
     rule = "a refetch at T+X whose content hash equals the fetch at T, with max(updatedAt) at T earlier than T, counts as final at T"
     hdrs = ("etag", "last-modified", "age", "date", "content-length")
-    if args_ns.session is not None and not _valid_session(args_ns.session):
-        _fail(f"invalid session {args_ns.session!r}: expected YYYY-MM-DD", 2)
+    out = getattr(args_ns, "out", None)
+    session = getattr(args_ns, "session", None)
+    if not (isinstance(out, str) and "\x00" not in out
+            and (session is None or (isinstance(session, str) and "\x00" not in session))):
+        _fail("invalid argument types", 2)
+    if session is not None and not _valid_session(session):
+        _fail(f"invalid session {session!r}: expected YYYY-MM-DD", 2)
     try:
-        root = Path(args_ns.out).resolve()
+        root = Path(out).resolve()
         root_dirs = sorted(p.name for p in root.iterdir() if p.is_dir())
     except OSError as exc:
         _fail_path(exc)
-    sessions = [args_ns.session] if args_ns.session else root_dirs
+    sessions = [session] if session else root_dirs
     metas = []
     for s in sessions:
         sdir = root / s
