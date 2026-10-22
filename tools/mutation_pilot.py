@@ -2267,6 +2267,7 @@ def mutmut_config_text(defaults: dict, mutate: list[str], tests: list[str],
              + lines("also_copy", also_copy)
              + lines("pytest_add_cli_args_test_selection", tests)
              + lines("pytest_add_cli_args", defaults["pytest_args"]
+                     + ["-p", "tools.mutation_stats_diagnostics"]
                      + [f"--deselect={d}" for d in defaults.get("deselect", [])])
              + f"timeout_constant = {float(defaults['timeout_constant'])}\n"
              + f"timeout_multiplier = {float(defaults['timeout_multiplier'])}\n"
@@ -2498,6 +2499,12 @@ def cmd_run(cfg: dict, args) -> int:
     # ops_catalog_state now shares that CI-only default, so the same echo
     # covers its shard too.
     env = os.environ.copy()
+    # A stats-only pytest plugin writes outside the fork-local stdout buffer.
+    # Source-policy tests inspect the authored snapshot, never generated wrappers.
+    diagnostic = work / "stats-failure.txt"
+    diagnostic.unlink(missing_ok=True)
+    env["MUTATION_PILOT_STATS_DIAGNOSTIC"] = str(diagnostic)
+    env["MUTATION_PILOT_SOURCE_ROOT"] = str(work)
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         env[var] = "1"

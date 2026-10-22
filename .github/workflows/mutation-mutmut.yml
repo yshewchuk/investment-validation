@@ -441,6 +441,11 @@ jobs:
           if [ "$PR_OPEN" = "false" ]; then
             SKIP_ARGS=(--skipped-reason pr_closed_mid_run)
           fi
+          diagnostic="$HOME/.cache/investing-plan-mutation-pilot/$MODULE/stats-failure.txt"
+          if [ -f "$diagnostic" ]; then
+            mkdir -p "report/$MODULE"
+            cp "$diagnostic" "report/$MODULE/stats-failure.txt"
+          fi
           # set -e: mutation_results.py export is the gate for a module whose
           # state cannot be read at all; a nonzero mutmut rc still writes an
           # honest partial artifact (run_exit_code recorded) and is failed on

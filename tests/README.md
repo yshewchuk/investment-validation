@@ -475,8 +475,18 @@ its 330-minute step timeout.
 
 - **Diagnosing a failed stats run.** When mutmut's clean/stats run fails it
   prints only `failed to collect stats. runner returned 1` and swallows the
-  child pytest output that explains it. The remedy is mutmut's supported
-  `debug = true`, which the driver adds to the generated `setup.cfg [mutmut]`.
+  forked child's pytest output. The driver now loads the supported pytest
+  plugin `tools.mutation_stats_diagnostics`: failed setup/call/teardown,
+  collection and internal-error reports from the stats phase are written
+  directly to `stats-failure.txt` in the module work directory. CI retains
+  that file inside `mutation-mutmut-module-<module>`, beside its result summaries,
+  even if result export fails. Captured output accompanies the traceback;
+  an unwritable diagnostic emits a warning without replacing the test failure.
+  The file is cleared before each run, capped at 64 KiB (keeping the start
+  and end of an oversized report), and never receives mutant-phase reports.
+  This does not rerun tests, change the backend exit code, or classify any
+  unmeasured mutant as killed. For extra output, mutmut also supports
+  `debug = true`, added to `setup.cfg [mutmut]` by the driver.
   Be honest about what it does: `debug` is **full-run verbosity**, not a
   stats-only hook -- with it on, mutmut echoes every mutant's child pytest
   output for the whole run, so the log grows large. Because that is expensive,
@@ -491,6 +501,9 @@ its 330-minute step timeout.
   was not reproduced, not a root cause.
   The `ops_catalog_state` CI shard enables the same debug setting under the
   same CI-only default (its stats step failed the same way in run 36025664817).
+  Authored-source size/import policies read `MUTATION_PILOT_SOURCE_ROOT`, the
+  driver's uninstrumented work snapshot, rather than mutmut's generated
+  wrappers; runtime assertions still import and exercise instrumented code.
 
 | trigger | mode | state |
 |---|---|---|
