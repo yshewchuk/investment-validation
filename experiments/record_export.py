@@ -419,8 +419,8 @@ def export_run_record(
     results/runs/<key>/ where key is derived from the spec, request and
     recording mode bytes. A replay of the same run keeps the first persisted
     bytes silently (status unchanged); differing existing bytes of the same
-    run are kept silently. Manifest hashes describe the proposed bytes, which
-    equal the bytes on disk for every file this call writes.
+    run are kept silently. Manifest hashes describe the persisted bytes on
+    disk.
     """
     root = Path(experiments_root)
     with _export_lock(root):
@@ -488,21 +488,26 @@ def export_run_record(
                 )
             existing_manifest_doc = _read_manifest(top / "export_manifest.json")
             if (
-                existing_manifest_doc is not None
-                and isinstance(existing_manifest_doc.get("files"), dict)
+                existing_manifest_doc is None
+                or not isinstance(existing_manifest_doc.get("files"), dict)
             ):
-                files = existing_manifest_doc["files"]
-                for name, existing_bytes in (
-                    ("spec.json", existing_spec),
-                    ("request.json", existing_request),
-                ):
-                    digest = hashlib.sha256(existing_bytes).hexdigest()
-                    if digest != files.get(name):
-                        raise fail(
-                            "EXPERIMENT_IDENTITY_CONFLICT",
-                            f"replay mismatch for {top / name}: persisted sha256 "
-                            f"{digest} != manifest {files.get(name)!r}",
-                        )
+                raise fail(
+                    "EXPERIMENT_IDENTITY_CONFLICT",
+                    f"existing {top / 'export_manifest.json'} is missing, invalid, "
+                    f"or has no files object",
+                )
+            files = existing_manifest_doc["files"]
+            for name, existing_bytes in (
+                ("spec.json", existing_spec),
+                ("request.json", existing_request),
+            ):
+                digest = hashlib.sha256(existing_bytes).hexdigest()
+                if digest != files.get(name):
+                    raise fail(
+                        "EXPERIMENT_IDENTITY_CONFLICT",
+                        f"replay mismatch for {top / name}: persisted sha256 "
+                        f"{digest} != manifest {files.get(name)!r}",
+                    )
             existing_mode = (
                 existing_manifest_doc.get("recording_mode")
                 if existing_manifest_doc is not None

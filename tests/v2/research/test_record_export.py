@@ -854,6 +854,18 @@ def test_replay_with_manifest_missing_document_name_is_identity_conflict(tmp_pat
     assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
+def test_manifest_without_files_object_conflicts_before_runs(tmp_path):
+    _export(tmp_path)
+    results = tmp_path / "EXP-101_x" / "results"
+    (results / "export_manifest.json").write_text(json.dumps(
+        {"experiment_id": "x", "exp_number": 101}
+    ))
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path, spec={"hypothesis": "other"})
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert not (results / "runs").exists()
+
+
 def test_oversize_mapping_spec_is_trimmed_without_kept(tmp_path):
     result = _export(tmp_path, spec={"k": "x" * 1_200_000})
     assert result["trimmed"] == ["spec.json"]
