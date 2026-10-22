@@ -122,7 +122,7 @@ accept the `computed_moves.v4` or `computed_moves.v5` contract and refuse any ot
 `CONTRACT_MISMATCH`; on v5 a row with a `not_computed_reason` other than `no_price_window`
 is `skipped` and carries no outcome, so it never counts as a scoreable event. The
 writer's reason is the only reason research reports for a skipped row: the history and
-training-label omission lists (`omitted_history`, `omitted_labels`) carry the row's
+training-label and opt-in evaluation omission lists (`omitted_history`, `omitted_labels`) carry the row's
 `not_computed_reason` as the omission `reason` (v4 rows, and v5 rows without a reason, keep
 `skipped`), never a research-side re-derivation. Non-skipped rows the readers omit for
 availability keep the reader's own `unavailable` / `not_available_before_fit` reasons. The
@@ -246,7 +246,8 @@ non-finite labels refuse the whole call, with zero remaining a valid value.
 Exception, opt-in only: `omit_not_computed=True` (used by the magnitude search's inner and outer
 evaluation reads) treats a row the writer marked `skipped` (v5 `not_computed_reason`, e.g. `not_orats`)
 exactly as `qualify_magnitude_training_targets` does: it is omitted, never parsed, and listed in the
-frame attrs and receipt as `omitted_labels` (`[{"event_id", "reason": "skipped"}]`, sorted by event ID).
+frame attrs and receipt as `omitted_labels` (`[{"event_id", "reason"}]`, sorted by event ID), where `reason` is the row's
+`not_computed_reason` (`skipped` for a row without one), the same rule as the training qualifier.
 `omit_not_computed` must be a `bool` (`CONTRACT_MISMATCH` otherwise). The receipt carries `omitted_labels` only when non-empty (receipts with none are byte-identical to before).
 Every other refusal above is unchanged; only `skipped=true` is omitted, never null/late availability.
 Forecasts for omitted events are made but not scored; `event_count` counts scored events.

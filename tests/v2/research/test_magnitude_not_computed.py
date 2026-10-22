@@ -1,11 +1,16 @@
 """Not-computed (skipped) magnitude labels: opt-in omission in loader and evidence."""
 import pytest
 
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.data.errors import DataError
 from engine.v2.foundation import content_hash
 from engine.v2.research import magnitude_inputs
 from experiments import magnitude_search_evidence as evidence
-from tests.v2.research.magnitude_trial_support import history_event, outcome_move
+from tests.v2.research.magnitude_trial_support import (
+    commit_history_inputs,
+    history_event,
+    outcome_move,
+)
 from tests.v2.research.test_event_history import commit_event_history
 
 MONTH = "2025-01"
@@ -54,6 +59,22 @@ def test_omit_flag_drops_skipped_event_and_binds_its_object(tmp_path):
             by_event[kept_first["event_id"]], by_event[kept_second["event_id"]]]
         assert result.realized_move_pct.tolist() == [2.0, 2.0]
         assert result.absolute_move_pct.tolist() == [2.0, 2.0]
+    finally:
+        conn.close()
+
+
+def test_v5_omit_reports_the_writers_reason(tmp_path):
+    skipped, kept = history_event("2024-01-04"), history_event("2024-03-05")
+    conn, repository, snapshot = commit_history_inputs(
+        tmp_path, [skipped, kept],
+        [outcome_move(skipped, None, skipped=True, available_as_of_date=None,
+                      not_computed_reason="no_session"),
+         outcome_move(kept)],
+        contract=COMPUTED_MOVES_V5_CONTRACT, include_calendar=False)
+    try:
+        result = _load(repository, snapshot, omit_not_computed=True)
+        assert result.event_id.tolist() == [kept["event_id"]]
+        assert result.attrs["omitted_labels"] == [{"event_id": skipped["event_id"], "reason": "no_session"}]
     finally:
         conn.close()
 

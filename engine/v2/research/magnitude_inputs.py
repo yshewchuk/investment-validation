@@ -7,7 +7,7 @@ from engine.v2.data import errors
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.foundation import content_hash, market_calendar
 from engine.v2.foundation.experiment_holdouts import _calendar_date
-from engine.v2.research.event_history import _CONTEXT, _plans
+from engine.v2.research.event_history import _CONTEXT, _plans, skipped_reason
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.prediction_inputs import _parse_target
 
@@ -108,7 +108,7 @@ def load_magnitude_targets(repository, snapshot, *, as_of_month, labels_before,
         if (omit_not_computed and len(decoded) == 1
                 and type(decoded[0].get("skipped")) is bool and decoded[0]["skipped"]
                 and decoded[0].get("event_date") == event.event_date.date().isoformat()):
-            omitted.append({"event_id": event.event_id, "reason": "skipped"})
+            omitted.append({"event_id": event.event_id, "reason": skipped_reason(decoded[0])})
             continue
         value, _, known = _label_before(decoded, event, cutoff)
         signed.append(value)
@@ -153,8 +153,7 @@ def _training_label(rows, event, cutoff):
         raise errors.fail("EXPERIMENT_VARIANT_FAILED", "magnitude training label identity is invalid")
     row = rows[0]
     if row["skipped"]:
-        reason = row.get("not_computed_reason")
-        return None, reason if isinstance(reason, str) and reason else "skipped"
+        return None, skipped_reason(row)
     if row["available_as_of_date"] is None:
         return None, "unavailable"
     try:

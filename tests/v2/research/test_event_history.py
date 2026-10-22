@@ -4,7 +4,7 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
-from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.data.errors import DataError, fail
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.research.event_history import load_event_history

@@ -151,14 +151,19 @@ def _plans(repository, snapshot, candidates, contract, *, columns=None):
     return plans
 
 
+def skipped_reason(row):
+    """The writer's reason for a skipped row; "skipped" for v4 or reason-less rows."""
+    reason = row.get("not_computed_reason")
+    return reason if isinstance(reason, str) and reason else "skipped"
+
+
 def _historical_target(rows, event, decision):
     """Omit unavailable decoded labels before numeric validation or arithmetic."""
     if len(rows) != 1 or rows[0]["event_date"] != event.event_date.date().isoformat():
         raise errors.fail("EXPERIMENT_VARIANT_FAILED", "historical outcome identity is invalid")
     row = rows[0]
     if row["skipped"] is True:
-        reason = row.get("not_computed_reason")
-        return None, reason if isinstance(reason, str) and reason else "skipped"
+        return None, skipped_reason(row)
     if row["available_as_of_date"] is None:
         return None, "unavailable"
     try:
