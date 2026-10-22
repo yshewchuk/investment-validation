@@ -140,11 +140,16 @@ def _alarm(item, when: str):
         return
 
     def expired(signum, frame):
-        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
-        pytest.fail(f"TIMEOUT: {item.nodeid} exceeded its {when} budget of {seconds:g}s "
-                    f"(--test-timeout / PYTEST_TEST_TIMEOUT / @pytest.mark.test_timeout). "
-                    f"The traceback shows where it was waiting; all threads are dumped "
-                    f"in the captured stderr.")
+        try:
+            # capsys/redirect_stderr may replace sys.stderr with a stream
+            # without fileno(). Keep the original descriptor for the dump.
+            faulthandler.dump_traceback(file=sys.__stderr__, all_threads=True)
+        finally:
+            # A dump failure must never become a catchable validation error
+            # (e.g. UnsupportedOperation) instead of the expired test budget.
+            pytest.fail(f"TIMEOUT: {item.nodeid} exceeded its {when} budget of {seconds:g}s "
+                        f"(--test-timeout / PYTEST_TEST_TIMEOUT / @pytest.mark.test_timeout). "
+                        f"A traceback was attempted on the original stderr.")
 
     previous = signal.signal(signal.SIGALRM, expired)
     signal.setitimer(signal.ITIMER_REAL, seconds)

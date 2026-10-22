@@ -100,6 +100,11 @@ python3 -m pytest -q -n 4 --dist loadgroup -rfEs --durations=15 tests/ 2>&1 | ta
 
 Nothing in the suite waits unboundedly any more:
 
+Expired per-test budgets always raise pytest's `TIMEOUT` failure, even if the
+traceback dump fails. Dumps use original stderr, not a `capsys`/redirected
+stream without `fileno()`, so diagnostic I/O cannot masquerade as a caught
+domain-validation error. No timeout budget is increased by this safeguard.
+
 | Guard | What it does | Knob |
 |---|---|---|
 | Per-test timeout (`conftest.py`) | Each setup/call/teardown phase gets 600 s; past that the test **fails** as `TIMEOUT: <node id> ...` with the stack it was waiting in, and the run continues. pytest-timeout is not installed; this is a SIGALRM equivalent that switches itself off if pytest-timeout is ever installed. The first `ui_dist_dir` setup (npm ci + build) gets a longer budget. | `--test-timeout N`, env `PYTEST_TEST_TIMEOUT`, `@pytest.mark.test_timeout(N)`; `0` disables |
