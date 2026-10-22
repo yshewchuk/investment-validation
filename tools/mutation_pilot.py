@@ -2432,11 +2432,16 @@ def _become_subreaper() -> bool:
         return False
 
 
-# Best-effort and bounded (<= ~5 s of waiting): if subreaper is unavailable only
-# direct/still-attached descendants are found (the `subreaper: no` line says
-# so); a process that survives SIGKILL (D state) is logged and abandoned, never
-# waited on forever. No mutant is excluded or skipped by this change.
+# Best-effort and bounded (<= ~5 s of waiting). Without a child subreaper a
+# descendant orphaned to init is not found at all -- only descendants still
+# attached below this process in the tree are seen (the `subreaper: no` line
+# says so). A process that survives SIGKILL (D state) is logged, including one
+# that is not this process's own child (re-checked with a signal-0 probe), and
+# abandoned, never waited on forever. No mutant is excluded or skipped by this
+# change.
 def _reap_descendants(label: str) -> int:
+    if not sys.platform.startswith("linux"):
+        return 0
     try:
         ppid: dict[int, int] = {}
         proc_state: dict[int, str] = {}
@@ -2457,47 +2462,78 @@ def _reap_descendants(label: str) -> int:
             victims.append(pid)
             stack.extend(kids.get(pid, []))
         cmdlines: dict[int, str] = {}
-        killed = 0
+        killed: list[int] = []
         for pid in victims:
             try:
-                cmdlines[pid] = Path(f"/proc/{pid}/cmdline").read_bytes().replace(
-                    b"\0", b" ").decode("utf-8", "replace")[:200]
+                with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                    raw = fh.read(4096)
+                cmdlines[pid] = raw.replace(b"\0", b" ").decode("utf-8", "replace")[:200]
             except OSError:
                 cmdlines[pid] = ""
             try:
                 os.kill(pid, signal.SIGKILL)
-                if proc_state.get(pid) != "Z":
-                    killed += 1
             except ProcessLookupError:
                 continue
             except OSError as exc:
                 print(f"[mutation_pilot] {label}: could not kill pid={pid}: {exc}",
                       file=sys.stderr, flush=True)
+                continue
+            if proc_state.get(pid) != "Z":
+                killed.append(pid)
         deadline, pending = time.monotonic() + 5.0, set(victims)
-        while pending and time.monotonic() < deadline:
+        not_children: set[int] = set()
+        while (pending or not_children) and time.monotonic() < deadline:
             for pid in list(pending):
                 try:
                     if os.waitpid(pid, os.WNOHANG)[0]:
                         pending.discard(pid)
                 except ChildProcessError:
+                    not_children.add(pid)
                     pending.discard(pid)
-            if pending:
+            for pid in list(not_children):
+                try:
+                    if os.waitpid(pid, os.WNOHANG)[0]:
+                        not_children.discard(pid)
+                        continue
+                except ChildProcessError:
+                    pass
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    not_children.discard(pid)
+            if pending or not_children:
                 time.sleep(0.05)
-        if pending:
-            print(f"[mutation_pilot] {label}: {len(pending)} process(es) did not exit "
-                  f"after SIGKILL: {' '.join(str(p) for p in sorted(pending))}",
+        alive = set(pending)
+        for pid in not_children:
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0]:
+                    continue
+            except ChildProcessError:
+                pass
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except OSError:
+                alive.add(pid)
+            else:
+                if proc_state.get(pid) != "Z":
+                    alive.add(pid)
+        if alive:
+            print(f"[mutation_pilot] {label}: {len(alive)} process(es) did not exit "
+                  f"after SIGKILL: {' '.join(str(p) for p in sorted(alive))}",
                   file=sys.stderr, flush=True)
         if not killed:
             return 0
-        print(f"[mutation_pilot] {label}: killed {killed} leftover descendant process(es)",
+        print(f"[mutation_pilot] {label}: killed {len(killed)} leftover descendant process(es)",
               file=sys.stderr, flush=True)
-        for pid in victims[:20]:
+        for pid in killed[:20]:
             print(f"[mutation_pilot]   pid={pid} cmd={cmdlines.get(pid, '')}",
                   file=sys.stderr, flush=True)
-        if len(victims) > 20:
-            print(f"[mutation_pilot]   ... and {len(victims) - 20} more",
+        if len(killed) > 20:
+            print(f"[mutation_pilot]   ... and {len(killed) - 20} more",
                   file=sys.stderr, flush=True)
-        return killed
+        return len(killed)
     except Exception as exc:
         print(f"[mutation_pilot] {label}: descendant sweep failed: {exc}",
               file=sys.stderr, flush=True)

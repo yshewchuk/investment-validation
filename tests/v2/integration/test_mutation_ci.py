@@ -5798,44 +5798,47 @@ _SWEEP_PREAMBLE = (
 @pytest.mark.skipif(sys.platform != "linux", reason="child subreaper is Linux-only")
 def test_reap_descendants_kills_an_orphaned_session_detached_process():
     inner = (
-        "import subprocess, sys\n"
-        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],"
-        " start_new_session=True)\n"
-        "print(p.pid, flush=True)\n"
+        "import subprocess, sys, time\n"
+        "orphan = subprocess.Popen([sys.executable, '-c',"
+        " 'import time; time.sleep(300)'], start_new_session=True)\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
+        "print(orphan.pid, child.pid, flush=True)\n"
+        "time.sleep(300)\n"
     )
     script = _SWEEP_PREAMBLE + (
         "pilot._become_subreaper()\n"
         f"inter = subprocess.Popen([sys.executable, '-c', {inner!r}],"
         " stdout=subprocess.PIPE, start_new_session=True, text=True)\n"
         "line = inter.stdout.readline().strip()\n"
-        "inter.wait()\n"
-        "sleeper = int(line)\n"
-        "print(f'SLEEPER={sleeper}', flush=True)\n"
+        "pids = [int(x) for x in line.split()]\n"
+        "print('PIDS=' + ' '.join(str(p) for p in [inter.pid, *pids]), flush=True)\n"
         "count = pilot._reap_descendants('t')\n"
-        "alive = True\n"
-        "try:\n"
-        "    os.kill(sleeper, 0)\n"
-        "except ProcessLookupError:\n"
-        "    alive = False\n"
-        "print(f'COUNT={count} ALIVE={int(alive)}', flush=True)\n"
+        "alive = 0\n"
+        "for pid in [inter.pid, *pids]:\n"
+        "    try:\n"
+        "        os.kill(pid, 0)\n"
+        "    except ProcessLookupError:\n"
+        "        continue\n"
+        "    alive += 1\n"
+        "print(f'COUNT={count} ALIVE={alive}', flush=True)\n"
     )
-    sleeper_pid = None
+    pids: list[int] = []
     try:
         proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
                               text=True, timeout=60)
-        match = re.search(r"SLEEPER=(\d+)", proc.stdout)
+        match = re.search(r"PIDS=([\d ]+)", proc.stdout)
         if match:
-            sleeper_pid = int(match.group(1))
+            pids = [int(x) for x in match.group(1).split()]
         final = re.search(r"COUNT=(\d+) ALIVE=(\d+)", proc.stdout)
         assert final, proc.stderr
-        assert int(final.group(1)) >= 1
+        assert int(final.group(1)) == 3  # live intermediate, its sleeper, orphaned sleeper
         assert final.group(2) == "0"
-        assert "killed" in proc.stderr
+        assert "killed 3 leftover descendant process(es)" in proc.stderr
         assert "time.sleep(300)" in proc.stderr
     finally:
-        if sleeper_pid is not None:
+        for pid in pids:
             try:
-                os.kill(sleeper_pid, signal.SIGKILL)
+                os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
 
@@ -5856,6 +5859,17 @@ def test_reap_descendants_is_silent_and_zero_when_nothing_is_left():
 def test_cmd_run_sweeps_after_the_budget_stop(monkeypatch, tmp_path):
     sweeps = []
 
+    monkeypatch.setattr(pilot, "_run_with_time_budget",
+                        lambda cmd, cwd, env, budget: pilot.TIME_BUDGET_STOP_RC)
+    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=0, budget=3300, sweep=sweeps)
+    assert rc == pilot.TIME_BUDGET_STOP_RC == 124
+    assert calls == []  # the unbounded subprocess.run path was NOT taken
+    assert sweeps == ["after mutmut exit"]
+
+
+def test_cmd_run_sweeps_on_an_exception(monkeypatch, tmp_path):
+    sweeps = []
+
     def fake_bounded(cmd, cwd, env, budget):
         raise RuntimeError("bounded runner failed")
 
@@ -5867,8 +5881,8 @@ def test_cmd_run_sweeps_after_the_budget_stop(monkeypatch, tmp_path):
 
 def test_cmd_run_sweeps_once_on_a_normal_return(monkeypatch, tmp_path):
     sweeps = []
-    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=0, sweep=sweeps)
-    assert rc == 0  # the subprocess exit code is returned unchanged
+    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=3, sweep=sweeps)
+    assert rc == 3  # the subprocess exit code is returned unchanged
     assert len(calls) == 1
     assert sweeps == ["after mutmut exit"]
 
@@ -5881,9 +5895,39 @@ def test_cmd_run_becomes_a_subreaper_once(monkeypatch, tmp_path):
     assert seen == [1]
 
 
-def test_reap_descendants_never_raises(monkeypatch, capsys):
+@pytest.mark.parametrize("supported,word", [(True, "yes"), (False, "no")])
+def test_cmd_run_becomes_subreaper_then_runs_then_sweeps(
+        monkeypatch, tmp_path, capsys, supported, word):
+    events = []
+    work = tmp_path / "work"
+    (work / "mutants").mkdir(parents=True)
+    monkeypatch.setattr(pilot, "sync_workdir", lambda *a, **k: work)
+    monkeypatch.setattr(pilot, "mutate_files", lambda cfg, name, tracked=None: ["engine/x.py"])
+    monkeypatch.setattr(pilot, "test_files", lambda cfg, name, tracked=None: ["tests/test_a.py"])
+    monkeypatch.setattr(pilot, "tests_digest", lambda *a: "digest")
+    monkeypatch.setattr(pilot, "reset_on_test_change", lambda *a, **k: 0)
+    monkeypatch.setattr(mr, "snapshot", lambda *a, **k: {})
+    monkeypatch.setattr(pilot, "_become_subreaper",
+                        lambda: events.append("subreaper") or supported)
+
+    def fake_run(cmd, **kw):
+        events.append("run")
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(pilot.subprocess, "run", fake_run)
+    monkeypatch.setattr(pilot, "_reap_descendants",
+                        lambda label: events.append("sweep") or 0)
+    args = types.SimpleNamespace(module="toy", fresh=False, max_children=None, globs=[],
+                                 time_budget_seconds=None)
+    assert pilot.cmd_run({"defaults": DIAG_DEFAULTS, "modules": {"toy": {}}}, args) == 0
+    assert events == ["subreaper", "run", "sweep"]
+    assert f"child subreaper: {word}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("exc", [OSError, RuntimeError])
+def test_reap_descendants_never_raises(monkeypatch, capsys, exc):
     def boom(_path):
-        raise OSError("boom")
+        raise exc("boom")
 
     monkeypatch.setattr(pilot.os, "listdir", boom)
     assert pilot._reap_descendants("t") == 0
