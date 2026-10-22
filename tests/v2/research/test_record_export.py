@@ -81,14 +81,15 @@ def test_read_spec_document_directory_is_invalid_spec(tmp_path):
     with pytest.raises(OpsError) as exc:
         read_spec_document(tmp_path)
     assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
-    assert "not a regular file" in str(exc.value)
+    assert "spec file is not a regular file" in str(exc.value)
+    assert str(tmp_path) not in str(exc.value)
 
 
 def test_read_spec_document_missing_file_is_invalid_spec(tmp_path):
     with pytest.raises(OpsError) as exc:
         read_spec_document(tmp_path / "missing.json")
     assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
-    assert "cannot read spec file" in str(exc.value)
+    assert "cannot read spec file: No such file or directory" in str(exc.value)
     assert str(tmp_path) not in str(exc.value)
 
 
@@ -202,6 +203,7 @@ def test_resolve_no_number_and_no_link_is_invalid(tmp_path):
         resolve_exp_number(tmp_path, "x", None)
     assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
     assert str(tmp_path) not in str(exc.value)
+    assert "is not linked and --exp-number was not given" in str(exc.value)
 
 
 def test_resolve_number_held_by_other_experiment_conflicts(tmp_path):
@@ -450,6 +452,7 @@ def test_resolve_unlinked_id_with_none_is_invalid(tmp_path):
         resolve_exp_number(tmp_path, "x", None)
     assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
     assert str(tmp_path) not in str(exc.value)
+    assert "is not linked and --exp-number was not given" in str(exc.value)
 
 
 def test_resolve_symlinked_run_folder_with_matching_id_conflicts(tmp_path):
@@ -1111,3 +1114,30 @@ def test_hygiene_pin_results_paths_and_report(tmp_path):
     except (FileNotFoundError, OSError):
         pytest.skip("git is not available")
     assert proc.returncode == 0
+
+
+def test_export_or_skip_without_exp_number_is_skipped():
+    assert record_export.export_or_skip(
+        None, None, {}, {}, {}, None, False, 0, None) == ("skipped", None)
+
+
+@pytest.mark.parametrize("raised, cause", [
+    (OSError("disk"), "RESOURCE_UNAVAILABLE"),
+    (ValueError("bad"), "INVALID_EXPERIMENT_SPEC"),
+    (fail("EXPERIMENT_IDENTITY_CONFLICT", "x"), "EXPERIMENT_IDENTITY_CONFLICT"),
+])
+def test_export_or_skip_maps_failures_to_refusal(monkeypatch, raised, cause):
+    def boom(*args, **kwargs):
+        raise raised
+    monkeypatch.setattr(record_export, "export_native_run", boom)
+    assert record_export.export_or_skip(
+        None, None, {}, {}, {}, 101, False, 0, None) == (
+        None, {"refused": "record_export_failed", "cause": cause})
+
+
+def test_export_or_skip_success_returns_public_result(monkeypatch):
+    monkeypatch.setattr(record_export, "export_native_run",
+                        lambda *a, **k: {"status": "created", "trimmed": False, "dir": "/x"})
+    assert record_export.export_or_skip(
+        None, None, {}, {}, {}, 101, False, 0, None) == (
+        {"status": "created", "trimmed": False}, None)

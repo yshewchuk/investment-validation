@@ -95,6 +95,10 @@ def read_spec_document(path, max_bytes=16 * 1024 * 1024):
             "unreadable": "cannot read spec file",
             "not_regular": "spec file is not a regular file",
         }[refused.reason]
+        # strerror carries the OS reason (ENOENT vs EACCES) and no path.
+        detail = getattr(refused.__cause__, "strerror", None)
+        if detail:
+            message = f"{message}: {detail}"
         raise fail("INVALID_EXPERIMENT_SPEC", message) from refused
     if len(raw) > max_bytes:
         raise fail("INVALID_EXPERIMENT_SPEC", "spec file exceeds 16 MiB")

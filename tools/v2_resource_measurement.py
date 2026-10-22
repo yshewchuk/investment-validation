@@ -21,6 +21,9 @@ two values only the child's own log can supply:
   exit 76 only: a 137 reports only the memory strings (``BOX FLOOR
   BREACH``, ``SWAP BREACH``, ``CAP BREACH``), so a ``DISK LIMIT
   unreadable`` warning line is never reported as the reason a 137 died.
+  On exit 76 only a terminal breach line (``DISK LIMIT:`` or ``DISK
+  LIMIT unreadable for N ticks``) counts; the earlier ``DISK LIMIT
+  unreadable:`` warning does not.
   Memory strings are matched in ``KILL_REASONS`` tuple order, which is
   this recorder's priority, not the watchdog's own precedence.
   ``None`` for any other exit, and for a 137/76 with no breach string of
