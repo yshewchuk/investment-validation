@@ -219,7 +219,8 @@ def test_plan_without_a_manifest_ref_is_an_invalid_request(tmp_path, manifest_re
         "input_bindings['legacy_manifest.json'] must be a non-empty string"]}
 
 
-def _wire(tmp_path, monkeypatch, states=None, drift=(), prior_names=None):
+def _wire(tmp_path, monkeypatch, states=None, drift=(), prior_names=None, mode=None,
+          prior_release_id="prior1"):
     """Stage a prior release, patch the state classifier and the inventory, return worker args."""
     inventory, _body = _stage_prior(tmp_path, prior_names=prior_names)
     states = _STATES if states is None else states
@@ -239,10 +240,13 @@ def _wire(tmp_path, monkeypatch, states=None, drift=(), prior_names=None):
     monkeypatch.setattr(phase5_prepare_release, "frozen_state_payloads", fake_payloads)
     monkeypatch.setattr(inventory_module, "current_release_inventory", lambda *a, **k: (inventory, drift))
     parameters = {"expected_ids": ["phase5_state_stage"], "release_root": str(tmp_path),
-                  "prior_release_id": "prior1", "release_id": "cand1", "cutoff": "2026-10-01",
+                  "prior_release_id": prior_release_id, "release_id": "cand1",
+                  "cutoff": "2026-10-01",
                   "state_files": sorted(states),
                   "input_bindings": {**{name: f"job_x#training/{name}" for name in states},
                                      "legacy_manifest.json": "artifact_manifest"}}
+    if mode is not None:
+        parameters["mode"] = mode
     return parameters, staging
 
 
@@ -948,3 +952,98 @@ def test_worker_refuses_a_parameters_dict_missing_a_field(tmp_path, monkeypatch)
         "problems": ["parameters are missing a field or have the wrong type"]}
     assert not (staging / "stage_result.json").exists()
     assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+
+
+def test_bootstrap_mode_accepts_a_null_prior():
+    assert state_stage_parameter_problems(
+        None, _params(mode="bootstrap", prior_release_id=None)) == []
+
+
+def test_unknown_mode_is_reported():
+    assert state_stage_parameter_problems(
+        None, _params(mode="sideways")) == ["mode must be 'carry' or 'bootstrap'"]
+
+
+def test_carry_with_a_null_prior_is_reported():
+    assert state_stage_parameter_problems(None, _params(prior_release_id=None)) == [
+        "prior_release_id and release_id must be safe non-empty ids"]
+
+
+def test_bootstrap_with_a_null_prior_checks_only_the_release_id():
+    assert state_stage_parameter_problems(
+        None, _params(mode="bootstrap", prior_release_id=None, release_id="../x")) == [
+            "release_id must be a safe non-empty id"]
+
+
+def test_plan_passes_the_bootstrap_mode_through(tmp_path):
+    plan = state_stage_plan(release_root=str(tmp_path), prior_release_id=None,
+                            release_id="cand1", cutoff="2026-10-01",
+                            state_refs={"a.json": "j#o"}, manifest_ref="artifact_manifest",
+                            source_root=REPO_ROOT, mode="bootstrap")
+    assert plan["parameters"]["mode"] == "bootstrap"
+
+
+def _store_names(root):
+    store = phase5_release.deployment_root(root) / "objects"
+    return sorted(path.name for path in store.iterdir()) if store.exists() else []
+
+
+def _assert_bootstrap_refusal(tmp_path, staging, parameters, message, code):
+    before = _store_names(tmp_path)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == f"VALIDATION_FAILED: {message}"
+    assert err.value.problem.details == {"code": code}
+    assert _store_names(tmp_path) == before
+    assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+    assert not (staging / "stage_result.json").exists()
+
+
+def test_bootstrap_refuses_a_damaged_prior_before_any_write(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch, mode="bootstrap")
+    phase5_release.catalog_path(tmp_path, "prior1").write_bytes(b"{not json")
+    _assert_bootstrap_refusal(tmp_path, staging, parameters,
+                              "prior release could not be read", "PRIOR_MISMATCH")
+
+
+def test_bootstrap_refuses_a_usable_prior(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch, mode="bootstrap")
+    _assert_bootstrap_refusal(tmp_path, staging, parameters,
+                              "prior release already has a pool catalog", "PRIOR_USABLE")
+
+
+def test_bootstrap_refuses_when_the_assembly_is_not_built(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch, mode="bootstrap",
+                                prior_release_id=None)
+    _assert_bootstrap_refusal(tmp_path, staging, parameters,
+                              "bootstrap assembly is not available yet", "BOOTSTRAP_NOT_BUILT")
+
+
+def test_bootstrap_refuses_a_prior_without_a_catalog(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch, mode="bootstrap")
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+    _assert_bootstrap_refusal(tmp_path, staging, parameters,
+                              "bootstrap assembly is not available yet", "BOOTSTRAP_NOT_BUILT")
+
+
+def test_light_checks_accept_a_null_carried_from_in_bootstrap(tmp_path, monkeypatch):
+    from tools import phase5_state_stage_job as job
+
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    assert run_state_stage_worker(parameters, staging)["completed_ids"] == ["phase5_state_stage"]
+    path = phase5_release.catalog_path(tmp_path, "cand1")
+    body = json.loads(path.read_bytes())
+    body["sources"]["carried_from"] = None
+    path.write_text(json.dumps(phase5_release.manifest_body(
+        body["release_id"], body["deployment_id"], body["members"], body["sources"])))
+    job.light_checks(tmp_path, {**parameters, "mode": "bootstrap"}, set())
+
+
+def test_light_checks_refuse_a_non_null_carried_from_in_bootstrap(tmp_path, monkeypatch):
+    from tools import phase5_state_stage_job as job
+
+    parameters, staging = _wire(tmp_path, monkeypatch)
+    assert run_state_stage_worker(parameters, staging)["completed_ids"] == ["phase5_state_stage"]
+    with pytest.raises(job.StageRefused) as err:
+        job.light_checks(tmp_path, {**parameters, "mode": "bootstrap"}, set())
+    assert str(err.value) == "candidate release failed the light checks"

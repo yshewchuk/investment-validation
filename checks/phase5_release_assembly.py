@@ -60,6 +60,10 @@ _UNSAFE_ID_CHARS = ("/", "\\", "\0")
 _STRAY_ERRORS = (KeyError, TypeError, AttributeError, ValueError, RecursionError)
 MAX_OBJECT_BYTES = 512 * 1024 * 1024
 LOCK_WAIT_S = 30.0
+PRIOR_NONE = "NONE"
+PRIOR_NO_POOL_CATALOG = "NO_POOL_CATALOG"
+PRIOR_USABLE = "USABLE"
+PRIOR_DAMAGED = "DAMAGED"
 
 
 class ReleaseAssemblyRefusal(ValueError):
@@ -80,6 +84,12 @@ class PoolOutput:
     cutoff: str
     payload_bytes: int
     carried: bool = False
+
+
+@dataclass(frozen=True)
+class PriorClass:
+    kind: str
+    reason: str
 
 
 def _content_hash_valid(value: object) -> bool:
@@ -420,6 +430,37 @@ def _publication_lock(store: Path):
             os.close(fd)
 
 
+def classify_prior(release_root: Path, prior_release_id) -> PriorClass:
+    """Read-only prior classification for the pool-release bootstrap (#1102); never writes."""
+    if prior_release_id is None:
+        return PriorClass(PRIOR_NONE, "no prior release was requested")
+    try:
+        _require_safe_id(prior_release_id, "PRIOR_MISMATCH", "prior release id is not a safe string")
+        catalog = _load_catalog(catalog_path(Path(release_root), prior_release_id),
+                                prior_release_id, "PRIOR_MISMATCH",
+                                "prior catalog could not be read or validated")
+    except ReleaseAssemblyRefusal:
+        return PriorClass(PRIOR_DAMAGED, "the prior catalog could not be read or validated")
+    except _STRAY_ERRORS:
+        return PriorClass(PRIOR_DAMAGED, "the prior catalog could not be read or validated")
+    if catalog is None:
+        if prior_release_id.startswith("pools-"):
+            return PriorClass(PRIOR_DAMAGED, "a pools-* release always has a catalog")
+        return PriorClass(PRIOR_NO_POOL_CATALOG, "the prior release has no catalog")
+    sources = catalog.get("sources")
+    if isinstance(sources, dict) and "pool_cutoff" not in sources:
+        return PriorClass(PRIOR_NO_POOL_CATALOG, "the prior catalog has no pool_cutoff")
+    try:
+        _parse_day(sources["pool_cutoff"], "PRIOR_MISMATCH",
+                   "prior pool_cutoff is not an ISO date")
+        _prior_pool_rows(catalog.get("members"))
+    except ReleaseAssemblyRefusal:
+        return PriorClass(PRIOR_DAMAGED, "the prior catalog is malformed")
+    except _STRAY_ERRORS:
+        return PriorClass(PRIOR_DAMAGED, "the prior catalog is malformed")
+    return PriorClass(PRIOR_USABLE, "the prior catalog has a pool_cutoff")
+
+
 def prior_carry_set(release_root: Path, prior_release_id: str) -> tuple[str, tuple[PoolOutput, ...]]:
     """The prior ``sources.pool_cutoff`` and every prior pool/chooser object as ``carried`` outputs.
 
@@ -576,6 +617,7 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
 
 __all__ = [
     "CHOOSER_MEMBER_ID", "LOCK_WAIT_S", "MAX_OBJECT_BYTES",
-    "POOL_MEMBER_IDS", "PoolOutput", "ReleaseAssemblyRefusal", "carry_forward_release",
-    "derive_catalog", "prior_carry_set",
+    "POOL_MEMBER_IDS", "PRIOR_DAMAGED", "PRIOR_NONE", "PRIOR_NO_POOL_CATALOG",
+    "PRIOR_USABLE", "PoolOutput", "PriorClass", "ReleaseAssemblyRefusal",
+    "carry_forward_release", "classify_prior", "derive_catalog", "prior_carry_set",
 ]
