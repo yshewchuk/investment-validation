@@ -435,7 +435,7 @@ that policy.
 
 Layout: `REPORT.md` (stub: ids, status, the success report text), and in `results/`
 `spec.json`, `request.json`, `event_ids.json`, `outcome.json` (result or typed
-refusal, replay flag, resource usage as elapsed seconds and peak RSS, snapshot id, commit id) and
+refusal, replay flag, resource usage as elapsed seconds and peak RSS, snapshot id, commit id, source closure hash, environment, magnitude request, magnitude execution) and
 `export_manifest.json` (experiment_id, EXP number, recording mode, trimmed files).
 
 The operator assigns the EXP number: `--exp-number N` (an integer of at least `lib.FIRST_NUMBER`, 101, or a digit string of at most 9 characters; numbers above 999999999 are refused for every input type, int or string).
@@ -686,7 +686,7 @@ existing catalog/store and explicit holdout month. It fingerprints its executing
 metadata-only. `read_native_registration` verifies the stored identity; run performs current
 admission before replay or evaluation; missing registration is R1. R3/R4/R5
 refusals use that admitted identity and never export a current-attempt report.
-R1/R2/R6 preserve private receipts only. Unless `--no-record-export` is given, `run` also writes the private run record after a published or replayed outcome on the normal path; a refusal published by the error path is exported by the next replay (see Private run-record export). Untyped evaluation/rendering errors use
+R1/R2/R6 preserve private receipts only. Unless `--no-record-export` is given, `run` (it requires `--exp-number N` unless the experiment_id is already linked) also writes the private run record after a published or replayed outcome on the normal path; a refusal published by the error path is exported by the next replay (see Private run-record export). Untyped evaluation/rendering errors use
 retryable `WORKER_FAILED`, never terminal outcomes or CSV rows. `--no-ledger`
 isolates smoke recording; otherwise `--ledger` is required. Completed `REPORT.md` is exported through the
 shared immutable outcome lifecycle; retries reuse the original result/date.

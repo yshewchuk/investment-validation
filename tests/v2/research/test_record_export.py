@@ -349,10 +349,14 @@ def test_concurrent_exports_leave_manifest_consistent_with_disk(tmp_path):
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(export, range(2)))
     assert all(result["dir"] for result in results)
+    assert sorted(result["status"] for result in results) == ["unchanged", "written"]
+    written_writer = next(i for i, result in enumerate(results) if result["status"] == "written")
     results_dir = tmp_path / "EXP-101_x" / "results"
     man = json.loads((results_dir / "export_manifest.json").read_bytes())
     for name, digest in man["files"].items():
         assert digest == hashlib.sha256((results_dir / name).read_bytes()).hexdigest(), name
+    outcome = json.loads((results_dir / "outcome.json").read_text())
+    assert outcome["writer"] == written_writer
     assert (tmp_path / ".record_export.lock").is_file()
 
 
@@ -745,16 +749,27 @@ def test_resolve_through_symlinked_folder_with_fifo_manifest_does_not_hang(tmp_p
     results.mkdir(parents=True)
     os.mkfifo(results / "export_manifest.json")
     (tmp_path / "EXP-101_x").symlink_to(real)
-    try:
+    with pytest.raises(OpsError) as exc:
         resolve_exp_number(tmp_path, "exp-x", 101)
-    except OpsError:
-        pass
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert "symlink" in str(exc.value)
 
 
 def test_read_capped_on_fifo_returns_none(tmp_path):
     fifo = tmp_path / "pipe"
     os.mkfifo(fifo)
     assert record_export._read_capped(fifo) is None
+
+
+def test_replay_with_manifest_missing_document_name_is_identity_conflict(tmp_path):
+    _export(tmp_path)
+    manifest_path = tmp_path / "EXP-101_x" / "results" / "export_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["files"]["outcome.json"]
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path)
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_oversize_mapping_spec_is_trimmed_without_kept(tmp_path):
@@ -806,7 +821,8 @@ def test_hygiene_pin_results_paths_and_report(tmp_path):
         rel = f"experiments/EXP-101_x/results/{name}"
         report = Report()
         check_path_policy(rel, report)
-        assert len(report.violations) >= 1, rel
+        assert len(report.violations) == 1, rel
+        assert all(rel in str(violation) for violation in report.violations), rel
         matched = any(
             rel.startswith(directory + "/")
             and fnmatch(rel[len(directory) + 1:], pattern)
