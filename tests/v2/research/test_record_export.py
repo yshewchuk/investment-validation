@@ -762,6 +762,28 @@ def test_partial_outcome_trim_stub_is_adopted_and_listed_trimmed(tmp_path):
     ).hexdigest()
 
 
+def test_partial_folder_with_outcome_recording_mode_routes_to_runs(tmp_path):
+    other = tmp_path / "other"
+    _export(other, recording_mode="smoke")
+    planted = other / "EXP-101_x" / "results"
+    results = tmp_path / "EXP-101_x" / "results"
+    results.mkdir(parents=True)
+    (results / "spec.json").write_bytes((planted / "spec.json").read_bytes())
+    outcome_bytes = _dump({"recording_mode": "smoke", "failure_code": None})
+    (results / "outcome.json").write_bytes(outcome_bytes)
+    result = _export(tmp_path, recording_mode="ledger")
+    assert result["status"] == "written"
+    spec = {"hypothesis": "h"}
+    request = {"action": "run"}
+    key = _run_key(spec, request, "ledger")
+    run_dir = results / "runs" / key
+    for name in RESULT_NAMES:
+        assert (run_dir / name).is_file(), name
+    assert (run_dir / "REPORT.md").is_file()
+    assert (results / "outcome.json").read_bytes() == outcome_bytes
+    assert not (results / "export_manifest.json").exists()
+
+
 def test_manifest_listings_request_but_missing_is_conflict(tmp_path):
     _export(tmp_path)
     results = tmp_path / "EXP-101_x" / "results"

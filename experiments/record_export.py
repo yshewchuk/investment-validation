@@ -656,9 +656,25 @@ def export_run_record(
                             f"from this run; refusing to adopt it",
                         )
                 # Same run resumed: keep the persisted spec/request/event_ids
-                # bytes and adopt this run's recording mode; the writes below
-                # fill the missing files and the manifest.
+                # bytes. If an existing outcome.json carries a recording_mode,
+                # keep that mode so a differing mode routes this run to
+                # results/runs/<key>/ and leaves the partial folder untouched;
+                # otherwise adopt this run's recording mode so the writes
+                # below fill the missing files and the manifest.
                 existing_mode = recording_mode
+                outcome_path = top / "outcome.json"
+                if os.path.lexists(outcome_path):
+                    outcome_raw = _read_capped(outcome_path)
+                    if outcome_raw is not None and len(outcome_raw) <= MAX_JSON_BYTES:
+                        try:
+                            outcome_doc = json.loads(outcome_raw)
+                        except ValueError:
+                            outcome_doc = None
+                        if (
+                            isinstance(outcome_doc, dict)
+                            and "recording_mode" in outcome_doc
+                        ):
+                            existing_mode = outcome_doc["recording_mode"]
             if (
                 existing_spec != spec_raw
                 or (existing_request is not None and existing_request != request_raw)
