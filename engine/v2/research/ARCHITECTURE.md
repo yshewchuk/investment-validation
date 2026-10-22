@@ -124,13 +124,15 @@ is `skipped` and carries no outcome, so it never counts as a scoreable event. Th
 writer's reason is the only reason research reports for a skipped row: the history and
 training-label and opt-in evaluation omission lists (`omitted_history`, `omitted_labels`) carry the row's
 `not_computed_reason` as the omission `reason` (v4 rows, and v5 rows without a reason, keep
-`skipped`), never a research-side re-derivation. Non-skipped rows the readers omit for
+`skipped`; the magnitude search's `validate_targets` accepts exactly `skipped` and the writer's
+closed reason set, so a receipt with any other reason is `EXPERIMENT_IDENTITY_CONFLICT`), never a research-side re-derivation. Non-skipped rows the readers omit for
 availability keep the reader's own `unavailable` / `not_available_before_fit` reasons. The
 isolation guard of the history and magnitude readers (`_plans`) is unchanged: every
 candidate still needs exactly one isolated fragment, and a candidate with no fragment
 refuses `HOLDOUT_ACCESS_DENIED`. `prediction_inputs` does not use that guard: it refuses a
 table whose contract is neither native contract with `CONTRACT_MISMATCH` before any target
-scan, and a v5 skipped row with `EXPERIMENT_VARIANT_FAILED` naming the reason.
+scan, and a v5 skipped row with `EXPERIMENT_VARIANT_FAILED` naming the reason (the v5 contract
+requires one; a reason-less skipped row is malformed and gets the generic target message).
 It returns the signed move, binary `positive_move` target, and
 `target_available_on` date. The date is required and later than the event;
 fold consumers must admit training labels only when available before their

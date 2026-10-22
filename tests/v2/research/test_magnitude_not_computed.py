@@ -165,8 +165,9 @@ def _receipt(omitted):
     return {**identity, "inputs_id": content_hash(identity), "holdout_exclusions": []}
 
 
-def test_validate_targets_accepts_omitted_label_receipt():
-    omitted = [{"event_id": "event-b", "reason": "skipped"}]
+@pytest.mark.parametrize("reason", ["skipped", "not_orats", "no_session", "ticker_too_few_events"])
+def test_validate_targets_accepts_omitted_label_receipt(reason):
+    omitted = [{"event_id": "event-b", "reason": reason}]
     evidence.validate_targets(_preflight(), FOLD, _receipt(omitted),
         [{"event_id": "event-a", "absolute_move_pct": 2.5}])
 
@@ -174,6 +175,8 @@ def test_validate_targets_accepts_omitted_label_receipt():
 @pytest.mark.parametrize("omitted", [
     [{"event_id": "event-c", "reason": "skipped"}],
     [{"event_id": "event-b", "reason": "unavailable"}],
+    [{"event_id": "event-b", "reason": "made_up"}],
+    [{"event_id": "event-b", "reason": ["skipped"]}],
     [{"event_id": "event-b", "reason": "skipped"}, {"event_id": "event-a", "reason": "skipped"}],
     [{"event_id": "event-b", "reason": "skipped"}, {"event_id": "event-b", "reason": "skipped"}],
 ])
