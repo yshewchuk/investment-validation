@@ -229,7 +229,10 @@ def test_recorded_run_after_smoke_replays_original_date_and_exactly_one_row(sour
     set_outcome_clock(monkeypatch, "2026-02-10")
     _metadata_only(monkeypatch)
     repeated = _invoke(source, capsys, "run", "--ledger", ledger)
-    assert repeated == first
+    assert {key: value for key, value in repeated.items() if key != "record_export"} == {
+        key: value for key, value in first.items() if key != "record_export"}
+    assert first["record_export"]["status"] == "written"
+    assert repeated["record_export"]["status"] == "unchanged"
     _preserved(source, before[0], before[1])
     assert ledger.read_bytes() == before[2]
     assert len(read_ledger_rows(ledger)) == 1

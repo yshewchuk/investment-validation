@@ -16,7 +16,6 @@ import re
 import resource
 import stat as stat_mod
 import subprocess
-import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -416,9 +415,13 @@ def export_run_record(
     Unreadable/non-regular/oversized existing targets raise before any write.
     An existing manifest must replay: its files hashes must cover the four
     docs and match the persisted bytes, else EXPERIMENT_IDENTITY_CONFLICT.
-    Existing targets with different bytes are kept (stderr warning, status
-    unchanged); manifest hashes describe the proposed bytes, which equal the
-    bytes on disk for every file this call writes.
+    The first run of an experiment_id keeps the flat layout; a different run
+    (another arm, or a recorded run after a smoke run) is written under
+    results/runs/<key>/ where key is derived from the spec, request and
+    recording mode bytes. A replay of the same run keeps the first persisted
+    bytes silently (status unchanged); differing existing bytes of the same
+    run are kept silently. Manifest hashes describe the proposed bytes, which
+    equal the bytes on disk for every file this call writes.
     """
     root = Path(experiments_root)
     with _export_lock(root):
@@ -443,9 +446,10 @@ def export_run_record(
         folder = _resolve_folder(root, exp_number, slugify(slug))
         if folder.is_symlink():
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", f"run folder {folder} is a symlink; refusing to export into it")
-        results = folder / "results"
-        if results.is_symlink():
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", f"results folder {results} is a symlink; refusing to export into it")
+        top = folder / "results"
+        if top.is_symlink():
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", f"results folder {top} is a symlink; refusing to export into it")
+        results = top
 
         trimmed: list[str] = []
         docs = {
@@ -454,7 +458,7 @@ def export_run_record(
             "event_ids.json": event_ids,
             "outcome.json": outcome,
         }
-        proposed: dict[Path, bytes] = {}
+        encoded: dict[str, bytes] = {}
         for name, doc in docs.items():
             try:
                 raw, was_trimmed = _encode_doc(doc)
@@ -465,14 +469,74 @@ def export_run_record(
                 ) from exc
             if was_trimmed and name not in trimmed:
                 trimmed.append(name)
-            proposed[results / name] = raw
-        proposed[folder / "REPORT.md"] = _report_md(
+            encoded[name] = raw
+
+        spec_raw = encoded["spec.json"]
+        request_raw = encoded["request.json"]
+        if os.path.lexists(top / "spec.json"):
+            existing_spec = _read_capped(top / "spec.json")
+            existing_request = _read_capped(top / "request.json")
+            if (
+                existing_spec is None
+                or len(existing_spec) > MAX_JSON_BYTES
+                or existing_request is None
+                or len(existing_request) > MAX_JSON_BYTES
+            ):
+                raise fail(
+                    "EXPERIMENT_IDENTITY_CONFLICT",
+                    f"existing {top / 'spec.json'} or {top / 'request.json'} is "
+                    f"unreadable, not a regular file, or oversized",
+                )
+            existing_manifest_doc = _read_manifest(top / "export_manifest.json")
+            if (
+                existing_manifest_doc is not None
+                and isinstance(existing_manifest_doc.get("files"), dict)
+            ):
+                files = existing_manifest_doc["files"]
+                for name, existing_bytes in (
+                    ("spec.json", existing_spec),
+                    ("request.json", existing_request),
+                ):
+                    digest = hashlib.sha256(existing_bytes).hexdigest()
+                    if digest != files.get(name):
+                        raise fail(
+                            "EXPERIMENT_IDENTITY_CONFLICT",
+                            f"replay mismatch for {top / name}: persisted sha256 "
+                            f"{digest} != manifest {files.get(name)!r}",
+                        )
+            existing_mode = (
+                existing_manifest_doc.get("recording_mode")
+                if existing_manifest_doc is not None
+                else None
+            )
+            if (
+                existing_spec != spec_raw
+                or existing_request != request_raw
+                or existing_mode != recording_mode
+            ):
+                key = hashlib.sha256(
+                    spec_raw + b"\0" + request_raw + b"\0"
+                    + (recording_mode or "").encode("utf-8")
+                ).hexdigest()[:12]
+                runs_dir = top / "runs"
+                if runs_dir.is_symlink():
+                    raise fail(
+                        "EXPERIMENT_IDENTITY_CONFLICT",
+                        f"runs directory {runs_dir} is a symlink; refusing to "
+                        f"export into it",
+                    )
+                results = runs_dir / key
+
+        proposed: dict[Path, bytes] = {
+            (results / name): raw for name, raw in encoded.items()
+        }
+        report_path = folder / "REPORT.md" if results == top else results / "REPORT.md"
+        proposed[report_path] = _report_md(
             exp_number, experiment_id, outcome, report_text
         ).encode("utf-8")
 
         # Preflight: read every existing target, conflict or keep before any write.
         wrote = False
-        kept_differing = False
         persisted: dict[Path, bytes] = {}
         for path, data in proposed.items():
             if not os.path.lexists(path):
@@ -483,12 +547,6 @@ def export_run_record(
                 raise fail(
                     "EXPERIMENT_IDENTITY_CONFLICT",
                     f"existing {path} is unreadable, not a regular file, or oversized",
-                )
-            if existing != data:
-                kept_differing = True
-                print(
-                    f"WARNING: record_export keeping existing {path} (differs from proposed export)",
-                    file=sys.stderr,
                 )
             persisted[path] = existing
 
@@ -554,12 +612,6 @@ def export_run_record(
                         f"replay mismatch for {doc_path}: persisted sha256 {digest} "
                         f"!= manifest {manifest_files[name]!r}",
                     )
-            if existing != manifest_data:
-                kept_differing = True
-                print(
-                    f"WARNING: record_export keeping existing {manifest_path} (differs from proposed export)",
-                    file=sys.stderr,
-                )
             persisted[manifest_path] = existing
 
         # The returned trimmed list describes the PERSISTED record: an existing
@@ -579,7 +631,7 @@ def export_run_record(
                 wrote = True
         return {
             "dir": str(folder),
-            "status": "written" if wrote and not kept_differing else "unchanged",
+            "status": "written" if wrote else "unchanged",
             "trimmed": returned_trimmed,
         }
 

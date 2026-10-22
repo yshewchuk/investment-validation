@@ -809,7 +809,11 @@ def test_native_build_cli_register_smoke_record_and_replay_without_rebuilding(tm
         assert smoke["record_export"]["status"] == "written"
         assert {key: value for key, value in smoke_replay.items() if key != "record_export"} == {
             key: value for key, value in smoke.items() if key != "record_export"}
-        assert _invoke(source, capsys, "run", "--ledger", ledger) == recorded
+        recorded_replay = _invoke(source, capsys, "run", "--ledger", ledger)
+        assert {key: value for key, value in recorded_replay.items() if key != "record_export"} == {
+            key: value for key, value in recorded.items() if key != "record_export"}
+        assert recorded["record_export"]["status"] == "written"
+        assert recorded_replay["record_export"]["status"] == "unchanged"
         assert (catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()) == before
     finally:
         source.conn.close()

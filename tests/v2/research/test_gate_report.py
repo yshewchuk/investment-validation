@@ -272,10 +272,15 @@ def test_two_real_cli_arms_consume_distinct_fill_record_and_replay_once(source, 
     rows = list(csv.DictReader(ledger.open()))
     assert len(rows) == 2 and {row["stage"] for row in rows} == {"ran"}
     assert {row["spec_hash"] for row in rows} == {result["variant_id"] for result in results}
-    assert any("differs from proposed export" in w for w in RECORD_EXPORT_WARNINGS)
+    export_folder = next((source.root / "experiments").glob("EXP-101_*"))
+    assert outputs[1]["record_export"]["status"] == "written"
+    run_dirs = list((export_folder / "results" / "runs").iterdir())
+    assert len(run_dirs) == 1
+    assert (run_dirs[0] / "request.json").is_file()
+    assert (run_dirs[0] / "outcome.json").is_file()
+    assert RECORD_EXPORT_WARNINGS == []
     before = ledger.read_bytes()
     first_output = outputs[0]
-    export_folder = next((source.root / "experiments").glob("EXP-101_*"))
     assert Path(outputs[0]["report"]).read_text().strip() in (export_folder / "REPORT.md").read_text()
     assert set(first_output["record_export"]) == {"status", "trimmed"}
     assert "dir" not in first_output["record_export"]
@@ -291,7 +296,7 @@ def test_two_real_cli_arms_consume_distinct_fill_record_and_replay_once(source, 
     for index, (spec, output) in enumerate(zip((build_gate_spec(), build_gate_spec(1.0, "control")), outputs, strict=True)):
         replayed = _invoke(source, capsys, "run", spec, "--ledger", ledger)
         assert replayed["record_export"]["status"] == "unchanged"
-        assert output["record_export"]["status"] == ("written" if index == 0 else "unchanged")
+        assert output["record_export"]["status"] == "written"
         assert replayed["recording_mode"] == "recorded"
         assert replayed["variant_id"] == results[index]["variant_id"]
         assert {key: value for key, value in replayed.items() if key != "record_export"} == {

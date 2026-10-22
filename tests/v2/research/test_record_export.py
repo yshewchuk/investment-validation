@@ -689,26 +689,89 @@ def test_oversize_event_ids_are_trimmed(tmp_path):
     assert man["files"]["event_ids.json"] == hashlib.sha256(raw).hexdigest()
 
 
-def test_replay_returns_persisted_trimmed_list(tmp_path):
+def test_replay_returns_persisted_trimmed_list(tmp_path, capsys):
     ids = [f"evt-{i}" for i in range(200_000)]
     first = _export(tmp_path, event_ids=ids)
     assert first["trimmed"] == ["event_ids.json"]
     second = _export(tmp_path, event_ids=["a"])
     assert second["trimmed"] == ["event_ids.json"]
     assert second["status"] == "unchanged"
+    assert not (tmp_path / "EXP-101_x" / "results" / "runs").exists()
+    assert capsys.readouterr().err == ""
 
     other = tmp_path / "other"
     small_first = _export(other, event_ids=["a"])
     assert small_first["trimmed"] == []
     oversized = _export(other, event_ids=ids)
     assert oversized["trimmed"] == []
+    assert not (other / "EXP-101_x" / "results" / "runs").exists()
 
 
-def test_identical_second_export_is_unchanged(tmp_path):
+def test_identical_second_export_is_unchanged(tmp_path, capsys):
     first = _export(tmp_path)
     second = _export(tmp_path)
     assert first["status"] == "written"
     assert second["status"] == "unchanged"
+    assert capsys.readouterr().err == ""
+
+
+def _run_key(spec, request, recording_mode="ledger"):
+    return hashlib.sha256(
+        _dump(spec) + b"\0" + _dump(request) + b"\0" + recording_mode.encode("utf-8")
+    ).hexdigest()[:12]
+
+
+def test_different_spec_writes_under_results_runs(tmp_path, capsys):
+    _export(tmp_path, spec={"hypothesis": "h"})
+    top = tmp_path / "EXP-101_x" / "results"
+    before = {name: (top / name).read_bytes() for name in RESULT_NAMES}
+    before_report = (tmp_path / "EXP-101_x" / "REPORT.md").read_bytes()
+    spec = {"hypothesis": "other"}
+    request = {"action": "run"}
+    result = _export(tmp_path, spec=spec, request=request)
+    assert result["status"] == "written"
+    key = _run_key(spec, request)
+    run_dir = top / "runs" / key
+    for name in RESULT_NAMES:
+        assert (run_dir / name).is_file(), name
+        assert (top / name).read_bytes() == before[name], name
+    assert (run_dir / "REPORT.md").is_file()
+    assert (tmp_path / "EXP-101_x" / "REPORT.md").read_bytes() == before_report
+    assert json.loads((run_dir / "spec.json").read_bytes()) == spec
+    again = _export(tmp_path, spec=spec, request=request)
+    assert again["status"] == "unchanged"
+    assert capsys.readouterr().err == ""
+
+
+def test_recorded_run_after_smoke_lands_under_runs(tmp_path, capsys):
+    spec = {"hypothesis": "h"}
+    request = {"action": "run"}
+    first = _export(tmp_path, spec=spec, request=request, recording_mode="smoke")
+    assert first["status"] == "written"
+    top = tmp_path / "EXP-101_x" / "results"
+    assert (top / "spec.json").is_file()
+    second = _export(tmp_path, spec=spec, request=request, recording_mode="recorded")
+    assert second["status"] == "written"
+    key = _run_key(spec, request, "recorded")
+    run_dir = top / "runs" / key
+    for name in RESULT_NAMES:
+        assert (run_dir / name).is_file(), name
+    assert (run_dir / "REPORT.md").is_file()
+    replay = _export(tmp_path, spec=spec, request=request, recording_mode="recorded")
+    assert replay["status"] == "unchanged"
+    assert capsys.readouterr().err == ""
+
+
+def test_runs_directory_symlink_is_identity_conflict(tmp_path):
+    _export(tmp_path, spec={"hypothesis": "h"})
+    top = tmp_path / "EXP-101_x" / "results"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (top / "runs").symlink_to(elsewhere)
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path, spec={"hypothesis": "other"})
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert not list(elsewhere.iterdir())
 
 
 def test_replay_tamper_with_spec_bytes_is_identity_conflict(tmp_path):
@@ -800,7 +863,7 @@ def test_symlinked_folder_resolution_conflicts(tmp_path):
     assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
-def test_different_outcome_keeps_first_outcome_bytes(tmp_path):
+def test_different_outcome_keeps_first_outcome_bytes(tmp_path, capsys):
     _export(tmp_path, outcome={"failure_code": None, "v": 1})
     results = tmp_path / "EXP-101_x" / "results"
     outcome_path = results / "outcome.json"
@@ -810,6 +873,8 @@ def test_different_outcome_keeps_first_outcome_bytes(tmp_path):
     assert result["status"] == "unchanged"
     man = json.loads((results / "export_manifest.json").read_text())
     assert man["files"]["outcome.json"] == hashlib.sha256(before).hexdigest()
+    assert not (results / "runs").exists()
+    assert capsys.readouterr().err == ""
 
 
 def test_hygiene_pin_results_paths_and_report(tmp_path):

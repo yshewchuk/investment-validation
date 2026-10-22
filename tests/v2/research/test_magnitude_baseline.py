@@ -461,7 +461,11 @@ def test_cli_recorded_lifecycle_replays_original_date_with_exactly_one_ledger_ro
         before = catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()
         set_outcome_clock(monkeypatch, "2026-02-10")
         _metadata_only(monkeypatch)
-        assert _invoke(source, capsys, "run", "--ledger", ledger) == first
+        replayed = _invoke(source, capsys, "run", "--ledger", ledger)
+        assert {key: value for key, value in replayed.items() if key != "record_export"} == {
+            key: value for key, value in first.items() if key != "record_export"}
+        assert first["record_export"]["status"] == "written"
+        assert replayed["record_export"]["status"] == "unchanged"
         assert (catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()) == before
     finally:
         source.conn.close()
