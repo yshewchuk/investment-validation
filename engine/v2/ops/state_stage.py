@@ -26,13 +26,14 @@ class StateStageParameters:
     expected_ids: tuple[str, ...]        # always ("phase5_state_stage",)
     #: The store's parent: the catalog and objects live under ``<release_root>/deployment``.
     release_root: str
-    prior_release_id: str
+    prior_release_id: str | None
     release_id: str
     cutoff: str
     #: Frozen-state file names; exactly the ``input_bindings`` keys other than
     #: the pinned ``legacy_manifest.json`` read-set binding.
     state_files: tuple[str, ...]
     input_bindings: dict[str, str] | None = None
+    mode: str = "carry"
 
 
 def _safe_id(value) -> bool:
@@ -46,7 +47,12 @@ def _identity_problems(params) -> list[str]:
         problems.append("expected_ids must be exactly ('phase5_state_stage',)")
     if not isinstance(params.release_root, str) or not params.release_root:
         problems.append("release_root must be a non-empty string")
-    if not _safe_id(params.prior_release_id) or not _safe_id(params.release_id):
+    if params.mode not in ("carry", "bootstrap"):
+        problems.append("mode must be 'carry' or 'bootstrap'")
+    elif params.mode == "bootstrap" and params.prior_release_id is None:
+        if not _safe_id(params.release_id):
+            problems.append("release_id must be a safe non-empty id")
+    elif not _safe_id(params.prior_release_id) or not _safe_id(params.release_id):
         problems.append("prior_release_id and release_id must be safe non-empty ids")
     elif params.prior_release_id == params.release_id:
         problems.append("release_id must differ from prior_release_id")
@@ -103,11 +109,12 @@ def state_stage_job_kind() -> JobKind:
 
 
 def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, state_refs,
-                     manifest_ref, source_root) -> dict:
+                     manifest_ref, source_root, mode="carry") -> dict:
     """Build a ``phase5_state_stage`` plan; ``state_refs`` maps file name -> training output id.
     ``manifest_ref`` is the pinned ``legacy_input_manifest.v1.0`` artifact the supervisor's
     launch-time ``_pin_read_set`` stages as ``staging/legacy``. ``source_root`` is the code
-    checkout the implementation fingerprint is taken from (the caller's code source)."""
+    checkout the implementation fingerprint is taken from (the caller's code source).
+    ``mode`` is ``"carry"`` (default) or ``"bootstrap"`` (#1102)."""
     from engine.v2.foundation import content_hash
     from engine.v2.models import deployment
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
@@ -125,7 +132,7 @@ def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, stat
         expected_ids=("phase5_state_stage",), release_root=release_root,
         prior_release_id=prior_release_id, release_id=release_id, cutoff=cutoff,
         state_files=tuple(sorted(refs)),
-        input_bindings={**refs, "legacy_manifest.json": manifest_ref})
+        input_bindings={**refs, "legacy_manifest.json": manifest_ref}, mode=mode)
     problems = state_stage_parameter_problems(None, params)
     if problems:
         raise fail("INVALID_REQUEST", "state stage plan is invalid",
@@ -147,7 +154,8 @@ def _worker_problems(parameters) -> list[str]:
             expected_ids=tuple(parameters["expected_ids"]), release_root=parameters["release_root"],
             prior_release_id=parameters["prior_release_id"], release_id=parameters["release_id"],
             cutoff=parameters["cutoff"], state_files=tuple(parameters["state_files"]),
-            input_bindings=parameters["input_bindings"])
+            input_bindings=parameters["input_bindings"],
+            mode=parameters.get("mode", "carry"))
     except (KeyError, TypeError):
         return ["parameters are missing a field or have the wrong type"]
     return state_stage_parameter_problems(None, params)
