@@ -46,9 +46,11 @@ from engine.v2.models.recalibration_artifact import (
 )
 from engine.v2.models.residual_artifact import (
     DriverResidualPoolArtifact,
+    PairedResidualPoolArtifact,
     ResidualArtifactError,
     residual_artifact_from_document,
 )
+from engine.v2.models.trailing_cutoff_artifact import TrailingCutoffArtifact
 
 __all__ = [
     "ModelIdentity",
@@ -72,7 +74,11 @@ _DRIVER_RESIDUAL_PREFIX = "driver_residual_pool:"
 _CHOOSER_POOL_MEMBER_ID = "chooser_analog_pool"
 _CHOOSER_TABLE_MEMBER_ID = "admissible_table:dyn_sv"
 _CHOOSER_MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
-_ChooserState = TypeVar("_ChooserState", ChooserAnalogPoolArtifact, AdmissibleDepthTable)
+_PAIRED_POOL_MEMBER_ID = "paired_residual_pool"
+_TRAILING_CUTOFF_MEMBER_ID = "trailing_pnl_cutoff"
+_ChooserState = TypeVar(
+    "_ChooserState", ChooserAnalogPoolArtifact, AdmissibleDepthTable,
+    PairedResidualPoolArtifact, TrailingCutoffArtifact)
 
 
 class ReleaseBindingError(ValueError):
@@ -156,6 +162,8 @@ class ScoringReleaseBinding:
     #: selection remains the assembler's responsibility. Absent -> empty.
     chooser_analog_artifacts: tuple[ChooserAnalogPoolArtifact, ...] = ()
     chooser_admissible_artifacts: tuple[AdmissibleDepthTable, ...] = ()
+    paired_residual_artifacts: tuple[PairedResidualPoolArtifact, ...] = ()
+    trailing_cutoff_artifacts: tuple[TrailingCutoffArtifact, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_identity", MappingProxyType(dict(self.model_identity)))
@@ -172,6 +180,10 @@ class ScoringReleaseBinding:
         object.__setattr__(self, "chooser_analog_artifacts", tuple(self.chooser_analog_artifacts))
         object.__setattr__(self, "chooser_admissible_artifacts",
                            tuple(self.chooser_admissible_artifacts))
+        object.__setattr__(self, "paired_residual_artifacts",
+                           tuple(self.paired_residual_artifacts))
+        object.__setattr__(self, "trailing_cutoff_artifacts",
+                           tuple(self.trailing_cutoff_artifacts))
 
 
 def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
@@ -217,6 +229,12 @@ def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
         dep_root, catalog, _CHOOSER_POOL_MEMBER_ID, ChooserAnalogPoolArtifact)
     chooser_admissible = _resolve_chooser_state_group(
         dep_root, catalog, _CHOOSER_TABLE_MEMBER_ID, AdmissibleDepthTable)
+    paired_residual = _resolve_chooser_state_group(
+        dep_root, catalog, _PAIRED_POOL_MEMBER_ID, PairedResidualPoolArtifact,
+        label="paired residual pool")
+    trailing_cutoff = _resolve_chooser_state_group(
+        dep_root, catalog, _TRAILING_CUTOFF_MEMBER_ID, TrailingCutoffArtifact,
+        label="trailing cutoff")
 
     return ScoringReleaseBinding(
         release_id=release.release_id, model_identity=model_identity,
@@ -226,6 +244,8 @@ def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
         driver_residual_artifacts=driver_residual,
         chooser_analog_artifacts=chooser_analog,
         chooser_admissible_artifacts=chooser_admissible,
+        paired_residual_artifacts=paired_residual,
+        trailing_cutoff_artifacts=trailing_cutoff,
     )
 
 
@@ -524,6 +544,7 @@ def _load_analog(dep_root: Path, member_id: str, obj: Mapping):
 
 def _resolve_chooser_state_group(
     dep_root: Path, catalog: Mapping, member_id: str, kind: type[_ChooserState],
+    label: str = "chooser state",
 ) -> tuple[_ChooserState, ...]:
     """Load a whole optional family without selecting a request's state.
 
@@ -540,9 +561,9 @@ def _resolve_chooser_state_group(
                 OverflowError, RuntimeError) as exc:
             # Decoder numeric/shape/depth errors and path resolution failures
             # must not leak raw parser or filesystem details.
-            raise ModelNotReady(member, "chooser state could not be verified or loaded") from exc
+            raise ModelNotReady(member, f"{label} could not be verified or loaded") from exc
         if not isinstance(state, kind):
-            raise ModelNotReady(member, "chooser state has the wrong artifact type")
+            raise ModelNotReady(member, f"{label} has the wrong artifact type")
         return state
 
     grouped = _resolve_state_group(
@@ -550,7 +571,7 @@ def _resolve_chooser_state_group(
         key=lambda state: member_id)
     artifacts = grouped.get(member_id, ())
     if len({artifact.key for artifact in artifacts}) != len(artifacts):
-        raise ModelNotReady(member_id, "ambiguous chooser state key")
+        raise ModelNotReady(member_id, f"ambiguous {label} key")
     return artifacts
 
 

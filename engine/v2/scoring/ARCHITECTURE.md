@@ -116,6 +116,15 @@ load-bearing entrypoints:
   verified objects from `chooser_analog_pool` and `admissible_table:dyn_sv`.
   These immutable tuples preserve catalog order; identities come from each
   artifact's own key, never object names or catalog strategy labels.
+  `paired_residual_artifacts: tuple[PairedResidualPoolArtifact, ...]` and
+  `trailing_cutoff_artifacts: tuple[TrailingCutoffArtifact, ...]` follow the
+  same rule for the `paired_residual_pool` and `trailing_pnl_cutoff` members
+  (empty independently when absent; each object a regular file of at most
+  32 MiB; a key repeated within a family, even with equal bytes, is
+  `ModelNotReady` naming the member; a wrong artifact type is
+  `ModelNotReady`). They only expose verified objects: choosing the one for a
+  row's (models, cutoff) or event month, and declaring it, is the nightly
+  bundle's job, and the entry-rule stage refuses a missing or mismatched one.
   Picking the object matching a request's own `(strategy, alpha, cutoff)`
   and mapping a binding to specific forecast-output names is the per-night
   assembler's job, not this module's.
