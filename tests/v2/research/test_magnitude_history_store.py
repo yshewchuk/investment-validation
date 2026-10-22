@@ -1205,14 +1205,16 @@ def test_build_scans_calendar_once_population_twice_and_each_outcome_once(source
     _, output = build_history(source)
     scans = list(source.repository.scans)
     # Four event-year partitions (two passes), three market-year partitions (one pass).
-    assert Counter(name for name, _ in scans) == {"earnings_events": 8, "daily_market": 3, "computed_moves": 4}
+    # Four candidates in two runs (a protected and an ambiguous object lie between them): one scan per run.
+    assert Counter(name for name, _ in scans) == {"earnings_events": 8, "daily_market": 3, "computed_moves": 2}
     outcome_queries = [q for name, q in scans if name == "computed_moves"]
-    assert all(q.max_result_rows == 1 and q.max_batch_rows == 1 for q in outcome_queries)
-    assert len({q.time_interval.start_inclusive for q in outcome_queries}) == 4
+    assert sorted(q.max_result_rows for q in outcome_queries) == [2, 2]
+    assert all(q.max_batch_rows == 1 for q in outcome_queries)
+    assert len({q.time_interval.start_inclusive for q in outcome_queries}) == 2
     assert len(_read(source, output)["rows"]) == 12
     source.repository.scans.clear()
     build_history(source, history_start="2022-02-01")
-    assert Counter(name for name, _ in source.repository.scans)["computed_moves"] == 4  # No cross-build cache.
+    assert Counter(name for name, _ in source.repository.scans)["computed_moves"] == 2  # No cross-build cache.
 
 
 def test_candidate_equal_to_a_forecast_ceiling_is_absent_from_that_forecast_reads(source):
