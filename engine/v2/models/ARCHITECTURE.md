@@ -205,12 +205,31 @@ and positional-lag behavior. Nonpositive prices produce missing move labels.
   pool/chooser object as `carried=True`, recorded at the prior `sources.pool_cutoff`
   (`PRIOR_MISMATCH` on a missing prior or structurally malformed rows, object keys or `pool_cutoff`;
   wrong-typed object fields are not checked here and refuse later as `POOL_SET_MISMATCH`, or `CHOOSER_MISMATCH` for the chooser).
+- `classify_prior(release_root, prior_release_id) -> PriorClass` — read-only; handled refusal, validation and I/O failures return `DAMAGED` rather than raising. Kind `NONE`/`NO_POOL_CATALOG`/`USABLE`/`DAMAGED` with a fixed reason (§2.2.2). Every present catalog (with or without `pool_cutoff`) must verify against its staged release and `deployment_id`; a legacy catalog without `pool_cutoff` is not checked for pool rows or objects, which it need not have. `USABLE` needs a valid catalog with an ISO `pool_cutoff`, well-formed pool rows, objects whose hash and size verify, and a `deployment_id` equal to the staged release's.
+
+**Prior classification (#1102).** The `phase5_state_stage` job classifies the prior with one read-only helper, `classify_prior(release_root, prior_release_id)`; it never writes:
+
+| Prior state | Class | Outcome |
+|---|---|---|
+| Pointer absent (nothing ever promoted) | `NONE` | bootstrap; `none` stands for the prior id in phase keys and `expected_previous_release_id` is null |
+| Catalog file absent at `catalog_path` for an id that does not start with `pools-` (a release this cycle stages always has a catalog, so an absent one under a `pools-*` id is `DAMAGED`), or a valid catalog whose `sources` has no `pool_cutoff` (legacy-bootstrapped) | `NO_POOL_CATALOG` | bootstrap against that pointer id |
+| Catalog valid with `pool_cutoff` | `USABLE` | nightly carry-forward (§2.2), unchanged |
+| Catalog present but a symlink, not a regular file, oversize, unparseable, wrong `release_id`/`deployment_id` (also against the staged release), malformed rows or objects, an object whose hash or size does not verify, or a non-ISO `pool_cutoff` | `DAMAGED` | no bootstrap: refuses `VALIDATION_FAILED` (`details.code` `PRIOR_MISMATCH`); a damaged store is operator recovery (#154), never silently replaced |
+
+In `bootstrap` mode the job classifies the prior (`classify_prior`, §2.1) before any object is written, with the refusals in the table below, and the light checks expect `sources.carried_from` null. Nothing submits `bootstrap` mode yet.
+
+| Condition | Outcome |
+|---|---|
+| Prior `DAMAGED` | `VALIDATION_FAILED`, fixed message, `details.code` `PRIOR_MISMATCH` |
+| Prior `NONE`/`NO_POOL_CATALOG` | `VALIDATION_FAILED`, fixed message, `details.code` `BOOTSTRAP_NOT_BUILT` |
+| Prior `USABLE` while `mode` is `bootstrap` | `VALIDATION_FAILED`, fixed message, `details.code` `PRIOR_USABLE` |
+
 - `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
   — verifies the prior staged release, untouched rows and supplied objects on disk,
   re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),
   then writes the candidate catalog. It never touches `DEPLOYED`.
 
-Both refuse with a stable `ReleaseAssemblyRefusal.code`; stray `KeyError`, `TypeError`, `AttributeError`,
+`derive_catalog` and `carry_forward_release` refuse with a stable `ReleaseAssemblyRefusal.code`; stray `KeyError`, `TypeError`, `AttributeError`,
 `ValueError`, `RecursionError` map to `PRIOR_MISMATCH` (inventory or stage-time ones to `INVENTORY_MISMATCH`,
 publish `OSError` to `PUBLICATION_FAILED`).
 
@@ -252,7 +271,7 @@ because the assembly helpers live in `checks/`; `projection` resource class (its
 stages a candidate release; it never touches `DEPLOYED` (`models_promote` is separate).
 
 - Parameters: `release_root` (the store's parent; empty resolves the production root at
-  plan time), `prior_release_id`, `release_id`, `cutoff` (extended ISO), `state_files` and
+  plan time), `prior_release_id` (null only with `mode` `bootstrap` and no prior), `mode` (`carry` default or `bootstrap`, §2.2.2), `release_id`, `cutoff` (extended ISO), `state_files` and
   `input_bindings` (a mapping from each state file name to its `training` output id; the job framework requires
   the producing job to have succeeded), plus a required `legacy_manifest.json` binding (the pinned legacy
   manifest, as `training` jobs bind it): the kind declares a `legacy_store` read, so the job's read set
@@ -267,7 +286,7 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 - Output: a re-verified candidate release (never `DEPLOYED`) and `stage_result.json`. The
   inventory comes from the legacy champion registry under the new id; drift refuses before any write.
 - Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a
-  `ReleaseAssemblyRefusal`, `members`, `member`, `issues`, `months`; plan-time `INVALID_REQUEST`
+  `ReleaseAssemblyRefusal`, or `PRIOR_USABLE`/`BOOTSTRAP_NOT_BUILT` in `bootstrap` mode (§2.2.2), `members`, `member`, `issues`, `months`; plan-time `INVALID_REQUEST`
   carries `problems`). A trailing object's month may not start after `cutoff`. An unreadable prior
   refuses "prior release could not be read"; an inventory artifact or registry that is a symlink,
   not a regular file, or over its size cap refuses "release inventory could not be built". One attempt only.

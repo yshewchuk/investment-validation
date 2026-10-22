@@ -99,8 +99,10 @@ def light_checks(release_root: Path, parameters, new_hashes: set[str]) -> None:
         sources = body["sources"]
         present = {item["content_hash"] for row in body["members"]
                    for item in row.get("objects", ())}
+        expected_carried_from = (None if parameters.get("mode", "carry") == "bootstrap"
+                                 else parameters["prior_release_id"])
         ok = (sources.get("pool_cutoff") == parameters["cutoff"]
-              and sources.get("carried_from") == parameters["prior_release_id"]
+              and sources.get("carried_from") == expected_carried_from
               and new_hashes <= present)
     except StageRefused:
         raise
@@ -115,9 +117,12 @@ def stage_candidate(parameters, root: Path) -> dict:
     from engine.v2.models import release_layout as rel
     from checks.phase5_release_assembly import (
         CHOOSER_MEMBER_ID,
+        PRIOR_DAMAGED,
+        PRIOR_USABLE,
         PoolOutput,
         ReleaseAssemblyRefusal,
         carry_forward_release,
+        classify_prior,
         prior_carry_set,
     )
     from engine.v2.foundation import ArtifactError
@@ -129,6 +134,16 @@ def stage_candidate(parameters, root: Path) -> dict:
     cutoff = parameters["cutoff"]
     new = classify(Path(root), parameters["state_files"])
     check_trailing_months(new, cutoff)
+    if parameters.get("mode", "carry") == "bootstrap":
+        prior_class = classify_prior(release_root, parameters["prior_release_id"])
+        if prior_class.kind == PRIOR_DAMAGED:
+            raise StageRefused("prior release could not be read", {"code": "PRIOR_MISMATCH"})
+        if prior_class.kind == PRIOR_USABLE:
+            raise StageRefused("prior release already has a pool catalog",
+                               {"code": "PRIOR_USABLE"})
+        # NONE and NO_POOL_CATALOG: the bootstrap assembly lands in a later #1102 slice.
+        raise StageRefused("bootstrap assembly is not available yet",
+                           {"code": "BOOTSTRAP_NOT_BUILT"})
     try:
         _, carried = prior_carry_set(release_root, parameters["prior_release_id"])
     except ReleaseAssemblyRefusal as exc:

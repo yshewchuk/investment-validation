@@ -14,7 +14,7 @@ No package-wide runner/schema exists; invoke each CLI directly, e.g. `python3 ch
 Some checks also expose callable report functions.
 `phase5_modules.modules_available` probes optional modules (kept here: production code may not import dynamically).
 `phase5_release_assembly` (`derive_catalog`, `carry_forward_release`) assembles a carried-forward
-release catalog (plus `prior_carry_set`, which lists a prior release's objects as carried);
+release catalog (plus `prior_carry_set`, which lists a prior release's objects as carried, and `classify_prior`, the read-only prior classification of `engine/v2/models/ARCHITECTURE.md` §2.2.2);
 its contract and refusal codes are `engine/v2/models/ARCHITECTURE.md` §2.1. The ops job
 `phase5_state_stage` reaches it through `tools/phase5_state_stage_job.py` (§2.2).
 
