@@ -17,14 +17,15 @@ two values only the child's own log can supply:
   startup reading; ``0.0`` would claim a measurement that was never taken.
 * ``kill_reason`` -- for a child that exited 137 (memory) or 76 (the disk
   ceiling, bounded_run.py's DISK_LIMIT_EXIT), which of the watchdog's
-  literal breach strings appeared (``BOX FLOOR BREACH``, ``SWAP BREACH``,
-  ``CAP BREACH``, ``DISK LIMIT``). Tuple order is the match priority
-  applied to the captured output, not the watchdog's own precedence:
-  ``DISK LIMIT`` is last so a ``DISK LIMIT unreadable`` warning line can
-  never preempt a memory breach string on a 137.
-  ``None`` for any other exit, and for a 137/76 with no breach string at
-  all -- ``killed`` is still true there, because the exit code is the fact
-  and the reason is the absence.
+  literal breach strings appeared. The ``DISK LIMIT`` reason belongs to
+  exit 76 only: a 137 reports only the memory strings (``BOX FLOOR
+  BREACH``, ``SWAP BREACH``, ``CAP BREACH``), so a ``DISK LIMIT
+  unreadable`` warning line is never reported as the reason a 137 died.
+  Memory strings are matched in ``KILL_REASONS`` tuple order, which is
+  this recorder's priority, not the watchdog's own precedence.
+  ``None`` for any other exit, and for a 137/76 with no breach string of
+  the kind that exit can report -- ``killed`` is still true there,
+  because the exit code is the fact and the reason is the absence.
 
 Contention is recorded, never waited on: the supervisor owns the "one heavy
 job at a time" rule (AGENTS.md) and the pre-launch ``free -m`` floor; this
@@ -59,7 +60,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from tools.bounded_run import MAX_SWAP_DEFAULT_GB  # noqa: E402
+from tools.bounded_run import DISK_LIMIT_EXIT, MAX_SWAP_DEFAULT_GB  # noqa: E402
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -69,6 +70,7 @@ __all__ = [
     "HEAVY_JOB_PATTERNS",
     "HEARTBEAT_MINUTES",
     "KILL_REASONS",
+    "DISK_LIMIT_REASON",
     "parse_free_available_gb",
     "collect_contention",
     "watchdog_rss_values",
@@ -91,14 +93,16 @@ HEAVY_JOB_PATTERNS = (
 )
 #: bounded_run.py's watchdog breach strings; the tuple order is the match
 #: priority applied to the captured output, not the watchdog's own
-#: precedence. "DISK LIMIT" is bounded_run.py's disk-ceiling breach (exit
-#: 76, DISK_LIMIT_EXIT, not 137); it stays last so a "DISK LIMIT
-#: unreadable" warning line can never preempt a real memory breach
-#: string on a 137.
-KILL_REASONS = ("BOX FLOOR BREACH", "SWAP BREACH", "CAP BREACH", "DISK LIMIT")
+#: precedence. These are the memory breach strings, classified on exit
+#: 137. The disk-ceiling breach belongs to exit 76 only (DISK_LIMIT_EXIT)
+#: and stays out of this tuple so a "DISK LIMIT unreadable" warning line
+#: is never reported as the reason a 137 died.
+KILL_REASONS = ("BOX FLOOR BREACH", "SWAP BREACH", "CAP BREACH")
+#: bounded_run.py's disk-ceiling breach string; reported only for exit 76.
+DISK_LIMIT_REASON = "DISK LIMIT"
 #: Exit codes bounded_run.py uses for a watchdog kill: 137 (memory: cap,
 #: swap, box floor) and 76 (DISK_LIMIT_EXIT, the disk-used ceiling).
-KILL_EXIT_CODES = (137, 76)
+KILL_EXIT_CODES = (137, DISK_LIMIT_EXIT)
 
 _WATCHDOG_RSS = re.compile(r"\[watchdog\]\s+([\d.]+)m\s+rss\s+(\d+\.\d+)G\s+pss")
 _LABEL = re.compile(r"[A-Za-z0-9._-]+")
@@ -171,9 +175,16 @@ def watchdog_rss_values(output: str) -> list[float]:
 
 
 def classify_kill(output: str, exit_code: int) -> str | None:
-    """Which watchdog breach string killed the child, or None."""
+    """Which watchdog breach string killed the child, or None.
+
+    The disk reason belongs to exit 76 only; a 137 reports the memory
+    strings alone, so a "DISK LIMIT unreadable" warning line is never
+    reported as the reason a 137 died.
+    """
     if exit_code not in KILL_EXIT_CODES:
         return None
+    if exit_code == DISK_LIMIT_EXIT:
+        return DISK_LIMIT_REASON if DISK_LIMIT_REASON in output else None
     for reason in KILL_REASONS:
         if reason in output:
             return reason

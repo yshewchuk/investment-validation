@@ -359,8 +359,13 @@ def test_heavy_single_unreadable_tick_does_not_kill(monkeypatch, capsys):
 def test_disk_limit_exit_76_classifies_and_other_exits_do_not():
     assert rm.classify_kill("[watchdog] 1.0m DISK LIMIT: /x used 600.0G"
                             " > ceiling 500G", 76) == "DISK LIMIT"
+    assert rm.classify_kill("DISK LIMIT", 76) == "DISK LIMIT"
+    assert rm.classify_kill("", 76) is None
     assert rm.classify_kill("DISK LIMIT", 1) is None
     assert rm.classify_kill("CAP BREACH", 137) == "CAP BREACH"
+    assert rm.classify_kill("[watchdog] DISK LIMIT unreadable: boom", 137) is None
+    # A 137 reports memory strings only, so CAP BREACH wins here even
+    # though the output carries a "DISK LIMIT unreadable" warning line.
     assert rm.classify_kill(
         "[watchdog] DISK LIMIT unreadable: boom\n"
         "[watchdog] 2.0m rss 5.60G pss CAP BREACH", 137) == "CAP BREACH"
