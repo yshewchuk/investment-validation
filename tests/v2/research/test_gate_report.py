@@ -145,7 +145,8 @@ def _register(source, spec=None, **kwargs):
     return spec, registered
 
 
-def _invoke(source, capsys, action, spec=None, *extra, status=0, exp_number="101"):
+def _invoke(source, capsys, action, spec=None, *extra, status=0, exp_number="101",
+            allow_stderr=False):
     path = source.root / "spec.json"
     path.write_text(json.dumps(asdict(spec or build_gate_spec())))
     arguments = [action, "--spec", str(path), "--catalog", str(source.root / "catalog.sqlite"),
@@ -156,7 +157,8 @@ def _invoke(source, capsys, action, spec=None, *extra, status=0, exp_number="101
             arguments += ["--exp-number", str(exp_number)]
     assert cli.main(arguments) == status
     captured = capsys.readouterr()
-    assert captured.err == ""
+    if not allow_stderr:
+        assert captured.err == ""
     return json.loads(captured.out)
 
 
@@ -664,6 +666,14 @@ def test_run_no_record_export_skips_and_warns_no_exp_number(source, capsys):
     assert "no EXP number" in captured.err
     output = json.loads(captured.out)
     assert output["record_export"] == "skipped"
+    assert not (source.root / "experiments").exists()
+
+
+def test_run_no_record_export_still_validates_exp_number(source, capsys):
+    _invoke(source, capsys, "register")
+    response = _invoke(source, capsys, "run", None, "--no-ledger", "--no-record-export",
+                       status=2, exp_number="auto", allow_stderr=True)
+    assert response["refused"] == "INVALID_EXPERIMENT_SPEC"
     assert not (source.root / "experiments").exists()
 
 

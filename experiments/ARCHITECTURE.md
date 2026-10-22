@@ -463,14 +463,14 @@ Prediction records also carry the target and model-selection options and the reg
 | Symlinked run folder, `results/` or `results/runs/` | Refused at export (`EXPERIMENT_IDENTITY_CONFLICT`); number resolution refuses it too when the followed manifest names the experiment or the explicit number matches the folder, before any evaluation. |
 | Direct export for an experiment_id already linked to another number | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
 | Outcome published by a CLI error path (a typed refusal raised during evaluation) | Not exported by that invocation; the next replay `run` exports it. |
-| Crash before the manifest is written | The folder has no manifest, so a retry refuses with the conflict above; partial exports are not auto-resumed (known limit). |
+| Crash after some files, before the manifest | Retrying the same run (same spec bytes) with the same EXP number completes the folder and writes the manifest; a partial folder of a different spec, or one holding unknown files, is `EXPERIMENT_IDENTITY_CONFLICT`. |
 | Report text over the cap | `REPORT.md` holds a truncated report plus a truncation line, so replay never exceeds the cap. |
 | Manifest whose `exp_number` differs from its folder number | `EXPERIMENT_IDENTITY_CONFLICT`. |
 | Non-string slug or non-JSON-serializable document | `INVALID_EXPERIMENT_SPEC`. |
 | Empty or non-string experiment_id (resolution and export alike) | `INVALID_EXPERIMENT_SPEC`. |
 | Supplied success report that cannot be read | `RESOURCE_UNAVAILABLE`; nothing is exported. |
 | Replay over an existing record | A replay of the same run keeps the first persisted bytes silently. The result reports the persisted `trimmed` list from the existing manifest, not the new proposal's. |
-| Export fails after the outcome was published | The outcome stays valid; the CLI exits 2 with `{"refused": "record_export_failed", "cause": <code>}`, where the cause is the `OpsError` code, `RESOURCE_UNAVAILABLE` for an OS error or `INVALID_EXPERIMENT_SPEC` for a value error. CLI output carries only the export `status` and `trimmed` list, never the export path. A rerun replays, then exports, unless the failure left a manifestless folder (see the crash row), which it refuses. |
+| Export fails after the outcome was published | The outcome stays valid; the CLI exits 2 with `{"refused": "record_export_failed", "cause": <code>}`, where the cause is the `OpsError` code, `RESOURCE_UNAVAILABLE` for an OS error or `INVALID_EXPERIMENT_SPEC` for a value error. CLI output carries only the export `status` and `trimmed` list, never the export path. A rerun replays, then exports; a failure that left a manifestless partial folder is completed by a retry of the same run (see the crash row). |
 
 ## Reconstructed gate evaluation
 

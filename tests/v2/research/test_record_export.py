@@ -23,6 +23,7 @@ from experiments.record_export import (
     export_native_run,
     export_run_record,
     public_result,
+    read_spec_document,
     resolve_exp_number,
 )
 from tools.private_mirror import INCLUDE
@@ -58,6 +59,34 @@ def test_public_result_keeps_only_status_and_trimmed():
     result = {"dir": "/tmp/EXP-101_x", "status": "written", "trimmed": ["event_ids.json"]}
     assert public_result(result) == {"status": "written", "trimmed": ["event_ids.json"]}
     assert "dir" not in public_result(result)
+
+
+def test_read_spec_document_returns_dict(tmp_path):
+    path = tmp_path / "spec.json"
+    path.write_text('{"hypothesis": "h"}')
+    assert read_spec_document(path) == {"hypothesis": "h"}
+
+
+def test_read_spec_document_oversized_file_is_invalid_spec(tmp_path):
+    path = tmp_path / "spec.json"
+    path.write_bytes(b"x" * 11)
+    with pytest.raises(OpsError) as exc:
+        read_spec_document(path, max_bytes=10)
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert "spec file exceeds 16 MiB" in str(exc.value)
+
+
+def test_read_spec_document_directory_is_invalid_spec(tmp_path):
+    with pytest.raises(OpsError) as exc:
+        read_spec_document(tmp_path)
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert "not a regular file" in str(exc.value)
+
+
+def test_read_spec_document_missing_file_is_invalid_spec(tmp_path):
+    with pytest.raises(OpsError) as exc:
+        read_spec_document(tmp_path / "missing.json")
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def _export(root, *, exp_number=101, experiment_id="x", slug=None,
@@ -291,10 +320,10 @@ def test_symlinked_run_folder_conflicts_and_writes_nothing(tmp_path):
     assert not (target / "REPORT.md").exists()
 
 
-def test_manifestless_folder_with_results_refuses_as_crashed_or_partial_export(tmp_path):
+def test_manifestless_folder_with_unknown_file_refuses_as_crashed_or_partial_export(tmp_path):
     results = tmp_path / "EXP-101_x" / "results"
     results.mkdir(parents=True)
-    (results / "spec.json").write_text('{"hypothesis": "h"}')
+    (results / "notes.txt").write_text("not a run record")
     with pytest.raises(OpsError) as exc:
         _export(tmp_path, exp_number=101, experiment_id="x")
     assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
@@ -618,7 +647,7 @@ def test_bogus_git_dir_env_still_gets_real_commit_id(tmp_path, monkeypatch):
     assert outcome["commit_id"] == expected
 
 
-def test_partial_write_leaves_manifestless_folder_and_retry_refuses(tmp_path, monkeypatch):
+def test_partial_write_is_completed_by_retry(tmp_path, monkeypatch):
     real_write_new = record_export._write_new
     calls = {"n": 0}
 
@@ -633,9 +662,62 @@ def test_partial_write_leaves_manifestless_folder_and_retry_refuses(tmp_path, mo
         _export(tmp_path, exp_number=101, experiment_id="x")
     assert not (tmp_path / "EXP-101_x" / "results" / "export_manifest.json").exists()
     monkeypatch.setattr(record_export, "_write_new", real_write_new)
-    with pytest.raises(OpsError) as exc:
+    result = _export(tmp_path, exp_number=101, experiment_id="x")
+    assert result["status"] == "written"
+    results = tmp_path / "EXP-101_x" / "results"
+    man = json.loads((results / "export_manifest.json").read_bytes())
+    assert set(man["files"]) == {"spec.json", "request.json", "event_ids.json", "outcome.json"}
+    for name, digest in man["files"].items():
+        assert digest == hashlib.sha256((results / name).read_bytes()).hexdigest(), name
+
+
+def test_partial_export_of_different_spec_is_refused(tmp_path, monkeypatch):
+    real_write_new = record_export._write_new
+    calls = {"n": 0}
+
+    def flaky_write_new(path, data):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise OSError("simulated partial write")
+        return real_write_new(path, data)
+
+    monkeypatch.setattr(record_export, "_write_new", flaky_write_new)
+    with pytest.raises(OSError):
         _export(tmp_path, exp_number=101, experiment_id="x")
+    monkeypatch.setattr(record_export, "_write_new", real_write_new)
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path, exp_number=101, experiment_id="x",
+                spec={"hypothesis": "other"})
     assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert "partial export of a different spec" in str(exc.value)
+
+
+def test_crash_after_spec_before_request_recovers(tmp_path):
+    other = tmp_path / "other"
+    _export(other)
+    planted = other / "EXP-101_x" / "results" / "spec.json"
+    results = tmp_path / "EXP-101_x" / "results"
+    results.mkdir(parents=True)
+    (results / "spec.json").write_bytes(planted.read_bytes())
+    result = _export(tmp_path)
+    assert result["status"] == "written"
+    for name in RESULT_NAMES:
+        assert (results / name).is_file(), name
+    assert (tmp_path / "EXP-101_x" / "REPORT.md").is_file()
+    man = json.loads((results / "export_manifest.json").read_bytes())
+    for name, digest in man["files"].items():
+        assert digest == hashlib.sha256((results / name).read_bytes()).hexdigest(), name
+
+
+def test_manifest_listings_request_but_missing_is_conflict(tmp_path):
+    _export(tmp_path)
+    results = tmp_path / "EXP-101_x" / "results"
+    (results / "request.json").unlink()
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path)
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert "lists request.json but" in str(exc.value)
+    assert "is missing" in str(exc.value)
 
 
 def test_manifest_number_mismatch_is_identity_conflict(tmp_path):

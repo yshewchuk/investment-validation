@@ -44,6 +44,47 @@ def public_result(result) -> dict:
     return {"status": result["status"], "trimmed": result["trimmed"]}
 
 
+def read_spec_document(path, max_bytes=16 * 1024 * 1024):
+    """Read and parse an experiment spec JSON file, capped at max_bytes.
+
+    A missing/unreadable/non-regular file or a file over the cap raises
+    INVALID_EXPERIMENT_SPEC; JSON decode errors propagate as today.
+    """
+    flags = os.O_RDONLY | os.O_NONBLOCK
+    try:
+        fd = os.open(str(path), flags)
+    except OSError as exc:
+        raise fail("INVALID_EXPERIMENT_SPEC", f"cannot read spec file: {exc}") from exc
+    try:
+        if not stat_mod.S_ISREG(os.fstat(fd).st_mode):
+            raise fail(
+                "INVALID_EXPERIMENT_SPEC",
+                f"spec file is not a regular file: {path}",
+            )
+        chunks: list[bytes] = []
+        total = 0
+        while total <= max_bytes:
+            chunk = os.read(fd, max_bytes + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > max_bytes:
+            raise fail(
+                "INVALID_EXPERIMENT_SPEC",
+                "spec file exceeds 16 MiB",
+            )
+        raw = b"".join(chunks)
+    except OSError as exc:
+        raise fail("INVALID_EXPERIMENT_SPEC", f"cannot read spec file: {exc}") from exc
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    return json.loads(raw)
+
+
 @contextmanager
 def _export_lock(root: Path):
     """Serialize export_run_record: one exporter preflights and publishes at a time."""
@@ -187,9 +228,43 @@ def _folders_with_number(root: Path, n: int) -> list[Path]:
     return [folder for num, folder in _exp_folders(root) if num == n]
 
 
+_PARTIAL_RESULTS_NAMES = {
+    "spec.json",
+    "request.json",
+    "event_ids.json",
+    "outcome.json",
+    "runs",
+}
+
+
+def _is_partial_export(folder: Path) -> bool:
+    """True iff folder holds a recoverable partial export with no manifest.
+
+    Only results/spec.json (or nothing) plus at most the other run-record
+    names may be present; any unknown entry makes the folder unadoptable.
+    """
+    results = folder / "results"
+    try:
+        if results.is_symlink() or not results.is_dir():
+            return False
+        if (folder / "results" / "export_manifest.json").exists():
+            return False
+        for entry in os.scandir(results):
+            if entry.name == "runs":
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    return False
+            elif entry.name not in _PARTIAL_RESULTS_NAMES - {"runs"}:
+                return False
+            elif entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                return False
+        return True
+    except OSError:
+        return False
+
+
 def _check_number_folder(folder: Path, exp_number: int, experiment_id):
-    """Reject a symlinked folder/results dir, manifestless folder, or one
-    linked to a different experiment_id."""
+    """Reject a symlinked folder/results dir or manifestless folder that is not
+    a recoverable partial export, or one linked to a different experiment_id."""
     if folder.is_symlink():
         raise fail(
             "EXPERIMENT_IDENTITY_CONFLICT",
@@ -203,6 +278,8 @@ def _check_number_folder(folder: Path, exp_number: int, experiment_id):
         )
     man = _manifest_for(folder)
     if man is None:
+        if _is_partial_export(folder):
+            return
         raise fail(
             "EXPERIMENT_IDENTITY_CONFLICT",
             f"EXP-{exp_number:03d} in {folder.name} has no export manifest (an unlinked folder, or a crashed or partial export that never wrote its manifest), not linked to {experiment_id!r}",
@@ -410,7 +487,10 @@ def export_run_record(
 ):
     """Create-only export: preflight every conflict, then write only missing files.
 
-    Folder/results symlinks and manifestless folders raise before any write.
+    Folder/results symlinks and manifestless folders that are not recoverable
+    partial exports raise before any write; a partial export of the same spec
+    bytes is completed (missing files and the manifest are written), while one
+    of a different spec is EXPERIMENT_IDENTITY_CONFLICT.
     Unreadable/non-regular/oversized existing targets raise before any write.
     An existing manifest must replay: its files hashes must cover the four
     docs and match the persisted bytes, else EXPERIMENT_IDENTITY_CONFLICT.
@@ -474,48 +554,69 @@ def export_run_record(
         request_raw = encoded["request.json"]
         if os.path.lexists(top / "spec.json"):
             existing_spec = _read_capped(top / "spec.json")
-            existing_request = _read_capped(top / "request.json")
-            if (
-                existing_spec is None
-                or len(existing_spec) > MAX_JSON_BYTES
-                or existing_request is None
-                or len(existing_request) > MAX_JSON_BYTES
-            ):
+            if existing_spec is None or len(existing_spec) > MAX_JSON_BYTES:
                 raise fail(
                     "EXPERIMENT_IDENTITY_CONFLICT",
-                    f"existing {top / 'spec.json'} or {top / 'request.json'} is "
+                    f"existing {top / 'spec.json'} is "
                     f"unreadable, not a regular file, or oversized",
                 )
-            existing_manifest_doc = _read_manifest(top / "export_manifest.json")
-            if (
-                existing_manifest_doc is None
-                or not isinstance(existing_manifest_doc.get("files"), dict)
-            ):
-                raise fail(
-                    "EXPERIMENT_IDENTITY_CONFLICT",
-                    f"existing {top / 'export_manifest.json'} is missing, invalid, "
-                    f"or has no files object",
-                )
-            files = existing_manifest_doc["files"]
-            for name, existing_bytes in (
-                ("spec.json", existing_spec),
-                ("request.json", existing_request),
-            ):
-                digest = hashlib.sha256(existing_bytes).hexdigest()
-                if digest != files.get(name):
+            if os.path.lexists(top / "request.json"):
+                existing_request = _read_capped(top / "request.json")
+                if existing_request is None or len(existing_request) > MAX_JSON_BYTES:
                     raise fail(
                         "EXPERIMENT_IDENTITY_CONFLICT",
-                        f"replay mismatch for {top / name}: persisted sha256 "
-                        f"{digest} != manifest {files.get(name)!r}",
+                        f"existing {top / 'request.json'} is "
+                        f"unreadable, not a regular file, or oversized",
                     )
-            existing_mode = (
-                existing_manifest_doc.get("recording_mode")
-                if existing_manifest_doc is not None
-                else None
-            )
+            else:
+                existing_request = None
+            existing_mode = None
+            manifest_present = os.path.lexists(top / "export_manifest.json")
+            if manifest_present:
+                existing_manifest_doc = _read_manifest(top / "export_manifest.json")
+                if (
+                    existing_manifest_doc is None
+                    or not isinstance(existing_manifest_doc.get("files"), dict)
+                ):
+                    raise fail(
+                        "EXPERIMENT_IDENTITY_CONFLICT",
+                        f"existing {top / 'export_manifest.json'} is missing, invalid, "
+                        f"or has no files object",
+                    )
+                files = existing_manifest_doc["files"]
+                if "request.json" in files and existing_request is None:
+                    raise fail(
+                        "EXPERIMENT_IDENTITY_CONFLICT",
+                        f"{top / 'export_manifest.json'} lists request.json but "
+                        f"{top / 'request.json'} is missing",
+                    )
+                for name, existing_bytes in (
+                    ("spec.json", existing_spec),
+                    ("request.json", existing_request),
+                ):
+                    if existing_bytes is None:
+                        continue
+                    digest = hashlib.sha256(existing_bytes).hexdigest()
+                    if digest != files.get(name):
+                        raise fail(
+                            "EXPERIMENT_IDENTITY_CONFLICT",
+                            f"replay mismatch for {top / name}: persisted sha256 "
+                            f"{digest} != manifest {files.get(name)!r}",
+                        )
+                existing_mode = existing_manifest_doc.get("recording_mode")
+            else:
+                if existing_spec != spec_raw:
+                    raise fail(
+                        "EXPERIMENT_IDENTITY_CONFLICT",
+                        f"{top} holds a partial export of a different spec; refusing to adopt it",
+                    )
+                # Same run resumed: keep the persisted spec/request bytes and
+                # adopt this run's recording mode; the writes below fill the
+                # missing files and the manifest.
+                existing_mode = recording_mode
             if (
                 existing_spec != spec_raw
-                or existing_request != request_raw
+                or (existing_request is not None and existing_request != request_raw)
                 or existing_mode != recording_mode
             ):
                 key = hashlib.sha256(
@@ -555,7 +656,6 @@ def export_run_record(
             persisted[path] = existing
 
         manifest_path = results / "export_manifest.json"
-        existing_manifest_doc = None
         try:
             manifest_data = _manifest_bytes(
                 experiment_id,
@@ -590,7 +690,6 @@ def export_run_record(
                     "EXPERIMENT_IDENTITY_CONFLICT",
                     f"existing {manifest_path} is not a JSON object",
                 )
-            existing_manifest_doc = manifest_doc
             manifest_files = manifest_doc.get("files")
             if not isinstance(manifest_files, dict):
                 raise fail(
@@ -622,10 +721,12 @@ def export_run_record(
         # manifest read during preflight supplies it; otherwise use the newly
         # computed list for a manifest this call is about to write.
         returned_trimmed = trimmed
-        if existing_manifest_doc is not None and isinstance(
-            existing_manifest_doc.get("trimmed"), list
-        ):
-            returned_trimmed = existing_manifest_doc["trimmed"]
+        if os.path.lexists(manifest_path):
+            persisted_manifest = _read_manifest(manifest_path)
+            if persisted_manifest is not None and isinstance(
+                persisted_manifest.get("trimmed"), list
+            ):
+                returned_trimmed = persisted_manifest["trimmed"]
 
         # Write only missing files (folder/results dirs created lazily after preflight).
         results.mkdir(parents=True, exist_ok=True)

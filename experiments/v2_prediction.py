@@ -57,7 +57,7 @@ def main(argv=None):
     store, conn, registration, attempted = None, None, None, False
     try:
         store = foundation.ArtifactStore(args.store_root)
-        spec_document = json.loads(Path(args.spec).read_text())
+        spec_document = record_export.read_spec_document(args.spec)
         spec = experiment_spec_from_document(spec_document)
         reporter.validate_prediction_spec(spec)
         if args.action == "run" and not args.no_ledger and args.ledger is None:
@@ -83,10 +83,13 @@ def main(argv=None):
         else:
             registration = native.require_native_registration(conn, store, repository, spec, expected=registration, **binding)
         exp_number = None
+        experiment_id = registration.document["execution_plan"]["experiment_id"]
         if args.no_record_export:
             print("WARNING: no EXP number; run record NOT exported", file=sys.stderr)
+            if args.exp_number is not None:
+                record_export.resolve_exp_number(
+                    args.experiments_root, experiment_id, args.exp_number)
         else:
-            experiment_id = registration.document["execution_plan"]["experiment_id"]
             exp_number = record_export.resolve_exp_number(
                 args.experiments_root, experiment_id, args.exp_number)
         recording = dict(no_ledger=args.no_ledger, ledger_path=args.ledger)
