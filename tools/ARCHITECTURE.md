@@ -16,3 +16,8 @@ Opt-in guard against a heavy job filling the host disk (WSL's virtual disk never
 | `statvfs` unreadable mid-run | one tick is skipped and logged once; with `--heavy`, 5 consecutive failed ticks kill the tree as a disk breach (fail closed); without `--heavy` the check stays off for that tick only. |
 | started already above the ceiling | the first tick breaches and kills the job (exit 76). |
 | heartbeat | the once-a-minute line adds `disk used <G>G/<ceiling>G` when the check is on. |
+| resource-measurement record (`tools/v2_resource_measurement.py`, caller of bounded_run) | `killed` is true for exit 76 as well as 137; `kill_reason` is `DISK LIMIT` for exit 76 when that string appears in the output, `None` when no breach string appears; on exit 137 a memory breach string wins over `DISK LIMIT` (match priority BOX FLOOR, SWAP, CAP, DISK LIMIT). |
+
+## Dependencies
+
+Callers are `tools/v2_resource_measurement.py` and the ops executor adapter in `engine/v2/ops`; depends only on the stdlib and Linux `/proc`, `os.statvfs`.

@@ -37,6 +37,10 @@ def _isolated_state_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("BOUNDED_RUN_STATE_DIR", str(tmp_path))
     monkeypatch.delenv("BOUNDED_RUN_NESTED", raising=False)
     monkeypatch.delenv(mod.DISK_ENV, raising=False)
+    saved = {sig: signal.getsignal(sig) for sig in mod._SIGNALS}
+    yield
+    for sig, handler in saved.items():
+        signal.signal(sig, handler)
 
 
 def _st(f_blocks: int, f_bfree: int, f_frsize: int) -> types.SimpleNamespace:
@@ -236,8 +240,10 @@ def test_check_disk_fail_counter_resets_on_good_sample(monkeypatch):
 def test_disk_kill_stops_the_whole_process_group(monkeypatch):
     """A descendant that ignores SIGTERM must still die with the group."""
     proc = subprocess.Popen(
-        ["sh", "-c", "trap 'exit 0' TERM; (trap '' TERM; sleep 60) & wait"],
-        start_new_session=True)
+        ["sh", "-c",
+         "trap 'exit 0' TERM; (trap '' TERM; echo ready; exec sleep 60) & "
+         "wait"],
+        start_new_session=True, stdout=subprocess.PIPE)
     try:
         monkeypatch.setattr(mod, "SIGNAL_WAIT_S", 2)
         monkeypatch.setattr(mod, "_statvfs",
@@ -245,9 +251,11 @@ def test_disk_kill_stops_the_whole_process_group(monkeypatch):
         args = _parse(["--max-disk-used-gb", "500", "--kill-grace-s", "2"])
         args.disk_guard = mod._DiskGuard(args.max_disk_used_gb, [("/x", 1)],
                                          heavy=False)
+        assert proc.stdout.readline().strip() == b"ready"
         assert mod._check_disk(proc, args, 0.0) is True
         assert not mod._pgid_alive(proc.pid)
     finally:
+        proc.stdout.close()
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except OSError:
@@ -353,3 +361,6 @@ def test_disk_limit_exit_76_classifies_and_other_exits_do_not():
                             " > ceiling 500G", 76) == "DISK LIMIT"
     assert rm.classify_kill("DISK LIMIT", 1) is None
     assert rm.classify_kill("CAP BREACH", 137) == "CAP BREACH"
+    assert rm.classify_kill(
+        "[watchdog] DISK LIMIT unreadable: boom\n"
+        "[watchdog] 2.0m rss 5.60G pss CAP BREACH", 137) == "CAP BREACH"
