@@ -136,6 +136,40 @@ def test_malformed_object_row_is_damaged(tmp_path):
     assert cls.reason == "the prior catalog is malformed"
 
 
+def test_traversal_object_hash_is_damaged(tmp_path, monkeypatch):
+    _stage_prior(tmp_path)
+
+    def corrupt_pool_row(body):
+        row = next(r for r in body["members"] if r["member_id"] == "paired_residual_pool")
+        row["objects"][0]["content_hash"] = "sha256:../../../etc/passwd"
+
+    _rewrite(phase5_release.catalog_path(tmp_path, "prior1"), corrupt_pool_row)
+
+    real_read = assembly._read_regular
+    catalog_name = phase5_release.catalog_path(tmp_path, "prior1").name
+
+    def guarded_read(path, *args, **kwargs):
+        if str(path).endswith(catalog_name):
+            return real_read(path, *args, **kwargs)
+        raise AssertionError("object read before hash shape check")
+
+    monkeypatch.setattr(assembly, "_read_regular", guarded_read)
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog is malformed"
+
+
+def test_tampered_staged_manifest_is_damaged(tmp_path):
+    _stage_prior(tmp_path)
+    manifest = phase5_release.staged_manifest_path(
+        phase5_release.deployment_root(tmp_path), "prior1")
+    with manifest.open("ab") as handle:
+        handle.write(b"tampered")
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog disagrees with its staged release"
+
+
 def test_corrupt_untouched_prior_object_is_damaged(tmp_path):
     _stage_prior(tmp_path)
     catalog = json.loads(phase5_release.catalog_path(tmp_path, "prior1").read_bytes())

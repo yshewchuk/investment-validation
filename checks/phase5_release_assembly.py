@@ -462,6 +462,8 @@ def classify_prior(release_root: Path, prior_release_id) -> PriorClass:
                    "prior pool_cutoff is not an ISO date")
         _prior_pool_rows(catalog.get("members"))
         _, carried = prior_carry_set(release_root, prior_release_id)
+        if not all(_content_hash_valid(item.content_hash) for item in carried):
+            raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "a prior pool object hash is malformed")
         _verify_carried_rows(store, catalog)
         _verify_objects(store, carried)
     except (ReleaseAssemblyRefusal, deployment.DeploymentError, OSError, *_STRAY_ERRORS):
