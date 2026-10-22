@@ -24,6 +24,6 @@ Callers are `tools/v2_resource_measurement.py`, `tools/land.py` and `tools/oc_ch
 
 ## Mutation stats diagnostics (#581)
 
-`mutation_pilot.py` loads `mutation_stats_diagnostics.py` through pytest's supported plugin interface. In the stats child only, it appends failure reports directly to a fresh, 64-KiB-bounded module sidecar; this survives mutmut's fork-local output capture without enabling per-mutant debug noise or running tests twice. The mutation workflow includes the sidecar in the existing module artifact. Backend exit codes and scoring remain authoritative and unchanged.
+`mutation_pilot.py` loads `mutation_stats_diagnostics.py` through pytest's supported plugin interface. In the stats child only, it appends failure reports directly to a fresh, 64-KiB-bounded module sidecar; this survives mutmut's fork-local output capture without enabling per-mutant debug noise or running tests twice. The mutation workflow includes the sidecar in the existing module artifact. A failed backend also echoes at most 64 KiB to stderr, so diagnostics are visible before the `workflow_run` artifact-copy YAML reaches main. Diagnostic I/O cannot replace the backend outcome. Backend exit codes and scoring remain authoritative and unchanged.
 
 The driver also identifies the uninstrumented work snapshot through `MUTATION_PILOT_SOURCE_ROOT`. Authored-source import/size policies use that snapshot; behavioral tests keep using mutmut's instrumented imports. No production source, test selection, assertion or dependency allowance is weakened.

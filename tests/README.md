@@ -484,6 +484,10 @@ its 330-minute step timeout.
   an unwritable diagnostic emits a warning without replacing the test failure.
   The file is cleared before each run, capped at 64 KiB (keeping the start
   and end of an oversized report), and never receives mutant-phase reports.
+  A nonzero backend result also echoes at most 64 KiB to stderr, without
+  changing that result if reading or writing diagnostics fails. This keeps
+  PR failures visible before the artifact-copy YAML reaches main:
+  `workflow_run` executes main's workflow, not the PR's updated YAML.
   This does not rerun tests, change the backend exit code, or classify any
   unmeasured mutant as killed. For extra output, mutmut also supports
   `debug = true`, added to `setup.cfg [mutmut]` by the driver.

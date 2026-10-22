@@ -150,3 +150,53 @@ def test_driver_resets_stale_diagnostic_and_passes_snapshot_root(monkeypatch, tm
     assert not diagnostic.exists()
     assert calls[0][1]["env"]["MUTATION_PILOT_SOURCE_ROOT"] == str(work)
     assert calls[0][1]["env"]["MUTATION_PILOT_STATS_DIAGNOSTIC"] == str(diagnostic)
+
+
+@pytest.mark.parametrize("rc,payload", [(1, b"synthetic stats failure\n"),
+    (17, b"x" + "\u00e9".encode() * diagnostics.LIMIT_BYTES),
+    (124, b"partial stats failure before budget stop\n"), (0, b"must not echo on success")],
+    ids=["failure", "bounded-multibyte", "budget-stop", "success"])
+def test_driver_echo_is_bounded_and_preserves_backend_result(monkeypatch, tmp_path, capsys,
+                                                           rc, payload):
+    from tests.v2.integration.test_mutation_ci import _cmd_run, pilot as driver
+
+    calls = []
+
+    def fake_bounded(cmd, cwd, env, budget):
+        calls.append(cmd)
+        Path(env["MUTATION_PILOT_STATS_DIAGNOSTIC"]).write_bytes(payload)
+        return rc
+
+    monkeypatch.setenv("MASSIVE_API_KEY", "synthetic-env-value-must-not-be-logged")
+    monkeypatch.setattr(driver, "_run_with_time_budget", fake_bounded)
+    result, unbounded_calls = _cmd_run(monkeypatch, tmp_path, rc=0, budget=10)
+    echoed = capsys.readouterr().err
+    assert result == rc and len(calls) == 1 and unbounded_calls == []
+    assert echoed == (payload[:diagnostics.LIMIT_BYTES].decode("utf-8", "ignore") if rc else "")
+    assert len(echoed.encode()) <= diagnostics.LIMIT_BYTES
+
+
+@pytest.mark.parametrize("failure", ["read", OSError, ValueError])
+def test_driver_echo_io_failure_preserves_backend_result(monkeypatch, tmp_path, failure):
+    from tests.v2.integration.test_mutation_ci import _cmd_run, pilot as driver
+
+    calls = []
+
+    def fake_bounded(cmd, cwd, env, budget):
+        calls.append(cmd)
+        destination = Path(env["MUTATION_PILOT_STATS_DIAGNOSTIC"])
+        if failure == "read":
+            destination.mkdir()  # deterministic EISDIR, even for privileged CI users
+        else:
+            destination.write_text("synthetic failure")
+        return 1
+
+    def unavailable(text):
+        raise failure("stderr unavailable")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(driver, "_run_with_time_budget", fake_bounded)
+        if failure != "read":
+            scoped.setattr(sys, "stderr", SimpleNamespace(write=unavailable))
+        result, unbounded_calls = _cmd_run(scoped, tmp_path, rc=0, budget=10)
+    assert result == 1 and len(calls) == 1 and unbounded_calls == []

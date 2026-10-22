@@ -2471,6 +2471,7 @@ def _run_with_time_budget(cmd: list[str], cwd: Path, env: dict, budget_s: float)
 
 def cmd_run(cfg: dict, args) -> int:
     from mutation_results import SNAPSHOT_NAME, snapshot
+    from mutation_stats_diagnostics import LIMIT_BYTES
 
     work = sync_workdir(args.module, cfg, fresh=args.fresh)
     files = mutate_files(cfg, args.module)
@@ -2512,6 +2513,14 @@ def cmd_run(cfg: dict, args) -> int:
         rc = _run_with_time_budget(cmd, work, env, args.time_budget_seconds)
     else:
         rc = subprocess.run(cmd, cwd=work, env=env).returncode
+    if rc:
+        # workflow_run uses main's YAML until merge. Keep failures visible even
+        # before that workflow knows to upload the sidecar; never dump the env.
+        try:
+            with diagnostic.open("rb") as stream:
+                sys.stderr.write(stream.read(LIMIT_BYTES).decode("utf-8", "ignore"))
+        except (OSError, ValueError):
+            pass  # unavailable diagnostics must not replace the backend outcome
     # On a first run mutants/ did not exist before mutmut; record the digest now
     # so the next run compares against this one.
     reset_on_test_change(work, [], digest)
