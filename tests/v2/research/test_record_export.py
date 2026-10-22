@@ -88,6 +88,8 @@ def test_read_spec_document_missing_file_is_invalid_spec(tmp_path):
     with pytest.raises(OpsError) as exc:
         read_spec_document(tmp_path / "missing.json")
     assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert "cannot read spec file" in str(exc.value)
+    assert str(tmp_path) not in str(exc.value)
 
 
 def _export(root, *, exp_number=101, experiment_id="x", slug=None,

@@ -362,6 +362,7 @@ def test_disk_limit_exit_76_classifies_and_other_exits_do_not():
     assert rm.classify_kill("DISK LIMIT: /x used 1G > ceiling 1G", 76) == "DISK LIMIT"
     # An earlier unreadable-sample warning is not the kill reason.
     assert rm.classify_kill("[watchdog] DISK LIMIT unreadable: boom", 76) is None
+    assert rm.classify_kill("[watchdog]   2.0m DISK LIMIT unreadable for 3 ticks — killing tree", 76) == "DISK LIMIT"
     assert rm.classify_kill("", 76) is None
     assert rm.classify_kill("DISK LIMIT: /x used 1G > ceiling 1G", 1) is None
     assert rm.classify_kill("CAP BREACH", 137) == "CAP BREACH"

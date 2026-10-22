@@ -174,6 +174,11 @@ def watchdog_rss_values(output: str) -> list[float]:
     return values
 
 
+# Terminal disk-kill lines of bounded_run: the ceiling breach and the heavy
+# fail-closed "unreadable for N ticks" kill; the first-tick warning is not one.
+_DISK_TERMINAL = re.compile(rf"{DISK_LIMIT_REASON}(?::| unreadable for \d+ ticks)")
+
+
 def classify_kill(output: str, exit_code: int) -> str | None:
     """Which watchdog breach string killed the child, or None.
 
@@ -181,15 +186,16 @@ def classify_kill(output: str, exit_code: int) -> str | None:
     strings alone, so a "DISK LIMIT unreadable" warning line is never
     reported as the reason a 137 died.
 
-    On exit 76 only the terminal `DISK LIMIT:` breach line counts; an
-    earlier `DISK LIMIT unreadable` warning does not.
+    On exit 76 only a terminal breach line (`DISK LIMIT:` or `DISK LIMIT
+    unreadable for N ticks`) counts; an earlier `DISK LIMIT unreadable:`
+    warning does not.
     """
     if exit_code not in KILL_EXIT_CODES:
         return None
     if exit_code == DISK_LIMIT_EXIT:
         # Match the terminal breach line ("DISK LIMIT: <path> used ..."), not
         # an earlier "DISK LIMIT unreadable" warning from a failed sample.
-        return DISK_LIMIT_REASON if f"{DISK_LIMIT_REASON}:" in output else None
+        return DISK_LIMIT_REASON if _DISK_TERMINAL.search(output) else None
     for reason in KILL_REASONS:
         if reason in output:
             return reason
