@@ -90,10 +90,13 @@ def baseline_evidence(source):
 
 
 def _args(source, action, *extra):
-    return [action, "--spec", str(source.spec_path), "--catalog", str(source.root / "catalog.sqlite"),
+    argv = [action, "--spec", str(source.spec_path), "--catalog", str(source.root / "catalog.sqlite"),
         "--store-root", str(source.store.root), "--as-of-month", MONTH,
         "--target", "absolute_move", "--magnitude-training-start", START,
         "--magnitude-labels-before", CUTOFF, *map(str, extra)]
+    if action == "run":
+        argv += ["--exp-number", "101", "--experiments-root", str(source.root / "experiments")]
+    return argv
 
 
 def _invoke(source, capsys, action, *extra, status=0):
@@ -424,7 +427,11 @@ def test_cli_metadata_registration_then_durable_smoke_never_touches_ledger(tmp_p
         before = catalog_rows(source.conn), artifact_object_bytes(source.store)
         with monkeypatch.context() as patch:
             _metadata_only(patch)
-            assert _invoke(source, capsys, "run", "--no-ledger") == output
+            replayed = _invoke(source, capsys, "run", "--no-ledger")
+        assert replayed["record_export"]["status"] == "unchanged"
+        assert output["record_export"]["status"] == "written"
+        assert {key: value for key, value in replayed.items() if key != "record_export"} == {
+            key: value for key, value in output.items() if key != "record_export"}
         assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     finally:
         source.conn.close()
@@ -452,7 +459,11 @@ def test_cli_recorded_lifecycle_replays_original_date_with_exactly_one_ledger_ro
         before = catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()
         set_outcome_clock(monkeypatch, "2026-02-10")
         _metadata_only(monkeypatch)
-        assert _invoke(source, capsys, "run", "--ledger", ledger) == first
+        replayed = _invoke(source, capsys, "run", "--ledger", ledger)
+        assert {key: value for key, value in replayed.items() if key != "record_export"} == {
+            key: value for key, value in first.items() if key != "record_export"}
+        assert first["record_export"]["status"] == "written"
+        assert replayed["record_export"]["status"] == "unchanged"
         assert (catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes()) == before
     finally:
         source.conn.close()

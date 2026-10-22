@@ -78,6 +78,8 @@ INCLUDE = (
     # it is the experiment's evidence and is not regenerable from code alone.
     ("experiments", "**/DEFINITION.md"),
     ("experiments", "**/results/*.json"),
+    # Further runs of one experiment_id (other arms, recorded-after-smoke) land under results/runs/<key>/.
+    ("experiments", "**/results/runs/*/*.json"),
     # The transaction logs behind the plotted equity curves: real ORATS quotes,
     # so they can never reach the PUBLIC repo — and the reason a reported chart
     # can be spot-checked at all, so they must reach this one.
