@@ -24,6 +24,18 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 - `nightly.py` — the orchestrator; run as the legacy nightly entrypoint
   (root doc §4). Public helpers for the Tier-4 gap repair:
   `repair_tier4_gap`, `repair_tier4_gap_if_needed`, `mark_tiers_degraded`.
+  `--fetch-only` (`run_nightly(fetch_only=True)`) runs only the refresh
+  half the v2 snapshot import reads (`engine/v2/data/import_snapshot.py`):
+  universe, refresh (Tier 2 `data/curated/*`), finality, validate, moves,
+  tiers (panel, Tier 4, SNAPSHOT) and the panel-staleness flags. It skips
+  warm_serving, score, ledger, settle, ladder, backfill, model_evidence,
+  render, selfcheck, publish and backup. Each skipped step is reported as
+  `{"skipped": true, "reason": "fetch_only"}` and the report keeps the usual
+  keys (`as_of`, `finality`, `steps.tiers` with an explicit `degraded`).
+  Timings from the 10-16..10-18 reports: about 40-50 min (refresh 1.8-2.3 ks,
+  validate ~20 s, tiers incl. moves 0.5-0.6 ks); the 9-11 ks score step and
+  its ~9.7G peak are not run (peak memory of the refresh half is not recorded
+  in those reports).
 - `warm_serving.py` — `warm(event_dates, decision_start)`: before score
   (default scorer only), fits every Tier-4 serving model (all `PRODUCES`) whose
   cache file for the current panel sha is missing or not ready (bad metadata,
@@ -212,6 +224,17 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   | No gap, finalize fails | `tiers_degraded` as above |
   | Repaired, or no gap | SNAPSHOT written once |
 
+- **`--fetch-only`** — requires refresh and tiers on and no backup: with
+  `--no-refresh`, `--no-tiers` or `--backup` the CLI exits 2 (argparse) before
+  running anything. Gating failures behave as in a full run (red validate,
+  non-final session, rotated credential, typed `TIER4_*` stop: `NightlyStop`,
+  exit 1, no report); refresh and tiers degrade as in a full run and are
+  recorded in `steps`/`flags`. The run writes the flag report and the
+  standard `nightly_<date>.json`, never writes the nightly state file
+  (`last_successful_as_of`, calendar), so a later full run still back-fills
+  the nights this one did not score, and never touches the ledger, bundle or
+  publish target. A degraded `tiers` step is visible to
+  `nightly_readiness._require_ready`, which refuses it as for a full run.
 - **Validate** — a red validation stops the pipeline; yesterday's snapshot
   stays published and a flag is raised.
 - **Selfcheck mismatch** — stops the publish; the nightly records raw
