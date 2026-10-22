@@ -115,11 +115,12 @@ def main(argv=None):
             record = "skipped"
             if exp_number is not None:
                 try:
-                    record = record_export.export_native_run(
+                    record = record_export.public_result(record_export.export_native_run(
                         args.experiments_root, registration, spec_document, request_dict,
-                        saved, exp_number, replayed, started, report_path=None)
-                except (OpsError, OSError, ValueError):
-                    print(json.dumps({"refused": "record_export_failed"}))
+                        saved, exp_number, replayed, started, report_path=None))
+                except (OpsError, OSError, ValueError) as error:
+                    print(json.dumps({"refused": "record_export_failed",
+                                      "cause": record_export.export_failure_cause(error)}))
                     return 2
             print(json.dumps({"refused": saved["outcome"]["failure_code"],
                               "receipt_ref": saved["receipt_ref"],
@@ -129,11 +130,12 @@ def main(argv=None):
         record = "skipped"
         if exp_number is not None:
             try:
-                record = record_export.export_native_run(
+                record = record_export.public_result(record_export.export_native_run(
                     args.experiments_root, registration, spec_document, request_dict,
-                    saved, exp_number, replayed, started, report_path=report_path or None)
-            except (OpsError, OSError, ValueError):
-                print(json.dumps({"refused": "record_export_failed"}))
+                    saved, exp_number, replayed, started, report_path=report_path or None))
+            except (OpsError, OSError, ValueError) as error:
+                print(json.dumps({"refused": "record_export_failed",
+                                  "cause": record_export.export_failure_cause(error)}))
                 return 2
         print(json.dumps({"report": str(report_path), "variant_id": registration.variant_id,
                           "recording_mode": saved["receipt"]["recording_mode"],

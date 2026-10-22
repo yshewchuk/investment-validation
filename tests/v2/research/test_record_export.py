@@ -16,12 +16,14 @@ from types import SimpleNamespace
 import pytest
 
 from checks.repo_hygiene import Report, check_path_policy
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from experiments import lib, record_export
 from experiments.record_export import (
     MAX_JSON_BYTES,
+    export_failure_cause,
     export_native_run,
     export_run_record,
+    public_result,
     resolve_exp_number,
 )
 from tools.private_mirror import INCLUDE
@@ -37,6 +39,26 @@ RESULT_NAMES = (
 
 def _dump(doc) -> bytes:
     return (json.dumps(doc, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def test_export_failure_cause_maps_ops_os_and_value_errors():
+    assert export_failure_cause(fail("RESOURCE_UNAVAILABLE", "x")) == "RESOURCE_UNAVAILABLE"
+    assert export_failure_cause(fail("EXPERIMENT_IDENTITY_CONFLICT", "y")) == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert export_failure_cause(OSError("disk full")) == "RESOURCE_UNAVAILABLE"
+    assert export_failure_cause(ValueError("bad json")) == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_export_failure_cause_reraises_other_exceptions():
+    error = TypeError("unexpected")
+    with pytest.raises(TypeError) as caught:
+        export_failure_cause(error)
+    assert caught.value is error
+
+
+def test_public_result_keeps_only_status_and_trimmed():
+    result = {"dir": "/tmp/EXP-101_x", "status": "written", "trimmed": ["event_ids.json"]}
+    assert public_result(result) == {"status": "written", "trimmed": ["event_ids.json"]}
+    assert "dir" not in public_result(result)
 
 
 def _export(root, *, exp_number=101, experiment_id="x", slug=None,

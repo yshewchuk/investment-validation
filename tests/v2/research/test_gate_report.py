@@ -270,8 +270,10 @@ def test_two_real_cli_arms_consume_distinct_fill_record_and_replay_once(source, 
     assert {row["spec_hash"] for row in rows} == {result["variant_id"] for result in results}
     before = ledger.read_bytes()
     first_output = outputs[0]
-    assert json.loads((Path(first_output["record_export"]["dir"])
-                       / "results" / "request.json").read_text()) == {
+    export_folder = next((source.root / "experiments").glob("EXP-101_*"))
+    assert set(first_output["record_export"]) == {"status", "trimmed"}
+    assert "dir" not in first_output["record_export"]
+    assert json.loads((export_folder / "results" / "request.json").read_text()) == {
         "action": "run",
         "as_of_month": MONTH,
         "scope": "shadow",
@@ -632,7 +634,7 @@ def test_record_export_failure_refuses_run_and_second_run_succeeds(source, capsy
         raise fail("RESOURCE_UNAVAILABLE", "x")
     monkeypatch.setattr(cli.record_export, "export_native_run", boom)
     response = _invoke(source, capsys, "run", None, "--no-ledger", status=2)
-    assert response["refused"] == "record_export_failed"
+    assert response == {"refused": "record_export_failed", "cause": "RESOURCE_UNAVAILABLE"}
     monkeypatch.setattr(cli.record_export, "export_native_run", export_native_run)
     output = _invoke(source, capsys, "run", None, "--no-ledger")
     assert output["record_export"]["status"] == "written"

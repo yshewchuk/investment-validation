@@ -22,11 +22,27 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from experiments.lib import FIRST_NUMBER, parse_experiment_id, slugify
 
 MAX_JSON_BYTES = 1_000_000
 _NUM_DIR_RE = re.compile(r"^EXP-(\d+)_")
+
+
+def export_failure_cause(error) -> str:
+    """Public cause code for a failed export attempt."""
+    if isinstance(error, OpsError):
+        return error.code
+    if isinstance(error, OSError):
+        return "RESOURCE_UNAVAILABLE"
+    if isinstance(error, ValueError):
+        return "INVALID_EXPERIMENT_SPEC"
+    raise error
+
+
+def public_result(result) -> dict:
+    """CLI projection of an export result: only status and trimmed, never dir."""
+    return {"status": result["status"], "trimmed": result["trimmed"]}
 
 
 @contextmanager

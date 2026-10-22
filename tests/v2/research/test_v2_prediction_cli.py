@@ -816,7 +816,9 @@ def test_first_successful_run_exports_exp_record_and_report(source, capsys):
                  "request.json", "event_ids.json"):
         assert (results / name).is_file()
     assert (folders[0] / "REPORT.md").is_file()
-    exported = Path(output["record_export"]["dir"])
+    exported = next((source.root / "experiments").glob("EXP-101_*"))
+    assert set(output["record_export"]) == {"status", "trimmed"}
+    assert "dir" not in output["record_export"]
     request = json.loads((exported / "results" / "request.json").read_text())
     assert request == {"action": "run", "as_of_month": MONTH, "scope": "shadow",
                        "event_ids": None, "no_ledger": True,
@@ -882,7 +884,7 @@ def test_record_export_failure_keeps_outcome_and_rerun_exports(source, monkeypat
     with monkeypatch.context() as patch:
         patch.setattr(cli.record_export, "export_native_run", broken)
         response = _invoke(source, capsys, "run", "--no-ledger", status=2)
-    assert response == {"refused": "record_export_failed"}
+    assert response == {"refused": "record_export_failed", "cause": "RESOURCE_UNAVAILABLE"}
     evidence = _evidence(source)
     assert "native_smoke" in evidence
     assert _document(source, evidence["native_smoke"])["failure_code"] is None

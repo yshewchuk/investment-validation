@@ -466,7 +466,7 @@ Prediction records also carry the target and model-selection options and the reg
 | Empty or non-string experiment_id (resolution and export alike) | `INVALID_EXPERIMENT_SPEC`. |
 | Supplied success report that cannot be read | `RESOURCE_UNAVAILABLE`; nothing is exported. |
 | Replay over an existing record | The result reports the persisted `trimmed` list from the existing manifest, not the new proposal's. |
-| Export fails after the outcome was published | The outcome stays valid; the CLI exits 2 with `record_export_failed`. A rerun replays, then exports, unless the failure left a manifestless folder (see the crash row), which it refuses. |
+| Export fails after the outcome was published | The outcome stays valid; the CLI exits 2 with `{"refused": "record_export_failed", "cause": <code>}`, where the cause is the `OpsError` code, `RESOURCE_UNAVAILABLE` for an OS error or `INVALID_EXPERIMENT_SPEC` for a value error. CLI output carries only the export `status` and `trimmed` list, never the export path. A rerun replays, then exports, unless the failure left a manifestless folder (see the crash row), which it refuses. |
 
 ## Reconstructed gate evaluation
 
