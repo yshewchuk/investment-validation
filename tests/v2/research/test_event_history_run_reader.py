@@ -223,3 +223,15 @@ def test_runs_are_cut_only_where_another_fragment_may_lie_between_neighbours():
     assert lengths([("2023-02-01", "2023-02-01")]) == [1, 1, 1]  # the middle day cuts both gaps
     assert lengths([("2023-03-01", "2023-03-01")]) == [2, 1]  # o[0] <= hi kills the later gap only
     assert lengths([None]) == [1, 1, 1]  # an unreadable interval cuts everywhere
+
+
+def test_cached_event_still_refuses_a_mismatched_day_or_request(source):
+    repository, snapshot = source
+    plans, read_rows = _plan(repository, snapshot)
+    event, request, _ = plans[0]
+    read_rows(event, request)  # now cached
+    wrong_day = SimpleNamespace(event_id=event.event_id, ticker=event.ticker, event_date=plans[1][0].event_date)
+    with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+        read_rows(wrong_day, request)
+    with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+        read_rows(event, plans[1][1])

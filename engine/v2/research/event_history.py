@@ -237,11 +237,11 @@ def _run_reader(repository, contract, plans, index):
 
     def read_rows(event, request):
         """Advance the run's stream only up to this candidate's day; later fragments stay unopened."""
+        day = event.event_date.date().isoformat()
+        _check_planned(plan_of.get(event.event_id), event, day, request)
         if event.event_id in rows_by_event:
             return rows_by_event[event.event_id]
-        run, day = run_of.get(event.event_id), event.event_date.date().isoformat()
-        planned = plan_of.get(event.event_id)
-        _check_planned(planned, event, day, request)
+        run = run_of[event.event_id]
         state = streams.get(id(run))
         if state is None:
             state = streams[id(run)] = [open_run(run), {}, ""]
