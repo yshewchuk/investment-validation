@@ -201,6 +201,7 @@ def test_resolve_no_number_and_no_link_is_invalid(tmp_path):
     with pytest.raises(OpsError) as exc:
         resolve_exp_number(tmp_path, "x", None)
     assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert str(tmp_path) not in str(exc.value)
 
 
 def test_resolve_number_held_by_other_experiment_conflicts(tmp_path):
@@ -448,6 +449,7 @@ def test_resolve_unlinked_id_with_none_is_invalid(tmp_path):
     with pytest.raises(OpsError) as exc:
         resolve_exp_number(tmp_path, "x", None)
     assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert str(tmp_path) not in str(exc.value)
 
 
 def test_resolve_symlinked_run_folder_with_matching_id_conflicts(tmp_path):
