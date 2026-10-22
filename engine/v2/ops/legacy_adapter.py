@@ -308,13 +308,15 @@ def _refresh_gspc(fetcher, source_root) -> dict:
     from datetime import datetime, timezone
     from uuid import uuid4
 
+    from engine import paths
     from engine.data.pulls.gspc_refresh import refresh_gspc_daily
 
     if source_root is not None:
-        gspc_path = (Path(source_root) / "earnings_predictions" / "data" / "raw"
-                     / "polygon" / "gspc_daily.csv")
+        # The same relative location ``paths`` registers for ``GSPC_DAILY``
+        # (``ROOT`` is its own parent, so this is the literal legacy subtree
+        # path, derived rather than hardcoded).
+        gspc_path = Path(source_root) / paths.GSPC_DAILY.relative_to(paths.ROOT)
     else:
-        from engine import paths
         gspc_path = paths.GSPC_DAILY
     return refresh_gspc_daily(
         fetcher, gspc_path,

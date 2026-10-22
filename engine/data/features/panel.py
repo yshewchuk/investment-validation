@@ -436,8 +436,15 @@ def add_regime_features(
                     _STALE_REGIME_WARNED.add(key)
                     detail = (f"gspc series ends {last.date()}, decision date "
                               f"{asked.date()}: regime features are stale")
-                    warnings.warn(detail)
+                    # Print first, then warn inside try/except Warning: a
+                    # caller running under ``-W error`` turns ``warnings.warn``
+                    # into a raised UserWarning, and a staleness diagnostic
+                    # must never abort the calculation it reports on.
                     print(f"[regime] WARNING {detail}", file=sys.stderr, flush=True)
+                    try:
+                        warnings.warn(detail)
+                    except Warning:
+                        pass
     for i, j in enumerate(idx):
         if j < 0 or j >= len(closes):
             continue

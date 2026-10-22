@@ -51,6 +51,23 @@ def _write_legacy(path, dates: list[str]) -> bytes:
     return path.read_bytes()
 
 
+def _rows_body(rows: list[tuple[str, float]]) -> bytes:
+    """A yfinance body with EXACT ``(date, close)`` pairs, OHLC around the close."""
+    lines = ["Date,Close,High,Low,Open,Volume"]
+    for i, (d, c) in enumerate(rows):
+        lines.append(f"{d},{c},{c + 1},{c - 1},{c},{1000 + i}")
+    return ("\n".join(lines) + "\n").encode()
+
+
+def _write_legacy_rows(path, rows: list[tuple[str, float]]) -> bytes:
+    """Seed the legacy file with EXACT ``(date, close)`` pairs; return its bytes."""
+    lines = list(HEADER_LINES)
+    for i, (d, c) in enumerate(rows):
+        lines.append(f"{d},{c},{c},{c + 1},{c - 1},{c},{1000 + i}\n")
+    path.write_text("".join(lines))
+    return path.read_bytes()
+
+
 class StubFetcher:
     """Returns one canned record (or raises one canned error) per call."""
 
@@ -234,6 +251,69 @@ def test_catchup_rewrite_writes_the_exact_bytes(tmp_path):
 
     assert result == {"ok": True, "last_date": "2026-08-30", "rows": 6}
     assert path.read_bytes() == _legacy_text(caught_up).encode("utf-8")
+    assert path.read_bytes() != before
+
+
+#: Eight stored dates: the first three are older than the tail (their Close
+#: must survive a refresh), the last five are the correctable tail
+#: (``TAIL_CORRECTABLE_ROWS``).
+TAIL_DATES = [f"2026-08-{day:02d}" for day in range(20, 28)]
+
+
+def test_head_close_mismatch_refuses_as_history_changed(tmp_path):
+    """A fresh answer that rewrites a stored Close outside the last five
+    stored rows is a DIFFERENT history, not a catch-up: refused, the file
+    untouched."""
+    path = tmp_path / "gspc_daily.csv"
+    stored = [(d, 100.0 + i) for i, d in enumerate(TAIL_DATES)]
+    before = _write_legacy_rows(path, stored)
+    changed = list(stored)
+    changed[0] = (changed[0][0], 100.0 + 1e-3)  # rel ~1e-5, far outside 1e-9
+
+    result = refresh_gspc_daily(StubFetcher(body=_rows_body(changed)), path,
+                                refetch_token="run-1")
+
+    assert result == {"ok": False, "reason": "history_changed"}
+    assert path.read_bytes() == before
+
+
+def test_sixth_from_last_close_mismatch_is_history_changed(tmp_path):
+    """The tail is EXACTLY the last five stored rows: the 6th-from-last row
+    (the head's newest) is still guarded."""
+    path = tmp_path / "gspc_daily.csv"
+    stored = [(d, 100.0 + i) for i, d in enumerate(TAIL_DATES)]
+    before = _write_legacy_rows(path, stored)
+    changed = list(stored)
+    changed[-6] = (changed[-6][0], changed[-6][1] + 1e-6)  # rel ~1e-8 > 1e-9
+
+    result = refresh_gspc_daily(StubFetcher(body=_rows_body(changed)), path,
+                                refetch_token="run-1")
+
+    assert result == {"ok": False, "reason": "history_changed"}
+    assert path.read_bytes() == before
+
+
+def test_tail_close_mismatch_is_accepted_and_the_fresh_value_is_written(tmp_path):
+    """Mismatches inside the last five stored rows are the corrections this
+    pull exists to make: accepted, and the written file carries the fresh
+    value. A head row inside the rel 1e-9 tolerance is likewise accepted and
+    rewritten with the fresh value."""
+    path = tmp_path / "gspc_daily.csv"
+    stored = [(d, 100.0 + i) for i, d in enumerate(TAIL_DATES)]
+    before = _write_legacy_rows(path, stored)
+    corrected = list(stored)
+    corrected[-5] = (corrected[-5][0], 555.0)                     # 5th from last
+    corrected[-1] = (corrected[-1][0], corrected[-1][1] + 1e-10)  # tail
+    corrected[1] = (corrected[1][0], 101.0 + 1e-10)  # head, rel ~1e-12 <= 1e-9
+
+    result = refresh_gspc_daily(StubFetcher(body=_rows_body(corrected)), path,
+                                refetch_token="run-1")
+
+    assert result == {"ok": True, "last_date": "2026-08-27", "rows": 8}
+    raw = pd.read_csv(path, skiprows=3, header=None)
+    assert list(raw[2])[-5] == 555.0
+    assert list(raw[2])[-1] == pytest.approx(107.0 + 1e-10)
+    assert list(raw[2])[1] == pytest.approx(101.0 + 1e-10)
     assert path.read_bytes() != before
 
 

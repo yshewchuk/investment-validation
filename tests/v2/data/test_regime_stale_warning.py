@@ -5,8 +5,9 @@ frame whose decision dates run past the series end was silently served stale
 market state. The fix is a warning only: one ``UserWarning`` and one stderr
 line, once per ``(path, mtime)``, with every computed value unchanged. These
 tests pin the warning's shape, the once-per-file-version suppression, the
-strictly-seven-day threshold, and value identity across the call that warned
-and the one that stayed quiet.
+strictly-seven-day threshold, value identity across the call that warned and
+the one that stayed quiet, and that a strict ``-W error`` filter never aborts
+the calculation.
 
 Synthetic data only: no network, nothing under the real data root.
 """
@@ -131,6 +132,36 @@ def test_stale_frame_emits_exactly_one_stderr_line(tmp_path, capsys):
     # The same file version never repeats it, on stderr either.
     add_regime_features(_frame(STALE_DECISION), gspc_path=path)
     assert capsys.readouterr().err == ""
+
+
+def test_strict_error_filter_never_aborts_the_calculation(tmp_path, capsys):
+    """Under ``-W error`` (``warnings.simplefilter("error")``) the stale call
+    still returns the same computed block and still prints the stderr line:
+    the diagnostic warns after printing and swallows the raised UserWarning,
+    so a strict filter can never abort the calculation it reports on."""
+    path = tmp_path / "gspc_daily.csv"
+    _write_gspc(path)
+    frame = _frame(STALE_DECISION)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        strict = add_regime_features(frame, gspc_path=path)
+
+    expected_line = (
+        "[regime] WARNING gspc series ends 2026-08-27, decision date "
+        "2026-10-29: regime features are stale"
+    )
+    assert expected_line in capsys.readouterr().err
+
+    # The same values the warned (non-strict) call yields: the (path, mtime)
+    # dedupe keeps this second call silent, so only the calculation is
+    # compared, never the diagnostic.
+    quiet = add_regime_features(frame, gspc_path=path)
+    capsys.readouterr()
+    pd.testing.assert_frame_equal(strict, quiet)
+    for col, pinned in SPY_AT_ANCHOR.items():
+        assert strict[col].iloc[0] == pytest.approx(pinned), col
+    assert strict["regime_asof"].iloc[0] == np.datetime64(str(SERIES_END.date()))
 
 
 def test_decision_within_seven_days_does_not_warn(tmp_path, capsys):

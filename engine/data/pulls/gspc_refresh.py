@@ -16,7 +16,13 @@ Guards, because this file feeds a champion-model feature: a fetch or parse
 failure leaves the stored bytes untouched, and a fresh body may never shrink
 the series' start, move its end backwards, or drop a stored date — the whole
 point is catching up, so a smaller, older or hole-ridden answer is refused by
-reason instead of written. An identical rewrite is skipped entirely:
+reason instead of written. Nor may it change the stored Close of any row
+older than the last ``TAIL_CORRECTABLE_ROWS`` (5) stored rows: those
+overlapping dates must agree within rel 1e-9 or the answer is refused as
+``history_changed`` (the regime features computed from the stored rows must
+not move). Mismatches inside that tail ARE allowed — the rewrite then stores
+the fresh values, which is exactly the tail correction this pull exists to
+make. An identical rewrite is skipped entirely:
 ``panel._gspc_series`` caches on file mtime, so touching the file with the
 same bytes would invalidate it for nothing. Every write goes through
 ``engine.paths.assert_writable`` (``GSPC_DAILY`` is its one
@@ -51,7 +57,7 @@ import pandas as pd
 from engine import paths
 
 __all__ = ["refresh_gspc_daily", "HEADER_LINES", "SERIES_START",
-           "MAX_EXISTING_BYTES", "MAX_FRESH_BYTES"]
+           "MAX_EXISTING_BYTES", "MAX_FRESH_BYTES", "TAIL_CORRECTABLE_ROWS"]
 
 #: Rows 0-2 of the legacy layout; readers (``panel._gspc_series``,
 #: ``calendar.trading_calendar``) skip exactly these three lines.
@@ -76,6 +82,14 @@ MAX_FRESH_BYTES = 64 * 1024 * 1024
 #: features computed from existing rows never change. A body left with no
 #: rows after the cut is unparseable.
 SERIES_START = pd.Timestamp("2006-01-01")
+
+#: The number of trailing stored rows a refresh may CORRECT: their Close values
+#: may disagree with the fresh answer and the rewrite then stores the fresh
+#: ones. Every older overlapping stored row must agree within rel 1e-9 or the
+#: rewrite is refused as ``history_changed`` -- a changed head is a different
+#: history, not a catch-up, and would silently move every regime feature ever
+#: computed from this series.
+TAIL_CORRECTABLE_ROWS = 5
 
 
 def _log(message: str) -> None:
@@ -151,7 +165,8 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
     whole-run condition). Returns ``{"ok": True, "last_date":
     "YYYY-MM-DD", "rows": N}`` or ``{"ok": False, "reason": ...}`` with the
     reason in ``fetch_failed`` / ``unparseable`` / ``shrunk`` /
-    ``older_than_existing`` / ``unreadable`` / ``unwritable``.
+    ``older_than_existing`` / ``history_changed`` / ``unreadable`` /
+    ``unwritable``.
     """
     from engine.data.sources.base import CredentialRotated, FetchError
 
@@ -254,6 +269,32 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
                     stored = set(map(str, existing.iloc[:, 0]))
                     if not stored <= set(frame["date"].dt.strftime("%Y-%m-%d")):
                         return _finish({"ok": False, "reason": "shrunk"}, started)
+                    # The tail rule (#1103 CodeRabbit round): every stored row
+                    # EXCEPT the last TAIL_CORRECTABLE_ROWS must carry the same
+                    # Close in the fresh answer (rel 1e-9, so a float rendering
+                    # difference cannot trip it and a real history edit cannot
+                    # slip through); a changed head is a different history, not
+                    # a catch-up. A stored file too narrow to carry a Close
+                    # column cannot demonstrate that either, and is refused.
+                    if len(existing) > TAIL_CORRECTABLE_ROWS:
+                        if existing.shape[1] < 3:
+                            return _finish({"ok": False,
+                                            "reason": "history_changed"}, started)
+                        fresh_close = dict(zip(frame["date"].dt.strftime("%Y-%m-%d"),
+                                               frame["close"]))
+                        head = existing.iloc[: len(existing) - TAIL_CORRECTABLE_ROWS]
+                        stored_close = pd.to_numeric(
+                            head.iloc[:, 2], errors="coerce").to_numpy(dtype=float)
+                        # Every stored date survived the subset guard above, so
+                        # the lookup cannot miss; the NaN default keeps a refusal
+                        # shape rather than a KeyError if that ever breaks.
+                        fresh_vals = np.array(
+                            [fresh_close.get(str(d), np.nan) for d in head.iloc[:, 0]],
+                            dtype=float)
+                        if not bool(np.all(np.isclose(
+                                fresh_vals, stored_close, rtol=1e-9, atol=0.0))):
+                            return _finish({"ok": False,
+                                            "reason": "history_changed"}, started)
 
             data = _render(frame)
             if existing_bytes != data:
