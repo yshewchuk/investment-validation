@@ -1009,6 +1009,9 @@ def price_refresh_command(args, root):
                           "skipped_already_fetched": len(plan["skipped_already_fetched"])}}
 
     report = result["report"]
+    # The ^GSPC pull outcome travels beside the plan/report so both the saved
+    # JSON and the returned dict carry it; it must be set before serialising.
+    report["gspc_daily"] = result.get("gspc_daily")
     out_dir = root / "price_refresh"
     ensure_directory(out_dir)
     out_path = out_dir / f"{plan['session']}.json"
