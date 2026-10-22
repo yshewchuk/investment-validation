@@ -2421,6 +2421,82 @@ TIME_BUDGET_STOP_RC = 124
 SIGINT_GRACE_SECONDS = 180
 
 
+def _become_subreaper() -> bool:
+    """Reparent orphaned descendants here; False (never raises) off Linux or on failure."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+        return ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
+    except Exception:
+        return False
+
+
+# Best-effort and bounded (<= ~5 s of waiting): if subreaper is unavailable only
+# direct/still-attached descendants are found (the `subreaper: no` line says
+# so); a process that survives SIGKILL (D state) is logged and abandoned, never
+# waited on forever. No mutant is excluded or skipped by this change.
+def _reap_descendants(label: str) -> int:
+    try:
+        ppid: dict[int, int] = {}
+        for entry in os.listdir("/proc"):
+            try:
+                ppid[int(entry)] = int(Path(f"/proc/{entry}/stat").read_text()
+                                            .rpartition(")")[2].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+        kids: dict[int, list[int]] = {}
+        for pid, parent in ppid.items():
+            kids.setdefault(parent, []).append(pid)
+        victims: list[int] = []
+        stack = list(kids.get(os.getpid(), []))
+        while stack:
+            pid = stack.pop()
+            victims.append(pid)
+            stack.extend(kids.get(pid, []))
+        cmdlines: dict[int, str] = {}
+        killed = 0
+        for pid in victims:
+            try:
+                cmdlines[pid] = Path(f"/proc/{pid}/cmdline").read_bytes().replace(
+                    b"\0", b" ").decode("utf-8", "replace")[:200]
+            except OSError:
+                cmdlines[pid] = ""
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed += 1
+            except ProcessLookupError:
+                continue
+            except OSError as exc:
+                print(f"[mutation_pilot] {label}: could not kill pid={pid}: {exc}",
+                      file=sys.stderr, flush=True)
+        deadline, pending = time.monotonic() + 5.0, set(victims)
+        while pending and time.monotonic() < deadline:
+            for pid in list(pending):
+                try:
+                    if os.waitpid(pid, os.WNOHANG)[0]:
+                        pending.discard(pid)
+                except ChildProcessError:
+                    pending.discard(pid)
+            if pending:
+                time.sleep(0.05)
+        if not killed:
+            return 0
+        print(f"[mutation_pilot] {label}: killed {killed} leftover descendant process(es)",
+              file=sys.stderr, flush=True)
+        for pid in victims[:20]:
+            print(f"[mutation_pilot]   pid={pid} cmd={cmdlines.get(pid, '')}",
+                  file=sys.stderr, flush=True)
+        if len(victims) > 20:
+            print(f"[mutation_pilot]   ... and {len(victims) - 20} more",
+                  file=sys.stderr, flush=True)
+        return killed
+    except Exception as exc:
+        print(f"[mutation_pilot] {label}: descendant sweep failed: {exc}",
+              file=sys.stderr, flush=True)
+        return 0
+
+
 def _run_with_time_budget(cmd: list[str], cwd: Path, env: dict, budget_s: float) -> int:
     """Run ``cmd`` for at most ``budget_s`` seconds; return its exit code if it
     finishes in time, or ``TIME_BUDGET_STOP_RC`` if this function had to stop it.
@@ -2501,10 +2577,15 @@ def cmd_run(cfg: dict, args) -> int:
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         env[var] = "1"
-    if args.time_budget_seconds:
-        rc = _run_with_time_budget(cmd, work, env, args.time_budget_seconds)
-    else:
-        rc = subprocess.run(cmd, cwd=work, env=env).returncode
+    subreaper = _become_subreaper()
+    print(f"[mutation_pilot] child subreaper: {'yes' if subreaper else 'no'}", flush=True)
+    try:
+        if args.time_budget_seconds:
+            rc = _run_with_time_budget(cmd, work, env, args.time_budget_seconds)
+        else:
+            rc = subprocess.run(cmd, cwd=work, env=env).returncode
+    finally:
+        _reap_descendants("after mutmut exit")
     # On a first run mutants/ did not exist before mutmut; record the digest now
     # so the next run compares against this one.
     reset_on_test_change(work, [], digest)

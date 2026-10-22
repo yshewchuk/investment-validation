@@ -5779,3 +5779,83 @@ def test_the_real_tests_conftest_proven_root_insert_never_taints_every_test():
     assert selected is not None
     assert "tests/v2/ops/test_v2_ops_computed_moves_store.py" in selected
     assert len(selected) < len(tests)
+
+
+# -- descendant sweep after mutmut exits (#1115) ---------------------------------
+
+_SWEEP_PREAMBLE = (
+    "import os, subprocess, sys, time\n"
+    f"sys.path.insert(0, {str(ROOT / 'tools')!r})\n"
+    "import mutation_pilot as pilot\n"
+)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="child subreaper is Linux-only")
+def test_reap_descendants_kills_an_orphaned_session_detached_process():
+    inner = (
+        "import subprocess, sys\n"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],"
+        " start_new_session=True)\n"
+        "print(p.pid, flush=True)\n"
+    )
+    script = _SWEEP_PREAMBLE + (
+        "pilot._become_subreaper()\n"
+        f"inter = subprocess.Popen([sys.executable, '-c', {inner!r}],"
+        " stdout=subprocess.PIPE, start_new_session=True, text=True)\n"
+        "line = inter.stdout.readline().strip()\n"
+        "inter.wait()\n"
+        "sleeper = int(line)\n"
+        "print(f'SLEEPER={sleeper}', flush=True)\n"
+        "count = pilot._reap_descendants('t')\n"
+        "alive = True\n"
+        "try:\n"
+        "    os.kill(sleeper, 0)\n"
+        "except ProcessLookupError:\n"
+        "    alive = False\n"
+        "print(f'COUNT={count} ALIVE={int(alive)}', flush=True)\n"
+    )
+    sleeper_pid = None
+    try:
+        proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                              text=True, timeout=60)
+        match = re.search(r"SLEEPER=(\d+)", proc.stdout)
+        if match:
+            sleeper_pid = int(match.group(1))
+        final = re.search(r"COUNT=(\d+) ALIVE=(\d+)", proc.stdout)
+        assert final, proc.stderr
+        assert int(final.group(1)) >= 1
+        assert final.group(2) == "0"
+        assert "killed" in proc.stderr
+    finally:
+        if sleeper_pid is not None:
+            try:
+                os.kill(sleeper_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="child subreaper is Linux-only")
+def test_reap_descendants_is_silent_and_zero_when_nothing_is_left():
+    script = _SWEEP_PREAMBLE + (
+        "pilot._become_subreaper()\n"
+        "count = pilot._reap_descendants('t')\n"
+        "print('COUNT=' + str(count), flush=True)\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                          text=True, timeout=60)
+    assert "COUNT=0" in proc.stdout, proc.stderr
+    assert proc.stderr == ""
+
+
+def test_cmd_run_sweeps_after_the_budget_stop(monkeypatch, tmp_path):
+    sweeps = []
+
+    def fake_bounded(cmd, cwd, env, budget):
+        raise RuntimeError("bounded runner failed")
+
+    monkeypatch.setattr(pilot, "_become_subreaper", lambda: False)
+    monkeypatch.setattr(pilot, "_run_with_time_budget", fake_bounded)
+    monkeypatch.setattr(pilot, "_reap_descendants", lambda label: sweeps.append(label))
+    with pytest.raises(RuntimeError):
+        _cmd_run(monkeypatch, tmp_path, rc=0, budget=3300)
+    assert sweeps == ["after mutmut exit"]
