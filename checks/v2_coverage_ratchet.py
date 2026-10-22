@@ -208,7 +208,6 @@ PHASE1_SUITE_VERSION = "phase1_coverage_suite.v19"
 
 # Baseline tests whose file was renamed (not just moved) after the baseline was written.
 PHASE1_RENAMED = {
-    "tests/test_v2_ops_native_board_universe.py": "tests/v2/ops/test_v2_ops_native_board_universe.py",
     "tests/test_v2_data_legacy_materialization.py": "tests/v2/data/test_legacy_materialization.py",
     "tests/test_v2_data_rebuild_rollback.py": "tests/v2/data/test_rebuild_rollback.py",
     "tests/test_v2_ops_experiment_reports.py": "tests/v2/ops/test_experiment_reports.py",
