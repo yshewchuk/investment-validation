@@ -301,7 +301,8 @@ and source hashes do not establish that evidence; strict PIT experiment
 admission remains a later prerequisite. The stored build uses `plan_magnitude_folds`,
 `event_history._assemble_history` and `_feature_recipe`, not this adapter.
 The adapter has no fitting, target-join, CLI, provider, report, ledger or final-read
-caller, and no cache, retry, write or partial result; Repository failures propagate.
+caller, and no retry, write or partial result; its only cache is the
+observed-session read (see its failure row); Repository failures propagate.
 
 `magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month,
 evaluation_years, training_start, event_ids=None)` plans metadata-only expanding
@@ -342,7 +343,8 @@ the native planner and `experiments.magnitude_search_plan` for admitted metadata
 | Missing calendar table, snapshot/admission or repository failure | Shared typed error propagates; no source fallback. |
 | Empty calendar / malformed dates or incomplete session window | `CALENDAR_UNAVAILABLE` / `CONTRACT_MISMATCH`; no outcome access. |
 | Catalog transactions | Short read-only SQLite transactions; no planner-owned write transaction or transaction spanning the full call. |
-| Cache, retry, partial write, replay | No cross-call cache, retry, write or partial return; identical pinned inputs give identical plans. |
+| Cache, retry, partial write, replay | The only cache is the observed-session read below; no retry, write or partial return; identical pinned inputs give identical plans. |
+| Observed-session read | The `daily_market` observed days are read once per pinned `Repository` (`pins_snapshots`) and snapshot id; the cache lives and dies with that repository, a second repository or snapshot reads again, and an unpinned repository reads on every call. A failed read caches nothing. Output and `calendar_input` identities are unchanged. |
 
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
@@ -801,7 +803,8 @@ an uncaught traceback instead.
   path, the loaded `ChainIndex` are held once in memory for that run's
   reads only (module-level caches the legacy code held for a mutable store
   are gone, on purpose — a pinned snapshot never changes under a run, so
-  there is nothing to invalidate).
+  there is nothing to invalidate). The one exception is the magnitude
+  observed-session day tuple, held per pinned `Repository` and snapshot id.
   With `index=None`, replay scopes chain availability and loaded chain
   data to the plan's own years, tickers and dates. The resulting
   `ChainIndex` contains only available plan keys. An explicit `index=`
