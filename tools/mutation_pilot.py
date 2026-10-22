@@ -2439,10 +2439,12 @@ def _become_subreaper() -> bool:
 def _reap_descendants(label: str) -> int:
     try:
         ppid: dict[int, int] = {}
+        proc_state: dict[int, str] = {}
         for entry in os.listdir("/proc"):
             try:
-                ppid[int(entry)] = int(Path(f"/proc/{entry}/stat").read_text()
-                                            .rpartition(")")[2].split()[1])
+                fields = Path(f"/proc/{entry}/stat").read_text().rpartition(")")[2].split()
+                ppid[int(entry)] = int(fields[1])
+                proc_state[int(entry)] = fields[0]
             except (OSError, ValueError, IndexError):
                 continue
         kids: dict[int, list[int]] = {}
@@ -2464,7 +2466,8 @@ def _reap_descendants(label: str) -> int:
                 cmdlines[pid] = ""
             try:
                 os.kill(pid, signal.SIGKILL)
-                killed += 1
+                if proc_state.get(pid) != "Z":
+                    killed += 1
             except ProcessLookupError:
                 continue
             except OSError as exc:
@@ -2480,6 +2483,10 @@ def _reap_descendants(label: str) -> int:
                     pending.discard(pid)
             if pending:
                 time.sleep(0.05)
+        if pending:
+            print(f"[mutation_pilot] {label}: {len(pending)} process(es) did not exit "
+                  f"after SIGKILL: {' '.join(str(p) for p in sorted(pending))}",
+                  file=sys.stderr, flush=True)
         if not killed:
             return 0
         print(f"[mutation_pilot] {label}: killed {killed} leftover descendant process(es)",

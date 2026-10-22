@@ -544,7 +544,7 @@ def test_ci_default_enables_debug_for_ops_catalog_state_setup_cfg(tmp_path, monk
     assert "debug = true" not in (other / "setup.cfg").read_text()
 
 
-def _cmd_run(monkeypatch, tmp_path, rc, budget=None):
+def _cmd_run(monkeypatch, tmp_path, rc, budget=None, sweep=None, subreaper=None):
     """Run cmd_run with mutmut's subprocess stubbed; return (rc_out, calls)."""
     work = tmp_path / "work"
     (work / "mutants").mkdir(parents=True)
@@ -554,6 +554,11 @@ def _cmd_run(monkeypatch, tmp_path, rc, budget=None):
     monkeypatch.setattr(pilot, "tests_digest", lambda *a: "digest")
     monkeypatch.setattr(pilot, "reset_on_test_change", lambda *a, **k: 0)
     monkeypatch.setattr(mr, "snapshot", lambda *a, **k: {})
+    monkeypatch.setattr(pilot, "_become_subreaper",
+                        subreaper if subreaper is not None else (lambda: False))
+    monkeypatch.setattr(pilot, "_reap_descendants",
+                        (lambda label: sweep.append(label)) if sweep is not None
+                        else (lambda label: 0))
     calls = []
 
     def fake_run(cmd, **kw):
@@ -5826,6 +5831,7 @@ def test_reap_descendants_kills_an_orphaned_session_detached_process():
         assert int(final.group(1)) >= 1
         assert final.group(2) == "0"
         assert "killed" in proc.stderr
+        assert "time.sleep(300)" in proc.stderr
     finally:
         if sleeper_pid is not None:
             try:
@@ -5853,9 +5859,32 @@ def test_cmd_run_sweeps_after_the_budget_stop(monkeypatch, tmp_path):
     def fake_bounded(cmd, cwd, env, budget):
         raise RuntimeError("bounded runner failed")
 
-    monkeypatch.setattr(pilot, "_become_subreaper", lambda: False)
     monkeypatch.setattr(pilot, "_run_with_time_budget", fake_bounded)
-    monkeypatch.setattr(pilot, "_reap_descendants", lambda label: sweeps.append(label))
     with pytest.raises(RuntimeError):
-        _cmd_run(monkeypatch, tmp_path, rc=0, budget=3300)
+        _cmd_run(monkeypatch, tmp_path, rc=0, budget=3300, sweep=sweeps)
     assert sweeps == ["after mutmut exit"]
+
+
+def test_cmd_run_sweeps_once_on_a_normal_return(monkeypatch, tmp_path):
+    sweeps = []
+    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=0, sweep=sweeps)
+    assert rc == 0  # the subprocess exit code is returned unchanged
+    assert len(calls) == 1
+    assert sweeps == ["after mutmut exit"]
+
+
+def test_cmd_run_becomes_a_subreaper_once(monkeypatch, tmp_path):
+    seen = []
+    rc, _ = _cmd_run(monkeypatch, tmp_path, rc=0,
+                     subreaper=lambda: seen.append(1) or False)
+    assert rc == 0
+    assert seen == [1]
+
+
+def test_reap_descendants_never_raises(monkeypatch, capsys):
+    def boom(_path):
+        raise OSError("boom")
+
+    monkeypatch.setattr(pilot.os, "listdir", boom)
+    assert pilot._reap_descendants("t") == 0
+    assert "descendant sweep failed" in capsys.readouterr().err
