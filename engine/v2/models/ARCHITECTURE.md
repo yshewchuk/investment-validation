@@ -307,7 +307,7 @@ of the newest nightly jobs, so a score older than that window is not found.
 
 ### 2.2.2 Bootstrap cycle (design, #1102; not implemented)
 
-**Problem.** The live incumbent `p5-6-2026-09-21b` is a legacy-bootstrapped release: its catalog is not under `deployment/releases/<id>/` and records no `sources.pool_cutoff`, so every nightly's `phase5_state_stage` refuses `PRIOR_MISMATCH` ("prior release could not be read") and no pool advances. **Decision (user, 2026-10-21):** when no usable prior release exists, the nightly runs a full release cycle through the standard pool-release assembly with the session's data date as the cutoff. It does not refuse, there is no one-time store repair, and no cutoff is picked by hand. Later nightlies carry forward (§2.2) from the bootstrapped release, so the cost is paid once per store wipe or rebuild.
+**Problem.** The live incumbent `p5-6-2026-09-21b` is a legacy-bootstrapped release: its catalog is not under `deployment/releases/<id>/` and records no `sources.pool_cutoff`, so every nightly's `phase5_state_stage` refuses `PRIOR_MISMATCH` ("prior release could not be read") and no pool advances. **Decision (user, 2026-10-21):** when the prior release has no pool catalog (classes `NONE` and `NO_POOL_CATALOG` below; a `DAMAGED` prior is not bootstrapped), the nightly runs a full release cycle through the standard pool-release assembly with the session's data date as the cutoff. It does not refuse, there is no one-time store repair, and no cutoff is picked by hand. Later nightlies carry forward (§2.2) from the bootstrapped release, so the cost is paid once per store wipe or rebuild.
 
 **Standard tool check.** No third-party tool covers this: the assembly is repo-specific (champion registry, content-addressed objects, catalog). The bootstrap reuses the state assembly of `tools/phase5_prepare_release.py` (`model_release`, `build_states`, `write_release`) instead of a second implementation; code slice 2 moves that logic into `engine/v2/models` so the job and the CLI share one path.
 
@@ -316,7 +316,7 @@ of the newest nightly jobs, so a score older than that window is not found.
 | Prior state | Class | Outcome |
 |---|---|---|
 | Pointer absent (nothing ever promoted) | `NONE` | bootstrap; `none` stands for the prior id in phase keys and `expected_previous_release_id` is null |
-| Catalog file absent at `catalog_path`, or a valid catalog whose `sources` has no `pool_cutoff` (legacy-bootstrapped) | `NO_POOL_CATALOG` | bootstrap against that pointer id |
+| Catalog file absent at `catalog_path` for an id that does not start with `pools-` (a release this cycle stages always has a catalog, so an absent one under a `pools-*` id is `DAMAGED`), or a valid catalog whose `sources` has no `pool_cutoff` (legacy-bootstrapped) | `NO_POOL_CATALOG` | bootstrap against that pointer id |
 | Catalog valid with `pool_cutoff` | `USABLE` | nightly carry-forward (§2.2), unchanged |
 | Catalog present but a symlink, not a regular file, oversize, unparseable, wrong `release_id`/`deployment_id`, or malformed rows | `DAMAGED` | no bootstrap: refuses `VALIDATION_FAILED` (`details.code` `PRIOR_MISMATCH`); a damaged store is operator recovery (#154), never silently replaced |
 
@@ -330,7 +330,8 @@ The panel identity comes from the pinned snapshot, never from `--tier3-snapshot 
 
 | Condition | Outcome |
 |---|---|
-| Prior `DAMAGED`, or `USABLE` while `mode` is `bootstrap` | `VALIDATION_FAILED`, fixed message, `details.code` |
+| Prior `DAMAGED` | `VALIDATION_FAILED`, fixed message, `details.code` `PRIOR_MISMATCH` |
+| Prior `USABLE` while `mode` is `bootstrap` | `VALIDATION_FAILED`, fixed message, `details.code` `PRIOR_USABLE` |
 | A training phase fails | the cycle stalls for operator recovery (§2.2.1 R3) |
 | Registry drift, bindings differ from the incumbent's, an empty member, or a bound file that is self-inconsistent | `VALIDATION_FAILED`; nothing promoted |
 | Candidate id present with different content | `ID_CONFLICT` in `details` (§2.2 R6) |
@@ -349,7 +350,7 @@ The panel identity comes from the pinned snapshot, never from `--tier3-snapshot 
 
 **Cost.** Estimated from the 09-21 P5-3 build logs (`/root/p5-build-logs`; the same training kinds, one session): paired residual 0.2 min, board analog 0.9 min (56 keys, estimated peak 2.54 GB), and seven payoff, recalibration and trailing runs at 0.0-0.1 min each. That is about 1.5 minutes sequential with a 2.5 GB peak; the 217 MB object store (`release-B/deployment/objects`) bounds the assembly write. Not measured: the driver-pool and chooser-pool training and the in-job assembly, which do not exist yet. By these numbers the bootstrap is not a heavy step, provided it avoids the panel hash above. Code slice 4 records the first live receipt (wall time, peak RSS) here; if the peak exceeds the training profile, the supervisor runs that first bootstrap under `bounded_run`, since the supervisor runs any heavy step.
 
-**Split list** (code, in order, each its own PR after this design): 1 `classify_prior`, the `mode` parameter, nullable `carried_from` in the catalog and light checks (about 150 lines); 2 move the from-scratch assembly into `engine/v2/models`, shared by the CLI and the job (about 350); 3 sidecar bootstrap phases and keys, and the §2.2.1 R1 change (about 250); 4 measured receipt and doc update. #1102 stays open until slice 3 lands; until then the nightly keeps refusing.
+**Split list** (code, in order, each its own PR after this design): 1 `classify_prior`, the `mode` parameter, nullable `carried_from` in the catalog and light checks (about 150 code, 120 test, 20 doc lines); 2 move the from-scratch assembly into `engine/v2/models`, shared by the CLI and the job (about 350 code, 150 test, 20 doc); 3 sidecar bootstrap phases and keys, and the §2.2.1 R1 change (about 250 code, 150 test, 30 doc); 4 measured receipt and doc update (about 0 code, 0 test, 15 doc). #1102 stays open until slice 3 lands; until then the nightly keeps refusing.
 
 ### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
 
