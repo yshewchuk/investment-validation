@@ -1002,6 +1002,8 @@ def _assert_bootstrap_refusal(tmp_path, staging, parameters, message, code):
 def test_bootstrap_refuses_a_damaged_prior_before_any_write(tmp_path, monkeypatch):
     parameters, staging = _wire(tmp_path, monkeypatch, mode="bootstrap")
     phase5_release.catalog_path(tmp_path, "prior1").write_bytes(b"{not json")
+    monkeypatch.setattr("checks.phase5_release_assembly.prior_carry_set",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("carry path reached")))
     _assert_bootstrap_refusal(tmp_path, staging, parameters,
                               "prior release could not be read", "PRIOR_MISMATCH")
 

@@ -454,9 +454,13 @@ def classify_prior(release_root: Path, prior_release_id) -> PriorClass:
         _parse_day(sources["pool_cutoff"], "PRIOR_MISMATCH",
                    "prior pool_cutoff is not an ISO date")
         _prior_pool_rows(catalog.get("members"))
-    except ReleaseAssemblyRefusal:
-        return PriorClass(PRIOR_DAMAGED, "the prior catalog is malformed")
-    except _STRAY_ERRORS:
+        _, carried = prior_carry_set(release_root, prior_release_id)
+        _verify_carried_rows(deployment_root(Path(release_root)), catalog)
+        _verify_objects(deployment_root(Path(release_root)), carried)
+        staged = deployment.resolve_release(deployment_root(Path(release_root)), prior_release_id)
+        if staged.deployment_id != catalog.get("deployment_id"):
+            return PriorClass(PRIOR_DAMAGED, "the prior catalog disagrees with its staged release")
+    except (ReleaseAssemblyRefusal, deployment.DeploymentError, OSError, *_STRAY_ERRORS):
         return PriorClass(PRIOR_DAMAGED, "the prior catalog is malformed")
     return PriorClass(PRIOR_USABLE, "the prior catalog has a pool_cutoff")
 
