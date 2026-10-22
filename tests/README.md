@@ -109,9 +109,17 @@ Nothing in the suite waits unboundedly any more:
 These are failures, not skips, on purpose: the check did not run, and a
 skip is easy to miss when the rest of the summary is green. To separate
 environment from code, `grep -E "RESOURCE WAIT|TIMEOUT:"` the output and rerun
-those files alone on a quieter box. `TEST_POLICY` caps every profile at
-256 MiB, so a memory `RESOURCE WAIT` means MemAvailable was below about
-0.75 GiB for a whole minute.
+those files alone on a quieter box. `TEST_POLICY` caps each profile at
+384 MiB (or its original lower limit); admission also reserves host headroom.
+Only the real snapshot-worker fixture raises `io_fetch` to 1 GiB when its
+already-imported data module has mutmut's actual generated wrapper. The
+authored-source fixture stays at 384 MiB; production `io_fetch` stays at
+512 MiB, and watchdog rejection still applies above either fixture limit.
+Generated-source compilation was measured near 674 MiB versus 197 MiB for
+the authored import. The mutation driver caps `data_incremental` at one
+child, including when CI requests `nproc`; other shards are unchanged.
+This limits concurrent fixture reservations, not total runner RSS, and
+does not provision a larger GitHub runner or increase a time budget.
 
 Timeout stderr lookup and post-signal growth polling use the Service's artifact
 root, even when the catalog is elsewhere. The tail still reads only the latest

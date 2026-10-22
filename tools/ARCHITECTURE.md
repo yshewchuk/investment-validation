@@ -4,6 +4,10 @@
 
 Standalone operator tools. `bounded_run.py` is the wrapper every heavy job runs under: CPU pinning, memory, swap and box-floor limits, test slots and the heavy reservation. Its module docstring is the flag reference; `engine/v2/ops/ARCHITECTURE.md` describes it as an executor adapter.
 
+## Mutation snapshot-worker budget (#581)
+
+`mutation_pilot.py` caps `data_incremental` at one mutmut child, even when a caller requests more. This contains concurrent reservations for its synthetic snapshot worker: only actual generated-code instrumentation permits that fixture's `io_fetch` reservation to rise from 384 MiB to 1 GiB. Authored-source and production policies, admission checks, watchdog enforcement and time budgets are unchanged. This is not a whole-run RSS limit or a larger GitHub runner. `tests/v2/integration/test_mutation_worker_memory.py` checks instrumentation identity, unchanged policies and rejection above both fixture ceilings.
+
 ## `bounded_run.py`: disk-used ceiling (#1119)
 
 Opt-in guard against a heavy job filling the host disk (WSL's virtual disk never shrinks, so growth past its largest size takes host space). The ceiling is an absolute used-bytes figure, `--max-disk-used-gb G` or, when the flag is absent, the environment variable `BOUNDED_RUN_MAX_DISK_USED_GB`; no value is committed to the repository. Unset means off and nothing below applies. A value that is not a positive finite number is a usage error (exit 2).

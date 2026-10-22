@@ -544,7 +544,7 @@ def test_ci_default_enables_debug_for_ops_catalog_state_setup_cfg(tmp_path, monk
     assert "debug = true" not in (other / "setup.cfg").read_text()
 
 
-def _cmd_run(monkeypatch, tmp_path, rc, budget=None):
+def _cmd_run(monkeypatch, tmp_path, rc, budget=None, module="toy", max_children=None):
     """Run cmd_run with mutmut's subprocess stubbed; return (rc_out, calls)."""
     work = tmp_path / "work"
     (work / "mutants").mkdir(parents=True)
@@ -561,9 +561,9 @@ def _cmd_run(monkeypatch, tmp_path, rc, budget=None):
         return types.SimpleNamespace(returncode=rc)
 
     monkeypatch.setattr(pilot.subprocess, "run", fake_run)
-    args = types.SimpleNamespace(module="toy", fresh=False, max_children=None, globs=[],
+    args = types.SimpleNamespace(module=module, fresh=False, max_children=max_children, globs=[],
                                  time_budget_seconds=budget)
-    return pilot.cmd_run({"defaults": DIAG_DEFAULTS, "modules": {"toy": {}}}, args), calls
+    return pilot.cmd_run({"defaults": DIAG_DEFAULTS, "modules": {module: {}}}, args), calls
 
 
 def test_cmd_run_preserves_the_exit_code_without_rerunning(monkeypatch, tmp_path):

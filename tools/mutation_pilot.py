@@ -2480,6 +2480,10 @@ def cmd_run(cfg: dict, args) -> int:
     # The verdicts before this run, so the export can mark what it re-tested.
     (work / SNAPSHOT_NAME).write_text(json.dumps(snapshot(work, files)))
     children = args.max_children or int(cfg["defaults"]["max_children"])
+    # Its instrumented snapshot fixture reserves 1 GiB for a real worker.
+    # Do not multiply that allowance by CI's --max-children "$(nproc)".
+    if args.module == "data_incremental":
+        children = min(children, 1)
     cmd = [sys.executable, "-u", "-m", "mutmut", "run", "--max-children", str(children), *args.globs]
     print(f"[mutation_pilot] {args.module}: {' '.join(cmd[2:])}  (cwd {work})", flush=True)
     # mutmut forks one worker per mutant from a process that has already run

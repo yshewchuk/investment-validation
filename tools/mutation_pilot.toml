@@ -400,6 +400,7 @@ mutate = [
     "engine/v2/data/massive_refresh.py",
 ]
 tests = [
+    "tests/v2/integration/test_mutation_worker_memory.py",
     "tests/v2/ops/test_massive_accounting_hooks.py",
     "tests/v2/ops/test_massive_acquisition.py",
     "tests/v2/data/test_computed_moves.py",
