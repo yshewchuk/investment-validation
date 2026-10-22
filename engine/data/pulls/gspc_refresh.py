@@ -10,11 +10,14 @@ positional ``date,adj,close,high,low,open,volume`` rows.
 
 Guards, because this file feeds a champion-model feature: a fetch or parse
 failure leaves the stored bytes untouched, and a fresh body may never shrink
-the series' start or move its end backwards — the whole point is catching up,
-so a smaller or older answer is refused by reason instead of written. An
-identical rewrite is skipped entirely: ``panel._gspc_series`` caches on file
-mtime, so touching the file with the same bytes would invalidate it for
-nothing.
+the series' start, move its end backwards, or drop a stored date — the whole
+point is catching up, so a smaller, older or hole-ridden answer is refused by
+reason instead of written. An identical rewrite is skipped entirely:
+``panel._gspc_series`` caches on file mtime, so touching the file with the
+same bytes would invalidate it for nothing. Every write goes through
+``engine.paths.assert_writable`` (``GSPC_DAILY`` is its one
+``WRITABLE_EXCEPTIONS`` carve-out, #1103); a ``PermissionError`` there is
+refused as reason ``unwritable``, never raised.
 
 ``live=True`` plus a caller-supplied ``refetch_token`` follow
 ``price_refresh.fetch_one``: the cache key for ``{"ticker": "^GSPC",
@@ -31,6 +34,8 @@ import time
 from pathlib import Path
 
 import pandas as pd
+
+from engine import paths
 
 __all__ = ["refresh_gspc_daily", "HEADER_LINES", "MAX_EXISTING_BYTES"]
 
@@ -110,12 +115,15 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
     whole-run condition). Returns ``{"ok": True, "last_date":
     "YYYY-MM-DD", "rows": N}`` or ``{"ok": False, "reason": ...}`` with the
     reason in ``fetch_failed`` / ``unparseable`` / ``shrunk`` /
-    ``older_than_existing`` / ``unreadable``.
+    ``older_than_existing`` / ``unreadable`` / ``unwritable``.
     """
-    from engine.data.sources.base import FetchError
+    from engine.data.sources.base import CredentialRotated, FetchError
 
     started = time.time()
-    path = Path(path)
+    try:
+        path = Path(path)
+    except (TypeError, OSError, ValueError):
+        return _finish({"ok": False, "reason": "unreadable"}, started)
     _log(f"refresh {path} starting")
 
     try:
@@ -123,6 +131,8 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
             "yfinance", "history", {"ticker": "^GSPC", "period": "max"},
             live=True, note="gspc-refresh", refetch_token=refetch_token,
         )
+    except CredentialRotated:
+        raise
     except (FetchError, OSError, ValueError):
         return _finish({"ok": False, "reason": "fetch_failed"}, started)
     if rec is None or rec.status != 200:
@@ -133,19 +143,36 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
         return _finish({"ok": False, "reason": "unparseable"}, started)
 
     existing_bytes = None
-    if path.exists():
-        # Bound the read before touching the file: a real CSV under the size
-        # ceiling, or refuse with the file untouched. A directory or an
-        # oversized file is not this pull's target, and a parse failure of the
-        # stored bytes never blindly overwrites it.
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        fd = None  # first write: nothing to guard against
+    except (OSError, ValueError):
+        return _finish({"ok": False, "reason": "unreadable"}, started)
+    if fd is not None:
         try:
-            st = os.stat(path)
+            st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_EXISTING_BYTES:
                 return _finish({"ok": False, "reason": "unreadable"}, started)
-            existing_bytes = path.read_bytes()
+            # Read at most MAX_EXISTING_BYTES + 1 so a file that grew between
+            # fstat and the read (or lied about its size) is refused, not
+            # slurped whole into memory.
+            chunks = []
+            remaining = MAX_EXISTING_BYTES + 1
+            while remaining > 0:
+                block = os.read(fd, min(remaining, 1 << 20))
+                if not block:
+                    break
+                chunks.append(block)
+                remaining -= len(block)
+            if remaining <= 0:
+                return _finish({"ok": False, "reason": "unreadable"}, started)
+            existing_bytes = b"".join(chunks)
             existing = pd.read_csv(io.BytesIO(existing_bytes), skiprows=3, header=None)
         except (OSError, ValueError):
             return _finish({"ok": False, "reason": "unreadable"}, started)
+        finally:
+            os.close(fd)
         if len(existing):
             if len(frame) < len(existing):
                 return _finish({"ok": False, "reason": "shrunk"}, started)
@@ -155,12 +182,22 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
                 return _finish({"ok": False, "reason": "shrunk"}, started)
             if pd.notna(existing_last) and frame["date"].iloc[-1] < existing_last:
                 return _finish({"ok": False, "reason": "older_than_existing"}, started)
+            # Every stored date must survive into the new series, or the rewrite
+            # would punch a hole the panel reads as a gap in the market history.
+            stored = set(map(str, existing.iloc[:, 0]))
+            if not stored <= set(frame["date"].dt.strftime("%Y-%m-%d")):
+                return _finish({"ok": False, "reason": "shrunk"}, started)
 
     data = _render(frame)
     if existing_bytes != data:
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        tmp.parent.mkdir(parents=True, exist_ok=True)
+        for guard in (path, tmp):
+            try:
+                paths.assert_writable(guard)
+            except PermissionError:
+                return _finish({"ok": False, "reason": "unwritable"}, started)
         try:
+            tmp.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_bytes(data)
             os.replace(tmp, path)
         finally:

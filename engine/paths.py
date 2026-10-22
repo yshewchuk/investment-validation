@@ -84,8 +84,14 @@ LEGACY_TRADE_SETS = {
     "S3_runup": (EP_STRATEGIES / "s3_pre_earnings_long_vol" / "data" / "trades_real_t14.csv", "t10_date", "exit_date"),
 }
 
-#: Everything above this line is read-only to engine code.
+#: Everything above this line is read-only to engine code, except for the one
+#: file carved out by ``WRITABLE_EXCEPTIONS`` below.
 GRANDFATHERED = (EP, BT, RAW_POLYGON_LEGACY)
+
+#: The one re-fetchable series refreshed by engine.data.pulls.gspc_refresh
+#: (#1103); the refresh refuses to shrink or backdate it. Its atomic-replace
+#: staging siblings (``gspc_daily.csv.<pid>.tmp``) are writable too.
+WRITABLE_EXCEPTIONS = (GSPC_DAILY,)
 
 # --------------------------------------------------------------------------
 # new three-tier store
@@ -156,8 +162,19 @@ def raw_fetch_path(source: str, key: str) -> Path:
 
 
 def is_grandfathered(path: Path | str) -> bool:
-    """True if ``path`` lies inside a read-only research tree."""
+    """True if ``path`` lies inside a read-only research tree.
+
+    ``WRITABLE_EXCEPTIONS`` and their staging siblings (same parent, name
+    starting with the exception's name plus ``"."``) are never grandfathered:
+    the refresh writes its one exception atomically through such a temp file.
+    """
     p = Path(path).resolve()
+    for exception in WRITABLE_EXCEPTIONS:
+        target = exception.resolve()
+        if p == target:
+            return False
+        if p.parent == target.parent and p.name.startswith(target.name + "."):
+            return False
     for root in GRANDFATHERED:
         try:
             p.relative_to(root.resolve())

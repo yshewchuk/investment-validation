@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from engine.data.sources.base import FetchError
+from engine.data.sources.base import CredentialRotated, FetchError
 from engine.data.pulls.gspc_refresh import HEADER_LINES, refresh_gspc_daily
 
 DATES = ["2026-08-25", "2026-08-26", "2026-08-27"]

@@ -32,6 +32,31 @@ STALE_MATCH = "regime features are stale"
 SPY_COLS = ("spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol5",
             "spy_vol20", "spy_vol60", "spy_vol252", "spy_vol20_rel252")
 
+#: Hand-computed market-state values at the anchor row — the series end, row
+#: 299 of the 300-row synthetic file below, whose closes are c_i = 100 + 0.5*i,
+#: so the spot is c_299 = 249.5. Derived once from the definitions in
+#: ``panel.add_regime_features`` (a scratch run of exactly these formulas) and
+#: pasted as literals, so the tests pin the computed block against arithmetic
+#: rather than re-deriving the expectation from the implementation:
+#:   spy_retW          = (c299 / c(299-W) - 1) * 100
+#:                       ret21: 10.5/239.0; ret63: 31.5/218.0; ret252: 126/123.5
+#:   spy_dd252         = (c299 / max(c48..c299) - 1) * 100 = 0.0 (rising series)
+#:   spy_volW          = sample std (ddof=1) of the simple returns
+#:                       c(k+1)/c(k) - 1 over k = 299-W .. 298,
+#:                       times sqrt(252) * 100
+#:   spy_vol20_rel252  = spy_vol20 / spy_vol252 - 1
+SPY_AT_ANCHOR = {
+    "spy_ret21": 4.3933054393305415,
+    "spy_ret63": 14.449541284403677,
+    "spy_ret252": 102.0242914979757,
+    "spy_dd252": 0.0,
+    "spy_vol5": 0.010202677511272283,
+    "spy_vol20": 0.03936749340495202,
+    "spy_vol60": 0.12668884515903708,
+    "spy_vol252": 0.9111766241585297,
+    "spy_vol20_rel252": -0.9567948821763202,
+}
+
 
 @pytest.fixture(autouse=True)
 def _fresh_dedup_state(monkeypatch):
@@ -39,10 +64,10 @@ def _fresh_dedup_state(monkeypatch):
     monkeypatch.setattr(panel, "_STALE_REGIME_WARNED", set())
 
 
-def _write_gspc(path, periods: int = 400) -> None:
-    """The legacy multi-header ^GSPC layout with strictly-rising closes."""
+def _write_gspc(path, periods: int = 300) -> None:
+    """The legacy multi-header ^GSPC layout, closes = 100 + 0.5*i rising."""
     dates = pd.date_range(end=SERIES_END, periods=periods, freq="D")
-    closes = 1000.0 + np.arange(len(dates), dtype=float)
+    closes = 100.0 + 0.5 * np.arange(len(dates), dtype=float)
     lines = [
         "Price,Adj Close,Close,High,Low,Open,Volume",
         "Ticker,^GSPC,^GSPC,^GSPC,^GSPC,^GSPC,^GSPC",
@@ -72,12 +97,12 @@ def test_stale_frame_warns_once_and_a_second_call_stays_quiet(tmp_path):
 
     # Values are identical with and without the warning, and they are the real
     # anchor: the last close strictly before the decision date is the series
-    # end (row 399). The staleness path is diagnostic only.
+    # end (row 299). The staleness path is diagnostic only.
     pd.testing.assert_frame_equal(first, second)
-    raw = pd.read_csv(path, skiprows=3, header=None)
-    closes = raw[2].to_numpy(dtype=float)
-    expected = (closes[399] / closes[399 - 21] - 1.0) * 100
-    assert first["spy_ret21"].iloc[0] == pytest.approx(expected)
+    # Every market-state value is pinned to its hand-computed literal, so the
+    # test checks arithmetic, not the implementation against itself.
+    for col, pinned in SPY_AT_ANCHOR.items():
+        assert first[col].iloc[0] == pytest.approx(pinned), col
     assert first["regime_asof"].iloc[0] == np.datetime64(str(SERIES_END.date()))
 
     # Every market-state value equals what the SAME file yields on a decision
@@ -118,9 +143,11 @@ def test_decision_within_seven_days_does_not_warn(tmp_path, capsys):
 
     assert [w for w in caught if "stale" in str(w.message)] == []
     assert "[regime] WARNING" not in capsys.readouterr().err
-    # It still computed the block normally: the series end is the anchor.
+    # It still computed the block normally: the series end is the anchor, so
+    # every value matches the same hand-computed literals as the stale call.
     assert out["regime_asof"].iloc[0] == np.datetime64(str(SERIES_END.date()))
-    assert np.isfinite(out["spy_ret21"].iloc[0])
+    for col, pinned in SPY_AT_ANCHOR.items():
+        assert out[col].iloc[0] == pytest.approx(pinned), col
 
 
 def test_boundary_exactly_seven_days_quiet_eight_days_warns(tmp_path, capsys):
