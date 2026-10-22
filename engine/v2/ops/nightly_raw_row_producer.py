@@ -33,6 +33,7 @@ from engine.v2.data.errors import DataError, fail
 from engine.v2.data.price_history_query import tickers_with_price_history
 from engine.v2.data.price_history_table import PRICE_HISTORY_TABLE_NAME
 from engine.v2.data.repository import Repository
+from engine.v2.domain.generation import DISABLED
 from engine.v2.features.panel_row_inputs import PanelRowInputs, scan_panel_row
 from engine.v2.ops import worker_progress
 from engine.v2.ops.errors import OpsError
@@ -58,6 +59,8 @@ _REFUSAL_SCHEMA_VERSION = "native_score_batch_producer_refusals.v1.0"
 _INTRADAY_CODE = "INTRADAY_EVENT_NOT_ADMITTED"
 #: Fixed public-safe detail text (CWE-209): never exception text or a key value.
 _INTRADAY_DETAIL = "the board request carries an intraday event timestamp"
+_UNSUPPORTED_CODE = "UNSUPPORTED_STRATEGY"
+_UNSUPPORTED_DETAIL = "the strategy has no native scoring support"
 _PANEL_HISTORY_DETAIL = "the pinned snapshot lacks required earlier panel sessions"
 _PRICE_HISTORY_CODE = "PRICE_HISTORY_NOT_AVAILABLE"
 _PRICE_HISTORY_DETAIL = "the pinned snapshot has no price history for this ticker"
@@ -242,7 +245,10 @@ def build_native_score_batch_events(
     ``tier4_row`` -- always ``{}`` -- ``quote_rows``, ``quote_status``) per fully
     composed request, plus the disjoint ``producer_refusals.v1.0`` document. An
     empty enumeration returns both empty before any calendar, panel, spot or
-    quote read, and an all-intraday one returns only its refusals. A missing
+    quote read, and an all-intraday one returns only its refusals. A key whose
+    strategy is disabled (CAL-P, CND-P) becomes a per-key
+    ``UNSUPPORTED_STRATEGY`` refusal at its original position, refused before
+    the ``option_chains`` check and any further read. A missing
     ticker history or missing/unusable exact-session spot becomes a
     per-key ``PRICE_HISTORY_NOT_AVAILABLE`` refusal at its original position.
     ``NO_RESOLVABLE_EXPIRY``, ``EVENT_NOT_FOUND``, ``IDENTITY_CONFLICT``,
@@ -282,6 +288,8 @@ def _build_events(repository: Repository, snapshot: SnapshotRef, *,
     for position, key in enumerate(requests):
         if _is_intraday(key):
             refusals[position] = _refusal(key, _INTRADAY_CODE, _INTRADAY_DETAIL)
+        elif key.strategy in DISABLED:
+            refusals[position] = _refusal(key, _UNSUPPORTED_CODE, _UNSUPPORTED_DETAIL)
         else:
             admitted.append((position, key))
     had_non_intraday = bool(admitted)
