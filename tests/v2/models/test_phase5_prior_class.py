@@ -166,8 +166,9 @@ def test_tampered_staged_manifest_is_damaged(tmp_path):
     _stage_prior(tmp_path)
     manifest = phase5_release.staged_manifest_path(
         phase5_release.deployment_root(tmp_path), "prior1")
-    with manifest.open("ab") as handle:
-        handle.write(b"tampered")
+    body = json.loads(manifest.read_bytes())
+    body["release"]["deployment_id"] = "x"
+    manifest.write_text(json.dumps(body))
     cls = _cls(tmp_path, "prior1")
     assert cls.kind == assembly.PRIOR_DAMAGED
     assert cls.reason == "the prior catalog disagrees with its staged release"

@@ -959,6 +959,18 @@ def test_bootstrap_mode_accepts_a_null_prior():
         None, _params(mode="bootstrap", prior_release_id=None)) == []
 
 
+def test_bootstrap_with_an_unsafe_non_null_prior_is_reported():
+    assert state_stage_parameter_problems(
+        None, _params(mode="bootstrap", prior_release_id="../x")) == [
+            "prior_release_id and release_id must be safe non-empty ids"]
+
+
+def test_bootstrap_with_prior_equal_to_release_is_reported():
+    assert state_stage_parameter_problems(
+        None, _params(mode="bootstrap", prior_release_id="cand1")) == [
+            "release_id must differ from prior_release_id"]
+
+
 def test_unknown_mode_is_reported():
     assert state_stage_parameter_problems(
         None, _params(mode="sideways")) == ["mode must be 'carry' or 'bootstrap'"]

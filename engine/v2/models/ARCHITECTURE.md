@@ -268,7 +268,7 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 - Output: a re-verified candidate release (never `DEPLOYED`) and `stage_result.json`. The
   inventory comes from the legacy champion registry under the new id; drift refuses before any write.
 - Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a
-  `ReleaseAssemblyRefusal`, `members`, `member`, `issues`, `months`; plan-time `INVALID_REQUEST`
+  `ReleaseAssemblyRefusal`, or `PRIOR_USABLE`/`BOOTSTRAP_NOT_BUILT` in `bootstrap` mode (§2.2.2), `members`, `member`, `issues`, `months`; plan-time `INVALID_REQUEST`
   carries `problems`). A trailing object's month may not start after `cutoff`. An unreadable prior
   refuses "prior release could not be read"; an inventory artifact or registry that is a symlink,
   not a regular file, or over its size cap refuses "release inventory could not be built". One attempt only.
@@ -314,7 +314,7 @@ of the newest nightly jobs, so a score older than that window is not found.
 
 **Standard tool check.** No third-party tool covers this: the assembly is repo-specific (champion registry, content-addressed objects, catalog). The bootstrap reuses the state assembly of `tools/phase5_prepare_release.py` (`model_release`, `build_states`, `write_release`) instead of a second implementation, shared by the job and the CLI.
 
-**Classification.** The sidecar and the job both classify the prior with one read-only helper, `classify_prior(release_root, prior_release_id)`; it never writes:
+**Classification.** The job (now) and the sidecar (from the sidecar slice) classify the prior with one read-only helper, `classify_prior(release_root, prior_release_id)`; it never writes:
 
 | Prior state | Class | Outcome |
 |---|---|---|
