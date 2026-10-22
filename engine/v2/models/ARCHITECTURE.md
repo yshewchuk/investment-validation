@@ -297,7 +297,7 @@ of the newest nightly jobs, so a score older than that window is not found.
 
 | Rule | Behaviour |
 |---|---|
-| R1 verified input | session and manifest id from the latest succeeded `finality`/`features` job (its `legacy_manifest.json` binding); prior release from the live pointer; a missing pointer or a prior without a pool catalog would start a bootstrap cycle (design in #1102, see §2.2.2; not built: today nothing is submitted for a missing pointer and the stage refuses) |
+| R1 verified input | session and manifest id from the latest succeeded `finality`/`features` job (its `legacy_manifest.json` binding); prior release from the live pointer; a missing pointer or a prior without a pool catalog would start a bootstrap cycle (design in #1102, see §2.2.2; not built: today a missing pointer submits nothing, and a catalog-less prior submits the training jobs and the stage refuses `PRIOR_MISMATCH`) |
 | R7 serve lifetime | the scheduled serve (not the snapshot-import serve) also stays up while the latest session's pool cycle is pending: a candidate release for it is not yet deployed, or a phase job (including the promote) is still running, and no phase job has failed; a missing release root or a failed phase ends the wait, and the serve deadline still bounds it |
 | R2 cache | durable job and pointer state is re-read each tick; no memo (reads are cheap indexed selects) |
 | R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); an incumbent changed before staging starts a new cycle under new keys; once a candidate is staged, the staged id or the guarded promote refuses and the cycle stalls |
@@ -307,7 +307,7 @@ of the newest nightly jobs, so a score older than that window is not found.
 
 ### 2.2.2 Bootstrap cycle (not implemented)
 
-Unimplemented design; it lives in issue #1102, moved out of this contract document (#1130). Today a missing pointer, or a prior release without a pool catalog, submits nothing and the stage refuses.
+Unimplemented; the design is in issue #1102. Today a missing pointer submits nothing. A readable prior without a pool catalog submits the three training jobs and then `phase5_state_stage`, which refuses `PRIOR_MISMATCH` ("prior release could not be read").
 
 ### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
 
