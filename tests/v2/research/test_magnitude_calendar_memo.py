@@ -1,10 +1,17 @@
 """Observed-session read memo: one daily_market pass per pinned repository and snapshot."""
+import gc
+
 import pytest
 
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.research import magnitude_features
-from tests.v2.research.magnitude_trial_support import commit_history_inputs, history_event, outcome_move
+from tests.v2.research.magnitude_trial_support import (
+    calendar_sessions,
+    commit_history_inputs,
+    history_event,
+    outcome_move,
+)
 
 
 def _counting(monkeypatch):
@@ -33,25 +40,49 @@ def test_pinned_repository_reads_daily_market_once_with_identical_output(tmp_pat
         first = magnitude_features._calendar_input(pinned, snapshot)
         second = magnitude_features._calendar_input(pinned, snapshot)
         assert calls == ["daily_market"]
+        assert first[0] == calendar_sessions()
         assert first == second
-        assert first[1] is not second[1]
+        assert first[1] is not second[1] and first[1]["objects"] is not second[1]["objects"]
+        assert first[1]["objects"] and first[1]["snapshot_id"] == snapshot.snapshot_id
+        assert set(magnitude_features._OBSERVED_DAYS[pinned]) == {snapshot.snapshot_id}
         unpinned = [magnitude_features._calendar_input(tracked, snapshot) for _ in range(2)]
         assert calls == ["daily_market"] * 3
         assert unpinned[0] == unpinned[1] == first
+        assert tracked not in magnitude_features._OBSERVED_DAYS
         magnitude_features._calendar_input(Repository(conn, tracked._store, pin_snapshots=True), snapshot)
         assert calls == ["daily_market"] * 4
     finally:
         conn.close()
 
 
-def test_failed_read_is_never_cached(tmp_path, monkeypatch):
-    conn, tracked, snapshot = _inputs(tmp_path, days=[])
+def test_cache_is_owned_weakly_by_the_repository(tmp_path):
+    conn, tracked, snapshot = _inputs(tmp_path)
+    try:
+        before = len(magnitude_features._OBSERVED_DAYS)
+        pinned = Repository(conn, tracked._store, pin_snapshots=True)
+        magnitude_features._calendar_input(pinned, snapshot)
+        assert len(magnitude_features._OBSERVED_DAYS) == before + 1
+        del pinned
+        gc.collect()
+        assert len(magnitude_features._OBSERVED_DAYS) == before
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("changes,code", [
+    ({"days": []}, "CALENDAR_UNAVAILABLE"),
+    ({"days": [*calendar_sessions().days[:-1], calendar_sessions().days[-1] + "T12:00:00"]}, "CONTRACT_MISMATCH"),
+])
+def test_failed_read_is_never_cached(tmp_path, monkeypatch, changes, code):
+    conn, tracked, snapshot = _inputs(tmp_path, **changes)
     try:
         pinned = Repository(conn, tracked._store, pin_snapshots=True)
         calls = _counting(monkeypatch)
         for _ in range(2):
-            with pytest.raises(DataError, match="CALENDAR_UNAVAILABLE"):
+            with pytest.raises(DataError) as raised:
                 magnitude_features._calendar_input(pinned, snapshot)
+            assert raised.value.code == code
         assert calls == ["daily_market"] * 2
+        assert snapshot.snapshot_id not in magnitude_features._OBSERVED_DAYS.get(pinned, {})
     finally:
         conn.close()
