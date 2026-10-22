@@ -213,7 +213,7 @@ def resolve_exp_number(experiments_root, experiment_id, requested):
         req_int = requested
     elif isinstance(requested, str):
         text = requested.strip()
-        if text.isdigit() and len(text) <= 9:
+        if requested.isascii() and text.isdigit() and len(text) <= 9:
             req_int = int(text)
         else:
             raise _bad(requested, experiment_id)

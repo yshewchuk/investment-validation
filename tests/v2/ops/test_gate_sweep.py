@@ -309,6 +309,8 @@ def test_earlier_nonroster_arm_stays_independent_after_sealing(source, monkeypat
     replay = json.loads(capsys.readouterr().out)
     assert output["record_export"]["status"] == "written"
     assert replay["record_export"]["status"] == "unchanged"
+    assert replay["recording_mode"] == "smoke"
+    assert replay["variant_id"] == registered.variant_id
     assert {key: value for key, value in replay.items() if key != "record_export"} == {
         key: value for key, value in output.items() if key != "record_export"}
     assert _scientific(source) == after and _row(source) == seal

@@ -449,7 +449,7 @@ Manifest hashes describe the exact bytes on disk. Every conflict is detected bef
 | Malformed `--exp-number`, or a number below 101 | `INVALID_EXPERIMENT_SPEC` before any evaluation. |
 | Number held by another experiment_id or an unlinked folder; experiment_id linked to another number | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
 | Existing results file that is over the cap, a symlink or not a regular file; folder or `results/` that is a symlink | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
-| JSON over the cap | A summary (original bytes, sha256, longest fitting list prefix) is written instead and listed under `trimmed`. |
+| JSON over the cap | A summary is written instead (original bytes and sha256; for a list, also the longest fitting prefix as `kept`) and listed under `trimmed`. |
 | Existing file with different bytes (a replay, or a further arm sharing the experiment_id) | One record exists per experiment_id; the first record is kept, a stderr warning is printed and the result is `unchanged`. |
 | Existing result file whose bytes differ from the hash in its existing manifest, or a manifest missing a document hash | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
 | Non-finite number (NaN, Infinity) in a document | `INVALID_EXPERIMENT_SPEC`; exports are strict JSON. |

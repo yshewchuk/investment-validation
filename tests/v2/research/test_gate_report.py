@@ -267,11 +267,23 @@ def test_two_real_cli_arms_consume_distinct_fill_record_and_replay_once(source, 
     assert len(rows) == 2 and {row["stage"] for row in rows} == {"ran"}
     assert {row["spec_hash"] for row in rows} == {result["variant_id"] for result in results}
     before = ledger.read_bytes()
+    first_output = outputs[0]
+    assert json.loads((Path(first_output["record_export"]["dir"])
+                       / "results" / "request.json").read_text()) == {
+        "action": "run",
+        "as_of_month": MONTH,
+        "scope": "shadow",
+        "event_ids": None,
+        "purpose": "sweep",
+        "no_ledger": False,
+    }
     monkeypatch.setattr(gate, "gate_result", _forbid)
     for index, (spec, output) in enumerate(zip((build_gate_spec(), build_gate_spec(1.0, "control")), outputs, strict=True)):
         replayed = _invoke(source, capsys, "run", spec, "--ledger", ledger)
         assert replayed["record_export"]["status"] == "unchanged"
         assert output["record_export"]["status"] == ("written" if index == 0 else "unchanged")
+        assert replayed["recording_mode"] == "recorded"
+        assert replayed["variant_id"] == results[index]["variant_id"]
         assert {key: value for key, value in replayed.items() if key != "record_export"} == {
             key: value for key, value in output.items() if key != "record_export"}
     assert ledger.read_bytes() == before

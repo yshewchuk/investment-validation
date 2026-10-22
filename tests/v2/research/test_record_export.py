@@ -10,6 +10,7 @@ import sys
 import time
 from fnmatch import fnmatch
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -181,6 +182,12 @@ def test_resolve_long_digit_string_is_invalid(tmp_path):
     assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
+def test_resolve_non_ascii_digit_string_is_invalid(tmp_path):
+    with pytest.raises(OpsError) as exc:
+        resolve_exp_number(tmp_path, "x", "²")
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
 def test_preexisting_oversize_spec_conflicts_without_manifest(tmp_path):
     results = tmp_path / "EXP-101_x" / "results"
     results.mkdir(parents=True)
@@ -320,7 +327,7 @@ def test_resolve_symlinked_run_folder_with_matching_id_conflicts(tmp_path):
     assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
-def test_export_native_run_independent_oracle(tmp_path):
+def test_export_native_run_independent_oracle(tmp_path, monkeypatch):
     registration = _Registration({
         "execution_plan": {"experiment_id": "exp-x"},
         "snapshot": {"snapshot_id": "snap-1"},
@@ -332,6 +339,10 @@ def test_export_native_run_independent_oracle(tmp_path):
         "outcome": {"failure_code": None},
         "receipt": {"recording_mode": "smoke"},
     }
+    started_value = time.monotonic() - 5.0
+    monkeypatch.setattr(record_export.time, "monotonic", lambda: started_value + 7.0)
+    monkeypatch.setattr(record_export, "resource", SimpleNamespace(
+        getrusage=lambda who: SimpleNamespace(ru_maxrss=123456), RUSAGE_SELF=0))
     result = export_native_run(
         tmp_path,
         registration,
@@ -340,7 +351,7 @@ def test_export_native_run_independent_oracle(tmp_path):
         saved,
         exp_number=101,
         replayed=True,
-        started=time.monotonic() - 5.0,
+        started=started_value,
     )
     folder = Path(result["dir"])
     outcome = json.loads((folder / "results" / "outcome.json").read_bytes())
@@ -352,10 +363,8 @@ def test_export_native_run_independent_oracle(tmp_path):
     ).hexdigest()
     assert outcome["source_closure_hash"] == expected_hash
     assert outcome["environment"] == {"python": "3"}
-    assert 5.0 <= outcome["elapsed_seconds"] < 65.0
-    assert outcome["peak_rss_kb"] > 1000
-    sampled = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    assert 0 < outcome["peak_rss_kb"] <= sampled
+    assert outcome["elapsed_seconds"] == 7.0
+    assert outcome["peak_rss_kb"] == 123456
     proc = subprocess.run(
         ["git", "-C", str(Path(__file__).resolve().parents[3]), "rev-parse", "HEAD"],
         capture_output=True,
