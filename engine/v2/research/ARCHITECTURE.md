@@ -146,6 +146,9 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 | Well-formed `computed_moves` contract that is neither native v4 nor v5 | `CONTRACT_MISMATCH` before any target scan; no partial returned frame. |
 | Empty bulk canonical calendar | `POPULATION_COLLAPSED`; no empty success. |
 | Missing, skipped, non-finite target, non-date outcome key or invalid target availability (R4) | `EXPERIMENT_VARIANT_FAILED`; no partial returned frame. |
+| `omit_not_computed=True` and a row is `skipped` | Event omitted, object still bound in `consumed_inputs`, listed in `omitted_labels`; other events returned. |
+| `omit_not_computed=True` and every planned label is `skipped` | Empty frame whose attrs list every event in `omitted_labels`; scoring then refuses `EXPERIMENT_VARIANT_FAILED` ("require scored rows"), which the inner search records as a refused terminal. |
+| `omit_not_computed` is not a `bool` | `CONTRACT_MISMATCH` before any repository access. |
 | Cache, retry, transaction, partial write, replay | No cache or automatic retry; read-only, no writes; complete scans precede return; identical pinned inputs return identical rows (R6). |
 
 These readers preserve no economic variant identity and cannot authorize the
@@ -240,6 +243,13 @@ remaining objects pass `event_history`'s shared singleton preflight before
 any is opened; mixed inherited snapshots refuse. Decoded label availability
 must be strictly before `labels_before`; missing, skipped, malformed or
 non-finite labels refuse the whole call, with zero remaining a valid value.
+Exception, opt-in only: `omit_not_computed=True` (used by the magnitude search's inner and outer
+evaluation reads) treats a row the writer marked `skipped` (v5 `not_computed_reason`, e.g. `not_orats`)
+exactly as `qualify_magnitude_training_targets` does: it is omitted, never parsed, and listed in the
+frame attrs and receipt as `omitted_labels` (`[{"event_id", "reason": "skipped"}]`, sorted by event ID).
+`omit_not_computed` must be a `bool` (`CONTRACT_MISMATCH` otherwise). The receipt carries `omitted_labels` only when non-empty (receipts with none are byte-identical to before).
+Every other refusal above is unchanged; only `skipped=true` is omitted, never null/late availability.
+Forecasts for omitted events are made but not scored; `event_count` counts scored events.
 Earlier events with late availability can be decoded to check their recorded
 date; this is reconstructed availability, not verified publication evidence.
 Output rows carry target/object identity; frame attributes bind recipe,
@@ -302,7 +312,8 @@ and source hashes do not establish that evidence; strict PIT experiment
 admission remains a later prerequisite. The stored build uses `plan_magnitude_folds`,
 `event_history._assemble_history` and `_feature_recipe`, not this adapter.
 The adapter has no fitting, target-join, CLI, provider, report, ledger or final-read
-caller, and no cache, retry, write or partial result; Repository failures propagate.
+caller, and no retry, write or partial result; its only cache is the
+observed-session read (see its failure row); Repository failures propagate.
 
 `magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month,
 evaluation_years, training_start, event_ids=None)` plans metadata-only expanding
@@ -343,7 +354,8 @@ the native planner and `experiments.magnitude_search_plan` for admitted metadata
 | Missing calendar table, snapshot/admission or repository failure | Shared typed error propagates; no source fallback. |
 | Empty calendar / malformed dates or incomplete session window | `CALENDAR_UNAVAILABLE` / `CONTRACT_MISMATCH`; no outcome access. |
 | Catalog transactions | Short read-only SQLite transactions; no planner-owned write transaction or transaction spanning the full call. |
-| Cache, retry, partial write, replay | No cross-call cache, retry, write or partial return; identical pinned inputs give identical plans. |
+| Cache, retry, partial write, replay | The only cache is the observed-session read below; no retry, write or partial return; identical pinned inputs give identical plans. |
+| Observed-session read | The `daily_market` observed days are read once per pinned `Repository` (`pins_snapshots`) and snapshot id; the cache lives and dies with that repository, a second repository or snapshot reads again, and an unpinned repository reads on every call. A failed read caches nothing. Output and `calendar_input` identities are unchanged. |
 
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
@@ -802,7 +814,8 @@ an uncaught traceback instead.
   path, the loaded `ChainIndex` are held once in memory for that run's
   reads only (module-level caches the legacy code held for a mutable store
   are gone, on purpose — a pinned snapshot never changes under a run, so
-  there is nothing to invalidate).
+  there is nothing to invalidate). The one exception is the magnitude
+  observed-session day tuple, held per pinned `Repository` and snapshot id.
   With `index=None`, replay scopes chain availability and loaded chain
   data to the plan's own years, tickers and dates. The resulting
   `ChainIndex` contains only available plan keys. An explicit `index=`

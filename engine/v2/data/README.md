@@ -32,7 +32,7 @@ underscore convention, and an import of a name absent from this list fails
 `query.ScanPopulation` and `query.plan_scan_population(...)` expose the shared
 membership-bound planner. `Repository.scan_population_bound(...)` returns the
 candidate-row bound for one pinned snapshot and selection without opening bytes.
-With `pin_snapshots=True`, scan and bound planning share the partition index;
+`Repository.pins_snapshots` (read-only property) reports whether the instance was opened with `pin_snapshots=True`. With `pin_snapshots=True`, scan and bound planning share the partition index;
 all fragment key bounds are validated before that index is first cached.
 `query.decode_predicates(key_filter)` shares strict predicate decoding between
 the planner and indexed selection, including duplicate-column refusal.

@@ -16,6 +16,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
+from engine.v2.foundation import market_calendar  # noqa: E402
 from engine.v2.foundation.market_calendar import (  # noqa: E402
     CalendarInputError,
     CalendarSessions,
@@ -438,3 +439,90 @@ def test_module_imports_are_stdlib_only() -> None:
             roots.add((node.module or "").split(".")[0])
     assert roots <= sys.stdlib_module_names
     assert not roots & {"engine", "pandas", "numpy"}
+
+
+EXPECTED_HOLIDAYS = {
+    2024: frozenset(date.fromisoformat(day) for day in (
+        "2024-01-01", "2024-01-15", "2024-02-19", "2024-03-29", "2024-05-27",
+        "2024-06-19", "2024-07-04", "2024-09-02", "2024-11-28", "2024-12-25")),
+    2025: frozenset(date.fromisoformat(day) for day in (
+        "2025-01-01", "2025-01-09", "2025-01-20", "2025-02-17", "2025-04-18",
+        "2025-05-26", "2025-06-19", "2025-07-04", "2025-09-01", "2025-11-27", "2025-12-25")),
+}
+
+
+def test_public_calendar_calls_reuse_only_immutable_holiday_years() -> None:
+    holidays = market_calendar._holidays
+    holidays.cache_clear()
+    try:
+        observed = ("2024-12-30", "2024-12-31", "2025-01-02", "2025-01-03")
+        built = build_calendar_sessions(observed, event_through="2025-01-03")
+        assert built == CalendarSessions(observed + ("2025-01-06",), "2025-01-03")
+        assert holidays.cache_info().misses == 2
+        before = holidays.cache_info().hits
+        for _ in range(3):
+            assert planned_exit_date(_key("STR-RUNUP", "2025-01-03", "BMO"), built) == "2025-01-02"
+            assert build_calendar_sessions(observed, event_through="2025-01-03") == built
+        assert holidays.cache_info().misses == 2
+        assert holidays.cache_info().hits > before
+        assert isinstance(holidays(2025), frozenset)
+        with pytest.raises(AttributeError):
+            holidays(2025).clear()
+        for year, expected in EXPECTED_HOLIDAYS.items():
+            assert holidays(year) == expected
+    finally:
+        holidays.cache_clear()
+
+
+def test_holiday_lru_is_bounded_and_eviction_preserves_values() -> None:
+    holidays = market_calendar._holidays
+    holidays.cache_clear()
+    try:
+        for year, expected in EXPECTED_HOLIDAYS.items():
+            assert holidays(year) == expected
+        for year in range(1800, 1928):
+            holidays(year)
+            if year == 1864:
+                assert holidays(2024) == EXPECTED_HOLIDAYS[2024]
+        assert holidays.cache_info().maxsize == holidays.cache_info().currsize == 128
+        assert holidays.cache_info().misses == 130
+        # Refreshing 2024 keeps it resident; FIFO would evict it instead.
+        hits = holidays.cache_info().hits
+        assert holidays(2024) == EXPECTED_HOLIDAYS[2024]
+        assert holidays.cache_info().hits == hits + 1
+        assert holidays.cache_info().misses == 130
+        assert holidays(2025) == EXPECTED_HOLIDAYS[2025]
+        assert holidays.cache_info().misses == 131
+        assert holidays.cache_info().currsize == 128
+    finally:
+        holidays.cache_clear()
+
+
+@pytest.mark.parametrize("days,message", [
+    (["2024-03-11", "2024-03-12"], "calendar days must be a non-empty tuple of YYYY-MM-DD strings"),
+    ((), "calendar days must be a non-empty tuple of YYYY-MM-DD strings"),
+    (("2024-03-16",), "calendar days must be weekday non-holiday sessions"),
+    (("2024-12-25",), "calendar days must be weekday non-holiday sessions"),
+    (("2024-3-13",), "calendar day '2024-3-13' is not a canonical YYYY-MM-DD date"),
+    (("2024-03-13", "2024-03-13"), "calendar days must be sorted and duplicate-free"),
+    (("2024-03-15", "2024-03-11"), "calendar days must be sorted and duplicate-free"),
+])
+def test_warm_holiday_cache_never_bypasses_supplied_calendar_validation(days: tuple | list, message: str) -> None:
+    valid = CalendarSessions(OBS_MAR, "2024-03-15")
+    assert planned_exit_date(_key("STR-THRU", "2024-03-12", "BMO"), valid) == "2024-03-12"
+    with pytest.raises(CalendarInputError) as caught:
+        planned_exit_date(_key("STR-THRU", "2024-03-12", "BMO"), CalendarSessions(days, "2024-03-15"))
+    assert type(caught.value) is CalendarInputError
+    assert caught.value.code == "INVALID_REQUEST"
+    assert str(caught.value) == message
+
+
+@pytest.mark.parametrize("event,session,expected", [
+    ("2024-03-12", "BMO", "2024-03-12"),
+    ("2024-03-12", "AMC", "2024-03-13"),
+    ("2024-03-13", "BMO", "2024-03-13"),
+    ("2024-03-13", "AMC", "2024-03-14"),
+])
+def test_planned_exit_does_not_validate_observed_through(event, session, expected) -> None:
+    calendar = CalendarSessions(OBS_MAR, "bad")
+    assert planned_exit_date(_key("STR-THRU", event, session), calendar) == expected

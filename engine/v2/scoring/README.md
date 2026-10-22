@@ -238,3 +238,7 @@ A negative control here looks like: corrupt one field of a frozen record, run
 the comparator, and assert it names **this package's stage** and that field
 path — not that "a row is red". A check that has never failed is not known to
 work.
+
+The frozen driver-residual array cache contract lives in `ARCHITECTURE.md`
+(Failure semantics); its tests are
+`tests/v2/scoring/test_driver_residual_array_cache.py`.

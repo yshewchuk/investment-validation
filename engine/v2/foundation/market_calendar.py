@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 from typing import Any, Protocol
 
 __all__ = ["CalendarEventKey", "CalendarSessions", "CalendarInputError",
@@ -85,7 +86,8 @@ def _easter(year: int) -> date:
     return date(year, month, day + 1)
 
 
-def _holidays(year: int) -> set[date]:
+@lru_cache(maxsize=128)
+def _holidays(year: int) -> frozenset[date]:
     """Scheduled NYSE rules with observations, plus the documented one-off full closures."""
     out = {_nth_weekday(year, 2, 0, 3), _easter(year) - timedelta(days=2),
            _last_weekday(year, 5, 0), _observed(date(year, 7, 4)), _nth_weekday(year, 9, 0, 1),
@@ -97,7 +99,7 @@ def _holidays(year: int) -> set[date]:
     if year >= 2022:  # Juneteenth became a market holiday in 2022
         out.add(_observed(date(year, 6, 19)))
     one_offs = (date(2012, 10, 29), date(2012, 10, 30), date(2018, 12, 5), date(2025, 1, 9))
-    return out | {d for d in one_offs if d.year == year}
+    return frozenset(out | {d for d in one_offs if d.year == year})
 
 
 def _rule_sessions(start: date, end: date) -> list[date]:

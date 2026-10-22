@@ -181,6 +181,7 @@ tests = [
     "tests/test_v2_models_residual_artifact.py",
     "tests/test_v2_models_recalibration_artifact.py",
     "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/v2/scoring/test_driver_residual_array_cache.py",
 ]
 
 [modules.pnl_sim]
@@ -190,6 +191,7 @@ tests = [
     "tests/test_pnl_sim_evidence.py",
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
     "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/v2/scoring/test_driver_residual_array_cache.py",
     "tests/test_v2_models_residual_artifact.py",
 ]
 
@@ -246,7 +248,7 @@ tests = [
     "tests/test_phase4_trace_verifier.py",
     "tests/test_v2_contracts_scoring.py",
     "tests/test_v2_data_contracts.py",
-    "tests/test_v2_data_tier4_coverage.py",
+    "tests/v2/data/test_tier4_coverage.py",
     "tests/test_v2_features_recipes.py",
     "tests/test_v2_models_inference.py",
     "tests/test_v2_models_releases.py",
@@ -275,6 +277,7 @@ tests = [
     "tests/test_v2_scoring_application_canonical.py",
     "tests/test_v2_scoring_application_track_b.py",
     "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/v2/scoring/test_driver_residual_array_cache.py",
     "tests/test_v2_scoring_planned_exit_bundle.py",
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
     "tests/test_v2_scoring_runup_frozen.py",
@@ -428,6 +431,7 @@ excluded = "legacy materialization/mapping/reference bridge the rearchitecture d
 why = "Legacy materialization, mapping, reference inputs and price history: the bridge that feeds legacy-shaped inputs into v2."
 mutate = [
     "engine/v2/data/legacy_*.py",
+    "engine/v2/data/materialize_progress.py",
     "engine/v2/data/import_snapshot.py",
     "engine/v2/data/reference_*.py",
     "engine/v2/data/tier4_coverage.py",
@@ -438,9 +442,10 @@ tests = [
     "tests/v2/data/test_legacy_reader_lifetime.py",
     "tests/test_v2_data_legacy_adapter.py",
     "tests/v2/data/test_legacy_materialization.py",
+    "tests/v2/data/test_legacy_materialize_progress.py",
     "tests/v2/data/test_price_downloads.py",
     "tests/v2/data/test_v2_data_reference_inputs.py",
-    "tests/test_v2_data_tier4_coverage.py",
+    "tests/v2/data/test_tier4_coverage.py",
     "tests/v2/ops/test_v2_ops_price_history.py",
     "tests/v2/ops/test_v2_ops_tier4_coverage.py",
 ]
@@ -466,6 +471,7 @@ tests = [
     "tests/test_v2_models_training_recipes.py",
     "tests/v2/models/training/test_v2_models_training_recipe_fields.py",
     "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/v2/scoring/test_driver_residual_array_cache.py",
     "tests/test_v2_scoring_native_payoff.py",
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
 ]
@@ -502,6 +508,7 @@ tests = [
     "tests/test_v2_scoring_frozen_executor.py",
     "tests/test_v2_scoring_frozen_recipes.py",
     "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/v2/scoring/test_driver_residual_array_cache.py",
     "tests/test_v2_scoring_planned_exit_bundle.py",
     "tests/test_v2_scoring_r4_20_frozen_parity.py",
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
@@ -587,6 +594,7 @@ tests = [
     "tests/test_v2_scoring_frozen_executor.py",
     "tests/test_v2_scoring_frozen_record.py",
     "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/v2/scoring/test_driver_residual_array_cache.py",
     "tests/test_v2_scoring_no_score_status.py",
     "tests/test_v2_scoring_r4_20_frozen_parity.py",
     "tests/test_v2_scoring_runup_frozen.py",
@@ -623,6 +631,7 @@ tests = [
     "tests/test_v2_scoring_frozen_inputs.py",
     "tests/test_v2_scoring_frozen_recipes.py",
     "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/v2/scoring/test_driver_residual_array_cache.py",
     "tests/test_v2_scoring_native_payoff.py",
     "tests/v2/scoring/test_nightly_source_bundle.py",
     "tests/test_v2_scoring_no_score_status.py",
@@ -680,6 +689,7 @@ tests = [
     "tests/v2/research/test_magnitude_search_trials.py",
     "tests/v2/research/test_magnitude_search_records.py",
     "tests/v2/research/test_magnitude_search_trial_integrity.py",
+    "tests/v2/research/test_magnitude_search_normalization.py",
     "tests/v2/research/test_magnitude_search_reconcil*.py",
     "tests/v2/research/test_magnitude_search_outer.py",
     "tests/v2/research/test_magnitude_search_outer_integrity.py",
@@ -883,6 +893,7 @@ tests = [
     "tests/v2/research/test_magnitude_search_trials.py",
     "tests/v2/research/test_magnitude_search_records.py",
     "tests/v2/research/test_magnitude_search_trial_integrity.py",
+    "tests/v2/research/test_magnitude_search_normalization.py",
     "tests/v2/research/test_magnitude_search_reconcil*.py",
     "tests/v2/research/test_magnitude_search_outer.py",
     "tests/v2/research/test_magnitude_search_outer_integrity.py",
@@ -1188,6 +1199,7 @@ tests = [
     "tests/v2/research/test_magnitude_search_trials.py",
     "tests/v2/research/test_magnitude_search_records.py",
     "tests/v2/research/test_magnitude_search_trial_integrity.py",
+    "tests/v2/research/test_magnitude_search_normalization.py",
     "tests/v2/research/test_magnitude_search_reconcil*.py",
     "tests/v2/research/test_magnitude_search_outer.py",
     "tests/v2/research/test_magnitude_search_outer_integrity.py",

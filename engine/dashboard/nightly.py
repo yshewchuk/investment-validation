@@ -1,5 +1,5 @@
-"""The nightly orchestrator: refresh → validate → score → ledger → render →
-selfcheck → publish → flags → backup, each step gating the next.
+"""The nightly orchestrator: refresh → validate → warm → score → ledger →
+render → selfcheck → publish → flags → backup, each step gating the next.
 
 Order is load-bearing, per the guide:
 
@@ -9,6 +9,8 @@ Order is load-bearing, per the guide:
    retry loops against a dead key only burn goodwill.
 2. **Validate** the fresh data. Red stops the pipeline; yesterday's snapshot
    stays published and a flag is raised.
+2a. **Warm** the Tier-4 serving models score will touch, in a subprocess; a
+   failure stops the run (`WARM_SERVING_FAILED`) so score never refits.
 3. **Score** the calendar (one shared Scorer, one shared chain index).
 4. **Ledger** — predictions are frozen BEFORE rendering; the frozen record is
    the point. Missed nights are backfilled honestly: their rows carry the true
@@ -824,6 +826,21 @@ def _refuse(report: NightlyReport, step: str, detail: str) -> NightlyStop:
     except Exception:  # noqa: BLE001 — a failed flag write must not mask the stop
         pass
     return NightlyStop(step, detail)
+
+
+def _log_rss(stage: str) -> None:
+    """Print current and peak RSS to stderr for a stage boundary.
+
+    An unreadable proc file reads as 0; a MemoryError or a failing stderr
+    write still propagates.
+    """
+    rss = memprobe.rss_bytes()
+    peak = memprobe.peak_rss_bytes()
+    print(
+        f"[nightly-mem] {stage} rss={rss / 1e9:.2f}G peak={peak / 1e9:.2f}G",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _repair_failed(report: NightlyReport, exc: Exception) -> NightlyStop:
@@ -1684,6 +1701,8 @@ def run_nightly(
         from engine.features import FeatureContext
 
         context_tickers = set(scoring_tickers or calendar_tickers)
+        warm_event_dates = list(upcoming["event_date"])
+        warm_decision_start = as_of
         # Backfill is a historical re-score, not a reason to construct a
         # second default Scorer. Include its possible events in this one
         # bounded daily slice so the existing engine can score those nights.
@@ -1701,6 +1720,27 @@ def run_nightly(
                     backfill_events["ticker"].isin(set(tickers))
                 ]
             context_tickers.update(backfill_events["ticker"].dropna().astype(str))
+            warm_event_dates += list(backfill_events["event_date"])
+            # Only the nights the bounded backfill will actually score (at most
+            # MAX_BACKFILL_DAYS), not the whole gap since the last run.
+            from engine.calendar import trading_calendar
+
+            warm_nights, _, _ = _nights_to_backfill(
+                backfill_start, as_of, calendar=trading_calendar()
+            )
+            if warm_nights:
+                warm_decision_start = warm_nights[0]
+        # Fit any missing Tier-4 serving models in a subprocess BEFORE score:
+        # an in-process refit inside score added ~2.4 GB and floor-killed two
+        # nightlies. A failure stops the run; it never falls back to refitting.
+        from engine.dashboard import warm_serving
+
+        try:
+            report.steps["warm_serving"] = warm_serving.warm(
+                warm_event_dates, warm_decision_start, as_of
+            )
+        except warm_serving.WarmError as exc:
+            raise _refuse(report, "warm_serving", f"WARM_SERVING_FAILED: {exc}") from exc
         context_years = range(as_of.year - 1, horizon.year + 1)
         context = FeatureContext.load(sorted(context_tickers), years=context_years)
         engine = Scorer(context=context)
@@ -1719,6 +1759,10 @@ def run_nightly(
     board_scores = scores
 
     report.mark("score", started=started)
+    _log_rss("score done")
+    if hasattr(engine, "release_score_caches"):
+        engine.release_score_caches()
+    _log_rss("score caches released")
     # -- 4. ledger, BEFORE rendering — the frozen record is the point --------
     # The ledger records the ATM board only: the ladder rows are EXTRAPOLATED
     # views of the same decision, and freezing them would inflate the
@@ -1728,6 +1772,7 @@ def run_nightly(
     )
 
     report.mark("ledger", started=started)
+    _log_rss("ledger done")
     # -- 4a. SETTLE what has already happened --------------------------------
     # The nightly wrote predictions for six nights and settled none of them,
     # because nothing ever called this. A frozen prediction with no outcome is
@@ -1749,6 +1794,7 @@ def run_nightly(
         })
 
     report.mark("settle", started=started)
+    _log_rss("settle done")
     # -- 3b. the strike ladder, for the explorer -------------------------------
     ladder = strike_ladder(
         board_scores, scorer=engine, alt_strikes=alt_strikes, as_of=as_of
@@ -1769,6 +1815,7 @@ def run_nightly(
     }
 
     report.mark("ladder", started=started)
+    _log_rss("ladder done")
     # -- 4b. honest backfill of missed nights --------------------------------
     late_as_ofs: list[str] = []
     skipped_closed: list[str] = []
@@ -1838,6 +1885,9 @@ def run_nightly(
         report.flags.append(calib_flag)
 
     report.mark("backfill", started=started)
+    if backfill and hasattr(engine, "release_score_caches"):
+        engine.release_score_caches()
+    _log_rss("backfill done")
     # -- 4c. model evidence — rebuilt only when a champion changed -----------
     # render copies data/features/model_evidence.json into the bundle verbatim,
     # and the file is keyed by the champions' artifact fingerprint. Nothing
@@ -1921,6 +1971,7 @@ def run_nightly(
 
     report.mark("render", started=started)
     # -- 5b. selfcheck — any mismatch stops the publish -----------------------
+    _log_rss("selfcheck start")
     check = selfcheck(bundle_dir, scorer=engine)
     report.steps["selfcheck"] = check.as_dict()
     if not check.ok:
@@ -1943,6 +1994,7 @@ def run_nightly(
         raise NightlyStop("selfcheck", check.detail)
 
     report.mark("selfcheck", started=started)
+    _log_rss("selfcheck done")
     # -- 6. publish atomically -------------------------------------------------
     if publish:
         try:

@@ -881,7 +881,7 @@ def _execute_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
     clock = SystemClock()
     try:
         store = ArtifactStore(objects_root)
-        repository = Repository(conn, store)
+        repository = Repository(conn, store, pin_snapshots=True)
         parent = repository.resolve_full(parent_snapshot_id)
         wanted = set(tickers)
         calendar, warnings = _native_calendar(repository, parent, as_of=as_of,

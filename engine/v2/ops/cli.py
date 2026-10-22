@@ -846,7 +846,7 @@ def computed_moves_command(args, root, conn, clock):
             raise fail("SNAPSHOT_NOT_READY", "scope has no existing snapshot head",
                        details={"scope": args.scope})
         store = ArtifactStore(root)
-        repository = Repository(conn, store)
+        repository = Repository(conn, store, pin_snapshots=True)
         parent = repository.resolve(head["snapshot_id"])
         parent_receipt_id = computed_moves_store.parent_receipt_id_for_snapshot(
             conn, args.scope, parent.snapshot_id)

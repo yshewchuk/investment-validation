@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import weakref
 
 from engine.v2.data import errors
 from engine.v2.foundation import content_hash, market_calendar
@@ -15,8 +16,21 @@ HISTORY_FEATURE_COLUMNS = ("n_prior", "mean_prior_move", "mean_prior_abs_move",
                            *(f"ema{span}_prior_{kind}" for span in (2, 4, 8, 12) for kind in ("move", "abs_move")))
 
 
-def _calendar_input(repository, snapshot):
-    """The native observed date union, without normalization or projected days."""
+#: Pinned Repository -> {snapshot id: sorted canonical session days}. A pinned snapshot is
+#: immutable, so a hit is exact; the entry dies with the repository; failures are never stored.
+_OBSERVED_DAYS = weakref.WeakKeyDictionary()
+
+
+def _observed_days(repository, snapshot):
+    """Sorted canonical daily_market dates; read once per pinned repository and snapshot."""
+    cache = None
+    if getattr(repository, "pins_snapshots", False) is True:
+        try:
+            cache = _OBSERVED_DAYS.setdefault(repository, {})
+        except TypeError:  # not weak-referenceable: read every call
+            cache = None
+    if cache is not None and snapshot.snapshot_id in cache:
+        return cache[snapshot.snapshot_id]
     frame = read_table(repository, snapshot, "daily_market", ("date",),
                        batch_filter=lambda batch: batch.drop_duplicates())
     if frame.empty:
@@ -25,6 +39,14 @@ def _calendar_input(repository, snapshot):
         days = tuple(sorted({_calendar_date(value).isoformat() for value in frame.date}))
     except (ValueError, TypeError, OverflowError):
         raise errors.fail("CONTRACT_MISMATCH", "magnitude calendar dates must be canonical") from None
+    if cache is not None:
+        cache[snapshot.snapshot_id] = days
+    return days
+
+
+def _calendar_input(repository, snapshot):
+    """The native observed date union, without normalization or projected days."""
+    days = _observed_days(repository, snapshot)
     records = repository.fragment_records(snapshot, "daily_market")
     source = {"snapshot_id": snapshot.snapshot_id, "calendar_version": snapshot.calendar_version,
         "table": "daily_market", "columns": ["date"],

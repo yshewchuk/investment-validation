@@ -12,8 +12,10 @@ from engine.v2.foundation import ArtifactStore, SystemClock, from_document
 from engine.v2.ops.catalog import connect
 from experiments import magnitude_search_execution as execution
 from experiments import magnitude_search_trials as trials
+from experiments.magnitude_search_inputs import load_fit_inputs
 from experiments.magnitude_search_plan import seal_search_plan
 from tests.v2.models.training.test_magnitude_estimators import FEATURES, HGB_PARAMS, RIDGE_PARAMS
+from tests.v2.research.magnitude_search_fit_source import fit_source
 from tests.v2.research.test_magnitude_search_plan import source as base_source  # noqa: F401
 
 LIMITS = {"memory_bytes": 2 * 1024 ** 3, "cpu_seconds": 30, "wall_seconds": 60}
@@ -58,7 +60,7 @@ def synthetic_inputs():
                 for event, x in zip(ids, values))
     return {"training": [{"event_id": event, "absolute_move_pct": label}
                          for event, label in zip(TRAIN_IDS, LABELS)],
-            "features": list(reversed(rows))}
+            "features": sorted(rows, key=lambda row: (row["event_id"], row["context_id"], row["horizon_sessions"]))}
 
 
 def expected_forecasts(kind, params):
@@ -79,7 +81,7 @@ def expected_forecasts(kind, params):
 
 
 @pytest.mark.parametrize("kind", ["history_ridge", "history_hgb"])
-def test_fixed_worker_nonconstant_fits_match_independent_closed_forms(monkeypatch, kind):
+def test_fixed_worker_nonconstant_fits_match_independent_closed_forms(monkeypatch, kind, tmp_path):
     original = execution.subprocess.Popen
     payloads = []
 
@@ -90,14 +92,15 @@ def test_fixed_worker_nonconstant_fits_match_independent_closed_forms(monkeypatc
 
     monkeypatch.setattr(execution.subprocess, "Popen", launch)
     inputs = synthetic_inputs()
+    source = fit_source(inputs, tmp_path)
     inner, plan = {"evaluation_event_ids": TEST_IDS}, {"horizons": list(OFFSETS)}
     forecasts = []
     for params in parameters(kind):
         policy = {"features": list(FEATURES), "fit_recipe": recipe(kind, params)}
-        expected_payload = copy.deepcopy({"inputs": inputs, "inner": inner, "plan": plan,
+        expected_payload = copy.deepcopy({**source, "inner": inner, "plan": plan,
                                           "execution": policy})
         progress = []
-        result = execution.run_fitted_trial(inputs, inner, plan, policy,
+        result = execution.run_fitted_trial(source, inner, plan, policy,
             execution.execution_limits(LIMITS), lambda state, fit: progress.append((state, fit)))
         assert payloads[-1] == expected_payload
         assert result["event"] == "succeeded"
@@ -134,11 +137,13 @@ def test_native_search_passes_each_declared_candidate_to_real_child(base_source,
         recorder.seal(clock=SystemClock())
         original, observed = trials.run_fitted_trial, []
 
-        def run(inputs, inner, plan, policy, limits, progress):
+        def run(source, inner, plan, policy, limits, progress):
             observed.append(copy.deepcopy(policy["fit_recipe"]))
             assert policy["fit_recipe"] == selected["recipe"]
-            assert len({row["absolute_move_pct"] for row in inputs["training"]}) > 1
-            return original(inputs, inner, plan, policy, limits, progress)
+            fit_inputs = load_fit_inputs(ArtifactStore(source["store_root"]), source["manifest"], source["inputs_id"],
+                                         inner["evaluation_event_ids"], plan["horizons"], policy["features"])
+            assert len({row["absolute_move_pct"] for row in fit_inputs["training"]}) > 1
+            return original(source, inner, plan, policy, limits, progress)
 
         monkeypatch.setattr(trials, "run_fitted_trial", run)
         forecasts = []

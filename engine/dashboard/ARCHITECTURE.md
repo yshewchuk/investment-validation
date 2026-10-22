@@ -15,7 +15,7 @@ secret scan by `checks/repo_hygiene.py`).
 The legacy nightly orchestrator, board renderer, selfcheck re-scorer,
 model-evidence page builder and atomic bundle publisher. `nightly.py`'s
 own module docstring states the load-bearing order: refresh → validate →
-score → ledger → render → selfcheck → publish → flags → backup, each step
+warm Tier-4 serving models (subprocess) → score → ledger → render → selfcheck → publish → flags → backup, each step
 gating the next. Idempotent by construction: re-running re-reads,
 re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 
@@ -24,6 +24,16 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 - `nightly.py` — the orchestrator; run as the legacy nightly entrypoint
   (root doc §4). Public helpers for the Tier-4 gap repair:
   `repair_tier4_gap`, `repair_tier4_gap_if_needed`, `mark_tiers_degraded`.
+- `warm_serving.py` — `warm(event_dates, decision_start)`: before score
+  (default scorer only), fits every Tier-4 serving model (all `PRODUCES`) whose
+  cache file for the current panel sha is missing or not ready (bad metadata,
+  or no embedded residual pool), in a SUBPROCESS via `tier4.serving_model`
+  (same cache files). Folds are a superset: every month from
+  `decision_start - 30 days` (STR-RUNUP enters 14 trading days early) to the latest event's month, because each
+  strategy's own decision date picks the fold. If the panel sha changes, the
+  child stops installing and discards its staged file (fits already installed
+  are keyed by the old sha). Failure raises `WarmError`; the nightly
+  stops with `WARM_SERVING_FAILED` and never refits in-process.
 - `render.py` — `build_meta`, `build_health`, `build_strategies`,
   `compact_row`, `row_digest`, `freshness_summary`, `quota_state`,
   `size_model_mae_from_ledger`, `payoff_curve`: the board's row/meta/health
@@ -77,6 +87,15 @@ anon/file/shmem, the pyarrow pool (backend, allocated, max; `_TRIM` also
 calls `release_unused()`), the largest mappings, untracked numpy arrays
 found via their holders, and gc object counts by type.
 
+### Post-score memory release
+
+| Condition | Outcome |
+|---|---|
+| `score_calendar` returns, before ledger replay | `Scorer.release_score_caches()` empties the `live_features` cache (pure memoization; a later call recomputes the same value) and calls the best-effort `_release_free_pages` (a platform without `malloc_trim` returns nothing to the OS) |
+| Backfill of missed nights finishes | the same release runs again, because backfill scoring repopulates the cache |
+| A stage among score, ledger, settle, ladder, backfill, selfcheck ends | `[nightly-mem] <stage> rss=<G> peak=<G>` goes to stderr, independent of the memprobe flags; other steps are not logged |
+| Any stage | the trades frame and chain indexes stay (ladder, replay, selfcheck read them) |
+
 ## Inputs
 
 Tier-1/2 fetch data (via the quota-guarded fetch wrapper), the shared
@@ -105,6 +124,11 @@ inside function bodies):
   `DAILY_STATE_FIELDS`, for the projected `daily_market` read; other uses lazy),
   `engine.memprobe` (`nightly.py`, also provided to `engine.score` and
   `engine.replay`, which are outside this package).
+- Lazy, `warm_serving.py` only: `engine.data.features.tier4` (`serving_model`,
+  `fold_start_of`, `feature_model`, `PRODUCES`, panel hashing through
+  `store.file_sha256` and `paths.PANEL`, private `_serving_path`; the child
+  temporarily reassigns `SERVING_DIR` to stage writes) and `engine.features`
+  (`load_panel`, child only).
 - Lazy (function-local) only, never at module top level: `engine.calendar`
   (`model_evidence.py::_dataset_for`, `nightly.py::_date_change_flag`/
   `_panel_staleness_flags`/`refresh_forward_chains`/`run_nightly`);
@@ -180,6 +204,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 
   | Condition | Outcome |
   | --- | --- |
+  | Warm step (default scorer): subprocess exits non-zero, cannot start, times out (3 h), fails to plan/verify, leaves a fit missing or not ready, or the panel changed under it | `NightlyStop` `WARM_SERVING_FAILED`; exit 1; nothing scored; no in-process refit |
   | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`); no gap flag once repaired |
   | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no new SNAPSHOT (the previous one is kept), so the native import sees no new session for the night (`not_yet`, unless an earlier run that night already wrote one) |
   | With tiers on, run stops between refresh and tiers (red validation, as-of finality stop) | Store refreshed, no new SNAPSHOT; the previous SNAPSHOT is kept (with `--no-tiers` the refresh step has already written one) |

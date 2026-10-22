@@ -64,7 +64,8 @@ def _write_root(request, spec: dict, dest: Path, attempt_id: str):
     store = ArtifactStore(spec["store_root"])
     conn = _read_only_catalog(spec["catalog_path"])
     try:
-        files = materialize(Repository(conn, store), store, request, partial)
+        files = materialize(Repository(conn, store, pin_snapshots=True),
+                            store, request, partial)
     finally:
         conn.close()
     try:

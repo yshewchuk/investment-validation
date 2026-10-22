@@ -17,16 +17,24 @@ def main():
     try:
         import pandas as pd
 
+        from engine.v2.foundation import ArtifactStore
         from engine.v2.ops.errors import OpsError
         from experiments.magnitude_fitted import fitted_forecasts
+        from experiments.magnitude_search_inputs import load_fit_inputs
+
+        # The header is small: limits-free request fields, the manifest, its expected id and the store root.
+        # The child streams only manifest-named shards; it opens no repository, catalog or validation target.
         from experiments.magnitude_search_records import MAX_BYTES
 
+        # The header holds a manifest, which the journal caps at MAX_BYTES, so a larger file is not a header.
         with open(sys.argv[1], "rb") as stream:
             payload = stream.read(MAX_BYTES + 1)
         if len(payload) > MAX_BYTES:
             raise MemoryError
         request = json.loads(payload)
-        inputs = request["inputs"]
+        inputs = load_fit_inputs(ArtifactStore(request["store_root"]), request["manifest"], request["inputs_id"],
+                                 request["inner"]["evaluation_event_ids"], request["plan"]["horizons"],
+                                 request["execution"]["features"])
         indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
 
         def progress(state, fit):

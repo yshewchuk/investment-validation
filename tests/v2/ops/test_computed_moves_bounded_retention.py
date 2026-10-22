@@ -308,6 +308,40 @@ def test_no_frame_is_alive_while_the_next_chunk_loads(tmp_path, monkeypatch):
     assert alive_at_load == [0] * len(alive_at_load)
 
 
+def test_below_bar_capture_drops_previous_frame_before_next_chunk_loads(tmp_path, monkeypatch):
+    """A second below-bar ticker's chunk load sees no frame from the first."""
+    monkeypatch.setitem(_PLAN, 'AC', (11, True, True))
+    alive_at_load: list[int] = []
+    baseline = _frames_now()
+    in_below_bar: list[bool] = []
+    real = computed_moves_store._scan_once
+
+    def spy(*args, **kwargs):
+        if in_below_bar:
+            gc.collect()
+            alive_at_load.append(_frame_rows_since(baseline))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(computed_moves_store, "_scan_once", spy)
+    real_capture = computed_moves_store._capture_below_bar
+
+    def capture(*args, **kwargs):
+        saved = computed_moves_store.MAX_SCAN_ROWS
+        computed_moves_store.MAX_SCAN_ROWS = 40  # chunk budget 20: AB (14) and AC (11) separate
+        in_below_bar.append(True)
+        try:
+            return real_capture(*args, **kwargs)
+        finally:
+            in_below_bar.clear()
+            computed_moves_store.MAX_SCAN_ROWS = saved
+
+    monkeypatch.setattr(computed_moves_store, "_capture_below_bar", capture)
+    _run(tmp_path)
+
+    assert len(alive_at_load) >= 2
+    assert alive_at_load == [0] * len(alive_at_load)
+
+
 @pytest.mark.parametrize("bulk", [0, 8, 16])
 def test_retained_input_rows_do_not_grow_with_total_history(tmp_path, monkeypatch, bulk):
     """(c) Total history grows ~3-4x across the cases; the rows retained at once never

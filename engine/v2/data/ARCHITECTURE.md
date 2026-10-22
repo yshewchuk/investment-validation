@@ -28,6 +28,19 @@ schema (`schema.py`, colocated with ops/ledger under migration owner
 and a Tier-4 serving-cache coverage check (`tier4_coverage.py` — not pure,
 not legacy-free) gating a scoring launch from `engine.v2.ops`.
 
+Tier-4 coverage contract (#1047): the scorer serves each event at
+`min(event_fold, fold(decision_date))`, and `decision_date` is per
+(event, strategy), so a score window can reach the NEXT month's fold.
+`required_serving_triples` therefore requires, per (event, producer), every
+monthly fold from the earlier of `serving_fold(event_date, as_of)` and the
+month before the event (a strategy may decide before the session), up to the
+event's own fold. The post-attempt materialization-root fingerprint check
+remains a separate backstop.
+
+| Condition | Outcome |
+|---|---|
+| a required `(model_id, fold, panel_sha)` has no pinned, matching serving cache | refuse before launch: `TIER4_CACHE_MISSING` (validation, not retryable); `details.missing` lists every triple |
+
 Non-responsibilities: never computes a trading verdict (`engine/v2/scoring`)
 or promotes a champion (`engine/v2/models/training`); never decides *what* to
 fetch or *when* to run a job (`engine/v2/ops`, a caller, owns that).
@@ -155,7 +168,7 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   planned-unit key validation, `normalizer_id` versioning, coverage
   completeness, and mcap carry-forward.
 - **Snapshot resolution and bounded reads** — `repository.Repository`:
-  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`; opt-in `pin_snapshots=True` memoises per instance `resolve` by snapshot id and the scan/bound path's table contract and membership by `(dataset_version_id, contract_id)`, not `fragment_records`, default off, a failure is never cached; a pinned `scan` or `scan_population_bound` whose `key_filter` names a partition column plans only the matching partitions' fragments (invalid key bounds in any fragment, including unselected fragments, refuse every pinned scan or bound lookup), each call returns an independent copy), a bounded Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/`get_close`, and `explain_dependencies`.
+  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`; opt-in `pin_snapshots=True` memoises per instance `resolve` by snapshot id and the scan/bound path's table contract and membership by `(dataset_version_id, contract_id)`, not `fragment_records`, default off, a failure is never cached; a pinned `scan` or `scan_population_bound` whose `key_filter` names a partition column plans only the matching partitions' fragments (invalid key bounds in any fragment, including unselected fragments, refuse every pinned scan or bound lookup), each call returns an independent copy; the read-only property `pins_snapshots` reports the flag), a bounded Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/`get_close`, and `explain_dependencies`.
   Metadata-only `scan_population_bound` sums recorded counts of surviving
   fragments of the supplied snapshot, with no head fallback or object reads,
   with the same strict predicate refusals and membership-bound semantics as `scan` and
@@ -229,7 +242,8 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   importing legacy `engine.*` code (17 declared, read-only entries). Built
   on it, read-only: `legacy_mapping.py` (table mapping);
   `legacy_materialization.py`/`legacy_nightly_read_plan.py` (materialization
-  and nightly barrier plans, neither importing legacy `engine.*` directly);
+  and nightly barrier plans, neither importing legacy `engine.*` directly;
+  `materialize_tree(..., progress=None)` calls `progress(done)` after each written table, and `materialize_progress.TableProgress.tick` turns that into at most one stderr line per 30 s plus a final line);
   `reference_inputs.py`/`reference_catalog.py` (pinned reference-input
   resolution, the latter legacy-free); `import_snapshot.py`; `tier4_coverage.py`.
 - **`computed_moves`/`price_history`** — pure math + each family's
@@ -442,9 +456,9 @@ and never computed per run by a reader:
 | `daily_market` calendar days unsorted or duplicated for a ticker | `build_rows` raises `CONTRACT_MISMATCH` (via `AsofSeries`) before any row is built |
 
 The ops store now commits v5. A refresh over a parent that still holds v3 or v4
-partitions refuses `VALIDATION_FAILED` ("full rebuild required", ops doc) when it neither
-rewrites nor attempts every non-v5 partition, or produces no v5 rows at all; older
-records are never carried.
+partitions refuses `VALIDATION_FAILED` ("full rebuild required", ops doc) when it
+leaves any non-v5 partition neither rewritten nor attempted, or when the run produces
+no v5 rows; older records are never carried.
 
 `computed_at` and `retrieved_at` never order or filter anything here. The builder
 imports `event_history` from this same package (no new cross-component dependency).
@@ -689,10 +703,20 @@ Idempotency: (1) insert-level payload match (`IDENTITY_CONFLICT` otherwise
 — a fragment match ignores its two non-identity provenance columns, so a
 corrected re-ingest reuses the existing fragment); (2) a receipt-level
 replay shortcut keyed on `request_hash`/`attempt_id`/`fence`/`scope`/
-`snapshot_id` — through the composed fence, reachable only for a no-op or
-that candidate's own already-applied effect; a direct caller with a
+`snapshot_id` — through the composed fence, reachable only for a no-op, that
+candidate's own already-applied effect, or its pending head CAS (table below); a direct caller with a
 head-blind `fence_check` gets a weaker guarantee (a matching replay returns
-the prior receipt even if the head moved since).
+the prior receipt even if the head moved since). A replay whose head still
+equals the caller's expected snapshot and generation applies the head CAS under
+the existing receipt, in the same transaction:
+
+| Replay condition | Outcome |
+|---|---|
+| Head equals expected snapshot and generation, receipt snapshot differs | Head CAS to the receipt snapshot, generation + 1 |
+| Head already equals the receipt snapshot | No write |
+| Head differs from the expectation | Prior receipt returned, head untouched |
+
+Every `commit_snapshot` caller inherits this.
 
 **`repository.py` reads (summary).** Missing input maps to the codes above;
 a corrupt id is `MANIFEST_CORRUPT`; a re-hash mismatch is `OBJECT_CORRUPT`.

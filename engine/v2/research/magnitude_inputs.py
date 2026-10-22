@@ -93,29 +93,41 @@ def _object_input(event, record):
 
 
 def load_magnitude_targets(repository, snapshot, *, as_of_month, labels_before,
-                           purpose="selection", event_ids=None):
+                           purpose="selection", event_ids=None, omit_not_computed=False):
     """Admit metadata and every physical object before reading any magnitude label."""
+    if type(omit_not_computed) is not bool:
+        raise errors.fail("CONTRACT_MISMATCH", "omit_not_computed must be a boolean")
     cutoff = _label_cutoff(labels_before)
     population, eligible, rows, plans = _candidate_plans(
         repository, snapshot, as_of_month, purpose, event_ids, cutoff)
-    signed, available, consumed = [], [], []
-    for event, request, record in plans:
+    signed, available, consumed, omitted, positions = [], [], [], [], []
+    for index, (event, request, record) in enumerate(plans):
         decoded = [row for batch in repository.scan(request, table_name="computed_moves")
                    for row in batch.to_pylist()]
+        consumed.append(_object_input(event, record))
+        if (omit_not_computed and len(decoded) == 1
+                and type(decoded[0].get("skipped")) is bool and decoded[0]["skipped"]
+                and decoded[0].get("event_date") == event.event_date.date().isoformat()):
+            omitted.append({"event_id": event.event_id, "reason": "skipped"})
+            continue
         value, _, known = _label_before(decoded, event, cutoff)
         signed.append(value)
         available.append(known)
-        consumed.append(_object_input(event, record))
+        positions.append(index)
+    candidates = rows
+    rows = candidates.iloc[positions].reset_index(drop=True)
     rows["realized_move_pct"], rows["absolute_move_pct"] = signed, [abs(value) for value in signed]
     rows["target_available_on"] = available
-    rows["target_object_id"] = [item["object_id"] for item in consumed]
+    rows["target_object_id"] = [consumed[index]["object_id"] for index in positions]
     recipe = magnitude_recipe()
     identity = {"schema_version": "research_magnitude_targets.v1",
-        **{name: rows.iloc[0][name] for name in _CONTEXT}, "purpose": purpose,
+        **{name: candidates.iloc[0][name] for name in _CONTEXT}, "purpose": purpose,
         "computed_moves_version": snapshot.table_versions["computed_moves"].dataset_version_id,
         "labels_before": cutoff.isoformat(), "target_recipe": recipe,
         "target_recipe_id": content_hash(recipe), "consumed_inputs": consumed,
         "excluded_future_events": sorted(population.loc[~eligible, "event_id"].tolist())}
+    if omitted:
+        identity["omitted_labels"] = sorted(omitted, key=lambda item: item["event_id"])
     rows.attrs.update(identity, inputs_id=content_hash(identity))
     return rows
 

@@ -15,6 +15,8 @@ Replaces (§4.4): `paths.py`, `env.py`, `jsonio.py`, `audit.py`, `session arithm
 - Canonical JSON (RFC 8785) and content hashing, per contracts §2.2.
 - Path and environment resolution.
 - Session arithmetic: BMO/AMC anchoring, trading-day offsets.
+- Pure holiday-year sets are immutable and LRU-bounded to 128 years; supplied
+  sessions and anchor requests are validated afresh on every call.
 - Causality primitives — the cutoff comparison every feature respects.
 - Strict decoding of contract documents: unknown fields, unknown enum values
   and unsupported schema versions are refused (contracts §2.3).
@@ -74,6 +76,7 @@ failure rather than a stale sentence.
 - engine/v2/models/training — `content_hash` for recipe fingerprints and receipt hashes.
 - engine/v2/research — research tools and replay reading pinned snapshots (Phase 6 slices 6-7); `experiment_exits.valid_exit_recipe` for exit walking; `iter_canonical_json` for streaming complete stored-history identities.
 - `experiments/runup_exit_report.py` — `content_hash`/`to_document` and `experiment_exits.valid_threshold_units` for RUNUP request admission.
+- `experiments/magnitude_search_worker.py` — `ArtifactStore` to stream the fit child's cohort shards.
 - `experiments/v2_magnitude_search_run.py` — `ArtifactStore`/`ArtifactError`, `DocumentError`, `SystemClock`, `content_hash`, `from_document`/`to_document` and `iter_canonical_json` for driver binding, metadata admission and bounded output.
 
 <!-- consumers: engine.v2.diagnosis, engine.v2.data, engine.v2.ops, engine.v2.ledger, engine.v2.serving, engine.v2.features, engine.v2.registry, engine.v2.scoring, engine.v2.models, engine.v2.models.training, engine.v2.research, engine.v2.parity -->
