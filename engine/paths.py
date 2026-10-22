@@ -7,7 +7,9 @@ filesystem path after this module exists. Two rules make that worth enforcing:
   under ``earnings_predictions/`` and ``polygon_cache/`` hold ~57k files that
   cost real quota to acquire and that the current verdicts rest on. They are
   registered here and never moved, renamed, or written to. :func:`assert_writable`
-  turns that convention into a runtime check.
+  turns that convention into a runtime check. The one carve-out is
+  ``WRITABLE_EXCEPTIONS`` (``GSPC_DAILY`` and its staging siblings), the single
+  re-fetchable series ``engine.data.pulls.gspc_refresh`` is allowed to rewrite.
 * **New data lives under one root.** Tiers 1/2/3 all hang off ``data/`` at the
   repo root so a single ``.gitignore`` line keeps them out of git and a single
   path move would relocate the whole store.

@@ -8,6 +8,7 @@ at the bottom of this file with every seam faked.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -212,6 +213,106 @@ def test_first_write_when_file_is_absent(tmp_path):
     assert path.exists()
 
 
+def test_credential_rotated_propagates_and_leaves_the_file_untouched(tmp_path):
+    """A whole-run credential condition is never swallowed into a refusal."""
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, DATES)
+
+    with pytest.raises(CredentialRotated):
+        refresh_gspc_daily(StubFetcher(error=CredentialRotated("rotated")), path,
+                           refetch_token="run-1")
+
+    assert path.read_bytes() == before
+
+
+def test_assert_writable_permission_error_is_unwritable(tmp_path, monkeypatch):
+    """A refused write guard is the unwritable reason, never a raised error."""
+    import engine.paths as paths_module
+
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, DATES)
+
+    def deny(p):
+        raise PermissionError(f"refusing to write: {p}")
+
+    monkeypatch.setattr(paths_module, "assert_writable", deny)
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path,
+                                refetch_token="run-1")
+
+    assert result == {"ok": False, "reason": "unwritable"}
+    assert path.read_bytes() == before
+
+
+def test_replace_failure_is_unwritable_and_leaves_no_stray_files(tmp_path, monkeypatch):
+    """An ``os.replace`` OSError refuses with the bytes intact, and the temp
+    sibling is cleaned up; only the ``.lock`` sibling may remain."""
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, DATES)
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", boom)
+
+    result = refresh_gspc_daily(StubFetcher(body=_body([*DATES, "2026-08-28"])), path,
+                                refetch_token="run-1")
+
+    assert result == {"ok": False, "reason": "unwritable"}
+    assert path.read_bytes() == before
+    assert sorted(p.name for p in path.parent.iterdir()) == [
+        "gspc_daily.csv", "gspc_daily.csv.lock"]
+
+
+def test_adj_close_column_is_used_for_the_adj_slot(tmp_path):
+    """With a real Adj Close in the body, column 2 carries it, not Close."""
+    path = tmp_path / "gspc_daily.csv"
+    closes = _closes(len(DATES))
+    lines = ["Date,Adj Close,Close,High,Low,Open,Volume"]
+    for i, d in enumerate(DATES):
+        c = closes[i]
+        lines.append(f"{d},{c * 0.5},{c},{c + 1},{c - 1},{c},{1000 + i}")
+    body = ("\n".join(lines) + "\n").encode()
+
+    result = refresh_gspc_daily(StubFetcher(body=body), path, refetch_token="run-1")
+
+    assert result["ok"] is True
+    raw = pd.read_csv(path, skiprows=3, header=None)
+    assert list(raw[1]) == [c * 0.5 for c in closes]  # adj == Adj Close
+    assert list(raw[2]) == closes  # close stays the raw Close series
+
+
+def test_non_finite_close_dropped_and_inf_volume_does_not_raise(tmp_path):
+    """inf Close loses its row; inf volume renders as 0, never an int64 crash."""
+    path = tmp_path / "gspc_daily.csv"
+    body = (b"Date,Close,High,Low,Open,Volume\n"
+            b"2026-08-25,100.0,101,99,100,inf\n"
+            b"2026-08-26,inf,102,100,101,1001\n"
+            b"2026-08-27,102.0,103,101,102,1002\n")
+
+    result = refresh_gspc_daily(StubFetcher(body=body), path, refetch_token="run-1")
+
+    assert result == {"ok": True, "last_date": "2026-08-27", "rows": 2}
+    raw = pd.read_csv(path, skiprows=3, header=None)
+    assert [str(v) for v in raw[0]] == ["2026-08-25", "2026-08-27"]
+    assert [int(v) for v in raw[6]] == [0, 1002]
+
+
+def test_symlink_target_is_unreadable(tmp_path):
+    """A symlink at the target is not a stored series; refused, real bytes intact."""
+    real = tmp_path / "stored.csv"
+    real.write_text(_legacy_text(DATES))
+    path = tmp_path / "gspc_daily.csv"
+    path.symlink_to(real)
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path,
+                                refetch_token="run-1")
+
+    assert result == {"ok": False, "reason": "unreadable"}
+    assert real.read_text() == _legacy_text(DATES)
+    assert path.is_symlink()
+
+
 def test_invoke_price_refresh_real_run_returns_gspc_daily(tmp_path, monkeypatch):
     """The adapter wires one Fetcher into both crossings and reports the pull.
 
@@ -270,6 +371,18 @@ def test_invoke_price_refresh_real_run_returns_gspc_daily(tmp_path, monkeypatch)
                                   source_root=source_root)
     assert second["gspc_daily"] == outcome
     assert calls[1][2] != token
+
+
+def test_invoke_price_refresh_source_root_without_planned_tickers_refuses(tmp_path):
+    """The mirror of the planned-path check: a bare source root is a bad request."""
+    from engine.v2.ops.errors import OpsError
+    from engine.v2.ops.legacy_adapter import invoke_price_refresh
+
+    with pytest.raises(OpsError) as error:
+        invoke_price_refresh("2026-10-20", source_root=tmp_path / "selected")
+
+    assert error.value.code == "INVALID_REQUEST"
+    assert error.value.problem.message == "source_root requires planned tickers"
 
 
 def test_cli_price_refresh_real_run_report_includes_gspc_daily(tmp_path, monkeypatch):

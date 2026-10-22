@@ -314,6 +314,8 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
     is given, else ``engine.paths.GSPC_DAILY`` -- and reports its outcome as
     the extra ``gspc_daily`` key next to the unchanged ``plan``/``report``.
     """
+    if source_root is not None and planned_tickers is None:
+        raise fail("INVALID_REQUEST", "source_root requires planned tickers")
     from engine.data.pulls.price_refresh import (
         load_events,
         load_fetch_history,
