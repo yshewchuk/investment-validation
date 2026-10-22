@@ -197,7 +197,8 @@ no summaries), and equal inputs return equal tuples (see Failure semantics).
 Only tests consume this preparatory interface; existing selection and nightly
 dispatch are unchanged. See README for fields and ownership obligations.
 
-**Forward forecast assembly (design; not implemented).** STR-THRU forward
+**Forward forecast assembly (slice A, the consumer, is built; the release
+producer and batch wiring follow).** STR-THRU forward
 inputs use native market/history features from the pinned snapshot (cutover
 6c), plus the verified release. The full-refit `size:*` champion supplies
 `driver_prediction`; a separate causally selected size fold supplies only the
@@ -205,13 +206,27 @@ gate's requested `pred_abs_move` family and `forecast_edge`. Both execute in
 the existing scoring stages, never in the raw-row producer. Gate-only forecasts
 must not create a top-level sizing forecast or change the selected structure.
 
-An optional typed `SourceBundle.gate_forecast_source` carries the selected
-fold's inference view, parent-release identity and held-out pool. The existing
-`gate_recipe.forecast` names its binding/output; `_gate_forecast_members`
-resolves it through `FrozenRecipeExecutor` using the shared `FrozenInference`.
-The champion release stays unchanged. Supplying conflicting legacy pool or
-binding declarations is refused, not resolved by precedence. The ordinary
-bundle path remains valid when the optional source is absent.
+`SourceBundle.gate_forecast_source` (optional `GateForecastSource`) carries the
+selected fold's `binding_id`, its fold-view `ModelRelease`, the shared
+`FrozenInference` and the held-out `pool_pred`/`pool_res`/`interval_floor`.
+`_gate_forecast_members` builds `gate.forecast_executor` from that release and
+inference (role `size`; the champion `model_release` is not consulted) and
+`gate.forecast_pool` from the pool. The champion release stays unchanged. The
+ordinary bundle path remains valid when the source is absent.
+
+| Condition | Outcome |
+| --- | --- |
+| Source plus `gate_recipe.forecast`, or plus a non-empty `gate_forecast_pool` | `ValueError` at bundle build (row refused `NATIVE_INPUT_BUILD_FAILED`); never resolved by precedence |
+| Not a `GateForecastSource`, blank `binding_id`, `binding_id` not exactly one `size` binding in its release, ragged or non-finite pool | `ValueError` at bundle build |
+| Gate names no forecast column | Source carried, unused, no flag |
+| Source absent, gate names a forecast column | Unchanged: `MISSING_GATE_INPUT:forecast` at the stage |
+| Thin pool | Unchanged: band columns unavailable, not an error |
+
+Failure semantics: slice A does no I/O, caching, retry or fallback; a refusal
+returns no bundle. Slice B (`release_bindings`) verifies and selects the fold by
+the legacy rule `tier4.serving_fold` (the earlier of the event's month and the
+decision month); a month with no staged fold is `ModelNotReady`, never an older
+fold. Slice C (`native_score_batch`) passes the selected fold per event.
 
 Raw feature names exclude stage-owned forecast/analog/pricing answers; the
 gate's declared feature order still includes them for stage-time derivation.

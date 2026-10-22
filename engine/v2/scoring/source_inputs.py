@@ -25,6 +25,7 @@ from engine.v2.scoring.frozen_executor import (
     FrozenRecipeExecutor,
     FrozenStageExecutor,
 )
+from engine.v2.scoring.gate_forecast_source import GateForecastSource
 from engine.v2.scoring.native_analog import (
     BUCKET_RECIPE_SCHEMA,
     FROZEN_ANALOG_RECIPE_FIELDS,
@@ -38,7 +39,7 @@ from engine.v2.scoring.stages import (
 )
 
 __all__ = ["SourceBundle", "build_native_score_inputs", "fold_pool", "SUPPORTED_STRATEGIES",
-           "AnswerFieldsInSource"]
+           "AnswerFieldsInSource", "GateForecastSource"]
 
 
 class AnswerFieldsInSource(ValueError):
@@ -335,6 +336,13 @@ class SourceBundle:
     # ``pool_res`` in stored order (a model-owned population, like
     # ``model_residual_rows``; never this row's answer). Empty: undeclared.
     gate_forecast_pool: Mapping[str, Any] = field(default_factory=dict)
+    # Forward forecast assembly, slice A (ARCHITECTURE.md, "Forward forecast
+    # assembly"): the causally selected fold as ONE source -- its binding,
+    # its fold-view release, the shared inference and its held-out pool --
+    # instead of ``gate_recipe.forecast`` plus ``gate_forecast_pool`` above,
+    # which it conflicts with (refused at build, never resolved by
+    # precedence). None: the ordinary path, unchanged.
+    gate_forecast_source: "GateForecastSource | None" = None
     # R4-20 gap 3 (sizing side): the SIZE fold's OWN held-out pool behind
     # ``forecast_p10``/``_p90``/``_sd`` -- legacy
     # ``Scorer._size_from_forecast``'s ``served.interval``, the fold's own
@@ -557,7 +565,9 @@ def _is_frozen_recipe(recipe: Any) -> bool:
 
 
 def _frozen_recipe_executor(
-    bundle: SourceBundle, target: str, recipe: Mapping[str, Any],
+    bundle: SourceBundle, target: str, recipe: Mapping[str, Any], *,
+    inference: FrozenInference | None = None,
+    release: ModelRelease | None = None,
 ) -> FrozenRecipeExecutor:
     """Resolve one binding-named recipe (R4-16) into a frozen executor.
 
@@ -565,12 +575,19 @@ def _frozen_recipe_executor(
     supplied, because a recipe wired to the wrong model is a malformed bundle.
     A missing release or inference is not malformed: the request is declared
     but unresolved, and the stage refuses it MODEL_NOT_READY.
+    ``inference``/``release`` override the bundle's own pair (slice A's
+    ``GateForecastSource`` carries the fold-view release and the shared
+    inference, not the champion's); ``None`` means the bundle's, so every
+    existing caller behaves exactly as before.
     """
     config = _bounded_recipe(f"{target} recipe", recipe, _FROZEN_RECIPE_FIELDS)
     binding_id = str(config.get("binding_id") or "").strip()
     if not binding_id:
         raise ValueError(f"{target} recipe binding_id must be non-empty")
-    inference, release = bundle.frozen_inference, bundle.model_release
+    if inference is None:
+        inference = bundle.frozen_inference
+    if release is None:
+        release = bundle.model_release
     if inference is not None and not isinstance(inference, FrozenInference):
         raise ValueError("frozen_inference must be a FrozenInference")
     if release is not None and not isinstance(release, ModelRelease):
@@ -674,17 +691,64 @@ def _gate_forecast_members(bundle: SourceBundle, gate: dict[str, Any]) -> dict[s
 
     ``forecast`` names the size-fold binding; ``gate_forecast_pool`` is that
     fold's pool. Both are optional -- a gate naming no forecast column needs
-    neither, and one that does but lacks them is refused at execution.
+    neither, and one that does but lacks them is refused at execution. A
+    ``gate_forecast_source`` (slice A) declares the same two as one source;
+    combined with either of them it is refused, never resolved by precedence.
     """
     members: dict[str, Any] = {}
     forecast = gate.pop("forecast", None)
+    source = bundle.gate_forecast_source
+    if source is None:
+        if forecast is not None:
+            if not _is_frozen_recipe(forecast):
+                raise ValueError("gate_recipe.forecast must name a frozen binding")
+            executor = _frozen_recipe_executor(bundle, "pred_abs_move", forecast)
+            members["forecast_executor"] = executor
+            members["forecast_recipe"] = str(executor)
+        pool = fold_pool("gate_forecast_pool", bundle.gate_forecast_pool)
+        if pool:
+            members["forecast_pool"] = pool
+        return members
+    if not isinstance(source, GateForecastSource):
+        raise ValueError("gate_forecast_source must be a GateForecastSource")
     if forecast is not None:
-        if not _is_frozen_recipe(forecast):
-            raise ValueError("gate_recipe.forecast must name a frozen binding")
-        executor = _frozen_recipe_executor(bundle, "pred_abs_move", forecast)
-        members["forecast_executor"] = executor
-        members["forecast_recipe"] = str(executor)
-    pool = fold_pool("gate_forecast_pool", bundle.gate_forecast_pool)
+        raise ValueError("gate_forecast_source cannot combine with gate_recipe.forecast")
+    if bundle.gate_forecast_pool:
+        raise ValueError("gate_forecast_source cannot combine with gate_forecast_pool")
+    members.update(_source_gate_forecast_members(bundle, source))
+    return members
+
+
+def _source_gate_forecast_members(
+    bundle: SourceBundle, source: GateForecastSource,
+) -> dict[str, Any]:
+    """The slice-A members: one size binding of the source's OWN release and
+    inference, plus the source's own pool. The champion pair the bundle
+    carries (or lacks) is never consulted."""
+    binding_id = str(source.binding_id or "").strip()
+    if not binding_id:
+        raise ValueError("gate_forecast_source binding_id must be non-empty")
+    release = source.release
+    if not isinstance(release, ModelRelease):
+        raise ValueError("gate_forecast_source.release must be a ModelRelease")
+    matches = [item for item in release.bindings if item.binding_id == binding_id]
+    if len(matches) != 1 or str(matches[0].role).split(":", 1)[0] != "size":
+        raise ValueError(
+            f"gate_forecast_source binding {binding_id!r} must be exactly one "
+            "size binding of its release"
+        )
+    executor = _frozen_recipe_executor(
+        bundle, "pred_abs_move", {"binding_id": binding_id},
+        inference=source.inference, release=release,
+    )
+    members: dict[str, Any] = {
+        "forecast_executor": executor,
+        "forecast_recipe": str(executor),
+    }
+    pool = fold_pool("gate_forecast_source", {
+        "predictions": source.pool_pred, "residuals": source.pool_res,
+        "interval_floor": source.interval_floor,
+    })
     if pool:
         members["forecast_pool"] = pool
     return members
@@ -692,12 +756,23 @@ def _gate_forecast_members(bundle: SourceBundle, gate: dict[str, Any]) -> dict[s
 
 def fold_pool(name: str, values: Mapping[str, Any]) -> dict[str, Any]:
     """A served Tier-4 fold's held-out pool (``pool_pred``/``pool_res``/
-    ``interval_floor``) as declared source rows; ``{}`` when undeclared."""
+    ``interval_floor``) as declared source rows; ``{}`` when undeclared.
+
+    Every value must be finite: ``float()`` alone would accept nan/inf, and a
+    pool carrying either is a malformed bundle (ARCHITECTURE.md, "Forward
+    forecast assembly"), refused here rather than at band time.
+    """
     pool = _bounded_recipe(name, values, _GATE_FORECAST_POOL_FIELDS)
     if not pool:
         return {}
-    predictions = tuple(float(value) for value in pool.get("predictions", ()))
-    residuals = tuple(float(value) for value in pool.get("residuals", ()))
+    predictions = tuple(
+        _finite_number(value, f"{name}.predictions[{index}]")
+        for index, value in enumerate(pool.get("predictions", ()))
+    )
+    residuals = tuple(
+        _finite_number(value, f"{name}.residuals[{index}]")
+        for index, value in enumerate(pool.get("residuals", ()))
+    )
     if len(predictions) != len(residuals):
         raise ValueError(f"{name} predictions and residuals differ in length")
     floor = pool.get("interval_floor", 0.0)
