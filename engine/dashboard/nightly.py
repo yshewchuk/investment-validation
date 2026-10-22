@@ -1686,16 +1686,23 @@ def run_nightly(
 
     report.mark("tiers", started=started)
     if fetch_only:
-        # Refresh half only: everything the v2 snapshot import reads has been
-        # written; scoring and all later steps are skipped (issue #1146).
-        tiers_step = report.steps.get("tiers")
-        if isinstance(tiers_step, dict):
-            tiers_step.setdefault("degraded", False)
-        else:
-            report.steps["tiers"] = {"degraded": False}
-        for skipped in ("warm_serving", "score", "ledger", "settle", "ladder", "backfill",
+        # Refresh half plus warm_serving: the v2 snapshot import reads the Tier-2/3/4
+        # files, SNAPSHOT and the Tier-4 serving caches that warm writes. Scoring and
+        # later steps are skipped (issue #1146).
+        report.steps["tiers"].setdefault("degraded", False)
+        from engine.dashboard import warm_serving
+
+        try:
+            report.steps["warm_serving"] = warm_serving.warm(
+                list(upcoming["event_date"]), as_of, as_of
+            )
+        except warm_serving.WarmError as exc:
+            raise _refuse(report, "warm_serving", f"WARM_SERVING_FAILED: {exc}") from exc
+        report.mark("warm_serving", started=started)
+        for skipped in ("score", "ledger", "settle", "ladder", "backfill",
                         "model_evidence", "render", "selfcheck", "publish", "backup"):
             report.steps[skipped] = {"skipped": True, "reason": "fetch_only"}
+        _log_rss("fetch-only done")
         flag_path = _write_flag_report(as_of, report.flags, report.steps)
         report.steps["flags"] = {"path": str(flag_path), "count": len(report.flags)}
         report.elapsed_s = time.time() - started
