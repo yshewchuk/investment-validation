@@ -245,7 +245,8 @@ def build_native_score_batch_events(
     ``tier4_row`` -- always ``{}`` -- ``quote_rows``, ``quote_status``) per fully
     composed request, plus the disjoint ``producer_refusals.v1.0`` document. An
     empty enumeration returns both empty before any calendar, panel, spot or
-    quote read, and an all-intraday one returns only its refusals. A key whose
+    quote read, and an all-intraday one returns only its refusals. An intraday
+    key is refused ``INTRADAY_EVENT_NOT_ADMITTED`` first; otherwise a key whose
     strategy is disabled (CAL-P, CND-P) becomes a per-key
     ``UNSUPPORTED_STRATEGY`` refusal at its original position, refused before
     the ``option_chains`` check and any further read. A missing
