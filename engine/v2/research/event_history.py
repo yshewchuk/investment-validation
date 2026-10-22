@@ -190,11 +190,19 @@ def _runs(group, others):
     return runs
 
 
+def _check_planned(planned, event, day, request):
+    """The reader serves only the exact preflighted event, day and request."""
+    if (planned is None or planned[0].ticker != event.ticker or planned[2].time_min != day
+            or planned[1] != request):
+        raise errors.fail("HOLDOUT_ACCESS_DENIED", "event or request was not preflighted for this reader")
+
+
 def _run_reader(repository, contract, plans, index):
     """One scan per run of adjacent preflighted candidates; refuses unless membership is exact."""
-    by_ticker, run_of, ticker_records, rows_by_event = {}, {}, {}, {}
+    by_ticker, run_of, ticker_records, rows_by_event, plan_of = {}, {}, {}, {}, {}
     for plan in plans:
         by_ticker.setdefault(plan[0].ticker, []).append(plan)
+        plan_of[plan[0].event_id] = plan
     partitions, invalid = index
     for ticker, group in by_ticker.items():
         group.sort(key=lambda plan: plan[2].time_min)
@@ -232,8 +240,8 @@ def _run_reader(repository, contract, plans, index):
         if event.event_id in rows_by_event:
             return rows_by_event[event.event_id]
         run, day = run_of.get(event.event_id), event.event_date.date().isoformat()
-        if run is None:
-            raise errors.fail("HOLDOUT_ACCESS_DENIED", "event was not preflighted for this reader")
+        planned = plan_of.get(event.event_id)
+        _check_planned(planned, event, day, request)
         state = streams.get(id(run))
         if state is None:
             state = streams[id(run)] = [open_run(run), {}, ""]

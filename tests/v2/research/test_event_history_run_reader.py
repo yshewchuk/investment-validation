@@ -87,6 +87,32 @@ def test_membership_mismatch_refuses_before_any_object_opens(source, monkeypatch
     assert len(opened) == base
 
 
+@pytest.mark.parametrize("clause", ["records", "row_count"])
+def test_run_membership_refuses_on_each_clause(source, monkeypatch, clause):
+    repository, snapshot = source
+    opened = poison_outcomes(monkeypatch, repository, snapshot, [], all_outcomes=True)
+    plans, read_rows = _plan(repository, snapshot)
+    base = len(opened)
+    protected = next(r for r in repository.fragment_records(snapshot, "computed_moves")
+                     if r.time_min == PROTECTED)
+    original = query_planner.plan_scan_population
+
+    def mismatched(contract, records, **kwargs):
+        population = original(contract, records, **kwargs)
+        if len(population.records) > 1:
+            if clause == "records":  # equal row_count with a different fragment set
+                return type(population)(records=(*population.records[:-1], protected),
+                                        row_count=population.row_count)
+            return type(population)(records=population.records,
+                                    row_count=population.row_count + 1)
+        return population
+
+    monkeypatch.setattr(query_planner, "plan_scan_population", mismatched)
+    with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+        read_rows(plans[0][0], plans[0][1])
+    assert len(opened) == base
+
+
 def test_scan_failure_drops_the_stream_and_a_retry_rescans(source, monkeypatch):
     repository, snapshot = source
     plans, read_rows = _plan(repository, snapshot)
@@ -105,7 +131,7 @@ def test_scan_failure_drops_the_stream_and_a_retry_rescans(source, monkeypatch):
     assert len(calls) == 2 and len(rows) == 1 and rows[0]["event_date"] == DAYS[0]
 
 
-def test_extra_fragment_in_the_run_range_refuses_before_any_object_opens(source, monkeypatch):
+def test_extra_fragment_beyond_the_run_refuses_before_any_object_opens(source, monkeypatch):
     repository, snapshot = source
     opened = poison_outcomes(monkeypatch, repository, snapshot, [], all_outcomes=True)
     plans, read_rows = _plan(repository, snapshot)
@@ -123,6 +149,30 @@ def test_extra_fragment_in_the_run_range_refuses_before_any_object_opens(source,
     with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
         read_rows(plans[0][0], plans[0][1])
     assert len(opened) == base
+
+
+def test_out_of_order_requests_match_in_order_rows(source):
+    repository, snapshot = source
+    plans, read_rows = _plan(repository, snapshot)
+    for index in (2, 0, 1, 4, 3):
+        event, request, _ = plans[index]
+        expected = [row for batch in repository.scan(request, table_name="computed_moves")
+                    for row in batch.to_pylist()]
+        assert read_rows(event, request) == expected
+
+
+def test_read_rows_refuses_a_mismatched_date_ticker_or_request(source):
+    repository, snapshot = source
+    plans, read_rows = _plan(repository, snapshot)
+    event = plans[0][0]
+    wrong_date = SimpleNamespace(event_id=event.event_id, ticker=event.ticker,
+                                 event_date=plans[1][0].event_date)
+    wrong_ticker = SimpleNamespace(event_id=event.event_id, ticker="OTHER",
+                                   event_date=event.event_date)
+    for candidate, request in ((wrong_date, plans[0][1]), (wrong_ticker, plans[0][1]),
+                               (event, plans[1][1])):
+        with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+            read_rows(candidate, request)
 
 
 def test_unplanned_event_refuses_and_malformed_candidates_refuse_contract_mismatch(source):
@@ -152,9 +202,10 @@ def test_run_stream_is_closed_after_its_last_candidate(source, monkeypatch):
     monkeypatch.setattr(repository, "scan", tracked)
     read_rows(plans[0][0], plans[0][1])
     assert closed == []
-    for event, request, _ in plans[1:3]:  # the rest of the first run
-        read_rows(event, request)
-    assert closed == [DAYS[0]]
+    read_rows(plans[1][0], plans[1][1])
+    assert closed == []  # only an intermediate candidate: the stream stays open
+    read_rows(plans[2][0], plans[2][1])
+    assert closed == [DAYS[0]]  # the run's last candidate closes it immediately
     assert read_rows(plans[1][0], plans[1][1])[0]["event_date"] == DAYS[1]
 
 
@@ -169,4 +220,6 @@ def test_runs_are_cut_only_where_another_fragment_may_lie_between_neighbours():
     assert lengths([("2022-01-01", "2022-12-31"), ("2023-04-01", "2023-05-01")]) == [3]  # outside the range
     assert lengths([("2023-02-10", "2023-02-10")]) == [2, 1]  # strictly between the last two
     assert lengths([("2023-01-01", "2023-01-01")]) == [1, 2]  # touching a candidate's day also cuts
+    assert lengths([("2023-02-01", "2023-02-01")]) == [1, 1, 1]  # the middle day cuts both gaps
+    assert lengths([("2023-03-01", "2023-03-01")]) == [2, 1]  # o[0] <= hi kills the later gap only
     assert lengths([None]) == [1, 1, 1]  # an unreadable interval cuts everywhere

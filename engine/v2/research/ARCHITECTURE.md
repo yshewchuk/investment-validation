@@ -127,7 +127,7 @@ training-label and opt-in evaluation omission lists (`omitted_history`, `omitted
 `skipped`; the magnitude search's `validate_targets` accepts exactly `skipped` and the writer's
 closed reason set, so a receipt with any other reason is `EXPERIMENT_IDENTITY_CONFLICT`), never a research-side re-derivation. Non-skipped rows the readers omit for
 availability keep the reader's own `unavailable` / `not_available_before_fit` reasons. The
-isolation guard of the history and magnitude readers (`_plans`) is unchanged: every
+isolation guard of the history and magnitude readers (`_plans`, also run by `plan_with_reader`) is unchanged: every
 candidate still needs exactly one isolated fragment, and a candidate with no fragment
 refuses `HOLDOUT_ACCESS_DENIED`. `prediction_inputs` does not use that guard: it refuses a
 table whose contract is neither native contract with `CONTRACT_MISMATCH` before any target
