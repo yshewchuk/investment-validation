@@ -209,7 +209,7 @@ and positional-lag behavior. Nonpositive prices produce missing move labels.
 
 **Prior classification (#1102).** The `phase5_state_stage` job classifies the prior with one read-only helper, `classify_prior(release_root, prior_release_id)`; it never writes:
 
-| Prior state | Class | Outcome |
+| Prior state | Class | Outcome (the `NONE`/`NO_POOL_CATALOG` bootstrap rows are the planned #1102 design; today they refuse `BOOTSTRAP_NOT_BUILT`, see below) |
 |---|---|---|
 | Pointer absent (nothing ever promoted) | `NONE` | bootstrap; `none` stands for the prior id in phase keys and `expected_previous_release_id` is null |
 | Catalog file absent at `catalog_path` for an id that does not start with `pools-` (a release this cycle stages always has a catalog, so an absent one under a `pools-*` id is `DAMAGED`), or a valid catalog whose `sources` has no `pool_cutoff` (legacy-bootstrapped) | `NO_POOL_CATALOG` | bootstrap against that pointer id |
