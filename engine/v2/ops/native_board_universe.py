@@ -1,12 +1,17 @@
 """Enumerate the native-covered board universe: one request per event per
-native-covered strategy, plus one DYN-SV meta-request per event.
+native-covered or disabled (CAL-P, CND-P) strategy, plus one DYN-SV
+meta-request per event.
 
 Mirrors `engine.score.score_calendar`'s event × strategy enumeration (the ATM
-pass only) for the strategies native has an input builder for, without
+pass only) for the strategies native has an input builder for plus the
+disabled strategies, without
 constructing a legacy `Scorer` or loading the legacy chain index. This module
 never imports `engine.score` — reading `engine.score.DISABLED_STRATEGIES`
 would pull in `engine.replay` -> `engine.fills` at import time, which the
 isolation invariant forbids even when nothing in that chain is ever called.
+
+Disabled strategies (CAL-P, CND-P) are enumerated so they end as keyed
+refusals rather than vanishing from the universe.
 
 `DYN-SV` is a meta-row, not a tenth covered strategy: one `BoardRequest` per
 event, never one per strategy — it fans out internally to the seven
@@ -22,6 +27,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from engine.v2.domain.generation import DISABLED
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.registry.strategies import DYNAMIC_MENU
 from engine.v2.scoring.source_inputs import SUPPORTED_STRATEGIES
@@ -37,11 +43,11 @@ __all__ = ["BoardRequest", "board_requests"]
 #: `DISABLED_STRATEGIES`/`STRUCTURES`: any v2 -> legacy import
 #: must be declared in checks/legacy_adapters.json, whose adapter count may
 #: only shrink, and engine.v2.ops already has its one allowed adapter module
-#: (`legacy_adapter.py`, §4.2). `SUPPORTED_STRATEGIES` already excludes both
-#: disabled strategies by construction (it comes from native's own input
-#: builder, which has no entry for CAL-P/CND-P), so that check would only
-#: restate a fact this module's one real dependency already guarantees.
-_COVERED_STRATEGIES = tuple(sorted(SUPPORTED_STRATEGIES))
+#: (`legacy_adapter.py`, §4.2). Disabled strategies (CAL-P, CND-P) are
+#: included in the union so each becomes a keyed `UNSUPPORTED_STRATEGY`
+#: refusal instead of vanishing from the universe; `DISABLED` comes from
+#: `engine.v2.domain.generation`, a v2 import with no legacy pull-in.
+_COVERED_STRATEGIES = tuple(sorted(SUPPORTED_STRATEGIES | frozenset(DISABLED)))
 _REQUIRED_COLUMNS = ("ticker", "event_date", "session")
 
 # Defensive consistency check, paid once at import time — a v2-only
@@ -206,7 +212,7 @@ def board_requests(
     Filters exactly like `score_calendar`: `as_of <= event_date <=
     as_of + horizon_days`, `session` not null, and an optional ticker filter.
     Events are ordered by `(event_date, ticker)`. Within one event: the
-    native-covered strategies in sorted (alphabetical) order, then one
+    native-covered and disabled (CAL-P, CND-P) strategies in sorted (alphabetical) order, then one
     `DYN-SV` request last.
 
     Raises `OpsError` (code `INVALID_REQUEST`) if `as_of` is `None`/`NaT`/

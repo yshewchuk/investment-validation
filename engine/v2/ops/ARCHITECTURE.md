@@ -10,7 +10,7 @@ Durable job submission, leases, retry history and dependencies; resource
 admission (each constrained cgroup uses `max(0, memory.current - (file - shmem))`, reading `file` and `shmem` from that same directory’s `memory.stat`; active and inactive file cache is reclaimable, while shmem/tmpfs stays counted; missing, malformed or unreadable statistics fall back to `max(0, memory.current - inactive_file)`, then raw usage; headroom remains `min(host_available, container_remaining) - free_margin`) and per-job CPU placement; the nightly job graph and its release
 boundary. It does not decide research conclusions (`engine/v2/evaluation`) and does not compute a score (`engine/v2/scoring`) — it only sequences and persists the jobs that call into those packages. `legacy_render` renders the staged score document's board rows, which scale with output rows, and builds a `Scorer` without calling its scoring path. Its `feature_panel`, `trades`, and `earnings_events` inputs are whole-table reads; `FeatureContext.load` filters its `daily_market` input by plan `context_tickers` and year range, while `Scorer` construction separately reads each historical `daily_market` year slice, then filters it to trade-derived ticker chunks, spanning the trade entry years plus one prior year. The lazy Tier-4 forecast path is not reached. The render profile (`projection`) must account for the complete evidence working set, which can include more tickers than the staged board rows; its 3 GiB reservation and cgroup `memory.max` cap are INTERIM, sized from the observed 100-ticker render only and NOT shown to fit the full universe, so the bounded/chunked read design tracked by issue #505 is the actual fix; available subset evidence does not establish full-universe fit.
 
-This doc also covers `native_board_universe.py`: a pure, answer-free enumerator reproducing legacy `engine.score.score_calendar`'s event × strategy enumeration for supported strategies, without the legacy chain index or a legacy `Scorer`; the native worker runs `build_native_score_batch_events` over the pinned snapshot, off the supervisor tick (see "Dependencies"); schema migrations follow the [checksummed R1–R6 table-recreate contract](MIGRATIONS.md).
+This doc also covers `native_board_universe.py`: a pure, answer-free enumerator reproducing legacy `engine.score.score_calendar`'s event × strategy enumeration for supported and disabled strategies, without the legacy chain index or a legacy `Scorer`; the native worker runs `build_native_score_batch_events` over the pinned snapshot, off the supervisor tick (see "Dependencies"); schema migrations follow the [checksummed R1–R6 table-recreate contract](MIGRATIONS.md).
 
 **Planned package split.**
 The `design/ops-package-split` PR records the proposed module homes and move slices. The planned dependency direction is entrypoints → runtime → workflows → stores → {legacy, native, providers} → core, with no upward or peer-package imports. Before implementation, remove prerequisite cycles and migrate all callers per move; no compatibility modules or re-export shims.
@@ -57,7 +57,7 @@ coordinator-effect functions in `effects_graph.py`; `training.py`'s `training_jo
 `stages.py::_core_kinds`, not in `supervisor._COORDINATOR_EFFECT_KINDS`), `training_plan`/`promote_plan`,
 `run_training_worker`/`run_promote_worker`; `native_training_pin_problems((catalog, store, snapshot, receipt), require_absolute=True)` returns a problem list without I/O (CLI validates raw pins with `False` before path resolution); `state_stage.py` (`phase5_state_stage`); `BoardRequest`/`board_requests(as_of, horizon_days, tickers, events_table)`
 (`native_board_universe.py`) — `board_requests` emits one `BoardRequest` — the pure key `(ticker, strategy, event_date, session)` — per event ×
-native-covered strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
+native-covered or disabled (CAL-P/CND-P, refused downstream) strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
 `computed_moves_job_kind`/`forward_calendar_job_kind`, `CalendarMovesParameters`/`calendar_moves_parameter_problems`/
 `calendar_moves_job_spec`, and `run_computed_moves_worker`/`run_forward_calendar_worker` (dispatched by `worker.py`).
 `forward_calendar_refresh` has a `JobKind` but no nightly submitter. `native_gate_pricing` and `native_gate_evaluation` are smoke-only, single-thread staged kinds: the executor launches only the fixed `experiments.native_gate_entrypoint` module, which passes its narrow callback to `worker.main` after the launch gate; registration/spec/code/environment checks precede pricing or fitting. Neither has a coordinator ledger effect or cache reuse; see `experiments/ARCHITECTURE.md`.
@@ -549,7 +549,7 @@ Entry/exit/expiry, spot and calendar-observed-through are caller-staged; validat
 
 | Native score batch raw-row producer and sidecar (R1–R6) | Outcome |
 |---|---|
-| R1: per-key producer refusal (`NO_RESOLVABLE_EXPIRY`, `EVENT_NOT_FOUND`/`IDENTITY_CONFLICT`, `INTRADAY_EVENT_NOT_ADMITTED`, `PANEL_HISTORY_NOT_AVAILABLE`, `PRICE_HISTORY_NOT_AVAILABLE`, `RUNUP_HORIZON_NOT_AVAILABLE`, `INVALID_RUNUP_HORIZON`, or a calendar/expiry refusal) | Recorded in `producer_refusals.json` and surfaced as parity `native_refused`; complete rows for other keys proceed. Price-history refusal covers absent ticker history or unusable exact-session close; RUNUP horizon unavailable means missing date/pre-print coverage, invalid means a negative session distance. Malformed calendars/source data and repository failures are not retyped. A later snapshot is evaluated afresh. Missing eligible score identity, an existing job, unavailable release, or a sidecar tick that does not reach production means no submission. |
+| R1: per-key producer refusal (`NO_RESOLVABLE_EXPIRY`, `EVENT_NOT_FOUND`/`IDENTITY_CONFLICT`, `INTRADAY_EVENT_NOT_ADMITTED`, `UNSUPPORTED_STRATEGY` (disabled CAL-P/CND-P), `PANEL_HISTORY_NOT_AVAILABLE`, `PRICE_HISTORY_NOT_AVAILABLE`, `RUNUP_HORIZON_NOT_AVAILABLE`, `INVALID_RUNUP_HORIZON`, or a calendar/expiry refusal) | Recorded in `producer_refusals.json` and surfaced as parity `native_refused`; complete rows for other keys proceed. Price-history refusal covers absent ticker history or unusable exact-session close; RUNUP horizon unavailable means missing date/pre-print coverage, invalid means a negative session distance. Malformed calendars/source data and repository failures are not retyped. A later snapshot is evaluated afresh. Missing eligible score identity, an existing job, unavailable release, or a sidecar tick that does not reach production means no submission. |
 | R2: producer-wide failure (missing source table, malformed source input, or a repository failure) | Returns no partial tuple; the native worker attempt fails before score outputs are committed and follows its bounded retry policy. Tick-side leases and legacy jobs are unaffected. The producer keeps no durable/negative cache and fetches no provider data: reuse is build- and snapshot-scoped, and unchanged inputs reproduce the same result or refusal. |
 | R3: late or unavailable prerequisite, or a readiness no-op | No producer refusal and no job; the next eligible sidecar tick reevaluates under existing scheduling/backoff behavior — no specific retry time is promised. |
 | R4: caller and builder boundaries | The worker is the sole producer caller, and the read-only producer makes no catalog writes. The tick builder supplies the snapshot identity and producer parameters; the worker derives the calendar revision from that pinned snapshot. |
@@ -937,7 +937,7 @@ waits without submitting until its paired succeeded inputs are ready.
   `ops plan training|promote|rollback` + `ops submit`. Rollback uses principal
   `operator`, namespace `shadow` and the caller idempotency key like promote.
 - `board_requests`: a tuple of `BoardRequest`, ordered by
-  `(event_date, ticker)` outer, native-covered strategies alphabetically
+  `(event_date, ticker)` outer, native-covered and disabled (CAL-P, CND-P) strategies alphabetically
   then `DYN-SV` last inner. No side effect, no write.
 
 **`computed_moves_refresh` and `forward_calendar_refresh` nightly wiring.**
@@ -1027,7 +1027,7 @@ Top-level imports, all strictly below this package's own layer (7.0):
 `release_bindings`/`nightly_source_bundle`/`source_inputs`/`stages`/
 `identity`/`application`, and since #681 `native_analog_query.analog_declarations` plus `identity.score_request_key`, declaring the frozen board analog pool on each row whose release carries a matching one), `engine.v2.ledger` (6.0), `engine.v2.parity`
 (6.5). `engine.v2.models` (3.5) permits top-level `payoff_artifact_key` in `native_score_batch` and `PayoffSurfaceArtifact`/`payoff_artifact_key`/`DriverResidualPoolArtifact` in `native_runup_inputs`, and `engine.v2.models.deployment`/`frozen_state_io` in `pool_refresh`; all other direct model imports are lazy.
-`engine.v2.domain.generation` (2.0, `Geometry`/`Pricing`) remains lazy-only. Ops does not import the native experiment adapter; the executor selects a fixed child module.
+`engine.v2.domain.generation` (4a, `Geometry`/`Pricing`) is lazy-only except the top-level `DISABLED` import in `native_board_universe.py` and `nightly_raw_row_producer.py`. Ops does not import the native experiment adapter; the executor selects a fixed child module.
 `engine.v2.domain.generation` supplies geometry to the rescore decoder
 (`native/input_decoding.py::_load_native_score_inputs`). The `nightly_calendar_inputs`
 calendar helper, called by `nightly_raw_row_producer`, uses its public expiry-only API lazily. Native foundation supplies calendar arithmetic;
@@ -1051,7 +1051,7 @@ or `engine.fills` — the first two each pull in `engine.replay`/`engine.fills` 
 fill model) at their own top level, which would violate the isolation invariant at import time even for
 a read-only comparison. It performs no consistency check against `engine.score.DISABLED_STRATEGIES` either:
 `SUPPORTED_STRATEGIES` (native's own input-builder strategy set, exported from `engine.v2.scoring.source_inputs`)
-already excludes both disabled strategies by construction, so no legacy read is needed; it is instead checked against
+excludes both disabled strategies (CAL-P, CND-P), so the enumerator adds the v2-owned `engine.v2.domain.generation.DISABLED` keys to the set (no legacy read): every legacy key ends as a record or a keyed refusal ([#1105](https://github.com/yshewchuk/investment-validation/issues/1105)). The raw-row producer refuses each such key in place as `UNSUPPORTED_STRATEGY` with fixed detail, before the `option_chains` check or any calendar, panel or quote read; other rows are unaffected (per-row, collected, no cache/retry/partial write). `SUPPORTED_STRATEGIES` is also checked against
 `engine.v2.registry.strategies.DYNAMIC_MENU` (a subset assertion paid once at import time, no I/O, no legacy dependency).
 
 **Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops. The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
@@ -1183,7 +1183,7 @@ Per row (collected as a refusal, never sinks the batch):
 | `MISSING_STAGED_INPUT` | the staged `calendar_row` has no non-empty string `event_id` |
 | `CALENDAR_ROW_INVALID` | the staged calendar row is not a mapping, or its `event_date`, `expiry`, or non-null `entry_date` does not parse |
 | `CALENDAR_ROW_KEY_MISMATCH` | the staged row's ticker/event_date disagrees with the row's own key |
-| `UNSUPPORTED_STRATEGY` | the row's strategy has no `_STRATEGY_REGISTRY` entry; no bundle is built |
+| `UNSUPPORTED_STRATEGY` | the row's strategy has no `_STRATEGY_REGISTRY` entry; no bundle is built. The raw-row producer also emits it for `DISABLED` strategies (CAL-P, CND-P) |
 | `RELEASE_MISSING_ROLE` | any ordered driver declaration has neither its exact role nor optional alias, or the registered gate role is absent |
 | `RELEASE_MISSING_FEATURE_ORDER` | `feature_names` is empty and any driver or gate identity has an empty `feature_order` |
 | `AMBIGUOUS_DECISION_CLOCK` | any resolved driver identity disagrees with the gate on decision clock; every required role resolves before clock comparison |
@@ -1334,7 +1334,7 @@ layer-6.0 rule): `run_native_score_batch_worker` runs `score_batch` inside
 `native_board_universe.py` adds two invariants of its own:
 - **Native vs. legacy values.** `ticker`, `event_date`, and `session` come
   from the shared events table, which neither side owns; `strategy` comes
-  from the native-covered strategy set (`SUPPORTED_STRATEGIES`) or the
+  from the native-covered strategy set (`SUPPORTED_STRATEGIES`), the v2 `DISABLED` keys or the
   `DYN-SV` literal, never from the events table. Its one consistency
   assertion (`DYNAMIC_MENU` is a subset of `SUPPORTED_STRATEGIES`) reads
   only v2-native names — never `engine.score.DISABLED_STRATEGIES` or any
@@ -1463,7 +1463,7 @@ commit happens until the combined kind list is clean.
 ```mermaid
 flowchart LR
     ET[events_table] --> BR[board_requests]
-    SI["source_inputs.SUPPORTED_STRATEGIES"] --> BR
+    SI["source_inputs.SUPPORTED_STRATEGIES"] & DS["domain.generation.DISABLED\n(CAL-P, CND-P)"] --> BR
     DM["registry.strategies.DYNAMIC_MENU\n(consistency check only)"] --> BR
     BR --> OUT["tuple[BoardRequest]\n(ticker, strategy, event_date, session)"]
     OUT --> RRP["nightly_raw_row_producer.build_native_score_batch_events\n(called only by native_score_batch worker)"]
