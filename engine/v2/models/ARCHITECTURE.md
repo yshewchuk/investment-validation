@@ -206,6 +206,24 @@ and positional-lag behavior. Nonpositive prices produce missing move labels.
   (`PRIOR_MISMATCH` on a missing prior or structurally malformed rows, object keys or `pool_cutoff`;
   wrong-typed object fields are not checked here and refuse later as `POOL_SET_MISMATCH`, or `CHOOSER_MISMATCH` for the chooser).
 - `classify_prior(release_root, prior_release_id) -> PriorClass` — read-only; handled refusal, validation and I/O failures return `DAMAGED` rather than raising. Kind `NONE`/`NO_POOL_CATALOG`/`USABLE`/`DAMAGED` with a fixed reason (§2.2.2). Every present catalog (with or without `pool_cutoff`) must verify against its staged release and `deployment_id`; a legacy catalog without `pool_cutoff` is not checked for pool rows or objects, which it need not have. `USABLE` needs a valid catalog with an ISO `pool_cutoff`, well-formed pool rows, objects whose hash and size verify, and a `deployment_id` equal to the staged release's.
+
+**Prior classification (#1102).** The `phase5_state_stage` job classifies the prior with one read-only helper, `classify_prior(release_root, prior_release_id)`; it never writes:
+
+| Prior state | Class | Outcome |
+|---|---|---|
+| Pointer absent (nothing ever promoted) | `NONE` | bootstrap; `none` stands for the prior id in phase keys and `expected_previous_release_id` is null |
+| Catalog file absent at `catalog_path` for an id that does not start with `pools-` (a release this cycle stages always has a catalog, so an absent one under a `pools-*` id is `DAMAGED`), or a valid catalog whose `sources` has no `pool_cutoff` (legacy-bootstrapped) | `NO_POOL_CATALOG` | bootstrap against that pointer id |
+| Catalog valid with `pool_cutoff` | `USABLE` | nightly carry-forward (§2.2), unchanged |
+| Catalog present but a symlink, not a regular file, oversize, unparseable, wrong `release_id`/`deployment_id` (also against the staged release), malformed rows or objects, an object whose hash or size does not verify, or a non-ISO `pool_cutoff` | `DAMAGED` | no bootstrap: refuses `VALIDATION_FAILED` (`details.code` `PRIOR_MISMATCH`); a damaged store is operator recovery (#154), never silently replaced |
+
+In `bootstrap` mode the job classifies the prior (`classify_prior`, §2.1) before any object is written, with the refusals in the table below, and the light checks expect `sources.carried_from` null. Nothing submits `bootstrap` mode yet.
+
+| Condition | Outcome |
+|---|---|
+| Prior `DAMAGED` | `VALIDATION_FAILED`, fixed message, `details.code` `PRIOR_MISMATCH` |
+| Prior `NONE`/`NO_POOL_CATALOG` | `VALIDATION_FAILED`, fixed message, `details.code` `BOOTSTRAP_NOT_BUILT` |
+| Prior `USABLE` while `mode` is `bootstrap` | `VALIDATION_FAILED`, fixed message, `details.code` `PRIOR_USABLE` |
+
 - `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
   — verifies the prior staged release, untouched rows and supplied objects on disk,
   re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),
@@ -298,7 +316,7 @@ of the newest nightly jobs, so a score older than that window is not found.
 
 | Rule | Behaviour |
 |---|---|
-| R1 verified input | session and manifest id from the latest succeeded `finality`/`features` job (its `legacy_manifest.json` binding); prior release from the live pointer; a missing pointer or a prior without a pool catalog starts the §2.2.2 bootstrap cycle (design, not built; today nothing is submitted for a missing pointer and the stage refuses) |
+| R1 verified input | session and manifest id from the latest succeeded `finality`/`features` job (its `legacy_manifest.json` binding); prior release from the live pointer; a missing pointer or a prior without a pool catalog would start a bootstrap cycle (design in #1102, see §2.2.2; not built: today a missing pointer submits nothing, and a catalog-less prior submits the training jobs and the stage refuses `VALIDATION_FAILED`, `details.code` `PRIOR_MISMATCH`) |
 | R7 serve lifetime | the scheduled serve (not the snapshot-import serve) also stays up while the latest session's pool cycle is pending: a candidate release for it is not yet deployed, or a phase job (including the promote) is still running, and no phase job has failed; a missing release root or a failed phase ends the wait, and the serve deadline still bounds it |
 | R2 cache | durable job and pointer state is re-read each tick; no memo (reads are cheap indexed selects) |
 | R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); an incumbent changed before staging starts a new cycle under new keys; once a candidate is staged, the staged id or the guarded promote refuses and the cycle stalls |
@@ -306,55 +324,9 @@ of the newest nightly jobs, so a score older than that window is not found.
 | R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; before the pointer swap the prior release stays deployed, and a failure after the swap follows the §7.2 history rules |
 | R6 idempotency | phase keys are stable per session, scoring manifest and prior release, so a rerun scored from a new manifest retrains; the candidate release id is `pools-{session}-{tag}` and does not include the prior release (the stage refusal carries `ID_CONFLICT` in `details` when the same candidate id is reused with different content; promotion separately checks `expected_previous_release_id`, R3); a deployed release already named so ends the cycle |
 
-### 2.2.2 Bootstrap cycle
+### 2.2.2 Bootstrap cycle (not implemented)
 
-In `bootstrap` mode the job classifies the prior (`classify_prior`, §2.1) before any object is written, with the refusals in the table below, and the light checks expect `sources.carried_from` null.
-
-**Problem.** A legacy-bootstrapped incumbent may have its catalog outside `deployment/releases/<id>/` and no `sources.pool_cutoff`, so every nightly's `phase5_state_stage` refuses `PRIOR_MISMATCH` ("prior release could not be read") and no pool advances. When the prior release has no pool catalog (classes `NONE` and `NO_POOL_CATALOG` below; a `DAMAGED` prior is not bootstrapped), the nightly runs a full release cycle through the standard pool-release assembly with the session's data date as the cutoff. It does not refuse, there is no one-time store repair, and no cutoff is picked by hand. Later nightlies carry forward (§2.2) from the bootstrapped release, so the cost is paid once per store wipe or rebuild.
-
-**Standard tool check.** No third-party tool covers this: the assembly is repo-specific (champion registry, content-addressed objects, catalog). The bootstrap reuses the state assembly of `tools/phase5_prepare_release.py` (`model_release`, `build_states`, `write_release`) instead of a second implementation, shared by the job and the CLI.
-
-**Classification.** The job (now) and the sidecar (from the sidecar slice) classify the prior with one read-only helper, `classify_prior(release_root, prior_release_id)`; it never writes:
-
-| Prior state | Class | Outcome |
-|---|---|---|
-| Pointer absent (nothing ever promoted) | `NONE` | bootstrap; `none` stands for the prior id in phase keys and `expected_previous_release_id` is null |
-| Catalog file absent at `catalog_path` for an id that does not start with `pools-` (a release this cycle stages always has a catalog, so an absent one under a `pools-*` id is `DAMAGED`), or a valid catalog whose `sources` has no `pool_cutoff` (legacy-bootstrapped) | `NO_POOL_CATALOG` | bootstrap against that pointer id |
-| Catalog valid with `pool_cutoff` | `USABLE` | nightly carry-forward (§2.2), unchanged |
-| Catalog present but a symlink, not a regular file, oversize, unparseable, wrong `release_id`/`deployment_id` (also against the staged release), malformed rows or objects, an object whose hash or size does not verify, or a non-ISO `pool_cutoff` | `DAMAGED` | no bootstrap: refuses `VALIDATION_FAILED` (`details.code` `PRIOR_MISMATCH`); a damaged store is operator recovery (#154), never silently replaced |
-
-**Cycle.** Same sidecar shape as §2.2.1: each phase only after the previous succeeded; keys per session, scoring manifest and prior id (`none` for `NONE`); candidate id `pools-{session}-{tag}`.
-
-1. `training` jobs at cutoff = session for every pool-type member the full release needs: the three nightly members, the three driver residual pools, and the payoff-line, payoff-surface and recalibration-map folds for the keys `tools/phase5_calibration_keys.py` lists. Each is an existing training kind bound to the session's scoring manifest. The chooser analog pool has no `training` state producer today (`tools/build_chooser_pool.py` writes the legacy parquet source only). The bootstrap therefore requires a new producer that writes the `(pool_id, cutoff)` `ChooserAnalogPoolArtifact` at the session cutoff, with its schema and lineage, and the stage job accepts that output as a new member; it never carries the legacy chooser object.
-2. One `phase5_state_stage` job with `mode: "bootstrap"`: re-runs `classify_prior` (anything but `NONE`/`NO_POOL_CATALOG` refuses), builds the model bindings from the champion registry inventory as `phase5_prepare_release` does, reads the legacy-trained Tier-4 serving folds from the pinned legacy tree (read only, not retrained) and stages them only as the legacy-labeled `tier4_folds:*` members with the lineage the catalog member row already records for them (the same rows the incumbent carries; no new representation), never relabeled native (`carried_from` null says only that no prior catalog was carried, not that the data is native), assembles every member content-addressed, and writes the staged manifest and catalog with `sources.pool_cutoff` = cutoff and `sources.carried_from` null. For `NO_POOL_CATALOG`, champion and gate bindings must equal the incumbent's staged bindings binding by binding; a difference refuses (a model change takes the §2.3 acceptance path). For `NONE` there is no incumbent to compare with, so the bindings come from the champion registry inventory alone.
-3. `models_promote`, guarded by `expected_previous_release_id` for `NO_POOL_CATALOG`. For `NONE` a null expected id alone is unguarded, so the promote must also assert the store is still empty and refuses `ConcurrentPromote` if any release was promoted meanwhile.
-
-Training cutoffs: the session cutoff applies to the pool members; each calibration fold keeps the cutoff its key in `tools/phase5_calibration_keys.py` gives (STR-RUNUP folds may be earlier than the session), since serving selects them by exact key.
-
-The panel identity comes from the pinned snapshot, never from `--tier3-snapshot auto`. Verifying the pinned panel copy still hashes the whole panel object once per fresh process, so that cost is part of the unmeasured total (§Cost). `write_release` is reused for object and state assembly only: the bootstrap publishes the staged manifest and catalog under the candidate id alone and does not rewrite a root `phase5_release.json` or preserve the legacy catalog.
-
-| Condition | Outcome |
-|---|---|
-| Prior `DAMAGED` | `VALIDATION_FAILED`, fixed message, `details.code` `PRIOR_MISMATCH` |
-| Prior `NONE`/`NO_POOL_CATALOG` | `VALIDATION_FAILED`, fixed message, `details.code` `BOOTSTRAP_NOT_BUILT` |
-| Prior `USABLE` while `mode` is `bootstrap` | `VALIDATION_FAILED`, fixed message, `details.code` `PRIOR_USABLE` |
-| A training phase fails | the cycle stalls for operator recovery (§2.2.1 R3) |
-| Registry drift, bindings differ from the incumbent's, an empty member, or a bound file that is self-inconsistent | `VALIDATION_FAILED`; nothing promoted |
-| Candidate id present with different content | `ID_CONFLICT` in `details` (§2.2 R6) |
-| Promote guard fails (incumbent changed) | `ConcurrentPromote`; the cycle stalls and the next session starts new keys |
-
-| Rule | Behaviour |
-|---|---|
-| R1 verified input | prior class re-derived at submit and again in the job; bound files and registry inventory re-verified; scoring manifest pinned as in §2.2.1 |
-| R2 cache | none; pointer, catalog and bound files re-read each call |
-| R3 retry | one attempt per job; a failed phase is terminal for that cycle until an operator acts (#154); the next session retries under new keys |
-| R4 transaction | objects go to the shared content-addressed store; the staged manifest and catalog exist only under the new id; `DEPLOYED` changes only through the guarded promote |
-| R5 partial failure | orphan objects or a staged candidate may remain, never promoted; before the pointer swap the incumbent stays deployed (a failure after the swap follows §7.2), so until it succeeds native analog and simulation fields stay null (#681) and STR-RUNUP stays `MODEL_NOT_READY` (#782) |
-| R6 idempotency | same inputs give the same catalog; a rerun after a successful bootstrap sees `USABLE` and carries forward; a deployed release already named `pools-{session}-{tag}` ends the cycle |
-
-**Progress logging.** Each phase and the assembly log stage start and end with elapsed time, member counts and RSS to stderr; the classification (class and reason) is logged once per cycle.
-
-**Cost.** Not yet measured for the bootstrap as a whole; wall time and peak RSS are recorded here from the first live run. Until then the bootstrap is not classified heavy or light; the supervisor runs any heavy step.
+Unimplemented; the design is in issue #1102. Today a missing pointer submits nothing. With a deployed pointer whose release has no usable pool catalog, it submits the three training jobs and then `phase5_state_stage`, which refuses `VALIDATION_FAILED` with `details.code` `PRIOR_MISMATCH` ("prior release could not be read").
 
 ### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
 
