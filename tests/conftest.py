@@ -83,10 +83,10 @@ def pytest_configure(config):
 # phases gets its own budget: `--test-timeout SECONDS`, else env
 # PYTEST_TEST_TIMEOUT, else DEFAULT_TEST_TIMEOUT; 0 disables it. A test can
 # carry `@pytest.mark.test_timeout(N)`. When the budget runs out the test
-# FAILS with its node id and the stack it was stuck in, and the run carries on
-# with the next test. Before this, one sleeping test kept its xdist worker
-# asleep until the outer timeout killed the run, and no summary or test name
-# came out.
+# FAILS with its node id, attempts a stack dump, and the run carries on with
+# the next test even if that dump fails. Before this, one sleeping test kept
+# its xdist worker asleep until the outer timeout killed the run, and no
+# summary or test name came out.
 #
 # 600 s is well above any test that finishes: the slowest known are the
 # real-parquet reads (~40 s each) and legacy test_features.py (~33 s serially),
