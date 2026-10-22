@@ -46,7 +46,7 @@ import pandas as pd
 
 from engine import paths
 
-__all__ = ["refresh_gspc_daily", "HEADER_LINES", "MAX_EXISTING_BYTES"]
+__all__ = ["refresh_gspc_daily", "HEADER_LINES", "MAX_EXISTING_BYTES", "MAX_FRESH_BYTES"]
 
 #: Rows 0-2 of the legacy layout; readers (``panel._gspc_series``,
 #: ``calendar.trading_calendar``) skip exactly these three lines.
@@ -61,6 +61,9 @@ HEADER_LINES = (
 #: thing this pull is meant to refresh, so it is refused rather than slurped
 #: into memory or overwritten.
 MAX_EXISTING_BYTES = 64 * 1024 * 1024
+
+#: Ceiling on the fetched fresh body, refused as unparseable before decoding.
+MAX_FRESH_BYTES = 64 * 1024 * 1024
 
 
 def _log(message: str) -> None:
@@ -158,10 +161,11 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
         return _finish({"ok": False, "reason": "fetch_failed"}, started)
     if rec is None or rec.status != 200:
         return _finish({"ok": False, "reason": "fetch_failed"}, started)
-    # The fresh body gets the same ceiling as the stored file: a max-history
-    # CSV is well under it, so an answer larger than any plausible series is
-    # refused as unparseable before a single byte of it is decoded.
-    if rec.body is None or len(rec.body) > MAX_EXISTING_BYTES:
+    # The fresh body gets its own ceiling (same value, separate knob, so tests
+    # that shrink the stored-file cap still see the fresh-body refusal as
+    # unparseable): a max-history CSV is well under it, so an answer larger
+    # than any plausible series is refused before a single byte is decoded.
+    if rec.body is None or len(rec.body) > MAX_FRESH_BYTES:
         return _finish({"ok": False, "reason": "unparseable"}, started)
 
     frame = _parse_body(rec.body)

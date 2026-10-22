@@ -146,7 +146,7 @@ def test_oversize_fresh_body_is_unparseable_before_decoding(tmp_path, monkeypatc
     import engine.data.pulls.gspc_refresh as gspc_module
 
     path = tmp_path / "gspc_daily.csv"
-    monkeypatch.setattr(gspc_module, "MAX_EXISTING_BYTES", 16)
+    monkeypatch.setattr(gspc_module, "MAX_FRESH_BYTES", 16)
 
     result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path,
                                 refetch_token="run-1")
