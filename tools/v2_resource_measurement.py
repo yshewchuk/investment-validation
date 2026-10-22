@@ -180,11 +180,16 @@ def classify_kill(output: str, exit_code: int) -> str | None:
     The disk reason belongs to exit 76 only; a 137 reports the memory
     strings alone, so a "DISK LIMIT unreadable" warning line is never
     reported as the reason a 137 died.
+
+    On exit 76 only the terminal `DISK LIMIT:` breach line counts; an
+    earlier `DISK LIMIT unreadable` warning does not.
     """
     if exit_code not in KILL_EXIT_CODES:
         return None
     if exit_code == DISK_LIMIT_EXIT:
-        return DISK_LIMIT_REASON if DISK_LIMIT_REASON in output else None
+        # Match the terminal breach line ("DISK LIMIT: <path> used ..."), not
+        # an earlier "DISK LIMIT unreadable" warning from a failed sample.
+        return DISK_LIMIT_REASON if f"{DISK_LIMIT_REASON}:" in output else None
     for reason in KILL_REASONS:
         if reason in output:
             return reason

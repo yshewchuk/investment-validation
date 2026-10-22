@@ -830,8 +830,8 @@ def test_first_successful_run_exports_exp_record_and_report(source, capsys):
                        "magnitude_feature_snapshot_id": None,
                        "magnitude_history_start": None}
     assert (exported / "REPORT.md").read_text().startswith("# EXP-101")
-    if "report" in output:
-        assert Path(output["report"]).read_text().strip() in (exported / "REPORT.md").read_text()
+    assert "report" in output
+    assert Path(output["report"]).read_text().strip() in (exported / "REPORT.md").read_text()
 
 
 def test_run_refuses_without_exp_number_then_auto_succeeds(source, capsys):
