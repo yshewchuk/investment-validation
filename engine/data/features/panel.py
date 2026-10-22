@@ -357,7 +357,9 @@ def build_events(moves_dir: Path | None = None,
 
 # #1103 — file versions whose staleness was already reported. Keyed on
 # (path, mtime), the same identity _gspc_series caches on, so a refreshed file
-# that is still behind the frame's decision dates can warn again.
+# that is still behind the frame's decision dates can warn again. Bounded: a
+# long-lived process that reads many distinct file versions clears the set at
+# 64 rather than growing it without limit.
 _STALE_REGIME_WARNED: set[tuple[str, float]] = set()
 
 
@@ -429,6 +431,8 @@ def add_regime_features(
             if asked - last > pd.Timedelta(days=7):
                 key = (str(gspc_path), mtime)
                 if key not in _STALE_REGIME_WARNED:
+                    if len(_STALE_REGIME_WARNED) >= 64:
+                        _STALE_REGIME_WARNED.clear()
                     _STALE_REGIME_WARNED.add(key)
                     detail = (f"gspc series ends {last.date()}, decision date "
                               f"{asked.date()}: regime features are stale")

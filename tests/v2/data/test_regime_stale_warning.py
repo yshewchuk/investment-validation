@@ -28,6 +28,10 @@ WITHIN_WINDOW = pd.Timestamp("2026-09-03")  # exactly 7 days past: must not warn
 
 STALE_MATCH = "regime features are stale"
 
+#: The market-state block the staleness diagnostic must never alter.
+SPY_COLS = ("spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol5",
+            "spy_vol20", "spy_vol60", "spy_vol252", "spy_vol20_rel252")
+
 
 @pytest.fixture(autouse=True)
 def _fresh_dedup_state(monkeypatch):
@@ -76,6 +80,14 @@ def test_stale_frame_warns_once_and_a_second_call_stays_quiet(tmp_path):
     assert first["spy_ret21"].iloc[0] == pytest.approx(expected)
     assert first["regime_asof"].iloc[0] == np.datetime64(str(SERIES_END.date()))
 
+    # Every market-state value equals what the SAME file yields on a decision
+    # date inside the 7-day window (which does not warn): the stale anchor is
+    # the series end in both cases, so the warning is diagnostic only and never
+    # moves a number.
+    fresh = add_regime_features(_frame(WITHIN_WINDOW), gspc_path=path)
+    for col in SPY_COLS:
+        assert first[col].iloc[0] == pytest.approx(fresh[col].iloc[0])
+
 
 def test_stale_frame_emits_exactly_one_stderr_line(tmp_path, capsys):
     path = tmp_path / "gspc_daily.csv"
@@ -109,6 +121,23 @@ def test_decision_within_seven_days_does_not_warn(tmp_path, capsys):
     # It still computed the block normally: the series end is the anchor.
     assert out["regime_asof"].iloc[0] == np.datetime64(str(SERIES_END.date()))
     assert np.isfinite(out["spy_ret21"].iloc[0])
+
+
+def test_boundary_exactly_seven_days_quiet_eight_days_warns(tmp_path, capsys):
+    """The threshold is strictly more than seven days: +7 stays quiet, +8 warns."""
+    path = tmp_path / "gspc_daily.csv"
+    _write_gspc(path)
+    seven = SERIES_END + pd.Timedelta(days=7)
+    eight = SERIES_END + pd.Timedelta(days=8)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        add_regime_features(_frame(seven), gspc_path=path)
+    assert [w for w in caught if "stale" in str(w.message)] == []
+    assert "[regime] WARNING" not in capsys.readouterr().err
+
+    with pytest.warns(UserWarning, match=STALE_MATCH):
+        add_regime_features(_frame(eight), gspc_path=path)
 
 
 def test_refreshed_file_can_warn_again(tmp_path):

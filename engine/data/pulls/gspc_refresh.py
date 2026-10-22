@@ -25,13 +25,14 @@ from __future__ import annotations
 
 import io
 import os
+import stat
 import sys
 import time
 from pathlib import Path
 
 import pandas as pd
 
-__all__ = ["refresh_gspc_daily", "HEADER_LINES"]
+__all__ = ["refresh_gspc_daily", "HEADER_LINES", "MAX_EXISTING_BYTES"]
 
 #: Rows 0-2 of the legacy layout; readers (``panel._gspc_series``,
 #: ``calendar.trading_calendar``) skip exactly these three lines.
@@ -40,6 +41,12 @@ HEADER_LINES = (
     "Ticker,^GSPC,^GSPC,^GSPC,^GSPC,^GSPC,^GSPC\n",
     "Date,,,,,,\n",
 )
+
+#: Ceiling on the existing CSV we read to guard the rewrite. The stored series
+#: is a twenty-year daily file (well under 1 MiB); anything larger is not the
+#: thing this pull is meant to refresh, so it is refused rather than slurped
+#: into memory or overwritten.
+MAX_EXISTING_BYTES = 64 * 1024 * 1024
 
 
 def _log(message: str) -> None:
@@ -103,7 +110,7 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
     whole-run condition). Returns ``{"ok": True, "last_date":
     "YYYY-MM-DD", "rows": N}`` or ``{"ok": False, "reason": ...}`` with the
     reason in ``fetch_failed`` / ``unparseable`` / ``shrunk`` /
-    ``older_than_existing``.
+    ``older_than_existing`` / ``unreadable``.
     """
     from engine.data.sources.base import FetchError
 
@@ -125,11 +132,20 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
     if frame is None:
         return _finish({"ok": False, "reason": "unparseable"}, started)
 
+    existing_bytes = None
     if path.exists():
+        # Bound the read before touching the file: a real CSV under the size
+        # ceiling, or refuse with the file untouched. A directory or an
+        # oversized file is not this pull's target, and a parse failure of the
+        # stored bytes never blindly overwrites it.
         try:
-            existing = pd.read_csv(path, skiprows=3, header=None)
-        except (ValueError, OSError):
-            existing = pd.DataFrame()
+            st = os.stat(path)
+            if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_EXISTING_BYTES:
+                return _finish({"ok": False, "reason": "unreadable"}, started)
+            existing_bytes = path.read_bytes()
+            existing = pd.read_csv(io.BytesIO(existing_bytes), skiprows=3, header=None)
+        except (OSError, ValueError):
+            return _finish({"ok": False, "reason": "unreadable"}, started)
         if len(existing):
             if len(frame) < len(existing):
                 return _finish({"ok": False, "reason": "shrunk"}, started)
@@ -141,11 +157,15 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
                 return _finish({"ok": False, "reason": "older_than_existing"}, started)
 
     data = _render(frame)
-    if not (path.exists() and path.read_bytes() == data):
-        tmp = path.with_name(path.name + ".tmp")
+    if existing_bytes != data:
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         tmp.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_bytes(data)
-        os.replace(tmp, path)
+        try:
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
     return _finish(
         {"ok": True, "last_date": str(frame["date"].iloc[-1].date()),
          "rows": int(len(frame))},

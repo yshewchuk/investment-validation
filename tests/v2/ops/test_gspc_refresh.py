@@ -7,6 +7,7 @@ at the bottom of this file with every seam faked.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,13 +33,19 @@ def _body(dates: list[str]) -> bytes:
     return ("\n".join(lines) + "\n").encode()
 
 
-def _write_legacy(path, dates: list[str]) -> bytes:
-    """Seed a stored file in the legacy layout; return its exact bytes."""
+def _legacy_text(dates: list[str]) -> str:
+    """The whole legacy file for ``dates``: three header lines, then rows."""
+    closes = _closes(len(dates))
     lines = list(HEADER_LINES)
     for i, d in enumerate(dates):
-        c = _closes(len(dates))[i]
+        c = closes[i]
         lines.append(f"{d},{c},{c},{c + 1},{c - 1},{c},{1000 + i}\n")
-    path.write_text("".join(lines))
+    return "".join(lines)
+
+
+def _write_legacy(path, dates: list[str]) -> bytes:
+    """Seed a stored file in the legacy layout; return its exact bytes."""
+    path.write_text(_legacy_text(dates))
     return path.read_bytes()
 
 
@@ -67,6 +74,7 @@ def test_success_writes_exact_legacy_layout(tmp_path):
     assert fetcher.calls == [("yfinance", "history",
                               {"ticker": "^GSPC", "period": "max"},
                               True, "gspc-refresh", "run-1")]
+    assert path.read_bytes() == _legacy_text(DATES).encode("utf-8")
     text = path.read_text()
     assert text.startswith("Price,Adj Close,Close,High,Low,Open,Volume\n"
                            "Ticker,^GSPC,^GSPC,^GSPC,^GSPC,^GSPC,^GSPC\n"
@@ -156,6 +164,44 @@ def test_older_last_date_than_stored_is_refused(tmp_path):
     assert path.read_bytes() == before
 
 
+def test_same_row_count_with_later_first_date_is_shrunk(tmp_path):
+    """Same length but a later start chopped the earliest session off the front."""
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, ["2026-08-24", "2026-08-25", "2026-08-26"])
+
+    result = refresh_gspc_daily(
+        StubFetcher(body=_body(["2026-08-25", "2026-08-26", "2026-08-27"])),
+        path, refetch_token="run-1")
+
+    assert result == {"ok": False, "reason": "shrunk"}
+    assert path.read_bytes() == before
+
+
+def test_existing_directory_is_unreadable(tmp_path):
+    """A directory at the target path is never a stored series; refused, untouched."""
+    path = tmp_path / "gspc_daily.csv"
+    path.mkdir()
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path, refetch_token="run-1")
+
+    assert result == {"ok": False, "reason": "unreadable"}
+    assert path.is_dir()
+
+
+def test_oversized_existing_is_unreadable(tmp_path, monkeypatch):
+    """A regular file above the size ceiling is refused rather than slurped in."""
+    import engine.data.pulls.gspc_refresh as gspc_module
+
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, DATES)
+    monkeypatch.setattr(gspc_module, "MAX_EXISTING_BYTES", 16)
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path, refetch_token="run-1")
+
+    assert result == {"ok": False, "reason": "unreadable"}
+    assert path.read_bytes() == before
+
+
 def test_first_write_when_file_is_absent(tmp_path):
     """With no stored file there is nothing to guard against; it is created."""
     path = tmp_path / "gspc_daily.csv"
@@ -224,3 +270,31 @@ def test_invoke_price_refresh_real_run_returns_gspc_daily(tmp_path, monkeypatch)
                                   source_root=source_root)
     assert second["gspc_daily"] == outcome
     assert calls[1][2] != token
+
+
+def test_cli_price_refresh_real_run_report_includes_gspc_daily(tmp_path, monkeypatch):
+    """The CLI carries the ^GSPC outcome into both the saved JSON and the return.
+
+    Only ``invoke_price_refresh`` is faked (returning plan/report/gspc_daily);
+    the command's own real-run path -- write the saved report, then hand back
+    the dict -- runs for real under ``tmp_path``.
+    """
+    from engine.v2.ops import cli
+
+    plan = {"session": "2026-10-20", "daily": ["AAA"], "monthly": [],
+            "skipped_already_fetched": []}
+    report = {"counts": {"fetched": 1}}
+    outcome = {"ok": True, "last_date": "2026-10-20", "rows": 1}
+    monkeypatch.setattr(
+        "engine.v2.ops.legacy_adapter.invoke_price_refresh",
+        lambda *args, **kwargs: {"plan": plan, "report": report, "gspc_daily": outcome},
+    )
+    args = SimpleNamespace(session="2026-10-20", dry_run=False,
+                           tickers=None, source_root=None)
+    root = tmp_path / "ops-root"
+
+    result = cli.price_refresh_command(args, root)
+
+    assert result["gspc_daily"] == outcome
+    saved = json.loads((root / "price_refresh" / "2026-10-20.json").read_text())
+    assert saved["gspc_daily"] == outcome
