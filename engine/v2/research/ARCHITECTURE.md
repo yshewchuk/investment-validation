@@ -120,7 +120,19 @@ then scans each eligible ticker/event-date pair in pinned `computed_moves`. The 
 and magnitude readers (`event_history`, `magnitude_inputs`, `magnitude_history_store`)
 accept the `computed_moves.v4` or `computed_moves.v5` contract and refuse any other
 `CONTRACT_MISMATCH`; on v5 a row with a `not_computed_reason` other than `no_price_window`
-is `skipped` and carries no outcome, so it never counts as a scoreable event.
+is `skipped` and carries no outcome, so it never counts as a scoreable event. The
+writer's reason is the only reason research reports for a skipped row: the history and
+training-label and opt-in evaluation omission lists (`omitted_history`, `omitted_labels`) carry the row's
+`not_computed_reason` as the omission `reason` (v4 rows, and v5 rows without a reason, keep
+`skipped`; the magnitude search's `validate_targets` accepts exactly `skipped` and the writer's
+closed reason set, so a receipt with any other reason is `EXPERIMENT_IDENTITY_CONFLICT`), never a research-side re-derivation. Non-skipped rows the readers omit for
+availability keep the reader's own `unavailable` / `not_available_before_fit` reasons. The
+isolation guard of the history and magnitude readers (`_plans`) is unchanged: every
+candidate still needs exactly one isolated fragment, and a candidate with no fragment
+refuses `HOLDOUT_ACCESS_DENIED`. `prediction_inputs` does not use that guard: it refuses a
+table whose contract is neither native contract with `CONTRACT_MISMATCH` before any target
+scan, and a v5 skipped row with `EXPERIMENT_VARIANT_FAILED` naming the reason (the v5 contract
+requires one; a reason-less skipped row is malformed and gets the generic target message).
 It returns the signed move, binary `positive_move` target, and
 `target_available_on` date. The date is required and later than the event;
 fold consumers must admit training labels only when available before their
@@ -133,6 +145,7 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 | Integrity or object failure during a table scan | Repository's typed refusal, such as `MANIFEST_CORRUPT` or `OBJECT_CORRUPT`; no partial returned frame. |
 | Missing table or malformed table contract | Repository's typed refusal; no partial returned frame. |
 | Invalid holdout context, unknown requested ID, excluded/ambiguous requested event, or empty explicit population (R5) | `HOLDOUT_ACCESS_DENIED` before target scans; no metrics or report. |
+| Well-formed `computed_moves` contract that is neither native v4 nor v5 | `CONTRACT_MISMATCH` before any target scan; no partial returned frame. |
 | Empty bulk canonical calendar | `POPULATION_COLLAPSED`; no empty success. |
 | Missing, skipped, non-finite target, non-date outcome key or invalid target availability (R4) | `EXPERIMENT_VARIANT_FAILED`; no partial returned frame. |
 | `omit_not_computed=True` and a row is `skipped` | Event omitted, object still bound in `consumed_inputs`, listed in `omitted_labels`; other events returned. |
@@ -235,7 +248,8 @@ non-finite labels refuse the whole call, with zero remaining a valid value.
 Exception, opt-in only: `omit_not_computed=True` (used by the magnitude search's inner and outer
 evaluation reads) treats a row the writer marked `skipped` (v5 `not_computed_reason`, e.g. `not_orats`)
 exactly as `qualify_magnitude_training_targets` does: it is omitted, never parsed, and listed in the
-frame attrs and receipt as `omitted_labels` (`[{"event_id", "reason": "skipped"}]`, sorted by event ID).
+frame attrs and receipt as `omitted_labels` (`[{"event_id", "reason"}]`, sorted by event ID), where `reason` is the row's
+`not_computed_reason` (`skipped` for a row without one), the same rule as the training qualifier.
 `omit_not_computed` must be a `bool` (`CONTRACT_MISMATCH` otherwise). The receipt carries `omitted_labels` only when non-empty (receipts with none are byte-identical to before).
 Every other refusal above is unchanged; only `skipped=true` is omitted, never null/late availability.
 Forecasts for omitted events are made but not scored; `event_count` counts scored events.

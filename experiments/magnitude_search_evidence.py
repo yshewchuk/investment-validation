@@ -12,6 +12,9 @@ from engine.v2.research.magnitude_inputs import (
 )
 from experiments.magnitude_history_inputs import history_binding
 
+OMISSION_REASONS = frozenset({"skipped", "not_orats", "no_session", "no_price_window",
+    "no_price_history", "ticker_too_few_events"})
+
 
 def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json=False):
     """Load preflighted native inputs; the caller supplies its history-conflict envelope."""
@@ -86,7 +89,8 @@ def validate_targets(preflight, fold, evaluation_inputs, targets, *, strict_json
     omitted_ids = []
     for row in omitted:
         if (not isinstance(row, dict) or set(row) != {"event_id", "reason"}
-                or row["reason"] != "skipped" or row["event_id"] not in events):
+                or not (type(row["reason"]) is str and row["reason"] in OMISSION_REASONS)
+                or row["event_id"] not in events):
             raise ValueError
         omitted_ids.append(row["event_id"])
     if omitted_ids != sorted(omitted_ids) or len(set(omitted_ids)) != len(omitted_ids):
