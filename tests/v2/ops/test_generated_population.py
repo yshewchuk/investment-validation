@@ -551,10 +551,11 @@ def test_a_native_board_population_would_have_failed_the_score_stage(env, monkey
 
     population, _, _ = _generate(env)
     native = [key for key in population if key.split("|")[1] in _COVERED_STRATEGIES]
-    assert len(native) < len(population)  # the legacy set has CAL-P and CND-P on top
-
+    # Native board now enumerates disabled strategies too, so it matches the
+    # full population; a strict subset still fails the score stage.
+    assert len(native) == len(population)
     with pytest.raises(OpsError, match="differs from planned"):
-        _score_stage(monkeypatch, tmp_path, native)
+        _score_stage(monkeypatch, tmp_path, native[:-1])
 
 
 def test_the_score_stage_still_refuses_chooser_rows_it_cannot_tie_to_a_planned_event(

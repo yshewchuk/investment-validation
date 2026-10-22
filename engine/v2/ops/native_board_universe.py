@@ -8,6 +8,9 @@ never imports `engine.score` — reading `engine.score.DISABLED_STRATEGIES`
 would pull in `engine.replay` -> `engine.fills` at import time, which the
 isolation invariant forbids even when nothing in that chain is ever called.
 
+Disabled strategies (CAL-P, CND-P) are enumerated so they end as keyed
+refusals rather than vanishing from the universe.
+
 `DYN-SV` is a meta-row, not a tenth covered strategy: one `BoardRequest` per
 event, never one per strategy — it fans out internally to the seven
 dynamic-menu members at scoring time, the same shape legacy uses when it
@@ -22,6 +25,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from engine.v2.domain.generation import DISABLED
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.registry.strategies import DYNAMIC_MENU
 from engine.v2.scoring.source_inputs import SUPPORTED_STRATEGIES
@@ -37,11 +41,11 @@ __all__ = ["BoardRequest", "board_requests"]
 #: `DISABLED_STRATEGIES`/`STRUCTURES`: any v2 -> legacy import
 #: must be declared in checks/legacy_adapters.json, whose adapter count may
 #: only shrink, and engine.v2.ops already has its one allowed adapter module
-#: (`legacy_adapter.py`, §4.2). `SUPPORTED_STRATEGIES` already excludes both
-#: disabled strategies by construction (it comes from native's own input
-#: builder, which has no entry for CAL-P/CND-P), so that check would only
-#: restate a fact this module's one real dependency already guarantees.
-_COVERED_STRATEGIES = tuple(sorted(SUPPORTED_STRATEGIES))
+#: (`legacy_adapter.py`, §4.2). Disabled strategies (CAL-P, CND-P) are
+#: included in the union so each becomes a keyed `UNSUPPORTED_STRATEGY`
+#: refusal instead of vanishing from the universe; `DISABLED` comes from
+#: `engine.v2.domain.generation`, a v2 import with no legacy pull-in.
+_COVERED_STRATEGIES = tuple(sorted(SUPPORTED_STRATEGIES | frozenset(DISABLED)))
 _REQUIRED_COLUMNS = ("ticker", "event_date", "session")
 
 # Defensive consistency check, paid once at import time — a v2-only

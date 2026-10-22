@@ -57,7 +57,7 @@ coordinator-effect functions in `effects_graph.py`; `training.py`'s `training_jo
 `stages.py::_core_kinds`, not in `supervisor._COORDINATOR_EFFECT_KINDS`), `training_plan`/`promote_plan`,
 `run_training_worker`/`run_promote_worker`; `native_training_pin_problems((catalog, store, snapshot, receipt), require_absolute=True)` returns a problem list without I/O (CLI validates raw pins with `False` before path resolution); `state_stage.py` (`phase5_state_stage`); `BoardRequest`/`board_requests(as_of, horizon_days, tickers, events_table)`
 (`native_board_universe.py`) — `board_requests` emits one `BoardRequest` — the pure key `(ticker, strategy, event_date, session)` — per event ×
-native-covered strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
+native-covered or disabled (CAL-P/CND-P, refused downstream) strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
 `computed_moves_job_kind`/`forward_calendar_job_kind`, `CalendarMovesParameters`/`calendar_moves_parameter_problems`/
 `calendar_moves_job_spec`, and `run_computed_moves_worker`/`run_forward_calendar_worker` (dispatched by `worker.py`).
 `forward_calendar_refresh` has a `JobKind` but no nightly submitter. `native_gate_pricing` and `native_gate_evaluation` are smoke-only, single-thread staged kinds: the executor launches only the fixed `experiments.native_gate_entrypoint` module, which passes its narrow callback to `worker.main` after the launch gate; registration/spec/code/environment checks precede pricing or fitting. Neither has a coordinator ledger effect or cache reuse; see `experiments/ARCHITECTURE.md`.
@@ -1051,7 +1051,7 @@ or `engine.fills` — the first two each pull in `engine.replay`/`engine.fills` 
 fill model) at their own top level, which would violate the isolation invariant at import time even for
 a read-only comparison. It performs no consistency check against `engine.score.DISABLED_STRATEGIES` either:
 `SUPPORTED_STRATEGIES` (native's own input-builder strategy set, exported from `engine.v2.scoring.source_inputs`)
-already excludes both disabled strategies by construction, so no legacy read is needed; it is instead checked against
+excludes both disabled strategies (CAL-P, CND-P), so the enumerator adds the v2-owned `engine.v2.domain.generation.DISABLED` keys to the set (no legacy read): every legacy key ends as a record or a keyed refusal ([#1105](https://github.com/yshewchuk/investment-validation/issues/1105)). The raw-row producer refuses each such key in place as `UNSUPPORTED_STRATEGY` with fixed detail, before the `option_chains` check or any calendar, panel or quote read; other rows are unaffected (per-row, collected, no cache/retry/partial write). `SUPPORTED_STRATEGIES` is also checked against
 `engine.v2.registry.strategies.DYNAMIC_MENU` (a subset assertion paid once at import time, no I/O, no legacy dependency).
 
 **Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops. The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
@@ -1183,7 +1183,7 @@ Per row (collected as a refusal, never sinks the batch):
 | `MISSING_STAGED_INPUT` | the staged `calendar_row` has no non-empty string `event_id` |
 | `CALENDAR_ROW_INVALID` | the staged calendar row is not a mapping, or its `event_date`, `expiry`, or non-null `entry_date` does not parse |
 | `CALENDAR_ROW_KEY_MISMATCH` | the staged row's ticker/event_date disagrees with the row's own key |
-| `UNSUPPORTED_STRATEGY` | the row's strategy has no `_STRATEGY_REGISTRY` entry; no bundle is built |
+| `UNSUPPORTED_STRATEGY` | the row's strategy has no `_STRATEGY_REGISTRY` entry; no bundle is built. The raw-row producer also emits it for `DISABLED` strategies (CAL-P, CND-P) |
 | `RELEASE_MISSING_ROLE` | any ordered driver declaration has neither its exact role nor optional alias, or the registered gate role is absent |
 | `RELEASE_MISSING_FEATURE_ORDER` | `feature_names` is empty and any driver or gate identity has an empty `feature_order` |
 | `AMBIGUOUS_DECISION_CLOCK` | any resolved driver identity disagrees with the gate on decision clock; every required role resolves before clock comparison |
@@ -1334,7 +1334,7 @@ layer-6.0 rule): `run_native_score_batch_worker` runs `score_batch` inside
 `native_board_universe.py` adds two invariants of its own:
 - **Native vs. legacy values.** `ticker`, `event_date`, and `session` come
   from the shared events table, which neither side owns; `strategy` comes
-  from the native-covered strategy set (`SUPPORTED_STRATEGIES`) or the
+  from the native-covered strategy set (`SUPPORTED_STRATEGIES`), the v2 `DISABLED` keys or the
   `DYN-SV` literal, never from the events table. Its one consistency
   assertion (`DYNAMIC_MENU` is a subset of `SUPPORTED_STRATEGIES`) reads
   only v2-native names — never `engine.score.DISABLED_STRATEGIES` or any
