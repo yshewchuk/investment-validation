@@ -89,30 +89,22 @@ def main(argv=None):
             "no_ledger": args.no_ledger,
         }
         if saved["outcome"]["failure_code"] is not None:
-            record = "skipped"
-            if exp_number is not None:
-                try:
-                    record = record_export.public_result(record_export.export_native_run(
-                        args.experiments_root, registration, spec_document, request_dict,
-                        saved, exp_number, replayed, started, report_path=None))
-                except (OpsError, OSError, ValueError) as error:
-                    print(json.dumps({"refused": "record_export_failed",
-                                      "cause": record_export.export_failure_cause(error)}))
-                    return 2
+            record, refusal = record_export.export_or_skip(
+                args.experiments_root, registration, spec_document, request_dict,
+                saved, exp_number, replayed, started, None)
+            if refusal is not None:
+                print(json.dumps(refusal))
+                return 2
             print(json.dumps({"refused": saved["outcome"]["failure_code"], "replayed": replayed,
                               "record_export": record}))
             return 2
         path = outcomes.export_native_report(conn, store, registration, **recording)
-        record = "skipped"
-        if exp_number is not None:
-            try:
-                record = record_export.public_result(record_export.export_native_run(
-                    args.experiments_root, registration, spec_document, request_dict,
-                    saved, exp_number, replayed, started, report_path=path or None))
-            except (OpsError, OSError, ValueError) as error:
-                print(json.dumps({"refused": "record_export_failed",
-                                  "cause": record_export.export_failure_cause(error)}))
-                return 2
+        record, refusal = record_export.export_or_skip(
+            args.experiments_root, registration, spec_document, request_dict,
+            saved, exp_number, replayed, started, path or None)
+        if refusal is not None:
+            print(json.dumps(refusal))
+            return 2
         print(json.dumps({"report": str(path), "variant_id": registration.variant_id,
                           "recording_mode": saved["receipt"]["recording_mode"],
                           "record_export": record}))

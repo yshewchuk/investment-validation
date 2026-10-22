@@ -427,7 +427,9 @@ Pre-admission receipts cannot invent admission; rejected-request ledger identiti
 
 `record_export.export_run_record` copies one run's private record to
 `experiments/EXP-NNN_<slug>/` so `tools/private_mirror.py` backs it up. The
-gate and prediction CLIs call it after `run`; it adds no catalog table and does not
+gate and prediction CLIs call it after `run` through `record_export.export_or_skip`,
+which returns `("skipped", None)` when no EXP number was given, `(public_result, None)` on success, and
+`(None, {"refused": "record_export_failed", "cause": <code>})` when the export raises `OpsError`, `OSError` or `ValueError`; it adds no catalog table and does not
 change outcome identity. Every data file sits under `results/`, which
 `checks/repo_hygiene.py` blocks (`BLOCKED_SEGMENTS`) and `.gitignore` ignores; `REPORT.md` is
 ignored by default-deny. The mirror includes both, including `results/runs/<key>/*.json`. This feature does not weaken

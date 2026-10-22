@@ -21,6 +21,9 @@ two values only the child's own log can supply:
   exit 76 only: a 137 reports only the memory strings (``BOX FLOOR
   BREACH``, ``SWAP BREACH``, ``CAP BREACH``), so a ``DISK LIMIT
   unreadable`` warning line is never reported as the reason a 137 died.
+  On exit 76 only a terminal breach line (``DISK LIMIT:`` or ``DISK
+  LIMIT unreadable for N ticks``) counts; the earlier ``DISK LIMIT
+  unreadable:`` warning does not.
   Memory strings are matched in ``KILL_REASONS`` tuple order, which is
   this recorder's priority, not the watchdog's own precedence.
   ``None`` for any other exit, and for a 137/76 with no breach string of
@@ -174,17 +177,28 @@ def watchdog_rss_values(output: str) -> list[float]:
     return values
 
 
+# Terminal disk-kill lines of bounded_run: the ceiling breach and the heavy
+# fail-closed "unreadable for N ticks" kill; the first-tick warning is not one.
+_DISK_TERMINAL = re.compile(rf"{DISK_LIMIT_REASON}(?::| unreadable for \d+ ticks)")
+
+
 def classify_kill(output: str, exit_code: int) -> str | None:
     """Which watchdog breach string killed the child, or None.
 
     The disk reason belongs to exit 76 only; a 137 reports the memory
     strings alone, so a "DISK LIMIT unreadable" warning line is never
     reported as the reason a 137 died.
+
+    On exit 76 only a terminal breach line (`DISK LIMIT:` or `DISK LIMIT
+    unreadable for N ticks`) counts; an earlier `DISK LIMIT unreadable:`
+    warning does not.
     """
     if exit_code not in KILL_EXIT_CODES:
         return None
     if exit_code == DISK_LIMIT_EXIT:
-        return DISK_LIMIT_REASON if DISK_LIMIT_REASON in output else None
+        # Match the terminal breach line ("DISK LIMIT: <path> used ..."), not
+        # an earlier "DISK LIMIT unreadable" warning from a failed sample.
+        return DISK_LIMIT_REASON if _DISK_TERMINAL.search(output) else None
     for reason in KILL_REASONS:
         if reason in output:
             return reason
