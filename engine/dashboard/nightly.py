@@ -1404,7 +1404,11 @@ def run_nightly(
     require_as_of: bool = False,
     fetch_only: bool = False,
 ) -> NightlyReport:
-    """One nightly pass. Raises :class:`NightlyStop` when a gating step fails."""
+    """One nightly pass. Raises :class:`NightlyStop` when a gating step fails.
+
+    Raises ValueError when fetch_only is combined with refresh=False,
+    tiers=False or backup=True.
+    """
     if fetch_only and (not refresh or not tiers or backup):
         raise ValueError("fetch_only requires refresh and tiers on and no backup")
     from engine import ledger
@@ -2132,7 +2136,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-staleness", type=int, default=MAX_STALENESS_DAYS)
     parser.add_argument("--json", default=None, help="write the run report to this path")
     parser.add_argument("--fetch-only", action="store_true",
-                        help="refresh half only (data, moves, Tier 3/4, SNAPSHOT) for the v2 "
+                        help="refresh half only (data, moves, Tier 3/4, SNAPSHOT, "
+                             "serving-model warm) for the v2 "
                              "snapshot import; skips scoring and everything after it")
     args = parser.parse_args(argv)
     if args.fetch_only and (args.no_refresh or args.no_tiers or args.backup):

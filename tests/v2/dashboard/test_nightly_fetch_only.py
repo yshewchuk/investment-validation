@@ -189,6 +189,7 @@ def test_fetch_only_warm_failure_stops_the_run(tmp_path, monkeypatch):
             chain_sessions=1,
         )
     assert exc.value.step == "warm_serving"
+    assert "WARM_SERVING_FAILED" in exc.value.detail
 
 
 def test_fetch_only_red_validation_stops_the_run(tmp_path, monkeypatch):

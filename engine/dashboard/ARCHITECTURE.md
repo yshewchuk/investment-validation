@@ -35,7 +35,7 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   `{"skipped": true, "reason": "fetch_only"}` and the report keeps the usual
   keys (`as_of`, `finality`, `steps.tiers` with an explicit `degraded`).
 - `warm_serving.py` — `warm(event_dates, decision_start)`: before score
-  (default scorer only), fits every Tier-4 serving model (all `PRODUCES`) whose
+  (default scorer only; `--fetch-only` also runs it, with no score after), fits every Tier-4 serving model (all `PRODUCES`) whose
   cache file for the current panel sha is missing or not ready (bad metadata,
   or no embedded residual pool), in a SUBPROCESS via `tier4.serving_model`
   (same cache files). Folds are a superset: every month from
@@ -214,7 +214,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 
   | Condition | Outcome |
   | --- | --- |
-  | Warm step (default scorer): subprocess exits non-zero, cannot start, times out (3 h), fails to plan/verify, leaves a fit missing or not ready, or the panel changed under it | `NightlyStop` `WARM_SERVING_FAILED`; exit 1; nothing scored; no in-process refit |
+  | Warm step (default scorer, or `--fetch-only`): subprocess exits non-zero, cannot start, times out (3 h), fails to plan/verify, leaves a fit missing or not ready, or the panel changed under it | `NightlyStop` `WARM_SERVING_FAILED`; exit 1; nothing scored; no in-process refit |
   | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`); no gap flag once repaired |
   | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no new SNAPSHOT (the previous one is kept), so the native import sees no new session for the night (`not_yet`, unless an earlier run that night already wrote one) |
   | With tiers on, run stops between refresh and tiers (red validation, as-of finality stop) | Store refreshed, no new SNAPSHOT; the previous SNAPSHOT is kept (with `--no-tiers` the refresh step has already written one) |
