@@ -309,7 +309,7 @@ of the newest nightly jobs, so a score older than that window is not found.
 
 **Problem.** The live incumbent `p5-6-2026-09-21b` is a legacy-bootstrapped release: its catalog is not under `deployment/releases/<id>/` and records no `sources.pool_cutoff`, so every nightly's `phase5_state_stage` refuses `PRIOR_MISMATCH` ("prior release could not be read") and no pool advances. **Decision (user, 2026-10-21):** when the prior release has no pool catalog (classes `NONE` and `NO_POOL_CATALOG` below; a `DAMAGED` prior is not bootstrapped), the nightly runs a full release cycle through the standard pool-release assembly with the session's data date as the cutoff. It does not refuse, there is no one-time store repair, and no cutoff is picked by hand. Later nightlies carry forward (§2.2) from the bootstrapped release, so the cost is paid once per store wipe or rebuild.
 
-**Standard tool check.** No third-party tool covers this: the assembly is repo-specific (champion registry, content-addressed objects, catalog). The bootstrap reuses the state assembly of `tools/phase5_prepare_release.py` (`model_release`, `build_states`, `write_release`) instead of a second implementation; code slice 2 moves that logic into `engine/v2/models` so the job and the CLI share one path.
+**Standard tool check.** No third-party tool covers this: the assembly is repo-specific (champion registry, content-addressed objects, catalog). The bootstrap reuses the state assembly of `tools/phase5_prepare_release.py` (`model_release`, `build_states`, `write_release`) instead of a second implementation, shared by the job and the CLI.
 
 **Classification.** The sidecar and the job both classify the prior with one read-only helper, `classify_prior(release_root, prior_release_id)`; it never writes:
 
@@ -323,10 +323,12 @@ of the newest nightly jobs, so a score older than that window is not found.
 **Cycle.** Same sidecar shape as §2.2.1: each phase only after the previous succeeded; keys per session, scoring manifest and prior id (`none` for `NONE`); candidate id `pools-{session}-{tag}`.
 
 1. `training` jobs at cutoff = session for every pool-type member the full release needs: the three nightly members, the three driver residual pools, the chooser analog pool, and the payoff-line, payoff-surface and recalibration-map folds for the keys `tools/phase5_calibration_keys.py` lists. Each is an existing training kind bound to the session's scoring manifest.
-2. One `phase5_state_stage` job with `mode: "bootstrap"`: re-runs `classify_prior` (anything but `NONE`/`NO_POOL_CATALOG` refuses), builds the model bindings from the champion registry inventory as `phase5_prepare_release` does, reads the legacy-trained Tier-4 serving folds from the pinned legacy tree (read only, not retrained), assembles every member content-addressed, and writes the staged manifest and catalog with `sources.pool_cutoff` = cutoff and `sources.carried_from` null. Champion and gate bindings must equal the incumbent's staged bindings binding by binding; a difference refuses (a model change takes the §2.3 acceptance path).
-3. `models_promote`, guarded by `expected_previous_release_id` (null for `NONE`).
+2. One `phase5_state_stage` job with `mode: "bootstrap"`: re-runs `classify_prior` (anything but `NONE`/`NO_POOL_CATALOG` refuses), builds the model bindings from the champion registry inventory as `phase5_prepare_release` does, reads the legacy-trained Tier-4 serving folds from the pinned legacy tree (read only, not retrained), assembles every member content-addressed, and writes the staged manifest and catalog with `sources.pool_cutoff` = cutoff and `sources.carried_from` null. For `NO_POOL_CATALOG`, champion and gate bindings must equal the incumbent's staged bindings binding by binding; a difference refuses (a model change takes the §2.3 acceptance path). For `NONE` there is no incumbent to compare with, so the bindings come from the champion registry inventory alone.
+3. `models_promote`, guarded by `expected_previous_release_id` for `NO_POOL_CATALOG`. For `NONE` a null expected id alone is unguarded, so the promote must also assert the store is still empty and refuses `ConcurrentPromote` if any release was promoted meanwhile.
 
-The panel identity comes from the pinned snapshot, never from `--tier3-snapshot auto`, which streams a hash of `panel.parquet` and is the CLI's only heavy step.
+Training cutoffs: the session cutoff applies to the pool members; each calibration fold keeps the cutoff its key in `tools/phase5_calibration_keys.py` gives (STR-RUNUP folds may be earlier than the session), since serving selects them by exact key.
+
+The panel identity comes from the pinned snapshot, never from `--tier3-snapshot auto`. Verifying the pinned panel copy still hashes the whole panel object once per fresh process, so that cost is part of the unmeasured total (§Cost). `write_release` is reused for object and state assembly only: the bootstrap publishes the staged manifest and catalog under the candidate id alone and does not rewrite a root `phase5_release.json` or preserve the legacy catalog.
 
 | Condition | Outcome |
 |---|---|
@@ -343,12 +345,12 @@ The panel identity comes from the pinned snapshot, never from `--tier3-snapshot 
 | R2 cache | none; pointer, catalog and bound files re-read each call |
 | R3 retry | one attempt per job; a failed phase is terminal for that cycle until an operator acts (#154); the next session retries under new keys |
 | R4 transaction | objects go to the shared content-addressed store; the staged manifest and catalog exist only under the new id; `DEPLOYED` changes only through the guarded promote |
-| R5 partial failure | orphan objects or a staged candidate may remain, never promoted; the incumbent stays deployed, so native analog and simulation fields stay null (#681) and STR-RUNUP stays `MODEL_NOT_READY` (#782) |
+| R5 partial failure | orphan objects or a staged candidate may remain, never promoted; before the pointer swap the incumbent stays deployed (a failure after the swap follows §7.2), so until it succeeds native analog and simulation fields stay null (#681) and STR-RUNUP stays `MODEL_NOT_READY` (#782) |
 | R6 idempotency | same inputs give the same catalog; a rerun after a successful bootstrap sees `USABLE` and carries forward; a deployed release already named `pools-{session}-{tag}` ends the cycle |
 
 **Progress logging.** Each phase and the assembly log stage start and end with elapsed time, member counts and RSS to stderr; the classification (class and reason) is logged once per cycle.
 
-**Cost.** Not yet measured for the bootstrap as a whole; the first live receipt (wall time, peak RSS) is recorded here once the cycle runs. Until then the bootstrap is not classified heavy or light; the supervisor runs any heavy step.
+**Cost.** Not yet measured for the bootstrap as a whole; wall time and peak RSS are recorded here from the first live run. Until then the bootstrap is not classified heavy or light; the supervisor runs any heavy step.
 
 ### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
 
