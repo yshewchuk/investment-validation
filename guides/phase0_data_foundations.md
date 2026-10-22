@@ -186,7 +186,7 @@ invalidates everything downstream. Do not proceed past a red migration test.**
 
 - Tier 1 append-only; Tier 2 rebuildable from Tier 1 with NO network access
   in normalizers; Tier 3 rebuildable from Tier 2.
-- Never modify grandfathered dirs; never re-download cached data.
+- Never modify grandfathered dirs (sole exception: `engine.paths.WRITABLE_EXCEPTIONS`, the refreshed `gspc_daily.csv`, #1103); never re-download cached data.
 - One Polygon process; ORATS reserve floor; credentials never printed.
 - Everything downstream (Phases 1–6) reads Tier 2/3 through `engine.paths` —
   direct reads of raw source formats outside `normalize/` are a code smell.

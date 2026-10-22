@@ -6,7 +6,11 @@ nothing refreshes it, so ``add_regime_features`` keeps anchoring every scored
 event on the same frozen series. This pull re-fetches the same
 ``period="max"`` history through the Tier-1 fetcher and rewrites the file in
 the layout both readers already parse: three multi-header lines, then
-positional ``date,adj,close,high,low,open,volume`` rows.
+positional ``date,adj,close,high,low,open,volume`` rows. The series is cut to
+the stored file's start (``SERIES_START``): ``period="max"`` reaches back to
+1927 while ``GSPC_DAILY`` starts 2006-01-03, so a refresh only appends or
+corrects the tail and the legacy regime features computed from the existing
+rows can never change.
 
 Guards, because this file feeds a champion-model feature: a fetch or parse
 failure leaves the stored bytes untouched, and a fresh body may never shrink
@@ -46,7 +50,8 @@ import pandas as pd
 
 from engine import paths
 
-__all__ = ["refresh_gspc_daily", "HEADER_LINES", "MAX_EXISTING_BYTES", "MAX_FRESH_BYTES"]
+__all__ = ["refresh_gspc_daily", "HEADER_LINES", "SERIES_START",
+           "MAX_EXISTING_BYTES", "MAX_FRESH_BYTES"]
 
 #: Rows 0-2 of the legacy layout; readers (``panel._gspc_series``,
 #: ``calendar.trading_calendar``) skip exactly these three lines.
@@ -65,6 +70,13 @@ MAX_EXISTING_BYTES = 64 * 1024 * 1024
 #: Ceiling on the fetched fresh body, refused as unparseable before decoding.
 MAX_FRESH_BYTES = 64 * 1024 * 1024
 
+#: The stored series starts 2006-01-03 but yfinance ``period="max"`` reaches
+#: back to 1927, so fetched rows before this date are cut in ``_parse_body``:
+#: a refresh only ever appends or corrects the tail and legacy regime
+#: features computed from existing rows never change. A body left with no
+#: rows after the cut is unparseable.
+SERIES_START = pd.Timestamp("2006-01-01")
+
 
 def _log(message: str) -> None:
     print(f"[gspc] {message}", file=sys.stderr, flush=True)
@@ -81,8 +93,10 @@ def _parse_body(body) -> pd.DataFrame | None:
     Close already is. Rows with an unparseable date, a NaN close or a
     non-finite close are dropped; non-finite other prices and volume become
     NaN before rendering (so ``astype("int64")`` on volume can never raise;
-    NaN/inf volume lands as ``0``), and duplicate dates keep the last
-    occurrence.
+    NaN/inf volume lands as ``0``), duplicate dates keep the last
+    occurrence, and rows before ``SERIES_START`` — the 1927-deep part of the
+    ``period="max"`` history — are cut so the rewrite only appends or
+    corrects the tail. Nothing left after the drops is ``None``.
     """
     try:
         frame = pd.read_csv(io.BytesIO(body if isinstance(body, bytes) else str(body).encode()))
@@ -104,6 +118,7 @@ def _parse_body(body) -> pd.DataFrame | None:
         out[name] = out[name].where(np.isfinite(out[name]))
     out = out.dropna(subset=["date"])
     out = out[np.isfinite(out["close"])]
+    out = out[out["date"] >= SERIES_START]
     if out.empty:
         return None
     out = out.sort_values("date").drop_duplicates(subset="date", keep="last")

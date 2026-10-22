@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -192,6 +193,50 @@ def test_same_row_count_with_later_first_date_is_shrunk(tmp_path):
     assert path.read_bytes() == before
 
 
+def test_dropped_mid_series_date_is_shrunk(tmp_path):
+    """Equal count, equal first and last dates, yet a stored date vanished."""
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, ["2026-08-24", "2026-08-26", "2026-08-27"])
+
+    result = refresh_gspc_daily(
+        StubFetcher(body=_body(["2026-08-24", "2026-08-25", "2026-08-27"])),
+        path, refetch_token="run-1")
+
+    assert result == {"ok": False, "reason": "shrunk"}
+    assert path.read_bytes() == before
+
+
+def test_pre_2006_rows_are_cut_to_the_stored_start(tmp_path):
+    """A 1927-deep period=max body is accepted, written from the stored start."""
+    path = tmp_path / "gspc_daily.csv"
+    stored = ["2006-01-03", "2006-01-04", *DATES]
+    _write_legacy(path, stored)
+    body_dates = ["1927-01-04", "1986-07-08", "2005-12-30", *stored, "2026-08-28"]
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(body_dates)), path,
+                                refetch_token="run-1")
+
+    assert result == {"ok": True, "last_date": "2026-08-28", "rows": 6}
+    text = path.read_text()
+    assert "1927" not in text and "1986" not in text and "2005-12-30" not in text
+    raw = pd.read_csv(path, skiprows=3, header=None)
+    assert [str(v) for v in raw[0]] == [*stored, "2026-08-28"]
+
+
+def test_catchup_rewrite_writes_the_exact_bytes(tmp_path):
+    """Stored file plus three extra later dates: the whole rewritten file is exact."""
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, DATES)
+    caught_up = [*DATES, "2026-08-28", "2026-08-29", "2026-08-30"]
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(caught_up)), path,
+                                refetch_token="run-1")
+
+    assert result == {"ok": True, "last_date": "2026-08-30", "rows": 6}
+    assert path.read_bytes() == _legacy_text(caught_up).encode("utf-8")
+    assert path.read_bytes() != before
+
+
 def test_existing_directory_is_unreadable(tmp_path):
     """A directory at the target path is never a stored series; refused, untouched."""
     path = tmp_path / "gspc_daily.csv"
@@ -201,6 +246,32 @@ def test_existing_directory_is_unreadable(tmp_path):
 
     assert result == {"ok": False, "reason": "unreadable"}
     assert path.is_dir()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo unavailable")
+def test_fifo_at_the_target_is_unreadable(tmp_path):
+    """A FIFO fed a valid stored series still fails the S_ISREG check.
+
+    The bytes go in through an ``O_RDWR`` open (which never blocks on a
+    FIFO) and the refresh opens ``O_NONBLOCK``, so neither side can hang.
+    Without the regular-file check the guarded read would consume the
+    buffered rows, pass every guard and replace the FIFO with a real file.
+    """
+    path = tmp_path / "gspc_daily.csv"
+    os.mkfifo(path)
+    fd = os.open(str(path), os.O_RDWR | os.O_NONBLOCK)
+    try:
+        os.write(fd, _legacy_text(DATES).encode("utf-8"))
+    finally:
+        os.close(fd)
+
+    result = refresh_gspc_daily(StubFetcher(body=_body([*DATES, "2026-08-28"])),
+                                path, refetch_token="run-1")
+
+    assert result == {"ok": False, "reason": "unreadable"}
+    assert stat.S_ISFIFO(os.stat(path).st_mode)
+    assert sorted(p.name for p in path.parent.iterdir()) == [
+        "gspc_daily.csv", "gspc_daily.csv.lock"]
 
 
 def test_oversized_existing_is_unreadable(tmp_path, monkeypatch):
@@ -269,22 +340,35 @@ def test_credential_rotated_propagates_and_leaves_the_file_untouched(tmp_path):
 
 
 def test_assert_writable_permission_error_is_unwritable(tmp_path, monkeypatch):
-    """A refused write guard is the unwritable reason, never a raised error."""
+    """A refusal inside the staging guard loop is the unwritable reason.
+
+    Only the ``.tmp`` sibling is denied, so the lock guard and the target
+    guard pass and the refusal lands on the second ``assert_writable`` call
+    of the ``for guard in (path, tmp)`` loop -- never a raised error.
+    """
     import engine.paths as paths_module
 
     path = tmp_path / "gspc_daily.csv"
     before = _write_legacy(path, DATES)
+    guards: list[str] = []
 
     def deny(p):
-        raise PermissionError(f"refusing to write: {p}")
+        guards.append(str(p))
+        if str(p).endswith(".tmp"):
+            raise PermissionError(f"refusing to write: {p}")
 
     monkeypatch.setattr(paths_module, "assert_writable", deny)
 
-    result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path,
-                                refetch_token="run-1")
+    result = refresh_gspc_daily(StubFetcher(body=_body([*DATES, "2026-08-28"])),
+                                path, refetch_token="run-1")
 
     assert result == {"ok": False, "reason": "unwritable"}
     assert path.read_bytes() == before
+    assert len(guards) == 3
+    assert guards[:2] == [str(path) + ".lock", str(path)]
+    assert guards[2].endswith(".tmp")
+    assert sorted(p.name for p in path.parent.iterdir()) == [
+        "gspc_daily.csv", "gspc_daily.csv.lock"]
 
 
 def test_replace_failure_is_unwritable_and_leaves_no_stray_files(tmp_path, monkeypatch):
