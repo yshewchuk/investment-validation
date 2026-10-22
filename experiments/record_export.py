@@ -458,6 +458,7 @@ def export_run_record(
         persisted[path] = existing
 
     manifest_path = results / "export_manifest.json"
+    existing_manifest_doc = None
     try:
         manifest_data = _manifest_bytes(
             experiment_id,
@@ -492,6 +493,7 @@ def export_run_record(
                 "EXPERIMENT_IDENTITY_CONFLICT",
                 f"existing {manifest_path} is not a JSON object",
             )
+        existing_manifest_doc = manifest_doc
         manifest_files = manifest_doc.get("files")
         if not isinstance(manifest_files, dict):
             raise fail(
@@ -525,6 +527,15 @@ def export_run_record(
             )
         persisted[manifest_path] = existing
 
+    # The returned trimmed list describes the PERSISTED record: an existing
+    # manifest read during preflight supplies it; otherwise use the newly
+    # computed list for a manifest this call is about to write.
+    returned_trimmed = trimmed
+    if existing_manifest_doc is not None and isinstance(
+        existing_manifest_doc.get("trimmed"), list
+    ):
+        returned_trimmed = existing_manifest_doc["trimmed"]
+
     # Write only missing files (folder/results dirs created lazily after preflight).
     results.mkdir(parents=True, exist_ok=True)
     for path, data in persisted.items():
@@ -534,7 +545,7 @@ def export_run_record(
     return {
         "dir": str(folder),
         "status": "written" if wrote and not kept_differing else "unchanged",
-        "trimmed": trimmed,
+        "trimmed": returned_trimmed,
     }
 
 

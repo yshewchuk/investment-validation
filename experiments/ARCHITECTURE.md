@@ -460,6 +460,9 @@ Manifest hashes describe the exact bytes on disk. Every conflict is detected bef
 | Report text over the cap | `REPORT.md` holds a truncated report plus a truncation line, so replay never exceeds the cap. |
 | Manifest whose `exp_number` differs from its folder number | `EXPERIMENT_IDENTITY_CONFLICT`. |
 | Non-string slug or non-JSON-serializable document | `INVALID_EXPERIMENT_SPEC`. |
+| Empty or non-string experiment_id (resolution and export alike) | `INVALID_EXPERIMENT_SPEC`. |
+| Supplied success report that cannot be read | `RESOURCE_UNAVAILABLE`; nothing is exported. |
+| Replay over an existing record | The result reports the persisted `trimmed` list from the existing manifest, not the new proposal's. |
 | Export fails after the outcome was published | The outcome stays valid; the CLI exits 2 with `record_export_failed`. A rerun replays, then exports, unless the failure left a manifestless folder (see the crash row), which it refuses. |
 
 ## Reconstructed gate evaluation

@@ -637,6 +637,21 @@ def test_oversize_event_ids_are_trimmed(tmp_path):
     assert man["files"]["event_ids.json"] == hashlib.sha256(raw).hexdigest()
 
 
+def test_replay_returns_persisted_trimmed_list(tmp_path):
+    ids = [f"evt-{i}" for i in range(200_000)]
+    first = _export(tmp_path, event_ids=ids)
+    assert first["trimmed"] == ["event_ids.json"]
+    second = _export(tmp_path, event_ids=["a"])
+    assert second["trimmed"] == ["event_ids.json"]
+    assert second["status"] == "unchanged"
+
+    other = tmp_path / "other"
+    small_first = _export(other, event_ids=["a"])
+    assert small_first["trimmed"] == []
+    oversized = _export(other, event_ids=ids)
+    assert oversized["trimmed"] == []
+
+
 def test_identical_second_export_is_unchanged(tmp_path):
     first = _export(tmp_path)
     second = _export(tmp_path)
