@@ -124,7 +124,7 @@ load-bearing entrypoints:
   `ModelNotReady` naming the member; a wrong artifact type is
   `ModelNotReady`). They only expose verified objects: choosing the one for a
   row's (models, cutoff) or event month, and declaring it, is the nightly
-  bundle's job, and the entry-rule stage refuses a missing or mismatched one.
+  bundle's job (#1157 step 2); until then nothing consumes these fields.
   Picking the object matching a request's own `(strategy, alpha, cutoff)`
   and mapping a binding to specific forecast-output names is the per-night
   assembler's job, not this module's.
@@ -562,7 +562,9 @@ and the release is not consulted for it.
 
 #### Chooser state members
 
-The chooser families use `FrozenStateLoader` with a 32 MiB per-object ceiling
+The chooser families, `paired_residual_pool` and `trailing_pnl_cutoff` (the
+table below applies to all four; keys of the last two are `(models, cutoff)`
+and `(history_id, month)`) use `FrozenStateLoader` with a 32 MiB per-object ceiling
 to verify object bytes and the decoded artifact's content hash. Only regular
 files are admitted; oversized objects are refused before hashing or decoding,
 including growth during the bounded read. This is an admission limit, not a
@@ -574,7 +576,7 @@ No pool rows are filtered, sorted, fitted or substituted during resolution.
 | Condition | Outcome |
 |---|---|
 | Family absent | Its tuple is empty; no invented state and no release refusal |
-| Nonregular chooser object or size above 32 MiB | Path-free `ModelNotReady` for that member; the whole release is unavailable, including STR-THRU-only consumers |
+| Nonregular object or size above 32 MiB | Path-free `ModelNotReady` for that member; the whole release is unavailable, including STR-THRU-only consumers |
 | Several objects with distinct `(pool_id, cutoff)` or `(table_id, version)` keys | Preserve every verified object; no implicit latest-object selection |
 | Declared family has non-STAGED status, no objects, malformed references, missing/unreadable/escaped objects, corrupt bytes/schema, wrong artifact type, or duplicate semantic keys | Path-free `ModelNotReady` naming the exact catalog member; no binding, partial family, or fallback |
 | Valid pool declares `cutoff=None` | Preserve the existing artifact identity; loading does not authorize use for a request |
@@ -618,7 +620,11 @@ resolved driver identity, the row is refused with `MODEL_NOT_READY`. If no
 release resolves, `NoCurrentRelease` remains; a resolved binding missing
 required model roles keeps the native batch's existing per-row refusals.
 
-#### Proposed paired residual contract (issue #498; not implemented)
+#### Proposed paired residual contract (issue #498; loading implemented by #1157 step 1, declaration not)
+
+The release binding already loads and exposes the typed `paired_residual_pool`
+members (`paired_residual_artifacts`, above); the recipe derivation and
+bundle declaration described below are not implemented yet.
 
 Legacy `Scorer._residual_pool` (`engine/score.py:3687`) joins Tier-4
 forecasts, panel outcomes and realized crush on `(ticker,event_date)`.

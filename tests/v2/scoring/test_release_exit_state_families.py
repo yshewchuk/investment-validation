@@ -1,6 +1,6 @@
 """Synthetic paired-residual-pool and trailing-cutoff release state; no providers or stored market data."""
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -117,6 +117,23 @@ def test_distinct_keys_load_in_catalog_order_verified_and_frozen(
     assert resolve_release_binding(tmp_path) == binding
 
 
+def test_constructor_copies_paired_and_trailing_sequences(tmp_path):
+    _stage_and_promote(tmp_path)
+    _write_catalog(tmp_path)
+    expected_paired = (_paired(cutoff="2026-03-01", value=17.0), _paired())
+    expected_trailing = (_trailing(month="2026-04-01", cutoff=9.0), _trailing())
+    paired, trailing = list(expected_paired), list(expected_trailing)
+    binding = replace(resolve_release_binding(tmp_path),
+                      paired_residual_artifacts=paired,
+                      trailing_cutoff_artifacts=trailing)
+    paired.clear()
+    trailing.clear()
+    assert isinstance(binding.paired_residual_artifacts, tuple)
+    assert isinstance(binding.trailing_cutoff_artifacts, tuple)
+    assert binding.paired_residual_artifacts == expected_paired
+    assert binding.trailing_cutoff_artifacts == expected_trailing
+
+
 @pytest.mark.parametrize("member", [_PAIRED, _TRAILING])
 @pytest.mark.parametrize("same_bytes", [False, True])
 def test_duplicate_semantic_keys_refuse_without_overwrite(tmp_path, member, same_bytes):
@@ -127,8 +144,7 @@ def test_duplicate_semantic_keys_refuse_without_overwrite(tmp_path, member, same
     _catalog(tmp_path, member, objects=[
         _stored(tmp_path, first), _stored(tmp_path, second)])
     error = _assert_refused(tmp_path, member)
-    assert "ambiguous" in error.detail
-    assert _LABELS[member] in error.detail
+    assert error.detail == f"ambiguous {_LABELS[member]} key"
 
 
 @pytest.mark.parametrize("member", [_PAIRED, _TRAILING])
@@ -136,7 +152,7 @@ def test_other_family_artifact_under_member_refuses(tmp_path, member):
     _stage_and_promote(tmp_path)
     _catalog(tmp_path, member, objects=[_stored(tmp_path, _wrong_type(member))])
     error = _assert_refused(tmp_path, member)
-    assert "wrong artifact type" in error.detail
+    assert error.detail == f"{_LABELS[member]} has the wrong artifact type"
 
 
 @pytest.mark.parametrize("member", [_PAIRED, _TRAILING])
@@ -146,7 +162,8 @@ def test_tampered_object_refuses_naming_member_without_path_leak(tmp_path, membe
     obj = _obj(_write_object(_dep_root(tmp_path), serialize_frozen_state(artifact)),
                _sha(b"another document"))
     _catalog(tmp_path, member, objects=[obj])
-    _assert_refused(tmp_path, member)
+    error = _assert_refused(tmp_path, member)
+    assert error.detail == f"{_LABELS[member]} could not be verified or loaded"
 
 
 @pytest.mark.parametrize("member", [_PAIRED, _TRAILING])
@@ -154,4 +171,5 @@ def test_tampered_object_refuses_naming_member_without_path_leak(tmp_path, membe
 def test_declared_nonstaged_state_refuses_whole_release(tmp_path, member, status):
     _stage_and_promote(tmp_path)
     _catalog(tmp_path, member, status=status)
-    _assert_refused(tmp_path, member)
+    error = _assert_refused(tmp_path, member)
+    assert error.detail == "status is not STAGED, or no staged objects"
