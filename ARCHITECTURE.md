@@ -773,7 +773,9 @@ change their arithmetic or imply that source receipt production is available.
   override. `tools/phase6_inventory.py` currently does this
   (`ROOT = Path(__file__).resolve().parents[1]`) — treat that as the
   pattern to avoid, not to copy, when adding a sibling tool.
-  Exceptions: `experiments.native_sweep_collection`, `experiments.v2_prediction`,
+  Exceptions: `experiments.registered_runup` (installed root only for its
+  registration source closure; caller data paths stay explicit),
+  `experiments.native_sweep_collection`, `experiments.v2_prediction`,
   `experiments.magnitude_history_store` and the search source seals in
   `experiments.magnitude_search_plan`, `experiments.magnitude_search_trials`,
   `experiments.magnitude_search_outer` and `experiments.v2_magnitude_search_run`

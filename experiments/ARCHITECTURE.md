@@ -25,7 +25,7 @@ Larger legitimate registrations can supply `max_evidence_bytes`, also exposed as
 history binds its temporal plan twice, so 16 MiB is not a universal population bound.
 The pure `valid_registration_read_budget` predicate admits only built-in integer
 budgets in `[1, 2**62 - 1]`, leaving SQLite headroom for UTF-16. The loader and all
-four CLI parsers share it; None never disables this loader's bounds. Later
+five CLI parsers (including RUNUP's evidence-budget flag) share it; None never disables this loader's bounds. Later
 admission/outcome APIs keep their existing policies. Execution under changed
 bound sources requires fresh preregistration; old seals are never migrated.
 
@@ -742,6 +742,46 @@ There is no retry, fallback source, projected calendar or partial-success mode.
 | Entry selection, common coverage, fractional debit/conversion or pairing fails | `EXPERIMENT_VARIANT_FAILED`, current stage/counts; zero compared. |
 | Repository integrity or unresolved snapshot | Native code; stage/counts only after comparison admission starts. |
 | CLI filesystem or SQLite failure | `INPUT_CHANGED`, no stage/counts. |
+
+### Registered RUNUP execution
+
+`v2_runup_study` composes `registered_runup` with existing native v1.0 registration/outcome
+protocols; focused synthetic research tests are its other caller. Dependencies are
+contracts/data/foundation/ops, `threadpoolctl`, the bounded staged-input reader and
+`runup_exit_report`; no scheduler or schema is added. One explicit target/stop candidate
+is compared with fixed-day 14 on the complete explicit cohort; seed zero/empty folds reject unsupported fitting declarations.
+The caller must supply an exact committed SnapshotRef; preparation never resolves
+a scope head. Metadata-only registration seals spec hash, plan, snapshot, cohort,
+holdout month/versions, source closure, single-thread numerical policy and the
+installed `threadpoolctl` version (`environment.thread_control`; a changed version
+refuses with EXPERIMENT_IDENTITY_CONFLICT). `run_runup` logs stage lines to stderr. Source
+identity describes on-disk files, not loaded-bytecode attestation. The original spec
+is needed for replay because the seal retains its hash rather than hypothesis text.
+
+Run validates the exact request and intact registration before accessing any outcome
+slot. Metadata-only re-preparation remains required on terminal replay, while market
+payloads and comparison execution are skipped. An unrelated scope-head move is safe;
+changed source/environment, pin, scope, cohort or month cannot reuse the seal.
+The comparison runs under `threadpool_limits(1)`; its unchanged inner report records
+its own environment identity without a thread policy. The outer registration owns
+that policy and runner identity. Canonical comparison JSON is stored directly as the
+native report artifact, returned by reference without Markdown export; inner mode/hash remains intact.
+
+The candidate plus control is one planned/attempted variant. Only a call reaching
+comparison can publish its supported scientific failure terminal. No ledger path is
+accepted; `--no-ledger` is an optional no-op and outcome/completion use the existing no-ledger slot. This seals reconstructed
+selection evidence, not OOS, as-known data, a complete search or release permission.
+Whole-cohort coverage and daily-mark units remain the exploratory comparison contract above.
+
+| Condition | Enforced outcome |
+|---|---|
+| Invalid policy/cohort/spec JSON, missing/non-directory spec or catalog path, nonregular catalog, or missing registration | `INVALID_EXPERIMENT_SPEC` before comparison; no terminal association. Post-parser results are one JSON document, exit 0 on success or 2 on refusal (including replayed scientific failure); argparse errors exit 2 with stderr diagnostics and empty stdout. |
+| Non-v1.0/final-read seal | `HOLDOUT_ACCESS_DENIED` before outcome access. |
+| Changed request/source/environment or corrupt seal | `EXPERIMENT_IDENTITY_CONFLICT`; no outcome-slot access or replacement. |
+| Registration population/holdout refusal | Native typed failure; no reservation or attempted variant. |
+| Admitted comparison emits a supported scientific failure | Immutable failed/refused terminal, attempted count one, no report or partial cohort. Other typed failures propagate without a terminal. |
+| Resource/publication interruption | Later snapshot/artifact/repository filesystem or SQLite failures remain `RESOURCE_UNAVAILABLE`; no synthesized scientific failure. A durable intent resumes without market reads; before intent exists, an exact retry may repeat the deterministic comparison. |
+| Malformed/oversized stored evidence or conflicting terminal | Existing native integrity refusal; no evidence replacement. Both register/run enforce the 16 MiB default or explicit JSON budget. Reservation preflights binding/catalog bytes before publication and bounds both stored-evidence checks; report/market bytes retain their own policies. |
 
 ## Selected-candidate outer evaluation
 
