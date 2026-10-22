@@ -66,10 +66,13 @@ def _dump(obj) -> bytes:
     ).encode("utf-8")
 
 
-def _read_capped(path: Path) -> bytes | None:
+def _read_capped(path: Path, *, follow: bool = False) -> bytes | None:
     """Read at most MAX_JSON_BYTES+1 bytes; None if unreadable/non-regular."""
+    flags = os.O_RDONLY | os.O_NONBLOCK
+    if not follow:
+        flags |= os.O_NOFOLLOW
     try:
-        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(str(path), flags)
     except OSError:
         return None
     try:
@@ -106,13 +109,9 @@ def _read_manifest(path: Path):
 
 
 def _read_manifest_following(path: Path):
-    """Like _read_manifest but follows symlinks (plain capped open)."""
-    try:
-        with open(path, "rb") as fh:
-            raw = fh.read(MAX_JSON_BYTES + 1)
-    except OSError:
-        return None
-    if len(raw) > MAX_JSON_BYTES:
+    """Like _read_manifest but follows symlinks (regular files only)."""
+    raw = _read_capped(path, follow=True)
+    if raw is None or len(raw) > MAX_JSON_BYTES:
         return None
     try:
         doc = json.loads(raw)
@@ -244,6 +243,8 @@ def _check_number(value, experiment_id):
         raise _bad(value, experiment_id)
     if value < FIRST_NUMBER:
         raise _bad(value, experiment_id, f"new experiments start at EXP-{FIRST_NUMBER}")
+    if value > 999_999_999:
+        raise _bad(value, experiment_id, "EXP number above 999999999")
     return value
 
 
@@ -278,8 +279,6 @@ def resolve_exp_number(experiments_root, experiment_id, requested):
         else:
             raise _bad(requested, experiment_id)
     if req_int is not None:
-        if req_int > 999_999_999:
-            raise _bad(requested, experiment_id)
         _check_number(req_int, experiment_id)
 
     linked = _linked_number(root, experiment_id)

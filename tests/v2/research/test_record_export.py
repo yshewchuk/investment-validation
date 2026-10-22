@@ -722,6 +722,41 @@ def test_nan_spec_is_invalid_spec(tmp_path):
     assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
+def test_export_direct_number_above_max_is_invalid(tmp_path):
+    with pytest.raises(OpsError) as exc:
+        export_run_record(
+            tmp_path,
+            exp_number=1_000_000_000,
+            experiment_id="x",
+            slug="x",
+            spec={"hypothesis": "h"},
+            request={"action": "run"},
+            event_ids=["e1"],
+            outcome={"failure_code": None},
+            report_text="# report body\n",
+            recording_mode="ledger",
+        )
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_resolve_through_symlinked_folder_with_fifo_manifest_does_not_hang(tmp_path):
+    real = tmp_path / "real"
+    results = real / "results"
+    results.mkdir(parents=True)
+    os.mkfifo(results / "export_manifest.json")
+    (tmp_path / "EXP-101_x").symlink_to(real)
+    try:
+        resolve_exp_number(tmp_path, "exp-x", 101)
+    except OpsError:
+        pass
+
+
+def test_read_capped_on_fifo_returns_none(tmp_path):
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    assert record_export._read_capped(fifo) is None
+
+
 def test_oversize_mapping_spec_is_trimmed_without_kept(tmp_path):
     result = _export(tmp_path, spec={"k": "x" * 1_200_000})
     assert result["trimmed"] == ["spec.json"]
