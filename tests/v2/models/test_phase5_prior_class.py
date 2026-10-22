@@ -5,6 +5,7 @@ import json
 
 from checks import phase5_release_assembly as assembly
 from engine.v2.foundation import content_hash
+from engine.v2.models import deployment
 from engine.v2.models import release_layout as phase5_release
 
 from tests.v2.models.test_phase5_release_assembly import _stage_prior
@@ -178,6 +179,46 @@ def test_corrupt_untouched_prior_object_is_damaged(tmp_path):
     (phase5_release.deployment_root(tmp_path) / obj["path"]).write_bytes(b"tampered bytes")
     cls = _cls(tmp_path, "prior1")
     assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog is malformed"
+
+
+def test_tampered_pool_object_is_damaged(tmp_path):
+    _stage_prior(tmp_path)
+    catalog = json.loads(phase5_release.catalog_path(tmp_path, "prior1").read_bytes())
+    row = next(r for r in catalog["members"] if r["member_id"] == "paired_residual_pool")
+    obj = row["objects"][0]
+    path = phase5_release.deployment_root(tmp_path) / obj["path"]
+    path.write_bytes(b"x" * len(path.read_bytes()))
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog is malformed"
+
+
+def test_negative_object_bytes_is_damaged(tmp_path):
+    _stage_prior(tmp_path)
+
+    def corrupt_pool_row(body):
+        row = next(r for r in body["members"] if r["member_id"] == "paired_residual_pool")
+        row["objects"][0]["bytes"] = -1
+
+    _rewrite(phase5_release.catalog_path(tmp_path, "prior1"), corrupt_pool_row)
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog is malformed"
+
+
+def test_corrupt_model_binding_payload_is_damaged(tmp_path):
+    _stage_prior(tmp_path)
+    store = phase5_release.deployment_root(tmp_path)
+    staged = deployment.resolve_release(store, "prior1")
+    member_path = store / staged.bindings[0].members[0].path
+    member_path.write_bytes(b"x" * len(member_path.read_bytes()))
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    # stage 3c: verify_staged only checks the staged manifest, not payload
+    # bytes, so the corruption reaches the pool_cutoff block's
+    # _read_prior_payloads read ("a prior model object is corrupt") and
+    # classify_prior reports "the prior catalog is malformed".
     assert cls.reason == "the prior catalog is malformed"
 
 

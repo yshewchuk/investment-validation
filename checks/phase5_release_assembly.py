@@ -281,6 +281,8 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
 
 def _read_regular(path: Path, limit: int, code: str, detail: str) -> bytes:
     """Read a bounded regular file, refusing symlinks, non-regular files and oversize input."""
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+        raise ReleaseAssemblyRefusal(code, detail)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
@@ -355,6 +357,10 @@ def _probe_regular(path: Path, limit: int, code: str, detail: str) -> None:
 def _verify_objects(store: Path, supplied: tuple[PoolOutput, ...]) -> None:
     for output in supplied:
         payload_bytes = output.payload_bytes
+        if (not isinstance(payload_bytes, int) or isinstance(payload_bytes, bool)
+                or payload_bytes < 0):
+            raise ReleaseAssemblyRefusal(
+                "OBJECT_UNVERIFIED", "a supplied object payload is not a bounded size")
         if payload_bytes > MAX_OBJECT_BYTES:
             raise ReleaseAssemblyRefusal(
                 "OBJECT_UNVERIFIED", "a supplied object payload is not a bounded size")
@@ -466,6 +472,7 @@ def classify_prior(release_root: Path, prior_release_id) -> PriorClass:
             raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "a prior pool object hash is malformed")
         _verify_carried_rows(store, catalog)
         _verify_objects(store, carried)
+        _read_prior_payloads(store, staged)
     except (ReleaseAssemblyRefusal, deployment.DeploymentError, OSError, *_STRAY_ERRORS):
         return PriorClass(PRIOR_DAMAGED, "the prior catalog is malformed")
     return PriorClass(PRIOR_USABLE, "the prior catalog has a pool_cutoff")
