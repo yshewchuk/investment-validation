@@ -1,4 +1,7 @@
 """Run-batched candidate reads: identical rows, exact isolation, lazy streaming, retry."""
+from types import SimpleNamespace
+
+import pandas as pd
 import pytest
 
 from engine.v2.data import errors
@@ -100,3 +103,70 @@ def test_scan_failure_drops_the_stream_and_a_retry_rescans(source, monkeypatch):
         read_rows(plans[0][0], plans[0][1])
     rows = read_rows(plans[0][0], plans[0][1])
     assert len(calls) == 2 and len(rows) == 1 and rows[0]["event_date"] == DAYS[0]
+
+
+def test_extra_fragment_in_the_run_range_refuses_before_any_object_opens(source, monkeypatch):
+    repository, snapshot = source
+    opened = poison_outcomes(monkeypatch, repository, snapshot, [], all_outcomes=True)
+    plans, read_rows = _plan(repository, snapshot)
+    base = len(opened)
+    protected = next(r for r in repository.fragment_records(snapshot, "computed_moves") if r.time_min == PROTECTED)
+    original = query_planner.plan_scan_population
+
+    def widened(contract, records, **kwargs):
+        population = original(contract, records, **kwargs)
+        if len(population.records) > 1:
+            return type(population)(records=(*population.records, protected), row_count=population.row_count + 1)
+        return population
+
+    monkeypatch.setattr(query_planner, "plan_scan_population", widened)
+    with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+        read_rows(plans[0][0], plans[0][1])
+    assert len(opened) == base
+
+
+def test_unplanned_event_refuses_and_malformed_candidates_refuse_contract_mismatch(source):
+    repository, snapshot = source
+    plans, read_rows = _plan(repository, snapshot)
+    stranger = SimpleNamespace(event_id="not-planned", event_date=pd.Timestamp(DAYS[0]))
+    with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+        read_rows(stranger, plans[0][1])
+    population = load_population(repository, snapshot, as_of_month=MONTH, purpose="selection")
+    for bad in (population.drop(columns=["ticker"]), population.assign(ticker=" " + population.ticker),
+                population.assign(event_date=population.event_date + pd.Timedelta(hours=1))):
+        with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+            event_history.plan_with_reader(repository, snapshot, bad, COMPUTED_MOVES_CONTRACT)
+
+
+def test_run_stream_is_closed_after_its_last_candidate(source, monkeypatch):
+    repository, snapshot = source
+    plans, read_rows = _plan(repository, snapshot)
+    original, closed = repository.scan, []
+
+    def tracked(query, *, table_name):
+        try:
+            yield from original(query, table_name=table_name)
+        finally:
+            closed.append(query.time_interval.start_inclusive)
+
+    monkeypatch.setattr(repository, "scan", tracked)
+    read_rows(plans[0][0], plans[0][1])
+    assert closed == []
+    for event, request, _ in plans[1:3]:  # the rest of the first run
+        read_rows(event, request)
+    assert closed == [DAYS[0]]
+    assert read_rows(plans[1][0], plans[1][1])[0]["event_date"] == DAYS[1]
+
+
+def _plan_at(day):
+    return (None, None, SimpleNamespace(time_min=day, time_max=day))
+
+
+def test_runs_are_cut_only_where_another_fragment_may_lie_between_neighbours():
+    group = [_plan_at(day) for day in ("2023-01-01", "2023-02-01", "2023-03-01")]
+    lengths = lambda others: [len(run) for run in event_history._runs(group, others)]  # noqa: E731
+    assert lengths([]) == [3]
+    assert lengths([("2022-01-01", "2022-12-31"), ("2023-04-01", "2023-05-01")]) == [3]  # outside the range
+    assert lengths([("2023-02-10", "2023-02-10")]) == [2, 1]  # strictly between the last two
+    assert lengths([("2023-01-01", "2023-01-01")]) == [1, 2]  # touching a candidate's day also cuts
+    assert lengths([None]) == [1, 1, 1]  # an unreadable interval cuts everywhere

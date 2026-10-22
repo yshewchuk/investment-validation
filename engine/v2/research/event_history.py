@@ -26,17 +26,22 @@ def plan_event_targets(repository, snapshot, candidates, contract, *, columns=No
     Metadata only; callers still own population admission and payload validation.
     """
     with stage("plan event targets"):
-        try:
-            if not {"ticker", "event_date"}.issubset(candidates.columns):
-                raise ValueError
-            for event in candidates.itertuples(index=False):
-                if (not isinstance(event.ticker, str) or not event.ticker.strip()
-                        or event.ticker != event.ticker.strip()
-                        or calendar_date(event.event_date) != event.event_date.date()):
-                    raise ValueError
-        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
-            raise errors.fail("CONTRACT_MISMATCH", "event target candidates are malformed") from None
+        _check_candidates(candidates)
         return _plans(repository, snapshot, candidates, contract, columns=columns)
+
+
+def _check_candidates(candidates):
+    """Refuse malformed candidate frames before any planning."""
+    try:
+        if not {"ticker", "event_date"}.issubset(candidates.columns):
+            raise ValueError
+        for event in candidates.itertuples(index=False):
+            if (not isinstance(event.ticker, str) or not event.ticker.strip()
+                    or event.ticker != event.ticker.strip()
+                    or calendar_date(event.event_date) != event.event_date.date()):
+                raise ValueError
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        raise errors.fail("CONTRACT_MISMATCH", "event target candidates are malformed") from None
 
 
 def _window(history_start, decision_session):
@@ -137,6 +142,7 @@ def _plans(repository, snapshot, candidates, contract, *, columns=None):
 
 def plan_with_reader(repository, snapshot, candidates, contract):
     """`_plans` plus a run-batched ``read_rows(event, request)`` that shares the same record index."""
+    _check_candidates(candidates)
     index = _record_index(repository.fragment_records(snapshot, contract.table_name), contract)
     plans = _plans_from_index(index, repository, snapshot, candidates, contract, None)
     return plans, _run_reader(repository, contract, plans, index)
@@ -225,21 +231,23 @@ def _run_reader(repository, contract, plans, index):
         """Advance the run's stream only up to this candidate's day; later fragments stay unopened."""
         if event.event_id in rows_by_event:
             return rows_by_event[event.event_id]
-        run, day = run_of[event.event_id], event.event_date.date().isoformat()
+        run, day = run_of.get(event.event_id), event.event_date.date().isoformat()
+        if run is None:
+            raise errors.fail("HOLDOUT_ACCESS_DENIED", "event was not preflighted for this reader")
         state = streams.get(id(run))
         if state is None:
             state = streams[id(run)] = [open_run(run), {}, ""]
         rows, by_day, _ = state
-        days = {plan[2].time_min for plan in run}
         try:
-            while day not in by_day and not (state[2] and day < state[2]):
+            while rows is not None and day not in by_day and not (state[2] and day < state[2]):
                 row = next(rows, None)
                 if row is None:
                     break
-                if row["event_date"] not in days:
-                    raise errors.fail("HOLDOUT_ACCESS_DENIED", "research outcome isolation cannot be proven")
                 by_day.setdefault(row["event_date"], []).append(row)
                 state[2] = row["event_date"]
+            if rows is not None and (day == run[-1][2].time_min or state[2] >= run[-1][2].time_min):
+                rows.close()  # last candidate of the run read: release the open object
+                state[0] = None
         except BaseException:
             streams.pop(id(run), None)  # a retry re-scans the run from its start
             raise
