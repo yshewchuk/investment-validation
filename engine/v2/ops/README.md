@@ -164,7 +164,7 @@ either required table. Their current consumer is
 `experiments/runup_exit_report.py` consumes `fingerprints.source_closure` /
 `environment_identity` and `errors.OpsError` / `fail` for exploratory identity
 and typed refusals; `experiments/v2_runup_exits.py` consumes those typed errors;
-`experiments/record_export.py` consumes `errors.fail` for its typed refusals.
+`experiments/record_export.py` consumes `errors.fail` / `errors.OpsError` for its typed refusals and failure causes; `experiments/v2_gate.py` and `experiments/v2_prediction.py` consume its `export_or_skip`.
 `experiments/registered_runup.py` consumes specification resolution and typed refusals; `experiments/v2_runup_study.py` also consumes catalog connection and specification decoding for registered RUNUP execution.
 
 Which packages import this one, and for what. Checked against the import graph:

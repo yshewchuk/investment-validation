@@ -44,23 +44,26 @@ def public_result(result) -> dict:
     return {"status": result["status"], "trimmed": result["trimmed"]}
 
 
-def read_spec_document(path, max_bytes=16 * 1024 * 1024):
-    """Read and parse an experiment spec JSON file, capped at max_bytes.
+class _ReadRefused(Exception):
+    """A bounded read failed; reason is unreadable or not_regular."""
 
-    A missing/unreadable/non-regular file or a file over the cap raises
-    INVALID_EXPERIMENT_SPEC; JSON decode errors propagate as today.
-    """
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _read_bounded(path, max_bytes: int, *, follow: bool = True) -> bytes:
+    """Read at most max_bytes+1 bytes of a regular file; raise _ReadRefused if unreadable/non-regular. Callers detect oversize by length > max_bytes."""
     flags = os.O_RDONLY | os.O_NONBLOCK
+    if not follow:
+        flags |= os.O_NOFOLLOW
     try:
         fd = os.open(str(path), flags)
     except OSError as exc:
-        raise fail("INVALID_EXPERIMENT_SPEC", f"cannot read spec file: {exc}") from exc
+        raise _ReadRefused("unreadable") from exc
     try:
         if not stat_mod.S_ISREG(os.fstat(fd).st_mode):
-            raise fail(
-                "INVALID_EXPERIMENT_SPEC",
-                f"spec file is not a regular file: {path}",
-            )
+            raise _ReadRefused("not_regular")
         chunks: list[bytes] = []
         total = 0
         while total <= max_bytes:
@@ -69,19 +72,36 @@ def read_spec_document(path, max_bytes=16 * 1024 * 1024):
                 break
             chunks.append(chunk)
             total += len(chunk)
-        if total > max_bytes:
-            raise fail(
-                "INVALID_EXPERIMENT_SPEC",
-                "spec file exceeds 16 MiB",
-            )
-        raw = b"".join(chunks)
+        return b"".join(chunks)
     except OSError as exc:
-        raise fail("INVALID_EXPERIMENT_SPEC", f"cannot read spec file: {exc}") from exc
+        raise _ReadRefused("unreadable") from exc
     finally:
         try:
             os.close(fd)
         except OSError:
             pass
+
+
+def read_spec_document(path, max_bytes=16 * 1024 * 1024):
+    """Read and parse an experiment spec JSON file, capped at max_bytes.
+
+    A missing/unreadable/non-regular file or a file over the cap raises
+    INVALID_EXPERIMENT_SPEC; JSON decode errors propagate as today.
+    """
+    try:
+        raw = _read_bounded(path, max_bytes)
+    except _ReadRefused as refused:
+        message = {
+            "unreadable": "cannot read spec file",
+            "not_regular": "spec file is not a regular file",
+        }[refused.reason]
+        # strerror carries the OS reason (ENOENT vs EACCES) and no path.
+        detail = getattr(refused.__cause__, "strerror", None)
+        if detail:
+            message = f"{message}: {detail}"
+        raise fail("INVALID_EXPERIMENT_SPEC", message) from refused
+    if len(raw) > max_bytes:
+        raise fail("INVALID_EXPERIMENT_SPEC", "spec file exceeds 16 MiB")
     return json.loads(raw)
 
 
@@ -108,49 +128,15 @@ def _dump(obj) -> bytes:
 
 def _read_capped(path: Path, *, follow: bool = False) -> bytes | None:
     """Read at most MAX_JSON_BYTES+1 bytes; None if unreadable/non-regular."""
-    flags = os.O_RDONLY | os.O_NONBLOCK
-    if not follow:
-        flags |= os.O_NOFOLLOW
     try:
-        fd = os.open(str(path), flags)
-    except OSError:
+        return _read_bounded(path, MAX_JSON_BYTES, follow=follow)
+    except _ReadRefused:
         return None
-    try:
-        if not stat_mod.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        chunks: list[bytes] = []
-        total = 0
-        while total <= MAX_JSON_BYTES:
-            chunk = os.read(fd, MAX_JSON_BYTES + 1 - total)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-        return b"".join(chunks)
-    except OSError:
-        return None
-    finally:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
 
 
-def _read_manifest(path: Path):
-    """Parse a manifest JSON object; None if missing/oversized/invalid."""
-    raw = _read_capped(path)
-    if raw is None or len(raw) > MAX_JSON_BYTES:
-        return None
-    try:
-        doc = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    return doc if isinstance(doc, dict) else None
-
-
-def _read_manifest_following(path: Path):
-    """Like _read_manifest but follows symlinks (regular files only)."""
-    raw = _read_capped(path, follow=True)
+def _read_manifest(path: Path, *, follow: bool = False):
+    """Parse a manifest JSON object; None if unreadable/non-regular/oversized/invalid."""
+    raw = _read_capped(path, follow=follow)
     if raw is None or len(raw) > MAX_JSON_BYTES:
         return None
     try:
@@ -193,8 +179,8 @@ def _linked_number(root: Path, experiment_id):
         if man is None:
             if not (folder.is_symlink() or (folder / "results").is_symlink()):
                 continue
-            man = _read_manifest_following(
-                folder / "results" / "export_manifest.json"
+            man = _read_manifest(
+                folder / "results" / "export_manifest.json", follow=True
             )
             if (
                 man is None
@@ -377,8 +363,8 @@ def resolve_exp_number(experiments_root, experiment_id, requested):
     if req_int is None:
         raise fail(
             "INVALID_EXPERIMENT_SPEC",
-            f"run has no EXP number: {experiment_id} is not linked under "
-            f"{root} and --exp-number was not given",
+            f"run has no EXP number: {experiment_id} is not linked and "
+            f"--exp-number was not given",
         )
     try:
         parse_experiment_id(f"EXP-{req_int:03d}")
@@ -878,3 +864,21 @@ def export_native_run(
         report_text=report_text,
         recording_mode=saved["receipt"].get("recording_mode"),
     )
+
+
+def export_or_skip(experiments_root, registration, spec_document, request_dict,
+                   saved, exp_number, replayed, started, report_path):
+    """CLI helper: export the run record unless no EXP number was given.
+
+    Returns (record, refusal): record is "skipped" or the public result;
+    refusal is None or the JSON-able refusal dict the CLI should print (exit 2).
+    """
+    if exp_number is None:
+        return "skipped", None
+    try:
+        return public_result(export_native_run(
+            experiments_root, registration, spec_document, request_dict,
+            saved, exp_number, replayed, started, report_path=report_path)), None
+    except (OpsError, OSError, ValueError) as error:
+        return None, {"refused": "record_export_failed",
+                      "cause": export_failure_cause(error)}
