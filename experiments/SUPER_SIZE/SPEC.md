@@ -26,7 +26,8 @@ For `python -m experiments.v2_prediction register|run`, supply the spec, existin
 catalog/store, scope and holdout month, plus `--target absolute_move`,
 `--magnitude-training-start`, `--magnitude-labels-before`, `--magnitude-model history_mean`,
 `--magnitude-feature-snapshot-id` and `--magnitude-history-start`. Repeat the same
-request for run; use `--no-ledger` for smoke before recorded execution with `--ledger`.
+request for run; pass `--exp-number N` (N >= 101) for a new experiment; use
+`--no-ledger` for smoke before recorded execution with `--ledger`.
 
 Random and rolling holdouts remain excluded. Native evidence binds consumed
 stored rows and original source identities; schedules/publication remain unverified

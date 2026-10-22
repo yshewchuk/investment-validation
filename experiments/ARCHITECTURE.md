@@ -423,6 +423,55 @@ from verified bytes; malformed metadata refuses before ledger or catalog effects
 
 Pre-admission receipts cannot invent admission; rejected-request ledger identities belong to the runner.
 
+## Private run-record export
+
+`record_export.export_run_record` copies one run's private record to
+`experiments/EXP-NNN_<slug>/` so `tools/private_mirror.py` backs it up. The
+gate and prediction CLIs call it after `run`; it adds no catalog table and does not
+change outcome identity. Every data file sits under `results/`, which
+`checks/repo_hygiene.py` blocks (`BLOCKED_SEGMENTS`) and `.gitignore` ignores; `REPORT.md` is
+ignored by default-deny. The mirror includes both, including `results/runs/<key>/*.json`. This feature does not weaken
+that policy.
+
+Layout: `REPORT.md` (stub: ids, status, the success report text), and in `results/`
+`spec.json`, `request.json`, `event_ids.json`, `outcome.json` (result or typed
+refusal, replay flag, resource usage as elapsed seconds and peak RSS, snapshot id, commit id, source closure hash, environment, magnitude request, magnitude execution) and
+`export_manifest.json` (experiment_id, EXP number, recording mode, trimmed files).
+The first run of an experiment_id keeps this flat layout; a different run of the
+same experiment_id is written under `results/runs/<key>/` (the same five files
+plus its own `REPORT.md`), where `key` is the first 12 hex digits of the sha256
+over the spec bytes, request bytes and recording mode.
+
+The operator assigns the EXP number: `--exp-number N` (an integer of at least `lib.FIRST_NUMBER`, 101, or a digit string of at most 9 characters; numbers above 999999999 are refused for every input type, int or string).
+The manifest links `experiment_id` to the number; a linked experiment_id reuses its number, so replay
+needs no flag. Records are create-only and read back only as regular files capped at 1,000,000 bytes.
+Manifest hashes describe the exact bytes on disk. Every conflict is detected before the first write.
+Exports on one experiments root are serialized by an exclusive lock on `.record_export.lock` (created, with the root, before the checks below), covering the
+ownership check, preflight and publication, so concurrent writers never publish a manifest over files they did not see.
+Prediction records also carry the target and model-selection options and the registration's magnitude request and execution documents.
+
+| Condition | Outcome |
+| --- | --- |
+| `run` with no number and no existing link | `INVALID_EXPERIMENT_SPEC` before any evaluation. `--no-record-export` skips the export and warns loudly on stderr. |
+| Malformed `--exp-number`, or a number below 101 | `INVALID_EXPERIMENT_SPEC` before any evaluation. |
+| Number held by another experiment_id or an unlinked folder; experiment_id linked to another number | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
+| Existing result file that is over the cap, a symlink or not a regular file; folder, `results/` or `results/runs/` that is a symlink | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
+| JSON over the cap | A summary is written instead (original bytes and sha256; for a list, also the longest fitting prefix as `kept`) and listed under `trimmed`. |
+| A different run (another arm or a recorded run after a smoke run) of a linked experiment_id | Written under `results/runs/<key>/` (key = first 12 hex of sha256 over spec, request and recording mode); the first run keeps the flat layout. |
+| Existing result file whose bytes differ from the hash in its existing manifest, or a manifest missing a document hash | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
+| Non-finite number (NaN, Infinity) in a document | `INVALID_EXPERIMENT_SPEC`; exports are strict JSON. |
+| Symlinked run folder, `results/` or `results/runs/` | Refused at export (`EXPERIMENT_IDENTITY_CONFLICT`); number resolution refuses it too when the followed manifest names the experiment or the explicit number matches the folder, before any evaluation. |
+| Direct export for an experiment_id already linked to another number | `EXPERIMENT_IDENTITY_CONFLICT`; no writes. |
+| Outcome published by a CLI error path (a typed refusal raised during evaluation) | Not exported by that invocation; the next replay `run` exports it. |
+| Crash after some files, before the manifest | Retrying the same run (same spec bytes) with the same EXP number completes the folder and writes the manifest; a partial folder of a different spec, or one holding unknown files, is `EXPERIMENT_IDENTITY_CONFLICT`. |
+| Report text over the cap | `REPORT.md` holds a truncated report plus a truncation line, so replay never exceeds the cap. |
+| Manifest whose `exp_number` differs from its folder number | `EXPERIMENT_IDENTITY_CONFLICT`. |
+| Non-string slug or non-JSON-serializable document | `INVALID_EXPERIMENT_SPEC`. |
+| Empty or non-string experiment_id (resolution and export alike) | `INVALID_EXPERIMENT_SPEC`. |
+| Supplied success report that cannot be read | `RESOURCE_UNAVAILABLE`; nothing is exported. |
+| Replay over an existing record | A replay of the same run keeps the first persisted bytes silently. The result reports the persisted `trimmed` list from the existing manifest, not the new proposal's. |
+| Export fails after the outcome was published | The outcome stays valid; the CLI exits 2 with `{"refused": "record_export_failed", "cause": <code>}`, where the cause is the `OpsError` code, `RESOURCE_UNAVAILABLE` for an OS error or `INVALID_EXPERIMENT_SPEC` for a value error. CLI output carries only the export `status` and `trimmed` list, never the export path. A rerun replays, then exports; a failure that left a manifestless partial folder is completed by a retry of the same run (see the crash row). |
+
 ## Reconstructed gate evaluation
 
 `python -m experiments.v2_gate register|run` evaluates one preregistered arm.
@@ -641,7 +690,7 @@ existing catalog/store and explicit holdout month. It fingerprints its executing
 metadata-only. `read_native_registration` verifies the stored identity; run performs current
 admission before replay or evaluation; missing registration is R1. R3/R4/R5
 refusals use that admitted identity and never export a current-attempt report.
-R1/R2/R6 preserve private receipts only. Untyped evaluation/rendering errors use
+R1/R2/R6 preserve private receipts only. Unless `--no-record-export` is given, `run` (it requires `--exp-number N` unless the experiment_id is already linked) also writes the private run record after a published or replayed outcome on the normal path; a refusal published by the error path is exported by the next replay (see Private run-record export). Untyped evaluation/rendering errors use
 retryable `WORKER_FAILED`, never terminal outcomes or CSV rows. `--no-ledger`
 isolates smoke recording; otherwise `--ledger` is required. Completed `REPORT.md` is exported through the
 shared immutable outcome lifecycle; retries reuse the original result/date.

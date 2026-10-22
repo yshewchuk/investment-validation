@@ -779,7 +779,8 @@ change their arithmetic or imply that source receipt production is available.
   `experiments.native_sweep_collection`, `experiments.v2_prediction`,
   `experiments.magnitude_history_store` and the search source seals in
   `experiments.magnitude_search_plan`, `experiments.magnitude_search_trials`,
-  `experiments.magnitude_search_outer` and `experiments.v2_magnitude_search_run`
+  `experiments.magnitude_search_outer`, `experiments.v2_magnitude_search_run`
+  and `experiments.record_export` (installed checkout's git commit id only)
   derive installed roots from `__file__`
   solely to fingerprint/compare on-disk source snapshots.
   `experiments.magnitude_search_execution` uses that root only to launch its
