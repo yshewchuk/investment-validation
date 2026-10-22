@@ -15,12 +15,13 @@ two values only the child's own log can supply:
   from the captured output. ``None`` both when no watchdog line ever appeared
   AND when the only line(s) seen were the unconditional ``elapsed=0.0``
   startup reading; ``0.0`` would claim a measurement that was never taken.
-* ``kill_reason`` -- for a child that exited 137, which of the watchdog's
+* ``kill_reason`` -- for a child that exited 137 (memory) or 76 (the disk
+  ceiling, bounded_run.py's DISK_LIMIT_EXIT), which of the watchdog's
   literal breach strings appeared (``BOX FLOOR BREACH``, ``SWAP BREACH``,
-  ``CAP BREACH``, in the watchdog's own precedence). ``None`` for any other
-  exit, and for a 137 with no breach string at all -- ``killed`` is still
-  true there, because the exit code is the fact and the reason is the
-  absence.
+  ``CAP BREACH``, ``DISK LIMIT``, in the watchdog's own precedence).
+  ``None`` for any other exit, and for a 137/76 with no breach string at
+  all -- ``killed`` is still true there, because the exit code is the fact
+  and the reason is the absence.
 
 Contention is recorded, never waited on: the supervisor owns the "one heavy
 job at a time" rule (AGENTS.md) and the pre-launch ``free -m`` floor; this
@@ -85,8 +86,14 @@ HEAVY_JOB_PATTERNS = (
     ("serve_monitor", "[s]erve_monitor"),
     ("corpus_parity.py run", "[c]orpus_parity.py run"),
 )
-#: bounded_run.py's three watchdog breach strings, in the watchdog's own order.
-KILL_REASONS = ("BOX FLOOR BREACH", "SWAP BREACH", "CAP BREACH")
+#: bounded_run.py's watchdog breach strings, in the watchdog's own order.
+#: "DISK LIMIT" is bounded_run.py's disk-ceiling breach (exit 76,
+#: DISK_LIMIT_EXIT, not 137); it stays last so a "DISK LIMIT unreadable"
+#: warning line can never preempt a real memory breach string on a 137.
+KILL_REASONS = ("BOX FLOOR BREACH", "SWAP BREACH", "CAP BREACH", "DISK LIMIT")
+#: Exit codes bounded_run.py uses for a watchdog kill: 137 (memory: cap,
+#: swap, box floor) and 76 (DISK_LIMIT_EXIT, the disk-used ceiling).
+KILL_EXIT_CODES = (137, 76)
 
 _WATCHDOG_RSS = re.compile(r"\[watchdog\]\s+([\d.]+)m\s+rss\s+(\d+\.\d+)G\s+pss")
 _LABEL = re.compile(r"[A-Za-z0-9._-]+")
@@ -160,7 +167,7 @@ def watchdog_rss_values(output: str) -> list[float]:
 
 def classify_kill(output: str, exit_code: int) -> str | None:
     """Which watchdog breach string killed the child, or None."""
-    if exit_code != 137:
+    if exit_code not in KILL_EXIT_CODES:
         return None
     for reason in KILL_REASONS:
         if reason in output:
@@ -265,7 +272,7 @@ def measure(workload_label, max_rss_gb, cache_state, command, *,
         # unrecorded).
         "peak_rss_gb": max(rss_values) if rss_values else None,
         "exit_code": exit_code,
-        "killed": exit_code == 137,
+        "killed": exit_code in KILL_EXIT_CODES,
         "kill_reason": classify_kill(output, exit_code),
         "capabilities_covered": list(capabilities_covered),
     }

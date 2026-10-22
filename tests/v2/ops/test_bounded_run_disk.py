@@ -21,6 +21,11 @@ _spec = importlib.util.spec_from_file_location(
 mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mod)
 
+_rm_spec = importlib.util.spec_from_file_location(
+    "v2_resource_measurement", ROOT / "tools" / "v2_resource_measurement.py")
+rm = importlib.util.module_from_spec(_rm_spec)
+_rm_spec.loader.exec_module(rm)
+
 GIB = 1024**3
 
 
@@ -70,7 +75,7 @@ def test_flag_overrides_env(monkeypatch):
     assert _parse(["--max-disk-used-gb", "7"]).max_disk_used_gb == 7.0
 
 
-@pytest.mark.parametrize("raw", ["abc", "0", "-2", "nan", "inf"])
+@pytest.mark.parametrize("raw", ["abc", "0", "-2", "nan", "inf", "", "  "])
 def test_bad_env_value_is_usage_error(monkeypatch, raw, capsys):
     monkeypatch.setenv(mod.DISK_ENV, raw)
     parser = mod._build_parser()
@@ -78,18 +83,22 @@ def test_bad_env_value_is_usage_error(monkeypatch, raw, capsys):
     with pytest.raises(SystemExit) as excinfo:
         mod._validate(args, parser)
     assert excinfo.value.code == 2
+    assert ("BOUNDED_RUN_MAX_DISK_USED_GB must be a positive finite number"
+            in capsys.readouterr().err)
 
 
 @pytest.mark.parametrize("raw", ["0", "-2", "nan", "inf"])
-def test_bad_flag_value_is_usage_error(raw):
+def test_bad_flag_value_is_usage_error(raw, capsys):
     parser = mod._build_parser()
     args = parser.parse_args(["--max-disk-used-gb", raw])
     with pytest.raises(SystemExit) as excinfo:
         mod._validate(args, parser)
     assert excinfo.value.code == 2
+    assert ("--max-disk-used-gb must be a positive finite number"
+            in capsys.readouterr().err)
 
 
-def test_more_than_the_path_cap_is_usage_error():
+def test_more_than_the_path_cap_is_usage_error(capsys):
     paths = [x for i in range(mod.DISK_PATHS_MAX + 1)
              for x in ("--disk-path", f"/p{i}")]
     parser = mod._build_parser()
@@ -97,6 +106,7 @@ def test_more_than_the_path_cap_is_usage_error():
     with pytest.raises(SystemExit) as excinfo:
         mod._validate(args, parser)
     assert excinfo.value.code == 2
+    assert "at most 8" in capsys.readouterr().err
 
 
 def test_path_cap_itself_is_accepted():
@@ -160,6 +170,19 @@ def test_check_disk_under_ceiling_records_and_does_not_kill(monkeypatch):
     assert guard.fails == 0
 
 
+def test_check_disk_exactly_at_ceiling_does_not_kill(monkeypatch):
+    kills = []
+    monkeypatch.setattr(mod, "_terminate_with_grace",
+                        lambda *a: kills.append(a))
+    monkeypatch.setattr(mod, "_statvfs", lambda path: _st(500, 0, GIB))
+    args = _parse(["--max-disk-used-gb", "500"])
+    guard = mod._DiskGuard(args.max_disk_used_gb, [("/data", 7)], heavy=False)
+    args.disk_guard = guard
+    assert mod._check_disk("PROC", args, elapsed=1.0) is False
+    assert kills == []
+    assert guard.last_used_gb == pytest.approx(500.0)
+
+
 def test_check_disk_fail_counter_resets_on_good_sample(monkeypatch):
     kills = []
     monkeypatch.setattr(mod, "_terminate_with_grace",
@@ -204,6 +227,7 @@ def test_watch_level_breach_exits_76_and_kills_the_tree(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert " disk-cap=500G" in captured.out
     assert "used 900.0G > ceiling 500G" in captured.out
+    assert os.getcwd() in captured.out
     assert "killed at the disk limit" in captured.out
 
 
@@ -279,3 +303,12 @@ def test_heavy_single_unreadable_tick_does_not_kill(monkeypatch, capsys):
     assert "killed at the disk limit" not in captured.out
     assert captured.err.count("DISK LIMIT unreadable") == 1
     assert "disk used 1.0G/500G" in captured.out
+
+
+# -------------------------------------------------- kill classification, exit 76
+
+def test_disk_limit_exit_76_classifies_and_other_exits_do_not():
+    assert rm.classify_kill("[watchdog] 1.0m DISK LIMIT: /x used 600.0G"
+                            " > ceiling 500G", 76) == "DISK LIMIT"
+    assert rm.classify_kill("DISK LIMIT", 1) is None
+    assert rm.classify_kill("CAP BREACH", 137) == "CAP BREACH"

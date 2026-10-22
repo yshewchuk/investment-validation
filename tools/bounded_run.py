@@ -885,12 +885,16 @@ def _validate(args, parser) -> None:
         parser.error("--min-free-gb must not be negative")
     if args.max_disk_used_gb is None:
         raw = os.environ.get(DISK_ENV)
-        if raw is not None and raw.strip():
+        if raw is not None:
+            message = (f"{DISK_ENV} must be a positive finite number, "
+                       f"got {raw!r}")
             try:
-                args.max_disk_used_gb = float(raw)
+                value = float(raw)
             except ValueError:
-                parser.error(f"{DISK_ENV} must be a positive finite number, "
-                             f"got {raw!r}")
+                parser.error(message)
+            if not math.isfinite(value) or value <= 0:
+                parser.error(message)
+            args.max_disk_used_gb = value
     if args.max_disk_used_gb is not None and (
             not math.isfinite(args.max_disk_used_gb)
             or args.max_disk_used_gb <= 0):
