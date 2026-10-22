@@ -937,7 +937,7 @@ waits without submitting until its paired succeeded inputs are ready.
   `ops plan training|promote|rollback` + `ops submit`. Rollback uses principal
   `operator`, namespace `shadow` and the caller idempotency key like promote.
 - `board_requests`: a tuple of `BoardRequest`, ordered by
-  `(event_date, ticker)` outer, native-covered strategies alphabetically
+  `(event_date, ticker)` outer, native-covered and disabled (CAL-P, CND-P) strategies alphabetically
   then `DYN-SV` last inner. No side effect, no write.
 
 **`computed_moves_refresh` and `forward_calendar_refresh` nightly wiring.**
@@ -1027,7 +1027,7 @@ Top-level imports, all strictly below this package's own layer (7.0):
 `release_bindings`/`nightly_source_bundle`/`source_inputs`/`stages`/
 `identity`/`application`, and since #681 `native_analog_query.analog_declarations` plus `identity.score_request_key`, declaring the frozen board analog pool on each row whose release carries a matching one), `engine.v2.ledger` (6.0), `engine.v2.parity`
 (6.5). `engine.v2.models` (3.5) permits top-level `payoff_artifact_key` in `native_score_batch` and `PayoffSurfaceArtifact`/`payoff_artifact_key`/`DriverResidualPoolArtifact` in `native_runup_inputs`, and `engine.v2.models.deployment`/`frozen_state_io` in `pool_refresh`; all other direct model imports are lazy.
-`engine.v2.domain.generation` (2.0, `Geometry`/`Pricing`) remains lazy-only. Ops does not import the native experiment adapter; the executor selects a fixed child module.
+`engine.v2.domain.generation` (2.0, `Geometry`/`Pricing`) is lazy-only except the top-level `DISABLED` import in `native_board_universe.py` and `nightly_raw_row_producer.py`. Ops does not import the native experiment adapter; the executor selects a fixed child module.
 `engine.v2.domain.generation` supplies geometry to the rescore decoder
 (`native/input_decoding.py::_load_native_score_inputs`). The `nightly_calendar_inputs`
 calendar helper, called by `nightly_raw_row_producer`, uses its public expiry-only API lazily. Native foundation supplies calendar arithmetic;
@@ -1463,7 +1463,7 @@ commit happens until the combined kind list is clean.
 ```mermaid
 flowchart LR
     ET[events_table] --> BR[board_requests]
-    SI["source_inputs.SUPPORTED_STRATEGIES"] --> BR
+    SI["source_inputs.SUPPORTED_STRATEGIES"] & DS["domain.generation.DISABLED\n(CAL-P, CND-P)"] --> BR
     DM["registry.strategies.DYNAMIC_MENU\n(consistency check only)"] --> BR
     BR --> OUT["tuple[BoardRequest]\n(ticker, strategy, event_date, session)"]
     OUT --> RRP["nightly_raw_row_producer.build_native_score_batch_events\n(called only by native_score_batch worker)"]

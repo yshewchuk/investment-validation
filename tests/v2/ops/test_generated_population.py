@@ -545,12 +545,15 @@ def test_the_generated_population_is_what_the_score_stage_emits(env, monkeypatch
     assert observed - chooser == set(population)
 
 
-def test_a_native_board_population_would_have_failed_the_score_stage(env, monkeypatch, tmp_path):
+def test_a_native_board_population_matches_the_planned_one_and_a_subset_fails_the_score_stage(
+        env, monkeypatch, tmp_path):
+    from engine.v2.domain.generation import DISABLED
     from engine.v2.ops.errors import OpsError
-    from engine.v2.ops.native_board_universe import _COVERED_STRATEGIES
+    from engine.v2.scoring.source_inputs import SUPPORTED_STRATEGIES
 
     population, _, _ = _generate(env)
-    native = [key for key in population if key.split("|")[1] in _COVERED_STRATEGIES]
+    native = [key for key in population
+              if key.split("|")[1] in SUPPORTED_STRATEGIES | frozenset(DISABLED)]
     # Native board now enumerates disabled strategies too, so it matches the
     # full population; a strict subset still fails the score stage.
     assert len(native) == len(population)

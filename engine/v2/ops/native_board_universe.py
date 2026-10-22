@@ -1,8 +1,10 @@
 """Enumerate the native-covered board universe: one request per event per
-native-covered strategy, plus one DYN-SV meta-request per event.
+native-covered or disabled (CAL-P, CND-P) strategy, plus one DYN-SV
+meta-request per event.
 
 Mirrors `engine.score.score_calendar`'s event × strategy enumeration (the ATM
-pass only) for the strategies native has an input builder for, without
+pass only) for the strategies native has an input builder for plus the
+disabled strategies, without
 constructing a legacy `Scorer` or loading the legacy chain index. This module
 never imports `engine.score` — reading `engine.score.DISABLED_STRATEGIES`
 would pull in `engine.replay` -> `engine.fills` at import time, which the
@@ -210,7 +212,7 @@ def board_requests(
     Filters exactly like `score_calendar`: `as_of <= event_date <=
     as_of + horizon_days`, `session` not null, and an optional ticker filter.
     Events are ordered by `(event_date, ticker)`. Within one event: the
-    native-covered strategies in sorted (alphabetical) order, then one
+    native-covered and disabled (CAL-P, CND-P) strategies in sorted (alphabetical) order, then one
     `DYN-SV` request last.
 
     Raises `OpsError` (code `INVALID_REQUEST`) if `as_of` is `None`/`NaT`/
