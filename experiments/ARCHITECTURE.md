@@ -442,7 +442,7 @@ The operator assigns the EXP number: `--exp-number N` (an integer of at least `l
 The manifest links `experiment_id` to the number; a linked experiment_id reuses its number, so replay
 needs no flag. Records are create-only and read back only as regular files capped at 1,000,000 bytes.
 Manifest hashes describe the exact bytes on disk. Every conflict is detected before the first write.
-Exports on one experiments root are serialized by an exclusive lock on `.record_export.lock`, covering the
+Exports on one experiments root are serialized by an exclusive lock on `.record_export.lock` (created, with the root, before the checks below), covering the
 ownership check, preflight and publication, so concurrent writers never publish a manifest over files they did not see.
 Prediction records also carry the target and model-selection options and the registration's magnitude request and execution documents.
 
