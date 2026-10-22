@@ -342,7 +342,8 @@ the native planner and `experiments.magnitude_search_plan` for admitted metadata
 | Missing calendar table, snapshot/admission or repository failure | Shared typed error propagates; no source fallback. |
 | Empty calendar / malformed dates or incomplete session window | `CALENDAR_UNAVAILABLE` / `CONTRACT_MISMATCH`; no outcome access. |
 | Catalog transactions | Short read-only SQLite transactions; no planner-owned write transaction or transaction spanning the full call. |
-| Cache, retry, partial write, replay | No cross-call cache, retry, write or partial return; identical pinned inputs give identical plans. |
+| Cache, retry, partial write, replay | The only cache is the observed-session read below; no retry, write or partial return; identical pinned inputs give identical plans. |
+| Observed-session read | `magnitude_features._calendar_input` reads the `daily_market` dates once per process for a `Repository` opened with `pin_snapshots=True` (`Repository.pins_snapshots` is true) and one snapshot id. Later calls reuse the same sorted day tuple and rebuild `source` from `fragment_records`. An unpinned repository reads on every call. A failed read caches nothing, and a pinned snapshot is immutable, so a hit is exact. The cache dies with the repository. Output and `calendar_input` identities are unchanged; a run's `daily_market` passes fall from one per `history_binding` call to one per process. |
 
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
