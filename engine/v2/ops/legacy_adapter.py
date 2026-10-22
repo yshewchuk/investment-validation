@@ -297,6 +297,30 @@ def invoke_score_calendar(root, as_of, *, scorer, tickers=None, horizon_days=35)
                           scorer=scorer, tickers=tickers, progress_every=10)
 
 
+def _refresh_gspc(fetcher, source_root) -> dict:
+    """Refresh the legacy ``^GSPC`` daily series through the shared Fetcher.
+
+    Writes into ``<source_root>/earnings_predictions/data/raw/polygon/
+    gspc_daily.csv`` when a source root is given, else
+    ``engine.paths.GSPC_DAILY``, and passes a unique ``refetch_token`` so a
+    stale cached body is kept and never served.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    from engine.data.pulls.gspc_refresh import refresh_gspc_daily
+
+    if source_root is not None:
+        gspc_path = (Path(source_root) / "earnings_predictions" / "data" / "raw"
+                     / "polygon" / "gspc_daily.csv")
+    else:
+        from engine import paths
+        gspc_path = paths.GSPC_DAILY
+    return refresh_gspc_daily(
+        fetcher, gspc_path,
+        refetch_token=f"{datetime.now(timezone.utc).isoformat()}-{uuid4().hex}")
+
+
 def invoke_price_refresh(session, *, dry_run: bool = False,
                          planned_tickers=None, source_root=None):
     """Plan (and, unless ``dry_run``, run) one ``ops price-refresh`` pass.
@@ -316,6 +340,8 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
     """
     if source_root is not None and planned_tickers is None:
         raise fail("INVALID_REQUEST", "source_root requires planned tickers")
+    if source_root is not None and str(source_root).strip() == "":
+        raise fail("INVALID_REQUEST", "source_root must not be blank")
     from engine.data.pulls.price_refresh import (
         load_events,
         load_fetch_history,
@@ -356,25 +382,13 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
                             always_daily=(*planned_tickers, CALENDAR_TICKER))
     if dry_run:
         return {"plan": plan, "report": None}
-    from datetime import datetime, timezone
-    from uuid import uuid4
-
     from engine.data.fetch import Fetcher
-    from engine.data.pulls.gspc_refresh import refresh_gspc_daily
 
     # One Fetcher for both crossings: the planned refresh and the ^GSPC pull
     # share the rooted Tier-1 cache and its throttle/backoff.
     fetcher = Fetcher(root=fetch_root)
     report = run_refresh(plan, fetcher)
-    if source_root is not None:
-        gspc_path = (Path(source_root) / "earnings_predictions" / "data" / "raw"
-                     / "polygon" / "gspc_daily.csv")
-    else:
-        from engine import paths
-        gspc_path = paths.GSPC_DAILY
-    gspc_daily = refresh_gspc_daily(
-        fetcher, gspc_path,
-        refetch_token=f"{datetime.now(timezone.utc).isoformat()}-{uuid4().hex}")
+    gspc_daily = _refresh_gspc(fetcher, source_root)
     return {"plan": plan, "report": report, "gspc_daily": gspc_daily}
 
 

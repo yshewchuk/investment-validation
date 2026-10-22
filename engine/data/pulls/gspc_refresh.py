@@ -17,8 +17,10 @@ reason instead of written. An identical rewrite is skipped entirely:
 same bytes would invalidate it for nothing. Every write goes through
 ``engine.paths.assert_writable`` (``GSPC_DAILY`` is its one
 ``WRITABLE_EXCEPTIONS`` carve-out, #1103); a ``PermissionError`` there is
-refused as reason ``unwritable``, never raised — as is any ``OSError`` from
-creating the ``.lock`` sibling, staging the temp file or replacing.
+refused as reason ``unwritable``, never raised — as is any
+``OSError``/``ValueError``/``TypeError`` from path or lock handling: creating
+the ``.lock`` sibling (opened ``O_NOFOLLOW``, never unlinked), flocking or
+closing it, staging the temp file (fsynced before the replace) or replacing.
 Concurrent refreshes serialize through an exclusive ``fcntl.flock`` on that
 ``.lock`` sibling, held from before the existing-file read to after the
 replace.
@@ -138,7 +140,10 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
     started = time.time()
     try:
         path = Path(path)
+        if not path.name:
+            raise ValueError("path has no final component")
     except (TypeError, OSError, ValueError):
+        # A malformed path is refused before any quota is spent on the fetch.
         return _finish({"ok": False, "reason": "unreadable"}, started)
     _log(f"refresh {path} starting")
 
@@ -153,6 +158,11 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
         return _finish({"ok": False, "reason": "fetch_failed"}, started)
     if rec is None or rec.status != 200:
         return _finish({"ok": False, "reason": "fetch_failed"}, started)
+    # The fresh body gets the same ceiling as the stored file: a max-history
+    # CSV is well under it, so an answer larger than any plausible series is
+    # refused as unparseable before a single byte of it is decoded.
+    if rec.body is None or len(rec.body) > MAX_EXISTING_BYTES:
+        return _finish({"ok": False, "reason": "unparseable"}, started)
 
     frame = _parse_body(rec.body)
     if frame is None:
@@ -164,88 +174,102 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
     # ``gspc_daily.csv.*`` names, the staging siblings ``paths`` already
     # allows); it is held from before the existing-file read to after the
     # replace, so two refreshes can never interleave a guard with a rewrite.
-    lock_path = path.with_name(path.name + ".lock")
+    # The lock is opened O_NOFOLLOW and is never unlinked. Every
+    # OSError/ValueError/TypeError from path or lock handling — composing or
+    # guarding the names, opening, flocking or closing the lock, staging or
+    # replacing — is refused as ``unwritable`` and never raised, including an
+    # OSError raised by the close in the ``finally`` below (it supersedes
+    # whatever the guarded section was about to return).
+    lock_fd = None
     try:
+        lock_path = path.with_name(path.name + ".lock")
         paths.assert_writable(lock_path)
         if not path.parent.is_dir():
             path.parent.mkdir(parents=True, exist_ok=True)
-        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
-    except OSError:
-        return _finish({"ok": False, "reason": "unwritable"}, started)
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        existing_bytes = None
+        lock_fd = os.open(str(lock_path),
+                          os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o644)
         try:
-            fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        except FileNotFoundError:
-            fd = None  # first write: nothing to guard against
-        except (OSError, ValueError):
-            return _finish({"ok": False, "reason": "unreadable"}, started)
-        if fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            existing_bytes = None
             try:
-                st = os.fstat(fd)
-                if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_EXISTING_BYTES:
-                    return _finish({"ok": False, "reason": "unreadable"}, started)
-                # Read at most MAX_EXISTING_BYTES + 1 so a file that grew between
-                # fstat and the read (or lied about its size) is refused, not
-                # slurped whole into memory.
-                chunks = []
-                remaining = MAX_EXISTING_BYTES + 1
-                while remaining > 0:
-                    block = os.read(fd, min(remaining, 1 << 20))
-                    if not block:
-                        break
-                    chunks.append(block)
-                    remaining -= len(block)
-                if remaining <= 0:
-                    return _finish({"ok": False, "reason": "unreadable"}, started)
-                existing_bytes = b"".join(chunks)
-                existing = pd.read_csv(io.BytesIO(existing_bytes), skiprows=3, header=None)
+                fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except FileNotFoundError:
+                fd = None  # first write: nothing to guard against
             except (OSError, ValueError):
                 return _finish({"ok": False, "reason": "unreadable"}, started)
-            finally:
-                os.close(fd)
-            if len(existing):
-                if len(frame) < len(existing):
-                    return _finish({"ok": False, "reason": "shrunk"}, started)
-                existing_first = pd.to_datetime(existing.iloc[0, 0], errors="coerce")
-                existing_last = pd.to_datetime(existing.iloc[-1, 0], errors="coerce")
-                if pd.notna(existing_first) and frame["date"].iloc[0] > existing_first:
-                    return _finish({"ok": False, "reason": "shrunk"}, started)
-                if pd.notna(existing_last) and frame["date"].iloc[-1] < existing_last:
-                    return _finish({"ok": False, "reason": "older_than_existing"}, started)
-                # Every stored date must survive into the new series, or the rewrite
-                # would punch a hole the panel reads as a gap in the market history.
-                stored = set(map(str, existing.iloc[:, 0]))
-                if not stored <= set(frame["date"].dt.strftime("%Y-%m-%d")):
-                    return _finish({"ok": False, "reason": "shrunk"}, started)
+            if fd is not None:
+                try:
+                    st = os.fstat(fd)
+                    if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_EXISTING_BYTES:
+                        return _finish({"ok": False, "reason": "unreadable"}, started)
+                    # Read at most MAX_EXISTING_BYTES + 1 so a file that grew between
+                    # fstat and the read (or lied about its size) is refused, not
+                    # slurped whole into memory.
+                    chunks = []
+                    remaining = MAX_EXISTING_BYTES + 1
+                    while remaining > 0:
+                        block = os.read(fd, min(remaining, 1 << 20))
+                        if not block:
+                            break
+                        chunks.append(block)
+                        remaining -= len(block)
+                    if remaining <= 0:
+                        return _finish({"ok": False, "reason": "unreadable"}, started)
+                    existing_bytes = b"".join(chunks)
+                    existing = pd.read_csv(io.BytesIO(existing_bytes), skiprows=3, header=None)
+                except (OSError, ValueError):
+                    return _finish({"ok": False, "reason": "unreadable"}, started)
+                finally:
+                    os.close(fd)
+                if len(existing):
+                    if len(frame) < len(existing):
+                        return _finish({"ok": False, "reason": "shrunk"}, started)
+                    existing_first = pd.to_datetime(existing.iloc[0, 0], errors="coerce")
+                    existing_last = pd.to_datetime(existing.iloc[-1, 0], errors="coerce")
+                    if pd.notna(existing_first) and frame["date"].iloc[0] > existing_first:
+                        return _finish({"ok": False, "reason": "shrunk"}, started)
+                    if pd.notna(existing_last) and frame["date"].iloc[-1] < existing_last:
+                        return _finish({"ok": False, "reason": "older_than_existing"}, started)
+                    # Every stored date must survive into the new series, or the rewrite
+                    # would punch a hole the panel reads as a gap in the market history.
+                    stored = set(map(str, existing.iloc[:, 0]))
+                    if not stored <= set(frame["date"].dt.strftime("%Y-%m-%d")):
+                        return _finish({"ok": False, "reason": "shrunk"}, started)
 
-        data = _render(frame)
-        if existing_bytes != data:
-            tmp = path.with_name(
-                f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-            for guard in (path, tmp):
+            data = _render(frame)
+            if existing_bytes != data:
+                tmp = path.with_name(
+                    f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+                for guard in (path, tmp):
+                    try:
+                        paths.assert_writable(guard)
+                    except PermissionError:
+                        return _finish({"ok": False, "reason": "unwritable"}, started)
                 try:
-                    paths.assert_writable(guard)
-                except PermissionError:
-                    return _finish({"ok": False, "reason": "unwritable"}, started)
-            try:
-                tmp.parent.mkdir(parents=True, exist_ok=True)
-                tmp.write_bytes(data)
-                os.replace(tmp, path)
-            except OSError:
-                return _finish({"ok": False, "reason": "unwritable"}, started)
-            finally:
-                # A failed replace leaves the stored bytes untouched; only the
-                # temp sibling needs removing, and a cleanup failure there is
-                # never allowed to raise out of a refusal.
-                try:
-                    if tmp.exists():
-                        tmp.unlink()
+                    tmp.parent.mkdir(parents=True, exist_ok=True)
+                    # fsync the staged bytes before the replace: a crash must
+                    # never leave the target pointing at an empty or partial
+                    # temp file.
+                    with open(tmp, "wb") as fh:
+                        fh.write(data)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    os.replace(tmp, path)
                 except OSError:
-                    pass
-    finally:
-        os.close(lock_fd)
+                    return _finish({"ok": False, "reason": "unwritable"}, started)
+                finally:
+                    # A failed replace leaves the stored bytes untouched; only the
+                    # temp sibling needs removing, and a cleanup failure there is
+                    # never allowed to raise out of a refusal.
+                    try:
+                        if tmp.exists():
+                            tmp.unlink()
+                    except OSError:
+                        pass
+        finally:
+            os.close(lock_fd)
+    except (OSError, ValueError, TypeError):
+        return _finish({"ok": False, "reason": "unwritable"}, started)
     return _finish(
         {"ok": True, "last_date": str(frame["date"].iloc[-1].date()),
          "rows": int(len(frame))},

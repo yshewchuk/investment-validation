@@ -20,6 +20,7 @@ variable, which is what the test-suite uses to build throwaway trees.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 # --------------------------------------------------------------------------
@@ -92,8 +93,13 @@ GRANDFATHERED = (EP, BT, RAW_POLYGON_LEGACY)
 
 #: The one re-fetchable series refreshed by engine.data.pulls.gspc_refresh
 #: (#1103); the refresh refuses to shrink or backdate it. Its atomic-replace
-#: staging siblings (``gspc_daily.csv.<pid>.tmp``) are writable too.
+#: staging siblings (``gspc_daily.csv.<pid>.<hex32>.tmp`` and the flock sibling
+#: ``gspc_daily.csv.lock``) are writable too.
 WRITABLE_EXCEPTIONS = (GSPC_DAILY,)
+
+#: The one temp-name shape ``gspc_refresh`` stages under: the target's name,
+#: then ``.<digits>.<32 lowercase hex>.tmp`` (pid + uuid4 hex).
+_STAGING_TMP_RE = r"\.\d+\.[0-9a-f]{32}\.tmp"
 
 # --------------------------------------------------------------------------
 # new three-tier store
@@ -166,16 +172,22 @@ def raw_fetch_path(source: str, key: str) -> Path:
 def is_grandfathered(path: Path | str) -> bool:
     """True if ``path`` lies inside a read-only research tree.
 
-    ``WRITABLE_EXCEPTIONS`` and their staging siblings (same parent, name
-    starting with the exception's name plus ``"."``) are never grandfathered:
-    the refresh writes its one exception atomically through such a temp file.
+    ``WRITABLE_EXCEPTIONS`` are never grandfathered, and neither is one of
+    their exact staging siblings: a sibling in the same directory whose name
+    is ``<target.name>.lock`` (the flock file) or matches
+    ``<target.name>.<digits>.<hex32>.tmp`` (the atomic-replace temp the refresh
+    stages through). Any other name in the tree — ``gspc_daily.csv.evil``
+    included — stays read-only.
     """
     p = Path(path).resolve()
     for exception in WRITABLE_EXCEPTIONS:
         target = exception.resolve()
         if p == target:
             return False
-        if p.parent == target.parent and p.name.startswith(target.name + "."):
+        if p.parent == target.parent and (
+            p.name == target.name + ".lock"
+            or re.fullmatch(re.escape(target.name) + _STAGING_TMP_RE, p.name)
+        ):
             return False
     for root in GRANDFATHERED:
         try:

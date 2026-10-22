@@ -1077,7 +1077,7 @@ Native gate children consume public `stages.NativeGateParameters`, `executor.THR
 | System / library | Used for | Notes |
 |---|---|---|
 | `sqlite3` | the operations catalog | — |
-| Local filesystem | artifact store, snapshot roots, legacy px/fetch-cache trees | legacy trees are read only through `legacy_adapter.py` |
+| Local filesystem | artifact store, snapshot roots, legacy px/fetch-cache trees | legacy trees are read only through `legacy_adapter.py`; the one write is the `price-refresh` refresh of `gspc_daily.csv` (plus its lock and staging siblings) |
 | `massive-stocks` provider account | [bounded Basic raw acquisition](stores/massive/ARCHITECTURE.md) | keyed; executor allowlist forwards only `MASSIVE_API_KEY`; always paced by its versioned policy |
 | `orats-daily-market` provider account | ORATS daily-market rows | keyed, reads `ORATS_API_KEY`; credentials are never held here, only remaining-call/reserve counts |
 | `nasdaq` provider account (`providers/nasdaq_calendar.py`) | forward-calendar rows via Nasdaq's public `api.nasdaq.com/api/calendar/earnings` endpoint, one date per call | unmetered, keyless (empty `PROVIDER_CREDENTIAL_VARIABLES`); still budget-tracked like a keyed account; needs a browser user-agent (the endpoint 403s the default client UA) |

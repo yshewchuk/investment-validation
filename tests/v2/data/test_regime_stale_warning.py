@@ -182,3 +182,46 @@ def test_refreshed_file_can_warn_again(tmp_path):
 
     with pytest.warns(UserWarning, match=STALE_MATCH):
         add_regime_features(frame, gspc_path=path)
+
+
+def test_mixed_frame_warns_on_the_newest_decision_date(tmp_path, capsys):
+    """A within-window row must not mask a stale one: the diagnostic asks
+    about the frame's MAX decision date, not the first row's."""
+    path = tmp_path / "gspc_daily.csv"
+    _write_gspc(path)
+    frame = pd.DataFrame({"ticker": ["AAA", "BBB"],
+                          "date": pd.to_datetime([WITHIN_WINDOW, STALE_DECISION])})
+
+    with pytest.warns(UserWarning, match=STALE_MATCH):
+        out = add_regime_features(frame, gspc_path=path)
+
+    err = capsys.readouterr().err
+    assert (f"[regime] WARNING gspc series ends {SERIES_END.date()}, "
+            f"decision date {STALE_DECISION.date()}: regime features are stale") in err
+    assert err.count("[regime] WARNING") == 1
+    # Both rows still anchor on the last close before their own date: the
+    # warning changed no value; the old row is served its own anchor.
+    assert out["regime_asof"].iloc[0] == np.datetime64(str(SERIES_END.date()))
+    assert out["regime_asof"].iloc[1] == np.datetime64(str(SERIES_END.date()))
+
+
+def test_dedup_set_at_64_versions_evicts_and_warns_again(tmp_path):
+    """The once-per-version set is bounded: at 64 tracked versions it clears,
+    so the next stale read of a fresh version warns, then quiets again."""
+    path = tmp_path / "gspc_daily.csv"
+    _write_gspc(path)
+    frame = _frame(STALE_DECISION)
+
+    panel._STALE_REGIME_WARNED.update(
+        {(f"/other/version-{i}.csv", 0.0) for i in range(64)})
+
+    with pytest.warns(UserWarning, match=STALE_MATCH):
+        add_regime_features(frame, gspc_path=path)
+
+    # The 64 stale entries were evicted; only this file version is tracked.
+    assert panel._STALE_REGIME_WARNED == {(str(path), path.stat().st_mtime)}
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        add_regime_features(frame, gspc_path=path)
+    assert [w for w in caught if "stale" in str(w.message)] == []

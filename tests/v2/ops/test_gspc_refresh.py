@@ -141,6 +141,20 @@ def test_garbage_body_is_unparseable(tmp_path):
     assert not path.exists()
 
 
+def test_oversize_fresh_body_is_unparseable_before_decoding(tmp_path, monkeypatch):
+    """A body above the ceiling is refused, never parsed into a frame."""
+    import engine.data.pulls.gspc_refresh as gspc_module
+
+    path = tmp_path / "gspc_daily.csv"
+    monkeypatch.setattr(gspc_module, "MAX_EXISTING_BYTES", 16)
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path,
+                                refetch_token="run-1")
+
+    assert result == {"ok": False, "reason": "unparseable"}
+    assert not path.exists()
+
+
 def test_fewer_rows_than_stored_is_refused_as_shrunk(tmp_path):
     """A smaller answer may not chop history off the series."""
     path = tmp_path / "gspc_daily.csv"
@@ -210,18 +224,47 @@ def test_first_write_when_file_is_absent(tmp_path):
     result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path, refetch_token="run-1")
 
     assert result["ok"] is True and result["rows"] == 3
-    assert path.exists()
+    assert path.read_bytes() == _legacy_text(DATES).encode("utf-8")
+
+
+def test_malformed_path_is_unreadable_before_fetching():
+    """A path that is not even a path is refused without spending a fetch."""
+    fetcher = StubFetcher(body=_body(DATES))
+
+    result = refresh_gspc_daily(fetcher, None, refetch_token="run-1")
+
+    assert result == {"ok": False, "reason": "unreadable"}
+    assert fetcher.calls == []
+
+
+def test_is_grandfathered_allows_only_the_real_staging_siblings():
+    """The carve-out names are exactly ``.lock`` and ``.<digits>.<hex32>.tmp``."""
+    from engine import paths
+
+    hex32 = "0123456789abcdef" * 2
+    lock = paths.GSPC_DAILY.with_name("gspc_daily.csv.lock")
+    tmp = paths.GSPC_DAILY.with_name(f"gspc_daily.csv.{os.getpid()}.{hex32}.tmp")
+    evil = paths.GSPC_DAILY.with_name("gspc_daily.csv.evil")
+
+    assert paths.is_grandfathered(lock) is False
+    assert paths.is_grandfathered(tmp) is False
+    assert paths.is_grandfathered(evil) is True
+    with pytest.raises(PermissionError, match="grandfathered"):
+        paths.assert_writable(evil)
 
 
 def test_credential_rotated_propagates_and_leaves_the_file_untouched(tmp_path):
     """A whole-run credential condition is never swallowed into a refusal."""
     path = tmp_path / "gspc_daily.csv"
     before = _write_legacy(path, DATES)
+    error = CredentialRotated("rotated")
 
-    with pytest.raises(CredentialRotated):
-        refresh_gspc_daily(StubFetcher(error=CredentialRotated("rotated")), path,
-                           refetch_token="run-1")
+    with pytest.raises(CredentialRotated) as raised:
+        refresh_gspc_daily(StubFetcher(error=error), path, refetch_token="run-1")
 
+    # The very object the fetcher raised, unchanged -- not a re-wrap.
+    assert raised.value is error
+    assert str(raised.value) == "rotated"
     assert path.read_bytes() == before
 
 
@@ -383,6 +426,19 @@ def test_invoke_price_refresh_source_root_without_planned_tickers_refuses(tmp_pa
 
     assert error.value.code == "INVALID_REQUEST"
     assert error.value.problem.message == "source_root requires planned tickers"
+
+
+def test_invoke_price_refresh_blank_source_root_refuses(tmp_path):
+    """A blank (whitespace-only) source root is as bad as a missing one."""
+    from engine.v2.ops.errors import OpsError
+    from engine.v2.ops.legacy_adapter import invoke_price_refresh
+
+    with pytest.raises(OpsError) as error:
+        invoke_price_refresh("2026-10-20", planned_tickers=("AAA",),
+                             source_root="   ")
+
+    assert error.value.code == "INVALID_REQUEST"
+    assert error.value.problem.message == "source_root must not be blank"
 
 
 def test_cli_price_refresh_real_run_report_includes_gspc_daily(tmp_path, monkeypatch):
