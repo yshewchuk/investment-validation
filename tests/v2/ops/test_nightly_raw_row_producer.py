@@ -1143,6 +1143,40 @@ def test_disabled_strategy_keys_become_unsupported_refusals_with_supported_event
     assert json.dumps(refusals_document)
 
 
+def test_intraday_disabled_key_refuses_intraday_not_unsupported(
+        tmp_path, monkeypatch):
+    """An intraday disabled key refuses INTRADAY_EVENT_NOT_ADMITTED: the intraday
+    check runs before the disabled check."""
+    from engine.v2.ops.native_board_universe import BoardRequest
+
+    repository, snapshot = _snapshot(tmp_path, [
+        _event_row("AAA", _INTRADAY, "BMO", event_id="aaa-intraday"),
+        _event_row("AAA", _MIDNIGHT, "BMO", event_id="aaa-midnight"),
+    ])
+    _ReaderRig(monkeypatch)
+    cal_p = BoardRequest(ticker="AAA", strategy="CAL-P",
+                         event_date=_INTRADAY, session="BMO")
+    cnd_p = BoardRequest(ticker="AAA", strategy="CND-P",
+                         event_date=_INTRADAY, session="BMO")
+
+    def intraday_enum(repo, snap, *, as_of, horizon_days, tickers=None):
+        return [cal_p, cnd_p]
+
+    _patch_reader(monkeypatch, nightly_raw_rows, "scan_forward_board_requests",
+                  intraday_enum)
+
+    events_document, refusals_document = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=_AS_OF, horizon_days=_HORIZON_DAYS)
+
+    assert events_document == []
+    refusals = refusals_document["refusals"]
+    assert [(_identity(item["key"]), item["code"]) for item in refusals] == [
+        (_identity(_event_keylike(cal_p)), "INTRADAY_EVENT_NOT_ADMITTED"),
+        (_identity(_event_keylike(cnd_p)), "INTRADAY_EVENT_NOT_ADMITTED"),
+    ]
+    assert all(item["detail"] == _INTRADAY_DETAIL for item in refusals)
+
+
 def test_only_disabled_keys_skip_option_chains_and_all_context_reads(
         tmp_path, monkeypatch):
     """A build whose only keys are disabled returns no events, needs no
