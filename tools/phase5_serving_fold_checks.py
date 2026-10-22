@@ -1,7 +1,7 @@
 """Validation helpers for ``tools/phase5_serving_folds.py`` (split out to keep both modules small).
 
-Pure checks over a serving-fold policy and its stored joblib header; every refusal is a
-``ValueError`` with a fixed message, exactly as the caller expects.
+Checks over a serving-fold policy and its stored joblib header (``load_stored_fold`` decodes a
+pickle, so it is not side-effect free); every refusal is a ``ValueError`` with a fixed message.
 """
 from __future__ import annotations
 

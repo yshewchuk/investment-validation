@@ -103,7 +103,7 @@ def test_descriptor_round_trip_and_identity(cache, staged):
     assert other.descriptor_hash != descriptor.descriptor_hash
 
 
-@pytest.mark.parametrize("defect", ["model", "features", "panel", "date", "month", "filename",
+@pytest.mark.parametrize("defect", ["model", "features", "panel", "date", "month", "compact", "filename",
                                      "estimator", "absent", "shape", "length", "numeric", "nan"])
 def test_malformed_cache_refuses(cache, staged, defect):
     original_name, policy = _name(cache), _policy(cache)
@@ -113,8 +113,8 @@ def test_malformed_cache_refuses(cache, staged, defect):
         cache["features"] = list(reversed(cache["features"]))
     elif defect == "panel":
         cache["tier3_snapshot"] = cache["tier3_snapshot"][:12] + "f" * 52
-    elif defect in ("date", "month"):
-        cache["fold_start"] = "2026-09-02" if defect == "date" else "2026-09-01"
+    elif defect in ("date", "month", "compact"):
+        cache["fold_start"] = {"date": "2026-09-02", "month": "2026-09-01", "compact": "20260901"}[defect]
     elif defect == "filename":
         original_name = "wrong.joblib"
     elif defect in ("estimator", "absent"):
