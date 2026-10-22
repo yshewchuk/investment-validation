@@ -151,7 +151,7 @@ The exhaustive name-by-name list is `README.md`'s checker-enforced Public
 interface section; this names only the load-bearing entry points.
 
 `documents.reject_duplicate_keys(pairs)` is the public, pure stdlib JSON hook
-used by `loads_document`, `experiments.v2_runup_exits` and `experiments.v2_magnitude_search_run`; it returns an object
+used by `loads_document`, `experiments.v2_runup_exits`, `experiments.v2_runup_study` and `experiments.v2_magnitude_search_run`; it returns an object
 dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
 
 - **Snapshot commit** — `catalog.commit_snapshot`/`.record_failed_import`/
@@ -557,7 +557,7 @@ pinned snapshots and calls `generic_incremental.commit_generic_table_candidate`
 `engine.v2.models.training` uses `errors`, `Repository`, `reference_catalog` and
 `computed_moves` for snapshot/receipt-pinned D14 datasets and calendar sessions.
 `experiments.v2_magnitude_search_run` consumes `repository.Repository`,
-`errors.DataError` and `documents.reject_duplicate_keys` for serial CLI admission.
+`errors.DataError` and `documents.reject_duplicate_keys` for serial CLI admission, as does `experiments.v2_runup_study`; `experiments.registered_runup` consumes `errors.DataError` for typed comparison refusals.
 `tools/*`, `checks/*`, `tests/test_v2_data_*.py` exercise this package
 directly.
 

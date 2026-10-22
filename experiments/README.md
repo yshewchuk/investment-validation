@@ -30,7 +30,7 @@ The owning modules expose these helpers to native experiment callers; no compati
 | `native_registration.read_native_registration` | Catalog/store and a spec load the exact verified binding with `max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES` (16 MiB UTF-8). A larger explicit integer budget supports larger legitimate registrations; only integers from 1 through `2**62 - 1` are accepted, otherwise `INVALID_EXPERIMENT_SPEC` before I/O. One SQL snapshot bounds evidence transfer (twice the budget for UTF-16, then a UTF-8 recheck); registration reference size is admitted before artifact loading. Missing reservation refuses `INVALID_EXPERIMENT_SPEC`; corrupt, malformed, oversized or spec-mismatched evidence refuses `EXPERIMENT_IDENTITY_CONFLICT`. Raw storage errors propagate. No writes, current-request admission or legacy seal migration. |
 | `native_registration.native_registration_exists` | An expected `NativeRegistration` gives false when absent, true for exact verified catalog/object evidence, or `EXPERIMENT_IDENTITY_CONFLICT`; read-only. Optional `max_evidence_bytes` bounds stored catalog/object JSON through the shared ops verifier; default None preserves prior policy. |
 | `native_registration.verify_native_registration` | Catalog/store and a `NativeRegistration` verify stored admission, returning None without writes or current-request revalidation. Wrong type, absent/conflicting registration or malformed/oversized bounded evidence refuses `EXPERIMENT_IDENTITY_CONFLICT`; optional `max_evidence_bytes` forwards the catalog/object JSON bound, while default None preserves existing limits. Foundation `ArtifactError` is converted to `EXPERIMENT_IDENTITY_CONFLICT`; raw `OSError`/`sqlite3.Error` propagate. |
-| `native_registration.reserve_native_registration` | Accepts the matching prepared registration/spec pair from the preparer; publishes complete binding bytes and reserves catalog rows, obeying any sweep seal. Exact replay is idempotent; conflicts refuse R6. Publication may leave an unreferenced complete object if reservation fails. |
+| `native_registration.reserve_native_registration` | Accepts the matching prepared registration/spec pair from the preparer; publishes complete binding bytes and reserves catalog rows, obeying any sweep seal. Optional `max_evidence_bytes` bounds prepared binding/catalog bytes before publication and both stored registration checks; invalid explicit budgets refuse R1, oversize R6. Default None preserves prior behavior. Exact replay is idempotent; conflicts refuse R6. Publication may leave an unreferenced complete object if reservation fails. |
 | `native_registration.read_native_gate_sweep` | Catalog/experiment ID yields stored text or None for absence. SQL atomically caps returned bytes at 16 MiB (32 MiB for UTF-16 catalogs), then decoding enforces 16 MiB UTF-8; wrong type, invalid encoding or oversize gives `EXPERIMENT_IDENTITY_CONFLICT`. Preparation, sealing and reservation share it; SQLite internals/decoded-object overhead are not capped. |
 | `native_registration.decode_native_gate_sweep` | Roster JSON text yields an object after a 16 MiB UTF-8 cap; malformed/oversized stored rows refuse `EXPERIMENT_IDENTITY_CONFLICT`. The new-seal writer requests `INVALID_EXPERIMENT_SPEC` before insertion. No writes or identity normalization. |
 | `native_gate_worker.read_native_staged_input` | A path yields bounded bytes from a no-follow regular-file descriptor; malformed files refuse `INVALID_EXPERIMENT_SPEC` and I/O errors propagate to the caller's typed boundary. |
@@ -93,6 +93,46 @@ reports include that basis and effective thresholds. Zero/credit entries and unu
 conversions refuse. Absolute requests retain their existing report shape. P&L always
 uses quote-price × quantity; bid/ask spread is modeled but commissions, fees and ×100 are not. Daily marks
 cannot establish intraday stop execution or a trading advantage.
+
+### Registered single-candidate RUNUP comparison
+
+`python -m experiments.v2_runup_study register` seals one candidate before any
+market-data read; `run` re-admits that seal, evaluates or replays, and publishes
+immutable no-ledger JSON evidence. Both require `--spec SPEC.json --catalog CATALOG
+--store-root STORE --snapshot-id SNAPSHOT --scope SCOPE --as-of-month YYYY-MM`
+and repeatable `--event-id ID`. The catalog must already exist; no implicit migration
+or current-head substitution is performed. Original spec and exact arguments are
+required for replay, even after the scope head moves. The installed source closure
+and numerical environment must still match; changed code needs a new registration.
+
+Use the native `ExperimentSpec` document with runner `experiments/v2_runup_study.py`,
+a nonblank hypothesis, exactly one named primary arm, seed 0, empty folds and no
+input files. Economics are exactly `fill` and `exit`; exit requires `kind: target_stop`,
+`trading_days: 14`, explicit `threshold_units` and signed `target_pnl`/`stop_pnl`.
+The cohort and thresholds are caller choices. The fixed-day control is implicit
+in this runner's contract, not a second attempted variant. No fitting is performed.
+
+`registered_runup.comparison_request` validates without I/O; `register_runup` and
+`run_runup` accept catalog/store/repository/spec plus explicit `snapshot` (SnapshotRef),
+`scope`, `as_of_month` and `event_ids`. Registration reads canonical event metadata
+only. Run rechecks the entire binding before outcome access; terminal replay reads
+metadata/evidence but no market payloads. Missing common-horizon marks fail the whole
+candidate, with no successful report or survivor subset. Supported scientific failures
+become immutable terminals; resource interruptions leave publication resumable.
+
+After argument parsing, the CLI emits one JSON document and exits 0 on success, 2 on refusal (including replayed scientific failure). Argparse errors exit 2 with stderr diagnostics and empty stdout. Run returns
+`variant_id`, `run_id`, `replayed`, `outcome`, `receipt` and `receipt_ref`;
+`receipt.report_ref` identifies canonical comparison JSON in the artifact store.
+Its existing exploratory report schema/mode stays unchanged; the enclosing native
+registration/outcome establishes the registered execution. No `REPORT.md` export or
+CSV ledger is written; optional `--no-ledger` is an accepted no-op. Both actions forward
+`--max-evidence-bytes` (default 16 MiB): registration preflights new binding/catalog bytes
+and bounds both stored-evidence checks; run bounds registration/outcome JSON admission.
+The public RUNUP helpers require a positive integer budget; None never disables it.
+This does not cap market scans or report size; spec files are capped at 16 MiB.
+This is reconstructed-history selection evidence, with the daily-mark economics above.
+It does not establish OOS validation, as-known prices, threshold-search completeness
+or release authority. Multi-arm selection and actual study design remain separate.
 
 ## Scientific sweep collection
 

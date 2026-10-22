@@ -6,7 +6,10 @@ from datetime import date, timedelta
 
 from engine.v2.contracts.data import DataQuery, KeyPredicate, TimeInterval
 from engine.v2.data import errors
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.research.experiment_population import load_population
+
+_DEFAULT_TARGET_COLUMNS = ("event_date", "realized_move_pct", "available_as_of_date", "skipped")
 
 
 def _target_filters(event):
@@ -18,11 +21,14 @@ def _target_filters(event):
     return keys, interval
 
 
-def _target_query(repository, snapshot, contract, event, *, population_bound=None,
-                  columns=("event_date", "realized_move_pct", "available_as_of_date", "skipped")):
+def _target_query(repository, snapshot, contract, event, *, population_bound=None, columns=None):
     """The shared exact ticker/day query; predicates alone do not isolate bytes."""
     version = snapshot.table_versions[contract.table_name]
     keys, interval = _target_filters(event)
+    if columns is None:
+        columns = _DEFAULT_TARGET_COLUMNS
+        if any(column.name == "not_computed_reason" for column in contract.columns):
+            columns = (*columns, "not_computed_reason")
     bound = population_bound
     if bound is None:
         bound = repository.scan_population_bound(snapshot.snapshot_id, table_name=contract.table_name,
@@ -36,6 +42,10 @@ def _target_query(repository, snapshot, contract, event, *, population_bound=Non
 
 def _parse_target(rows, day):
     """Validate one admitted outcome and its recorded availability."""
+    if len(rows) == 1 and isinstance(rows[0], dict) and rows[0].get("skipped") is True:
+        reason = rows[0].get("not_computed_reason")
+        if isinstance(reason, str) and reason:
+            raise errors.fail("EXPERIMENT_VARIANT_FAILED", f"prediction target was not computed: {reason}")
     try:
         if (len(rows) != 1 or rows[0]["skipped"] is not False
                 or rows[0]["event_date"] != day.isoformat()):
@@ -65,6 +75,8 @@ def load_prediction_targets(repository, snapshot, *, as_of_month, purpose="selec
     rows = load_population(repository, snapshot, as_of_month=as_of_month,
                            purpose=purpose, event_ids=event_ids)
     contract = repository.table_contract(snapshot, "computed_moves")
+    if contract not in (COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT):
+        raise errors.fail("CONTRACT_MISMATCH", "prediction targets require native computed moves")
     targets = [_target(repository, snapshot, contract, event) for event in rows.itertuples(index=False)]
     for index, name in enumerate(("realized_move_pct", "positive_move", "target_available_on")):
         rows[name] = [target[index] for target in targets]
