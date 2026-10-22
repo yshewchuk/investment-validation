@@ -62,6 +62,13 @@ def _fake_refresh_half(monkeypatch, tmp_path, rebuild=None):
                         "WATERMARK_OVERLAP_SESSIONS", 1, raising=False)
     monkeypatch.setattr("engine.data.rebuild.rebuild", _rebuild)
     monkeypatch.setattr("engine.data.rebuild.finalize_rebuild", finalize)
+
+    def finalize_current(*a, **k):
+        finalize_calls.append(("current",))
+        return SimpleNamespace(snapshot="abc")
+
+    monkeypatch.setattr("engine.data.rebuild.finalize_current_store",
+                        finalize_current)
     monkeypatch.setattr(nightly, "repair_tier4_gap_if_needed",
                         lambda *a, **k: None)
     monkeypatch.setattr(nightly, "_panel_staleness_flags", lambda *a, **k: [])
@@ -163,13 +170,15 @@ def test_fetch_only_degrades_when_rebuild_fails(tmp_path, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("boom")
 
-    _fake_refresh_half(monkeypatch, tmp_path, rebuild=boom)
+    fake = _fake_refresh_half(monkeypatch, tmp_path, rebuild=boom)
     report = nightly.run_nightly(
         "2026-10-22", fetch_only=True,
         bundle_dir=tmp_path / "b", target=tmp_path / "t",
         chain_sessions=1,
     )
     assert report.steps["tiers"]["degraded"] is True
+    assert report.steps["tiers"]["snapshot"] == "abc"
+    assert ("current",) in fake.finalize
     _assert_scoring_steps_skipped(report)
 
 
