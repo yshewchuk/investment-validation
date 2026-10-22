@@ -24,8 +24,18 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 - `nightly.py` — the orchestrator; run as the legacy nightly entrypoint
   (root doc §4). Public helpers for the Tier-4 gap repair:
   `repair_tier4_gap`, `repair_tier4_gap_if_needed`, `mark_tiers_degraded`.
+  `--fetch-only` (`run_nightly(fetch_only=True)`) runs only the steps whose
+  output the v2 snapshot import reads (`engine/v2/data/import_snapshot.py`,
+  `reference_inputs._tier4_caches`): universe, refresh (Tier 2
+  `data/curated/*`), finality, validate, moves, tiers (panel, Tier 4,
+  SNAPSHOT), the panel-staleness flags and warm_serving (the import refuses
+  `TIER4_CACHE_STALE` without a serving cache for the current panel sha). It
+  skips score, ledger, settle, ladder, backfill, model_evidence, render,
+  selfcheck, publish and backup. Each skipped step is reported as
+  `{"skipped": true, "reason": "fetch_only"}` and the report keeps the usual
+  keys (`as_of`, `finality`, `steps.tiers` with an explicit `degraded`).
 - `warm_serving.py` — `warm(event_dates, decision_start)`: before score
-  (default scorer only), fits every Tier-4 serving model (all `PRODUCES`) whose
+  (default scorer only; `--fetch-only` also runs it, with no score after), fits every Tier-4 serving model (all `PRODUCES`) whose
   cache file for the current panel sha is missing or not ready (bad metadata,
   or no embedded residual pool), in a SUBPROCESS via `tier4.serving_model`
   (same cache files). Folds are a superset: every month from
@@ -204,7 +214,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 
   | Condition | Outcome |
   | --- | --- |
-  | Warm step (default scorer): subprocess exits non-zero, cannot start, times out (3 h), fails to plan/verify, leaves a fit missing or not ready, or the panel changed under it | `NightlyStop` `WARM_SERVING_FAILED`; exit 1; nothing scored; no in-process refit |
+  | Warm step (default scorer, or `--fetch-only`): subprocess exits non-zero, cannot start, times out (3 h), fails to plan/verify, leaves a fit missing or not ready, or the panel changed under it | `NightlyStop` `WARM_SERVING_FAILED`; exit 1; nothing scored; no in-process refit |
   | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`); no gap flag once repaired |
   | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no new SNAPSHOT (the previous one is kept), so the native import sees no new session for the night (`not_yet`, unless an earlier run that night already wrote one) |
   | With tiers on, run stops between refresh and tiers (red validation, as-of finality stop) | Store refreshed, no new SNAPSHOT; the previous SNAPSHOT is kept (with `--no-tiers` the refresh step has already written one) |
@@ -212,6 +222,20 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   | No gap, finalize fails | `tiers_degraded` as above |
   | Repaired, or no gap | SNAPSHOT written once |
 
+- **`--fetch-only`** — requires refresh and tiers on and no backup: with
+  `--no-refresh`, `--no-tiers` or `--backup` the CLI exits 2 (argparse) before
+  running anything. Gating failures behave as in a full run (red validate,
+  non-final session, rotated credential, typed `TIER4_*` stop: `NightlyStop`,
+  exit 1, no report), and so does a warm_serving failure
+  (`WARM_SERVING_FAILED`, see the table). `run_nightly(fetch_only=True)` with
+  refresh off, tiers off or backup on raises `ValueError` before any work
+  (the CLI turns the same rule into the exit 2 above). Refresh and tiers degrade as in a full run and are
+  recorded in `steps`/`flags`. The run writes the flag report and the
+  standard `nightly_<date>.json`, never writes the nightly state file
+  (`last_successful_as_of`, calendar), so a later full run still back-fills
+  the nights this one did not score, and never touches the ledger, bundle or
+  publish target. A degraded `tiers` step is visible to
+  `nightly_readiness._require_ready`, which refuses it as for a full run.
 - **Validate** — a red validation stops the pipeline; yesterday's snapshot
   stays published and a flag is raised.
 - **Selfcheck mismatch** — stops the publish; the nightly records raw

@@ -102,7 +102,8 @@ does not. ~2 MB for a 148-event board.
 
 Useful flags: `--as-of YYYY-MM-DD` (replay a past night), `--tickers A,B,C`
 (bound the universe), `--alt-strikes N` (strikes either side of ATM, scored
-for gate passers only), `--horizon N`, `--backup` (git push + private mirror).
+for gate passers only), `--horizon N`, `--backup` (git push + private mirror),
+`--fetch-only` (data refresh, Tier 3/4 and serving-model warm only, no scoring).
 
 **Timing.** Scoring is ~1s per event and the full calendar is ~2,200 events in
 a three-week window, so a full unrestricted night is roughly 40 minutes. That
