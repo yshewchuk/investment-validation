@@ -18,7 +18,10 @@ two values only the child's own log can supply:
 * ``kill_reason`` -- for a child that exited 137 (memory) or 76 (the disk
   ceiling, bounded_run.py's DISK_LIMIT_EXIT), which of the watchdog's
   literal breach strings appeared (``BOX FLOOR BREACH``, ``SWAP BREACH``,
-  ``CAP BREACH``, ``DISK LIMIT``, in the watchdog's own precedence).
+  ``CAP BREACH``, ``DISK LIMIT``). Tuple order is the match priority
+  applied to the captured output, not the watchdog's own precedence:
+  ``DISK LIMIT`` is last so a ``DISK LIMIT unreadable`` warning line can
+  never preempt a memory breach string on a 137.
   ``None`` for any other exit, and for a 137/76 with no breach string at
   all -- ``killed`` is still true there, because the exit code is the fact
   and the reason is the absence.
@@ -86,10 +89,12 @@ HEAVY_JOB_PATTERNS = (
     ("serve_monitor", "[s]erve_monitor"),
     ("corpus_parity.py run", "[c]orpus_parity.py run"),
 )
-#: bounded_run.py's watchdog breach strings, in the watchdog's own order.
-#: "DISK LIMIT" is bounded_run.py's disk-ceiling breach (exit 76,
-#: DISK_LIMIT_EXIT, not 137); it stays last so a "DISK LIMIT unreadable"
-#: warning line can never preempt a real memory breach string on a 137.
+#: bounded_run.py's watchdog breach strings; the tuple order is the match
+#: priority applied to the captured output, not the watchdog's own
+#: precedence. "DISK LIMIT" is bounded_run.py's disk-ceiling breach (exit
+#: 76, DISK_LIMIT_EXIT, not 137); it stays last so a "DISK LIMIT
+#: unreadable" warning line can never preempt a real memory breach
+#: string on a 137.
 KILL_REASONS = ("BOX FLOOR BREACH", "SWAP BREACH", "CAP BREACH", "DISK LIMIT")
 #: Exit codes bounded_run.py uses for a watchdog kill: 137 (memory: cap,
 #: swap, box floor) and 76 (DISK_LIMIT_EXIT, the disk-used ceiling).

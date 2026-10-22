@@ -65,9 +65,10 @@ MEMORY
   capture climb gigabytes between looks and took docker down (2026-09-18); at
   0.25 s the overshoot is tens of MB. A tick reads a few /proc files.
 
-  Any breach prints the memory breakdown and exits 137. That turns this
-  box's failure mode — a silent OOM that kills a neighbor's job with no
-  traceback anywhere — into a clean, explained abort of exactly one job.
+  A memory breach prints the memory breakdown and exits 137; a disk
+  ceiling breach exits 76 (see DISK). That turns this box's failure
+  mode — a silent OOM that kills a neighbor's job with no traceback
+  anywhere — into a clean, explained abort of exactly one job.
 
 DISK
   ``--max-disk-used-gb G`` — or, when the flag is absent, the environment
@@ -883,21 +884,23 @@ def _validate(args, parser) -> None:
         parser.error("--poll-s must be positive")
     if args.min_free_gb < 0:
         parser.error("--min-free-gb must not be negative")
+    disk_source = "--max-disk-used-gb"
+    disk_env_raw: str | None = None
     if args.max_disk_used_gb is None:
-        raw = os.environ.get(DISK_ENV)
-        if raw is not None:
-            message = (f"{DISK_ENV} must be a positive finite number, "
-                       f"got {raw!r}")
+        disk_env_raw = os.environ.get(DISK_ENV)
+        if disk_env_raw is not None:
+            disk_source = DISK_ENV
             try:
-                value = float(raw)
+                args.max_disk_used_gb = float(disk_env_raw)
             except ValueError:
-                parser.error(message)
-            if not math.isfinite(value) or value <= 0:
-                parser.error(message)
-            args.max_disk_used_gb = value
+                parser.error(f"{DISK_ENV} must be a positive finite number, "
+                             f"got {disk_env_raw!r}")
     if args.max_disk_used_gb is not None and (
             not math.isfinite(args.max_disk_used_gb)
             or args.max_disk_used_gb <= 0):
+        if disk_source == DISK_ENV:
+            parser.error(f"{DISK_ENV} must be a positive finite number, "
+                         f"got {disk_env_raw!r}")
         parser.error("--max-disk-used-gb must be a positive finite number")
     if len(args.disk_path) > DISK_PATHS_MAX:
         parser.error(f"--disk-path may be repeated at most "
