@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import signal
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -149,15 +151,20 @@ def test_disk_targets_dedupe_repeats_of_the_same_path():
 
 def test_check_disk_over_ceiling_kills(monkeypatch):
     kills = []
+    waits = []
     monkeypatch.setattr(mod, "_terminate_with_grace",
                         lambda proc, grace, poll, floor: kills.append(
                             (proc, grace, poll, floor)))
+    monkeypatch.setattr(mod, "_wait_for_pgid_exit",
+                        lambda pgid, timeout: waits.append((pgid, timeout)))
     monkeypatch.setattr(mod, "_statvfs", lambda path: _st(1000, 100, GIB))
+    proc = types.SimpleNamespace(pid=4321)
     args = _parse(["--max-disk-used-gb", "500", "--min-free-gb", "2"])
     args.disk_guard = mod._DiskGuard(args.max_disk_used_gb, [("/data", 7)],
                                      heavy=False)
-    assert mod._check_disk("PROC", args, elapsed=60.0) is True
-    assert kills == [("PROC", args.kill_grace_s, args.poll_s, 2048.0)]
+    assert mod._check_disk(proc, args, elapsed=60.0) is True
+    assert kills == [(proc, args.kill_grace_s, args.poll_s, 2048.0)]
+    assert waits == [(proc.pid, mod.SIGNAL_WAIT_S)]
 
 
 def test_check_disk_under_ceiling_records_and_does_not_kill(monkeypatch):
@@ -172,21 +179,28 @@ def test_check_disk_under_ceiling_records_and_does_not_kill(monkeypatch):
 
 def test_check_disk_exactly_at_ceiling_does_not_kill(monkeypatch):
     kills = []
+    waits = []
     monkeypatch.setattr(mod, "_terminate_with_grace",
                         lambda *a: kills.append(a))
+    monkeypatch.setattr(mod, "_wait_for_pgid_exit",
+                        lambda *a: waits.append(a))
     monkeypatch.setattr(mod, "_statvfs", lambda path: _st(500, 0, GIB))
     args = _parse(["--max-disk-used-gb", "500"])
     guard = mod._DiskGuard(args.max_disk_used_gb, [("/data", 7)], heavy=False)
     args.disk_guard = guard
     assert mod._check_disk("PROC", args, elapsed=1.0) is False
     assert kills == []
+    assert waits == []
     assert guard.last_used_gb == pytest.approx(500.0)
 
 
 def test_check_disk_fail_counter_resets_on_good_sample(monkeypatch):
     kills = []
+    waits = []
     monkeypatch.setattr(mod, "_terminate_with_grace",
                         lambda *a: kills.append(a))
+    monkeypatch.setattr(mod, "_wait_for_pgid_exit",
+                        lambda *a: waits.append(a))
     good = _st(1000, 999, GIB)
     seq: list = []
 
@@ -200,21 +214,48 @@ def test_check_disk_fail_counter_resets_on_good_sample(monkeypatch):
     args = _parse(["--max-disk-used-gb", "500"])
     guard = mod._DiskGuard(args.max_disk_used_gb, [("/x", 1)], heavy=True)
     args.disk_guard = guard
+    proc = types.SimpleNamespace(pid=1234)
     errs = [OSError("e") for _ in range(4)]
     seq.extend(errs)
     for _ in range(4):
-        assert mod._check_disk("P", args, elapsed=1.0) is False
+        assert mod._check_disk(proc, args, elapsed=1.0) is False
     assert guard.fails == 4
     seq.append(good)
-    assert mod._check_disk("P", args, elapsed=1.0) is False
+    assert mod._check_disk(proc, args, elapsed=1.0) is False
     assert guard.fails == 0
     seq.extend(errs)
     for _ in range(4):
-        assert mod._check_disk("P", args, elapsed=1.0) is False
+        assert mod._check_disk(proc, args, elapsed=1.0) is False
     assert kills == []
     seq.append(OSError("boom"))
-    assert mod._check_disk("P", args, elapsed=1.0) is True
+    assert mod._check_disk(proc, args, elapsed=1.0) is True
     assert len(kills) == 1
+    assert waits == [(proc.pid, mod.SIGNAL_WAIT_S)]
+
+
+def test_disk_kill_stops_the_whole_process_group(monkeypatch):
+    """A descendant that ignores SIGTERM must still die with the group."""
+    proc = subprocess.Popen(
+        ["sh", "-c", "trap 'exit 0' TERM; (trap '' TERM; sleep 60) & wait"],
+        start_new_session=True)
+    try:
+        monkeypatch.setattr(mod, "SIGNAL_WAIT_S", 2)
+        monkeypatch.setattr(mod, "_statvfs",
+                            lambda path: _st(1000, 100, GIB))
+        args = _parse(["--max-disk-used-gb", "500", "--kill-grace-s", "2"])
+        args.disk_guard = mod._DiskGuard(args.max_disk_used_gb, [("/x", 1)],
+                                         heavy=False)
+        assert mod._check_disk(proc, args, 0.0) is True
+        assert not mod._pgid_alive(proc.pid)
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 # ------------------------------------------------------------------ main()

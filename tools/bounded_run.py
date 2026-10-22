@@ -80,7 +80,9 @@ DISK
   SIGKILL after ``--kill-grace-s``), prints a ``DISK LIMIT`` line naming the
   path, used GB and ceiling GB, and exits 76 — distinct from 137 (memory) and
   75 (resource wait); with the check on, the heartbeat line carries
-  ``disk used <G>G/<ceiling>G``. ``statvfs`` unreadable at startup:
+  ``disk used <G>G/<ceiling>G``. The kill then waits for the whole process
+  group and SIGKILLs it after ``SIGNAL_WAIT_S``, so no descendant that ignores
+  SIGTERM outlives the guard. ``statvfs`` unreadable at startup:
   ``--heavy`` refuses to start (exit 69, EX_UNAVAILABLE) before taking the
   heavy reservation; a light run prints a warning and runs with the disk
   check off. Mid-run an unreadable tick is skipped and logged once; under
@@ -1105,6 +1107,18 @@ def _print_breach_rows(tree: list[int], kind: str) -> None:
               flush=True)
 
 
+def _disk_kill(proc: subprocess.Popen, args) -> None:
+    """Kill the tree at the disk limit: the memory-limit grace path, then wait
+    for the WHOLE process group — SIGTERM only stops the leader, and disk is
+    not reclaimed until every descendant exits — SIGKILLing it after
+    ``SIGNAL_WAIT_S``. Prints the terminal line so both breach sites share it.
+    """
+    _terminate_with_grace(proc, args.kill_grace_s, args.poll_s,
+                          args.min_free_gb * 1024.0)
+    _wait_for_pgid_exit(proc.pid, SIGNAL_WAIT_S)
+    print("[bounded] killed at the disk limit", flush=True)
+
+
 def _check_disk(proc: subprocess.Popen, args, elapsed: float) -> bool:
     """One disk tick; True when the tree was killed at the disk limit.
 
@@ -1129,9 +1143,7 @@ def _check_disk(proc: subprocess.Popen, args, elapsed: float) -> bool:
         if guard.heavy and guard.fails >= DISK_FAIL_MAX:
             print(f"[watchdog] {elapsed / 60.0:6.1f}m DISK LIMIT unreadable "
                   f"for {guard.fails} ticks — killing tree", flush=True)
-            _terminate_with_grace(proc, args.kill_grace_s, args.poll_s,
-                                  args.min_free_gb * 1024.0)
-            print("[bounded] killed at the disk limit", flush=True)
+            _disk_kill(proc, args)
             return True
         return False
     guard.fails = 0
@@ -1140,9 +1152,7 @@ def _check_disk(proc: subprocess.Popen, args, elapsed: float) -> bool:
         print(f"[watchdog] {elapsed / 60.0:6.1f}m DISK LIMIT: {path} "
               f"used {used:.1f}G > ceiling {guard.ceiling_gb:g}G "
               f"— killing tree", flush=True)
-        _terminate_with_grace(proc, args.kill_grace_s, args.poll_s,
-                              args.min_free_gb * 1024.0)
-        print("[bounded] killed at the disk limit", flush=True)
+        _disk_kill(proc, args)
         return True
     return False
 
