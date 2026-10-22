@@ -450,6 +450,20 @@ def _write_new(path: Path, data: bytes) -> None:
             os.close(dfd)
 
 
+def _is_trim_stub(raw: bytes) -> bool:
+    """True iff raw is a JSON object declaring a trim (stub from _encode_doc)."""
+    try:
+        doc = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return (
+        isinstance(doc, dict)
+        and doc.get("trimmed") is True
+        and "original_bytes" in doc
+        and "sha256" in doc
+    )
+
+
 def _cap_report(text):
     """Cap report text to MAX_JSON_BYTES-8192 bytes and mark truncation."""
     encoded = str(text).encode("utf-8")
@@ -529,6 +543,20 @@ def export_run_record(
         if top.is_symlink():
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", f"results folder {top} is a symlink; refusing to export into it")
         results = top
+
+        if (
+            not os.path.lexists(top / "spec.json")
+            and not os.path.lexists(top / "export_manifest.json")
+            and any(
+                os.path.lexists(top / name)
+                for name in ("request.json", "event_ids.json", "outcome.json")
+            )
+        ):
+            raise fail(
+                "EXPERIMENT_IDENTITY_CONFLICT",
+                f"{top} holds run files without spec.json and a manifest; "
+                f"refusing to adopt them",
+            )
 
         trimmed: list[str] = []
         docs = {
@@ -610,9 +638,26 @@ def export_run_record(
                         "EXPERIMENT_IDENTITY_CONFLICT",
                         f"{top} holds a partial export of a different spec; refusing to adopt it",
                     )
-                # Same run resumed: keep the persisted spec/request bytes and
-                # adopt this run's recording mode; the writes below fill the
-                # missing files and the manifest.
+                for name, this_raw in (
+                    ("request.json", request_raw),
+                    ("event_ids.json", encoded["event_ids.json"]),
+                ):
+                    if not os.path.lexists(top / name):
+                        continue
+                    existing_raw = _read_capped(top / name)
+                    if (
+                        existing_raw is None
+                        or len(existing_raw) > MAX_JSON_BYTES
+                        or existing_raw != this_raw
+                    ):
+                        raise fail(
+                            "EXPERIMENT_IDENTITY_CONFLICT",
+                            f"{top} holds a partial export whose {name} differs "
+                            f"from this run; refusing to adopt it",
+                        )
+                # Same run resumed: keep the persisted spec/request/event_ids
+                # bytes and adopt this run's recording mode; the writes below
+                # fill the missing files and the manifest.
                 existing_mode = recording_mode
             if (
                 existing_spec != spec_raw
@@ -656,6 +701,8 @@ def export_run_record(
             persisted[path] = existing
 
         manifest_path = results / "export_manifest.json"
+        trimmed = [name for name in docs
+                   if _is_trim_stub(persisted[results / name])]
         try:
             manifest_data = _manifest_bytes(
                 experiment_id,
@@ -667,8 +714,8 @@ def export_run_record(
         except (TypeError, ValueError) as exc:
             raise fail(
                 "INVALID_EXPERIMENT_SPEC",
-                f"cannot JSON-encode export_manifest.json: {exc}",
-            ) from exc
+                    f"cannot JSON-encode export_manifest.json: {exc}",
+                ) from exc
         if not os.path.lexists(manifest_path):
             persisted[manifest_path] = manifest_data
         else:

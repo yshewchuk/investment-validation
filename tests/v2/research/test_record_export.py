@@ -19,6 +19,7 @@ from engine.v2.ops.errors import OpsError, fail
 from experiments import lib, record_export
 from experiments.record_export import (
     MAX_JSON_BYTES,
+    _dump,
     export_failure_cause,
     export_native_run,
     export_run_record,
@@ -318,6 +319,18 @@ def test_symlinked_run_folder_conflicts_and_writes_nothing(tmp_path):
     assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert not (target / "results").exists()
     assert not (target / "REPORT.md").exists()
+
+
+def test_manifestless_folder_with_outcome_and_no_spec_is_identity_conflict(tmp_path):
+    results = tmp_path / "EXP-101_x" / "results"
+    results.mkdir(parents=True)
+    (results / "outcome.json").write_text('{"failure_code": null}')
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path, exp_number=101, experiment_id="x")
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert "holds run files without spec.json and a manifest" in str(exc.value)
+    assert not (results / "spec.json").exists()
+    assert not (results / "export_manifest.json").exists()
 
 
 def test_manifestless_folder_with_unknown_file_refuses_as_crashed_or_partial_export(tmp_path):
@@ -709,6 +722,46 @@ def test_crash_after_spec_before_request_recovers(tmp_path):
         assert digest == hashlib.sha256((results / name).read_bytes()).hexdigest(), name
 
 
+def test_partial_export_with_differing_request_is_refused(tmp_path):
+    other = tmp_path / "other"
+    _export(other)
+    planted = other / "EXP-101_x" / "results" / "spec.json"
+    results = tmp_path / "EXP-101_x" / "results"
+    results.mkdir(parents=True)
+    (results / "spec.json").write_bytes(planted.read_bytes())
+    (results / "request.json").write_text('{"action": "other"}')
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path, exp_number=101, experiment_id="x")
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert "request.json differs" in str(exc.value)
+    assert not (results / "event_ids.json").exists()
+    assert not (results / "export_manifest.json").exists()
+
+
+def test_partial_outcome_trim_stub_is_adopted_and_listed_trimmed(tmp_path):
+    other = tmp_path / "other"
+    _export(other)
+    planted = other / "EXP-101_x" / "results"
+    results = tmp_path / "EXP-101_x" / "results"
+    results.mkdir(parents=True)
+    (results / "spec.json").write_bytes((planted / "spec.json").read_bytes())
+    (results / "outcome.json").write_bytes(_dump({
+        "trimmed": True,
+        "original_bytes": 2000000,
+        "sha256": "ab",
+    }))
+    result = _export(tmp_path, exp_number=101, experiment_id="x")
+    assert result["status"] == "written"
+    for name in RESULT_NAMES:
+        assert (results / name).is_file(), name
+    man = json.loads((results / "export_manifest.json").read_bytes())
+    assert man["trimmed"] == ["outcome.json"]
+    assert result["trimmed"] == ["outcome.json"]
+    assert man["files"]["outcome.json"] == hashlib.sha256(
+        (results / "outcome.json").read_bytes()
+    ).hexdigest()
+
+
 def test_manifest_listings_request_but_missing_is_conflict(tmp_path):
     _export(tmp_path)
     results = tmp_path / "EXP-101_x" / "results"
@@ -793,6 +846,7 @@ def test_oversize_event_ids_are_trimmed(tmp_path):
 def test_replay_returns_persisted_trimmed_list(tmp_path, capsys):
     ids = [f"evt-{i}" for i in range(200_000)]
     first = _export(tmp_path, event_ids=ids)
+    assert not (tmp_path / "EXP-101_x" / "results" / "runs").exists()
     assert first["trimmed"] == ["event_ids.json"]
     second = _export(tmp_path, event_ids=["a"])
     assert second["trimmed"] == ["event_ids.json"]
@@ -803,9 +857,9 @@ def test_replay_returns_persisted_trimmed_list(tmp_path, capsys):
     other = tmp_path / "other"
     small_first = _export(other, event_ids=["a"])
     assert small_first["trimmed"] == []
+    assert not (other / "EXP-101_x" / "results" / "runs").exists()
     oversized = _export(other, event_ids=ids)
     assert oversized["trimmed"] == []
-    assert not (other / "EXP-101_x" / "results" / "runs").exists()
 
 
 def test_identical_second_export_is_unchanged(tmp_path, capsys):
