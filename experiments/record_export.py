@@ -278,6 +278,8 @@ def resolve_exp_number(experiments_root, experiment_id, requested):
         else:
             raise _bad(requested, experiment_id)
     if req_int is not None:
+        if req_int > 999_999_999:
+            raise _bad(requested, experiment_id)
         _check_number(req_int, experiment_id)
 
     linked = _linked_number(root, experiment_id)

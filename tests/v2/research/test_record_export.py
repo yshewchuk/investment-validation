@@ -228,6 +228,13 @@ def test_resolve_non_ascii_digit_string_is_invalid(tmp_path):
     assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
+def test_resolve_number_above_max_is_invalid(tmp_path):
+    for bad in (1_000_000_000, "1000000000"):
+        with pytest.raises(OpsError) as exc:
+            resolve_exp_number(tmp_path, "exp-x", bad)
+        assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
 def test_preexisting_oversize_spec_conflicts_without_manifest(tmp_path):
     results = tmp_path / "EXP-101_x" / "results"
     results.mkdir(parents=True)

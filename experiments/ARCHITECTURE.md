@@ -438,7 +438,7 @@ Layout: `REPORT.md` (stub: ids, status, the success report text), and in `result
 refusal, replay flag, resource usage as elapsed seconds and peak RSS, snapshot id, commit id) and
 `export_manifest.json` (experiment_id, EXP number, recording mode, trimmed files).
 
-The operator assigns the EXP number: `--exp-number N` (an integer of at least `lib.FIRST_NUMBER`, 101).
+The operator assigns the EXP number: `--exp-number N` (an integer of at least `lib.FIRST_NUMBER`, 101, or a digit string of at most 9 characters; numbers above 999999999 are refused for every input type, int or string).
 The manifest links `experiment_id` to the number; a linked experiment_id reuses its number, so replay
 needs no flag. Records are create-only and read back only as regular files capped at 1,000,000 bytes.
 Manifest hashes describe the exact bytes on disk. Every conflict is detected before the first write.
