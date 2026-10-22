@@ -9,7 +9,6 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from fnmatch import fnmatch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -235,26 +234,33 @@ def test_resolve_number_above_max_is_invalid(tmp_path):
         assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
-def test_preexisting_oversize_spec_conflicts_without_manifest(tmp_path):
+def test_preexisting_oversize_spec_conflicts(tmp_path):
+    _write_manifest(tmp_path / "EXP-101_x", "x", 101)
     results = tmp_path / "EXP-101_x" / "results"
-    results.mkdir(parents=True)
+    planted = (results / "export_manifest.json").read_bytes()
     (results / "spec.json").write_bytes(b"x" * (MAX_JSON_BYTES + 1))
     with pytest.raises(OpsError) as exc:
         _export(tmp_path, exp_number=101, experiment_id="x")
     assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
-    assert not (results / "export_manifest.json").exists()
+    assert "spec.json" in str(exc.value)
+    assert "unreadable, not a regular file, or oversized" in str(exc.value)
+    assert (results / "export_manifest.json").read_bytes() == planted
+    assert not (results / "event_ids.json").exists()
 
 
 def test_symlinked_existing_spec_conflicts(tmp_path):
+    _write_manifest(tmp_path / "EXP-101_x", "x", 101)
     results = tmp_path / "EXP-101_x" / "results"
-    results.mkdir(parents=True)
+    planted = (results / "export_manifest.json").read_bytes()
     real = tmp_path / "real.json"
     real.write_bytes(b'{"hypothesis": "h"}')
     (results / "spec.json").symlink_to(real)
     with pytest.raises(OpsError) as exc:
         _export(tmp_path, exp_number=101, experiment_id="x")
     assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
-    assert not (results / "export_manifest.json").exists()
+    assert "spec.json" in str(exc.value)
+    assert (results / "export_manifest.json").read_bytes() == planted
+    assert not (results / "event_ids.json").exists()
 
 
 def test_resolve_auto_is_invalid(tmp_path):
@@ -285,9 +291,20 @@ def test_symlinked_run_folder_conflicts_and_writes_nothing(tmp_path):
     assert not (target / "REPORT.md").exists()
 
 
-def test_preflight_atomic_symlink_outcome_creates_no_partial_writes(tmp_path):
+def test_manifestless_folder_with_results_refuses_as_crashed_or_partial_export(tmp_path):
     results = tmp_path / "EXP-101_x" / "results"
     results.mkdir(parents=True)
+    (results / "spec.json").write_text('{"hypothesis": "h"}')
+    with pytest.raises(OpsError) as exc:
+        _export(tmp_path, exp_number=101, experiment_id="x")
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert "crashed or partial export" in str(exc.value)
+
+
+def test_preflight_atomic_symlink_outcome_creates_no_partial_writes(tmp_path):
+    _write_manifest(tmp_path / "EXP-101_x", "x", 101)
+    results = tmp_path / "EXP-101_x" / "results"
+    planted = (results / "export_manifest.json").read_bytes()
     real = tmp_path / "elsewhere" / "outcome.json"
     real.parent.mkdir()
     real.write_text('{"failure_code": null}')
@@ -295,8 +312,10 @@ def test_preflight_atomic_symlink_outcome_creates_no_partial_writes(tmp_path):
     with pytest.raises(OpsError) as exc:
         _export(tmp_path)
     assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert "outcome.json" in str(exc.value)
     assert not (results / "spec.json").exists()
-    assert not (results / "export_manifest.json").exists()
+    assert (results / "export_manifest.json").read_bytes() == planted
+    assert not (results / "event_ids.json").exists()
 
 
 def test_oversize_event_ids_trimmed_return_list(tmp_path):
@@ -879,6 +898,7 @@ def test_different_outcome_keeps_first_outcome_bytes(tmp_path, capsys):
 
 def test_hygiene_pin_results_paths_and_report(tmp_path):
     _export(tmp_path, experiment_id="x", slug="x")
+    _export(tmp_path, spec={"hypothesis": "other"})
     results = tmp_path / "EXP-101_x" / "results"
     assert results.is_dir()
     for name in RESULT_NAMES:
@@ -889,11 +909,22 @@ def test_hygiene_pin_results_paths_and_report(tmp_path):
         assert len(report.violations) == 1, rel
         assert all(rel in str(violation) for violation in report.violations), rel
         matched = any(
-            rel.startswith(directory + "/")
-            and fnmatch(rel[len(directory) + 1:], pattern)
-            for directory, pattern in INCLUDE
+            Path(hit) == results / name
+            for pattern in [pattern for directory, pattern in INCLUDE
+                            if directory == "experiments"]
+            for hit in tmp_path.glob(pattern)
         )
         assert matched, rel
+    runs = list(tmp_path.glob("EXP-101_x/results/runs/*/*.json"))
+    assert runs
+    for run_json in runs:
+        matched = any(
+            Path(hit) == run_json
+            for pattern in [pattern for directory, pattern in INCLUDE
+                            if directory == "experiments"]
+            for hit in tmp_path.glob(pattern)
+        )
+        assert matched, run_json
     repo_root = Path(__file__).resolve().parents[3]
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:

@@ -34,8 +34,6 @@ from tests.v2.research.test_native_registration import (
 from tests.v2.research.test_prediction_inputs import MONTH, commit_prediction_inputs
 from tests.v2.research.test_prediction_report import prediction_dataset
 
-RECORD_EXPORT_WARNINGS: list[str] = []
-
 
 @dataclass
 class Source:
@@ -78,11 +76,7 @@ def _args(source, action, *extra):
 def _invoke(source, capsys, action, *extra, status=0):
     assert cli.main(_args(source, action, *extra)) == status
     captured = capsys.readouterr()
-    RECORD_EXPORT_WARNINGS.extend(line for line in captured.err.splitlines()
-                                  if line.startswith("WARNING: record_export"))
-    err = "\n".join(line for line in captured.err.splitlines()
-                    if not line.startswith("WARNING: record_export"))
-    assert not err
+    assert not captured.err
     assert "Traceback" not in captured.out
     return json.loads(captured.out)
 

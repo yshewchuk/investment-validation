@@ -205,8 +205,7 @@ def _check_number_folder(folder: Path, exp_number: int, experiment_id):
     if man is None:
         raise fail(
             "EXPERIMENT_IDENTITY_CONFLICT",
-            f"EXP-{exp_number:03d} in {folder.name} has no export manifest "
-            f"(unlinked folder), not linked to {experiment_id!r}",
+            f"EXP-{exp_number:03d} in {folder.name} has no export manifest (an unlinked folder, or a crashed or partial export that never wrote its manifest), not linked to {experiment_id!r}",
         )
     if man.get("experiment_id") != experiment_id:
         raise fail(

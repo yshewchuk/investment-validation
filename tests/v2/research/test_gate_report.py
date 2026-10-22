@@ -36,7 +36,6 @@ from tests.v2.research.magnitude_trial_support import (
 
 REPO = Path(__file__).resolve().parents[3]
 MONTH = "2025-01"
-RECORD_EXPORT_WARNINGS: list[str] = []
 
 
 def build_gate_spec(alpha=0.0, arm="candidate", **changes):
@@ -157,11 +156,7 @@ def _invoke(source, capsys, action, spec=None, *extra, status=0, exp_number="101
             arguments += ["--exp-number", str(exp_number)]
     assert cli.main(arguments) == status
     captured = capsys.readouterr()
-    RECORD_EXPORT_WARNINGS.extend(line for line in captured.err.splitlines()
-                                  if line.startswith("WARNING: record_export"))
-    err = "\n".join(line for line in captured.err.splitlines()
-                    if not line.startswith("WARNING: record_export"))
-    assert err == ""
+    assert captured.err == ""
     return json.loads(captured.out)
 
 
@@ -253,7 +248,6 @@ def test_break_even_training_trade_is_negative_and_keeps_fold_probabilities(tmp_
 
 
 def test_two_real_cli_arms_consume_distinct_fill_record_and_replay_once(source, capsys, monkeypatch):
-    RECORD_EXPORT_WARNINGS.clear()
     ledger, results, outputs = source.root / "ledger.csv", [], []
     for spec in (build_gate_spec(), build_gate_spec(1.0, "control")):
         _invoke(source, capsys, "register", spec)
@@ -278,7 +272,6 @@ def test_two_real_cli_arms_consume_distinct_fill_record_and_replay_once(source, 
     assert len(run_dirs) == 1
     assert (run_dirs[0] / "request.json").is_file()
     assert (run_dirs[0] / "outcome.json").is_file()
-    assert RECORD_EXPORT_WARNINGS == []
     before = ledger.read_bytes()
     first_output = outputs[0]
     assert Path(outputs[0]["report"]).read_text().strip() in (export_folder / "REPORT.md").read_text()

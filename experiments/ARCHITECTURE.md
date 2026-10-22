@@ -430,7 +430,7 @@ Pre-admission receipts cannot invent admission; rejected-request ledger identiti
 gate and prediction CLIs call it after `run`; it adds no catalog table and does not
 change outcome identity. Every data file sits under `results/`, which
 `checks/repo_hygiene.py` blocks (`BLOCKED_SEGMENTS`) and `.gitignore` ignores; `REPORT.md` is
-ignored by default-deny. The mirror already includes both. This feature does not weaken
+ignored by default-deny. The mirror includes both, including `results/runs/<key>/*.json`. This feature does not weaken
 that policy.
 
 Layout: `REPORT.md` (stub: ids, status, the success report text), and in `results/`

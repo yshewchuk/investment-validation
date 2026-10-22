@@ -102,9 +102,7 @@ def _args(source, action, *extra):
 def _invoke(source, capsys, action, *extra, status=0):
     assert cli.main(_args(source, action, *extra)) == status
     captured = capsys.readouterr()
-    err = "\n".join(line for line in captured.err.splitlines()
-                    if not line.startswith("WARNING: record_export"))
-    assert not err and "Traceback" not in captured.out
+    assert not captured.err and "Traceback" not in captured.out
     return json.loads(captured.out)
 
 
