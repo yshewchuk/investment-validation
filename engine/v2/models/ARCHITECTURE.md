@@ -348,9 +348,7 @@ The panel identity comes from the pinned snapshot, never from `--tier3-snapshot 
 
 **Progress logging.** Each phase and the assembly log stage start and end with elapsed time, member counts and RSS to stderr; the classification (class and reason) is logged once per cycle.
 
-**Cost.** Estimated from the 09-21 P5-3 build logs (`/root/p5-build-logs`; the same training kinds, one session): paired residual 0.2 min, board analog 0.9 min (56 keys, estimated peak 2.54 GB), and seven payoff, recalibration and trailing runs at 0.0-0.1 min each. That is about 1.5 minutes sequential with a 2.5 GB peak; the 217 MB object store (`release-B/deployment/objects`) bounds the assembly write. Not measured: the driver-pool and chooser-pool training and the in-job assembly, which do not exist yet. By these numbers the bootstrap is not a heavy step, provided it avoids the panel hash above. Code slice 4 records the first live receipt (wall time, peak RSS) here; if the peak exceeds the training profile, the supervisor runs that first bootstrap under `bounded_run`, since the supervisor runs any heavy step.
-
-**Split list** (code, in order, each its own PR after this design): 1 `classify_prior`, the `mode` parameter, nullable `carried_from` in the catalog and light checks (about 150 code, 120 test, 20 doc lines); 2 move the from-scratch assembly into `engine/v2/models`, shared by the CLI and the job (about 350 code, 150 test, 20 doc); 3 sidecar bootstrap phases and keys, and the §2.2.1 R1 change (about 250 code, 150 test, 30 doc); 4 measured receipt and doc update (about 0 code, 0 test, 15 doc). #1102 stays open until slice 3 lands; until then the nightly keeps refusing.
+**Cost.** Not yet measured for the bootstrap as a whole; the first live receipt (wall time, peak RSS) is recorded here once the cycle runs. Until then the bootstrap is not classified heavy or light; the supervisor runs any heavy step.
 
 ### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
 
