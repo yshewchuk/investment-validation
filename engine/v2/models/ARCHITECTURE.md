@@ -205,13 +205,13 @@ and positional-lag behavior. Nonpositive prices produce missing move labels.
   pool/chooser object as `carried=True`, recorded at the prior `sources.pool_cutoff`
   (`PRIOR_MISMATCH` on a missing prior or structurally malformed rows, object keys or `pool_cutoff`;
   wrong-typed object fields are not checked here and refuse later as `POOL_SET_MISMATCH`, or `CHOOSER_MISMATCH` for the chooser).
-- `classify_prior(release_root, prior_release_id) -> PriorClass` — read-only; kind `NONE`/`NO_POOL_CATALOG`/`USABLE`/`DAMAGED` with a fixed reason (§2.2.2). Every present catalog (with or without `pool_cutoff`) must verify against its staged release and `deployment_id`; a legacy catalog without `pool_cutoff` is not checked for pool rows or objects, which it need not have. `USABLE` needs a valid catalog with an ISO `pool_cutoff`, well-formed pool rows, objects whose hash and size verify, and a `deployment_id` equal to the staged release's.
+- `classify_prior(release_root, prior_release_id) -> PriorClass` — read-only; handled refusal, validation and I/O failures return `DAMAGED` rather than raising. Kind `NONE`/`NO_POOL_CATALOG`/`USABLE`/`DAMAGED` with a fixed reason (§2.2.2). Every present catalog (with or without `pool_cutoff`) must verify against its staged release and `deployment_id`; a legacy catalog without `pool_cutoff` is not checked for pool rows or objects, which it need not have. `USABLE` needs a valid catalog with an ISO `pool_cutoff`, well-formed pool rows, objects whose hash and size verify, and a `deployment_id` equal to the staged release's.
 - `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
   — verifies the prior staged release, untouched rows and supplied objects on disk,
   re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),
   then writes the candidate catalog. It never touches `DEPLOYED`.
 
-Both refuse with a stable `ReleaseAssemblyRefusal.code`; stray `KeyError`, `TypeError`, `AttributeError`,
+`derive_catalog` and `carry_forward_release` refuse with a stable `ReleaseAssemblyRefusal.code`; stray `KeyError`, `TypeError`, `AttributeError`,
 `ValueError`, `RecursionError` map to `PRIOR_MISMATCH` (inventory or stage-time ones to `INVENTORY_MISMATCH`,
 publish `OSError` to `PUBLICATION_FAILED`).
 
@@ -306,9 +306,9 @@ of the newest nightly jobs, so a score older than that window is not found.
 | R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; before the pointer swap the prior release stays deployed, and a failure after the swap follows the §7.2 history rules |
 | R6 idempotency | phase keys are stable per session, scoring manifest and prior release, so a rerun scored from a new manifest retrains; the candidate release id is `pools-{session}-{tag}` and does not include the prior release (the stage refusal carries `ID_CONFLICT` in `details` when the same candidate id is reused with different content; promotion separately checks `expected_previous_release_id`, R3); a deployed release already named so ends the cycle |
 
-### 2.2.2 Bootstrap cycle (design, #1102; slice 1 built, cycle not yet runnable)
+### 2.2.2 Bootstrap cycle
 
-**Built (slice 1).** `classify_prior` (§2.1) and the job's `mode`: in `bootstrap` mode the job classifies the prior before any object is written (refusals in the table below), and the light checks expect `sources.carried_from` null. Nothing submits `bootstrap` yet.
+In `bootstrap` mode the job classifies the prior (`classify_prior`, §2.1) before any object is written, with the refusals in the table below, and the light checks expect `sources.carried_from` null.
 
 **Problem.** A legacy-bootstrapped incumbent may have its catalog outside `deployment/releases/<id>/` and no `sources.pool_cutoff`, so every nightly's `phase5_state_stage` refuses `PRIOR_MISMATCH` ("prior release could not be read") and no pool advances. When the prior release has no pool catalog (classes `NONE` and `NO_POOL_CATALOG` below; a `DAMAGED` prior is not bootstrapped), the nightly runs a full release cycle through the standard pool-release assembly with the session's data date as the cutoff. It does not refuse, there is no one-time store repair, and no cutoff is picked by hand. Later nightlies carry forward (§2.2) from the bootstrapped release, so the cost is paid once per store wipe or rebuild.
 
@@ -336,7 +336,7 @@ The panel identity comes from the pinned snapshot, never from `--tier3-snapshot 
 | Condition | Outcome |
 |---|---|
 | Prior `DAMAGED` | `VALIDATION_FAILED`, fixed message, `details.code` `PRIOR_MISMATCH` |
-| Prior `NONE`/`NO_POOL_CATALOG` before the assembly slice lands (interim) | `VALIDATION_FAILED`, fixed message, `details.code` `BOOTSTRAP_NOT_BUILT`; removed when the assembly is built |
+| Prior `NONE`/`NO_POOL_CATALOG` | `VALIDATION_FAILED`, fixed message, `details.code` `BOOTSTRAP_NOT_BUILT` |
 | Prior `USABLE` while `mode` is `bootstrap` | `VALIDATION_FAILED`, fixed message, `details.code` `PRIOR_USABLE` |
 | A training phase fails | the cycle stalls for operator recovery (§2.2.1 R3) |
 | Registry drift, bindings differ from the incumbent's, an empty member, or a bound file that is self-inconsistent | `VALIDATION_FAILED`; nothing promoted |
