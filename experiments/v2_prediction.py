@@ -12,6 +12,7 @@ from engine.v2.data.repository import Repository
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
+from experiments import lib
 from experiments import magnitude_history_report, magnitude_report
 from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
@@ -37,7 +38,7 @@ def main(argv=None):
     parser.add_argument("--magnitude-history-start")
     parser.add_argument("--max-registration-bytes", type=int, default=native.MAX_NATIVE_EVIDENCE_BYTES)
     parser.add_argument("--exp-number", default=None)
-    parser.add_argument("--experiments-root", type=Path, default=Path(__file__).resolve().parent)
+    parser.add_argument("--experiments-root", type=Path, default=lib.EXPERIMENTS_DIR)
     parser.add_argument("--no-record-export", action="store_true")
     args = parser.parse_args(argv)
     if not native.valid_registration_read_budget(args.max_registration_bytes):

@@ -156,6 +156,23 @@ def test_resolve_number_held_by_other_experiment_conflicts(tmp_path):
     assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
+def test_resolve_linked_id_with_duplicate_number_folder_conflicts(tmp_path):
+    _export(tmp_path, exp_number=101, experiment_id="x")
+    other = tmp_path / "EXP-101_other"
+    other.mkdir()
+    _write_manifest(other, "y", 101)
+    with pytest.raises(OpsError) as exc:
+        resolve_exp_number(tmp_path, "x", None)
+    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+@pytest.mark.parametrize("experiment_id", [None, ""])
+def test_resolve_bad_experiment_id_is_invalid(tmp_path, experiment_id):
+    with pytest.raises(OpsError) as exc:
+        resolve_exp_number(tmp_path, experiment_id, 101)
+    assert exc.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
 def test_resolve_linked_id_requested_other_number_conflicts(tmp_path):
     _write_manifest(tmp_path / "EXP-107_x", "x", 107)
     with pytest.raises(OpsError) as exc:
@@ -405,6 +422,34 @@ def test_export_native_run_refusal_reports_failure_code(tmp_path):
     assert "HOLDOUT_ACCESS_DENIED" in (folder / "REPORT.md").read_text()
 
 
+def test_export_native_run_unreadable_report_is_resource_unavailable(tmp_path):
+    registration = _Registration({
+        "execution_plan": {"experiment_id": "exp-x"},
+        "snapshot": {"snapshot_id": "snap-1"},
+        "event_ids": [],
+        "source_closure": {},
+        "environment": {},
+    })
+    saved = {
+        "outcome": {"failure_code": None},
+        "receipt": {"recording_mode": "smoke"},
+    }
+    with pytest.raises(OpsError) as exc:
+        export_native_run(
+            tmp_path,
+            registration,
+            {"hypothesis": "h"},
+            {"action": "run"},
+            saved,
+            exp_number=101,
+            replayed=False,
+            started=time.monotonic(),
+            report_path=tmp_path / "missing-report.md",
+        )
+    assert exc.value.code == "RESOURCE_UNAVAILABLE"
+    assert not any(child.name.startswith("EXP-") for child in tmp_path.iterdir())
+
+
 def test_large_report_is_truncated_and_replay_unchanged(tmp_path):
     registration = _Registration({
         "execution_plan": {"experiment_id": "exp-x"},
@@ -437,9 +482,10 @@ def test_large_report_is_truncated_and_replay_unchanged(tmp_path):
     report_md_text = report_md.read_text()
     assert report_md_text.startswith("# EXP-101")
     report_bytes = report.read_bytes()
-    report_prefix = report_bytes[:100].decode("utf-8", errors="ignore")
-    assert report_prefix in report_md_text
-    assert "[report truncated" in report_md_text
+    first_chars = report_bytes[:1000].decode("utf-8", errors="ignore")
+    assert first_chars in report_md_text
+    embedded = report_md_text.split("\n\n", 2)[1]
+    assert embedded.endswith("[report truncated to fit the 1 MB export cap]")
     second = export_native_run(
         tmp_path,
         registration,

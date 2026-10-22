@@ -13,6 +13,7 @@ from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments import gate_report as gate
+from experiments import lib
 from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
 from experiments import record_export
@@ -30,7 +31,7 @@ def main(argv=None):
     parser.add_argument("--ledger", type=Path)
     parser.add_argument("--max-registration-bytes", type=int, default=native.MAX_NATIVE_EVIDENCE_BYTES)
     parser.add_argument("--exp-number", default=None)
-    parser.add_argument("--experiments-root", type=Path, default=Path(__file__).resolve().parent)
+    parser.add_argument("--experiments-root", type=Path, default=lib.EXPERIMENTS_DIR)
     parser.add_argument("--no-record-export", action="store_true")
     args = parser.parse_args(argv)
     if not native.valid_registration_read_budget(args.max_registration_bytes):

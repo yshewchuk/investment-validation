@@ -145,13 +145,15 @@ def _register(source, spec=None, **kwargs):
     return spec, registered
 
 
-def _invoke(source, capsys, action, spec=None, *extra, status=0):
+def _invoke(source, capsys, action, spec=None, *extra, status=0, exp_number="101"):
     path = source.root / "spec.json"
     path.write_text(json.dumps(asdict(spec or build_gate_spec())))
     arguments = [action, "--spec", str(path), "--catalog", str(source.root / "catalog.sqlite"),
                  "--store-root", str(source.store.root), "--as-of-month", MONTH, *map(str, extra)]
     if action == "run":
-        arguments += ["--exp-number", "101", "--experiments-root", str(source.root / "experiments")]
+        arguments += ["--experiments-root", str(source.root / "experiments")]
+        if exp_number is not None:
+            arguments += ["--exp-number", str(exp_number)]
     assert cli.main(arguments) == status
     captured = capsys.readouterr()
     err = "\n".join(line for line in captured.err.splitlines()
@@ -634,6 +636,29 @@ def test_record_export_failure_refuses_run_and_second_run_succeeds(source, capsy
     monkeypatch.setattr(cli.record_export, "export_native_run", export_native_run)
     output = _invoke(source, capsys, "run", None, "--no-ledger")
     assert output["record_export"]["status"] == "written"
+
+
+def test_run_without_exp_number_refuses_and_creates_no_experiments_dir(source, capsys):
+    _invoke(source, capsys, "register")
+    response = _invoke(source, capsys, "run", None, "--no-ledger", status=2, exp_number=None)
+    assert response["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert not (source.root / "experiments").exists()
+
+
+def test_run_no_record_export_skips_and_warns_no_exp_number(source, capsys):
+    _invoke(source, capsys, "register")
+    path = source.root / "spec.json"
+    path.write_text(json.dumps(asdict(build_gate_spec())))
+    arguments = ["run", "--spec", str(path), "--catalog", str(source.root / "catalog.sqlite"),
+                 "--store-root", str(source.store.root), "--as-of-month", MONTH,
+                 "--no-ledger", "--no-record-export",
+                 "--experiments-root", str(source.root / "experiments")]
+    assert cli.main(arguments) == 0
+    captured = capsys.readouterr()
+    assert "no EXP number" in captured.err
+    output = json.loads(captured.out)
+    assert output["record_export"] == "skipped"
+    assert not (source.root / "experiments").exists()
 
 
 def test_registered_holdout_request_records_refusal_without_attempt_or_partial_report(source, capsys, monkeypatch):

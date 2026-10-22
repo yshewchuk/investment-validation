@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 from engine.v2.ops.errors import fail
-from experiments.lib import FIRST_NUMBER, experiment_dirs, parse_experiment_id, slugify
+from experiments.lib import FIRST_NUMBER, parse_experiment_id, slugify
 
 MAX_JSON_BYTES = 1_000_000
 _NUM_DIR_RE = re.compile(r"^EXP-(\d+)_")
@@ -95,9 +95,28 @@ def _manifest_for(folder: Path):
     return _read_manifest(folder / "results" / "export_manifest.json")
 
 
+def _exp_folders(root: Path) -> list[tuple[int, Path]]:
+    """Every EXP-###_* dir/symlink entry in root as (number, folder), uncollapsed."""
+    if not root.is_dir():
+        return []
+    out = []
+    for child in sorted(root.iterdir()):
+        if child.is_symlink() or child.is_dir():
+            m = _NUM_DIR_RE.match(child.name)
+            if m:
+                out.append((int(m.group(1)), child))
+    return out
+
+
 def _linked_number(root: Path, experiment_id):
-    """Find an EXP folder whose manifest links this experiment_id."""
-    for num, folder in experiment_dirs(root).items():
+    """Find an EXP folder whose manifest links this experiment_id.
+
+    Iterates every EXP entry itself so duplicate-number folders are not
+    collapsed: two folders naming this experiment_id under different numbers
+    are EXPERIMENT_IDENTITY_CONFLICT.
+    """
+    linked = None
+    for num, folder in _exp_folders(root):
         man = _manifest_for(folder)
         if man is None:
             if not (folder.is_symlink() or (folder / "results").is_symlink()):
@@ -122,21 +141,19 @@ def _linked_number(root: Path, experiment_id):
                 f"export manifest in {folder.name} claims EXP-{man.get('exp_number')!r} "
                 f"but the folder name is EXP-{num:03d}",
             )
-        return num
-    return None
+        if linked is not None and linked != num:
+            raise fail(
+                "EXPERIMENT_IDENTITY_CONFLICT",
+                f"{experiment_id} is linked to EXP-{linked:03d} and EXP-{num:03d} "
+                f"in {folder.name}",
+            )
+        linked = num
+    return linked
 
 
 def _folders_with_number(root: Path, n: int) -> list[Path]:
     """All EXP-###_ dirs in root with number n."""
-    if not root.is_dir():
-        return []
-    out = []
-    for child in sorted(root.iterdir()):
-        if child.is_symlink() or child.is_dir():
-            m = _NUM_DIR_RE.match(child.name)
-            if m and int(m.group(1)) == n:
-                out.append(child)
-    return out
+    return [folder for num, folder in _exp_folders(root) if num == n]
 
 
 def _check_number_folder(folder: Path, exp_number: int, experiment_id):
@@ -197,12 +214,22 @@ def _check_number(value, experiment_id):
     return value
 
 
+def _check_experiment_id(experiment_id):
+    """Validate an experiment id; raise INVALID_EXPERIMENT_SPEC."""
+    if not isinstance(experiment_id, str) or not experiment_id:
+        raise fail(
+            "INVALID_EXPERIMENT_SPEC",
+            f"experiment_id must be a non-empty string, got {experiment_id!r}",
+        )
+
+
 def resolve_exp_number(experiments_root, experiment_id, requested):
     """Resolve the operator-supplied EXP number: None/int/digit-string only.
 
     Any other string (e.g. ``"auto"``) is ``INVALID_EXPERIMENT_SPEC``; there
     is no auto-numbering.
     """
+    _check_experiment_id(experiment_id)
     root = Path(experiments_root)
     req_int = None
     if isinstance(requested, bool) or (
@@ -234,6 +261,8 @@ def resolve_exp_number(experiments_root, experiment_id, requested):
                 f"{experiment_id} is linked to EXP-{linked:03d} "
                 f"but EXP-{req_int:03d} was requested",
             )
+        for folder in _folders_with_number(root, linked):
+            _check_number_folder(folder, linked, experiment_id)
         return linked
 
     if req_int is None:
@@ -358,15 +387,11 @@ def export_run_record(
     bytes on disk for every file this call writes.
     """
     root = Path(experiments_root)
+    _check_experiment_id(experiment_id)
     if not isinstance(slug, str):
         raise fail(
             "INVALID_EXPERIMENT_SPEC",
             f"slug must be a string, got {type(slug).__name__}",
-        )
-    if not isinstance(experiment_id, str):
-        raise fail(
-            "INVALID_EXPERIMENT_SPEC",
-            f"experiment_id must be a string, got {type(experiment_id).__name__}",
         )
     _check_number(exp_number, experiment_id)
     linked = _linked_number(root, experiment_id)
@@ -555,8 +580,9 @@ def export_native_run(
     report_text = None
     if saved["outcome"]["failure_code"] is None and report_path is not None:
         report_raw = _read_capped(Path(report_path))
-        if report_raw is not None:
-            report_text = report_raw.decode("utf-8", errors="ignore")
+        if report_raw is None:
+            raise fail("RESOURCE_UNAVAILABLE", "supplied report could not be read")
+        report_text = report_raw.decode("utf-8", errors="ignore")
     closure = document.get("source_closure")
     source_closure_hash = hashlib.sha256(
         json.dumps(closure, sort_keys=True).encode("utf-8")
