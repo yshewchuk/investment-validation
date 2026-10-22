@@ -2443,33 +2443,41 @@ def _reap_descendants(label: str) -> int:
     if not sys.platform.startswith("linux"):
         return 0
     try:
-        ppid: dict[int, int] = {}
-        proc_state: dict[int, str] = {}
-        for entry in os.listdir("/proc"):
-            try:
-                fields = Path(f"/proc/{entry}/stat").read_text().rpartition(")")[2].split()
-                ppid[int(entry)] = int(fields[1])
-                proc_state[int(entry)] = fields[0]
-            except (OSError, ValueError, IndexError):
-                continue
-        kids: dict[int, list[int]] = {}
-        for pid, parent in ppid.items():
-            kids.setdefault(parent, []).append(pid)
-        victims: list[int] = []
-        stack = list(kids.get(os.getpid(), []))
-        while stack:
-            pid = stack.pop()
-            victims.append(pid)
-            stack.extend(kids.get(pid, []))
-        cmdlines: dict[int, str] = {}
-        killed: list[int] = []
-        for pid in victims:
+        def scan() -> tuple[list[int], dict[int, str]]:
+            ppid: dict[int, int] = {}
+            proc_state: dict[int, str] = {}
+            for entry in os.listdir("/proc"):
+                try:
+                    fields = Path(f"/proc/{entry}/stat").read_text().rpartition(")")[2].split()
+                    ppid[int(entry)] = int(fields[1])
+                    proc_state[int(entry)] = fields[0]
+                except (OSError, ValueError, IndexError):
+                    continue
+            kids: dict[int, list[int]] = {}
+            for pid, parent in ppid.items():
+                kids.setdefault(parent, []).append(pid)
+            victims: list[int] = []
+            stack = list(kids.get(os.getpid(), []))
+            while stack:
+                pid = stack.pop()
+                victims.append(pid)
+                stack.extend(kids.get(pid, []))
+            return victims, proc_state
+
+        def read_cmdline(pid: int) -> str:
             try:
                 with open(f"/proc/{pid}/cmdline", "rb") as fh:
                     raw = fh.read(4096)
-                cmdlines[pid] = raw.replace(b"\0", b" ").decode("utf-8", "replace")[:200]
+                return raw.replace(b"\0", b" ").decode("utf-8", "replace")[:200]
             except OSError:
-                cmdlines[pid] = ""
+                return ""
+
+        cmdlines: dict[int, str] = {}
+        killed: list[int] = []
+        victims, proc_state = scan()
+        signalled = set(victims)
+        for pid in victims:
+            cmdlines[pid] = read_cmdline(pid)
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
@@ -2482,7 +2490,25 @@ def _reap_descendants(label: str) -> int:
                 killed.append(pid)
         deadline, pending = time.monotonic() + 5.0, set(victims)
         not_children: set[int] = set()
-        while (pending or not_children) and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
+            found_new = False
+            descendants, proc_state = scan()
+            for pid in descendants:
+                if pid in signalled or proc_state.get(pid) == "Z":
+                    continue
+                found_new = True
+                signalled.add(pid)
+                pending.add(pid)
+                cmdlines[pid] = read_cmdline(pid)
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    continue
+                except OSError as exc:
+                    print(f"[mutation_pilot] {label}: could not kill pid={pid}: {exc}",
+                          file=sys.stderr, flush=True)
+                    continue
+                killed.append(pid)
             for pid in list(pending):
                 try:
                     if os.waitpid(pid, os.WNOHANG)[0]:
@@ -2501,8 +2527,9 @@ def _reap_descendants(label: str) -> int:
                     os.kill(pid, 0)
                 except ProcessLookupError:
                     not_children.discard(pid)
-            if pending or not_children:
-                time.sleep(0.05)
+            if not found_new and not pending and not not_children:
+                break
+            time.sleep(0.05)
         alive = set(pending)
         for pid in not_children:
             try:

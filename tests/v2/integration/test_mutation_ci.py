@@ -5798,12 +5798,11 @@ _SWEEP_PREAMBLE = (
 @pytest.mark.skipif(sys.platform != "linux", reason="child subreaper is Linux-only")
 def test_reap_descendants_kills_an_orphaned_session_detached_process():
     inner = (
-        "import subprocess, sys, time\n"
+        "import subprocess, sys\n"
         "orphan = subprocess.Popen([sys.executable, '-c',"
         " 'import time; time.sleep(300)'], start_new_session=True)\n"
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
         "print(orphan.pid, child.pid, flush=True)\n"
-        "time.sleep(300)\n"
     )
     script = _SWEEP_PREAMBLE + (
         "pilot._become_subreaper()\n"
@@ -5811,6 +5810,7 @@ def test_reap_descendants_kills_an_orphaned_session_detached_process():
         " stdout=subprocess.PIPE, start_new_session=True, text=True)\n"
         "line = inter.stdout.readline().strip()\n"
         "pids = [int(x) for x in line.split()]\n"
+        "inter.wait()\n"
         "print('PIDS=' + ' '.join(str(p) for p in [inter.pid, *pids]), flush=True)\n"
         "count = pilot._reap_descendants('t')\n"
         "alive = 0\n"
@@ -5831,10 +5831,66 @@ def test_reap_descendants_kills_an_orphaned_session_detached_process():
             pids = [int(x) for x in match.group(1).split()]
         final = re.search(r"COUNT=(\d+) ALIVE=(\d+)", proc.stdout)
         assert final, proc.stderr
-        assert int(final.group(1)) == 3  # live intermediate, its sleeper, orphaned sleeper
+        assert int(final.group(1)) == 2  # both workers re-parented to the subreaper
         assert final.group(2) == "0"
-        assert "killed 3 leftover descendant process(es)" in proc.stderr
+        assert "killed 2 leftover descendant process(es)" in proc.stderr
         assert "time.sleep(300)" in proc.stderr
+    finally:
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="child subreaper is Linux-only")
+def test_reap_descendants_rescans_for_processes_forked_during_the_sweep():
+    worker = (
+        "import subprocess, sys, time\n"
+        "end = time.monotonic() + 0.3\n"
+        "while time.monotonic() < end:\n"
+        "    child = subprocess.Popen([sys.executable, '-c',"
+        " 'import time; time.sleep(300)'], start_new_session=True,"
+        " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "    print(child.pid, flush=True)\n"
+        "    time.sleep(0.01)\n"
+    )
+    script = _SWEEP_PREAMBLE + (
+        "pilot._become_subreaper()\n"
+        f"worker = subprocess.Popen([sys.executable, '-c', {worker!r}],"
+        " stdout=subprocess.PIPE, text=True)\n"
+        "first = int(worker.stdout.readline())\n"
+        "real_kill = os.kill\n"
+        "first_kill = [True]\n"
+        "def slow_kill(pid, sig):\n"
+        "    if first_kill[0]:\n"
+        "        first_kill[0] = False\n"
+        "        time.sleep(0.1)\n"
+        "    return real_kill(pid, sig)\n"
+        "pilot.os.kill = slow_kill\n"
+        "count = pilot._reap_descendants('t')\n"
+        "rest = worker.stdout.read().split()\n"
+        "pids = [worker.pid, first, *[int(x) for x in rest]]\n"
+        "print('PIDS=' + ' '.join(str(p) for p in pids), flush=True)\n"
+        "alive = 0\n"
+        "for pid in pids:\n"
+        "    try:\n"
+        "        os.kill(pid, 0)\n"
+        "    except ProcessLookupError:\n"
+        "        continue\n"
+        "    alive += 1\n"
+        "print(f'COUNT={count} ALIVE={alive}', flush=True)\n"
+    )
+    pids: list[int] = []
+    try:
+        proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                              text=True, timeout=60)
+        match = re.search(r"PIDS=([\d ]+)", proc.stdout)
+        if match:
+            pids = [int(x) for x in match.group(1).split()]
+        final = re.search(r"COUNT=(\d+) ALIVE=(\d+)", proc.stdout)
+        assert final, proc.stderr
+        assert final.group(2) == "0"
     finally:
         for pid in pids:
             try:
