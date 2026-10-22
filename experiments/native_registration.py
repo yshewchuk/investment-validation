@@ -93,7 +93,7 @@ class NativeRegistration:
 def prepare_native_registration(repository, spec, *, code_root, as_of_month, scope, event_ids,
              final_read=None, expected=None, magnitude_training_start=None, magnitude_labels_before=None,
              admission=None, magnitude_feature_snapshot_id=None, magnitude_history_start=None, magnitude_fit_model=None,
-             snapshot=None):
+             snapshot=None, extra_environment=None):
     """Prepare immutable registration/spec inputs without reserving or evaluating."""
     if not isinstance(spec, ExperimentSpec):
         raise fail("INVALID_EXPERIMENT_SPEC", "native registration requires an experiment specification")
@@ -162,7 +162,7 @@ def prepare_native_registration(repository, spec, *, code_root, as_of_month, sco
         "schema_version": "native_experiment_registration.v1.0",
         "spec_hash": spec.spec_hash, "execution_plan": plan.as_document(),
         "snapshot": to_document(snapshot), "scope": scope,
-        "source_closure": sources, "environment": environment_identity(1),
+        "source_closure": sources, "environment": {**environment_identity(1), **(extra_environment or {})},
     }
     if declaration is not None:
         document.update(schema_version="native_experiment_registration.v1.1",

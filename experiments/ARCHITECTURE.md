@@ -752,7 +752,9 @@ contracts/data/foundation/ops, `threadpoolctl`, the bounded staged-input reader 
 is compared with fixed-day 14 on the complete explicit cohort; seed zero/empty folds reject unsupported fitting declarations.
 The caller must supply an exact committed SnapshotRef; preparation never resolves
 a scope head. Metadata-only registration seals spec hash, plan, snapshot, cohort,
-holdout month/versions, source closure and single-thread numerical policy. Source
+holdout month/versions, source closure, single-thread numerical policy and the
+installed `threadpoolctl` version (`environment.thread_control`; a changed version
+refuses with EXPERIMENT_IDENTITY_CONFLICT). `run_runup` logs stage lines to stderr. Source
 identity describes on-disk files, not loaded-bytecode attestation. The original spec
 is needed for replay because the seal retains its hash rather than hypothesis text.
 

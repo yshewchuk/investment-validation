@@ -1,4 +1,5 @@
 """Preregister and record one reconstructed-history RUNUP exit comparison."""
+import importlib.metadata, sys, time
 from pathlib import Path
 
 from threadpoolctl import threadpool_limits
@@ -39,7 +40,8 @@ def _prepare(repository, spec, request, *, snapshot, scope, as_of_month, expecte
         raise fail("INVALID_EXPERIMENT_SPEC", "RUNUP requires an explicit snapshot reference")
     return native.prepare_native_registration(repository, spec, code_root=ROOT,
         snapshot=snapshot, scope=scope, as_of_month=as_of_month,
-        event_ids=request["event_ids"], expected=expected)
+        event_ids=request["event_ids"], expected=expected,
+        extra_environment={"thread_control": {"threadpoolctl": importlib.metadata.version("threadpoolctl")}})
 
 
 def register_runup(conn, store, repository, spec, *, snapshot, scope, as_of_month, event_ids,
@@ -78,8 +80,13 @@ def run_runup(conn, store, repository, spec, *, snapshot, scope, as_of_month, ev
     recording = {"no_ledger": True, "max_evidence_bytes": max_evidence_bytes}
     saved = outcomes.replay_native_outcome(conn, store, registration, **recording)
     replayed = saved is not None
+    if replayed:
+        print("[runup] replayed terminal outcome", file=sys.stderr)
     if saved is None:
+        print(f"[runup] comparing {len(request['event_ids'])} events, 1 candidate + control, "
+              f"snapshot={snapshot.snapshot_id}", file=sys.stderr)
         # Everything above is admission. Only this call attempts the comparison.
+        started = time.monotonic()
         try:
             with threadpool_limits(limits=1):
                 report = compare_runup_exits(repository, snapshot, as_of_month=as_of_month,
@@ -87,9 +94,13 @@ def run_runup(conn, store, repository, spec, *, snapshot, scope, as_of_month, ev
         except (OpsError, DataError) as error:
             if error.code not in outcomes.STAGES:
                 raise
+            print(f"[runup] comparison finished in {time.monotonic() - started:.1f}s outcome=refused",
+                  file=sys.stderr)
             saved = outcomes.publish_native_outcome(conn, store, registration,
                 problem=error.problem, attempted=True, **recording)
         else:
+            print(f"[runup] comparison finished in {time.monotonic() - started:.1f}s outcome=report",
+                  file=sys.stderr)
             saved = outcomes.publish_native_outcome(conn, store, registration,
                 report=canonical_json(report), attempted=True, **recording)
     return {"variant_id": registration.variant_id, "run_id": registration.run_id,

@@ -1,4 +1,5 @@
 """Registration/recording boundaries over committed synthetic daily chains."""
+import importlib.metadata
 import json
 import os
 import sqlite3
@@ -406,6 +407,27 @@ def test_environment_drift_cannot_reuse_existing_terminal(source, monkeypatch):
     assert {**invoke(source, study.run_runup), "replayed": False} == result
 
 
+def test_threadpoolctl_version_is_registered_and_drift_refuses_the_run(source, monkeypatch):
+    pinned = importlib.metadata.version("threadpoolctl")
+    registration = invoke(source, study.register_runup)
+    stored = json.loads(source[2].read_verified(
+        from_document(ArtifactRef, evidence(source)[0]["native_registration"])))
+    assert stored["environment"]["thread_control"]["threadpoolctl"] == pinned
+    assert registration.document["environment"]["thread_control"]["threadpoolctl"] == pinned
+    real_version = importlib.metadata.version
+    monkeypatch.setattr(study.importlib.metadata, "version",
+        lambda name: "0.0.0" if name == "threadpoolctl" else real_version(name))
+    before = evidence(source)
+    with monkeypatch.context() as patch:
+        patch.setattr(outcomes, "replay_native_outcome", forbid)
+        patch.setattr(study, "compare_runup_exits", forbid)
+        with pytest.raises(OpsError) as caught:
+            invoke(source, study.run_runup)
+        assert_refusal(caught.value, "EXPERIMENT_IDENTITY_CONFLICT",
+                       "native execution inputs changed before population admission")
+    assert evidence(source) == before
+
+
 def test_late_missing_leg_records_whole_candidate_failure_and_replays(source, monkeypatch):
     rows = [row for row in chain_rows() if not (row["obs_date"] == DATES[8]
             and row["strike"] == 100 and row["right"] == "P")]
@@ -494,8 +516,9 @@ def test_cli_register_run_and_replay_emit_one_document(source, tmp_path, capsys,
         ids = [second] if cohort == "second" else [second, EVENT_ID]
     binding = dict(snapshot=snapshot, scope=scope, as_of_month=month, event_ids=ids)
     args = cli_arguments(source, tmp_path, **binding)
-    expected_registration, _ = native.prepare_native_registration(source[3], specification(),
-        code_root=study.ROOT, **binding)
+    spec = specification()
+    expected_registration, _ = study._prepare(source[3], spec, study.comparison_request(spec, ids),
+        snapshot=snapshot, scope=scope, as_of_month=month)
     request = {"event_ids": sorted(ids), "fill_alpha": 0.5,
                "threshold_units": "entry_debit_fraction",
                "arms": [{"arm_id": "candidate", "target_pnl": 0.25, "stop_pnl": -0.5}]}

@@ -36,9 +36,9 @@ def source(tmp_path):
 
 
 def prepare(source, **changes):
-    return native.prepare_native_registration(source[3], support.specification(), code_root=study.ROOT,
-        **{"snapshot": source[4], "scope": "shadow", "as_of_month": "2025-01",
-           "event_ids": [EVENT_ID], **changes})
+    spec = support.specification()
+    params = {"snapshot": source[4], "scope": "shadow", "as_of_month": "2025-01", **changes}
+    return study._prepare(source[3], spec, study.comparison_request(spec, [EVENT_ID]), **params)
 
 
 INVALID = [None, 0, -1, True, False, 1.0, "1", float("nan"), float("inf"), 2**62]
