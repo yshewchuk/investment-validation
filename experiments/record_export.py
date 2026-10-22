@@ -8,6 +8,7 @@ before the first write.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from engine.v2.ops.errors import fail
@@ -25,6 +27,21 @@ from experiments.lib import FIRST_NUMBER, parse_experiment_id, slugify
 
 MAX_JSON_BYTES = 1_000_000
 _NUM_DIR_RE = re.compile(r"^EXP-(\d+)_")
+
+
+@contextmanager
+def _export_lock(root: Path):
+    """Serialize export_run_record: one exporter preflights and publishes at a time."""
+    root.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(root / ".record_export.lock"), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def _dump(obj) -> bytes:
@@ -387,166 +404,167 @@ def export_run_record(
     bytes on disk for every file this call writes.
     """
     root = Path(experiments_root)
-    _check_experiment_id(experiment_id)
-    if not isinstance(slug, str):
-        raise fail(
-            "INVALID_EXPERIMENT_SPEC",
-            f"slug must be a string, got {type(slug).__name__}",
-        )
-    _check_number(exp_number, experiment_id)
-    linked = _linked_number(root, experiment_id)
-    if linked is not None and linked != exp_number:
-        raise fail(
-            "EXPERIMENT_IDENTITY_CONFLICT",
-            f"{experiment_id} is linked to EXP-{linked:03d} "
-            f"but this export targets EXP-{exp_number:03d}",
-        )
-    if report_text is not None:
-        report_text = _cap_report(report_text)
-    for folder in _folders_with_number(root, exp_number):
-        _check_number_folder(folder, exp_number, experiment_id)
-    folder = _resolve_folder(root, exp_number, slugify(slug))
-    if folder.is_symlink():
-        raise fail("EXPERIMENT_IDENTITY_CONFLICT", f"run folder {folder} is a symlink; refusing to export into it")
-    results = folder / "results"
-    if results.is_symlink():
-        raise fail("EXPERIMENT_IDENTITY_CONFLICT", f"results folder {results} is a symlink; refusing to export into it")
+    with _export_lock(root):
+        _check_experiment_id(experiment_id)
+        if not isinstance(slug, str):
+            raise fail(
+                "INVALID_EXPERIMENT_SPEC",
+                f"slug must be a string, got {type(slug).__name__}",
+            )
+        _check_number(exp_number, experiment_id)
+        linked = _linked_number(root, experiment_id)
+        if linked is not None and linked != exp_number:
+            raise fail(
+                "EXPERIMENT_IDENTITY_CONFLICT",
+                f"{experiment_id} is linked to EXP-{linked:03d} "
+                f"but this export targets EXP-{exp_number:03d}",
+            )
+        if report_text is not None:
+            report_text = _cap_report(report_text)
+        for folder in _folders_with_number(root, exp_number):
+            _check_number_folder(folder, exp_number, experiment_id)
+        folder = _resolve_folder(root, exp_number, slugify(slug))
+        if folder.is_symlink():
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", f"run folder {folder} is a symlink; refusing to export into it")
+        results = folder / "results"
+        if results.is_symlink():
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", f"results folder {results} is a symlink; refusing to export into it")
 
-    trimmed: list[str] = []
-    docs = {
-        "spec.json": spec,
-        "request.json": request,
-        "event_ids.json": event_ids,
-        "outcome.json": outcome,
-    }
-    proposed: dict[Path, bytes] = {}
-    for name, doc in docs.items():
+        trimmed: list[str] = []
+        docs = {
+            "spec.json": spec,
+            "request.json": request,
+            "event_ids.json": event_ids,
+            "outcome.json": outcome,
+        }
+        proposed: dict[Path, bytes] = {}
+        for name, doc in docs.items():
+            try:
+                raw, was_trimmed = _encode_doc(doc)
+            except (TypeError, ValueError) as exc:
+                raise fail(
+                    "INVALID_EXPERIMENT_SPEC",
+                    f"cannot JSON-encode {name}: {exc}",
+                ) from exc
+            if was_trimmed and name not in trimmed:
+                trimmed.append(name)
+            proposed[results / name] = raw
+        proposed[folder / "REPORT.md"] = _report_md(
+            exp_number, experiment_id, outcome, report_text
+        ).encode("utf-8")
+
+        # Preflight: read every existing target, conflict or keep before any write.
+        wrote = False
+        kept_differing = False
+        persisted: dict[Path, bytes] = {}
+        for path, data in proposed.items():
+            if not os.path.lexists(path):
+                persisted[path] = data
+                continue
+            existing = _read_capped(path)
+            if existing is None or len(existing) > MAX_JSON_BYTES:
+                raise fail(
+                    "EXPERIMENT_IDENTITY_CONFLICT",
+                    f"existing {path} is unreadable, not a regular file, or oversized",
+                )
+            if existing != data:
+                kept_differing = True
+                print(
+                    f"WARNING: record_export keeping existing {path} (differs from proposed export)",
+                    file=sys.stderr,
+                )
+            persisted[path] = existing
+
+        manifest_path = results / "export_manifest.json"
+        existing_manifest_doc = None
         try:
-            raw, was_trimmed = _encode_doc(doc)
+            manifest_data = _manifest_bytes(
+                experiment_id,
+                exp_number,
+                recording_mode,
+                trimmed,
+                {name: persisted[results / name] for name in docs},
+            )
         except (TypeError, ValueError) as exc:
             raise fail(
                 "INVALID_EXPERIMENT_SPEC",
-                f"cannot JSON-encode {name}: {exc}",
+                f"cannot JSON-encode export_manifest.json: {exc}",
             ) from exc
-        if was_trimmed and name not in trimmed:
-            trimmed.append(name)
-        proposed[results / name] = raw
-    proposed[folder / "REPORT.md"] = _report_md(
-        exp_number, experiment_id, outcome, report_text
-    ).encode("utf-8")
-
-    # Preflight: read every existing target, conflict or keep before any write.
-    wrote = False
-    kept_differing = False
-    persisted: dict[Path, bytes] = {}
-    for path, data in proposed.items():
-        if not os.path.lexists(path):
-            persisted[path] = data
-            continue
-        existing = _read_capped(path)
-        if existing is None or len(existing) > MAX_JSON_BYTES:
-            raise fail(
-                "EXPERIMENT_IDENTITY_CONFLICT",
-                f"existing {path} is unreadable, not a regular file, or oversized",
-            )
-        if existing != data:
-            kept_differing = True
-            print(
-                f"WARNING: record_export keeping existing {path} (differs from proposed export)",
-                file=sys.stderr,
-            )
-        persisted[path] = existing
-
-    manifest_path = results / "export_manifest.json"
-    existing_manifest_doc = None
-    try:
-        manifest_data = _manifest_bytes(
-            experiment_id,
-            exp_number,
-            recording_mode,
-            trimmed,
-            {name: persisted[results / name] for name in docs},
-        )
-    except (TypeError, ValueError) as exc:
-        raise fail(
-            "INVALID_EXPERIMENT_SPEC",
-            f"cannot JSON-encode export_manifest.json: {exc}",
-        ) from exc
-    if not os.path.lexists(manifest_path):
-        persisted[manifest_path] = manifest_data
-    else:
-        existing = _read_capped(manifest_path)
-        if existing is None or len(existing) > MAX_JSON_BYTES:
-            raise fail(
-                "EXPERIMENT_IDENTITY_CONFLICT",
-                f"existing {manifest_path} is unreadable, not a regular file, or oversized",
-            )
-        try:
-            manifest_doc = json.loads(existing)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise fail(
-                "EXPERIMENT_IDENTITY_CONFLICT",
-                f"existing {manifest_path} is not valid JSON: {exc}",
-            ) from exc
-        if not isinstance(manifest_doc, dict):
-            raise fail(
-                "EXPERIMENT_IDENTITY_CONFLICT",
-                f"existing {manifest_path} is not a JSON object",
-            )
-        existing_manifest_doc = manifest_doc
-        manifest_files = manifest_doc.get("files")
-        if not isinstance(manifest_files, dict):
-            raise fail(
-                "EXPERIMENT_IDENTITY_CONFLICT",
-                f"existing {manifest_path} has no files object",
-            )
-        for name in docs:
-            if name not in manifest_files:
+        if not os.path.lexists(manifest_path):
+            persisted[manifest_path] = manifest_data
+        else:
+            existing = _read_capped(manifest_path)
+            if existing is None or len(existing) > MAX_JSON_BYTES:
                 raise fail(
                     "EXPERIMENT_IDENTITY_CONFLICT",
-                    f"existing {manifest_path} does not list {name}",
+                    f"existing {manifest_path} is unreadable, not a regular file, or oversized",
                 )
-            doc_path = results / name
-            if not os.path.lexists(doc_path):
+            try:
+                manifest_doc = json.loads(existing)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 raise fail(
                     "EXPERIMENT_IDENTITY_CONFLICT",
-                    f"existing {manifest_path} lists {name} but {doc_path} is missing",
-                )
-            digest = hashlib.sha256(persisted[doc_path]).hexdigest()
-            if digest != manifest_files[name]:
+                    f"existing {manifest_path} is not valid JSON: {exc}",
+                ) from exc
+            if not isinstance(manifest_doc, dict):
                 raise fail(
                     "EXPERIMENT_IDENTITY_CONFLICT",
-                    f"replay mismatch for {doc_path}: persisted sha256 {digest} "
-                    f"!= manifest {manifest_files[name]!r}",
+                    f"existing {manifest_path} is not a JSON object",
                 )
-        if existing != manifest_data:
-            kept_differing = True
-            print(
-                f"WARNING: record_export keeping existing {manifest_path} (differs from proposed export)",
-                file=sys.stderr,
-            )
-        persisted[manifest_path] = existing
+            existing_manifest_doc = manifest_doc
+            manifest_files = manifest_doc.get("files")
+            if not isinstance(manifest_files, dict):
+                raise fail(
+                    "EXPERIMENT_IDENTITY_CONFLICT",
+                    f"existing {manifest_path} has no files object",
+                )
+            for name in docs:
+                if name not in manifest_files:
+                    raise fail(
+                        "EXPERIMENT_IDENTITY_CONFLICT",
+                        f"existing {manifest_path} does not list {name}",
+                    )
+                doc_path = results / name
+                if not os.path.lexists(doc_path):
+                    raise fail(
+                        "EXPERIMENT_IDENTITY_CONFLICT",
+                        f"existing {manifest_path} lists {name} but {doc_path} is missing",
+                    )
+                digest = hashlib.sha256(persisted[doc_path]).hexdigest()
+                if digest != manifest_files[name]:
+                    raise fail(
+                        "EXPERIMENT_IDENTITY_CONFLICT",
+                        f"replay mismatch for {doc_path}: persisted sha256 {digest} "
+                        f"!= manifest {manifest_files[name]!r}",
+                    )
+            if existing != manifest_data:
+                kept_differing = True
+                print(
+                    f"WARNING: record_export keeping existing {manifest_path} (differs from proposed export)",
+                    file=sys.stderr,
+                )
+            persisted[manifest_path] = existing
 
-    # The returned trimmed list describes the PERSISTED record: an existing
-    # manifest read during preflight supplies it; otherwise use the newly
-    # computed list for a manifest this call is about to write.
-    returned_trimmed = trimmed
-    if existing_manifest_doc is not None and isinstance(
-        existing_manifest_doc.get("trimmed"), list
-    ):
-        returned_trimmed = existing_manifest_doc["trimmed"]
+        # The returned trimmed list describes the PERSISTED record: an existing
+        # manifest read during preflight supplies it; otherwise use the newly
+        # computed list for a manifest this call is about to write.
+        returned_trimmed = trimmed
+        if existing_manifest_doc is not None and isinstance(
+            existing_manifest_doc.get("trimmed"), list
+        ):
+            returned_trimmed = existing_manifest_doc["trimmed"]
 
-    # Write only missing files (folder/results dirs created lazily after preflight).
-    results.mkdir(parents=True, exist_ok=True)
-    for path, data in persisted.items():
-        if not os.path.lexists(path):
-            _write_new(path, data)
-            wrote = True
-    return {
-        "dir": str(folder),
-        "status": "written" if wrote and not kept_differing else "unchanged",
-        "trimmed": returned_trimmed,
-    }
+        # Write only missing files (folder/results dirs created lazily after preflight).
+        results.mkdir(parents=True, exist_ok=True)
+        for path, data in persisted.items():
+            if not os.path.lexists(path):
+                _write_new(path, data)
+                wrote = True
+        return {
+            "dir": str(folder),
+            "status": "written" if wrote and not kept_differing else "unchanged",
+            "trimmed": returned_trimmed,
+        }
 
 
 def _git_commit_id() -> str | None:
@@ -617,6 +635,8 @@ def export_native_run(
             "commit_id": _git_commit_id(),
             "source_closure_hash": source_closure_hash,
             "environment": document.get("environment"),
+            "magnitude_request": document.get("magnitude_request"),
+            "magnitude_execution": document.get("magnitude_execution"),
         },
         report_text=report_text,
         recording_mode=saved["receipt"].get("recording_mode"),

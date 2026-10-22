@@ -104,6 +104,12 @@ def main(argv=None):
             "scope": args.scope,
             "event_ids": args.event_id,
             "no_ledger": args.no_ledger,
+            "target": args.target,
+            "magnitude_training_start": args.magnitude_training_start,
+            "magnitude_labels_before": args.magnitude_labels_before,
+            "magnitude_model": args.magnitude_model,
+            "magnitude_feature_snapshot_id": args.magnitude_feature_snapshot_id,
+            "magnitude_history_start": args.magnitude_history_start,
         }
         if saved["outcome"]["failure_code"]:
             record = "skipped"

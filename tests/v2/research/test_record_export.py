@@ -8,6 +8,7 @@ import resource
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from fnmatch import fnmatch
 from pathlib import Path
 from types import SimpleNamespace
@@ -287,6 +288,8 @@ def test_refusal_case_writes_outcome_with_failure_code_and_replayed(tmp_path):
         "event_ids": [],
         "source_closure": {},
         "environment": {},
+        "magnitude_request": {"magnitude_model": "history_mean"},
+        "magnitude_execution": {"magnitude_request": "exec", "shards": 2},
     })
     saved = {
         "outcome": {"failure_code": "HOLDOUT_ACCESS_DENIED"},
@@ -306,6 +309,22 @@ def test_refusal_case_writes_outcome_with_failure_code_and_replayed(tmp_path):
     outcome = json.loads((folder / "results" / "outcome.json").read_bytes())
     assert outcome["failure_code"] == "HOLDOUT_ACCESS_DENIED"
     assert outcome["replayed"] is False
+    assert outcome["magnitude_request"] == {"magnitude_model": "history_mean"}
+    assert outcome["magnitude_execution"] == {"magnitude_request": "exec", "shards": 2}
+
+
+def test_concurrent_exports_leave_manifest_consistent_with_disk(tmp_path):
+    def export(i):
+        return _export(tmp_path, exp_number=101, experiment_id="x",
+                       outcome={"failure_code": None, "writer": i})
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(export, range(2)))
+    assert all(result["dir"] for result in results)
+    results_dir = tmp_path / "EXP-101_x" / "results"
+    man = json.loads((results_dir / "export_manifest.json").read_bytes())
+    for name, digest in man["files"].items():
+        assert digest == hashlib.sha256((results_dir / name).read_bytes()).hexdigest(), name
+    assert (tmp_path / ".record_export.lock").is_file()
 
 
 class _Registration:

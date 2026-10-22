@@ -819,7 +819,13 @@ def test_first_successful_run_exports_exp_record_and_report(source, capsys):
     exported = Path(output["record_export"]["dir"])
     request = json.loads((exported / "results" / "request.json").read_text())
     assert request == {"action": "run", "as_of_month": MONTH, "scope": "shadow",
-                       "event_ids": None, "no_ledger": True}
+                       "event_ids": None, "no_ledger": True,
+                       "target": "positive_move",
+                       "magnitude_training_start": None,
+                       "magnitude_labels_before": None,
+                       "magnitude_model": None,
+                       "magnitude_feature_snapshot_id": None,
+                       "magnitude_history_start": None}
     assert (exported / "REPORT.md").read_text().startswith("# EXP-101")
 
 
