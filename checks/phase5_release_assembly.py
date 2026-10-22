@@ -439,14 +439,21 @@ def classify_prior(release_root: Path, prior_release_id) -> PriorClass:
         catalog = _load_catalog(catalog_path(Path(release_root), prior_release_id),
                                 prior_release_id, "PRIOR_MISMATCH",
                                 "prior catalog could not be read or validated")
-    except ReleaseAssemblyRefusal:
-        return PriorClass(PRIOR_DAMAGED, "the prior catalog could not be read or validated")
-    except _STRAY_ERRORS:
+    except (ReleaseAssemblyRefusal, *_STRAY_ERRORS):
         return PriorClass(PRIOR_DAMAGED, "the prior catalog could not be read or validated")
     if catalog is None:
         if prior_release_id.startswith("pools-"):
             return PriorClass(PRIOR_DAMAGED, "a pools-* release always has a catalog")
         return PriorClass(PRIOR_NO_POOL_CATALOG, "the prior release has no catalog")
+    try:
+        store = deployment_root(Path(release_root))
+        verify_staged(store, prior_release_id)
+        staged = deployment.resolve_release(store, prior_release_id)
+        if staged.deployment_id != catalog.get("deployment_id"):
+            return PriorClass(PRIOR_DAMAGED, "the prior catalog disagrees with its staged release")
+    except (ReleaseAssemblyRefusal, ReleaseLayoutError, deployment.DeploymentError, OSError,
+            *_STRAY_ERRORS):
+        return PriorClass(PRIOR_DAMAGED, "the prior catalog disagrees with its staged release")
     sources = catalog.get("sources")
     if isinstance(sources, dict) and "pool_cutoff" not in sources:
         return PriorClass(PRIOR_NO_POOL_CATALOG, "the prior catalog has no pool_cutoff")
@@ -455,11 +462,8 @@ def classify_prior(release_root: Path, prior_release_id) -> PriorClass:
                    "prior pool_cutoff is not an ISO date")
         _prior_pool_rows(catalog.get("members"))
         _, carried = prior_carry_set(release_root, prior_release_id)
-        _verify_carried_rows(deployment_root(Path(release_root)), catalog)
-        _verify_objects(deployment_root(Path(release_root)), carried)
-        staged = deployment.resolve_release(deployment_root(Path(release_root)), prior_release_id)
-        if staged.deployment_id != catalog.get("deployment_id"):
-            return PriorClass(PRIOR_DAMAGED, "the prior catalog disagrees with its staged release")
+        _verify_carried_rows(store, catalog)
+        _verify_objects(store, carried)
     except (ReleaseAssemblyRefusal, deployment.DeploymentError, OSError, *_STRAY_ERRORS):
         return PriorClass(PRIOR_DAMAGED, "the prior catalog is malformed")
     return PriorClass(PRIOR_USABLE, "the prior catalog has a pool_cutoff")

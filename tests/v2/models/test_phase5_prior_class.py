@@ -14,60 +14,42 @@ def _cls(root, prior_release_id):
     return assembly.classify_prior(root, prior_release_id)
 
 
-def _kind(root, prior_release_id):
-    return _cls(root, prior_release_id).kind
-
-
-_REASONS = {
-    assembly.PRIOR_NONE: {"no prior release was requested"},
-    assembly.PRIOR_NO_POOL_CATALOG: {
-        "the prior release has no catalog",
-        "the prior catalog has no pool_cutoff",
-    },
-    assembly.PRIOR_USABLE: {"the prior catalog has a pool_cutoff"},
-    assembly.PRIOR_DAMAGED: {
-        "the prior catalog could not be read or validated",
-        "the prior catalog disagrees with its staged release",
-        "the prior catalog is malformed",
-        "a pools-* release always has a catalog",
-    },
-}
-
-
 def test_absent_prior_id_is_none(tmp_path):
     cls = _cls(tmp_path, None)
     assert cls.kind == assembly.PRIOR_NONE
-    assert cls.reason in _REASONS[assembly.PRIOR_NONE]
+    assert cls.reason == "no prior release was requested"
 
 
 def test_missing_pools_catalog_is_damaged(tmp_path):
     cls = _cls(tmp_path, "pools-2026-01-01")
     assert cls.kind == assembly.PRIOR_DAMAGED
-    assert cls.reason in _REASONS[assembly.PRIOR_DAMAGED]
+    assert cls.reason == "a pools-* release always has a catalog"
 
 
 def test_missing_other_catalog_is_no_pool_catalog(tmp_path):
     cls = _cls(tmp_path, "someone-else")
     assert cls.kind == assembly.PRIOR_NO_POOL_CATALOG
-    assert cls.reason in _REASONS[assembly.PRIOR_NO_POOL_CATALOG]
+    assert cls.reason == "the prior release has no catalog"
 
 
 def test_unsafe_prior_id_is_damaged(tmp_path):
-    assert _kind(tmp_path, "../evil") == assembly.PRIOR_DAMAGED
+    cls = _cls(tmp_path, "../evil")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog could not be read or validated"
 
 
 def test_catalog_without_pool_cutoff_is_no_pool_catalog(tmp_path):
     _stage_prior(tmp_path, prior_sources={"panel_sha": "x"})
     cls = _cls(tmp_path, "prior1")
     assert cls.kind == assembly.PRIOR_NO_POOL_CATALOG
-    assert cls.reason in _REASONS[assembly.PRIOR_NO_POOL_CATALOG]
+    assert cls.reason == "the prior catalog has no pool_cutoff"
 
 
 def test_catalog_with_pool_cutoff_is_usable(tmp_path):
     _stage_prior(tmp_path)
     cls = _cls(tmp_path, "prior1")
     assert cls.kind == assembly.PRIOR_USABLE
-    assert cls.reason in _REASONS[assembly.PRIOR_USABLE]
+    assert cls.reason == "the prior catalog has a pool_cutoff"
 
 
 def test_symlinked_catalog_is_damaged(tmp_path):
@@ -77,14 +59,18 @@ def test_symlinked_catalog_is_damaged(tmp_path):
     target.write_bytes(path.read_bytes())
     path.unlink()
     path.symlink_to(target)
-    assert _kind(tmp_path, "prior1") == assembly.PRIOR_DAMAGED
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog could not be read or validated"
 
 
 def test_oversize_catalog_is_damaged(tmp_path, monkeypatch):
     _stage_prior(tmp_path)
     path = phase5_release.catalog_path(tmp_path, "prior1")
     monkeypatch.setattr(assembly, "MAX_CATALOG_BYTES", path.stat().st_size - 1)
-    assert _kind(tmp_path, "prior1") == assembly.PRIOR_DAMAGED
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog could not be read or validated"
 
 
 def test_unparseable_catalog_is_damaged(tmp_path):
@@ -92,19 +78,23 @@ def test_unparseable_catalog_is_damaged(tmp_path):
     phase5_release.catalog_path(tmp_path, "prior1").write_bytes(b"{not json")
     cls = _cls(tmp_path, "prior1")
     assert cls.kind == assembly.PRIOR_DAMAGED
-    assert cls.reason in _REASONS[assembly.PRIOR_DAMAGED]
+    assert cls.reason == "the prior catalog could not be read or validated"
 
 
 def test_wrong_release_id_is_damaged(tmp_path):
     _, body = _stage_prior(tmp_path)
     phase5_release.write_catalog(phase5_release.catalog_path(tmp_path, "prior1"),
                                  {**body, "release_id": "other"})
-    assert _kind(tmp_path, "prior1") == assembly.PRIOR_DAMAGED
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog could not be read or validated"
 
 
 def test_pool_cutoff_not_a_date_is_damaged(tmp_path):
     _stage_prior(tmp_path, prior_sources={"pool_cutoff": "not-a-date"})
-    assert _kind(tmp_path, "prior1") == assembly.PRIOR_DAMAGED
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog is malformed"
 
 
 def _rewrite(path, mutate):
@@ -119,14 +109,18 @@ def test_empty_members_is_damaged(tmp_path):
     _stage_prior(tmp_path)
     _rewrite(phase5_release.catalog_path(tmp_path, "prior1"),
              lambda body: body.__setitem__("members", []))
-    assert _kind(tmp_path, "prior1") == assembly.PRIOR_DAMAGED
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog is malformed"
 
 
 def test_sources_not_a_dict_is_damaged(tmp_path):
     _stage_prior(tmp_path)
     _rewrite(phase5_release.catalog_path(tmp_path, "prior1"),
              lambda body: body.__setitem__("sources", "not-a-mapping"))
-    assert _kind(tmp_path, "prior1") == assembly.PRIOR_DAMAGED
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog is malformed"
 
 
 def test_malformed_object_row_is_damaged(tmp_path):
@@ -137,14 +131,38 @@ def test_malformed_object_row_is_damaged(tmp_path):
         row["objects"][0]["content_hash"] = "bad"
 
     _rewrite(phase5_release.catalog_path(tmp_path, "prior1"), corrupt_pool_row)
-    assert _kind(tmp_path, "prior1") == assembly.PRIOR_DAMAGED
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog is malformed"
+
+
+def test_corrupt_untouched_prior_object_is_damaged(tmp_path):
+    _stage_prior(tmp_path)
+    catalog = json.loads(phase5_release.catalog_path(tmp_path, "prior1").read_bytes())
+    row = next(r for r in catalog["members"] if r["member_id"] == "payoff_line:STR-THRU")
+    obj = row["objects"][0]
+    (phase5_release.deployment_root(tmp_path) / obj["path"]).write_bytes(b"tampered bytes")
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog is malformed"
 
 
 def test_deployment_id_mismatch_is_damaged(tmp_path):
     _stage_prior(tmp_path)
     _rewrite(phase5_release.catalog_path(tmp_path, "prior1"),
              lambda body: body.__setitem__("deployment_id", "other-deployment"))
-    assert _kind(tmp_path, "prior1") == assembly.PRIOR_DAMAGED
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog disagrees with its staged release"
+
+
+def test_no_pool_cutoff_catalog_with_wrong_deployment_id_is_damaged(tmp_path):
+    _stage_prior(tmp_path, prior_sources={"panel_sha": "x"})
+    _rewrite(phase5_release.catalog_path(tmp_path, "prior1"),
+             lambda body: body.__setitem__("deployment_id", "other-deployment"))
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog disagrees with its staged release"
 
 
 def _snapshot(root):

@@ -205,7 +205,7 @@ and positional-lag behavior. Nonpositive prices produce missing move labels.
   pool/chooser object as `carried=True`, recorded at the prior `sources.pool_cutoff`
   (`PRIOR_MISMATCH` on a missing prior or structurally malformed rows, object keys or `pool_cutoff`;
   wrong-typed object fields are not checked here and refuse later as `POOL_SET_MISMATCH`, or `CHOOSER_MISMATCH` for the chooser).
-- `classify_prior(release_root, prior_release_id) -> PriorClass` — read-only; kind `NONE`/`NO_POOL_CATALOG`/`USABLE`/`DAMAGED` with a fixed reason (§2.2.2). `USABLE` needs a valid catalog with an ISO `pool_cutoff`, well-formed pool rows, objects whose hash and size verify, and a `deployment_id` equal to the staged release's.
+- `classify_prior(release_root, prior_release_id) -> PriorClass` — read-only; kind `NONE`/`NO_POOL_CATALOG`/`USABLE`/`DAMAGED` with a fixed reason (§2.2.2). Every present catalog (with or without `pool_cutoff`) must verify against its staged release and `deployment_id`; a legacy catalog without `pool_cutoff` is not checked for pool rows or objects, which it need not have. `USABLE` needs a valid catalog with an ISO `pool_cutoff`, well-formed pool rows, objects whose hash and size verify, and a `deployment_id` equal to the staged release's.
 - `carry_forward_release(release_root, *, prior_release_id, release_id, inventory, outputs, chooser, cutoff) -> Path`
   — verifies the prior staged release, untouched rows and supplied objects on disk,
   re-stages the prior bindings under the new `release_id` (`deployment.stage_release`),
