@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from checks import phase5_release_assembly as assembly
 from engine.v2.foundation import content_hash
 from engine.v2.models import deployment
@@ -207,6 +209,47 @@ def test_negative_object_bytes_is_damaged(tmp_path):
     assert cls.reason == "the prior catalog is malformed"
 
 
+@pytest.mark.parametrize("value", [True, 5.0, -1])
+def test_untouched_row_bool_or_float_bytes_is_damaged(tmp_path, value):
+    _stage_prior(tmp_path)
+
+    def corrupt_untouched_row(body):
+        row = next(r for r in body["members"] if r["member_id"] == "payoff_line:STR-THRU")
+        row["objects"][0]["bytes"] = value
+
+    _rewrite(phase5_release.catalog_path(tmp_path, "prior1"), corrupt_untouched_row)
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog is malformed"
+
+
+@pytest.mark.parametrize("value", [True, 2.5])
+def test_non_int_pool_object_bytes_is_damaged(tmp_path, value):
+    _stage_prior(tmp_path)
+
+    def corrupt_pool_row(body):
+        row = next(r for r in body["members"] if r["member_id"] == "paired_residual_pool")
+        row["objects"][0]["bytes"] = value
+
+    _rewrite(phase5_release.catalog_path(tmp_path, "prior1"), corrupt_pool_row)
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_DAMAGED
+    assert cls.reason == "the prior catalog is malformed"
+
+
+def test_legacy_catalog_without_pool_rows_is_no_pool_catalog(tmp_path):
+    _stage_prior(tmp_path, prior_sources={"panel_sha": "x"})
+
+    def keep_only_untouched_row(body):
+        body["members"] = [row for row in body["members"]
+                           if row["member_id"] == "payoff_line:STR-THRU"]
+
+    _rewrite(phase5_release.catalog_path(tmp_path, "prior1"), keep_only_untouched_row)
+    cls = _cls(tmp_path, "prior1")
+    assert cls.kind == assembly.PRIOR_NO_POOL_CATALOG
+    assert cls.reason == "the prior catalog has no pool_cutoff"
+
+
 def test_corrupt_model_binding_payload_is_damaged(tmp_path):
     _stage_prior(tmp_path)
     store = phase5_release.deployment_root(tmp_path)
@@ -241,8 +284,13 @@ def test_no_pool_cutoff_catalog_with_wrong_deployment_id_is_damaged(tmp_path):
 
 
 def _snapshot(root):
-    return {str(p.relative_to(root)): p.read_bytes()
-            for p in sorted(root.rglob("*")) if p.is_file()}
+    snapshot = {}
+    for p in sorted(root.rglob("*")):
+        if p.is_dir():
+            snapshot[str(p.relative_to(root)) + "/"] = b"<dir>"
+        else:
+            snapshot[str(p.relative_to(root))] = p.read_bytes()
+    return snapshot
 
 
 def test_classify_prior_writes_nothing(tmp_path):

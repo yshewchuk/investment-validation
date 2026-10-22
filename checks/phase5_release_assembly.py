@@ -395,11 +395,15 @@ def _verify_carried_rows(store: Path, prior_catalog: dict) -> None:
         for obj in row.get("objects", ()):
             if not isinstance(obj, dict) or not _content_hash_valid(obj.get("content_hash")):
                 raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "a carried row object is malformed")
+            claimed_bytes = obj.get("bytes")
+            if (not isinstance(claimed_bytes, int) or isinstance(claimed_bytes, bool)
+                    or claimed_bytes < 0):
+                raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "a carried row object is malformed")
             content_hash = obj["content_hash"]
             data = _read_regular(
                 store / object_relpath(content_hash), MAX_OBJECT_BYTES, "PRIOR_MISMATCH",
                 "a carried row object is missing or unreadable")
-            if sha256_bytes(data) != content_hash or len(data) != obj.get("bytes"):
+            if sha256_bytes(data) != content_hash or len(data) != claimed_bytes:
                 raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "a carried row object is corrupt")
 
 
