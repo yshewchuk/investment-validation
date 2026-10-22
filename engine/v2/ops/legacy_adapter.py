@@ -308,7 +308,11 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
     Standalone callers retain the legacy event/inventory universe. Nightly
     callers supply their scoring tickers and source root: only those names
     plus the calendar dependency are daily targets, without consulting a
-    separately maintained universe or process-global data roots.
+    separately maintained universe or process-global data roots. A real run
+    also refreshes the legacy ``^GSPC`` daily series through
+    ``engine.data.pulls.gspc_refresh`` -- into the same source root when one
+    is given, else ``engine.paths.GSPC_DAILY`` -- and reports its outcome as
+    the extra ``gspc_daily`` key next to the unchanged ``plan``/``report``.
     """
     from engine.data.pulls.price_refresh import (
         load_events,
@@ -350,8 +354,26 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
                             always_daily=(*planned_tickers, CALENDAR_TICKER))
     if dry_run:
         return {"plan": plan, "report": None}
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
     from engine.data.fetch import Fetcher
-    return {"plan": plan, "report": run_refresh(plan, Fetcher(root=fetch_root))}
+    from engine.data.pulls.gspc_refresh import refresh_gspc_daily
+
+    # One Fetcher for both crossings: the planned refresh and the ^GSPC pull
+    # share the rooted Tier-1 cache and its throttle/backoff.
+    fetcher = Fetcher(root=fetch_root)
+    report = run_refresh(plan, fetcher)
+    if source_root is not None:
+        gspc_path = (Path(source_root) / "earnings_predictions" / "data" / "raw"
+                     / "polygon" / "gspc_daily.csv")
+    else:
+        from engine import paths
+        gspc_path = paths.GSPC_DAILY
+    gspc_daily = refresh_gspc_daily(
+        fetcher, gspc_path,
+        refetch_token=f"{datetime.now(timezone.utc).isoformat()}-{uuid4().hex}")
+    return {"plan": plan, "report": report, "gspc_daily": gspc_daily}
 
 
 def _write_action(root, name, value):
