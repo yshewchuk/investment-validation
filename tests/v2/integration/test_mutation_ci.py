@@ -391,16 +391,11 @@ def test_config_hash_refuses_an_unknown_module():
 
 # -- mutmut diagnostics on the ops_legacy CI shard (run 36001042208) ---------
 #
-# mutmut only logs "failed to collect stats. runner returned 1" and swallows the
-# child pytest output that explains it. The driver's remedy is mutmut's own
-# supported ``debug = true`` config (``mutmut_config_text``): it is full-run
-# verbosity, so it is on only when the environment opts in through
-# ``MUTATION_PILOT_DEBUG`` or on the ops_legacy CI shard by default. These are
-# mock tests: they never run mutmut or pytest; they check the config we hand
-# mutmut, that the environment and module name reach the generated ``setup.cfg``,
-# and that ``cmd_run`` keeps the real exit code without rerunning anything.
-# ops_catalog_state now shares that CI-only default; it is covered by separate
-# tests below so the ops_legacy ones above stay untouched.
+# Stats-only retained output is covered in test_mutation_stats_diagnostics.py.
+# This block covers mutmut's separate supported ``debug = true`` full-run
+# verbosity. ``MUTATION_PILOT_DEBUG`` overrides the CI-only defaults for
+# ops_legacy, ops_catalog_state and ops_runtime. Config tests mock the backend
+# and check generated ``setup.cfg``; driver tests preserve exits without reruns.
 
 DIAG_DEFAULTS = {"pytest_args": ["-p", "no:xdist", "-p", "no:cacheprovider"],
                  "deselect": ["tests/test_a.py::gate_needs_git"],
@@ -544,7 +539,7 @@ def test_ci_default_enables_debug_for_ops_catalog_state_setup_cfg(tmp_path, monk
     assert "debug = true" not in (other / "setup.cfg").read_text()
 
 
-def _cmd_run(monkeypatch, tmp_path, rc, budget=None, sweep=None, subreaper=None):
+def run_mutation_command(monkeypatch, tmp_path, rc, budget=None, on_run=None, sweep=None, subreaper=None):
     """Run cmd_run with mutmut's subprocess stubbed; return (rc_out, calls)."""
     work = tmp_path / "work"
     (work / "mutants").mkdir(parents=True)
@@ -563,6 +558,8 @@ def _cmd_run(monkeypatch, tmp_path, rc, budget=None, sweep=None, subreaper=None)
 
     def fake_run(cmd, **kw):
         calls.append((cmd, kw))
+        if on_run is not None:
+            on_run(cmd, **kw)
         return types.SimpleNamespace(returncode=rc)
 
     monkeypatch.setattr(pilot.subprocess, "run", fake_run)
@@ -572,7 +569,7 @@ def _cmd_run(monkeypatch, tmp_path, rc, budget=None, sweep=None, subreaper=None)
 
 
 def test_cmd_run_preserves_the_exit_code_without_rerunning(monkeypatch, tmp_path):
-    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=1)
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=1)
     assert rc == 1  # the tool error still fails the job; scores are never silenced
     assert len(calls) == 1  # exactly one subprocess: no automatic pytest/mutmut rerun
     cmd, kw = calls[0]
@@ -589,7 +586,7 @@ def test_cmd_run_no_longer_strips_the_harness_env(monkeypatch, tmp_path):
     monkeypatch.setenv("MUTANT_UNDER_TEST", "stats")
     monkeypatch.setenv("COVERAGE_PROCESS_START", "/rc")
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "t::u (call)")
-    _, calls = _cmd_run(monkeypatch, tmp_path, rc=0)
+    _, calls = run_mutation_command(monkeypatch, tmp_path, rc=0)
     env = calls[0][1]["env"]
     assert env["MUTANT_UNDER_TEST"] == "stats"
     assert env["COVERAGE_PROCESS_START"] == "/rc"
@@ -605,7 +602,7 @@ def test_cmd_run_passes_the_time_budget_to_the_bounded_runner(monkeypatch, tmp_p
         return pilot.TIME_BUDGET_STOP_RC
 
     monkeypatch.setattr(pilot, "_run_with_time_budget", fake_bounded)
-    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=0, budget=3300)
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=0, budget=3300)
     assert rc == pilot.TIME_BUDGET_STOP_RC == 124
     assert calls == []  # the unbounded subprocess.run path was NOT taken
     assert seen["budget"] == 3300
@@ -2820,7 +2817,11 @@ def test_select_pr_tests_path_tests_add_the_tree_scanner_to_a_reached_path(
 
 def test_shipped_toml_declares_the_engine_v2_tree_scanner_test():
     assert pilot.load_config()["pr_selection"]["path_tests"] == {
-        "engine/v2/*": ["tests/v2/foundation/test_v2_ops_foundation.py"]}
+        "engine/v2/*": ["tests/v2/foundation/test_v2_ops_foundation.py"],
+        ".coderabbit.yaml": ["tests/v2/integration/test_performance_review_config.py"],
+        "AGENTS.md": ["tests/v2/integration/test_performance_review_config.py"],
+        "docs/performance_review.md": ["tests/v2/integration/test_performance_review_config.py"],
+    }
 
 
 @pytest.mark.parametrize("literal", ["scripts/worker_x.py", "scripts.worker_x"])
@@ -5917,7 +5918,7 @@ def test_cmd_run_sweeps_after_the_budget_stop(monkeypatch, tmp_path):
 
     monkeypatch.setattr(pilot, "_run_with_time_budget",
                         lambda cmd, cwd, env, budget: pilot.TIME_BUDGET_STOP_RC)
-    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=0, budget=3300, sweep=sweeps)
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=0, budget=3300, sweep=sweeps)
     assert rc == pilot.TIME_BUDGET_STOP_RC == 124
     assert calls == []  # the unbounded subprocess.run path was NOT taken
     assert sweeps == ["after mutmut exit"]
@@ -5931,13 +5932,13 @@ def test_cmd_run_sweeps_on_an_exception(monkeypatch, tmp_path):
 
     monkeypatch.setattr(pilot, "_run_with_time_budget", fake_bounded)
     with pytest.raises(RuntimeError):
-        _cmd_run(monkeypatch, tmp_path, rc=0, budget=3300, sweep=sweeps)
+        run_mutation_command(monkeypatch, tmp_path, rc=0, budget=3300, sweep=sweeps)
     assert sweeps == ["after mutmut exit"]
 
 
 def test_cmd_run_sweeps_once_on_a_normal_return(monkeypatch, tmp_path):
     sweeps = []
-    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=3, sweep=sweeps)
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=3, sweep=sweeps)
     assert rc == 3  # the subprocess exit code is returned unchanged
     assert len(calls) == 1
     assert sweeps == ["after mutmut exit"]
@@ -5945,7 +5946,7 @@ def test_cmd_run_sweeps_once_on_a_normal_return(monkeypatch, tmp_path):
 
 def test_cmd_run_becomes_a_subreaper_once(monkeypatch, tmp_path):
     seen = []
-    rc, _ = _cmd_run(monkeypatch, tmp_path, rc=0,
+    rc, _ = run_mutation_command(monkeypatch, tmp_path, rc=0,
                      subreaper=lambda: seen.append(1) or False)
     assert rc == 0
     assert seen == [1]
