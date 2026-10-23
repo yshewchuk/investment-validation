@@ -437,7 +437,7 @@ def test_same_row_count_altered_prior_with_updated_file_hash_is_rebuilt(
 
     assert len(calls) == 2
     assert rebuilt["database_file"] != first["database_file"]
-    assert rebuilt["database_content_hash"] == first["database_content_hash"]
+    assert rebuilt["database_content_hash"] != first["database_content_hash"]
 
 
 @pytest.mark.parametrize("corruption", ["integrity", "file-hash"])
@@ -704,6 +704,7 @@ def test_backup_rejects_symlink_target_before_writing(tmp_path):
     target.symlink_to(outside, target_is_directory=True)
     with pytest.raises(Exception):
         run_backup(conn, key="b4", owner="worker", target=target, clock=clock, store=store)
+    assert not list(outside.glob("b4.*.sqlite"))
     assert not (outside / "b4.sqlite").exists()
 
 
@@ -821,3 +822,217 @@ def test_backup_coordinator_retry_after_delivery_before_commit_attempt_succeeds(
         assert (crashed["state"], crashed["process_state"]) == ("failed", "verified_dead")
     finally:
         conn.close()
+
+
+def test_manifest_database_path_uses_current_name_or_legacy_fallback(tmp_path):
+    assert backup_module.manifest_database_path(
+        tmp_path, {"backup_key": "b1", "database_file": "b1.abc.sqlite"}) == \
+        tmp_path / "b1.abc.sqlite"
+    assert backup_module.manifest_database_path(
+        tmp_path, {"backup_key": "b1"}) == tmp_path / "b1.sqlite"
+
+
+def test_file_backed_snapshot_uses_a_separate_read_only_connection(tmp_path):
+    conn, _, _ = catalog(tmp_path)
+    try:
+        with backup_module._snapshot(conn) as (snapshot, separate):
+            assert separate is True
+            assert snapshot is not conn
+            assert snapshot.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 0
+            conn.execute("CREATE TABLE snapshot_probe (value INTEGER)")
+            conn.commit()
+        assert not conn.in_transaction
+    finally:
+        conn.close()
+
+
+def test_restore_refuses_database_over_the_byte_cap(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "cap", {}, clock=clock)
+    backup = tmp_path / "backup"
+    manifest = run_backup(conn, key="cap", owner="worker", target=backup,
+                          clock=clock, store=store)
+    size = (backup / manifest["database_file"]).stat().st_size
+    monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", size - 1)
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, tmp_path / "restored")
+    assert refused.value.code == "INTEGRITY_FAILED"
+
+
+def test_restore_refuses_a_published_database_size_mismatch(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "size", {}, clock=clock)
+    backup = tmp_path / "backup"
+    manifest = run_backup(conn, key="size", owner="worker", target=backup,
+                          clock=clock, store=store)
+    manifest["database_size"] += 1
+    (backup / "size.manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, tmp_path / "restored")
+    assert refused.value.code == "INTEGRITY_FAILED"
+
+
+def test_fresh_copy_outbox_state_tamper_is_refused_as_content_digest(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "b22", {}, clock=clock)
+    real_backup_to = backup_module.backup_to
+
+    def tamper(source, destination, *, progress=None):
+        real_backup_to(source, destination, progress=progress)
+        damaged = sqlite3.connect(destination)
+        try:
+            damaged.execute("UPDATE outbox SET attempts=attempts+1")
+            damaged.commit()
+        finally:
+            damaged.close()
+
+    monkeypatch.setattr(backup_module, "backup_to", tamper)
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="b22", owner="worker", target=tmp_path / "backup",
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+    assert refused.value.problem.details["reason"] == "content_digest"
+
+
+def test_malformed_prior_artifact_metadata_is_rebuilt(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "b23", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    calls = []
+    real_backup_to = backup_module.backup_to
+
+    def counted(conn, destination, *, progress=None):
+        calls.append(destination)
+        real_backup_to(conn, destination, progress=progress)
+
+    monkeypatch.setattr(backup_module, "backup_to", counted)
+
+    def crash(point):
+        if point == "after_manifest_before_ack":
+            raise RuntimeError("ack lost")
+
+    with pytest.raises(RuntimeError):
+        run_backup(conn, key="b23", owner="worker", target=backup, clock=clock,
+                   store=store, fault=crash)
+    manifest_path = backup / "b23.manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifacts"]["evidence.bin"]["content_hash"] = 123
+    manifest_path.write_text(json.dumps(manifest))
+
+    clock.advance(301)
+    rebuilt = run_backup(conn, key="b23", owner="retry", target=backup,
+                         clock=clock, store=store)
+
+    assert len(calls) == 2
+    assert rebuilt["backup_key"] == "b23"
+    assert isinstance(
+        json.loads(manifest_path.read_text())["artifacts"]["evidence.bin"]["content_hash"], str)
+
+
+def test_restore_refuses_a_published_database_hash_mismatch(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "hash", {}, clock=clock)
+    backup = tmp_path / "backup"
+    manifest = run_backup(conn, key="hash", owner="worker", target=backup,
+                          clock=clock, store=store)
+    published = backup / manifest["database_file"]
+    data = bytearray(published.read_bytes())
+    data[-1] ^= 0xFF
+    published.write_bytes(data)
+
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, tmp_path / "restored")
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+    assert "mismatch" in str(refused.value)
+    assert not (tmp_path / "restored" / "ops.sqlite").exists()
+
+
+def test_sparse_file_over_the_byte_cap_is_refused_without_a_destination(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", 1024)
+    sparse = tmp_path / "sparse.bin"
+    with sparse.open("wb") as stream:
+        stream.truncate(1025)
+    destination = tmp_path / "copy.bin"
+
+    for call in (
+        lambda: backup_module._hash_file(sparse, stage="sparse hash"),
+        lambda: backup_module._stream_copy(sparse, destination, stage="sparse copy"),
+    ):
+        with pytest.raises(OpsError) as refused:
+            call()
+        assert refused.value.code == "INTEGRITY_FAILED"
+        assert refused.value.problem.retryable is False
+
+    assert not destination.exists()
+
+
+def test_file_backed_backup_renews_keepalive_during_the_copy(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "b25", {}, clock=clock)
+    renewals = []
+    monkeypatch.setattr(backup_module, "_HEARTBEAT_SECONDS", 0)
+
+    run_backup(conn, key="b25", owner="worker", target=tmp_path / "backup",
+               clock=clock, store=store, keepalive=lambda: renewals.append(1))
+
+    assert renewals
+
+
+def test_superseded_uuid_database_is_removed_after_the_new_manifest(
+        tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    conn.execute("CREATE TABLE synthetic_change (value INTEGER)")
+    conn.commit()
+    prepare_backup(conn, "b26", {}, clock=clock)
+    backup = tmp_path / "backup"
+
+    def crash(point):
+        if point == "after_manifest_before_ack":
+            raise RuntimeError("ack lost")
+
+    with pytest.raises(RuntimeError):
+        run_backup(conn, key="b26", owner="worker", target=backup,
+                   clock=clock, store=store, fault=crash)
+    first = json.loads((backup / "b26.manifest.json").read_text())
+    first_path = backup / first["database_file"]
+    assert first_path.exists()
+
+    conn.execute("INSERT INTO synthetic_change VALUES (1)")
+    conn.commit()
+    clock.advance(301)
+    stale = backup / f"b26.{'0' * 32}.sqlite"
+    stale.write_bytes(b"stale")
+    assert stale.name != first["database_file"]
+
+    observed = []
+    real_remove = backup_module._remove_superseded_databases
+
+    def checked_remove(target, key, keep):
+        published = json.loads((backup / "b26.manifest.json").read_text())
+        observed.append((published["database_file"], (backup / keep).exists(),
+                         first_path.exists(), stale.exists()))
+        real_remove(target, key, keep)
+
+    monkeypatch.setattr(backup_module, "_remove_superseded_databases",
+                        checked_remove)
+    second = run_backup(conn, key="b26", owner="retry", target=backup,
+                        clock=clock, store=store)
+
+    assert second["database_file"] != first["database_file"]
+    assert observed == [(second["database_file"], True, True, True)]
+    assert not first_path.exists()
+    assert not stale.exists()
+    assert (backup / second["database_file"]).exists()
