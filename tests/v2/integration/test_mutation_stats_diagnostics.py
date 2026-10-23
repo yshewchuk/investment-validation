@@ -2,6 +2,7 @@
 
 # packages: ops
 """
+import io
 import os
 import subprocess
 import sys
@@ -97,6 +98,37 @@ def test_failure_reports_are_bounded_and_passed_reports_are_not_retained(tmp_pat
     assert result.endswith(b"--- Captured stdout call ---\ntyped refusal detail\n")
     plugin.pytest_internalerror("must not grow an already full diagnostic")
     assert path.read_bytes() == result
+
+
+@pytest.mark.parametrize("remaining", range(1, 31))
+def test_partial_truncation_marker_never_appends_a_zero_length_tail(tmp_path, remaining):
+    path = tmp_path / "stats-failure.txt"
+    prefix = b"x" * (65536 - remaining)
+    path.write_bytes(prefix)
+    plugin = diagnostics.StatsDiagnostics(path)
+    plugin.pytest_internalerror("oversized final report" * 100)
+    retained = path.read_bytes()
+    assert len(retained) == 65536
+    assert retained == prefix + b"\n[stats diagnostic truncated]\n"[:remaining]
+    plugin.pytest_internalerror("must not grow an already full diagnostic")
+    assert path.read_bytes() == retained
+
+
+def test_failed_write_warns_once_when_original_stderr_is_available(tmp_path, monkeypatch):
+    destination = tmp_path / "directory-not-sidecar"
+    destination.mkdir()
+    warning = io.StringIO()
+    plugin = diagnostics.StatsDiagnostics(destination)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(sys, "__stderr__", warning)
+        plugin.pytest_internalerror("original pytest error")
+        plugin.pytest_internalerror("unavailable destination must not be retried")
+    message = warning.getvalue()
+    assert message.startswith("[mutation_pilot] stats diagnostic unavailable: ")
+    assert str(destination) in message
+    assert message.count("stats diagnostic unavailable:") == 1
+    assert plugin.unavailable is True
+    assert list(destination.iterdir()) == []
 
 
 @pytest.mark.parametrize("error", [OSError, ValueError])
@@ -215,6 +247,10 @@ def test_workflow_retains_fresh_stats_diagnostic_and_never_blocks_export(tmp_pat
                             cwd=tmp_path, env=env, capture_output=True, text=True, timeout=5)
     assert result.returncode == 7, result.stdout + result.stderr
     assert "EXPORT_CALLED" in result.stdout
+    if housekeeping in {"mkdir", "cp"}:
+        assert result.stderr == "::warning::Stats diagnostic copy failed; continuing result export\n"
+    else:
+        assert result.stderr == ""
     artifact = tmp_path / "report/toy/stats-failure.txt"
     if housekeeping == "ok":
         assert artifact.read_text() == "original stats failure detail"
@@ -297,17 +333,23 @@ def test_driver_reset_failure_still_runs_once_without_echoing_stale_evidence(mon
     def unavailable(text):
         raise broken_warning("stderr unavailable")
 
+    warning = io.StringIO()
     with monkeypatch.context() as scoped:
         scoped.setattr(Path, "unlink", refuse_reset)
         if broken_warning:
             scoped.setattr(sys, "stderr", SimpleNamespace(write=unavailable))
             scoped.setattr(sys, "__stderr__", SimpleNamespace(write=unavailable))
+        else:
+            scoped.setattr(sys, "__stderr__", warning)
         result, calls = run_mutation_command(scoped, tmp_path, rc=17)
     assert result == 17 and len(calls) == 1
     assert calls[0][1]["env"]["MUTATION_PILOT_STATS_DIAGNOSTIC"] == ""
     assert diagnostic.read_text() == "STALE_FAILURE_MUST_NOT_BE_ECHOED"
     captured = capsys.readouterr()
     assert "STALE_FAILURE_MUST_NOT_BE_ECHOED" not in captured.out + captured.err
+    if not broken_warning:
+        assert warning.getvalue() == (
+            "[mutation_pilot] stats diagnostic unavailable: cannot reset stats sidecar\n")
 
 
 @pytest.mark.parametrize("rc,payload", [(1, b"synthetic stats failure\n"),
