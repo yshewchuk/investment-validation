@@ -1413,7 +1413,7 @@ flowchart LR
 | Registration and outcome/replay/export metadata opts in | `max_evidence_bytes`, default None, bounds registration/outcome/completion artifact metadata before reads. `checkpoints.registered_artifact(max_metadata_bytes=None)` offers a reference-JSON cap: non-text/oversized/invalid-encoding text refuses `INTEGRITY_FAILED`; malformed JSON/contract decoders retain raw `ValueError`/`DocumentError` or `RecursionError`. Existing defaults retain their policy. |
 | Supervisor claims and launches | A separately running supervisor (`ops serve`'s `Service.tick`, via `claim_next`) is the only path that acquires a job's lease before calling `_launch`. |
 | Worker has a `supervisor._COORDINATOR_EFFECT_KINDS` kind | These 14 kinds (see "Outputs" above) never touch the catalog from the worker process. All real state change happens in `_coordinator_effect`, called from the coordinator, not the worker. |
-| Coordinator effect dispatches | `_coordinator_effect` dispatches to `effects_graph.py` for some kinds and to `decision_commit.py`/`snapshot_promotion.py`/`snapshot_stages.py`/its own `supervisor.py` methods for the rest (see "Outputs"). |
+| Coordinator effect dispatches | `_coordinator_effect` dispatches to `effects_graph.py` for some kinds and to `decision_commit.py`/`snapshot_promotion.py`/`snapshot_stages.py`/its own `supervisor.py` methods for the rest (see "Outputs"). The backup coordinator runs retention only after a successful backup; the contract is in [`ARCHITECTURE.md` §4.1 "Backup retention (#1156)"](../../../ARCHITECTURE.md#backup-retention-1156). |
 
 ### Forward-calendar refresh: two-source, cache-first fetch (`forward_calendar_store.py`)
 
