@@ -160,12 +160,13 @@ from causal source rows. engine.v2.ops.cli imports the no-fit guard
 consume `no_fit.forbid_fitting` before native trial claims and fixed-child fitting.
 `experiments/magnitude_search_outer.py` consumes the legacy/v2 no-fit guards
 before selected outer refit claims; completed evidence replay never fits.
-`tools/phase5_serving_folds.py` consumes the chooser policy/descriptor types
+`serving_fold_preflight.py` consumes the chooser policy/descriptor types
 and `semantic_release_hash`, plus `engine.v2.foundation` typed-document conversion,
-for offline fold metadata; its helper `tools/phase5_serving_fold_checks.py` imports
-`FOLD_PANEL_SHA256_PATTERN`. `tools/phase5_prepare_release.py`
+for offline fold metadata; its helper `serving_fold_checks.py` imports
+`FOLD_PANEL_SHA256_PATTERN`. `pinned_panel.py` checks the pinned panel copy against
+`engine.v2.data`. `tools/phase5_prepare_release.py`
 consumes `ChooserFoldPolicy` and `chooser_fold_outputs`, obtains registered
-policies, and invokes `tools/phase5_serving_folds.py`'s `preflight_chooser_fold`
+policies, and invokes `serving_fold_preflight.preflight_chooser_fold`
 before publication.
 `release_layout.py` reads catalogs via `release_objects.read_regular_file`, a bounded final-component no-follow open. `tools/phase5_prepare_release.py` bounds its serving-fold reads (`read_bounded_state`, `MAX_FOLD_BYTES`) and frozen-state reads when a cap is passed; its other release-file reads (`path.read_bytes()`/`read_text()` near lines 185-204) and `checks/phase5_acceptance.py`'s staged-member and report reads are uncapped (tracked in #819).
 `checks/phase5_acceptance.py` publishes staging success after acceptance.

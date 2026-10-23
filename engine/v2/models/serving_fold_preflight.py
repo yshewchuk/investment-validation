@@ -13,18 +13,18 @@ from dataclasses import dataclass
 from engine.v2.foundation import from_document, to_document
 from engine.v2.models import ArtifactMember, ModelRelease
 from engine.v2.models.deployment import StagedManifest, semantic_release_hash
+from engine.v2.models.serving_fold_checks import (
+    check_size_policy,
+    fold_month,
+    held_out_pools,
+    load_stored_fold,
+)
 from engine.v2.models.serving_folds import (
     ChooserFoldPolicy,
     ChooserServingFoldDescriptor,
     ServingFoldDescriptor,
     SizeFoldPolicy,
     chooser_fold_outputs,
-)
-from tools.phase5_serving_fold_checks import (
-    check_size_policy,
-    fold_month,
-    held_out_pools,
-    load_stored_fold,
 )
 
 MAX_FOLD_BYTES = 32 * 1024 * 1024

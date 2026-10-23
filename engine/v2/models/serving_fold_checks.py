@@ -1,4 +1,4 @@
-"""Validation helpers for ``tools/phase5_serving_folds.py`` (split out to keep both modules small).
+"""Validation helpers for ``serving_fold_preflight.py`` (split out to keep both modules small).
 
 Checks over a serving-fold policy and its stored joblib header (``load_stored_fold`` decodes a
 pickle, so it is not side-effect free); every refusal is a ``ValueError`` with a fixed message.

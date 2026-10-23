@@ -27,6 +27,7 @@ from engine.v2.models import (
     release_layout as layout,
     release_objects,
 )
+from engine.v2.models import serving_fold_preflight as folds
 from engine.v2.models.serving_folds import (
     ChooserFoldPolicy,
     ChooserServingFoldDescriptor,
@@ -44,7 +45,6 @@ from tests.v2.models.serving_fold_support import (
     release_inputs,
 )
 from tools import phase5_prepare_release as prep
-from tools import phase5_serving_folds as folds
 
 OUTPUTS = {"implied_t1": ("driver_prediction", "pred_im_t1_d14"),
            "runup_move": ("pred_runup_abs_move_d14", "pred_runup_abs_move_d14")}

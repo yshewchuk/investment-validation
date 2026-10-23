@@ -405,7 +405,7 @@ exact month, full panel SHA-256, estimator member, embedded pool fields/count an
 explicit interval policy. The enclosing catalog hash binds catalog identity
 without a self-reference inside the descriptor.
 `tools.phase5_prepare_release` obtains the registered producer's `SizeFoldPolicy`;
-`tools.phase5_serving_folds` validates cache bytes before catalog publication, without fitting/inference.
+`serving_fold_preflight` (this package) validates cache bytes before catalog publication, without fitting/inference.
 Serving-fold writers (`tier4.serving_model`, Phase-4 build/backfill) use binary handles and explicit `compress=0`; filename suffixes cannot enable compression.
 Release preparation (`--tier4-dir` and raw-byte APIs) requires trusted uncompressed inputs from supported writers; it does not refuse arbitrary compressed inputs before decoding.
 Hashes verify bytes, not provenance. The serialized byte cap is not a decoded-memory bound.
@@ -619,10 +619,9 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   serve `/models/release.json`; never promotes.
 - `tools/phase5_state_stage_job.py` — publishes the staging-success record
   (`mark_staging_succeeded`) for a nightly pool candidate (§2.2).
-- `tools/phase5_prepare_release.py`, `tools/phase5_inventory.py` and
-  `tools/phase5_serving_folds.py` — release preparation, inventory and fold metadata;
-  `tools/phase5_serving_fold_checks.py` (its policy/header checks) imports
-  `FOLD_PANEL_SHA256_PATTERN` from `serving_folds`.
+- `tools/phase5_prepare_release.py` and `tools/phase5_inventory.py` — release preparation and
+  inventory; `serving_fold_preflight.py`, `serving_fold_checks.py` and `pinned_panel.py` (this
+  package) hold fold metadata, its policy/header checks and the pinned panel check.
 - `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_execution.py`
   — `no_fit.forbid_fitting` before native trial claims and fixed-child fitting.
 
