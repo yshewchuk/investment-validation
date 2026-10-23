@@ -83,10 +83,10 @@ def pytest_configure(config):
 # phases gets its own budget: `--test-timeout SECONDS`, else env
 # PYTEST_TEST_TIMEOUT, else DEFAULT_TEST_TIMEOUT; 0 disables it. A test can
 # carry `@pytest.mark.test_timeout(N)`. When the budget runs out the test
-# FAILS with its node id and the stack it was stuck in, and the run carries on
-# with the next test. Before this, one sleeping test kept its xdist worker
-# asleep until the outer timeout killed the run, and no summary or test name
-# came out.
+# FAILS with its node id, attempts a stack dump, and the run carries on with
+# the next test even if that dump fails. Before this, one sleeping test kept
+# its xdist worker asleep until the outer timeout killed the run, and no
+# summary or test name came out.
 #
 # 600 s is well above any test that finishes: the slowest known are the
 # real-parquet reads (~40 s each) and legacy test_features.py (~33 s serially),
@@ -140,11 +140,16 @@ def _alarm(item, when: str):
         return
 
     def expired(signum, frame):
-        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
-        pytest.fail(f"TIMEOUT: {item.nodeid} exceeded its {when} budget of {seconds:g}s "
-                    f"(--test-timeout / PYTEST_TEST_TIMEOUT / @pytest.mark.test_timeout). "
-                    f"The traceback shows where it was waiting; all threads are dumped "
-                    f"in the captured stderr.")
+        try:
+            # capsys/redirect_stderr may replace sys.stderr with a stream
+            # without fileno(). Keep the original descriptor for the dump.
+            faulthandler.dump_traceback(file=sys.__stderr__, all_threads=True)
+        finally:
+            # A dump failure must never become a catchable validation error
+            # (e.g. UnsupportedOperation) instead of the expired test budget.
+            pytest.fail(f"TIMEOUT: {item.nodeid} exceeded its {when} budget of {seconds:g}s "
+                        f"(--test-timeout / PYTEST_TEST_TIMEOUT / @pytest.mark.test_timeout). "
+                        f"A traceback was attempted on the original stderr.")
 
     previous = signal.signal(signal.SIGALRM, expired)
     signal.setitimer(signal.ITIMER_REAL, seconds)
