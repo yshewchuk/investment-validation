@@ -297,7 +297,7 @@ def build_context(repository, source_snapshot, history_snapshot, history_context
 
 
 def preflight_context(repository, source_snapshot, history_snapshot, context):
-    """Recheck the complete metadata plan; no cache or implicit refresh is allowed."""
+    """Rebuild metadata through pinned repository caches; never implicitly refresh snapshots."""
     validate_context(context)
     for snapshot in (source_snapshot, history_snapshot):
         _panel_snapshot(snapshot)

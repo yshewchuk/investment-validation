@@ -502,6 +502,8 @@ def test_public_history_preflight_rederives_identity_before_payloads(native, mon
     with pytest.raises(DataError) as caught:
         history.preflight_source(source.repository, source.snapshot, changed)
     assert caught.value.code == "IDENTITY_CONFLICT"
+    assert caught.value.problem.message == ("history context digest differs" if kind == "bad_digest"
+                                            else "history binding differs from source metadata")
 
 
 def test_public_history_preflight_preserves_valid_admitted_metadata(native, monkeypatch):
@@ -598,7 +600,9 @@ def test_malformed_snapshot_ids_refuse_before_resolution(native, monkeypatch, bo
     monkeypatch.setattr(source.repository, "resolve", resolve)
     scans = _metadata_only(monkeypatch, source.repository)
     code = "SNAPSHOT_UNRESOLVED" if boundary == "calendar" else "CONTRACT_MISMATCH"
-    with pytest.raises(DataError, match=code):
+    message = ("an exact native snapshot reference is required" if boundary == "calendar"
+               else "invalid panel snapshot reference")
+    with pytest.raises(DataError, match=rf"^{code}: {message}$"):
         if boundary == "calendar":
             magnitude_features.calendar_input(source.repository, snapshots[0])
         elif boundary.startswith("preflight_"):
@@ -615,7 +619,7 @@ def test_unknown_snapshot_ids_keep_native_refusal(native, monkeypatch, boundary)
     index = boundary == "history"
     snapshots[index] = replace(snapshots[index], snapshot_id="sha256:" + "0" * 64)
     scans = _metadata_only(monkeypatch, source.repository)
-    with pytest.raises(DataError, match="SNAPSHOT_NOT_FOUND"):
+    with pytest.raises(DataError, match="^SNAPSHOT_NOT_FOUND: unknown snapshot id$"):
         if boundary == "calendar":
             magnitude_features.calendar_input(source.repository, snapshots[0])
         else:
@@ -1032,9 +1036,9 @@ def test_producer_environment_requires_finite_plain_json(native, value):
     context = copy.deepcopy(original)
     context["producer"] = producer
     _context_hash(context)
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with pytest.raises(DataError, match="^CONTRACT_MISMATCH: invalid research panel context$"):
         plan.validate_context(context)
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with pytest.raises(DataError, match="^CONTRACT_MISMATCH: invalid panel producer metadata$"):
         plan.build_context(source.repository, source.snapshot, output, binding, producer=producer)
 
 
@@ -1121,7 +1125,8 @@ def test_excessive_document_depth_is_a_typed_public_refusal(native, boundary):
     producer = copy.deepcopy(producer)
     producer["environment"]["nested"] = nested
     # Deliberately neither deepcopy nor hash the over-depth document at the test boundary.
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    message = "invalid panel producer metadata" if boundary == "build_context" else "invalid research panel context"
+    with pytest.raises(DataError, match=rf"^CONTRACT_MISMATCH: {message}$"):
         if boundary == "validate_context":
             plan.validate_context(context)
         elif boundary == "validate_rows":
@@ -1144,7 +1149,9 @@ def test_deep_history_producer_is_a_typed_public_refusal(native, boundary, code)
         leaf["nested"] = {}
         leaf = leaf["nested"]
     # The independent panel producer remains valid; only the history binding is deep.
-    with pytest.raises(DataError, match=code):
+    message = ("invalid detached history identity" if boundary == "identity"
+               else "history binding differs from source metadata")
+    with pytest.raises(DataError, match=rf"^{code}: {message}$"):
         if boundary == "identity":
             history.validate_context_identity(binding)
         elif boundary == "preflight":
@@ -1268,13 +1275,13 @@ def test_history_digest_refusals_distinguish_detached_panel_from_repository_bind
     changed = copy.deepcopy(context)
     changed["history_context"] = binding
     _hash(changed, "context_id")
-    with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
+    with pytest.raises(DataError, match="^IDENTITY_CONFLICT: history context digest differs$"):
         history.validate_context_identity(binding)
-    with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
+    with pytest.raises(DataError, match="^IDENTITY_CONFLICT: history context digest differs$"):
         plan.build_context(source.repository, source.snapshot, output, binding, producer=producer)
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with pytest.raises(DataError, match="^CONTRACT_MISMATCH: invalid research panel context$"):
         plan.validate_context(changed)
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with pytest.raises(DataError, match="^CONTRACT_MISMATCH: invalid research panel context$"):
         plan.preflight_context(source.repository, source.snapshot, output, changed)
 
 
@@ -1340,13 +1347,13 @@ def test_malformed_history_binding_preserves_native_refusal_boundary(native, mon
     _hash(changed, "context_id")
     _metadata_only(monkeypatch, source.repository)
     # Native identity validation owns catalog-binding refusals, including its closed minimum shape.
-    with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
+    with pytest.raises(DataError, match="^IDENTITY_CONFLICT: history context digest differs$"):
         history.validate_context_identity(binding)
-    with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
+    with pytest.raises(DataError, match="^IDENTITY_CONFLICT: history context digest differs$"):
         plan.build_context(source.repository, source.snapshot, output, binding, producer=producer)
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with pytest.raises(DataError, match="^CONTRACT_MISMATCH: invalid research panel context$"):
         plan.validate_context(changed)
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with pytest.raises(DataError, match="^CONTRACT_MISMATCH: invalid research panel context$"):
         plan.preflight_context(source.repository, source.snapshot, output, changed)
 
 
@@ -1468,9 +1475,12 @@ def test_metadata_only_oracle_catches_alternate_payload_paths(native, monkeypatc
             list(repository.scan(SimpleNamespace(columns=("close",)), table_name=path))
         return original_preflight(*args)
 
-    # Harmless stand-ins isolate oracle sensitivity; no actual price/chain/provider access occurs.
-    monkeypatch.setattr(history, "preflight_source", accidental_payload_read)
     _metadata_only(monkeypatch, repository)
+    # Exercise the unmodified production builder and real native admission under every guard first.
+    assert plan.build_context(repository, source.snapshot, output, binding, producer=producer) == native[-1]
+    assert reached == []
+    # Then inject a forbidden read to prove oracle sensitivity; stand-ins prevent actual payload access.
+    monkeypatch.setattr(history, "preflight_source", accidental_payload_read)
     with pytest.raises(AssertionError, match="metadata-only"):
         plan.build_context(repository, source.snapshot, output, binding, producer=producer)
     assert reached == []
@@ -1507,3 +1517,31 @@ def test_direct_history_preflight_preserves_native_resolution_refusal(native, mo
     with pytest.raises(DataError) as caught:
         history.preflight_source(source.repository, source.snapshot, binding)
     assert caught.value is refusal and scans == []
+
+
+@pytest.mark.parametrize("index", [0, 1, 2])
+@pytest.mark.parametrize("boundary", ["history", "builder", "detached", "preflight"])
+def test_equal_float_horizons_refuse_before_reconstruction_or_normalization(native, monkeypatch, index, boundary):
+    source, output, binding, producer, original = native
+    changed = copy.deepcopy(binding)
+    changed["temporal_plan"]["horizons"][index] = float(changed["temporal_plan"]["horizons"][index])
+    # Canonical hashes and Python equality deliberately do not distinguish integral floats.
+    assert changed == binding and content_hash(changed) == content_hash(binding)
+    context = copy.deepcopy(original)
+    context["history_context"] = changed
+    assert context == original and content_hash(context) == content_hash(original)
+    scans = _metadata_only(monkeypatch, source.repository)
+    code, message = (("IDENTITY_CONFLICT", "history binding differs from source metadata")
+                     if boundary in ("history", "builder") else
+                     ("CONTRACT_MISMATCH", "invalid research panel context"))
+    with pytest.raises(DataError) as caught:
+        if boundary == "history":
+            history.preflight_source(source.repository, source.snapshot, changed)
+        elif boundary == "builder":
+            plan.build_context(source.repository, source.snapshot, output, changed, producer=producer)
+        elif boundary == "detached":
+            plan.validate_context(context)
+        else:
+            plan.preflight_context(source.repository, source.snapshot, output, context)
+    assert (caught.value.code, caught.value.problem.message) == (code, message)
+    assert scans == []

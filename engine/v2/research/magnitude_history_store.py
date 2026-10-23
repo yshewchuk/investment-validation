@@ -409,7 +409,9 @@ def preflight_source(repository, snapshot, context):
     try:
         _names(context)
         plan = context["temporal_plan"]
-        if (context["source_snapshot"] != to_document(snapshot)
+        if (type(plan["horizons"]) is not list
+                or any(type(horizon) is not int for horizon in plan["horizons"])
+                or context["source_snapshot"] != to_document(snapshot)
                 or plan["snapshot_id"] != snapshot.snapshot_id
                 or repository.resolve(snapshot.snapshot_id) != snapshot):
             raise ValueError
