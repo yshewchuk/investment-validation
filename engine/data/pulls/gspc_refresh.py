@@ -167,10 +167,10 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None,
     "YYYY-MM-DD", "rows": N}`` or ``{"ok": False, "reason": ...}`` with the
     reason in ``fetch_failed`` / ``unparseable`` / ``stale_source`` /
     ``shrunk`` / ``older_than_existing`` / ``history_changed`` /
-    ``unreadable`` / ``unwritable``. When ``minimum_last_date`` is given,
-    the fresh series must reach it; minimum coverage is checked after the
-    parse and before the lock or any file read or write, so a source that
-    ends too early leaves the target file untouched.
+    ``unreadable`` / ``unwritable`` / ``invalid_cutoff``. When
+    ``minimum_last_date`` is given, the fresh series must reach it; minimum
+    coverage is checked after the parse and before the lock or any file read
+    or write, so a source that ends too early leaves the target file untouched.
     """
     from engine.data.sources.base import CredentialRotated, FetchError
 
@@ -206,8 +206,14 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None,
     if frame is None:
         return _finish({"ok": False, "reason": "unparseable"}, started)
 
+    minimum = None
     if minimum_last_date is not None:
-        minimum = pd.Timestamp(minimum_last_date).normalize()
+        try:
+            minimum = pd.Timestamp(minimum_last_date).normalize()
+        except (TypeError, ValueError, OverflowError):
+            return _finish({"ok": False, "reason": "invalid_cutoff"}, started)
+        if minimum is pd.NaT:
+            return _finish({"ok": False, "reason": "invalid_cutoff"}, started)
         if frame["date"].max().normalize() < minimum:
             return _finish({"ok": False, "reason": "stale_source"}, started)
 

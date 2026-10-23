@@ -336,8 +336,9 @@ Order matters; each step gates the next.
 8. **Backup** (`--backup`): git push + private mirror. A failure flags but does
    not block the publish — the snapshot and the backup are independent.
 
-Re-running a night is safe: the fetch cache turns a same-day refresh into a
-hit, and the ledger refuses duplicate row ids.
+Re-running a night is safe: cached calendar fetches may be reused, while the
+guarded `^GSPC` refresh deliberately fetches fresh max history on each run;
+the ledger refuses duplicate row ids.
 
 ### Cron (WSL2)
 

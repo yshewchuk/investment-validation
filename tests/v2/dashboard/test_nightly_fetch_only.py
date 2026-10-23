@@ -45,10 +45,14 @@ def _fake_refresh_half(monkeypatch, tmp_path, rebuild=None):
     monkeypatch.setattr(nightly, "refresh_calendar_data",
                         lambda *a, **k: {"ok": True})
     from engine.data.pulls import gspc_refresh
+    refresh_calls = []
+
+    def refresh_gspc_daily(*args, **kwargs):
+        refresh_calls.append((args, kwargs))
+        return {"ok": True, "last_date": "2026-10-22", "rows": 1}
+
     monkeypatch.setattr(gspc_refresh, "refresh_gspc_daily",
-                        lambda *a, **k: {"ok": True,
-                                         "last_date": "2026-10-22",
-                                         "rows": 1})
+                        refresh_gspc_daily)
     monkeypatch.setattr("engine.data.finality.resolve_final_session",
                         lambda *a, **k: SimpleNamespace(
                             date="2026-10-22", detail="",
@@ -98,7 +102,8 @@ def _fake_refresh_half(monkeypatch, tmp_path, rebuild=None):
     monkeypatch.setattr("engine.dashboard.warm_serving.warm", warm)
     monkeypatch.setattr("engine.dashboard.publish.publish_bundle", _warn)
     return SimpleNamespace(flags=flag_calls, warm=warm_calls,
-                           rebuild=rebuild_calls, finalize=finalize_calls)
+                           rebuild=rebuild_calls, finalize=finalize_calls,
+                           gspc=refresh_calls)
 
 
 def _assert_scoring_steps_skipped(report):
@@ -169,6 +174,10 @@ def test_fetch_only_happy_path_skips_scoring_half(tmp_path, monkeypatch):
     assert fake.warm[0][1] == pd.Timestamp("2026-10-22")
     assert report.steps["warm_serving"] == {"folds": 0, "fitted": 0}
     assert len(fake.rebuild) == 1
+    assert len(fake.gspc) == 1
+    _, gspc_kwargs = fake.gspc[0]
+    assert gspc_kwargs["refetch_token"].startswith("legacy-nightly-")
+    assert gspc_kwargs["minimum_last_date"] == pd.Timestamp("2026-10-21")
 
 
 def test_fetch_only_degrades_when_rebuild_fails(tmp_path, monkeypatch):

@@ -87,7 +87,8 @@ def test_success_writes_exact_legacy_layout(tmp_path):
     path = tmp_path / "gspc_daily.csv"
     fetcher = StubFetcher(body=_body(DATES))
 
-    result = refresh_gspc_daily(fetcher, path, refetch_token="run-1")
+    result = refresh_gspc_daily(fetcher, path, minimum_last_date=DATES[-1],
+                                refetch_token="run-1")
 
     assert result == {"ok": True, "last_date": "2026-08-27", "rows": 3}
     assert fetcher.calls == [("yfinance", "history",
@@ -112,7 +113,7 @@ def test_success_writes_exact_legacy_layout(tmp_path):
 def test_stale_source_leaves_file_untouched(tmp_path):
     """A source ending before the minimum is refused; bytes and mtime stay."""
     path = tmp_path / "gspc_daily.csv"
-    before = _write_legacy(path, DATES)
+    before = _write_legacy(path, DATES[:-1])
     mtime = path.stat().st_mtime_ns
 
     result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path,
@@ -121,6 +122,17 @@ def test_stale_source_leaves_file_untouched(tmp_path):
     assert result == {"ok": False, "reason": "stale_source"}
     assert path.read_bytes() == before
     assert path.stat().st_mtime_ns == mtime
+
+
+def test_invalid_minimum_last_date_is_refused(tmp_path):
+    """A minimum_last_date that is not a date is refused before writing."""
+    path = tmp_path / "gspc_daily.csv"
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path,
+                                minimum_last_date="not-a-date")
+
+    assert result == {"ok": False, "reason": "invalid_cutoff"}
+    assert not path.exists()
 
 
 def test_identical_second_call_leaves_file_untouched(tmp_path):

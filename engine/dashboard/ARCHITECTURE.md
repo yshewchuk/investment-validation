@@ -26,8 +26,9 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   `tiers` are enabled (including fetch-only runs). A failed refresh, or a
   successful refresh whose source ends before the last NYSE session strictly
   before the decision date, stops with typed `NightlyStop` step
-  `gspc_refresh`. This cutoff uses `projected_trading_days`, so checking it
-  does not read the stored GSPC file. The helper checks minimum coverage before
+  `gspc_refresh`. This cutoff uses `projected_trading_days` with the calendar's
+  scheduled holidays and `UNSCHEDULED_CLOSURES`, so checking it does not read
+  the stored GSPC file. The helper checks minimum coverage before
   reading or replacing the stored file; a stale source leaves it untouched.
   With refresh disabled, both refresh and panel rebuild are skipped. The v2
   `price-refresh` stage omits the new optional cutoff and keeps its existing
@@ -218,8 +219,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   leaves the stored file unchanged. `refresh=False` skips this refresh and
   the panel rebuild. Existing report JSON top-level fields are unchanged. The
   optional helper cutoff is omitted by the v2 adapter, so its behavior is
-  unchanged. On refusal, the operator may correct the source/credential and
-  retry on the next nightly or a manual rerun.
+  unchanged.
 
 - **CLI report** — after `run_nightly` returns a report, the CLI atomically
   writes `reports/nightly_<requested date>.json`; a distinct `--json`

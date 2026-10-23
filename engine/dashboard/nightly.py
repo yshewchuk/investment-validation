@@ -1482,7 +1482,7 @@ def run_nightly(
 
     report.mark("universe", started=started)
     if refresh and tiers:
-        from engine.calendar import projected_trading_days
+        from engine.calendar import UNSCHEDULED_CLOSURES, projected_trading_days
         from engine.data.fetch import Fetcher, CredentialRotated
         from engine.data.pulls.gspc_refresh import refresh_gspc_daily
         if fetcher is None:
@@ -1492,6 +1492,9 @@ def run_nightly(
             previous_sessions = projected_trading_days(
                 as_of - pd.Timedelta(days=14), as_of - pd.Timedelta(days=1)
             )
+            previous_sessions = previous_sessions[
+                ~previous_sessions.strftime("%Y-%m-%d").isin(UNSCHEDULED_CLOSURES)
+            ]
             expected = previous_sessions[-1]
             refetch_token = f"legacy-nightly-{time.time_ns()}"
             result = refresh_gspc_daily(
@@ -1509,14 +1512,6 @@ def run_nightly(
                         "got source ending before cutoff",
                     )
                 raise _refuse(report, "gspc_refresh", "GSPC_REFRESH_FAILED: " + str(result.get("reason", "unknown")))
-            last_date = pd.to_datetime(result.get("last_date"), errors="coerce")
-            if pd.isna(last_date) or last_date.normalize() < pd.Timestamp(expected).normalize():
-                got = "missing" if pd.isna(last_date) else str(last_date.date())
-                raise _refuse(
-                    report, "gspc_refresh",
-                    f"GSPC_REFRESH_STALE: expected through {pd.Timestamp(expected).date()}, "
-                    f"got {got}",
-                )
         except CredentialRotated as exc:
             _log_rss("gspc refresh end")
             report.mark("gspc_refresh", started=started)
