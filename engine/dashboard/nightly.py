@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import gc
 import json
 import os
 import subprocess
@@ -1694,11 +1695,16 @@ def run_nightly(
         # files, SNAPSHOT and the Tier-4 serving caches that warm writes. Scoring and
         # later steps are skipped (issue #1146).
         report.steps["tiers"].setdefault("degraded", False)
+        warm_dates = list(upcoming["event_date"])
+        del events, frontier, upcoming
+        tier_result = None
+        gc.collect()
+        _log_rss("fetch-only before warm")
         from engine.dashboard import warm_serving
 
         try:
             report.steps["warm_serving"] = warm_serving.warm(
-                list(upcoming["event_date"]), as_of, as_of
+                warm_dates, as_of, as_of
             )
         except warm_serving.WarmError as exc:
             raise _refuse(report, "warm_serving", f"WARM_SERVING_FAILED: {exc}") from exc

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import gc
+import weakref
 from types import SimpleNamespace
 
 import pandas as pd
@@ -213,3 +215,58 @@ def test_fetch_only_red_validation_stops_the_run(tmp_path, monkeypatch):
             chain_sessions=1,
         )
     assert exc.value.step == "validate"
+
+
+def test_fetch_only_drops_frames_before_warm(tmp_path, monkeypatch):
+    frame_refs: list = []
+    rebuild_refs: list = []
+
+    class RebuildResult:
+        elapsed_s = 1.0
+        snapshot = "abc"
+        gap_fill = {}
+
+    def tracked_rebuild(*args, **kwargs):
+        result = RebuildResult()
+        rebuild_refs.append(weakref.ref(result))
+        return result
+
+    fake = _fake_refresh_half(monkeypatch, tmp_path, rebuild=tracked_rebuild)
+
+    def events_table(*args, **kwargs):
+        frame = pd.DataFrame({
+            "event_id": [1],
+            "ticker": ["AAA"],
+            "event_date": ["2026-10-25"],
+            "session": ["amc"],
+            "date_conflict": [False],
+        })
+        frame_refs.append(weakref.ref(frame))
+        return frame
+
+    monkeypatch.setattr("engine.data.store.read_table", events_table)
+
+    def warm(*args, **kwargs):
+        fake.warm.append(args)
+        gc.collect()
+        assert args[0] == [pd.Timestamp("2026-10-25")]
+        assert frame_refs, "no events frame was tracked"
+        assert all(ref() is None for ref in frame_refs), (
+            "events frame still alive when warm is called"
+        )
+        assert rebuild_refs, "no rebuild result was tracked"
+        assert all(ref() is None for ref in rebuild_refs), (
+            "rebuild result still alive when warm is called"
+        )
+        return {"folds": 0, "fitted": 0}
+
+    monkeypatch.setattr("engine.dashboard.warm_serving.warm", warm)
+
+    report = nightly.run_nightly(
+        "2026-10-22", fetch_only=True,
+        bundle_dir=tmp_path / "b", target=tmp_path / "t",
+        chain_sessions=1,
+    )
+    assert len(fake.warm) == 1
+    assert report.steps["warm_serving"] == {"folds": 0, "fitted": 0}
+    assert report.as_of == "2026-10-22"
