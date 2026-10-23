@@ -20,6 +20,7 @@ _CONTEXT = ("snapshot_id", "holdout_as_of_month", "random_membership_version",
 POPULATION_CONTEXT_COLUMNS = _CONTEXT
 
 _MAX_OPEN_RUN_STREAMS = 32  # interleaved tickers keep their streams; the oldest is closed beyond this
+MAX_OUTCOME_OBJECT_BYTES = 1 << 20  # per outcome object, as iv_crush_inputs.MAX_TARGET_OBJECT_BYTES
 
 
 def plan_event_targets(repository, snapshot, candidates, contract, *, columns=None):
@@ -236,7 +237,8 @@ def _run_reader(repository, contract, plans, index):
             raise errors.fail("HOLDOUT_ACCESS_DENIED", "research outcome isolation cannot be proven")
         request = replace(run[0][1], key_filter=keys, time_interval=interval,
             max_batch_rows=1, max_result_rows=len(expected))
-        scan = repository.scan(request, table_name=contract.table_name)
+        scan = repository.scan(request, table_name=contract.table_name,
+                               max_object_bytes=MAX_OUTCOME_OBJECT_BYTES)
         return scan, (row for batch in scan for row in batch.to_pylist())
 
     streams = {}  # id(run) -> [row iterator, rows by day, last day seen, scan generator]
@@ -244,8 +246,6 @@ def _run_reader(repository, contract, plans, index):
     def read_rows(event, request):
         """Advance the run's stream only up to this candidate's day; later fragments stay unopened."""
         planned = plan_of.get(getattr(event, "event_id", None))
-        if planned is None:
-            raise errors.fail("HOLDOUT_ACCESS_DENIED", "event or request was not preflighted for this reader")
         stamp = getattr(event, "event_date", None)
         day = stamp.date().isoformat() if hasattr(stamp, "date") else None
         _check_planned(planned, event, day, request)

@@ -500,11 +500,11 @@ def test_all_metadata_is_admitted_before_any_feature_column_decode(source, monke
     scan = Repository.scan
     seen = []
 
-    def guarded(repository, request, *, table_name):
+    def guarded(repository, request, *, table_name, **kwargs):
         if table_name == TABLE:
             assert not set(request.columns) & set(FEATURES), "feature columns decoded before full metadata admission"
             seen.append(request)
-        yield from scan(repository, request, table_name=table_name)
+        yield from scan(repository, request, table_name=table_name, **kwargs)
 
     monkeypatch.setattr(Repository, "scan", guarded)
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):

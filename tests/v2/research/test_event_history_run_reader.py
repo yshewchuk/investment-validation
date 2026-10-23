@@ -123,12 +123,12 @@ def test_scan_failure_drops_the_stream_and_a_retry_rescans(source, monkeypatch):
     plans, read_rows = _plan(repository, snapshot)
     original, calls, closed = repository.scan, [], []
 
-    def flaky(query, *, table_name):
+    def flaky(query, *, table_name, **kwargs):
         calls.append(query)
         try:
             if len(calls) == 1:
                 raise errors.fail("MANIFEST_CORRUPT", "synthetic scan failure")
-            yield from original(query, table_name=table_name)
+            yield from original(query, table_name=table_name, **kwargs)
         finally:
             closed.append(query)
 
@@ -147,12 +147,12 @@ def test_retry_after_rows_accumulated_returns_full_rows(source, monkeypatch):
     plans, read_rows = _plan(repository, snapshot)
     original, calls = repository.scan, []
 
-    def flaky(query, *, table_name):
+    def flaky(query, *, table_name, **kwargs):
         calls.append(query)
         if len(calls) > 1:  # only the first call of the stream fails
-            yield from original(query, table_name=table_name)
+            yield from original(query, table_name=table_name, **kwargs)
             return
-        batches = original(query, table_name=table_name)
+        batches = original(query, table_name=table_name, **kwargs)
         yield next(batches)  # one batch reaches the reader, then the stream dies
         raise errors.fail("MANIFEST_CORRUPT", "synthetic scan failure")
 
@@ -248,10 +248,10 @@ def test_run_stream_is_closed_after_its_last_candidate(source, monkeypatch):
     original, closed = repository.scan, []
     held = []
 
-    def tracked(query, *, table_name):
+    def tracked(query, *, table_name, **kwargs):
         def body():
             try:
-                yield from original(query, table_name=table_name)
+                yield from original(query, table_name=table_name, **kwargs)
             finally:
                 closed.append(query.time_interval.start_inclusive)
         generator = body()
@@ -276,10 +276,10 @@ def test_streams_beyond_the_cap_close_the_oldest(source, monkeypatch):
     original, closed = repository.scan, []
     held = []
 
-    def tracked(query, *, table_name):
+    def tracked(query, *, table_name, **kwargs):
         def body():
             try:
-                yield from original(query, table_name=table_name)
+                yield from original(query, table_name=table_name, **kwargs)
             finally:
                 closed.append(query.time_interval.start_inclusive)
         generator = body()
@@ -301,9 +301,9 @@ def test_interleaved_runs_keep_their_streams_and_scan_once(source, monkeypatch):
     plans, read_rows = _plan(repository, snapshot)
     original, calls = repository.scan, []
 
-    def counting(query, *, table_name):
+    def counting(query, *, table_name, **kwargs):
         calls.append(query)
-        yield from original(query, table_name=table_name)
+        yield from original(query, table_name=table_name, **kwargs)
 
     monkeypatch.setattr(repository, "scan", counting)
     order = (0, 3, 1, 4, 2)  # two runs interleaved, under the default cap
@@ -354,3 +354,25 @@ def test_planned_id_without_ticker_or_date_refuses_typed(source):
                     SimpleNamespace(event_id=event.event_id, event_date=event.event_date)):
         with pytest.raises(DataError, match="(?s)HOLDOUT_ACCESS_DENIED.*event or request was not preflighted for this reader"):
             read_rows(partial, plans[0][1])
+
+
+def test_run_scan_passes_the_per_object_byte_cap(source, monkeypatch):
+    repository, snapshot = source
+    plans, read_rows = _plan(repository, snapshot)
+    original, caps = repository.scan, []
+
+    def spying(query, *, table_name, **kwargs):
+        caps.append(kwargs.get("max_object_bytes"))
+        return original(query, table_name=table_name, **kwargs)
+
+    monkeypatch.setattr(repository, "scan", spying)
+    read_rows(plans[0][0], plans[0][1])
+    assert caps == [event_history.MAX_OUTCOME_OBJECT_BYTES]
+
+
+def test_object_over_the_byte_cap_refuses_result_limit_exceeded(source, monkeypatch):
+    repository, snapshot = source
+    plans, read_rows = _plan(repository, snapshot)
+    monkeypatch.setattr(event_history, "MAX_OUTCOME_OBJECT_BYTES", 1)
+    with pytest.raises(DataError, match="(?s)RESULT_LIMIT_EXCEEDED.*object exceeds max_object_bytes"):
+        read_rows(plans[0][0], plans[0][1])
