@@ -4,9 +4,11 @@ render → selfcheck → publish → flags → backup, each step gating the next
 Order is load-bearing, per the guide:
 
 1. **Refresh** Tier 1/2 for calendar names through the fetch wrapper, on the
-   quota guard. A refresh failure degrades to cached data (staleness stays
-   visible in meta.json) — except a rotated credential, which stops the run:
-   retry loops against a dead key only burn goodwill.
+   quota guard. The guarded `^GSPC` refresh runs only with refresh and tiers
+   enabled and must cover the previous trading session or stops the run. A
+   calendar refresh failure degrades to cached data (staleness stays visible in
+   meta.json) — except a rotated credential, which stops the run: retry loops
+   against a dead key only burn goodwill.
 2. **Validate** the fresh data. Red stops the pipeline; yesterday's snapshot
    stays published and a flag is raised.
 2a. **Warm** the Tier-4 serving models score will touch, in a subprocess; a
@@ -1479,18 +1481,29 @@ def run_nightly(
                                        "(the calendar may need a refresh)"})
 
     report.mark("universe", started=started)
-    if tiers:
+    if refresh and tiers:
+        from engine.calendar import trading_calendar
         from engine.data.fetch import Fetcher, CredentialRotated
         from engine.data.pulls.gspc_refresh import refresh_gspc_daily
         if fetcher is None:
             fetcher = Fetcher()
+        _log_rss("gspc refresh start")
         try:
             refetch_token = f"legacy-nightly-{time.time_ns()}"
             result = refresh_gspc_daily(fetcher, paths.GSPC_DAILY, refetch_token=refetch_token)
+            _log_rss("gspc refresh end")
+            report.mark("gspc_refresh", started=started)
             report.steps["gspc_refresh"] = result
             if not result.get("ok"):
                 raise _refuse(report, "gspc_refresh", "GSPC_REFRESH_FAILED: " + str(result.get("reason", "unknown")))
+            expected = trading_calendar().shift(as_of, -1)
+            last_date = pd.to_datetime(result.get("last_date"), errors="coerce")
+            if pd.isna(last_date) or last_date.normalize() < pd.Timestamp(expected).normalize():
+                got = "missing" if pd.isna(last_date) else str(last_date.date())
+                raise _refuse(report, "gspc_refresh", f"GSPC_REFRESH_STALE: expected through {pd.Timestamp(expected).date()}, got {got}")
         except CredentialRotated as exc:
+            _log_rss("gspc refresh end")
+            report.mark("gspc_refresh", started=started)
             report.steps["gspc_refresh"] = {"ok": False, "reason": "credential_rotated"}
             raise _refuse(report, "gspc_refresh", "GSPC_REFRESH_FAILED: credential_rotated") from exc
     # -- 1. refresh -----------------------------------------------------------

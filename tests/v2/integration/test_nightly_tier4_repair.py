@@ -1109,7 +1109,7 @@ def _patch_run_nightly(monkeypatch, *, rebuild_results, finalize_calls, marker_p
     from engine.data.pulls import gspc_refresh
 
     monkeypatch.setattr(gspc_refresh, "refresh_gspc_daily",
-                        lambda *a, **k: {"ok": True, "last_date": "2026-10-12",
+                        lambda *a, **k: {"ok": True, "last_date": "2026-10-13",
                                          "rows": 1})
 
     if events is None:
@@ -1202,7 +1202,7 @@ def _run(monkeypatch, tmp_path, *, rebuild_results, finalize_calls):
 def test_run_nightly_refuses_stale_panel_input_when_gspc_refresh_fails(
         monkeypatch, tmp_path, fetch_only):
     finalize_calls = []
-    nightly, _calls, captured, marker_writes = _patch_run_nightly(
+    nightly, calls, captured, marker_writes = _patch_run_nightly(
         monkeypatch, rebuild_results=[], finalize_calls=finalize_calls,
         marker_path=_marker(tmp_path), events=_events_stub(["AAA"]))
     from engine.data.pulls import gspc_refresh
@@ -1234,6 +1234,74 @@ def test_run_nightly_refuses_stale_panel_input_when_gspc_refresh_fails(
         "timeline", "flags", "stopped", "elapsed_s"}
     assert not sentinel.touched
     assert marker_writes == []
+    assert calls == []
+
+
+def test_run_nightly_skips_gspc_refresh_when_refresh_is_disabled(
+        monkeypatch, tmp_path):
+    finalize_calls = []
+    nightly, _calls, _captured, _marker_writes = _patch_run_nightly(
+        monkeypatch, rebuild_results=[], finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path))
+    from engine.data.pulls import gspc_refresh
+    monkeypatch.setattr(gspc_refresh, "refresh_gspc_daily",
+                        lambda *a, **k: pytest.fail("GSPC refresh ran with refresh=False"))
+    sentinel = _ScorerSentinel()
+
+    with pytest.raises(_Scored):
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=[], refresh=False, tiers=True,
+            publish=False, scorer=sentinel,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+    assert sentinel.touched
+
+
+@pytest.mark.parametrize(("failure_kind", "fetch_only"), [
+    ("stale", False), ("stale", True),
+    ("rotated", False), ("rotated", True),
+])
+def test_run_nightly_refuses_stale_gspc_coverage_and_rotation(
+        monkeypatch, tmp_path, failure_kind, fetch_only):
+    finalize_calls = []
+    nightly, calls, captured, marker_writes = _patch_run_nightly(
+        monkeypatch, rebuild_results=[], finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path), events=_events_stub(["AAA"]))
+    from engine.data.pulls import gspc_refresh
+    attempted = []
+
+    def fail_gspc(fetcher, path, *, refetch_token=None):
+        attempted.append(refetch_token)
+        if failure_kind == "rotated":
+            from engine.data.sources.base import CredentialRotated
+            raise CredentialRotated("test credential rotation")
+        return {"ok": True, "last_date": "2026-10-10", "rows": 1}
+
+    monkeypatch.setattr(gspc_refresh, "refresh_gspc_daily", fail_gspc)
+    monkeypatch.setattr(nightly, "refresh_calendar_data",
+                        lambda *a, **k: pytest.fail("calendar refresh ran after GSPC refusal"))
+    sentinel = _ScorerSentinel()
+
+    with pytest.raises(NightlyStop) as caught:
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=["AAA"], refresh=True, tiers=True,
+            publish=False, scorer=sentinel, fetch_only=fetch_only,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+
+    assert attempted and attempted[0].startswith("legacy-nightly-")
+    assert caught.value.step == "gspc_refresh"
+    if failure_kind == "rotated":
+        assert caught.value.detail == "GSPC_REFRESH_FAILED: credential_rotated"
+        assert captured["report"].steps["gspc_refresh"] == {
+            "ok": False, "reason": "credential_rotated"}
+    else:
+        assert caught.value.detail == (
+            "GSPC_REFRESH_STALE: expected through 2026-10-13, got 2026-10-10")
+        assert captured["report"].steps["gspc_refresh"]["last_date"] == "2026-10-10"
+    assert calls == []
+    assert marker_writes == []
+    assert not sentinel.touched
 
 
 def test_run_nightly_repairs_a_gap_then_scores(monkeypatch, tmp_path):

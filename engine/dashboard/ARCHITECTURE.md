@@ -22,10 +22,13 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 ## Primary contracts and public interfaces
 
 - `nightly.py` refreshes the guarded legacy `^GSPC` daily series before the
-  calendar refresh and any Tier-3 panel rebuild, for both full and fetch-only
-  runs. A refresh result with `ok: false` stops the run with typed
-  `NightlyStop` step `gspc_refresh`; the panel is not built from stale input.
-  The v2 `price-refresh` stage keeps its existing behaviour.
+  calendar refresh and any Tier-3 panel rebuild when both `refresh` and
+  `tiers` are enabled (including fetch-only runs). A failed refresh, or a
+  successful refresh whose `last_date` is before the decision date's previous
+  trading session, stops the run with typed `NightlyStop` step `gspc_refresh`;
+  stale input is not used to build the panel. With refresh disabled, both
+  refresh and panel rebuild are skipped. The v2 `price-refresh` stage keeps
+  its existing behaviour.
 
 - `nightly.py` — the orchestrator; run as the legacy nightly entrypoint
   (root doc §4). Public helpers for the Tier-4 gap repair:
@@ -154,7 +157,8 @@ inside function bodies):
   (`nightly.py::backfill_ticker_history`/`refresh_calendar_data`/
   `refresh_forward_chains`/`run_nightly`); `engine.data.finality`
   (`nightly.py::run_nightly`); `engine.data.pulls`
-  (`nightly.py::run_nightly`); `engine.data.pulls.forward_calendar`
+  (`nightly.py::run_nightly`, including `gspc_refresh::refresh_gspc_daily`);
+  `engine.data.pulls.forward_calendar`
   (`nightly.py::refresh_calendar_data`); `engine.data.rebuild`
   (`nightly.py::refresh_calendar_data`/`run_nightly`/`mark_tiers_degraded`);
   `engine.data.manifest` (`nightly.py::_write_flag_report`);
@@ -198,12 +202,17 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 
 ## Failure semantics
 
-- **`^GSPC` refresh failure** — a refused refresh stops full and fetch-only
-  runs with `NightlyStop` at `gspc_refresh` before the calendar refresh,
-  validation, panel rebuild, or scoring. The existing report JSON fields are
-  unchanged. A successful refresh may rewrite only through the existing
-  guarded `refresh_gspc_daily` helper; its own fetch and write refusal rules
-  remain authoritative.
+- **`^GSPC` refresh failure or stale success** — when both refresh and tiers
+  are enabled, a refused refresh or a returned `last_date` before the
+  decision date's previous trading session stops full and fetch-only runs
+  with `NightlyStop` at `gspc_refresh` before calendar refresh, validation,
+  panel rebuild or scoring. `refresh=False` skips this refresh and the panel
+  rebuild. The existing report JSON top-level fields are unchanged. A
+  successful refresh may rewrite only through the existing guarded
+  `refresh_gspc_daily` helper; its fetch and write refusal rules remain
+  authoritative. A rotated fetch credential uses the fixed detail
+  `GSPC_REFRESH_FAILED: credential_rotated`; the operator must repair the
+  credential before retrying.
 
 - **CLI report** — after `run_nightly` returns a report, the CLI atomically
   writes `reports/nightly_<requested date>.json`; a distinct `--json`
@@ -211,9 +220,10 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   write failure is logged to stderr and returns exit code 1 before the
   optional destination is attempted; optional-write failure is also logged
   and returns 1 after the standard report has been saved.
-- **Missing input / refresh failure** — degrades to cached data (staleness
-  stays visible in `meta.json`) — except a rotated credential, which stops
-  the run rather than burning retries against a dead key.
+- **Calendar input / refresh failure** — a calendar refresh failure degrades
+  to cached data (staleness stays visible in `meta.json`) — except a rotated
+  credential, which stops the run rather than burning retries against a dead
+  key. `^GSPC` refresh failures use the typed refusal above.
 - **Tier-4 gap repair** — with refresh and tiers on, at most one SNAPSHOT per run:
   on the repair path it is written after the Tier-4 gap check; a degraded
   tiers step writes its own (see table); a failed write keeps the previous
@@ -227,6 +237,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 
   | Condition | Outcome |
   | --- | --- |
+  | `^GSPC` refresh refuses or ends before the decision date's previous trading session (with refresh and tiers on) | `NightlyStop` at `gspc_refresh`; exit 1 before calendar refresh, panel rebuild, warm or score; previous panel and published board remain |
   | Warm step (default scorer, or `--fetch-only`): subprocess exits non-zero, cannot start, times out (3 h), fails to plan/verify, leaves a fit missing or not ready, or the panel changed under it | `NightlyStop` `WARM_SERVING_FAILED`; exit 1; nothing scored; no in-process refit |
   | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`); no gap flag once repaired |
   | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no new SNAPSHOT (the previous one is kept), so the native import sees no new session for the night (`not_yet`, unless an earlier run that night already wrote one) |
@@ -242,8 +253,10 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   exit 1, no report), and so does a warm_serving failure
   (`WARM_SERVING_FAILED`, see the table). `run_nightly(fetch_only=True)` with
   refresh off, tiers off or backup on raises `ValueError` before any work
-  (the CLI turns the same rule into the exit 2 above). Refresh and tiers degrade as in a full run and are
-  recorded in `steps`/`flags`. The run writes the flag report and the
+  (the CLI turns the same rule into the exit 2 above). The `^GSPC` pre-panel
+  refresh is required here too and refuses failed or stale coverage as in the
+  table. Calendar refresh and tiers degrade as in a full run and are recorded
+  in `steps`/`flags`. The run writes the flag report and the
   standard `nightly_<date>.json`, never writes the nightly state file
   (`last_successful_as_of`, calendar), so a later full run still back-fills
   the nights this one did not score, and never touches the ledger, bundle or

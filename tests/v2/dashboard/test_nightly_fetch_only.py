@@ -44,6 +44,11 @@ def _fake_refresh_half(monkeypatch, tmp_path, rebuild=None):
     monkeypatch.setattr("engine.data.store.read_table", events_table)
     monkeypatch.setattr(nightly, "refresh_calendar_data",
                         lambda *a, **k: {"ok": True})
+    from engine.data.pulls import gspc_refresh
+    monkeypatch.setattr(gspc_refresh, "refresh_gspc_daily",
+                        lambda *a, **k: {"ok": True,
+                                         "last_date": "2026-10-22",
+                                         "rows": 1})
     monkeypatch.setattr("engine.data.finality.resolve_final_session",
                         lambda *a, **k: SimpleNamespace(
                             date="2026-10-22", detail="",
