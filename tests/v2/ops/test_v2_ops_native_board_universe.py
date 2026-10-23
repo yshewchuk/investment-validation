@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from engine.v2.domain.generation import DISABLED
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_board_universe import BoardRequest, board_requests
 from engine.v2.scoring.source_inputs import SUPPORTED_STRATEGIES
@@ -98,7 +99,7 @@ class TestBoardUniverseParityWithLegacy:
         ])
         as_of = pd.Timestamp("2026-01-25")
         horizon_days = 21
-        covered = sorted(SUPPORTED_STRATEGIES)
+        covered = sorted(SUPPORTED_STRATEGIES | frozenset(DISABLED))
 
         native_keys = Counter(
             (r.ticker, r.strategy, str(r.event_date.date()), r.session)
@@ -303,7 +304,7 @@ class TestDeterministicOrder:
             {"ticker": "BBB", "event_date": pd.Timestamp("2026-02-03"), "session": "AMC"},
             {"ticker": "AAA", "event_date": pd.Timestamp("2026-02-01"), "session": "BMO"},
         ])
-        covered = sorted(SUPPORTED_STRATEGIES)
+        covered = sorted(SUPPORTED_STRATEGIES | frozenset(DISABLED))
         requests = board_requests(
             pd.Timestamp("2026-01-25"), 21, None, events_df,
         )
@@ -328,7 +329,7 @@ class TestDeterministicOrder:
         # strategy in alphabetical order, then DYN-SV last, each request
         # carrying the event's own ticker/date/session.
         covered = (
-            "BFLY-P", "BFLY-P5", "CND-PS", "CTR5", "RAMP7",
+            "BFLY-P", "BFLY-P5", "CAL-P", "CND-P", "CND-PS", "CTR5", "RAMP7",
             "STR-RUNUP", "STR-THRU", "TWIN-P", "TWIN-P5",
         )
         assert [r.strategy for r in first] == [*covered, "DYN-SV"]
@@ -337,3 +338,25 @@ class TestDeterministicOrder:
         assert {r.session for r in first} == {"BMO"}
         # Supplementary repeatability check.
         assert first == second
+
+
+class TestDisabledStrategiesEnumerated:
+    def test_cal_p_and_cnd_p_each_appear_once_per_event_and_dyn_sv_is_last(self):
+        events_df = _events([
+            {"event_id": "e1", "ticker": "AAA", "event_date": pd.Timestamp("2026-02-01"), "session": "BMO"},
+            {"event_id": "e2", "ticker": "BBB", "event_date": pd.Timestamp("2026-02-03"), "session": "AMC"},
+        ])
+        requests = board_requests(
+            pd.Timestamp("2026-01-25"), 21, None, events_df,
+        )
+        covered = sorted(SUPPORTED_STRATEGIES | frozenset(DISABLED))
+        by_event: dict[tuple, list[str]] = {}
+        for r in requests:
+            by_event.setdefault(
+                (r.ticker, r.event_date, r.session), []).append(r.strategy)
+        assert len(by_event) == 2
+        for strategies in by_event.values():
+            assert strategies == [*covered, "DYN-SV"]
+            assert strategies.count("CAL-P") == 1
+            assert strategies.count("CND-P") == 1
+            assert strategies[-1] == "DYN-SV"

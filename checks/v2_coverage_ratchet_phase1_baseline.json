@@ -1,6 +1,6 @@
 {
   "schema_version": "phase1_coverage.v1.0",
-  "suite_version": "phase1_coverage_suite.v17",
+  "suite_version": "phase1_coverage_suite.v19",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_dashboard_board_filters_ops_root.py",
@@ -37,7 +37,7 @@
     "tests/v2/data/test_v2_data_reference_inputs.py",
     "tests/test_v2_data_repository.py",
     "tests/test_v2_data_roundtrip.py",
-    "tests/test_v2_data_tier4_coverage.py",
+    "tests/v2/data/test_tier4_coverage.py",
     "tests/test_v2_ops_artifacts.py",
     "tests/test_v2_ops_authority.py",
     "tests/test_v2_ops_calendar_moves_jobs.py",
@@ -74,7 +74,7 @@
     "tests/test_v2_ops_legacy_features.py",
     "tests/v2/ops/test_v2_ops_legacy_workflows.py",
     "tests/test_v2_ops_migrations.py",
-    "tests/test_v2_ops_native_board_universe.py",
+    "tests/v2/ops/test_v2_ops_native_board_universe.py",
     "tests/test_v2_ops_native_parity_sidecar.py",
     "tests/test_v2_ops_native_refresh_e2e.py",
     "tests/test_v2_ops_native_refresh_nightly_e2e.py",

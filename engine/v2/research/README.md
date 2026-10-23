@@ -26,9 +26,11 @@ write path.
 ## Responsibilities
 
 - Pure analysis cores moved verbatim from the legacy research tools.
-- One `resolve_pinned`/`resolve` call per run, with the resulting
-  `snapshot_id` threaded through every read and into the output, including
-  the experiment loader's explicit holdout context columns.
+- One pinned snapshot identity per run, threaded through every read and output,
+  including the experiment loader's explicit holdout context columns. Public
+  readers may revalidate that identity: the eligibility planner resolves it at
+  admission and again at the independently callable canonical reader boundary;
+  repository scan planning/validation also resolves the pinned identity.
 - Plan and price events against one resolved `SnapshotRef`, at a grid of fill
   alphas, with the same arithmetic the legacy replay uses.
 - Publish replay output as the `trades` table through the generic incremental
@@ -53,6 +55,18 @@ write path.
   publishing exactly as before.
 
 ## Public interface
+
+`eligibility_policy.eligibility_policy` validates an explicit version/width;
+`eligibility_policy.plan_eligibility` returns the opt-in metadata-only plan described below.
+`experiment_population.canonical_events` reads the six canonical metadata columns
+after exact committed-snapshot admission, and flags same-ticker/date conflicts. `experiment_trades.classify_events` accepts
+that frame, snapshot and explicit as-of month; it returns detached canonical rows,
+membership labels, structurally ambiguous IDs and pinned holdout context. Malformed
+event IDs refuse; invalid scalar dates/sessions are classified as ambiguous.
+`snapshot_inputs.snapshot_reference` checks native reference shape only;
+`admit_snapshot` additionally resolves and compares the complete committed identity.
+The pure classifier checks shape, not commitment of its caller-supplied context.
+Neither metadata helper grants payload access or accepts caller-provided membership labels.
 
 `progress.Progress`, `progress.stage` and `progress.decision` provide shared stderr telemetry:
 bounded-cadence ticks, stage timing/RSS, optional native refusal codes (no message text) and aggregate decisions.
@@ -168,7 +182,7 @@ The manual no-ledger `experiments.v2_gate_variant` CLI consumes
 `experiments.gate_report` combines protected historical features, pinned
 calendar plans and fresh per-arm pricing for exploratory fold reports.
 
-<!-- public-interface: progress.Progress, progress.stage, progress.decision, iv_crush_inputs.load_iv_crush_targets, iv_crush_inputs.preflight_iv_crush_targets, event_history.plan_event_targets, event_history.POPULATION_CONTEXT_COLUMNS, replay.clean_chain_rows, _pricing.MIN_MEANINGFUL_COST, _pricing.ChainSnapshot, _pricing.FillModel, _pricing.StructureError, _pricing.price_structure, signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ReplayResult, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _chains.read_chains_for_years, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label, experiment_exits.PositionLeg, experiment_exits.EnteredPosition, experiment_exits.ExitDecision, experiment_exits.walk_fixed_day, experiment_exits.walk_exit, experiment_exits.exit_report_frame, experiment_population.load_population, prediction_inputs.load_prediction_targets, event_history.load_event_history, magnitude_inputs.magnitude_recipe, magnitude_inputs.forecast_cutoff, magnitude_inputs.load_magnitude_targets, magnitude_inputs.preflight_magnitude_targets, magnitude_inputs.qualify_magnitude_training_targets, magnitude_features.load_magnitude_history, magnitude_folds.plan_magnitude_folds, magnitude_folds.magnitude_window, magnitude_folds.annual_fold, magnitude_history_store.build_context, magnitude_history_store.materialize, magnitude_history_store.read_stored, magnitude_history_store.preflight_stored, magnitude_history_store.read_stored_for_events, magnitude_history_inputs.admit_stored -->
+<!-- public-interface: eligibility_policy.eligibility_policy, eligibility_policy.plan_eligibility, experiment_population.canonical_events, experiment_trades.classify_events, snapshot_inputs.snapshot_reference, snapshot_inputs.admit_snapshot, progress.Progress, progress.stage, progress.decision, iv_crush_inputs.load_iv_crush_targets, iv_crush_inputs.preflight_iv_crush_targets, event_history.plan_event_targets, event_history.POPULATION_CONTEXT_COLUMNS, replay.clean_chain_rows, _pricing.MIN_MEANINGFUL_COST, _pricing.ChainSnapshot, _pricing.FillModel, _pricing.StructureError, _pricing.price_structure, signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ReplayResult, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _chains.read_chains_for_years, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label, experiment_exits.PositionLeg, experiment_exits.EnteredPosition, experiment_exits.ExitDecision, experiment_exits.walk_fixed_day, experiment_exits.walk_exit, experiment_exits.exit_report_frame, experiment_population.load_population, prediction_inputs.load_prediction_targets, event_history.load_event_history, magnitude_inputs.magnitude_recipe, magnitude_inputs.forecast_cutoff, magnitude_inputs.load_magnitude_targets, magnitude_inputs.preflight_magnitude_targets, magnitude_inputs.qualify_magnitude_training_targets, magnitude_features.load_magnitude_history, magnitude_folds.plan_magnitude_folds, magnitude_folds.magnitude_window, magnitude_folds.annual_fold, magnitude_history_store.build_context, magnitude_history_store.materialize, magnitude_history_store.read_stored, magnitude_history_store.preflight_stored, magnitude_history_store.read_stored_for_events, magnitude_history_inputs.admit_stored -->
 
 ## Consumers
 
@@ -277,3 +291,25 @@ chains, snapshot pinning, and the refusal paths.
 `tests/test_v2_research_reconcile_trades.py` covers the canonical-event prune:
 non-canonical rows tombstoned, everything else byte-identical, the pinned
 snapshot recorded, and an explicit `--snapshot-id` honoured.
+
+## Opt-in grouped eligibility
+
+`eligibility_policy.eligibility_policy(version=..., embargo_days=...)` declares
+`grouped_ticker_embargo.v1`; whole calendar-day width is explicit, not globally 30.
+`eligibility_policy.plan_eligibility` rederives random/rolling membership from
+pinned canonical event metadata and returns a content-addressed development
+exclusion plan with retained IDs, reasons, coverage and separate evaluation IDs.
+It merges same-ticker random windows and uses inclusive interval overlap;
+one overlapping horizon excludes the whole event, not individual price bars.
+
+The closed `event_group_bounds.v1` input binds the full `source_snapshot`,
+`holdout_as_of_month`, `policy_id`, sorted positive `horizons`, `groups`, and
+`metadata_id` (native content hash of the other fields). Each group declares
+`event_id`, `ticker`, `event_date`, `label_start`, `label_end`, and one forecast
+per horizon with `horizon_sessions`, `decision_date`, `source_session_ceiling`.
+Dates are canonical ISO calendar days. Producers must establish these bounds;
+missing bounds refuse. A caller's digest is not evidence of their truth.
+
+This is a metadata foundation only: no current runner uses it. Evaluation IDs
+are preserved, not authorized for reading. Existing v1 behavior is unchanged.
+Integration sequencing belongs to the [stage-2 design](../../../experiments/SUPER_SIZE/STAGE2_DESIGN.md).

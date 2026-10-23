@@ -163,7 +163,9 @@ either required table. Their current consumer is
 
 `experiments/runup_exit_report.py` consumes `fingerprints.source_closure` /
 `environment_identity` and `errors.OpsError` / `fail` for exploratory identity
-and typed refusals; `experiments/v2_runup_exits.py` consumes those typed errors.
+and typed refusals; `experiments/v2_runup_exits.py` consumes those typed errors;
+`experiments/record_export.py` consumes `errors.fail` / `errors.OpsError` for its typed refusals and failure causes; `experiments/v2_gate.py` and `experiments/v2_prediction.py` consume its `export_or_skip`.
+`experiments/registered_runup.py` consumes specification resolution and typed refusals; `experiments/v2_runup_study.py` also consumes catalog connection and specification decoding for registered RUNUP execution.
 
 Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
@@ -196,7 +198,7 @@ submitted jobs inline, or switch production authority: it queues the plan and
 returns the job ids, leaving execution to a separately started supervisor.
 
 The top-level `experiments/native_registration.py` library consumes the narrow
-registration surface above. Like other `experiments/` callers, it is outside
+registration surface above, including `native_registration.native_evidence_json` for bounded reservation serialization. Like other `experiments/` callers, it is outside
 the engine import graph; it introduces no peer-layer engine dependency.
 `experiments/native_outcomes.py` consumes `catalog.transaction`, `native_registration.read_native_evidence`/`native_evidence_json` and
 `errors.OpsError`/`fail` for catalog-owned publication and typed refusal.

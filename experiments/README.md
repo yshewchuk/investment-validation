@@ -14,19 +14,23 @@ The owning modules expose these helpers to native experiment callers; no compati
 | `magnitude_search_evidence.fit_evidence` | Admitted inputs, fold, horizons and execution columns yield ordered per-horizon event/matrix identities without fitting or I/O. |
 | `magnitude_search_evidence.normalize_forecasts` | Forecast rows, fold and horizons yield ordered complete finite nonnegative event/horizon predictions. Default Real/Integral admission supports inner submissions; `strict_json=True` requires JSON-native numbers. Malformed input raises structural/numeric exceptions for caller-owned refusal mapping. |
 | `magnitude_search_evidence.validate_targets` | Preflight, fold, target receipt and rows must match protected membership, cutoff, recipe and finite nonnegative targets; returns None without I/O. Default Real support and optional strict-JSON validation preserve caller policies; malformed evidence raises structural/numeric exceptions. |
+| `magnitude_search_shards.write_section` / `build_manifest` / `manifest_id` / `verify_manifest` / `iter_section` / `LIST_MEMBERS` | Called by `magnitude_search_inputs.load_inputs` and `load_fit_inputs` (`iter_section`) and `publish_inputs` (`write_section`, `build_manifest`, `manifest_id`). Rows with a strictly increasing key publish as canonical content-addressed shards through `ArtifactStore`; the manifest hash is the cohort `inputs_id`; `iter_section` streams one verified shard at a time after validating all shard metadata. Imports foundation, contracts, ops errors and `magnitude_search_errors`. Contract: [ARCHITECTURE.md](ARCHITECTURE.md#sharded-cohort-inputs). |
+| `magnitude_search_inputs.publish_inputs` | The one cohort publisher: publishes the shards of an admitted inputs dict and returns `(manifest, inputs_id)`; the caller appends the manifest. Callers: `SearchTrials._start` (`cohort:`) and the outer writer (`outer-inputs:`). |
+| `magnitude_search_inputs.load_inputs` | The one cohort loader: a v2 manifest is verified and streamed shard by shard into the inputs shape, a v1 whole-cohort record is bound by content hash. Consumers: `SearchTrials` (record, reconcile, freeze, `_validation`) and outer replay. Imports foundation, ops errors and `magnitude_search_shards`. |
+| `magnitude_search_inputs.load_fit_inputs` | Store, manifest, expected `inputs_id`, evaluation events, horizons and feature columns yield the fit child's projected `{features, training}` rows, streamed shard by shard from the `training` and `features` sections after the manifest hash check; any mismatch is `EXPERIMENT_IDENTITY_CONFLICT` (retryable store errors propagate; a projected row missing a requested column raises `KeyError`, which the child reports as unavailable). Sole consumer: `magnitude_search_worker` (the fit child). |
 | `magnitude_search_errors.artifact_failure` / `SearchArtifactError` | Artifact error plus caller-owned messages yields a redacted `OpsError` with identity/resource policy; the subtype identifies artifact-origin failures without parsing messages. Journal reference syntax and publication `UNSAFE_PATH` are identity conflicts; read-time `UNSAFE_PATH` after syntax admission is a retryable resource failure, with no attempt-retry authorization. Plan publication retains its resource policy. |
-| `magnitude_search_trials.SearchTrials` | Verified plan/anchor, catalog/store and native repository; `seal(clock=...)`, `start(outer_year, inner_year, candidate_id)`, `record(..., forecasts=... or failure=Problem)` and `freeze()` persist immutable all-attempt evidence and selections from submitted forecasts. Candidate terminals are guarded here by stage and canonical `EXPERIMENT_VARIANT_FAILED` admission. A native-derived validation cohort independently binds terminal targets and the complete receipt to admitted preflight/cutoff/recipe; replay never reopens labels. This detects inconsistent journal evidence, not wholesale fabrication of all evidence. These submitted-forecast methods do not verify execution or fit models; native `execute` is described below. No outer evaluation or final authority. |
+| `magnitude_search_trials.SearchTrials` | Verified plan/anchor, catalog/store and native repository; `seal(clock=...)`, `start(outer_year, inner_year, candidate_id)`, `record(..., forecasts=... or failure=Problem)` and `freeze()` persist immutable all-attempt evidence and selections from submitted forecasts. Candidate terminals are guarded here by stage and canonical `EXPERIMENT_VARIANT_FAILED` admission. A native-derived validation cohort independently binds terminal targets and the complete receipt to admitted preflight/cutoff/recipe; replay never reopens labels. This detects inconsistent journal evidence, not wholesale fabrication of all evidence. These methods never fit models. When native execution evidence exists, `record` checks completion status and the submitted forecast digest; terminal replay verifies the stored receipt and execution evidence. Native `execute` is described below. No outer evaluation or final authority. |
 | `SearchTrials.execute` | One declared candidate/inner fold plus explicit CPU-time, wall-time and address-space limits runs fresh native horizon fits in a fixed child. Immutable fit admission/completion counts and matrix/forecast digests feed the existing journal; completed replay launches nothing. Resource/shared failures stay unfinished, and no outer-evaluation or final-read authority is added. |
 | `SearchTrials.reconcile` | The same trial and exact limits finish missing publication only from its immutable post-exit `execution-result` record. Verifies the original admission, fit markers, result and forecast bytes; never fits, reclaims a start or substitutes caller forecasts. Missing/incomplete results refuse. Existing validation is reused, otherwise native admission precedes label reads. Completed replay is read-only under both no-fit guards; original source/plan identity still applies. |
 | `magnitude_search_execution.validate_execution_limits` / `execution_limits` | Admit exactly three positive platform-representable integer limits without effects; the latter also selects the lowest currently allowed Linux CPU or refuses `RESOURCE_UNAVAILABLE`. Neither claims a trial or reserves host resources. |
-| `magnitude_search_execution.run_fitted_trial` | Admitted features/training targets, fold, horizons, recipe, resolved limits and a progress callback drive the fixed internal `magnitude_search_worker` child. Requires exactly the validated resource trio plus a non-Boolean integer `cpu_id` in `[0, 2**31 - 1)`; malformed limits refuse `INVALID_EXPERIMENT_SPEC` before input access or effects. Both no-fit guards apply; the transport projects only consumed identity/numeric rows and qualified targets before applying the unchanged 16 MiB limit; bounded I/O and child resource limits constrain execution, and each fit marker awaits the callback before acknowledgement. Returns the child outcome; always reaps the child and removes scratch inputs. The worker is an internal protocol entrypoint, not a public caller API. |
+| `magnitude_search_execution.run_fitted_trial` | An admitted cohort source (`manifest`, `inputs_id`, `store_root`), fold, horizons, recipe, resolved limits and a progress callback drive the fixed internal `magnitude_search_worker` child. Requires exactly the validated resource trio plus a non-Boolean integer `cpu_id` in `[0, 2**31 - 1)`; malformed limits refuse `INVALID_EXPERIMENT_SPEC` before input access or effects. Both no-fit guards apply; the child streams the manifest's shards and projects only consumed identity/numeric rows and qualified targets, with no input byte cap (child output stays capped at 16 MiB); bounded I/O and child resource limits constrain execution, and each fit marker awaits the callback before acknowledgement. Returns the child outcome; always reaps the child and removes scratch inputs. The worker is an internal protocol entrypoint, not a public caller API. |
 | `magnitude_fitted.fitted_forecasts` | Existing admitted matrices and recipe yield forecasts/evidence. Optional progress callbacks bracket each fit; bounded execution opts into propagating resource/infrastructure errors. Existing callers retain their previous failure mapping. |
 | `native_registration.prepare_native_registration` | A validated spec, repository, source root and holdout context produce `(NativeRegistration, normalized_spec)`; resolves one scope pin or verifies an explicit `SnapshotRef`, reads eligible metadata only, and writes nothing. |
 | `native_registration.valid_registration_read_budget` | Pure predicate shared by the loader and CLI parsers: true only for built-in integers from 1 through `2**62 - 1`. Returns false for booleans, None, other types and out-of-range values; no coercion, I/O or exceptions. Entry boundaries own their existing typed refusal or argparse diagnostic. |
 | `native_registration.read_native_registration` | Catalog/store and a spec load the exact verified binding with `max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES` (16 MiB UTF-8). A larger explicit integer budget supports larger legitimate registrations; only integers from 1 through `2**62 - 1` are accepted, otherwise `INVALID_EXPERIMENT_SPEC` before I/O. One SQL snapshot bounds evidence transfer (twice the budget for UTF-16, then a UTF-8 recheck); registration reference size is admitted before artifact loading. Missing reservation refuses `INVALID_EXPERIMENT_SPEC`; corrupt, malformed, oversized or spec-mismatched evidence refuses `EXPERIMENT_IDENTITY_CONFLICT`. Raw storage errors propagate. No writes, current-request admission or legacy seal migration. |
 | `native_registration.native_registration_exists` | An expected `NativeRegistration` gives false when absent, true for exact verified catalog/object evidence, or `EXPERIMENT_IDENTITY_CONFLICT`; read-only. Optional `max_evidence_bytes` bounds stored catalog/object JSON through the shared ops verifier; default None preserves prior policy. |
 | `native_registration.verify_native_registration` | Catalog/store and a `NativeRegistration` verify stored admission, returning None without writes or current-request revalidation. Wrong type, absent/conflicting registration or malformed/oversized bounded evidence refuses `EXPERIMENT_IDENTITY_CONFLICT`; optional `max_evidence_bytes` forwards the catalog/object JSON bound, while default None preserves existing limits. Foundation `ArtifactError` is converted to `EXPERIMENT_IDENTITY_CONFLICT`; raw `OSError`/`sqlite3.Error` propagate. |
-| `native_registration.reserve_native_registration` | Accepts the matching prepared registration/spec pair from the preparer; publishes complete binding bytes and reserves catalog rows, obeying any sweep seal. Exact replay is idempotent; conflicts refuse R6. Publication may leave an unreferenced complete object if reservation fails. |
+| `native_registration.reserve_native_registration` | Accepts the matching prepared registration/spec pair from the preparer; publishes complete binding bytes and reserves catalog rows, obeying any sweep seal. Optional `max_evidence_bytes` bounds prepared binding/catalog bytes before publication and both stored registration checks; invalid explicit budgets refuse R1, oversize R6. Default None preserves prior behavior. Exact replay is idempotent; conflicts refuse R6. Publication may leave an unreferenced complete object if reservation fails. |
 | `native_registration.read_native_gate_sweep` | Catalog/experiment ID yields stored text or None for absence. SQL atomically caps returned bytes at 16 MiB (32 MiB for UTF-16 catalogs), then decoding enforces 16 MiB UTF-8; wrong type, invalid encoding or oversize gives `EXPERIMENT_IDENTITY_CONFLICT`. Preparation, sealing and reservation share it; SQLite internals/decoded-object overhead are not capped. |
 | `native_registration.decode_native_gate_sweep` | Roster JSON text yields an object after a 16 MiB UTF-8 cap; malformed/oversized stored rows refuse `EXPERIMENT_IDENTITY_CONFLICT`. The new-seal writer requests `INVALID_EXPERIMENT_SPEC` before insertion. No writes or identity normalization. |
 | `native_gate_worker.read_native_staged_input` | A path yields bounded bytes from a no-follow regular-file descriptor; malformed files refuse `INVALID_EXPERIMENT_SPEC` and I/O errors propagate to the caller's typed boundary. |
@@ -47,6 +51,8 @@ embed their temporal plan twice. The option neither changes saved identity nor
 changes subsequent admission/outcome APIs' separate read policies.
 
 ## Consumers and authority
+
+`record_export` (run-record export) is consumed by `v2_gate` and `v2_prediction` `run`; it depends on `lib` (EXP numbering) and ops errors only.
 
 `v2_magnitude_search_run` consumes `magnitude_search_plan.read_search_plan`, `magnitude_search_records.MIGRATIONS`/`OWNER`/`append_record`/`read_record`, `magnitude_search_trials.SearchTrials`, `magnitude_search_execution.validate_execution_limits`, and `magnitude_search_outer.execute_outer_fold`/`collect_outer_results` for source-sealed serial orchestration.
 Its CLI also consumes `native_registration.read_native_registration`/`valid_registration_read_budget`/`MAX_NATIVE_EVIDENCE_BYTES` and `native_gate_worker.read_native_staged_input`; direct engine dependencies are contracts, data, foundation and ops. The [driver section](#serial-magnitude-search-driver) defines the public seal/run helpers and each CLI action's authority.
@@ -87,6 +93,46 @@ reports include that basis and effective thresholds. Zero/credit entries and unu
 conversions refuse. Absolute requests retain their existing report shape. P&L always
 uses quote-price × quantity; bid/ask spread is modeled but commissions, fees and ×100 are not. Daily marks
 cannot establish intraday stop execution or a trading advantage.
+
+### Registered single-candidate RUNUP comparison
+
+`python -m experiments.v2_runup_study register` seals one candidate before any
+market-data read; `run` re-admits that seal, evaluates or replays, and publishes
+immutable no-ledger JSON evidence. Both require `--spec SPEC.json --catalog CATALOG
+--store-root STORE --snapshot-id SNAPSHOT --scope SCOPE --as-of-month YYYY-MM`
+and repeatable `--event-id ID`. The catalog must already exist; no implicit migration
+or current-head substitution is performed. Original spec and exact arguments are
+required for replay, even after the scope head moves. The installed source closure
+and numerical environment must still match; changed code needs a new registration.
+
+Use the native `ExperimentSpec` document with runner `experiments/v2_runup_study.py`,
+a nonblank hypothesis, exactly one named primary arm, seed 0, empty folds and no
+input files. Economics are exactly `fill` and `exit`; exit requires `kind: target_stop`,
+`trading_days: 14`, explicit `threshold_units` and signed `target_pnl`/`stop_pnl`.
+The cohort and thresholds are caller choices. The fixed-day control is implicit
+in this runner's contract, not a second attempted variant. No fitting is performed.
+
+`registered_runup.comparison_request` validates without I/O; `register_runup` and
+`run_runup` accept catalog/store/repository/spec plus explicit `snapshot` (SnapshotRef),
+`scope`, `as_of_month` and `event_ids`. Registration reads canonical event metadata
+only. Run rechecks the entire binding before outcome access; terminal replay reads
+metadata/evidence but no market payloads. Missing common-horizon marks fail the whole
+candidate, with no successful report or survivor subset. Supported scientific failures
+become immutable terminals; resource interruptions leave publication resumable.
+
+After argument parsing, the CLI emits one JSON document and exits 0 on success, 2 on refusal (including replayed scientific failure). Argparse errors exit 2 with stderr diagnostics and empty stdout. Run returns
+`variant_id`, `run_id`, `replayed`, `outcome`, `receipt` and `receipt_ref`;
+`receipt.report_ref` identifies canonical comparison JSON in the artifact store.
+Its existing exploratory report schema/mode stays unchanged; the enclosing native
+registration/outcome establishes the registered execution. No `REPORT.md` export or
+CSV ledger is written; optional `--no-ledger` is an accepted no-op. Both actions forward
+`--max-evidence-bytes` (default 16 MiB): registration preflights new binding/catalog bytes
+and bounds both stored-evidence checks; run bounds registration/outcome JSON admission.
+The public RUNUP helpers require a positive integer budget; None never disables it.
+This does not cap market scans or report size; spec files are capped at 16 MiB.
+This is reconstructed-history selection evidence, with the daily-mark economics above.
+It does not establish OOS validation, as-known prices, threshold-search completeness
+or release authority. Multi-arm selection and actual study design remain separate.
 
 ## Scientific sweep collection
 
@@ -216,3 +262,7 @@ driver seal, whose hash `seal` returns as `driver_id`, supplies driver provenanc
 `seal_search_run(..., clock=...)` exposes the explicit seal as a library API.
 `seal` and `collect` reject resource flags. Optional `--no-ledger` is a no-op:
 all modes exclude ledger/outcome publication, final holdouts, releases and orders.
+
+Native inner recording normalizes each successful forecast submission once within
+the recording call, reusing that local value for its completion digest and publication.
+This adds no cross-call cache: fresh reads, validation order and receipt verification remain unchanged.

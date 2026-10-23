@@ -510,7 +510,7 @@ def _update_head(conn: sqlite3.Connection, scope: str, new_snapshot_id: str,
 
 
 # --------------------------------------------------------------------------
-# receipt-level idempotency: a repeated call under the same receipt_id is a no-op
+# receipt-level idempotency: a repeated call under the same receipt_id returns the stored receipt and applies its pending head CAS (#1060)
 # --------------------------------------------------------------------------
 
 
@@ -529,7 +529,10 @@ def _existing_receipt(conn: sqlite3.Connection, receipt_id: str, request_hash: s
     fix, #77/#82): the original commit never bumped the generation or moved
     the head when its candidate already equalled
     ``expected_head_snapshot_id``, so a replay of that call must not claim
-    it did either.
+    it did either. A caller of this shortcut may still owe a head CAS the
+    original commit performed but the catalog no longer shows (head rewound
+    to the expected parent): ``commit_snapshot`` re-applies that pending CAS
+    on the shortcut path (#1060).
     """
     row = conn.execute("SELECT * FROM data_import_receipts WHERE receipt_id = ?",
                        (receipt_id,)).fetchone()
@@ -550,6 +553,33 @@ def _existing_receipt(conn: sqlite3.Connection, receipt_id: str, request_hash: s
         prior_head_snapshot_id=expected_head_snapshot_id,
         resulting_head_snapshot_id=snapshot.snapshot_id, resulting_head_generation=resulting_generation,
         status="committed", problem=None, envelope={})
+
+
+def _apply_pending_head_cas(conn: sqlite3.Connection, scope: str, shortcut: SnapshotImportReceipt,
+                            expected_head_snapshot_id: str | None, expected_head_generation: int,
+                            receipt_id: str, now: str) -> None:
+    """Apply a still-pending head CAS on a receipt-replay shortcut (#1060).
+
+    A replay under an existing receipt_id returns that receipt and, if the
+    head still sits at the caller's expected (snapshot, generation) while the
+    receipt claims a different resulting head, applies the still-pending head
+    CAS (#1060): the stored receipt already claims the resulting head, but the
+    head row may still sit at the caller's expected parent (e.g. rewound after
+    the original commit). Only then advance it — never clobber a head that has
+    since moved elsewhere.
+    """
+    current = _current_head(conn, scope)
+    head_matches = (
+        (current is None and expected_head_generation == 0)
+        if expected_head_snapshot_id is None
+        else (current is not None
+              and current["snapshot_id"] == expected_head_snapshot_id
+              and current["generation"] == expected_head_generation))
+    if (shortcut.resulting_head_snapshot_id != expected_head_snapshot_id
+            and head_matches):
+        _update_head(conn, scope, shortcut.resulting_head_snapshot_id,
+                     expected_head_snapshot_id, expected_head_generation,
+                     receipt_id, now)
 
 
 # --------------------------------------------------------------------------
@@ -587,6 +617,8 @@ def commit_snapshot(conn: sqlite3.Connection, *, scope: str, request_hash: str,
         shortcut = _existing_receipt(conn, receipt_id, request_hash, attempt_id, fence, scope,
                                      snapshot, expected_head_snapshot_id, expected_head_generation)
         if shortcut is not None:
+            _apply_pending_head_cas(conn, scope, shortcut, expected_head_snapshot_id,
+                                    expected_head_generation, receipt_id, now)
             return shortcut
         _check_head_expectation(_current_head(conn, scope), expected_head_snapshot_id,
                                 expected_head_generation)

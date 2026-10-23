@@ -15,11 +15,12 @@ from engine.v2.data import objects
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import from_document
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import ExperimentSpec
 from experiments import gate_report as gate
 from experiments import native_outcomes, native_registration
 from experiments import v2_gate as cli
+from experiments.record_export import export_native_run
 from tests.data_scan_support import (
     catalog_and_store,
     commit_tables,
@@ -145,17 +146,28 @@ def _register(source, spec=None, **kwargs):
     return spec, registered
 
 
-def _invoke(source, capsys, action, spec=None, *extra, status=0, required_tables=None):
+def _invoke(source, capsys, action, spec=None, *extra, status=0, required_tables=None,
+            exp_number="101"):
     path = source.root / "spec.json"
     path.write_text(json.dumps(asdict(spec or build_gate_spec())))
     arguments = [action, "--spec", str(path), "--catalog", str(source.root / "catalog.sqlite"),
                  "--store-root", str(source.store.root), "--as-of-month", MONTH, *map(str, extra)]
+    if action == "run":
+        arguments += ["--experiments-root", str(source.root / "experiments")]
+        if exp_number is not None:
+            arguments += ["--exp-number", str(exp_number)]
     with observe_scan_outcomes({"earnings_events", "daily_market", "option_chains"}) as scans:
         assert cli.main(arguments) == status
     captured = capsys.readouterr()
+    stderr = captured.err
+    if action == "run" and "--no-record-export" in extra:
+        warning = "WARNING: no EXP number; run record NOT exported\n"
+        lines = stderr.splitlines(keepends=True)
+        assert lines.count(warning) == 1
+        stderr = "".join(line for line in lines if line != warning)
     # Replays still admit events, but only fresh evaluation needs calendar/quotes.
     required = {"earnings_events"} if required_tables is None else required_tables
-    assert_scan_boundaries(captured.err, tables={"earnings_events", "daily_market", "option_chains"},
+    assert_scan_boundaries(stderr, tables={"earnings_events", "daily_market", "option_chains"},
                            expected_scans=scans, required_tables=required, allow_failures=status != 0)
     return json.loads(captured.out)
 
@@ -267,10 +279,34 @@ def test_two_real_cli_arms_consume_distinct_fill_record_and_replay_once(source, 
     rows = list(csv.DictReader(ledger.open()))
     assert len(rows) == 2 and {row["stage"] for row in rows} == {"ran"}
     assert {row["spec_hash"] for row in rows} == {result["variant_id"] for result in results}
+    export_folder = next((source.root / "experiments").glob("EXP-101_*"))
+    assert outputs[1]["record_export"]["status"] == "written"
+    run_dirs = list((export_folder / "results" / "runs").iterdir())
+    assert len(run_dirs) == 1
+    assert (run_dirs[0] / "request.json").is_file()
+    assert (run_dirs[0] / "outcome.json").is_file()
     before = ledger.read_bytes()
+    first_output = outputs[0]
+    assert Path(outputs[0]["report"]).read_text().strip() in (export_folder / "REPORT.md").read_text()
+    assert set(first_output["record_export"]) == {"status", "trimmed"}
+    assert "dir" not in first_output["record_export"]
+    assert json.loads((export_folder / "results" / "request.json").read_text()) == {
+        "action": "run",
+        "as_of_month": MONTH,
+        "scope": "shadow",
+        "event_ids": None,
+        "purpose": "sweep",
+        "no_ledger": False,
+    }
     monkeypatch.setattr(gate, "gate_result", _forbid)
-    for spec, output in zip((build_gate_spec(), build_gate_spec(1.0, "control")), outputs, strict=True):
-        assert _invoke(source, capsys, "run", spec, "--ledger", ledger) == output
+    for index, (spec, output) in enumerate(zip((build_gate_spec(), build_gate_spec(1.0, "control")), outputs, strict=True)):
+        replayed = _invoke(source, capsys, "run", spec, "--ledger", ledger)
+        assert replayed["record_export"]["status"] == "unchanged"
+        assert output["record_export"]["status"] == "written"
+        assert replayed["recording_mode"] == "recorded"
+        assert replayed["variant_id"] == results[index]["variant_id"]
+        assert {key: value for key, value in replayed.items() if key != "record_export"} == {
+            key: value for key, value in output.items() if key != "record_export"}
     assert ledger.read_bytes() == before
 
 
@@ -383,7 +419,9 @@ def test_missing_evaluation_quotes_records_one_failed_attempt_and_replay_does_no
         monkeypatch.setattr(gate, "gate_result", _forbid)
         before = ledger.read_bytes()
         replayed = _invoke(source, capsys, "run", None, "--ledger", ledger, status=2)
-        assert replayed == {"refused": "EXPERIMENT_VARIANT_FAILED", "replayed": True}
+        assert replayed["refused"] == "EXPERIMENT_VARIANT_FAILED"
+        assert replayed["replayed"] is True
+        assert replayed["record_export"]["status"] == "written"
         assert ledger.read_bytes() == before
     finally:
         source.conn.close()
@@ -599,11 +637,48 @@ def test_plan_and_fold_failures_record_one_failed_attempt_without_partial_report
         assert not list(source.root.rglob("REPORT.md"))
         before = ledger.read_bytes()
         monkeypatch.setattr(gate, "gate_result", _forbid)
-        assert _invoke(source, capsys, "run", spec, "--ledger", ledger, status=2) == {
-            "refused": "EXPERIMENT_VARIANT_FAILED", "replayed": True}
+        replayed = _invoke(source, capsys, "run", spec, "--ledger", ledger, status=2)
+        assert replayed["refused"] == "EXPERIMENT_VARIANT_FAILED"
+        assert replayed["replayed"] is True
+        assert replayed["record_export"]["status"] == "written"
         assert ledger.read_bytes() == before
     finally:
         source.conn.close()
+
+
+def test_record_export_failure_refuses_run_and_second_run_succeeds(source, capsys, monkeypatch):
+    _invoke(source, capsys, "register")
+    def boom(*args, **kwargs):
+        raise fail("RESOURCE_UNAVAILABLE", "x")
+    monkeypatch.setattr(cli.record_export, "export_native_run", boom)
+    response = _invoke(source, capsys, "run", None, "--no-ledger", status=2)
+    assert response == {"refused": "record_export_failed", "cause": "RESOURCE_UNAVAILABLE"}
+    monkeypatch.setattr(cli.record_export, "export_native_run", export_native_run)
+    output = _invoke(source, capsys, "run", None, "--no-ledger")
+    assert output["record_export"]["status"] == "written"
+
+
+def test_run_without_exp_number_refuses_and_creates_no_experiments_dir(source, capsys):
+    _invoke(source, capsys, "register")
+    response = _invoke(source, capsys, "run", None, "--no-ledger", status=2, exp_number=None)
+    assert response["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert not (source.root / "experiments").exists()
+
+
+def test_run_no_record_export_skips_and_warns_no_exp_number(source, capsys):
+    _invoke(source, capsys, "register")
+    output = _invoke(source, capsys, "run", None, "--no-ledger", "--no-record-export",
+                     exp_number=None, required_tables={"earnings_events", "daily_market", "option_chains"})
+    assert output["record_export"] == "skipped"
+    assert not (source.root / "experiments").exists()
+
+
+def test_run_no_record_export_still_validates_exp_number(source, capsys):
+    _invoke(source, capsys, "register")
+    response = _invoke(source, capsys, "run", None, "--no-ledger", "--no-record-export",
+                       status=2, exp_number="auto")
+    assert response["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert not (source.root / "experiments").exists()
 
 
 def test_registered_holdout_request_records_refusal_without_attempt_or_partial_report(source, capsys, monkeypatch):

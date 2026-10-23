@@ -183,6 +183,11 @@ class Repository:
         self._pinned_tables: dict[tuple[str, str], tuple] = {}
         self.read_counters = read_counters.ReadCounters()
 
+    @property
+    def pins_snapshots(self) -> bool:
+        """Whether this instance was opened with ``pin_snapshots=True``."""
+        return self._pin_snapshots
+
     def resolve(self, snapshot_id: str) -> SnapshotRef:
         if not self._pin_snapshots:
             return self._resolve_uncached(snapshot_id)

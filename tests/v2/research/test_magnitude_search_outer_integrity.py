@@ -15,6 +15,7 @@ from engine.v2.ops.migrations import Migration, migrate
 from experiments import magnitude_search_outer as outer
 from experiments import magnitude_search_records as records
 from experiments import magnitude_search_trials as trials
+from experiments.magnitude_search_inputs import load_inputs
 from tests.v2.models.training.test_magnitude_estimators import FEATURES, RIDGE_PARAMS
 from tests.v2.research.magnitude_trial_support import history_event, trial_cases, trial_forecasts
 from tests.v2.research.test_magnitude_search_execution import LIMITS, inject_child
@@ -243,9 +244,9 @@ def test_collection_rechecks_later_fold_sources_and_evidence(outer_case, monkeyp
         run(case, "2025")
     assert all(slot(case, "terminal", year) is not None for year in ("2024", "2025"))
     replay, seen = outer._replay, []
-    def replayed(read, started, fold, plan, execution):
+    def replayed(read, store, started, fold, plan, execution):
         seen.append(fold["year"])
-        return replay(read, started, fold, plan, execution)
+        return replay(read, store, started, fold, plan, execution)
     monkeypatch.setattr(outer, "_replay", replayed)
     forbid_work(monkeypatch)
     forbidden = Mock(side_effect=AssertionError("corrupt collection published evidence"))
@@ -291,7 +292,8 @@ def test_collection_cannot_fit_if_terminal_disappears_after_inventory(outer_case
 
 def test_valid_native_candidate_failure_is_excluded_without_blocking_outer(case, monkeypatch):  # noqa: F811
     original = trials.run_fitted_trial
-    def failed(inputs, fold, plan, execution, limits, progress):
+    def failed(source, fold, plan, execution, limits, progress):
+        inputs = load_inputs(ArtifactStore(source["store_root"]), source["manifest"], source["inputs_id"])
         first = trials.SearchTrials._fit_evidence(inputs, fold, plan, execution)[0]
         progress("started", first)
         return {"event": "failed"}
@@ -334,9 +336,9 @@ def test_valid_hash_outer_evidence_tampering_refuses_replay(outer_case, monkeypa
                 body.pop("outer_year")
         if name.startswith("outer-inputs:"):
             if mutation == "inputs_features":
-                body["features"][0]["n_prior"] += 1
+                body["sections"]["features"]["row_count"] += 1
             if mutation == "inputs_training":
-                body["training"][0]["absolute_move_pct"] += 1
+                body["sections"]["training"]["row_count"] += 1
         if name.startswith("outer-fit-started:") and mutation == "fit_started":
             body["prediction_matrix_id"] = "wrong"
         if name.startswith("outer-fit-completed:") and mutation == "fit_completed":

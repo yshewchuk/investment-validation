@@ -714,7 +714,7 @@ def _build_native_computed_moves_plan(as_of, *, catalog_path, objects_root,
         ("shadow",)).fetchone()
     if head is None:
         return None
-    repository = Repository(conn, store)
+    repository = Repository(conn, store, pin_snapshots=True)
     snapshot = repository.resolve(head["snapshot_id"])
     if ("earnings_events" not in snapshot.table_versions
             or "daily_market" not in snapshot.table_versions):

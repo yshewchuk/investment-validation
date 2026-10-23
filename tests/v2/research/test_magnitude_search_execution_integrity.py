@@ -29,7 +29,7 @@ def native(journal, monkeypatch):
     inputs = {**native_inputs(), "training": [{"event_id": "train", "absolute_move_pct": 2.0}],
               "features": [{"event_id": event, "context_id": "history", "horizon_sessions": horizon,
                   **dict.fromkeys(execution["features"], 0.0)}
-                  for event in ("train", "event") for horizon in (5, 3, 1)]}
+                  for event in ("event", "train") for horizon in (1, 3, 5)]}
     monkeypatch.setattr(journal.recorder, "_inputs", lambda *a: inputs)
     prepare_recording(journal, monkeypatch)
     def fit(*args):

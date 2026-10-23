@@ -54,7 +54,7 @@ deployment pointer's model identity/artifact refs and the release's frozen
 payoff/recalibration/board-analog-matcher artifacts, plus the
 role-keyed `driver_residual_artifacts` mapping (empty when no driver pool
 member is staged) and `chooser_analog_artifacts`/`chooser_admissible_artifacts`
-tuples (empty independently when their family is absent), into one immutable
+tuples, plus `paired_residual_artifacts` and `trailing_cutoff_artifacts` tuples (each empty independently when its family is absent), into one immutable
 `ScoringReleaseBinding`. Chooser tuples retain all distinct artifact keys;
 each declared chooser object must be a regular file no larger than 32 MiB.
 Request-specific selection and nightly chooser wiring are not performed here.
@@ -238,3 +238,7 @@ A negative control here looks like: corrupt one field of a frozen record, run
 the comparator, and assert it names **this package's stage** and that field
 path — not that "a row is red". A check that has never failed is not known to
 work.
+
+The frozen driver-residual array cache contract lives in `ARCHITECTURE.md`
+(Failure semantics); its tests are
+`tests/v2/scoring/test_driver_residual_array_cache.py`.

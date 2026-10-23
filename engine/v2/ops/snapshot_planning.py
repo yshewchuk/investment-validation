@@ -131,7 +131,9 @@ def generated_population(conn, store, scope, *, as_of, tickers, clock,
     try:
         snapshot = _resolve_scope_snapshot(conn, store, scope, clock=clock,
                                            expected_snapshot_id=expected_snapshot_id)
-        repository = Repository(conn, store)
+        # Generated-population scans + carried-set reads hit the same membership tables
+        # repeatedly; pin the contract so each contract is decoded once.
+        repository = Repository(conn, store, pin_snapshots=True)
         requests = scan_forward_board_requests(
             repository, snapshot, as_of=as_of,
             horizon_days=GENERATED_HORIZON_DAYS, tickers=tickers)
@@ -311,7 +313,7 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
         receipt_id = committed_receipt_for_snapshot(conn, scope=scope, snapshot_id=snapshot.snapshot_id)
         pinned = pinned_materialization_refs(
             reference_inputs_for_snapshot(conn, scope=scope, snapshot_id=snapshot.snapshot_id))
-        repository = Repository(conn, store)
+        repository = Repository(conn, store, pin_snapshots=True)
         request = _build(repository, store, snapshot, pinned, scopes, observation_ceiling)
         estimate = scratch_estimate(repository, store, request)
     except DataError as exc:

@@ -112,7 +112,7 @@ id = "nightly-score"
 evidence = "job:legacy_score"
 area = "nightly"
 capability = "Score the calendar, validate refreshed inputs, and build the explorer strike ladder"
-old = ["nightly:legacy score", "nightly:legacy validate", "nightly:legacy ladder"]
+old = ["nightly:legacy score", "nightly:legacy validate", "nightly:legacy ladder", "nightly:legacy warm_serving", "cli:engine/dashboard/warm_serving.py"]
 new = ["nightly:v2 score", "action:legacy_score", "action:legacy_score_requests", "py:engine/v2/scoring/application.py::score_batch"]
 producer = "legacy_score action (pinned engine.score.score_calendar) inside a supervised worker; native score_batch not wired into the nightly"
 identity = "score.json artifact bound to job id, implementation_ref and legacy input manifest"
@@ -847,6 +847,10 @@ reason = "Supervisor merge/gate/push wrapper (hygiene + bounded tests before pus
 [[excluded]]
 ids = ["cli:tools/captured_native_comparison.py", "cli:tools/phase4_targeted_replay.py", "cli:tools/phase5_calibration_keys.py", "cli:tools/phase5_inventory.py", "cli:tools/phase5_prepare_release.py", "cli:tools/prepare_phase4_tier4_caches.py", "cli:tools/phase6_inventory.py", "cli:tools/phase7_candidate_manifest.py"]
 reason = "Phase 4/5/6/7 migration preparation, inventory and targeted replay diagnostic tooling; evidence producers, not production consumers."
+
+[[excluded]]
+ids = ["cli:tools/finality_probe.py"]
+reason = "Manual supervisor-run EOD finality measurement probe for ORATS and Massive (#877); evidence producer, not a production consumer."
 
 [[excluded]]
 ids = ["cli:tools/verify_incremental_rebuild.py"]

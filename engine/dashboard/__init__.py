@@ -7,7 +7,7 @@ the remote host. Phone view, desk view, and engine therefore cannot drift:
     engine/dashboard/render.py      score_calendar() output -> snapshot bundle
     engine/dashboard/selfcheck.py   bundle vs direct engine.score re-score
     engine/dashboard/publish.py     bundle -> target, atomic, access-checked
-    engine/dashboard/nightly.py     refresh -> validate -> score -> ledger ->
+    engine/dashboard/nightly.py     refresh -> validate -> warm -> score -> ledger ->
                                     render -> selfcheck -> publish -> flags
 
 The bundle layout the renderer writes (and the server serves)::

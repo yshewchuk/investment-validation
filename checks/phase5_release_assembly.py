@@ -60,6 +60,10 @@ _UNSAFE_ID_CHARS = ("/", "\\", "\0")
 _STRAY_ERRORS = (KeyError, TypeError, AttributeError, ValueError, RecursionError)
 MAX_OBJECT_BYTES = 512 * 1024 * 1024
 LOCK_WAIT_S = 30.0
+PRIOR_NONE = "NONE"
+PRIOR_NO_POOL_CATALOG = "NO_POOL_CATALOG"
+PRIOR_USABLE = "USABLE"
+PRIOR_DAMAGED = "DAMAGED"
 
 
 class ReleaseAssemblyRefusal(ValueError):
@@ -80,6 +84,12 @@ class PoolOutput:
     cutoff: str
     payload_bytes: int
     carried: bool = False
+
+
+@dataclass(frozen=True)
+class PriorClass:
+    kind: str
+    reason: str
 
 
 def _content_hash_valid(value: object) -> bool:
@@ -271,6 +281,8 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
 
 def _read_regular(path: Path, limit: int, code: str, detail: str) -> bytes:
     """Read a bounded regular file, refusing symlinks, non-regular files and oversize input."""
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+        raise ReleaseAssemblyRefusal(code, detail)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
@@ -345,6 +357,10 @@ def _probe_regular(path: Path, limit: int, code: str, detail: str) -> None:
 def _verify_objects(store: Path, supplied: tuple[PoolOutput, ...]) -> None:
     for output in supplied:
         payload_bytes = output.payload_bytes
+        if (not isinstance(payload_bytes, int) or isinstance(payload_bytes, bool)
+                or payload_bytes < 0):
+            raise ReleaseAssemblyRefusal(
+                "OBJECT_UNVERIFIED", "a supplied object payload is not a bounded size")
         if payload_bytes > MAX_OBJECT_BYTES:
             raise ReleaseAssemblyRefusal(
                 "OBJECT_UNVERIFIED", "a supplied object payload is not a bounded size")
@@ -379,11 +395,15 @@ def _verify_carried_rows(store: Path, prior_catalog: dict) -> None:
         for obj in row.get("objects", ()):
             if not isinstance(obj, dict) or not _content_hash_valid(obj.get("content_hash")):
                 raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "a carried row object is malformed")
+            claimed_bytes = obj.get("bytes")
+            if (not isinstance(claimed_bytes, int) or isinstance(claimed_bytes, bool)
+                    or claimed_bytes < 0):
+                raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "a carried row object is malformed")
             content_hash = obj["content_hash"]
             data = _read_regular(
                 store / object_relpath(content_hash), MAX_OBJECT_BYTES, "PRIOR_MISMATCH",
                 "a carried row object is missing or unreadable")
-            if sha256_bytes(data) != content_hash or len(data) != obj.get("bytes"):
+            if sha256_bytes(data) != content_hash or len(data) != claimed_bytes:
                 raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "a carried row object is corrupt")
 
 
@@ -418,6 +438,48 @@ def _publication_lock(store: Path):
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+
+
+def classify_prior(release_root: Path, prior_release_id) -> PriorClass:
+    """Read-only prior classification for the pool-release bootstrap (#1102); never writes."""
+    if prior_release_id is None:
+        return PriorClass(PRIOR_NONE, "no prior release was requested")
+    try:
+        _require_safe_id(prior_release_id, "PRIOR_MISMATCH", "prior release id is not a safe string")
+        catalog = _load_catalog(catalog_path(Path(release_root), prior_release_id),
+                                prior_release_id, "PRIOR_MISMATCH",
+                                "prior catalog could not be read or validated")
+    except (ReleaseAssemblyRefusal, *_STRAY_ERRORS):
+        return PriorClass(PRIOR_DAMAGED, "the prior catalog could not be read or validated")
+    if catalog is None:
+        if prior_release_id.startswith("pools-"):
+            return PriorClass(PRIOR_DAMAGED, "a pools-* release always has a catalog")
+        return PriorClass(PRIOR_NO_POOL_CATALOG, "the prior release has no catalog")
+    try:
+        store = deployment_root(Path(release_root))
+        verify_staged(store, prior_release_id)
+        staged = deployment.resolve_release(store, prior_release_id)
+        if staged.deployment_id != catalog.get("deployment_id"):
+            return PriorClass(PRIOR_DAMAGED, "the prior catalog disagrees with its staged release")
+    except (ReleaseAssemblyRefusal, ReleaseLayoutError, deployment.DeploymentError, OSError,
+            *_STRAY_ERRORS):
+        return PriorClass(PRIOR_DAMAGED, "the prior catalog disagrees with its staged release")
+    sources = catalog.get("sources")
+    if isinstance(sources, dict) and "pool_cutoff" not in sources:
+        return PriorClass(PRIOR_NO_POOL_CATALOG, "the prior catalog has no pool_cutoff")
+    try:
+        _parse_day(sources["pool_cutoff"], "PRIOR_MISMATCH",
+                   "prior pool_cutoff is not an ISO date")
+        _prior_pool_rows(catalog.get("members"))
+        _, carried = prior_carry_set(release_root, prior_release_id)
+        if not all(_content_hash_valid(item.content_hash) for item in carried):
+            raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "a prior pool object hash is malformed")
+        _verify_carried_rows(store, catalog)
+        _verify_objects(store, carried)
+        _read_prior_payloads(store, staged)
+    except (ReleaseAssemblyRefusal, deployment.DeploymentError, OSError, *_STRAY_ERRORS):
+        return PriorClass(PRIOR_DAMAGED, "the prior catalog is malformed")
+    return PriorClass(PRIOR_USABLE, "the prior catalog has a pool_cutoff")
 
 
 def prior_carry_set(release_root: Path, prior_release_id: str) -> tuple[str, tuple[PoolOutput, ...]]:
@@ -576,6 +638,7 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
 
 __all__ = [
     "CHOOSER_MEMBER_ID", "LOCK_WAIT_S", "MAX_OBJECT_BYTES",
-    "POOL_MEMBER_IDS", "PoolOutput", "ReleaseAssemblyRefusal", "carry_forward_release",
-    "derive_catalog", "prior_carry_set",
+    "POOL_MEMBER_IDS", "PRIOR_DAMAGED", "PRIOR_NONE", "PRIOR_NO_POOL_CATALOG",
+    "PRIOR_USABLE", "PoolOutput", "PriorClass", "ReleaseAssemblyRefusal",
+    "carry_forward_release", "classify_prior", "derive_catalog", "prior_carry_set",
 ]

@@ -97,6 +97,8 @@ def install_fetcher(monkeypatch):
 
             def fetch(self, source, endpoint, params, *, live, note, refetch_token=None):
                 """Write synthetic history or return the configured failure."""
+                if note == "gspc-refresh":
+                    return SimpleNamespace(status=200, body=b"")
                 ticker = params["ticker"]
                 assert (source, endpoint, params, live, note) == (
                     "yfinance", "history", {"ticker": ticker, "period": "max"},
@@ -291,6 +293,8 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
             """Return success for each request executed by the real refresh loop."""
             requests.append((source, endpoint, params, live, note))
             refetch_tokens.append((params["ticker"], refetch_token))
+            if note == "gspc-refresh":
+                return SimpleNamespace(status=200, body=b"")
             return SimpleNamespace(status=200)
 
     monkeypatch.setattr(price_refresh, "load_events", load_events)
@@ -314,7 +318,10 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
                     "monthly": ["EVENT_ONLY_MONTHLY", "INVENTORY_MONTHLY", "INVENTORY_OLD"]},
         "failed": [],
     }
-    assert result == {"plan": expected_plan, "report": None if dry_run else expected_report}
+    expected_result = {"plan": expected_plan, "report": None if dry_run else expected_report}
+    if not dry_run:
+        expected_result["gspc_daily"] = {"ok": False, "reason": "unparseable"}
+    assert result == expected_result
     assert loaders == ["events", "inventory", "history", "times"]
     assert fetcher_roots == ([] if dry_run else [None])
     expected_requests = [
@@ -322,13 +329,17 @@ def test_standalone_refresh_preserves_legacy_discovery_and_cadence(
         for ticker in ("EVENT_DAILY", "SPY", "EVENT_ONLY_MONTHLY", "INVENTORY_MONTHLY",
                        "INVENTORY_OLD")
     ]
+    if not dry_run:
+        expected_requests.append(("yfinance", "history", {"ticker": "^GSPC", "period": "max"},
+                                  True, "gspc-refresh"))
     assert requests == ([] if dry_run else expected_requests)
     # Daily requests carry a unique per-call refetch nonce; monthly stay tokenless.
     if dry_run:
         assert refetch_tokens == []
     else:
-        assert [t for t, tok in refetch_tokens if tok is not None] == ["EVENT_DAILY", "SPY"]
-        assert len({tok for _, tok in refetch_tokens if tok is not None}) == 2
+        assert [t for t, tok in refetch_tokens if tok is not None] == [
+            "EVENT_DAILY", "SPY", "^GSPC"]
+        assert len({tok for _, tok in refetch_tokens if tok is not None}) == 3
         assert [t for t, tok in refetch_tokens if tok is None] == [
             "EVENT_ONLY_MONTHLY", "INVENTORY_MONTHLY", "INVENTORY_OLD"]
     assert not isolated_legacy_sources.exists()

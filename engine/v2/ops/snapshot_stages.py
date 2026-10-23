@@ -172,7 +172,8 @@ def validated_request(conn, store, snapshot_artifact_id, request_artifact_id):
     request = request_from_artifact(conn, store, request_artifact_id)
     if request.snapshot_ref != snapshot:
         raise fail("INPUT_CHANGED", "materialization request was built for another snapshot")
-    repository = Repository(conn, store)
+    # One fixed snapshot for resolve + read_plan_complete's membership reads.
+    repository = Repository(conn, store, pin_snapshots=True)
     try:
         if repository.resolve(snapshot.snapshot_id) != snapshot:
             raise fail("INPUT_CHANGED", "bound SnapshotRef differs from the committed snapshot")
