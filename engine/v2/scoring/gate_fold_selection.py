@@ -110,7 +110,8 @@ def select_gate_forecast_source(binding, event_date, as_of) -> GateForecastSourc
     fold_start = min(_month(event_date), _month(as_of)).isoformat()
     catalog = getattr(binding, "size_folds", None)
     descriptor = catalog.descriptors.get(fold_start) if catalog is not None else None
-    if descriptor is None or getattr(binding, "frozen_inference", None) is None:
+    if (descriptor is None or descriptor.fold_start != fold_start
+            or getattr(binding, "frozen_inference", None) is None):
         raise ModelNotReady(_MEMBER_ID, f"no staged size fold for {fold_start}")
     try:
         ref = load_serving_fold(

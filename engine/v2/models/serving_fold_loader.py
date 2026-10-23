@@ -64,6 +64,7 @@ def _validate_descriptor(descriptor):
 def validate_serving_fold_descriptor(descriptor):
     """Validate one serving-fold descriptor's intrinsic fields."""
     try:
+        descriptor = from_document(ServingFoldDescriptor, to_document(descriptor))
         _validate_descriptor(descriptor)
     except ServingFoldError:
         raise

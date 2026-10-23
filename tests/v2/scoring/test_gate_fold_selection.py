@@ -13,7 +13,12 @@ import pytest
 from engine.v2.foundation import content_hash, to_document
 from engine.v2.models import deployment
 from engine.v2.models.loader import FrozenInference
-from engine.v2.models.serving_fold_loader import MAX_FOLD_BYTES, load_serving_fold
+from engine.v2.models.serving_fold_loader import (
+    MAX_FOLD_BYTES,
+    ServingFoldError,
+    load_serving_fold,
+    validate_serving_fold_descriptor,
+)
 from engine.v2.models.serving_folds import SizeFoldPolicy
 from engine.v2.scoring.gate_fold_selection import (
     SizeFoldCatalog,
@@ -210,6 +215,30 @@ def test_index_duplicate_fold_start_refuses(tmp_path):
     _assert_model_not_ready(caught, "size fold catalog is not valid")
 
 
+def test_size_fold_catalog_descriptors_are_read_only(tmp_path):
+    cache = _cache()
+    parent = _staged(tmp_path, cache)
+    descriptor = _descriptor(cache, parent)
+    catalog = SizeFoldCatalog(parent=parent, catalog_hash=content_hash("catalog"),
+                              descriptors={descriptor.fold_start: descriptor})
+    with pytest.raises(TypeError):
+        catalog.descriptors["2026-11-01"] = descriptor
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda d: replace(d, pool_count=True),
+    lambda d: replace(d, role="iv_crush"),
+    lambda d: replace(d, policy=replace(d.policy, interval_floor=float("nan"))),
+    lambda d: replace(d, policy=replace(d.policy, interval_floor=float("inf"))),
+])
+def test_validate_serving_fold_descriptor_refuses_untyped_fields(tmp_path, mutate):
+    cache = _cache()
+    parent = _staged(tmp_path, cache)
+    descriptor = _descriptor(cache, parent)
+    with pytest.raises(ServingFoldError):
+        validate_serving_fold_descriptor(mutate(descriptor))
+
+
 @pytest.mark.parametrize("event,as_of", [
     ("2026-11-15", "2026-10-01"),
     ("2026-10-20", "2026-11-05"),
@@ -260,6 +289,21 @@ def test_selection_picks_non_october_fold(november_fold):
     assert ref.descriptor.fold_start == "2026-11-01"
     assert source.binding_id == ref.release.bindings[0].binding_id
     assert source.release == ref.release
+
+
+def test_selection_refuses_catalog_keyed_to_wrong_month(november_fold, monkeypatch):
+    def fail(*args, **kwargs):
+        raise AssertionError("load_serving_fold must not run for a miskeyed catalog")
+
+    monkeypatch.setattr("engine.v2.scoring.gate_fold_selection.load_serving_fold", fail)
+    catalog = SizeFoldCatalog(
+        parent=november_fold.parent, catalog_hash=november_fold.catalog_hash,
+        descriptors={"2026-10-01": november_fold.descriptor})
+    binding = SimpleNamespace(
+        frozen_inference=november_fold.binding.frozen_inference, size_folds=catalog)
+    with pytest.raises(ModelNotReady) as caught:
+        select_gate_forecast_source(binding, "2026-10-05", "2026-10-06")
+    _assert_model_not_ready(caught, "no staged size fold for 2026-10-01")
 
 
 def test_selection_uses_fold_policy_interval_floor(tmp_path):
@@ -395,18 +439,22 @@ def test_index_objects_not_a_list_refuses(tmp_path):
 def _three_folds(tmp_path):
     parent = _staged(tmp_path, _cache("2026-08-01"))
     descriptors = {}
-    for month in ("2026-08-01", "2026-09-01", "2026-10-01"):
+    pools = {}
+    for index, month in enumerate(("2026-08-01", "2026-09-01", "2026-10-01")):
         cache = _cache(month)
+        cache.update(pool_pred=np.array([0.1 + index, 0.2 + index]),
+                     pool_res=np.array([-0.01 - index, 0.02 + index]))
         descriptor = _descriptor(cache, parent)
         path = tmp_path / descriptor.estimator.path
         path.parent.mkdir(exist_ok=True)
         path.write_bytes(fold_bytes(cache))
         descriptors[month] = descriptor
+        pools[month] = (tuple(cache["pool_pred"]), tuple(cache["pool_res"]))
     catalog = _catalog(parent, _row(list(descriptors.values())))
     indexed = index_size_folds(catalog, parent)
     binding = SimpleNamespace(frozen_inference=FrozenInference(tmp_path), size_folds=indexed)
     return SimpleNamespace(binding=binding, parent=parent, descriptors=descriptors,
-                           catalog=indexed)
+                           catalog=indexed, pools=pools)
 
 
 @pytest.fixture
@@ -433,6 +481,11 @@ def test_selection_among_three_folds(three_folds, event, as_of, expected):
     assert source.release == ref.release
     assert source.pool_pred == ref.pool_pred
     assert source.pool_res == ref.pool_res
+    expected_pools = three_folds.pools[expected]
+    assert source.pool_pred == expected_pools[0]
+    assert source.pool_res == expected_pools[1]
+    other_pools = [pools for month, pools in three_folds.pools.items() if month != expected]
+    assert all(pools[0] != expected_pools[0] for pools in other_pools)
 
 
 def _stage_and_promote(tmp_path, cache):
@@ -447,9 +500,41 @@ def _stage_and_promote(tmp_path, cache):
 def test_resolve_release_binding_indexes_size_folds(tmp_path):
     cache = _cache()
     parent = _stage_and_promote(tmp_path, cache)
-    descriptor = _descriptor(cache, parent)
-    catalog = _catalog(parent, _row([descriptor]))
+    october = _descriptor(cache, parent)
+    november = _descriptor(_cache("2026-11-01"), parent)
+    catalog = _catalog(parent, _row([october, november]))
     (tmp_path / "phase5_release.json").write_text(json.dumps(catalog, sort_keys=True))
     binding = resolve_release_binding(tmp_path)
-    assert binding.size_folds is not None
-    assert set(binding.size_folds.descriptors) == {"2026-10-01"}
+    size_folds = binding.size_folds
+    assert size_folds is not None
+    assert size_folds.catalog_hash == catalog["manifest_hash"]
+    assert size_folds.descriptors == {"2026-10-01": october, "2026-11-01": november}
+    for key, descriptor in size_folds.descriptors.items():
+        assert key == descriptor.fold_start
+        assert descriptor.estimator.name == "estimator"
+
+
+def test_resolve_release_binding_refuses_bad_catalog_hash(tmp_path):
+    cache = _cache()
+    parent = _stage_and_promote(tmp_path, cache)
+    descriptor = _descriptor(cache, parent)
+    catalog = _catalog(parent, _row([descriptor]), digest="sha256:" + "0" * 64)
+    (tmp_path / "phase5_release.json").write_text(json.dumps(catalog, sort_keys=True))
+    with pytest.raises(ModelNotReady) as caught:
+        resolve_release_binding(tmp_path)
+    assert caught.value.code == "MODEL_NOT_READY"
+    assert caught.value.member_id == "phase5_release.json"
+    assert "manifest_hash" in caught.value.detail
+
+
+def test_resolve_release_binding_refuses_malformed_size_fold_row(tmp_path):
+    cache = _cache()
+    parent = _stage_and_promote(tmp_path, cache)
+    descriptor = _descriptor(cache, parent)
+    row = _row([descriptor])
+    row["objects"] = "not-a-list"
+    catalog = _catalog(parent, row)
+    (tmp_path / "phase5_release.json").write_text(json.dumps(catalog, sort_keys=True))
+    with pytest.raises(ModelNotReady) as caught:
+        resolve_release_binding(tmp_path)
+    _assert_model_not_ready(caught, "size fold catalog is not valid")

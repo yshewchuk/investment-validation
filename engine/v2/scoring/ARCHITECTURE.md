@@ -258,7 +258,7 @@ loads that one fold through `load_serving_fold` and the binding's shared
 | Catalog `schema_version`, `release_id` (against the parent manifest) or self `manifest_hash` not verifying (`index_size_folds` re-checks them; it never trusts a caller-built catalog) | `ModelNotReady` |
 | `members` not a list, a member row that is not a mapping, more than one `tier4_folds:size` row, `objects` not a list, an object that is not a mapping or lacks string `path`/`content_hash`, no `serving_fold` descriptor, undecodable descriptor, descriptor failing the loader's descriptor check (first-of-month `fold_start`, policy, pool count, estimator), descriptor `estimator` path or hash differing from the catalog object, catalog object `name` or `bytes` failing the serving-fold object check (name derived from the descriptor, `0 < bytes <= MAX_FOLD_BYTES`), duplicate `fold_start` | `ModelNotReady` at `resolve_release_binding` |
 | `binding.size_folds` is `None` (hand-built binding) | `ModelNotReady` at selection |
-| No staged fold for the selected month | `ModelNotReady("tier4_folds:size", ...)`; never an older fold |
+| No staged fold for the selected month, or the catalog entry's descriptor `fold_start` differs from its key (caller-built catalog) | `ModelNotReady("tier4_folds:size", ...)`; never an older fold |
 | Fold fails verification or loading (`ServingFoldError`) | `ModelNotReady`; no fallback to another fold |
 | `event_date` or `as_of` not an ISO date | `ValueError` |
 
@@ -538,6 +538,7 @@ rather than its own. `native_score_batch` goes through `score_one`, never
   | `resolve_production_release_binding()` only: no/blank `MODEL_RELEASE_ROOT` | `ModelNotReady("release_root", "no production release root is configured")` |
   | once resolved, any member (model binding, payoff/recalibration/analog artifact) missing, wrong status, hash mismatch, or fails its typed load | `ModelNotReady(member_id, ...)`, naming the exact member (e.g. `"model:gate:STR-THRU"`) |
   | Release-local `phase5_release.json`: unreadable, bad self-hash, wrong schema or release ID | `ModelNotReady("phase5_release.json", ...)` before any state-family row is read; a valid root copy never overrides this refusal |
+  | `tier4_folds:size` row malformed (more than one row, non-mapping rows or objects, bad descriptor, name/bytes mismatch, duplicate `fold_start`) | `ModelNotReady("tier4_folds:size", ...)` at resolve; an absent or non-`STAGED` row indexes empty (see "Forward forecast assembly") |
   | Release-local catalog absent | Read the legacy root catalog only if its schema, self-hash and release ID match; otherwise `ModelNotReady` |
 
   Catalogs beside each staged model manifest survive promotion and rollback.
