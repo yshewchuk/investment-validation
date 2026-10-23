@@ -1695,6 +1695,7 @@ def run_nightly(
         # files, SNAPSHOT and the Tier-4 serving caches that warm writes. Scoring and
         # later steps are skipped (issue #1146).
         report.steps["tiers"].setdefault("degraded", False)
+        _log_rss("fetch-only before release")
         warm_dates = list(upcoming["event_date"])
         del events, frontier, upcoming
         tier_result = None
