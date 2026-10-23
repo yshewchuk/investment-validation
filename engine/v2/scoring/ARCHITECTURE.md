@@ -653,8 +653,15 @@ over `SourceBundle.trailing_cutoff_artifact` (a missing artifact is carried as
 ambiguous pool or cutoff, an unusable `mcap_usd`, or a non-finite value raises
 `NightlySourceBundleRefusal("MODEL_NOT_READY")` for that row only; the
 declaration is pure (no I/O, cache, retry, transaction or partial write) and
-equal inputs give equal output. Nothing registers a strategy to use it until
-#1157 step 3.
+equal inputs give equal output. The gate branch also validates any declared
+`gate_forecast_source`/`gate_forecast_pool` exactly as the model-gate branch does.
+
+| Condition | Outcome |
+|---|---|
+| Strategy outside `ENTRY_RULE_STRATEGIES`, no unique paired pool for `(size, iv_crush, cutoff)`, no unique trailing cutoff for the event month, unparsable event date, or `mcap_usd` that is a bool, string or non-finite | `NightlySourceBundleRefusal("MODEL_NOT_READY")`, fixed detail, that row only |
+| `mcap_usd` is `None` | Declared; the rule's verdict is undetermined (`MISSING_FEATURES` flag) |
+| Gate recipe with members other than `mode`/`mcap_usd`, a non-entry-rule strategy, a wrongly typed or orphan `trailing_cutoff_artifact`, no artifact and no `context.event_date`, or an invalid declared gate source | `ValueError` from the source-input builder |
+| No release family staged | The binding tuple is empty and the row refuses as above |
 
 Legacy `Scorer._residual_pool` (`engine/score.py:3687`) joins Tier-4
 forecasts, panel outcomes and realized crush on `(ticker,event_date)`.
@@ -672,8 +679,9 @@ lineage and hash; no request fallback, rebuild or invented residuals.
 `resolve_release_binding` in `engine/v2/scoring/release_bindings.py`
 loads the typed member into `ScoringReleaseBinding`; the recipe is derived only
 from the verified artifact key/hash, and requests
-cannot override it or reintroduce per-row pools. Missing or malformed paired
-state raises `ModelNotReady` (`MODEL_NOT_READY`) atomically for the release;
+cannot override it or reintroduce per-row pools. A malformed or unloadable paired
+member raises `ModelNotReady` (`MODEL_NOT_READY`) atomically for the release; an
+absent family is an empty tuple and only the rows that need it refuse;
 model-role gaps retain their existing per-row refusals. A valid zero-row artifact is not a
 refusal and preserves the legacy thin-pool/undetermined outcome. Changed
 releases use the standard rebuild and promotion path; old releases have no fallback.

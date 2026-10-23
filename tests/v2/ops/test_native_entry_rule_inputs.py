@@ -106,6 +106,11 @@ def test_a_pool_of_another_crush_model_is_refused():
              "one exact paired residual pool is required")
 
 
+def test_a_pool_of_another_move_model_is_refused():
+    _refused(_binding((_paired(move_model_id="m-other"),), (_trailing(),)),
+             "one exact paired residual pool is required")
+
+
 def test_a_pool_frozen_at_another_cutoff_is_refused():
     _refused(_binding((_paired(cutoff="2026-03-01"),), (_trailing(),)),
              "one exact paired residual pool is required")
@@ -113,6 +118,12 @@ def test_a_pool_frozen_at_another_cutoff_is_refused():
 
 def test_no_trailing_cutoff_for_the_event_month_is_refused():
     _refused(_binding((_paired(),), (_trailing(month="2026-04-01"),)),
+             "one exact trailing cutoff artifact is required")
+
+
+def test_a_trailing_cutoff_of_another_history_is_refused():
+    _refused(_binding((_paired(),),
+                      (_trailing(history_id="features.other_history"),)),
              "one exact trailing cutoff artifact is required")
 
 
@@ -127,8 +138,8 @@ def test_an_unparsable_event_date_is_refused():
              event_date="not-a-date")
 
 
-@pytest.mark.parametrize("mcap_usd", [True, float("nan"), float("inf"), "2e10"],
-                         ids=["bool", "nan", "inf", "str"])
+@pytest.mark.parametrize("mcap_usd", [True, float("nan"), float("inf"), "5", b"5"],
+                         ids=["bool", "nan", "inf", "str", "bytes"])
 def test_an_unusable_mcap_is_refused(mcap_usd):
     _refused(_ready_binding(),
              "entry rule mcap_usd must be a finite number or None",

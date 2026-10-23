@@ -787,6 +787,7 @@ def _entry_rule_gate_block(bundle: SourceBundle) -> dict[str, Any]:
         entry_rule_block,
     )
 
+    _gate_forecast_members(bundle, {})
     if set(bundle.gate_recipe) != {"mode", "mcap_usd"}:
         raise ValueError(
             "gate_recipe entry_rule takes only mode and mcap_usd")
