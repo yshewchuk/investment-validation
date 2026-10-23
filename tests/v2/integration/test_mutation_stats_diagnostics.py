@@ -181,6 +181,8 @@ def test_real_forked_stats_failure_retains_traceback_without_debug_or_rerun(tmp_
     if not writable:
         diagnostic.mkdir()  # deterministic EISDIR, including privileged CI users
     env = dict(os.environ, MUTATION_PILOT_STATS_DIAGNOSTIC=str(diagnostic))
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        env.pop(name, None)
     result = subprocess.run([sys.executable, "-u", "-m", "mutmut", "run", "--max-children", "1"],
                             cwd=work, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 1, result.stdout + result.stderr
@@ -208,6 +210,7 @@ def test_real_forked_stats_failure_retains_traceback_without_debug_or_rerun(tmp_
     ("import pathlib\n", True), ("\n" * 209, True), ("\n" * 210, False),
     ("import pandas\n", False), ("import numpy\n", False), ("import engine\n", False),
     ("from pandas import DataFrame\n", False), ("from engine import data\n", False),
+    ("import requests\n", False),  # outside stdlib, but not in the explicit denylist
 ])
 def test_source_policy_still_checks_authored_imports_and_size(tmp_path, monkeypatch, source, allowed):
     from tests.v2.foundation import test_v2_foundation_market_calendar as checks
@@ -259,16 +262,8 @@ def test_workflow_retains_fresh_stats_diagnostic_and_never_blocks_export(tmp_pat
     assert not (tmp_path / "report/toy/summary.json").exists()  # not a fabricated success
 
 
-@pytest.mark.parametrize("extra,allowed", [
-    ("import pathlib\n", True), ("import subprocess\n", False),
-    ("import importlib\n", False), ("import runpy\n", False),
-    ("__import__('subprocess')\n", False), ("eval('1')\n", False), ("exec('pass')\n", False),
-    ("from . import leaf\n", False),
-])
-def test_provider_boundary_still_rejects_authored_dynamic_imports(tmp_path, monkeypatch, extra, allowed):
-    from tests.v2.ops import test_provider_response_boundary as checks
-
-    sources = {
+def _provider_contract_sources():
+    return {
         "engine/v2/ops/provider_response.py": (
             "from __future__ import annotations\nimport dataclasses\nimport typing\n"
             "from engine.v2.ops.errors import fail\n"),
@@ -280,10 +275,23 @@ def test_provider_boundary_still_rejects_authored_dynamic_imports(tmp_path, monk
             "from engine.v2.foundation import canonical_json\nfrom engine.v2.ops.errors import fail\n"
             "from engine.v2.ops.provider_response import classify_response\n"),
         "engine/v2/ops/providers/nasdaq_calendar.py": "from engine.v2.ops.errors import fail\n",
-        "engine/v2/ops/providers/yfinance_edge.py": extra,
+        "engine/v2/ops/providers/yfinance_edge.py": "import pathlib\n",
         "tests/v2/ops/test_provider_response.py": (
             "from engine.v2.ops import provider_response\nfrom engine.v2.ops.errors import OpsError\n"),
     }
+
+
+@pytest.mark.parametrize("extra,allowed", [
+    ("import pathlib\n", True), ("import subprocess\n", False),
+    ("import importlib\n", False), ("import runpy\n", False),
+    ("__import__('subprocess')\n", False), ("eval('1')\n", False), ("exec('pass')\n", False),
+    ("from . import leaf\n", False),
+])
+def test_provider_boundary_still_rejects_authored_dynamic_imports(tmp_path, monkeypatch, extra, allowed):
+    from tests.v2.ops import test_provider_response_boundary as checks
+
+    sources = _provider_contract_sources()
+    sources["engine/v2/ops/providers/yfinance_edge.py"] = extra
     for relative, source in sources.items():
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -296,6 +304,28 @@ def test_provider_boundary_still_rejects_authored_dynamic_imports(tmp_path, monk
         # construct can reject this otherwise-identical complete source tree.
         with pytest.raises(AssertionError):
             checks.test_provider_and_pure_test_direct_dependency_contracts()
+
+
+@pytest.mark.parametrize("relative,extra", [
+    ("engine/v2/ops/providers/yfinance_edge.py", "from engine.v2.ops.errors import fail\n"),
+    ("engine/v2/ops/provider_response.py", "import pathlib\n"),
+], ids=["unexpected-engine-dependency", "unexpected-pure-module"])
+def test_provider_boundary_independently_enforces_dependency_and_module_sets(tmp_path, monkeypatch,
+                                                                         relative, extra):
+    from tests.v2.ops import test_provider_response_boundary as checks
+
+    sources = _provider_contract_sources()
+    for name, source in sources.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+    monkeypatch.setenv("MUTATION_PILOT_SOURCE_ROOT", str(tmp_path))
+    checks.test_provider_and_pure_test_direct_dependency_contracts()
+    # Both additions are absolute, static imports permitted by the dynamic
+    # import guard; each violates exactly one independent dependency contract.
+    (tmp_path / relative).write_text(sources[relative] + extra)
+    with pytest.raises(AssertionError):
+        checks.test_provider_and_pure_test_direct_dependency_contracts()
 
 
 def test_driver_resets_stale_diagnostic_and_passes_snapshot_root(monkeypatch, tmp_path):

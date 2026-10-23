@@ -34,4 +34,4 @@ Mutation diagnostics are optional evidence, never authority over a backend resul
 | Failure echo cannot be read/written, or CI cannot copy evidence | The backend exit remains unchanged and result export is still attempted. An export failure remains a failure, not a fabricated result. |
 | Evidence exceeds its byte budget | The retained evidence is truncated, not the failure outcome. |
 
-Authored-source import/size policies consume the uninstrumented work snapshot selected by the driver; behavioral tests still exercise instrumented imports. Production sources, selected tests and dependency allowances are unchanged. Operator details and artifact names are in [the testing guide](../tests/README.md).
+Authored-source import/size policies consume the uninstrumented work snapshot selected by the driver; behavioral tests still exercise instrumented imports. Operator details and artifact names are in [the testing guide](../tests/README.md).
