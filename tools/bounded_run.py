@@ -65,9 +65,29 @@ MEMORY
   capture climb gigabytes between looks and took docker down (2026-09-18); at
   0.25 s the overshoot is tens of MB. A tick reads a few /proc files.
 
-  Any breach prints the memory breakdown and exits 137. That turns this
-  box's failure mode — a silent OOM that kills a neighbor's job with no
-  traceback anywhere — into a clean, explained abort of exactly one job.
+  A memory breach prints the memory breakdown and exits 137; a disk
+  ceiling breach exits 76 (see DISK). That turns this box's failure
+  mode — a silent OOM that kills a neighbor's job with no traceback
+  anywhere — into a clean, explained abort of exactly one job.
+
+DISK
+  ``--max-disk-used-gb G`` — or, when the flag is absent, the environment
+  variable ``BOUNDED_RUN_MAX_DISK_USED_GB`` — caps absolute used bytes on the
+  filesystem holding bounded_run's working directory plus each ``--disk-path``
+  (repeatable, at most 8, de-duplicated by device). One ``statvfs`` per
+  distinct filesystem per watchdog tick; no directory walk. A sample over the
+  ceiling kills the tree through the memory-limit kill path (SIGTERM, then
+  SIGKILL after ``--kill-grace-s``), prints a ``DISK LIMIT`` line naming the
+  path, used GB and ceiling GB, and exits 76 — distinct from 137 (memory) and
+  75 (resource wait); with the check on, the heartbeat line carries
+  ``disk used <G>G/<ceiling>G``. The kill then waits for the whole process
+  group and SIGKILLs it after ``SIGNAL_WAIT_S``, so no descendant that ignores
+  SIGTERM outlives the guard. ``statvfs`` unreadable at startup:
+  ``--heavy`` refuses to start (exit 69, EX_UNAVAILABLE) before taking the
+  heavy reservation; a light run prints a warning and runs with the disk
+  check off. Mid-run an unreadable tick is skipped and logged once; under
+  ``--heavy`` 5 consecutive unreadable ticks fail closed as a disk breach
+  (exit 76). Started already above the ceiling, the first tick kills.
 
 What an aborted nightly actually costs, since this said "resumable" and there
 are no checkpoints to resume from: the FETCHED work survives, because the store
@@ -147,7 +167,8 @@ COORDINATION
 Usage:
     python3 tools/bounded_run.py [--cores N] [--max-rss-gb G] \\
         [--max-swap-gb G] [--min-free-gb F] [--poll-s S] [--heavy] \\
-        [--max-wait-s S] -- <command...>
+        [--max-wait-s S] [--max-disk-used-gb G] [--disk-path P] \\
+        -- <command...>
 
     python3 tools/bounded_run.py --heavy --max-rss-gb 5.5 -- \\
         python3 -m engine.dashboard.nightly --as-of 2026-09-09
@@ -158,6 +179,7 @@ import argparse
 import atexit
 import fcntl
 import json
+import math
 import os
 import re
 import signal
@@ -184,6 +206,13 @@ ADMISSION_POLL_S = 5.0
 HEAVY_POLL_S = 30.0
 EX_TEMPFAIL = 75
 SIGNAL_WAIT_S = 30.0
+#: Disk-used ceiling (#1119): env fallback for --max-disk-used-gb, the two
+#: exit codes, the fail-closed tick count under --heavy, and the path cap.
+DISK_ENV = "BOUNDED_RUN_MAX_DISK_USED_GB"
+DISK_LIMIT_EXIT = 76
+DISK_UNREADABLE_EXIT = 69
+DISK_FAIL_MAX = 5
+DISK_PATHS_MAX = 8
 #: The signals bounded_run forwards to its job (and blocks around the spawn).
 _SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
@@ -318,6 +347,61 @@ def _cmdline(pid: int) -> str:
         return " ".join(raw.split("\0"))[:100]
     except (FileNotFoundError, ProcessLookupError, OSError):
         return "<gone>"
+
+
+# --------------------------------------------------------------------------
+# disk-used ceiling (#1119): statvfs helpers, injectable for tests
+# --------------------------------------------------------------------------
+
+
+def _statvfs(path: str):
+    """The one filesystem read the disk guard makes (tests patch this name)."""
+    return os.statvfs(path)
+
+
+def _disk_targets(paths: list[str]) -> list[tuple[str, int]]:
+    """``(path, st_dev)`` for the working directory plus each extra path,
+    de-duplicated by device so one filesystem costs one ``statvfs`` per tick.
+    An ``os.stat`` OSError propagates: an unreadable target is a startup
+    refusal decision, not something to silently drop."""
+    targets: list[tuple[str, int]] = []
+    seen: set[int] = set()
+    for path in [os.getcwd(), *paths]:
+        dev = os.stat(path).st_dev
+        if dev not in seen:
+            seen.add(dev)
+            targets.append((path, dev))
+    return targets
+
+
+def _disk_used_gb(path: str) -> float:
+    """Used bytes per ``statvfs``, in GB: ``(f_blocks - f_bfree) * f_frsize``."""
+    st = _statvfs(path)
+    return (st.f_blocks - st.f_bfree) * st.f_frsize / 1024**3
+
+
+def _disk_sample(targets: list[tuple[str, int]]) -> tuple[float, str]:
+    """``(max_used_gb, path_of_max)`` over the targets; OSError propagates."""
+    worst, worst_path = -1.0, ""
+    for path, _dev in targets:
+        used = _disk_used_gb(path)
+        if used > worst:
+            worst, worst_path = used, path
+    return worst, worst_path
+
+
+class _DiskGuard:
+    """Disk-watch state on ``args.disk_guard`` (None there means the check
+    is off). ``fails`` counts consecutive unreadable ticks; ``last_used_gb``
+    is the newest good sample, carried for the heartbeat line."""
+
+    def __init__(self, ceiling_gb: float, targets: list[tuple[str, int]],
+                 heavy: bool):
+        self.ceiling_gb = ceiling_gb
+        self.targets = targets
+        self.heavy = heavy
+        self.fails = 0
+        self.last_used_gb: float | None = None
 
 
 # --------------------------------------------------------------------------
@@ -768,6 +852,17 @@ def _build_parser() -> argparse.ArgumentParser:
                              "entirely")
     parser.add_argument("--poll-s", type=float, default=POLL_DEFAULT_S,
                         help="watchdog interval in seconds (default: 0.25)")
+    parser.add_argument("--max-disk-used-gb", type=float, default=None,
+                        help="kill the tree when used bytes on the sampled "
+                             "filesystems cross this ceiling in GB; when the "
+                             "flag is absent the environment variable "
+                             "BOUNDED_RUN_MAX_DISK_USED_GB is read; unset "
+                             "means off")
+    parser.add_argument("--disk-path", action="append", default=[],
+                        metavar="PATH",
+                        help="extra filesystem to sample, given as any path "
+                             "on it (repeatable, at most 8; the working "
+                             "directory is always sampled)")
     parser.add_argument("--kill-grace-s", type=int, default=KILL_GRACE_DEFAULT_S,
                         help="seconds between SIGTERM and SIGKILL")
     parser.add_argument("--heavy", action="store_true",
@@ -791,6 +886,27 @@ def _validate(args, parser) -> None:
         parser.error("--poll-s must be positive")
     if args.min_free_gb < 0:
         parser.error("--min-free-gb must not be negative")
+    disk_source = "--max-disk-used-gb"
+    disk_env_raw: str | None = None
+    if args.max_disk_used_gb is None:
+        disk_env_raw = os.environ.get(DISK_ENV)
+        if disk_env_raw is not None:
+            disk_source = DISK_ENV
+            try:
+                args.max_disk_used_gb = float(disk_env_raw)
+            except ValueError:
+                parser.error(f"{DISK_ENV} must be a positive finite number, "
+                             f"got {disk_env_raw!r}")
+    if args.max_disk_used_gb is not None and (
+            not math.isfinite(args.max_disk_used_gb)
+            or args.max_disk_used_gb <= 0):
+        if disk_source == DISK_ENV:
+            parser.error(f"{DISK_ENV} must be a positive finite number, "
+                         f"got {disk_env_raw!r}")
+        parser.error("--max-disk-used-gb must be a positive finite number")
+    if len(args.disk_path) > DISK_PATHS_MAX:
+        parser.error(f"--disk-path may be repeated at most "
+                     f"{DISK_PATHS_MAX} times")
     if args.max_wait_s is None:
         # A heavy job (the nightly) must not give up on the night because
         # another heavy job is still running; it queues behind it instead.
@@ -833,11 +949,13 @@ def _warn_cap_over_mem_total(max_rss_gb: float, mem_total_mb: float) -> None:
 
 def _print_startup(args, cores: str, worker_cores: int,
                    swap_enabled: bool) -> None:
+    disk = (f" disk-cap={args.max_disk_used_gb:g}G"
+            if args.max_disk_used_gb is not None else "")
     print(f"[bounded] cap={args.max_rss_gb:g}G warn at {args.warn_pct:g}% "
           f"swap-cap={'disabled' if not swap_enabled else f'{args.max_swap_gb:g}G'} "
           f"box floor={args.min_free_gb:g}G "
           f"cores={cores} of {os.cpu_count()} poll={args.poll_s:g}s "
-          f"nice=19 threads={worker_cores}", flush=True)
+          f"nice=19 threads={worker_cores}{disk}", flush=True)
 
 
 def main() -> int:
@@ -862,6 +980,28 @@ def main() -> int:
 
     cores, worker_cores = _core_placement(args, parser)
     env = _child_env(worker_cores)
+
+    # Read the ceiling once, before coordinating or spawning: a --heavy job
+    # that cannot see its own filesystem refuses to start rather than run the
+    # night unguarded; a light run warns and drops the check. Started above
+    # the ceiling is NOT handled here — the first watchdog tick kills.
+    args.disk_guard = None
+    if args.max_disk_used_gb is not None:
+        guard = _DiskGuard(args.max_disk_used_gb, [], args.heavy)
+        try:
+            guard.targets = _disk_targets(args.disk_path)
+            guard.last_used_gb, _ = _disk_sample(guard.targets)
+        except OSError as err:
+            if args.heavy:
+                print(f"[bounded] DISK LIMIT unreadable: {err} — refusing to "
+                      f"start --heavy", flush=True, file=sys.stderr)
+                return DISK_UNREADABLE_EXIT
+            print(f"[bounded] WARNING: DISK LIMIT unreadable: {err} — "
+                  f"running with the disk check off", flush=True,
+                  file=sys.stderr)
+            args.max_disk_used_gb = None
+        else:
+            args.disk_guard = guard
 
     _print_startup(args, cores, worker_cores, swap_enabled)
     print(f"[bounded] command: {' '.join(command)}", flush=True)
@@ -967,6 +1107,56 @@ def _print_breach_rows(tree: list[int], kind: str) -> None:
               flush=True)
 
 
+def _disk_kill(proc: subprocess.Popen, args) -> None:
+    """Kill the tree at the disk limit: the memory-limit grace path, then wait
+    for the WHOLE process group — SIGTERM only stops the leader, and disk is
+    not reclaimed until every descendant exits — SIGKILLing it after
+    ``SIGNAL_WAIT_S``. Prints the terminal line so both breach sites share it.
+    """
+    _terminate_with_grace(proc, args.kill_grace_s, args.poll_s,
+                          args.min_free_gb * 1024.0)
+    _wait_for_pgid_exit(proc.pid, SIGNAL_WAIT_S)
+    print("[bounded] killed at the disk limit", flush=True)
+
+
+def _check_disk(proc: subprocess.Popen, args, elapsed: float) -> bool:
+    """One disk tick; True when the tree was killed at the disk limit.
+
+    At most one ``statvfs`` per target per tick, no walk. An unreadable tick
+    is skipped and logged once; a good sample resets the failure count.
+    Under ``--heavy`` ``DISK_FAIL_MAX`` consecutive unreadable ticks fail
+    closed as a disk breach; without it the check simply stays off for the
+    tick. The kill reuses the swap-breach grace path (SIGTERM, then SIGKILL
+    after ``--kill-grace-s``, immediate SIGKILL if the box floor is crossed).
+    """
+    guard = getattr(args, "disk_guard", None)
+    if guard is None:
+        return False
+    try:
+        used, path = _disk_sample(guard.targets)
+    except OSError as err:
+        guard.fails += 1
+        if guard.fails == 1:
+            print(f"[watchdog] DISK LIMIT unreadable: {err} — the disk tick "
+                  f"is skipped until a sample works", flush=True,
+                  file=sys.stderr)
+        if guard.heavy and guard.fails >= DISK_FAIL_MAX:
+            print(f"[watchdog] {elapsed / 60.0:6.1f}m DISK LIMIT unreadable "
+                  f"for {guard.fails} ticks — killing tree", flush=True)
+            _disk_kill(proc, args)
+            return True
+        return False
+    guard.fails = 0
+    guard.last_used_gb = used
+    if used > guard.ceiling_gb:
+        print(f"[watchdog] {elapsed / 60.0:6.1f}m DISK LIMIT: {path} "
+              f"used {used:.1f}G > ceiling {guard.ceiling_gb:g}G "
+              f"— killing tree", flush=True)
+        _disk_kill(proc, args)
+        return True
+    return False
+
+
 def _watch(proc: subprocess.Popen, args, cap_mb: float, floor_mb: float,
            swap_cap_mb: float, started: float) -> int:
     warned = False
@@ -982,12 +1172,18 @@ def _watch(proc: subprocess.Popen, args, cap_mb: float, floor_mb: float,
         if available < floor_mb:
             _floor_breach(proc, args, floor_mb, elapsed, available, set(tree))
             return 137
+        if _check_disk(proc, args, elapsed):
+            return DISK_LIMIT_EXIT
         rss_total = sum(_vmrss_mb(pid) for pid in tree)
         swap_total = sum(_vmswap_mb(pid) for pid in tree)
         heartbeat = elapsed - last_beat >= HEARTBEAT_S
         pss_total, swap_pss_total, pct, line = _sample_tree(
             args, cap_mb, swap_cap_mb, available, elapsed, heartbeat, tree,
             rss_total, swap_total)
+        guard = getattr(args, "disk_guard", None)
+        if guard is not None and guard.last_used_gb is not None:
+            line += (f"; disk used {guard.last_used_gb:.1f}G/"
+                     f"{guard.ceiling_gb:g}G")
         if swap_pss_total > swap_cap_mb:
             print(f"{line} — SWAP BREACH, killing tree", flush=True)
             print("[bounded] per-process memory at breach:", flush=True)

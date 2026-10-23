@@ -48,6 +48,9 @@ load-bearing entrypoints:
 - `source_inputs.py` — `SourceBundle` (answer-free source dataclass, frozen,
   `kw_only=True`) and `build_native_score_inputs(bundle) -> NativeScoreInputs`,
   the boundary every acceptance/parity caller starts from.
+- `gate_forecast_source.py` — `GateForecastSource`, the optional
+  `SourceBundle.gate_forecast_source` carrying the selected size fold's
+  binding, release, inference and held-out pool for the gate's forecast.
 - `frozen_executor.py` — `FrozenStageExecutor`/`FrozenRecipeExecutor`,
   running one frozen-model binding and raising `FrozenStageRefusal(code,
   detail, reason_codes=...)` (code always `"MODEL_NOT_READY"`) — the refusal
@@ -116,6 +119,15 @@ load-bearing entrypoints:
   verified objects from `chooser_analog_pool` and `admissible_table:dyn_sv`.
   These immutable tuples preserve catalog order; identities come from each
   artifact's own key, never object names or catalog strategy labels.
+  `paired_residual_artifacts: tuple[PairedResidualPoolArtifact, ...]` and
+  `trailing_cutoff_artifacts: tuple[TrailingCutoffArtifact, ...]` follow the
+  same rule for the `paired_residual_pool` and `trailing_pnl_cutoff` members
+  (empty independently when absent; each object a regular file of at most
+  32 MiB; a key repeated within a family, even with equal bytes, is
+  `ModelNotReady` naming the member; a wrong artifact type is
+  `ModelNotReady`). They only expose verified objects: choosing the one for a
+  row's (models, cutoff) or event month, and declaring it, is the nightly
+  bundle's job (#1157 step 2); until then nothing consumes these fields.
   Picking the object matching a request's own `(strategy, alpha, cutoff)`
   and mapping a binding to specific forecast-output names is the per-night
   assembler's job, not this module's.
@@ -197,7 +209,7 @@ no summaries), and equal inputs return equal tuples (see Failure semantics).
 Only tests consume this preparatory interface; existing selection and nightly
 dispatch are unchanged. See README for fields and ownership obligations.
 
-**Forward forecast assembly (design; not implemented).** STR-THRU forward
+**Forward forecast assembly.** STR-THRU forward
 inputs use native market/history features from the pinned snapshot (cutover
 6c), plus the verified release. The full-refit `size:*` champion supplies
 `driver_prediction`; a separate causally selected size fold supplies only the
@@ -205,13 +217,26 @@ gate's requested `pred_abs_move` family and `forecast_edge`. Both execute in
 the existing scoring stages, never in the raw-row producer. Gate-only forecasts
 must not create a top-level sizing forecast or change the selected structure.
 
-An optional typed `SourceBundle.gate_forecast_source` carries the selected
-fold's inference view, parent-release identity and held-out pool. The existing
-`gate_recipe.forecast` names its binding/output; `_gate_forecast_members`
-resolves it through `FrozenRecipeExecutor` using the shared `FrozenInference`.
-The champion release stays unchanged. Supplying conflicting legacy pool or
-binding declarations is refused, not resolved by precedence. The ordinary
-bundle path remains valid when the optional source is absent.
+`SourceBundle.gate_forecast_source` (optional `GateForecastSource`) carries the
+selected fold's `binding_id`, its fold-view `ModelRelease`, the shared
+`FrozenInference` and the held-out `pool_pred`/`pool_res`/`interval_floor`.
+`_gate_forecast_members` builds `gate.forecast_executor` from that release and
+inference (role `size`; the champion `model_release` is not consulted) and
+`gate.forecast_pool` from the pool. The champion release stays unchanged. The
+ordinary bundle path remains valid when the source is absent.
+
+| Condition | Outcome |
+| --- | --- |
+| Source plus `gate_recipe.forecast`, or plus a non-empty `gate_forecast_pool` | `ValueError` at bundle build (row refused `NATIVE_INPUT_BUILD_FAILED`); never resolved by precedence |
+| Not a `GateForecastSource`, `release` not a `ModelRelease`, `inference` not a `FrozenInference`, blank `binding_id`, `binding_id` not exactly one binding of its release, that binding not role `size`, ragged pool | `ValueError` at bundle build |
+| Non-finite value in any declared fold pool (`gate_forecast_pool`, `forecast_pool`, source pool, `interval_floor`) | `ValueError` at bundle build (`fold_pool` applies this to every pool) |
+| Gate names no forecast column | Executor and pool are built but the stage never calls them; no flag |
+| Source absent, gate names a forecast column | Bundle builds; the stage flags `MISSING_GATE_INPUT:forecast` |
+| Thin pool | Bundle builds; the stage leaves the band columns unavailable |
+
+Failure semantics: building the source members does no I/O, caching, retry or
+fallback; a refusal returns no bundle. Choosing which fold to supply is the
+caller's duty and this input does not select or fall back.
 
 Raw feature names exclude stage-owned forecast/analog/pricing answers; the
 gate's declared feature order still includes them for stage-time derivation.
@@ -553,7 +578,9 @@ and the release is not consulted for it.
 
 #### Chooser state members
 
-The chooser families use `FrozenStateLoader` with a 32 MiB per-object ceiling
+The chooser families, `paired_residual_pool` and `trailing_pnl_cutoff` (the
+table below applies to all four; keys of the last two are `(models, cutoff)`
+and `(history_id, month)`) use `FrozenStateLoader` with a 32 MiB per-object ceiling
 to verify object bytes and the decoded artifact's content hash. Only regular
 files are admitted; oversized objects are refused before hashing or decoding,
 including growth during the bounded read. This is an admission limit, not a
@@ -565,7 +592,7 @@ No pool rows are filtered, sorted, fitted or substituted during resolution.
 | Condition | Outcome |
 |---|---|
 | Family absent | Its tuple is empty; no invented state and no release refusal |
-| Nonregular chooser object or size above 32 MiB | Path-free `ModelNotReady` for that member; the whole release is unavailable, including STR-THRU-only consumers |
+| Nonregular object or size above 32 MiB | Path-free `ModelNotReady` for that member; the whole release is unavailable, including STR-THRU-only consumers |
 | Several objects with distinct `(pool_id, cutoff)` or `(table_id, version)` keys | Preserve every verified object; no implicit latest-object selection |
 | Declared family has non-STAGED status, no objects, malformed references, missing/unreadable/escaped objects, corrupt bytes/schema, wrong artifact type, or duplicate semantic keys | Path-free `ModelNotReady` naming the exact catalog member; no binding, partial family, or fallback |
 | Valid pool declares `cutoff=None` | Preserve the existing artifact identity; loading does not authorize use for a request |
@@ -609,7 +636,11 @@ resolved driver identity, the row is refused with `MODEL_NOT_READY`. If no
 release resolves, `NoCurrentRelease` remains; a resolved binding missing
 required model roles keeps the native batch's existing per-row refusals.
 
-#### Proposed paired residual contract (issue #498; not implemented)
+#### Proposed paired residual contract (issue #498; loading implemented by #1157 step 1, declaration not)
+
+The release binding already loads and exposes the typed `paired_residual_pool`
+members (`paired_residual_artifacts`, above); the recipe derivation and
+bundle declaration described below are not implemented yet.
 
 Legacy `Scorer._residual_pool` (`engine/score.py:3687`) joins Tier-4
 forecasts, panel outcomes and realized crush on `(ticker,event_date)`.
@@ -707,6 +738,30 @@ returns no partial bundle. Other strategies retain their existing projection.
 - **Read-only (R2–R5 do not apply).** No I/O of any kind: every staged input
   arrives already loaded, and nothing this function does can mutate a
   store, a file, or its own arguments.
+
+### Frozen driver-residual array cache
+
+Frozen driver-residual lookup checks the requested causal key and optional hash
+pin on every call. Only the exact same deeply immutable object reuses converted
+arrays; a strong reference prevents identity reuse. Distinct objects never share
+cached conversions, even if their declared hashes match. Direct mutable inputs
+are converted on every call, without retention. Admission trusts the declared
+hash alone; the payload is not re-hashed. Arrays have immutable
+bytes backing. The process-local FIFO retains at most four entries and 16 MiB of
+numeric buffer bytes, not total RSS (retained source objects and Python metadata
+are extra). A lock serializes lookup/accounting/eviction; conversion stays
+outside it. Sampling order and legacy scoring are independent of cache state.
+
+| Condition | Outcome |
+| --- | --- |
+| Missing/wrong kind, causal key or requested hash pin | `MODEL_NOT_READY` before cache lookup on every call. |
+| Valid artifact whose selected residual pool is empty | `MISSING_MODEL_RESIDUALS`; no pool is returned. |
+| Distinct direct objects with equal declared hashes and different contents | Convert each object's own contents. |
+| Same retained deeply immutable object | Reuse its immutable numeric buffers after the per-call identity checks. |
+| Valid miss fitting both caps | Convert once; retain the object and buffers, evicting oldest entries until both caps hold. |
+| Valid conversion exceeds 16 MiB or input contains mutable fields | Return converted buffers without retention or eviction of existing entries. |
+| Concurrent misses for the same object | Recheck under the lock and reuse the first insertion if it is still retained, with no duplicate accounting. If another insertion evicted it first, the loser inserts its own conversion under the normal caps. |
+| Evicted object requested again | Check immutability and reconvert; output and sampling order are identical to a hit. |
 
 ## Invariants
 

@@ -25,6 +25,7 @@ from tests.v2.research.magnitude_trial_support import (
     catalog_rows,
     prediction_spec,
 )
+from tests.v2.research.scan_progress_support import assert_scan_boundaries, observe_scan_outcomes
 from tests.v2.research.test_native_outcomes import read_ledger_rows, set_outcome_clock
 from tests.v2.research.test_native_registration import (
     advance_snapshot_head,
@@ -65,15 +66,22 @@ def source(tmp_path):
 
 
 def _args(source, action, *extra):
-    return [action, "--spec", str(source.spec_path), "--catalog", str(source.root / "catalog.sqlite"),
+    argv = [action, "--spec", str(source.spec_path), "--catalog", str(source.root / "catalog.sqlite"),
             "--store-root", str(source.store.root),
             "--as-of-month", MONTH, *map(str, extra)]
+    if action == "run":
+        argv += ["--exp-number", "101", "--experiments-root", str(source.root / "experiments")]
+    return argv
 
 
-def _invoke(source, capsys, action, *extra, status=0):
-    assert cli.main(_args(source, action, *extra)) == status
+def _invoke(source, capsys, action, *extra, status=0, required_tables=None):
+    with observe_scan_outcomes({"earnings_events"}) as scans:
+        assert cli.main(_args(source, action, *extra)) == status
     captured = capsys.readouterr()
-    assert not captured.err
+    # Admission scans canonical events; pre-scan refusals opt out explicitly.
+    assert_scan_boundaries(captured.err, tables={"earnings_events"}, expected_scans=scans,
+                           required_tables=required_tables,
+                           allow_failures=status != 0)
     assert "Traceback" not in captured.out
     return json.loads(captured.out)
 
@@ -220,7 +228,10 @@ def test_recorded_run_after_smoke_replays_original_date_and_exactly_one_row(sour
     set_outcome_clock(monkeypatch, "2026-02-10")
     _metadata_only(monkeypatch)
     repeated = _invoke(source, capsys, "run", "--ledger", ledger)
-    assert repeated == first
+    assert {key: value for key, value in repeated.items() if key != "record_export"} == {
+        key: value for key, value in first.items() if key != "record_export"}
+    assert first["record_export"]["status"] == "written"
+    assert repeated["record_export"]["status"] == "unchanged"
     _preserved(source, before[0], before[1])
     assert ledger.read_bytes() == before[2]
     assert len(read_ledger_rows(ledger)) == 1
@@ -269,7 +280,7 @@ def test_pre_admission_refusals_do_not_evaluate_or_record(source, monkeypatch, c
         extra += ["--scope", "does-not-exist"]
     _metadata_only(monkeypatch)
     before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
-    response = _invoke(source, capsys, "run", *extra, status=2)
+    response = _invoke(source, capsys, "run", *extra, status=2, required_tables=set())
     _private_refusal(source, response,
                      "SNAPSHOT_UNRESOLVED" if kind == "missing-scope" else "INVALID_EXPERIMENT_SPEC")
     _preserved(source, before, objects)
@@ -338,9 +349,11 @@ def test_injected_r3_and_r4_at_prediction_input_boundary_are_recorded_and_replay
     ledger_bytes = None if smoke else ledger.read_bytes()
     monkeypatch.setattr(prediction, "load_prediction_targets", _forbid)
     replayed = _invoke(source, capsys, "run", *recording, status=2)
-    assert replayed == {"refused": expected, "receipt_ref": evidence[key + "_receipt"]}
+    assert replayed["refused"] == expected
+    assert replayed["receipt_ref"] == evidence[key + "_receipt"]
+    assert replayed["record_export"]["status"] == "written"
     assert catalog_rows(source.conn) == catalog and artifact_object_bytes(source.store) == objects
-    assert not list(source.root.rglob("REPORT.md"))
+    assert not [path for path in source.root.rglob("REPORT.md") if "experiments" not in path.parts]
     if smoke:
         assert not ledger.parent.exists()
     else:
@@ -488,7 +501,7 @@ def test_changed_binding_precedes_holdout_and_cannot_consume_original_outcome(
             patch.setattr(outcomes, "replay_native_outcome", _forbid)
             patch.setattr(outcomes, "ledger_append", _forbid)
             catalog, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
-            response = _invoke(source, capsys, "run", *recording, *selected, status=2)
+            response = _invoke(source, capsys, "run", *recording, *selected, status=2, required_tables=set())
             _private_refusal(source, response, "EXPERIMENT_IDENTITY_CONFLICT")
             _preserved(source, catalog, objects)
             assert _evidence(source) == original_evidence
@@ -551,7 +564,8 @@ def test_r6_preserves_prior_report_catalog_and_ledger(source, monkeypatch, capsy
     before, objects, csv_bytes, report_bytes = (
         catalog_rows(source.conn), artifact_object_bytes(source.store), ledger.read_bytes(), report.read_bytes())
     _metadata_only(monkeypatch)
-    response = _invoke(source, capsys, "run", "--ledger", target, status=2)
+    response = _invoke(source, capsys, "run", "--ledger", target, status=2,
+                       required_tables={"earnings_events"} if kind in {"outcome-bytes", "destination"} else set())
     _private_refusal(source, response, "EXPERIMENT_IDENTITY_CONFLICT")
     _preserved(source, before, objects)
     assert ledger.read_bytes() == csv_bytes and report.read_bytes() == report_bytes
@@ -587,7 +601,8 @@ def test_storage_faults_are_typed_without_raw_tracebacks(source, monkeypatch, ca
         def unavailable(*args, **kwargs):
             raise OSError("SECRET synthetic export failure")
         monkeypatch.setattr(outcomes, "export_native_report", unavailable)
-    response = _invoke(source, capsys, action, *extra, status=2)
+    response = _invoke(source, capsys, action, *extra, status=2,
+                       required_tables=set() if fault in {"catalog", "refusal"} else {"earnings_events"})
     assert response["refused"] == "RESOURCE_UNAVAILABLE"
     assert "SECRET" not in json.dumps(response)
     assert not list(source.root.rglob("REPORT.md"))
@@ -602,7 +617,9 @@ def test_module_subprocess_register_and_smoke(source):
             env={**os.environ, "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
                  "MKL_NUM_THREADS": "1"}, capture_output=True, text=True, timeout=60)
         assert completed.returncode == 0, completed.stdout + completed.stderr
-        assert not completed.stderr
+        # Three fixture years: one admission pass, plus one target-loader pass on run.
+        assert_scan_boundaries(completed.stderr, tables={"earnings_events"},
+                               expected_scans=[("earnings_events", "done")] * (3 if action == "register" else 6))
         result = json.loads(completed.stdout)
     assert result["recording_mode"] == "smoke"
     _assert_runtime_sources(source)
@@ -650,8 +667,12 @@ def test_unsupported_prior_seed_refuses_before_admission_or_reads(tmp_path, monk
     source = _source(tmp_path, spec=spec)
     try:
         if action == "run":
-            native.register_native(source.conn, source.store, Repository(source.conn, source.store), spec,
-                code_root=Path(__file__).resolve().parents[3], as_of_month=MONTH)
+            with observe_scan_outcomes({"earnings_events"}) as setup_scans:
+                native.register_native(source.conn, source.store, Repository(source.conn, source.store), spec,
+                    code_root=Path(__file__).resolve().parents[3], as_of_month=MONTH)
+            setup = capsys.readouterr()
+            assert setup.out == "" and setup_scans == [("earnings_events", "done")] * 3
+            assert_scan_boundaries(setup.err, tables={"earnings_events"}, expected_scans=setup_scans)
         before, objects = catalog_rows(source.conn), artifact_object_bytes(source.store)
         monkeypatch.setattr(Repository, "scan", _forbid)
         monkeypatch.setattr(DummyClassifier, "fit", _forbid)
@@ -659,7 +680,7 @@ def test_unsupported_prior_seed_refuses_before_admission_or_reads(tmp_path, monk
         monkeypatch.setattr(outcomes, "ledger_append", _forbid)
         ledger = tmp_path / "must-not-exist" / "ledger.csv"
         args = ["--ledger", ledger] + (["--no-ledger"] if smoke else [])
-        response = _invoke(source, capsys, action, *args, status=2)
+        response = _invoke(source, capsys, action, *args, status=2, required_tables=set())
         _private_refusal(source, response, "INVALID_EXPERIMENT_SPEC")
         _preserved(source, before, objects)
         assert not ledger.parent.exists()
@@ -794,3 +815,101 @@ def test_untyped_execution_errors_stay_private_and_retry_same_registration(
     else:
         assert len(read_ledger_rows(ledger)) == 1
         assert read_ledger_rows(ledger)[0]["stage"] == "ran"
+
+
+def test_first_successful_run_exports_exp_record_and_report(source, capsys):
+    _invoke(source, capsys, "register")
+    output = _invoke(source, capsys, "run", "--no-ledger")
+    assert output["record_export"]["status"] == "written"
+    export_root = source.root / "experiments"
+    folders = [child for child in export_root.iterdir()
+               if child.is_dir() and child.name.startswith("EXP-101_")]
+    assert len(folders) == 1
+    results = folders[0] / "results"
+    for name in ("export_manifest.json", "outcome.json", "spec.json",
+                 "request.json", "event_ids.json"):
+        assert (results / name).is_file()
+    assert (folders[0] / "REPORT.md").is_file()
+    exported = next((source.root / "experiments").glob("EXP-101_*"))
+    assert set(output["record_export"]) == {"status", "trimmed"}
+    assert "dir" not in output["record_export"]
+    request = json.loads((exported / "results" / "request.json").read_text())
+    assert request == {"action": "run", "as_of_month": MONTH, "scope": "shadow",
+                       "event_ids": None, "no_ledger": True,
+                       "target": "positive_move",
+                       "magnitude_training_start": None,
+                       "magnitude_labels_before": None,
+                       "magnitude_model": None,
+                       "magnitude_feature_snapshot_id": None,
+                       "magnitude_history_start": None}
+    assert (exported / "REPORT.md").read_text().startswith("# EXP-101")
+    assert "report" in output
+    assert Path(output["report"]).read_text().strip() in (exported / "REPORT.md").read_text()
+
+
+def test_run_refuses_without_exp_number_then_auto_succeeds(source, capsys):
+    _invoke(source, capsys, "register")
+    argv = ["run", "--spec", str(source.spec_path),
+            "--catalog", str(source.root / "catalog.sqlite"),
+            "--store-root", str(source.store.root), "--as-of-month", MONTH,
+            "--no-ledger", "--experiments-root", str(source.root / "experiments")]
+    with observe_scan_outcomes({"earnings_events"}) as scans:
+        assert cli.main(argv) == 2
+    captured = capsys.readouterr()
+    assert_scan_boundaries(captured.err, tables={"earnings_events"}, expected_scans=scans)
+    response = json.loads(captured.out)
+    assert response["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert not (source.root / "experiments").exists()
+    evidence = _evidence(source)
+    assert "native_smoke" not in evidence and "native_outcome" not in evidence
+    output = _invoke(source, capsys, "run", "--no-ledger")
+    assert output["record_export"]["status"] == "written"
+
+
+def test_run_auto_exp_number_refused_invalid_experiment_spec(source, capsys):
+    _invoke(source, capsys, "register")
+    argv = ["run", "--spec", str(source.spec_path),
+            "--catalog", str(source.root / "catalog.sqlite"),
+            "--store-root", str(source.store.root), "--as-of-month", MONTH,
+            "--no-ledger", "--experiments-root", str(source.root / "experiments"),
+            "--exp-number", "auto"]
+    with observe_scan_outcomes({"earnings_events"}) as scans:
+        assert cli.main(argv) == 2
+    captured = capsys.readouterr()
+    assert_scan_boundaries(captured.err, tables={"earnings_events"}, expected_scans=scans)
+    response = json.loads(captured.out)
+    assert response["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert not (source.root / "experiments").exists()
+
+
+def test_no_record_export_skips_export_with_warning(source, capsys):
+    _invoke(source, capsys, "register")
+    argv = _args(source, "run", "--no-ledger", "--no-record-export")
+    with observe_scan_outcomes({"earnings_events"}) as scans:
+        assert cli.main(argv) == 0
+    captured = capsys.readouterr()
+    warning = "WARNING: no EXP number; run record NOT exported\n"
+    lines = captured.err.splitlines(keepends=True)
+    assert lines.count(warning) == 1
+    assert_scan_boundaries("".join(line for line in lines if line != warning),
+                           tables={"earnings_events"}, expected_scans=scans)
+    response = json.loads(captured.out)
+    assert response["record_export"] == "skipped"
+    assert not (source.root / "experiments").exists()
+
+
+def test_record_export_failure_keeps_outcome_and_rerun_exports(source, monkeypatch, capsys):
+    _invoke(source, capsys, "register")
+
+    def broken(*_args, **_kwargs):
+        raise fail("RESOURCE_UNAVAILABLE", "synthetic record export failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cli.record_export, "export_native_run", broken)
+        response = _invoke(source, capsys, "run", "--no-ledger", status=2)
+    assert response == {"refused": "record_export_failed", "cause": "RESOURCE_UNAVAILABLE"}
+    evidence = _evidence(source)
+    assert "native_smoke" in evidence
+    assert _document(source, evidence["native_smoke"])["failure_code"] is None
+    output = _invoke(source, capsys, "run", "--no-ledger")
+    assert output["record_export"]["status"] == "written"

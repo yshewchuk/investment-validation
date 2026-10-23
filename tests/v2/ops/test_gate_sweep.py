@@ -46,6 +46,7 @@ from tests.data_scan_support import (
     publish_and_inspect,
 )
 from tests.ops_support import TEST_POLICY, FakeClock, run_until
+from tests.v2.research.scan_progress_support import assert_scan_boundaries, observe_scan_outcomes
 from tests.v2.research.test_gate_report import MONTH, REPO, build_gate_source, build_gate_spec
 from tests.v2.research.test_gate_report import source as source
 
@@ -296,7 +297,8 @@ def test_earlier_nonroster_arm_stays_independent_after_sealing(source, monkeypat
     spec_path = source.root / "independent-spec.json"
     spec_path.write_text(canonical_json(asdict(spec)))
     args = ["run", "--spec", str(spec_path), "--catalog", str(source.root / "catalog.sqlite"),
-            "--store-root", str(source.store.root), "--as-of-month", MONTH, "--no-ledger"]
+            "--store-root", str(source.store.root), "--as-of-month", MONTH, "--no-ledger",
+            "--exp-number", "101", "--experiments-root", str(source.root / "experiments")]
     assert gate_cli.main(args) == 0
     output = json.loads(capsys.readouterr().out)
     assert output["variant_id"] == registered.variant_id and output["recording_mode"] == "smoke"
@@ -305,7 +307,13 @@ def test_earlier_nonroster_arm_stays_independent_after_sealing(source, monkeypat
     after = _scientific(source)
     monkeypatch.setattr(gate_report, "gate_result", _forbid)
     assert gate_cli.main(args) == 0
-    assert json.loads(capsys.readouterr().out) == output
+    replay = json.loads(capsys.readouterr().out)
+    assert output["record_export"]["status"] == "written"
+    assert replay["record_export"]["status"] == "unchanged"
+    assert replay["recording_mode"] == "smoke"
+    assert replay["variant_id"] == registered.variant_id
+    assert {key: value for key, value in replay.items() if key != "record_export"} == {
+        key: value for key, value in output.items() if key != "record_export"}
     assert _scientific(source) == after and _row(source) == seal
     assert [row for row in after if row[0] in roster_ids] == roster_rows
     assert source.root.joinpath(output["report"]).read_text() == report
@@ -334,7 +342,8 @@ def test_pre_sweep_gate_binding_replays_without_rewriting_identity(source, tmp_p
     monkeypatch.setattr(gate_cli, "__file__", str(checkout / gate_report.RUNNER))
     monkeypatch.setattr(gate_report, "gate_result", _forbid)
     args = ["run", "--spec", str(spec_path), "--catalog", str(source.root / "catalog.sqlite"),
-            "--store-root", str(source.store.root), "--as-of-month", MONTH, "--no-ledger"]
+            "--store-root", str(source.store.root), "--as-of-month", MONTH, "--no-ledger",
+            "--exp-number", "101", "--experiments-root", str(source.root / "experiments")]
     assert gate_cli.main(args) == 0
     output = json.loads(capsys.readouterr().out)
     assert output["variant_id"] == registered.variant_id and output["recording_mode"] == "smoke"
@@ -857,7 +866,12 @@ def test_non_string_event_id_refuses_before_catalog_or_population(source, monkey
 
 @pytest.mark.parametrize("damage,code", [("corrupt", "INTEGRITY_FAILED"), ("symlink", "UNSAFE_PATH")])
 def test_cli_corrupt_staged_object_refuses_exactly_then_recovers(source, capsys, damage, code):
-    _call(source)
+    with observe_scan_outcomes({"earnings_events", "daily_market"}) as setup_scans:
+        _call(source)
+    setup = capsys.readouterr()
+    assert setup.out == ""
+    assert_scan_boundaries(setup.err, tables={"earnings_events", "daily_market"},
+                           expected_scans=setup_scans, required_tables={"earnings_events"})
     payload = canonical_json(asdict(build_gate_spec())).encode()
     ref = source.store.publish_bytes(payload, schema_ref="native_staged_input.v1.0")
     target = source.store.root / ref.storage_key
@@ -873,9 +887,12 @@ def test_cli_corrupt_staged_object_refuses_exactly_then_recovers(source, capsys,
     roster.write_text(json.dumps(_request()))
     args = ["submit", "--roster", str(roster), "--catalog", str(source.root / "catalog.sqlite"),
             "--store-root", str(source.store.root), "--as-of-month", MONTH, "--code-root", str(REPO), "--no-ledger"]
-    assert sweep.main(args) == 2
+    with observe_scan_outcomes({"earnings_events", "daily_market"}) as scans:
+        assert sweep.main(args) == 2
     captured = capsys.readouterr()
-    assert captured.err == "" and json.loads(captured.out) == {"refused": code}
+    assert_scan_boundaries(captured.err, tables={"earnings_events", "daily_market"},
+                           expected_scans=scans, required_tables={"earnings_events"})
+    assert json.loads(captured.out) == {"refused": code}
     assert list(source.conn.iterdump()) == before
     assert source.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
     assert foreign.read_bytes() == payload

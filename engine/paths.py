@@ -7,7 +7,9 @@ filesystem path after this module exists. Two rules make that worth enforcing:
   under ``earnings_predictions/`` and ``polygon_cache/`` hold ~57k files that
   cost real quota to acquire and that the current verdicts rest on. They are
   registered here and never moved, renamed, or written to. :func:`assert_writable`
-  turns that convention into a runtime check.
+  turns that convention into a runtime check. The one carve-out is
+  ``WRITABLE_EXCEPTIONS`` (``GSPC_DAILY`` and its staging siblings), the single
+  re-fetchable series ``engine.data.pulls.gspc_refresh`` is allowed to rewrite.
 * **New data lives under one root.** Tiers 1/2/3 all hang off ``data/`` at the
   repo root so a single ``.gitignore`` line keeps them out of git and a single
   path move would relocate the whole store.
@@ -18,6 +20,7 @@ variable, which is what the test-suite uses to build throwaway trees.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 # --------------------------------------------------------------------------
@@ -84,8 +87,19 @@ LEGACY_TRADE_SETS = {
     "S3_runup": (EP_STRATEGIES / "s3_pre_earnings_long_vol" / "data" / "trades_real_t14.csv", "t10_date", "exit_date"),
 }
 
-#: Everything above this line is read-only to engine code.
+#: Everything above this line is read-only to engine code, except for the one
+#: file carved out by ``WRITABLE_EXCEPTIONS`` below.
 GRANDFATHERED = (EP, BT, RAW_POLYGON_LEGACY)
+
+#: The one re-fetchable series refreshed by engine.data.pulls.gspc_refresh
+#: (#1103); the refresh refuses to shrink or backdate it. Its atomic-replace
+#: staging siblings (``gspc_daily.csv.<pid>.<hex32>.tmp`` and the flock sibling
+#: ``gspc_daily.csv.lock``) are writable too.
+WRITABLE_EXCEPTIONS = (GSPC_DAILY,)
+
+#: The one temp-name shape ``gspc_refresh`` stages under: the target's name,
+#: then ``.<digits>.<32 lowercase hex>.tmp`` (pid + uuid4 hex).
+_STAGING_TMP_RE = r"\.\d+\.[0-9a-f]{32}\.tmp"
 
 # --------------------------------------------------------------------------
 # new three-tier store
@@ -156,8 +170,25 @@ def raw_fetch_path(source: str, key: str) -> Path:
 
 
 def is_grandfathered(path: Path | str) -> bool:
-    """True if ``path`` lies inside a read-only research tree."""
+    """True if ``path`` lies inside a read-only research tree.
+
+    ``WRITABLE_EXCEPTIONS`` are never grandfathered, and neither is one of
+    their exact staging siblings: a sibling in the same directory whose name
+    is ``<target.name>.lock`` (the flock file) or matches
+    ``<target.name>.<digits>.<hex32>.tmp`` (the atomic-replace temp the refresh
+    stages through). Any other name in the tree — ``gspc_daily.csv.evil``
+    included — stays read-only.
+    """
     p = Path(path).resolve()
+    for exception in WRITABLE_EXCEPTIONS:
+        target = exception.resolve()
+        if p == target:
+            return False
+        if p.parent == target.parent and (
+            p.name == target.name + ".lock"
+            or re.fullmatch(re.escape(target.name) + _STAGING_TMP_RE, p.name)
+        ):
+            return False
     for root in GRANDFATHERED:
         try:
             p.relative_to(root.resolve())

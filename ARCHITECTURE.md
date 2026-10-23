@@ -46,6 +46,7 @@ request body and, if durable, in the operator guides instead — see
 | Component | Doc |
 |---|---|
 | `checks/` | [`checks/ARCHITECTURE.md`](checks/ARCHITECTURE.md) |
+| `tools/` | [`tools/ARCHITECTURE.md`](tools/ARCHITECTURE.md) |
 | `experiments/` | [`experiments/ARCHITECTURE.md`](experiments/ARCHITECTURE.md) |
 | `engine/v2/contracts/` | (pending) |
 | `engine/v2/foundation/` | [`engine/v2/foundation/ARCHITECTURE.md`](engine/v2/foundation/ARCHITECTURE.md) |
@@ -474,8 +475,8 @@ Only a tracked path absent from the worktree reads as empty.
 
 - **Legacy nightly — `engine.dashboard.nightly`.** The board in production
   today. Its own module docstring states the load-bearing order: refresh →
-  validate → score → ledger → render → selfcheck → publish → flags → backup,
-  each step gating the next. It stays unchanged until Phase 7 cutover. See
+  validate → warm Tier-4 serving models → score → ledger → render → selfcheck → publish → flags → backup,
+  each step gating the next. See
   `engine/dashboard/ARCHITECTURE.md` for the full per-step detail.
 - **v2 supervisor — `python3 -m engine.v2.ops`.** The operator interface is
   the versioned command protocol `engine/v2/ops/cli.py` exposes; see
@@ -773,10 +774,13 @@ change their arithmetic or imply that source receipt production is available.
   override. `tools/phase6_inventory.py` currently does this
   (`ROOT = Path(__file__).resolve().parents[1]`) — treat that as the
   pattern to avoid, not to copy, when adding a sibling tool.
-  Exceptions: `experiments.native_sweep_collection`, `experiments.v2_prediction`,
+  Exceptions: `experiments.registered_runup` (installed root only for its
+  registration source closure; caller data paths stay explicit),
+  `experiments.native_sweep_collection`, `experiments.v2_prediction`,
   `experiments.magnitude_history_store` and the search source seals in
   `experiments.magnitude_search_plan`, `experiments.magnitude_search_trials`,
-  `experiments.magnitude_search_outer` and `experiments.v2_magnitude_search_run`
+  `experiments.magnitude_search_outer`, `experiments.v2_magnitude_search_run`
+  and `experiments.record_export` (installed checkout's git commit id only)
   derive installed roots from `__file__`
   solely to fingerprint/compare on-disk source snapshots.
   `experiments.magnitude_search_execution` uses that root only to launch its

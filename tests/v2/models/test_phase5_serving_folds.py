@@ -103,7 +103,7 @@ def test_descriptor_round_trip_and_identity(cache, staged):
     assert other.descriptor_hash != descriptor.descriptor_hash
 
 
-@pytest.mark.parametrize("defect", ["model", "features", "panel", "date", "month", "filename",
+@pytest.mark.parametrize("defect", ["model", "features", "panel", "date", "month", "compact", "filename",
                                      "estimator", "absent", "shape", "length", "numeric", "nan"])
 def test_malformed_cache_refuses(cache, staged, defect):
     original_name, policy = _name(cache), _policy(cache)
@@ -113,8 +113,10 @@ def test_malformed_cache_refuses(cache, staged, defect):
         cache["features"] = list(reversed(cache["features"]))
     elif defect == "panel":
         cache["tier3_snapshot"] = cache["tier3_snapshot"][:12] + "f" * 52
-    elif defect in ("date", "month"):
-        cache["fold_start"] = "2026-09-02" if defect == "date" else "2026-09-01"
+    elif defect in ("date", "month", "compact"):
+        cache["fold_start"] = {"date": "2026-09-02", "month": "2026-09-01", "compact": "20260901"}[defect]
+        if defect != "month":
+            original_name = _name(cache)  # name matches, so only fold_month can refuse
     elif defect == "filename":
         original_name = "wrong.joblib"
     elif defect in ("estimator", "absent"):
@@ -122,7 +124,8 @@ def test_malformed_cache_refuses(cache, staged, defect):
     else:
         cache["pool_res"] = {"shape": [[1, 2]], "length": [1], "numeric": ["bad", "bad"],
                              "nan": [float("nan"), 1]}[defect]
-    with pytest.raises(ValueError) as error:
+    expected = "invalid serving fold month" if defect in ("date", "compact") else ""
+    with pytest.raises(ValueError, match=expected) as error:
         folds.describe_size_fold(_bytes(cache), original_name, policy, staged)
     assert "/" not in str(error.value)
 

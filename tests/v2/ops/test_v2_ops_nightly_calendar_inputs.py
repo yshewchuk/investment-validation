@@ -8,7 +8,9 @@ providers, no data/fixtures contents.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+import gc
+import weakref
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime
 
 import pandas as pd
@@ -812,13 +814,14 @@ def test_producer_spot_reuse_preserves_all_documents_and_reads_afresh_per_build(
         events, refusals = actual
         if close_raw == 10.0:
             assert len(events) == 20
-            assert refusals["refusals"] == []
+            assert len(refusals["refusals"]) == 4  # main now enumerates disabled strategies
+            assert {row["code"] for row in refusals["refusals"]} == {"UNSUPPORTED_STRATEGY"}
             assert {event["calendar_row"]["spot"] for event in events} == {10.0}
         else:
             assert events == []
-            assert len(refusals["refusals"]) == 20
+            assert len(refusals["refusals"]) == 24
             assert {row["code"] for row in refusals["refusals"]} == {
-                "PRICE_HISTORY_NOT_AVAILABLE"}
+                "PRICE_HISTORY_NOT_AVAILABLE", "UNSUPPORTED_STRATEGY"}
         assert producer.build_native_score_batch_events(
             repository, snapshot, as_of=_SESSION, horizon_days=35) == expected
         assert len(queries) == 4  # no memo survives the preceding build
@@ -874,39 +877,106 @@ def test_spot_reader_is_bounded_retains_only_spot_rows_and_never_caches_exceptio
     assert read("AAA", _SESSION) is row
     assert read("AAA", _SESSION) is row
     assert calls == ["AAA", "AAA"]
-    for index in range(129):
+    for index in range(128):
         assert read(f"T{index}", _SESSION) is row
-    assert len(calls) == 131
-    assert read("T1", _SESSION) is row  # oldest of the retained 128 entries
-    assert len(calls) == 131
+    assert len(calls) == 130
+    assert read("T0", _SESSION) is row  # all 128 new entries remain, not 127
+    assert len(calls) == 130
     read("AAA", _SESSION)
-    assert len(calls) == 132  # evicted entry is read again
+    assert len(calls) == 131  # the 129th distinct entry was evicted, not retained
+
+
+def test_spot_reader_caches_absent_rows_but_not_across_readers(monkeypatch):
+    calls = []
+
+    def source(repo, query, snapshot):
+        calls.append((query.ticker, query.session_date))
+        return ()
+
+    monkeypatch.setattr(nci, "get_price_series", source)
+    read = nci.make_spot_reader(None, None)
+    assert read("AAA", _SESSION) is None
+    assert read("AAA", _SESSION) is None
+    assert calls == [("AAA", _SESSION)]
+    assert nci.make_spot_reader(None, None)("AAA", _SESSION) is None
+    assert calls == [("AAA", _SESSION), ("AAA", _SESSION)]
+
+
+@pytest.mark.parametrize("attribute", ["repository", "snapshot"])
+def test_spot_reader_binding_cannot_be_reassigned(attribute):
+    repository, snapshot = object(), object()
+    read = nci.make_spot_reader(repository, snapshot)
+    with pytest.raises(FrozenInstanceError):
+        setattr(read, attribute, object())
+    assert read.repository is repository
+    assert read.snapshot is snapshot
+
+
+def test_spot_reader_releases_history_evicted_rows_and_build_state(monkeypatch):
+    from engine.v2.contracts import PriceSeriesRow
+
+    observed = []
+
+    def source(repo, query, snapshot):
+        rows = tuple(PriceSeriesRow(
+            date=day, close_adj=9., close_raw=10., high_raw=10.,
+            retrieved_at=None, source_hash=None)
+            for day in ("2024-01-04", _SESSION, "2024-01-08"))
+        observed.append(tuple(weakref.ref(row) for row in rows))
+        return rows
+
+    monkeypatch.setattr(nci, "get_price_series", source)
+    read = nci.make_spot_reader(None, None)
+    assert read("AAA", _SESSION) is observed[0][1]()
+    gc.collect()
+    assert observed[0][0]() is None and observed[0][2]() is None
+    assert observed[0][1]() is not None  # only the selected row is held
+    for index in range(128):
+        read(f"T{index}", _SESSION)
+    gc.collect()
+    assert all(ref() is None for ref in observed[0])  # evicted selected row
+    assert sum(ref() is not None for rows in observed for ref in rows) == 128
+    del read
+    gc.collect()
+    assert all(ref() is None for rows in observed for ref in rows)
 
 
 def test_cached_spot_does_not_move_key_date_or_chain_validation(monkeypatch):
     def forbidden(*args):
         raise AssertionError("spot read preceded existing validation")
 
-    for key, session, chains in [
-        (replace(_STRADDLE_KEY, strategy="not-a-strategy"), _SESSION, None),
-        (_STRADDLE_KEY, "2024-01-05T01:00:00", None),
-        (_STRADDLE_KEY, _SESSION, [{"ticker": "AAA"}]),
+    monkeypatch.setattr(nci, "get_price_series", forbidden)
+    read = nci.make_spot_reader(None, None)
+    for key, session, chains, message in [
+        (replace(_STRADDLE_KEY, strategy="not-a-strategy"), _SESSION, None,
+         "calendar input key has an unsupported strategy"),
+        (_STRADDLE_KEY, "2024-01-05T01:00:00", None,
+         "decision_session must be a midnight calendar day"),
+        (_STRADDLE_KEY, _SESSION, [{"ticker": "AAA"}],
+         "chain rows must carry every chain column"),
     ]:
         with pytest.raises(OpsError) as failure:
             scan_calendar_row_inputs(None, None, key, decision_session=session,
                                      calendar=_CALENDAR, chain_rows=chains,
-                                     spot_reader=forbidden)
+                                     spot_reader=read)
         assert failure.value.code == "INVALID_REQUEST"
+        assert failure.value.problem.message == message
+        assert failure.value.problem.retryable is False
 
 
 def _spot_fixture_documents(close_raw):
     """Literal fixture oracle, independent of production document/refusal helpers."""
     events, refusals = [], []
     for ticker in ("AAA", "BBB"):
-        for strategy in ("BFLY-P", "BFLY-P5", "CND-PS", "CTR5", "RAMP7",
+        for strategy in ("BFLY-P", "BFLY-P5", "CAL-P", "CND-P", "CND-PS", "CTR5", "RAMP7",
                          "STR-RUNUP", "STR-THRU", "TWIN-P", "TWIN-P5", "DYN-SV"):
             key = {"ticker": ticker, "strategy": strategy, "event_date": "2024-01-16",
                    "session": "BMO"}
+            if strategy in ("CAL-P", "CND-P"):
+                refusals.append({
+                    "key": key, "code": "UNSUPPORTED_STRATEGY",
+                    "detail": "the strategy has no native scoring support"})
+                continue
             if close_raw != 10.0:
                 refusals.append({
                     "key": key, "code": "PRICE_HISTORY_NOT_AVAILABLE",

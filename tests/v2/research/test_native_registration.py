@@ -68,9 +68,9 @@ class MetadataRepository(TrackingRepository):
         self.pins.append(scope)
         return Repository.resolve_pinned(self, scope)
 
-    def scan(self, query, *, table_name):
+    def scan(self, query, *, table_name, **kwargs):
         assert table_name == "earnings_events", "preregistration touched outcomes"
-        yield from super().scan(query, table_name=table_name)
+        yield from super().scan(query, table_name=table_name, **kwargs)
 
 
 @dataclass
@@ -603,9 +603,9 @@ def test_mutating_callers_economics_cannot_rewrite_captured_spec(source, monkeyp
     if seam == "population":
         original = source.repository.scan
 
-        def scan(query, *, table_name):
+        def scan(query, *, table_name, **kwargs):
             mutate()
-            yield from original(query, table_name=table_name)
+            yield from original(query, table_name=table_name, **kwargs)
 
         monkeypatch.setattr(source.repository, "scan", scan)
     else:

@@ -28,7 +28,8 @@ def trading_days_before_print(calendar: CalendarSessions, *, entry_date: Any,
     within coverage. Neither endpoint may lie outside the supplied calendar;
     holes inside observed history are never filled. Malformed inputs retain
     CalendarInputError; only insufficient date/anchor coverage is its distinct
-    CalendarCoverageError subclass. No I/O, cache, retry or partial result.
+    CalendarCoverageError subclass. No I/O, request cache, retry or partial result;
+    validation reuses only bounded immutable annual holiday sets.
     """
     days = _calendar_days(_field(calendar, "days"))
     observed = _as_day(_field(calendar, "observed_through"), "observed_through")

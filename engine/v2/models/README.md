@@ -162,7 +162,8 @@ consume `no_fit.forbid_fitting` before native trial claims and fixed-child fitti
 before selected outer refit claims; completed evidence replay never fits.
 `tools/phase5_serving_folds.py` consumes the chooser policy/descriptor types
 and `semantic_release_hash`, plus `engine.v2.foundation` typed-document conversion,
-for offline fold metadata. `tools/phase5_prepare_release.py`
+for offline fold metadata; its helper `tools/phase5_serving_fold_checks.py` imports
+`FOLD_PANEL_SHA256_PATTERN`. `tools/phase5_prepare_release.py`
 consumes `ChooserFoldPolicy` and `chooser_fold_outputs`, obtains registered
 policies, and invokes `tools/phase5_serving_folds.py`'s `preflight_chooser_fold`
 before publication.
@@ -173,8 +174,8 @@ before publication.
 (`deployment.stage_release`, `resolve_release`, `StagingRefused`, `DeploymentError`,
 `MAX_MANIFEST_BYTES`, and `releases.ModelReleaseRefusal`) when carrying pool objects forward;
 `release_layout.py` (which re-exports the `release_objects.py` names `write_object`, `ReleaseLayoutError`, `ObjectVerificationError`, `deployment_root` and `object_relpath`, alongside `STATE_SPECS` and `read_catalog`) is imported by `checks/phase5_*.py` and `tools/phase5_*.py`; `release_layout.py` reaches the public `manifest_path`, `read_manifest`, `manifest_hash_matches` and `atomic_write_bytes` for catalog layout checks.
-`tools/phase5_state_stage_job.py` (behind the `phase5_state_stage` ops job) calls `carry_forward_release`
-and `prior_carry_set` and the same bounded reader, and takes its inventory from `current_release_inventory`; it then calls `deployment.mark_staging_succeeded`.
+`tools/phase5_state_stage_job.py` (behind the `phase5_state_stage` ops job) calls `carry_forward_release`,
+`classify_prior` (bootstrap mode) and `prior_carry_set` and the same bounded reader, and takes its inventory from `current_release_inventory`; it then calls `deployment.mark_staging_succeeded`.
 `engine/v2/ops/pool_refresh.py` (the nightly pool sidecar, `Service._reconcile_pool_nightly_refresh`) reads the `DEPLOYED` pointer through the bounded state reader
 each tick (`PointerState` decoded directly) and submits the stage and `models_promote` jobs; the supervisor and `engine/v2/ops/nightly_trigger.py` (scheduled-serve hold) resolve `production_release_root`.
 engine.v2.serving.operations (P6-4) imports the deployment pointer

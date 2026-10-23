@@ -28,6 +28,19 @@ schema (`schema.py`, colocated with ops/ledger under migration owner
 and a Tier-4 serving-cache coverage check (`tier4_coverage.py` — not pure,
 not legacy-free) gating a scoring launch from `engine.v2.ops`.
 
+Tier-4 coverage contract (#1047): the scorer serves each event at
+`min(event_fold, fold(decision_date))`, and `decision_date` is per
+(event, strategy), so a score window can reach the NEXT month's fold.
+`required_serving_triples` therefore requires, per (event, producer), every
+monthly fold from the earlier of `serving_fold(event_date, as_of)` and the
+month before the event (a strategy may decide before the session), up to the
+event's own fold. The post-attempt materialization-root fingerprint check
+remains a separate backstop.
+
+| Condition | Outcome |
+|---|---|
+| a required `(model_id, fold, panel_sha)` has no pinned, matching serving cache | refuse before launch: `TIER4_CACHE_MISSING` (validation, not retryable); `details.missing` lists every triple |
+
 Non-responsibilities: never computes a trading verdict (`engine/v2/scoring`)
 or promotes a champion (`engine/v2/models/training`); never decides *what* to
 fetch or *when* to run a job (`engine/v2/ops`, a caller, owns that).
@@ -138,7 +151,7 @@ The exhaustive name-by-name list is `README.md`'s checker-enforced Public
 interface section; this names only the load-bearing entry points.
 
 `documents.reject_duplicate_keys(pairs)` is the public, pure stdlib JSON hook
-used by `loads_document`, `experiments.v2_runup_exits` and `experiments.v2_magnitude_search_run`; it returns an object
+used by `loads_document`, `experiments.v2_runup_exits`, `experiments.v2_runup_study` and `experiments.v2_magnitude_search_run`; it returns an object
 dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
 
 - **Snapshot commit** — `catalog.commit_snapshot`/`.record_failed_import`/
@@ -155,10 +168,10 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   planned-unit key validation, `normalizer_id` versioning, coverage
   completeness, and mcap carry-forward.
 - **Snapshot resolution and bounded reads** — `repository.Repository`:
-  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`; opt-in `pin_snapshots=True` memoises per instance `resolve` by snapshot id and the scan/bound path's table contract and membership by `(dataset_version_id, contract_id)`, not `fragment_records`, default off, a failure is never cached; a pinned `scan` whose `key_filter` names a partition column plans only that partition's fragments (index built once per pinned table, every fragment's key bounds validated when it is built, so a corrupt bound still refuses every pinned scan), each call returns an independent copy), a bounded Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/`get_close`, and `explain_dependencies`.
+  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`; opt-in `pin_snapshots=True` memoises per instance `resolve` by snapshot id and the scan/bound path's table contract and membership by `(dataset_version_id, contract_id)`, not `fragment_records`, default off, a failure is never cached; a pinned `scan` or `scan_population_bound` whose `key_filter` names a partition column plans only the matching partitions' fragments (invalid key bounds in any fragment, including unselected fragments, refuse every pinned scan or bound lookup), each call returns an independent copy; the read-only property `pins_snapshots` reports the flag), a bounded Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/`get_close`, and `explain_dependencies`.
   Metadata-only `scan_population_bound` sums recorded counts of surviving
   fragments of the supplied snapshot, with no head fallback or object reads,
-  through the same membership-bound planner behind `scan` and
+  with the same strict predicate refusals and membership-bound semantics as `scan` and
   `explain_dependencies`. That summed manifest-footer count is the
   authoritative selected-population bound: both paths check a request's
   `max_result_rows` against it before row streaming. A query-level limit
@@ -229,7 +242,8 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   importing legacy `engine.*` code (17 declared, read-only entries). Built
   on it, read-only: `legacy_mapping.py` (table mapping);
   `legacy_materialization.py`/`legacy_nightly_read_plan.py` (materialization
-  and nightly barrier plans, neither importing legacy `engine.*` directly);
+  and nightly barrier plans, neither importing legacy `engine.*` directly;
+  `materialize_tree(..., progress=None)` calls `progress(done)` after each written table, and `materialize_progress.TableProgress.tick` turns that into at most one stderr line per 30 s plus a final line);
   `reference_inputs.py`/`reference_catalog.py` (pinned reference-input
   resolution, the latter legacy-free); `import_snapshot.py`; `tier4_coverage.py`.
 - **`computed_moves`/`price_history`** — pure math + each family's
@@ -439,13 +453,61 @@ and never computed per run by a reader:
 | duplicate or unsorted event dates, or duplicate or unsorted `daily_market` dates, for a ticker | `build_rows` raises `CONTRACT_MISMATCH`; the refresh fails before any catalog commit, surfaced by the store as `OpsError` `INPUT_CHANGED` (`details.data_code` = the data code) |
 | the `daily_market` frame, empty or not, lacks `date`, `implied_move` or `src_iv` | `build_rows` raises `CONTRACT_MISMATCH` (the store's own scan refuses a missing table column first, per the ops doc) |
 | no `src_iv` row before an event | `implied_move_pct` null, no contribution to the aggregate |
+| `daily_market` calendar days unsorted or duplicated for a ticker | `build_rows` raises `CONTRACT_MISMATCH` (via `AsofSeries`) before any row is built |
 
-A refresh over a parent that still holds v3 partitions refuses `VALIDATION_FAILED`
-("full rebuild required", ops doc) when it neither rewrites nor attempts every non-v4
-partition, or produces no v4 rows at all; v3 records are never carried.
+The ops store now commits v5. A refresh over a parent that still holds v3 or v4
+partitions refuses `VALIDATION_FAILED` ("full rebuild required", ops doc) when it
+leaves any non-v5 partition neither rewritten nor attempted, or when the run produces
+no v5 rows; older records are never carried.
 
 `computed_at` and `retrieved_at` never order or filter anything here. The builder
 imports `event_history` from this same package (no new cross-component dependency).
+
+**`computed_moves.v5` — one row per considered event, with a reason (issue #966).**
+Status: the ops capture (`run_computed_moves_refresh`) commits `computed_moves.v5` through
+`build_event_rows`; v4 is no longer written and survives only as a readable contract.
+Contract `computed_moves.v5` / `5.0.0` (`COMPUTED_MOVES_V5_CONTRACT`) and the pure
+`build_event_rows` / `classify_event_reasons` sit beside v4, which stays pinned and
+readable (no migration, dual read or backfill; the standard capture rewrites
+partitions). In a v5 dataset version the builder, not a reader, decides which events
+computed moves omits and records that decision on the event's own row, so every
+considered event has exactly one single-row fragment and the research isolation guard
+is unchanged: a candidate with no fragment is still a refusal. Nothing is written to
+`earnings_events`. The ops store commits `computed_moves.v5` (ops doc); v4 is readable but no longer written.
+- New column `not_computed_reason` string nullable. Null exactly when the row is a
+  computed outcome (`skipped` false). Non-null exactly when `skipped` is true and
+  `realized_move_pct` and `available_as_of_date` are null. Closed set:
+  `not_orats` (no ORATS confirmation, e.g. a `forward_claim` phantom), `no_session`
+  (confirmed, session null), `no_price_window` (the v4 skipped case: missing close or
+  a P→Q gap over `MAX_GAP_CALENDAR_DAYS`), `no_price_history` (the ticker's close
+  series is empty), `ticker_too_few_events` (fewer than `MIN_SCOREABLE`
+  past ORATS-confirmed sessioned events, or fewer than `ADMISSION_EVENTS` computable
+  ones). Ticker-level reasons apply to every event of that ticker. A caller that skips
+  loading prices for a ticker below `MIN_SCOREABLE` passes `prices_known=False`: the
+  ticker classifies `ticker_too_few_events` (never `no_price_history`), and the builder
+  refuses `CONTRACT_MISMATCH` at or above `MIN_SCOREABLE` confirmed events.
+- Considered events: every `earnings_events` row of a ticker dated before `as_of`.
+  The v4 omissions (non-ORATS event, ticker below the bars, ticker without prices)
+  become rows; the whole-ticker empty return is gone.
+- Counting stays on confirmed events: `event_ordinal` counts earlier ORATS-confirmed
+  sessioned events; on a row whose reason is `not_orats`, `no_session` or ticker-level,
+  `admitted` is false, `implied_move_pct` and `mean_prior_or_implied` are null and
+  `n_prior_implied` is 0. `no_price_window` rows keep v4 semantics. A phantom never
+  shifts a real event's ordinal or prior mean.
+- Readers must not treat a row as a scoreable event unless `not_computed_reason` is
+  null or `no_price_window`; each history feature decides explicitly how every reason
+  counts.
+
+| Condition | Outcome |
+|---|---|
+| a considered event | exactly one row, `(ticker, event_date)` unique |
+| a ticker with no earnings events | no rows |
+| same-ticker same-date `earnings_events` rows | one row; a confirmed row wins over an unconfirmed one, else the first in input order |
+| an empty event list with valid inputs | no rows; the input refusals below still apply first |
+| reason precedence for one event | per-event `not_orats`, then `no_session`; ticker-level overrides every event: with `prices_known=False` `ticker_too_few_events`, else `no_price_history` (no closes, checked first), else `ticker_too_few_events`; otherwise a confirmed event with no bracketing window is `no_price_window`, else null |
+| event dates not strictly ascending after the same-date collapse, or `sd` not non-decreasing | `CONTRACT_MISMATCH` from both entry points, whatever the ticker-level outcome |
+| a malformed `min_scoreable`, event frame, price series or `daily` frame (both v5 entry points refuse alike, except that only `build_event_rows` takes and validates `daily`; per-branch detail lives in code docstrings and tests) | `CONTRACT_MISMATCH` before any row is built, ticker-level reasons included |
+| `prices_known` not a `bool`, or `prices_known=False` with `MIN_SCOREABLE` or more confirmed events (both entry points) | `CONTRACT_MISMATCH`; with `prices_known=False` and fewer, every event is `ticker_too_few_events` whatever `sd`/`sc` hold |
 
 **`event_history.py` — event-history primitives (design #651).** Pure, no I/O,
 no clock. A feature declares its parameters; none is hard-coded in the module.
@@ -464,7 +526,8 @@ no clock. A feature declares its parameters; none is hard-coded in the module.
 - Dates are canonical `YYYY-MM-DD` data dates only; `retrieved_at` and
   `computed_at` are provenance and never filter or order.
 - The module only computes from the inputs it is given; it stores nothing. Its
-  one production caller is `computed_moves.build_rows` (`computed_moves.v4`).
+  production caller is `computed_moves.build_event_rows` (`computed_moves.v5`), which
+  reaches these primitives through `build_rows` over the confirmed-only frame.
 
 | Condition | Outcome |
 |---|---|
@@ -494,7 +557,7 @@ pinned snapshots and calls `generic_incremental.commit_generic_table_candidate`
 `engine.v2.models.training` uses `errors`, `Repository`, `reference_catalog` and
 `computed_moves` for snapshot/receipt-pinned D14 datasets and calendar sessions.
 `experiments.v2_magnitude_search_run` consumes `repository.Repository`,
-`errors.DataError` and `documents.reject_duplicate_keys` for serial CLI admission.
+`errors.DataError` and `documents.reject_duplicate_keys` for serial CLI admission, as does `experiments.v2_runup_study`; `experiments.registered_runup` consumes `errors.DataError` for typed comparison refusals.
 `tools/*`, `checks/*`, `tests/test_v2_data_*.py` exercise this package
 directly.
 
@@ -640,10 +703,20 @@ Idempotency: (1) insert-level payload match (`IDENTITY_CONFLICT` otherwise
 — a fragment match ignores its two non-identity provenance columns, so a
 corrected re-ingest reuses the existing fragment); (2) a receipt-level
 replay shortcut keyed on `request_hash`/`attempt_id`/`fence`/`scope`/
-`snapshot_id` — through the composed fence, reachable only for a no-op or
-that candidate's own already-applied effect; a direct caller with a
+`snapshot_id` — through the composed fence, reachable only for a no-op, that
+candidate's own already-applied effect, or its pending head CAS (table below); a direct caller with a
 head-blind `fence_check` gets a weaker guarantee (a matching replay returns
-the prior receipt even if the head moved since).
+the prior receipt even if the head moved since). A replay whose head still
+equals the caller's expected snapshot and generation applies the head CAS under
+the existing receipt, in the same transaction:
+
+| Replay condition | Outcome |
+|---|---|
+| Head equals expected snapshot and generation, receipt snapshot differs | Head CAS to the receipt snapshot, generation + 1 |
+| Head already equals the receipt snapshot | No write |
+| Head differs from the expectation | Prior receipt returned, head untouched |
+
+Every `commit_snapshot` caller inherits this.
 
 **`repository.py` reads (summary).** Missing input maps to the codes above;
 a corrupt id is `MANIFEST_CORRUPT`; a re-hash mismatch is `OBJECT_CORRUPT`.

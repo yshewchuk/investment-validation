@@ -14,7 +14,7 @@ import joblib
 import pandas as pd
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from engine.data.features import tier4 as legacy_tier4  # noqa: E402
@@ -75,20 +75,29 @@ def test_fold_rule_parity_with_legacy_scorer(event_date, as_of):
 def test_required_serving_triples_crosses_events_with_every_producer():
     population = [("2026-01-15", "2026-01-10"), ("2026-02-20", "2026-02-10")]
     required = tc.required_serving_triples(population, MODELS, PANEL_SHA)
-    assert required == frozenset({
-        ("size", "202601", PANEL_SHA), ("iv_crush", "202601", PANEL_SHA),
-        ("size", "202602", PANEL_SHA), ("iv_crush", "202602", PANEL_SHA),
-    })
+    assert required == frozenset(
+        (m["model_id"], fold, PANEL_SHA)
+        for m in MODELS for fold in ("202512", "202601", "202602")
+    )
 
 
-def test_required_serving_triples_dedupes_repeated_event_as_of_pairs():
-    """Two events sharing an (event_date, as_of) pair compute the fold once
-    (an implementation property, checked by asserting the *set* is right
-    rather than any internal call count) and the result is still a plain set
-    -- no duplicate triples, however many events share a fold."""
-    population = [("2026-01-15", "2026-01-10"), ("2026-01-16", "2026-01-10")]
+def test_required_serving_triples_dedupes_repeated_event_as_of_pairs(monkeypatch):
+    """A repeated (event_date, as_of) pair computes its folds once, and the
+    result is a plain set with no duplicate triples."""
+    calls = []
+    real = legacy_adapter.legacy_serving_fold
+
+    def spy(event_date, as_of):
+        calls.append((event_date, as_of))
+        return real(event_date, as_of)
+
+    monkeypatch.setattr(legacy_adapter, "legacy_serving_fold", spy)
+    population = [("2026-01-15", "2026-01-10"), ("2026-01-15", "2026-01-10")]
     required = tc.required_serving_triples(population, MODELS[:1], PANEL_SHA)
-    assert required == frozenset({("size", "202601", PANEL_SHA)})
+    assert required == frozenset(
+        {("size", "202512", PANEL_SHA), ("size", "202601", PANEL_SHA)}
+    )
+    assert len(calls) == 2  # floor + event fold, once for the repeated pair
 
 
 # --------------------------------------------------------------------------

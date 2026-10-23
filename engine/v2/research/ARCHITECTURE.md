@@ -47,11 +47,14 @@ These CLI files sit outside `checks/import_layers.py`'s hook (it only parses
 `engine*` importers), so no `engine` package is recorded as importing this
 one; the library entrypoints below are this package's real public interface:
 
+`eligibility_policy.eligibility_policy`, `eligibility_policy.plan_eligibility`,
+`experiment_population.canonical_events`, `experiment_trades.classify_events`,
+`snapshot_inputs.snapshot_reference`, `snapshot_inputs.admit_snapshot`,
 `signal_screen.run`, `fill_quality.run`, `polygon_fills.run`, `replay.replay`,
 `replay.replay_one`, `replay.ALPHA_GRID`, `_replay_run.run`,
 `_replay_run.events_frame`, `_plan.plan_events`, `_chains.ChainIndex`,
 `_chains.load_chain_index`, `_chains.filter_plan_by_availability`,
-`_chains.read_chain_keys`, `_chains.read_chain_keys_for`,
+`_chains.read_chain_keys`, `_chains.read_chain_keys_for`, `_chains.read_chains_for_years`,
 `_trades_table.to_trades_table`, `_build_run.run`,
 `reconcile_trades.run`, `_trades_publish.publish`, `build_trades.coverage`,
 `_pricing.STRUCTURES`, `_pricing.trading_calendar_from_snapshot`,
@@ -116,7 +119,23 @@ workers. Their no-report/no-ledger contracts live in `experiments/ARCHITECTURE.m
 protected `event_history` and fresh replay for each fold's training/evaluation rows;
 its reconstructed date-ceiling and native publication contracts live in that same doc.
 `prediction_inputs.load_prediction_targets` consumes this population first,
-then scans each eligible ticker/event-date pair in pinned `computed_moves`.
+then scans each eligible ticker/event-date pair in pinned `computed_moves`. The history
+and magnitude readers (`event_history`, `magnitude_inputs`, `magnitude_history_store`)
+accept the `computed_moves.v4` or `computed_moves.v5` contract and refuse any other
+`CONTRACT_MISMATCH`; on v5 a row with a `not_computed_reason` other than `no_price_window`
+is `skipped` and carries no outcome, so it never counts as a scoreable event. The
+writer's reason is the only reason research reports for a skipped row: the history and
+training-label and opt-in evaluation omission lists (`omitted_history`, `omitted_labels`) carry the row's
+`not_computed_reason` as the omission `reason` (v4 rows, and v5 rows without a reason, keep
+`skipped`; the magnitude search's `validate_targets` accepts exactly `skipped` and the writer's
+closed reason set, so a receipt with any other reason is `EXPERIMENT_IDENTITY_CONFLICT`), never a research-side re-derivation. Non-skipped rows the readers omit for
+availability keep the reader's own `unavailable` / `not_available_before_fit` reasons. The
+isolation guard of the history and magnitude readers (`_plans`'s per-candidate checks, shared with `plan_with_reader`) is unchanged: every
+candidate still needs exactly one isolated fragment, and a candidate with no fragment
+refuses `HOLDOUT_ACCESS_DENIED`. `prediction_inputs` does not use that guard: it refuses a
+table whose contract is neither native contract with `CONTRACT_MISMATCH` before any target
+scan, and a v5 skipped row with `EXPERIMENT_VARIANT_FAILED` naming the reason (the v5 contract
+requires one; a reason-less skipped row is malformed and gets the generic target message).
 It returns the signed move, binary `positive_move` target, and
 `target_available_on` date. The date is required and later than the event;
 fold consumers must admit training labels only when available before their
@@ -129,8 +148,12 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 | Integrity or object failure during a table scan | Repository's typed refusal, such as `MANIFEST_CORRUPT` or `OBJECT_CORRUPT`; no partial returned frame. |
 | Missing table or malformed table contract | Repository's typed refusal; no partial returned frame. |
 | Invalid holdout context, unknown requested ID, excluded/ambiguous requested event, or empty explicit population (R5) | `HOLDOUT_ACCESS_DENIED` before target scans; no metrics or report. |
+| Well-formed `computed_moves` contract that is neither native v4 nor v5 | `CONTRACT_MISMATCH` before any target scan; no partial returned frame. |
 | Empty bulk canonical calendar | `POPULATION_COLLAPSED`; no empty success. |
 | Missing, skipped, non-finite target, non-date outcome key or invalid target availability (R4) | `EXPERIMENT_VARIANT_FAILED`; no partial returned frame. |
+| `omit_not_computed=True` and a row is `skipped` | Event omitted, object still bound in `consumed_inputs`, listed in `omitted_labels`; other events returned. |
+| `omit_not_computed=True` and every planned label is `skipped` | Empty frame whose attrs list every event in `omitted_labels`; scoring then refuses `EXPERIMENT_VARIANT_FAILED` ("require scored rows"), which the inner search records as a refused terminal. |
+| `omit_not_computed` is not a `bool` | `CONTRACT_MISMATCH` before any repository access. |
 | Cache, retry, transaction, partial write, replay | No cache or automatic retry; read-only, no writes; complete scans precede return; identical pinned inputs return identical rows (R6). |
 
 These readers preserve no economic variant identity and cannot authorize the
@@ -225,6 +248,14 @@ remaining objects pass `event_history`'s shared singleton preflight before
 any is opened; mixed inherited snapshots refuse. Decoded label availability
 must be strictly before `labels_before`; missing, skipped, malformed or
 non-finite labels refuse the whole call, with zero remaining a valid value.
+Exception, opt-in only: `omit_not_computed=True` (used by the magnitude search's inner and outer
+evaluation reads) treats a row the writer marked `skipped` (v5 `not_computed_reason`, e.g. `not_orats`)
+exactly as `qualify_magnitude_training_targets` does: it is omitted, never parsed, and listed in the
+frame attrs and receipt as `omitted_labels` (`[{"event_id", "reason"}]`, sorted by event ID), where `reason` is the row's
+`not_computed_reason` (`skipped` for a row without one), the same rule as the training qualifier.
+`omit_not_computed` must be a `bool` (`CONTRACT_MISMATCH` otherwise). The receipt carries `omitted_labels` only when non-empty (receipts with none are byte-identical to before).
+Every other refusal above is unchanged; only `skipped=true` is omitted, never null/late availability.
+Forecasts for omitted events are made but not scored; `event_count` counts scored events.
 Earlier events with late availability can be decoded to check their recorded
 date; this is reconstructed availability, not verified publication evidence.
 Output rows carry target/object identity; frame attributes bind recipe,
@@ -287,7 +318,8 @@ and source hashes do not establish that evidence; strict PIT experiment
 admission remains a later prerequisite. The stored build uses `plan_magnitude_folds`,
 `event_history._assemble_history` and `_feature_recipe`, not this adapter.
 The adapter has no fitting, target-join, CLI, provider, report, ledger or final-read
-caller, and no cache, retry, write or partial result; Repository failures propagate.
+caller, and no retry, write or partial result; its only cache is the
+observed-session read (see its failure row); Repository failures propagate.
 
 `magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month,
 evaluation_years, training_start, event_ids=None)` plans metadata-only expanding
@@ -328,7 +360,8 @@ the native planner and `experiments.magnitude_search_plan` for admitted metadata
 | Missing calendar table, snapshot/admission or repository failure | Shared typed error propagates; no source fallback. |
 | Empty calendar / malformed dates or incomplete session window | `CALENDAR_UNAVAILABLE` / `CONTRACT_MISMATCH`; no outcome access. |
 | Catalog transactions | Short read-only SQLite transactions; no planner-owned write transaction or transaction spanning the full call. |
-| Cache, retry, partial write, replay | No cross-call cache, retry, write or partial return; identical pinned inputs give identical plans. |
+| Cache, retry, partial write, replay | The only cache is the observed-session read below; no retry, write or partial return; identical pinned inputs give identical plans. |
+| Observed-session read | The `daily_market` observed days are read once per pinned `Repository` (`pins_snapshots`) and snapshot id; the cache lives and dies with that repository, a second repository or snapshot reads again, and an unpinned repository reads on every call. A failed read caches nothing. Output and `calendar_input` identities are unchanged. |
 
 `experiment_exits.walk_exit(repository, snapshot, positions, economic_params=...)`
 accepts entered `EnteredPosition`/`PositionLeg` contracts and resolved experiment
@@ -473,8 +506,18 @@ returns its population or raises its typed refusal. Predicates, exact-pair
 filtering, batch filtering, successful row ordering and deduplication remain
 part of the read contract.
 
-The internal `_scan.read_table` and `_snapshot.read_table` readers accept an
-optional `batch_filter` callback. They invoke it immediately after each Arrow
+Shared `_scan` reads report decoded-row progress against the candidate-row bound
+on stderr at bounded cadence, with rate, ETA and the selected batch-row limit. Predicates and batch filtering
+may retain fewer rows; the denominator is an upper bound, not a final row count.
+Filtered scans also report cumulative retained/skipped rows at that same cadence.
+Every row scan logs start and completion/failure with elapsed time and peak RSS,
+including short scans; periodic ticks remain silent below their cadence.
+No additional scan is used for telemetry, and native errors propagate unchanged.
+
+Public `_chains.read_chains_for_years` delegates a nonempty iterable of years to
+internal `_snapshot.read_table`/`_scan.read_table`, with the fixed chain projection,
+optional key predicates and `batch_filter`. It materializes retained rows and
+performs no experiment holdout admission. The callback runs immediately after each Arrow
 batch becomes a pandas frame, before retaining frames; it returns narrowed
 rows or `None` for no rows. Omitting it or passing `None` preserves existing
 reads. `_chains.load_chain_index` uses it to keep exact requested ticker/date
@@ -627,9 +670,9 @@ It does not authenticate arbitrary rehashed calendars as builder-derived.
 |---|---|
 | Inputs | Exact source snapshot, admitted temporal plan, history start, fixed 5/3/1 clocks, per-feature missingness and installed producer source/environment identity. No experiment outputs. |
 | Protected reads | The complete eligible singleton candidate union is preflighted before any outcome opens. Protected/ambiguous objects never open; admitted late labels may decode availability and be omitted before arithmetic. |
-| Build boundaries | Full candidate preflight completes before any outcome opens. Each admitted candidate outcome is decoded at most once per build; no cache persists across builds. Memory has no fixed byte cap; production scale is unmeasured. |
+| Build boundaries | Full candidate preflight completes before any outcome opens. An admitted candidate outcome is decoded once per build while its run stream stays open; a finished run's decoded rows stay for the build, as the per-event row cache already does. No cache persists across builds. Memory has no fixed byte cap; production scale is unmeasured. A scan failure propagates its native code and fails the build before any snapshot, receipt or head is published (see Publication). Batched outcome reads: the build reads candidate outcomes through `event_history.plan_with_reader`: the `plan_event_targets` preflight plus unique non-null `event_id`s; malformed candidates refuse `CONTRACT_MISMATCH`. Adjacent candidates of a ticker share one run scan, and a protected, mixed or unadmitted fragment is never opened. Membership that is not exactly the preflighted set, an unplanned event, or a mismatched day, ticker or request refuses `HOLDOUT_ACCESS_DENIED` before the run opens any outcome. Each outcome object is capped at 1 MiB (`MAX_OUTCOME_OBJECT_BYTES`); a larger one refuses `RESULT_LIMIT_EXCEEDED`. At most 32 run streams are live at once (a finished run does not count); the oldest live one is closed to make room and is re-scanned if asked for again. Rows equal per-candidate reads. One scan per run holds while a ticker's requests stay grouped, as the build's event order gives; interleaving beyond the cap costs extra scans only. |
 | Catalog reads | The CLI opens its `Repository` with `pin_snapshots=True`, so each scan and bound reuses the pinned snapshot's cached table membership instead of re-decoding it from the catalog (decodes were quadratic in candidates). `fragment_records` and a table's first use still decode membership; `earnings_events` is still read once by fold planning and once by preflight. Output, receipts and identities are unchanged; the pin is per process and immutable-identity keyed. |
-| Progress | Long passes write progress to stderr only (stdout stays the JSON result): `progress.stage` logs start/end with elapsed seconds and peak RSS for the build's `history preflight`, `history prepare` and `history materialize` stages (a full-universe `load_population` logs only its end, and only when it took 5 s or more); `progress.Progress` logs `done/total` (counted after an item finishes), rate, ETA and peak RSS at most once per interval (default 30 s, and not before the configured item count), never per item, and nothing for passes shorter than the interval. `progress.decision` emits aggregate control decisions; opt-in `stage(report_refusals=True)` adds the native DataError code only (no message, no details). The public helper is shared by package readers. Logging never changes results or errors. |
+| Progress | All canonical population scans, including explicit selections, report row-scan start/end/failure with elapsed seconds and peak RSS on stderr. Full-universe `load_population` additionally reports outer completion after 5 s. Build stages use the same `progress.stage`; periodic `progress.Progress` ticks report count/rate/ETA/RSS at most every 30 s, against the candidate-row bound for scans, with retained/skipped counts when batch-filtered. `progress.decision` emits aggregate control decisions; opt-in refusal stages include the native DataError code only, without messages or details. Telemetry never changes results, errors or stdout; native experiment CLIs retain JSON stdout, while replay/chain readers retain their existing stdout diagnostics. |
 | Per-forecast features | Shared history arithmetic preserves availability and numeric-refusal order. Consumed objects, omissions and availability accompany all eleven columns. Exclusion rosters remain transient; persisted lineage omits `holdout_exclusions` and the stored reader refuses it. Empty `n_prior` is zero; other missing values are null with `on_missing=null`. No runtime imputation or production v4 aggregates. |
 | Output | Features-only `research_magnitude_history.v1` snapshot, separate from unchanged source. Three ordered horizons per event-isolated object; primary key `(event_id, context_id, horizon_sessions)`, physical context field and context partition. |
 | Publication | Inspected objects/manifests and success receipt commit atomically under an initially empty deterministic scope. Failure admits no snapshot; complete unreferenced objects remain for normal cleanup. |
@@ -662,6 +705,46 @@ numeric features, without lineage strings. Full-snapshot lineage is not retained
 memory still scales with metadata and selected rows, with no fixed overall byte cap.
 A prior successful read never substitutes for fresh validation.
 The original full-row `read_stored` API and its returned envelope remain unchanged.
+
+## Opt-in eligibility policy boundary
+
+`eligibility_policy.eligibility_policy` declares an explicit supported version and
+nonnegative integer calendar-day width. `plan_eligibility` is metadata-only and
+opt-in; existing consumers are unchanged. It uses `experiment_population.canonical_events`
+for exact committed-snapshot admission and the six-column metadata projection and `experiment_trades.classify_events`
+for detached membership/structural ambiguity labels and caller-pinned context.
+Shared `snapshot_inputs` validates reference shape and exact committed identity;
+the pure classifier checks shape only, without claiming repository commitment.
+
+The closed producer envelope binds snapshot/month/policy and event groups with
+explicit label bounds and every declared horizon's decision/source ceiling.
+Bounds contain the event, with source ceiling <= decision <= event. These are
+producer declarations, not proof of price-bracketing or publication times.
+No calendar guessing, outcome/feature decoding, write, registration or fit occurs.
+
+Random-held windows are merged per ticker. Inclusive event/label interval or
+forecast-point overlap excludes an entire development group; shared random,
+rolling and ambiguous labels also exclude it. Results bind sorted groups, policy,
+metadata identity, merged windows, retained IDs, reasons, coverage and a separately
+preserved evaluation manifest into `plan_id`. Supplied documents are detached.
+There are no retries, persistence, cache or partial results. Bounded membership,
+metadata, window and group progress plus stage timing/RSS go to stderr; admission
+and planning refusals report only the native error code, not row values.
+
+| Condition | Outcome |
+| --- | --- |
+| Unknown, malformed or mismatched snapshot reference | `SNAPSHOT_UNRESOLVED` |
+| Repository integrity failure other than unknown snapshot | Original native error propagates |
+| Unsupported policy, stale digest/envelope, malformed bounds, duplicate declared group IDs or malformed/duplicate evaluation IDs | `CONTRACT_MISMATCH` |
+| Missing/duplicate classifier columns, malformed event IDs or metadata values that prevent classification | `CONTRACT_MISMATCH` |
+| Invalid scalar dates/sessions or structural collisions handled by membership classification | Successful classification with `ambiguous` membership; structural ambiguity IDs returned |
+| Invalid as-of month, unknown group/evaluation identity or colliding canonical population IDs | `HOLDOUT_ACCESS_DENIED` |
+| Ambiguous random-event identity or overflowing window bounds | `HOLDOUT_ACCESS_DENIED` |
+| Valid protected/overlapping development group | Excluded whole event with reasons; evaluation IDs preserved |
+
+This is neither a physical-read capability nor a statistical isolation guarantee.
+Long-memory/cross-ticker effects remain; chronological and random holdouts are
+complementary, not interchangeable.
 
 ## External systems and libraries
 
@@ -700,6 +783,13 @@ Argument validation is separate because it can refuse before that handler.
 One pre-existing data-path exception, called out below
 where it applies (`_snapshot.py`'s bare `ValueError`, issue #70), escapes as
 an uncaught traceback instead.
+
+| Shared row-scan condition | Outcome |
+| --- | --- |
+| `read_chains_for_years` receives an empty year iterable | Raise `ValueError("option_chains: years must not be empty")` before repository access or scan telemetry; never expand to all years. |
+| `read_chains_for_years` receives scalar str/bytes | Raise `ValueError("option_chains: years must be a non-string iterable")` before repository access; string elements inside an iterable remain supported. |
+| Scan iteration or batch filtering raises | Attempt the failed boundary on stderr with elapsed time/RSS; propagate the original exception unchanged, with no partial frame or retry. |
+| Default stderr emission fails | Suppress the telemetry error; preserve the scan's rows or original failure. |
 
 - **CLI argument parsing (before R1–R6).**
   - **A supplied replay `--alpha` is non-finite or outside `[0, 1]`.**
@@ -787,7 +877,8 @@ an uncaught traceback instead.
   path, the loaded `ChainIndex` are held once in memory for that run's
   reads only (module-level caches the legacy code held for a mutable store
   are gone, on purpose — a pinned snapshot never changes under a run, so
-  there is nothing to invalidate).
+  there is nothing to invalidate). The one exception is the magnitude
+  observed-session day tuple, held per pinned `Repository` and snapshot id.
   With `index=None`, replay scopes chain availability and loaded chain
   data to the plan's own years, tickers and dates. The resulting
   `ChainIndex` contains only available plan keys. An explicit `index=`

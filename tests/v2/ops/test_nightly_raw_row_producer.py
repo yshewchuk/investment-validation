@@ -20,6 +20,7 @@ import pytest
 
 from engine.v2.data.errors import DataError, fail as data_fail
 from engine.v2.data.repository import Repository
+from engine.v2.domain.generation import DISABLED
 from engine.v2.features import panel_row_inputs
 from engine.v2.features.panel_row_inputs import PanelRowInputs
 from engine.v2.foundation.market_calendar import CalendarSessions
@@ -53,6 +54,7 @@ _REFUSAL_SCHEMA = "native_score_batch_producer_refusals.v1.0"
 _PANEL_HISTORY_SESSIONS = 253
 _PANEL_HISTORY_DETAIL = "the pinned snapshot lacks required earlier panel sessions"
 _INTRADAY_DETAIL = "the board request carries an intraday event timestamp"
+_UNSUPPORTED_DETAIL = "the strategy has no native scoring support"
 _PROJECTED_DAYS = ("2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11",
                    "2024-01-12", "2024-01-16", "2024-01-17")
 
@@ -203,8 +205,9 @@ class _ReaderRig:
             self.enum_calls.append({"repository": repository, "snapshot": snapshot,
                                     "as_of": as_of, "horizon_days": horizon_days,
                                     "tickers": tickers})
-            return self.real_enumerate(repository, snapshot, as_of=as_of,
+            keys = self.real_enumerate(repository, snapshot, as_of=as_of,
                                        horizon_days=horizon_days, tickers=tickers)
+            return tuple(key for key in keys if key.strategy not in DISABLED)
 
         def decision_calendar(repository, snapshot, *, decision_session, event_through):
             self.calendar_calls.append((decision_session, event_through))
@@ -241,8 +244,9 @@ class _ReaderRig:
         _patch_reader(monkeypatch, nightly_quote_rows, "scan_quote_rows", quote_rows)
 
     def direct(self, repository, snapshot):
-        return self.real_enumerate(repository, snapshot, as_of=_AS_OF,
+        keys = self.real_enumerate(repository, snapshot, as_of=_AS_OF,
                                    horizon_days=_HORIZON_DAYS, tickers=None)
+        return tuple(key for key in keys if key.strategy not in DISABLED)
 
 
 def test_mixed_midnight_and_intraday_rows_keep_order_and_refuse_intraday(
@@ -1101,3 +1105,134 @@ def test_exact_mixed_refusal_order(tmp_path, monkeypatch):
     ]
     assert actual == expected
     assert len(refusals) == len(direct)
+
+
+def test_disabled_strategy_keys_become_unsupported_refusals_with_supported_event(
+        tmp_path, monkeypatch):
+    """CAL-P/CND-P keys refuse as UNSUPPORTED_STRATEGY; a supported key still
+    produces an event in the same call, all at original request positions."""
+    from engine.v2.ops.native_board_universe import BoardRequest
+
+    repository, snapshot = _snapshot(tmp_path, [
+        _event_row("AAA", _MIDNIGHT, "BMO", event_id="aaa-midnight"),
+    ])
+    rig = _ReaderRig(monkeypatch)
+    supported = rig.direct(repository, snapshot)
+    assert supported
+    good_key = next(key for key in supported if key.strategy != "DYN-SV")
+    cal_p = BoardRequest(ticker="AAA", strategy="CAL-P",
+                         event_date=_MIDNIGHT, session="BMO")
+    cnd_p = BoardRequest(ticker="AAA", strategy="CND-P",
+                         event_date=_MIDNIGHT, session="BMO")
+    mixed = [cal_p, good_key, cnd_p]
+
+    def mixed_enum(repo, snap, *, as_of, horizon_days, tickers=None):
+        return mixed
+
+    _patch_reader(monkeypatch, nightly_raw_rows, "scan_forward_board_requests",
+                  mixed_enum)
+
+    events_document, refusals_document = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=_AS_OF, horizon_days=_HORIZON_DAYS)
+
+    assert len(events_document) == 1
+    assert events_document[0]["key"] == _event_keylike(good_key)
+    refusals = refusals_document["refusals"]
+    assert [(_identity(item["key"]), item["code"]) for item in refusals] == [
+        (_identity(_event_keylike(cal_p)), "UNSUPPORTED_STRATEGY"),
+        (_identity(_event_keylike(cnd_p)), "UNSUPPORTED_STRATEGY"),
+    ]
+    assert all(item["detail"] == _UNSUPPORTED_DETAIL for item in refusals)
+    assert json.dumps(refusals_document)
+
+
+def test_intraday_disabled_key_refuses_intraday_not_unsupported(
+        tmp_path, monkeypatch):
+    """An intraday disabled key refuses INTRADAY_EVENT_NOT_ADMITTED: the intraday
+    check runs before the disabled check."""
+    from engine.v2.ops.native_board_universe import BoardRequest
+
+    repository, snapshot = _snapshot(tmp_path, [
+        _event_row("AAA", _INTRADAY, "BMO", event_id="aaa-intraday"),
+        _event_row("AAA", _MIDNIGHT, "BMO", event_id="aaa-midnight"),
+    ])
+    _ReaderRig(monkeypatch)
+    cal_p = BoardRequest(ticker="AAA", strategy="CAL-P",
+                         event_date=_INTRADAY, session="BMO")
+    cnd_p = BoardRequest(ticker="AAA", strategy="CND-P",
+                         event_date=_INTRADAY, session="BMO")
+
+    def intraday_enum(repo, snap, *, as_of, horizon_days, tickers=None):
+        return [cal_p, cnd_p]
+
+    _patch_reader(monkeypatch, nightly_raw_rows, "scan_forward_board_requests",
+                  intraday_enum)
+
+    events_document, refusals_document = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=_AS_OF, horizon_days=_HORIZON_DAYS)
+
+    assert events_document == []
+    refusals = refusals_document["refusals"]
+    assert [(_identity(item["key"]), item["code"]) for item in refusals] == [
+        (_identity(_event_keylike(cal_p)), "INTRADAY_EVENT_NOT_ADMITTED"),
+        (_identity(_event_keylike(cnd_p)), "INTRADAY_EVENT_NOT_ADMITTED"),
+    ]
+    assert all(item["detail"] == _INTRADAY_DETAIL for item in refusals)
+
+
+def test_only_disabled_keys_skip_option_chains_and_all_context_reads(
+        tmp_path, monkeypatch):
+    """A build whose only keys are disabled returns no events, needs no
+    option_chains table, and does no repository reads beyond enumeration."""
+    from engine.v2.ops.native_board_universe import BoardRequest
+
+    conn, clock, store = catalog_and_store(tmp_path)
+    rows = [_event_row("AAA", _MIDNIGHT, "BMO", event_id="aaa-midnight")]
+    fragment = publish_and_inspect(store, _EVENTS, _EVENTS_REF, rows, "2024")
+    snapshot = commit_tables(
+        conn, clock, {_EVENTS_NAME: [fragment]}, {_EVENTS_NAME: _EVENTS},
+        scope="test",
+    )
+    repository = Repository(conn, store)
+    keys = [
+        BoardRequest(ticker="AAA", strategy="CAL-P",
+                     event_date=_MIDNIGHT, session="BMO"),
+        BoardRequest(ticker="AAA", strategy="CND-P",
+                     event_date=_MIDNIGHT, session="BMO"),
+    ]
+
+    def enumerate_keys(repo, snap, *, as_of, horizon_days, tickers=None):
+        return keys
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("context reader invoked for disabled-only keys")
+
+    _patch_reader(monkeypatch, nightly_raw_rows, "scan_forward_board_requests",
+                  enumerate_keys)
+    _patch_reader(monkeypatch, nightly_calendar_inputs, "scan_decision_calendar",
+                  forbidden)
+    _patch_reader(monkeypatch, nightly_calendar_inputs, "scan_calendar_row_inputs",
+                  forbidden)
+    _patch_reader(monkeypatch, panel_row_inputs, "scan_panel_row", forbidden)
+    _patch_reader(monkeypatch, nightly_quote_rows, "scan_quote_rows", forbidden)
+    monkeypatch.setattr(nrp, "scan_chain_slices",
+                        lambda *a, **k: forbidden())
+    monkeypatch.setattr(
+        Repository, "fragment_records",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("repository read beyond enumeration")))
+
+    events_document, refusals_document = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=_AS_OF, horizon_days=_HORIZON_DAYS)
+
+    assert events_document == []
+    refusals = refusals_document["refusals"]
+    assert [item["code"] for item in refusals] == [
+        "UNSUPPORTED_STRATEGY", "UNSUPPORTED_STRATEGY"]
+    assert [item["detail"] for item in refusals] == [
+        _UNSUPPORTED_DETAIL, _UNSUPPORTED_DETAIL]
+    assert [_identity(item["key"]) for item in refusals] == [
+        ("AAA", "CAL-P", _MIDNIGHT_WIRE, "BMO"),
+        ("AAA", "CND-P", _MIDNIGHT_WIRE, "BMO"),
+    ]
+    assert json.dumps(refusals_document)

@@ -297,6 +297,32 @@ def invoke_score_calendar(root, as_of, *, scorer, tickers=None, horizon_days=35)
                           scorer=scorer, tickers=tickers, progress_every=10)
 
 
+def _refresh_gspc(fetcher, source_root) -> dict:
+    """Refresh the legacy ``^GSPC`` daily series through the shared Fetcher.
+
+    Writes into ``<source_root>/earnings_predictions/data/raw/polygon/
+    gspc_daily.csv`` when a source root is given, else
+    ``engine.paths.GSPC_DAILY``, and passes a unique ``refetch_token`` so a
+    stale cached body is kept and never served.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    from engine import paths
+    from engine.data.pulls.gspc_refresh import refresh_gspc_daily
+
+    if source_root is not None:
+        # The same relative location ``paths`` registers for ``GSPC_DAILY``
+        # (``ROOT`` is its own parent, so this is the literal legacy subtree
+        # path, derived rather than hardcoded).
+        gspc_path = Path(source_root) / paths.GSPC_DAILY.relative_to(paths.ROOT)
+    else:
+        gspc_path = paths.GSPC_DAILY
+    return refresh_gspc_daily(
+        fetcher, gspc_path,
+        refetch_token=f"{datetime.now(timezone.utc).isoformat()}-{uuid4().hex}")
+
+
 def invoke_price_refresh(session, *, dry_run: bool = False,
                          planned_tickers=None, source_root=None):
     """Plan (and, unless ``dry_run``, run) one ``ops price-refresh`` pass.
@@ -308,8 +334,16 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
     Standalone callers retain the legacy event/inventory universe. Nightly
     callers supply their scoring tickers and source root: only those names
     plus the calendar dependency are daily targets, without consulting a
-    separately maintained universe or process-global data roots.
+    separately maintained universe or process-global data roots. A real run
+    also refreshes the legacy ``^GSPC`` daily series through
+    ``engine.data.pulls.gspc_refresh`` -- into the same source root when one
+    is given, else ``engine.paths.GSPC_DAILY`` -- and reports its outcome as
+    the extra ``gspc_daily`` key next to the unchanged ``plan``/``report``.
     """
+    if source_root is not None and planned_tickers is None:
+        raise fail("INVALID_REQUEST", "source_root requires planned tickers")
+    if source_root is not None and str(source_root).strip() == "":
+        raise fail("INVALID_REQUEST", "source_root must not be blank")
     from engine.data.pulls.price_refresh import (
         load_events,
         load_fetch_history,
@@ -351,7 +385,13 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
     if dry_run:
         return {"plan": plan, "report": None}
     from engine.data.fetch import Fetcher
-    return {"plan": plan, "report": run_refresh(plan, Fetcher(root=fetch_root))}
+
+    # One Fetcher for both crossings: the planned refresh and the ^GSPC pull
+    # share the rooted Tier-1 cache and its throttle/backoff.
+    fetcher = Fetcher(root=fetch_root)
+    report = run_refresh(plan, fetcher)
+    gspc_daily = _refresh_gspc(fetcher, source_root)
+    return {"plan": plan, "report": report, "gspc_daily": gspc_daily}
 
 
 def _write_action(root, name, value):

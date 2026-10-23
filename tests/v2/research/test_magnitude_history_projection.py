@@ -101,13 +101,13 @@ def test_projection_globally_admits_metadata_before_numbers_in_bounded_batches(s
     metadata_rows, checked_features = [], []
     metadata, features = stored._metadata, stored._validate_features
 
-    def scan(repository, request, *, table_name):
+    def scan(repository, request, *, table_name, **kwargs):
         if table_name == TABLE:
             requests.append(request)
             assert request.max_batch_rows == 3
             assert request.max_result_rows == 12
             assert len(request.key_filter) == 1 and request.key_filter[0].column == "context_id"
-        yield from original(repository, request, table_name=table_name)
+        yield from original(repository, request, table_name=table_name, **kwargs)
 
     def admit(row, *args):
         metadata_rows.append(row["event_id"])

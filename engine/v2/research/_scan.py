@@ -18,7 +18,7 @@ import pandas as pd
 
 from engine.v2.contracts.data import DataQuery, KeyPredicate, SnapshotRef, TimeInterval
 from engine.v2.data import errors, time_formats
-from engine.v2.research.progress import Progress
+from engine.v2.research import progress
 
 __all__ = ["DEFAULT_SCOPE", "next_representable", "read_table", "resolve_snapshot"]
 
@@ -70,13 +70,13 @@ def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
         records = [record for record in records if record.partition_key in wanted]
     frames: list[pd.DataFrame] = []
     partitions = list(dict.fromkeys(record.partition_key for record in records))
-    progress = Progress(f"read {table_name} partitions", len(partitions))
+    reporter = progress.Progress(f"read {table_name} partitions", len(partitions))
     for partition in partitions:
         group = [record for record in records if record.partition_key == partition]
         frames.extend(_scan_partition(repository, snapshot_ref, table_name, contract, columns,
                                       group, key_filter=tuple(key_filter),
                                       batch_filter=batch_filter))
-        progress.tick()
+        reporter.tick()
     frames = [frame for frame in frames if not frame.empty]
     if not frames:
         return pd.DataFrame(columns=list(columns))
@@ -159,10 +159,19 @@ def _scan_interval(repository, snapshot_ref: SnapshotRef, table_name: str, contr
         order_by=contract.primary_key, max_batch_rows=max_batch_rows,
         max_result_rows=max_result_rows)
     frames: list[pd.DataFrame] = []
-    for batch in repository.scan(query, table_name=table_name):
-        frame = batch.to_pandas()
-        if batch_filter is not None:
-            frame = batch_filter(frame)
-        if frame is not None and not frame.empty:
-            frames.append(frame)
+    retained = 0
+    reporter = progress.Progress(f"read {table_name} rows/candidate bound; batch limit {max_batch_rows:,}", max_result_rows)
+    with progress.stage(f"read {table_name} rows"):
+        for batch in repository.scan(query, table_name=table_name):
+            frame = batch.to_pandas()
+            if batch_filter is not None:
+                frame = batch_filter(frame)
+            if frame is not None and not frame.empty:
+                frames.append(frame)
+                retained += len(frame)
+            previous_lines = reporter.lines
+            reporter.tick(batch.num_rows)
+            if batch_filter is not None and reporter.lines > previous_lines:
+                progress.decision(f"read {table_name} filter",
+                                  f"retained={retained:,}, skipped={reporter.done - retained:,}")
     return frames

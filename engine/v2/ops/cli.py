@@ -823,7 +823,7 @@ def _computed_moves_capture_report(dry_run, targets, cache):
 
 
 def computed_moves_command(args, root, conn, clock):
-    """Build one computed_moves.v4 generation from the local Tier-1 cache."""
+    """Build one computed_moves.v5 generation from the local Tier-1 cache."""
     from engine.v2.data.repository import Repository
     from engine.v2.ops import computed_moves_store
     from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
@@ -846,7 +846,7 @@ def computed_moves_command(args, root, conn, clock):
             raise fail("SNAPSHOT_NOT_READY", "scope has no existing snapshot head",
                        details={"scope": args.scope})
         store = ArtifactStore(root)
-        repository = Repository(conn, store)
+        repository = Repository(conn, store, pin_snapshots=True)
         parent = repository.resolve(head["snapshot_id"])
         parent_receipt_id = computed_moves_store.parent_receipt_id_for_snapshot(
             conn, args.scope, parent.snapshot_id)
@@ -1009,6 +1009,9 @@ def price_refresh_command(args, root):
                           "skipped_already_fetched": len(plan["skipped_already_fetched"])}}
 
     report = result["report"]
+    # The ^GSPC pull outcome travels beside the plan/report so both the saved
+    # JSON and the returned dict carry it; it must be set before serialising.
+    report["gspc_daily"] = result.get("gspc_daily")
     out_dir = root / "price_refresh"
     ensure_directory(out_dir)
     out_path = out_dir / f"{plan['session']}.json"

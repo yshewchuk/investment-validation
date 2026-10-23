@@ -58,7 +58,9 @@ _STRADDLE_DOMAIN = frozenset({"STR-THRU", "STR-RUNUP"})
 #: The strategy/session domains whose expiry this staging can resolve at all.
 #: Strategies: the board universe's own values -- ``native_board_universe``
 #: builds every request from ``source_inputs.SUPPORTED_STRATEGIES`` plus the one
-#: ``DYN-SV`` meta-request, exactly the set the candidate policy above (straddle
+#: ``DYN-SV`` meta-request, and also enumerates the disabled CAL-P/CND-P,
+#: which the producer refuses before this staging, so they never reach it --
+#: exactly the set the candidate policy above (straddle
 #: ∩ vs listed put) and ``planned_exit_date``'s exit anchor both know. Sessions:
 #: the two ``planned_exit_date`` anchors on. An unsupported nonempty value is
 #: malformed input, never a legitimately empty eligible expiry domain.

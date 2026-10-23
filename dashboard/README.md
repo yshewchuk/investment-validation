@@ -102,7 +102,8 @@ does not. ~2 MB for a 148-event board.
 
 Useful flags: `--as-of YYYY-MM-DD` (replay a past night), `--tickers A,B,C`
 (bound the universe), `--alt-strikes N` (strikes either side of ATM, scored
-for gate passers only), `--horizon N`, `--backup` (git push + private mirror).
+for gate passers only), `--horizon N`, `--backup` (git push + private mirror),
+`--fetch-only` (data refresh, Tier 3/4 and serving-model warm only, no scoring).
 
 **Timing.** Scoring is ~1s per event and the full calendar is ~2,200 events in
 a three-week window, so a full unrestricted night is roughly 40 minutes. That
@@ -311,6 +312,10 @@ Order matters; each step gates the next.
    instead of going silent.
 2. **Validate** the store it is about to score from. Red stops the pipeline:
    yesterday's snapshot stays published and a flag is written.
+2a. **Warm** the Tier-4 serving models the score will touch: any missing for
+   the current panel are fit in a subprocess first, so score never refits
+   in-process. A failure stops the run (`WARM_SERVING_FAILED`, nothing scored).
+   Skipped when a custom scorer is injected.
 3. **Score** the confirmed calendar, ATM, with one shared Scorer.
 4. **Ledger** — the ATM board is frozen into `ledger/predictions/` *before*
    rendering. Missed nights backfill honestly (real `decision_ts`, flagged
@@ -405,6 +410,7 @@ opened and looked at.
 | `publish_failed` | target down, or the access probe saw a public 200 | the local bundle still rendered; fix the target, retry next night |
 | Nightly exits 1 with a `TIER4_*` code (`TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET`, `TIER4_GAP_REMAINS`) | the Tier-4 gap repair failed, ran over budget or left the gap; nothing was scored and no new SNAPSHOT was written | read the `tiers_stop` flag in the flag report; fix the cause and rerun (the repair is idempotent) |
 | Nightly exits 1 with `TIERS_SNAPSHOT_FAILED` (`tiers_stop` flag) | the Tier-3/4 rebuild degraded and the SNAPSHOT write for the store as found then failed; nothing was scored | read the `tiers_stop` flag in the flag report; fix the disk or permission cause and rerun |
+| Nightly exits 1 with `WARM_SERVING_FAILED` | a Tier-4 serving fit failed, timed out, or the panel changed during the warm step; nothing was scored | read the flag report and the stderr `[warm]` lines, fix the cause, rerun; fits already completed are kept |
 | `quota_below_reserve` | live ops is eating the 3k/month reserve | refresh degrades to cache until the month rolls |
 | Rows badged `NO_CHAIN` | no option chain in the store for that event | expected for names outside the pulled slices |
 | CAL-P rows unscored | the scorer disables CAL-P until EXP-101/102 | by design — the evidence is for a different structure |

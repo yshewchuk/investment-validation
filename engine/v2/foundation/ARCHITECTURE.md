@@ -65,7 +65,18 @@ None. This module does not access repositories, providers, loaders, models, legs
 
 ## Failure semantics
 
-Invalid/empty sessions, malformed/missing dates (`None`, `NaT`), unknown strategy/session, or insufficient pre-print or post-print anchor coverage raise `CalendarInputError(code="INVALID_REQUEST")`. The bounded search for the first future session stops at Python's maximum representable date: if a session remains in range it is returned, and if none remains the function raises the same typed refusal rather than leaking date-arithmetic overflow. R1–R6: source failures propagate at the adapter; no cache or retries; deterministic for the same inputs; read-only; no partial result or writes; stable output for the same request.
+Invalid/empty sessions, malformed/missing dates (`None`, `NaT`), unknown strategy/session, or insufficient pre-print or post-print anchor coverage raise `CalendarInputError(code="INVALID_REQUEST")`. The bounded search for the first future session stops at Python's maximum representable date: if a session remains in range it is returned, and if none remains the function raises the same typed refusal rather than leaking date-arithmetic overflow. R1–R6: source failures propagate at the adapter; no external-source or request-result cache or retries; deterministic for the same inputs; read-only; no partial result or writes; stable output for the same request.
+
+Only pure annual holiday calculations use a process-local stdlib LRU (128 years),
+returning immutable sets that include one-off closure dates. Observed sessions,
+anchors and external data are not cached. `planned_exit_date` validates
+`calendar.days`; it does not read `calendar.observed_through`.
+
+| Holiday-cache condition | Outcome |
+|---|---|
+| Year is retained in the process-local LRU | Reuse its immutable scheduled/one-off holiday set. |
+| Year is absent, including after eviction | Recompute the same pure year rules; retain at most 128 years, evicting the least recently used. |
+| `planned_exit_date` receives invalid `calendar.days`, whether cache is warm or cold | Empty/non-tuple input, invalid dates, non-increasing/duplicate days, weekends or holidays raise `CalendarInputError`. |
 
 For `trading_days_before_print` only, missing date/anchor coverage raises the
 `CalendarCoverageError` subclass (same code), distinguishable from malformed

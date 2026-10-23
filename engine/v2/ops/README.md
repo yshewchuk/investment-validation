@@ -124,7 +124,7 @@ candidate row.
 `nightly_calendar_inputs.scan_calendar_row_inputs` (both of the latter accept
 an optional `chain_rows`; calendar-row scanning also accepts `spot_reader`) are internal staging APIs
 for pinned raw-row calendar inputs. They compose decision-calendar sessions,
-strategy-eligible expiries and calendar-row inputs; `nightly_raw_row_producer` calls `scan_decision_calendar` and `scan_calendar_row_inputs` (which calls `scan_candidate_expiries`). See the component architecture contract.
+strategy-eligible expiries and calendar-row inputs; `nightly_raw_row_producer` calls `scan_decision_calendar`, `make_spot_reader`, and `scan_calendar_row_inputs` (which calls `scan_candidate_expiries`). See the component architecture contract.
 
 `nightly_calendar_inputs.make_spot_reader(repository, snapshot)` creates a frozen
 `SpotReader` bound to those exact objects; at most 128 `(ticker, session)` spot rows or
@@ -169,7 +169,9 @@ either required table. Their current consumer is
 
 `experiments/runup_exit_report.py` consumes `fingerprints.source_closure` /
 `environment_identity` and `errors.OpsError` / `fail` for exploratory identity
-and typed refusals; `experiments/v2_runup_exits.py` consumes those typed errors.
+and typed refusals; `experiments/v2_runup_exits.py` consumes those typed errors;
+`experiments/record_export.py` consumes `errors.fail` / `errors.OpsError` for its typed refusals and failure causes; `experiments/v2_gate.py` and `experiments/v2_prediction.py` consume its `export_or_skip`.
+`experiments/registered_runup.py` consumes specification resolution and typed refusals; `experiments/v2_runup_study.py` also consumes catalog connection and specification decoding for registered RUNUP execution.
 
 Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
@@ -202,7 +204,7 @@ submitted jobs inline, or switch production authority: it queues the plan and
 returns the job ids, leaving execution to a separately started supervisor.
 
 The top-level `experiments/native_registration.py` library consumes the narrow
-registration surface above. Like other `experiments/` callers, it is outside
+registration surface above, including `native_registration.native_evidence_json` for bounded reservation serialization. Like other `experiments/` callers, it is outside
 the engine import graph; it introduces no peer-layer engine dependency.
 `experiments/native_outcomes.py` consumes `catalog.transaction`, `native_registration.read_native_evidence`/`native_evidence_json` and
 `errors.OpsError`/`fail` for catalog-owned publication and typed refusal.

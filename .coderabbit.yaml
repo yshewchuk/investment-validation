@@ -33,6 +33,11 @@ reviews:
         5. Siblings with the same pattern that were NOT fixed — when this
            diff fixes a defect, check for the same shape elsewhere and name
            any sibling left unfixed.
+        6. Performance — apply /docs/performance_review.md, "Performance review:
+           repeated work and safe reuse." Trace affected callers and repeated
+           work, substantiate cost, preserve integrity/freshness and distinguish
+           cold/warm helper savings from whole-workload claims. Follow that
+           section's scope and evidence bar; do not demand speculative tuning.
 
         Only after the Design review section, give line-level findings.
 
@@ -304,3 +309,4 @@ knowledge_base:
       - "AGENTS.md"
       - "CLAUDE.md"
       - "**/ARCHITECTURE.md"
+      - "docs/performance_review.md"

@@ -2,6 +2,8 @@
 import argparse
 import json
 import sqlite3
+import sys
+import time
 from pathlib import Path
 
 from engine.v2 import foundation
@@ -11,8 +13,10 @@ from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments import gate_report as gate
+from experiments import lib
 from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
+from experiments import record_export
 
 
 def main(argv=None):
@@ -26,6 +30,9 @@ def main(argv=None):
     parser.add_argument("--no-ledger", action="store_true")
     parser.add_argument("--ledger", type=Path)
     parser.add_argument("--max-registration-bytes", type=int, default=native.MAX_NATIVE_EVIDENCE_BYTES)
+    parser.add_argument("--exp-number", default=None)
+    parser.add_argument("--experiments-root", type=Path, default=lib.EXPERIMENTS_DIR)
+    parser.add_argument("--no-record-export", action="store_true")
     args = parser.parse_args(argv)
     if not native.valid_registration_read_budget(args.max_registration_bytes):
         parser.error("--max-registration-bytes must be a positive SQLite-safe byte budget")
@@ -33,7 +40,8 @@ def main(argv=None):
     try:
         if args.purpose != "sweep":
             raise fail("HOLDOUT_ACCESS_DENIED", "gate evaluation admits sweep research only")
-        spec = experiment_spec_from_document(json.loads(Path(args.spec).read_text()))
+        spec_document = record_export.read_spec_document(args.spec)
+        spec = experiment_spec_from_document(spec_document)
         gate.validate_gate_spec(spec)
         if args.action == "run" and not args.no_ledger and args.ledger is None:
             raise fail("INVALID_EXPERIMENT_SPEC", "recorded gate evaluation requires --ledger")
@@ -51,21 +59,55 @@ def main(argv=None):
         if "final_read" in registration.document:
             raise fail("HOLDOUT_ACCESS_DENIED", "gate evaluation has no final-read authority")
         registration = native.require_native_registration(conn, store, repository, spec,
-                                                         expected=registration, **binding)
+                                                          expected=registration, **binding)
+        exp_number = None
+        experiment_id = registration.document["execution_plan"]["experiment_id"]
+        if args.no_record_export:
+            print("WARNING: no EXP number; run record NOT exported", file=sys.stderr)
+            if args.exp_number is not None:
+                record_export.resolve_exp_number(
+                    args.experiments_root, experiment_id, args.exp_number)
+        else:
+            exp_number = record_export.resolve_exp_number(
+                args.experiments_root, experiment_id, args.exp_number)
         recording = dict(no_ledger=args.no_ledger, ledger_path=args.ledger)
+        started = time.monotonic()
         saved = outcomes.replay_native_outcome(conn, store, registration, **recording)
+        replayed = saved is not None
         if saved is None:
             attempted = True
             result = gate.gate_result(repository, registration, spec)
             report = gate.render_gate_report(registration, result, spec=spec, no_ledger=args.no_ledger)
             saved = outcomes.publish_native_outcome(conn, store, registration, report=report,
                                                     attempted=True, **recording)
+        request_dict = {
+            "action": args.action,
+            "as_of_month": args.as_of_month,
+            "scope": args.scope,
+            "event_ids": args.event_id,
+            "purpose": args.purpose,
+            "no_ledger": args.no_ledger,
+        }
         if saved["outcome"]["failure_code"] is not None:
-            print(json.dumps({"refused": saved["outcome"]["failure_code"], "replayed": True}))
+            record, refusal = record_export.export_or_skip(
+                args.experiments_root, registration, spec_document, request_dict,
+                saved, exp_number, replayed, started, None)
+            if refusal is not None:
+                print(json.dumps(refusal))
+                return 2
+            print(json.dumps({"refused": saved["outcome"]["failure_code"], "replayed": replayed,
+                              "record_export": record}))
             return 2
         path = outcomes.export_native_report(conn, store, registration, **recording)
+        record, refusal = record_export.export_or_skip(
+            args.experiments_root, registration, spec_document, request_dict,
+            saved, exp_number, replayed, started, path or None)
+        if refusal is not None:
+            print(json.dumps(refusal))
+            return 2
         print(json.dumps({"report": str(path), "variant_id": registration.variant_id,
-                          "recording_mode": saved["receipt"]["recording_mode"]}))
+                          "recording_mode": saved["receipt"]["recording_mode"],
+                          "record_export": record}))
         return 0
     except (OpsError, DataError, foundation.ArtifactError, ValueError, TypeError, KeyError,
             OSError, sqlite3.Error, RuntimeError) as error:

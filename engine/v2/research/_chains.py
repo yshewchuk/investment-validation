@@ -102,17 +102,23 @@ def read_chain_keys_for(repository, snapshot_ref, keys) -> set[tuple[str, pd.Tim
 
 def read_chains_for_years(repository, snapshot_ref, years, batch_filter=None,
                           key_filter=()) -> pd.DataFrame:
-    """option_chains rows for ``years``, projected to ``_CHAIN_COLUMNS``.
+    """Pinned option_chains rows for a nonempty iterable of ``years``.
 
-    ``batch_filter`` is an optional per-batch predicate forwarded to the read
-    adapters (default ``None`` — omitted and explicit ``None`` behave
-    identically to the pre-existing whole-year read). ``key_filter`` is an
-    optional tuple of ``KeyPredicate`` values forwarded unchanged to the read
-    adapter (default ``()`` — omitted and ``()`` behave identically to the
-    pre-existing whole-year read).
+    Empty ``years`` or scalar str/bytes raises ``ValueError`` before repository
+    access. The fixed projection is ticker, obs_date, expiry, dte, strike, right, bid, ask, delta,
+    spot and quote_repaired. ``batch_filter`` narrows each pandas batch or returns
+    ``None`` to retain nothing; omitted/None keeps all scanned rows. ``key_filter``
+    forwards ``KeyPredicate`` values unchanged (default ``()``). Retained rows
+    are materialized; candidate-row/batch bounds are not a process-memory cap.
+    Errors propagate without retries. This raw reader performs no holdout admission.
     """
+    if isinstance(years, (str, bytes)):
+        raise ValueError("option_chains: years must be a non-string iterable")
+    partition_keys = [str(y) for y in years]
+    if not partition_keys:
+        raise ValueError("option_chains: years must not be empty")
     return read_table(repository, snapshot_ref, "option_chains", _CHAIN_COLUMNS,
-                      partition_keys=[str(y) for y in years], batch_filter=batch_filter,
+                      partition_keys=partition_keys, batch_filter=batch_filter,
                       key_filter=key_filter)
 
 

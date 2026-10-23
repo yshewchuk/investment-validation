@@ -54,9 +54,9 @@ class TrackingRepository(Repository):
         super().__init__(conn, store)
         self.scans = []
 
-    def scan(self, query, *, table_name):
+    def scan(self, query, *, table_name, max_object_bytes=None):
         self.scans.append((table_name, query))
-        yield from super().scan(query, table_name=table_name)
+        yield from super().scan(query, table_name=table_name, max_object_bytes=max_object_bytes)
 
     def resolve_pinned(self, _scope):
         raise AssertionError("implicit latest is forbidden")
@@ -100,6 +100,7 @@ def poison_outcomes(monkeypatch, repository, snapshot, protected_days, *, all_ou
     forbidden = {r.object_ref.object_id for r in records
         if all_outcomes or any(r.time_min <= day <= r.time_max for day in protected_days)}
     original = objects.verify_object_path
+    original_bytes = objects.read_verified_bytes
     opened = []
 
     def verify(store, ref):
@@ -107,7 +108,13 @@ def poison_outcomes(monkeypatch, repository, snapshot, protected_days, *, all_ou
         opened.append(ref.object_id)
         return original(store, ref)
 
+    def read_bytes(store, ref, *, max_bytes):
+        assert ref.object_id not in forbidden, "protected outcome bytes were requested"
+        opened.append(ref.object_id)
+        return original_bytes(store, ref, max_bytes=max_bytes)
+
     monkeypatch.setattr(objects, "verify_object_path", verify)
+    monkeypatch.setattr(objects, "read_verified_bytes", read_bytes)
     return opened
 
 
@@ -117,10 +124,13 @@ def calendar_sessions(start="2024-06-03", end="2024-06-14"):
     return market_calendar.CalendarSessions(days, days[-1])
 
 
-def commit_history_inputs(tmp_path, events, moves, *, days=None, mixed_days=(), include_calendar=True, marker=None):
+def commit_history_inputs(tmp_path, events, moves, *, days=None, mixed_days=(), include_calendar=True,
+                          marker=None, contract=None):
+    if contract is None:
+        contract = COMPUTED_MOVES_CONTRACT
     tmp_path.mkdir(parents=True, exist_ok=True)
     conn, clock, store = catalog_and_store(tmp_path)
-    contracts = {"earnings_events": contract_for("earnings_events"), "computed_moves": COMPUTED_MOVES_CONTRACT}
+    contracts = {"earnings_events": contract_for("earnings_events"), "computed_moves": contract}
     inputs = {"earnings_events": events, "computed_moves": moves}
     if include_calendar:
         contracts["daily_market"] = contract_for("daily_market")

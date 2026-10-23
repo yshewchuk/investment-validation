@@ -135,7 +135,8 @@ requirements. They do not change current strategy definitions or deployments.
    No databases, no message queues, no npm/build toolchains, no Docker. Files,
    cron, and one FastAPI app are the whole runtime.
 8. **Don't break the running research.** Never move or rewrite
-   `earnings_predictions/` or `bt/` content; the new engine wraps and reads,
+   `earnings_predictions/` or `bt/` content (sole exception: the refresh of
+   `gspc_daily.csv` listed in `engine.paths.WRITABLE_EXCEPTIONS`, #1103); the new engine wraps and reads,
    the migration test proves equivalence, and old paths keep working until
    the plan retires them explicitly.
 9. **Reports are the interface.** Anything an agent concludes must exist as a
