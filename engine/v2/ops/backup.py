@@ -5,7 +5,6 @@ import fcntl
 import json
 import os
 import sqlite3
-import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -78,12 +77,13 @@ def _delivered_or_stale(conn, kind, logical_key):
 
 @contextmanager
 def _read_snapshot(conn):
-    """One explicit deferred read transaction, so counts and a backup agree.
+    """One explicit deferred read transaction, so counts, prior validation and
+    a backup agree.
 
     ``BEGIN`` (not ``BEGIN IMMEDIATE``) only takes a read lock on first access,
     leaving writers free in WAL mode. Commit on success, roll back on anything
-    else. Callers keep this open only around counting and ``backup_to``: never
-    around artifact copying or manifest publication.
+    else. Callers keep this open only around counting, prior validation and
+    ``backup_to``: never around artifact copying or manifest publication.
     """
     if conn.in_transaction:
         raise RuntimeError("nested catalog transaction: backup needs a clean connection")
@@ -110,34 +110,13 @@ def _table_row_counts(conn):
 
 
 def _read_manifest(manifest_path):
-    """Parse a prior manifest without following non-regular files or reading
-    past ``MAX_MANIFEST_BYTES``; any invalid prior is reported as ``None``."""
+    """Parse a prior manifest within ``MAX_MANIFEST_BYTES``; a missing,
+    symlinked, non-regular, oversize or invalid prior is reported as ``None``."""
+    from engine.v2.ops.workflows.commands import read_bounded_bytes
+
     try:
-        fd = os.open(manifest_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    except OSError:
-        return None
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            return None
-        chunks = []
-        remaining = MAX_MANIFEST_BYTES + 1
-        while remaining > 0:
-            chunk = os.read(fd, remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        data = b"".join(chunks)
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
-    if len(data) > MAX_MANIFEST_BYTES:
-        return None
-    try:
-        return json.loads(data)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        return json.loads(read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
+    except (OSError, ValueError):
         return None
 
 
@@ -248,13 +227,30 @@ def _install_stage(staged, target, database, source_rows):
 
 
 def _copy_artifact(store, target, name, ref, fault):
-    """Copy one artifact, verify its hash and run the per-artifact fault hook."""
+    """Copy one artifact durably, verify its published hash and run the
+    per-artifact fault hook before publication."""
     source = store.verify(ref)
     destination = target / "artifacts" / name
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(source.read_bytes())
-    if fault:
-        fault(name)
+    fd, temporary_name = tempfile.mkstemp(
+        dir=str(destination.parent), prefix=f".{destination.name}.", suffix=".pending")
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(source.read_bytes())
+            stream.flush()
+            os.fsync(stream.fileno())
+        if fault:
+            fault(name)
+        os.replace(temporary, destination)
+        temporary = None
+        fsync_directory(destination.parent)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
     if file_hash(destination) != ref.content_hash:
         raise fail("INTEGRITY_FAILED", "backup artifact hash mismatch")
     return {"content_hash": ref.content_hash, "byte_size": ref.byte_size}

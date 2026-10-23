@@ -11,6 +11,11 @@ happens inside one (contracts §11.2). Nesting is refused, because a nested
 block that silently committed the outer work is exactly how an effect escapes
 its fence.
 
+``transaction()`` is that short ``BEGIN IMMEDIATE`` write transaction. A backup
+uses a separate deferred read snapshot instead (``backup._read_snapshot``): its
+plain ``BEGIN`` can span row counts and the SQLite online backup without
+blocking WAL writers, and it ends before artifact or manifest publication.
+
 Backups use the SQLite online backup API. Copying only the main database file
 while WAL holds committed pages is not a consistent backup (§6.1), and
 ``tests/test_v2_ops_catalog.py`` demonstrates the rows it loses.

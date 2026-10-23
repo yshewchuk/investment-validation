@@ -88,6 +88,7 @@ def test_staged_row_count_mismatch_is_refused_with_table_details(tmp_path, monke
         run_backup(conn, key="b8", owner="worker", target=tmp_path / "backup",
                    clock=clock, store=store)
     assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
     assert "outbox" in refused.value.problem.details["tables"]
 
 
@@ -193,21 +194,69 @@ def test_backup_counts_and_copy_share_one_snapshot(tmp_path, monkeypatch):
     assert manifest["database_rows"] == before
 
 
-def test_oversized_prior_manifest_is_ignored_and_rebuilt(tmp_path):
+def test_oversized_prior_manifest_is_ignored_and_rebuilt(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "b11", {}, clock=clock)
     backup = tmp_path / "backup"
-    backup.mkdir()
+    calls = []
+    real_backup_to = backup_module.backup_to
+
+    def counted(conn, destination):
+        calls.append(destination)
+        real_backup_to(conn, destination)
+
+    monkeypatch.setattr(backup_module, "backup_to", counted)
+
+    def crash(point):
+        if point == "after_manifest_before_ack":
+            raise RuntimeError("ack lost")
+
+    with pytest.raises(RuntimeError):
+        run_backup(conn, key="b11", owner="worker", target=backup, clock=clock,
+                   store=store, fault=crash)
     manifest_path = backup / "b11.manifest.json"
-    manifest_path.write_bytes(b"{" + b" " * backup_module.MAX_MANIFEST_BYTES + b"}")
+    manifest = json.loads(manifest_path.read_text())
+    assert len(calls) == 1
 
-    manifest = run_backup(conn, key="b11", owner="worker", target=backup, clock=clock,
-                          store=store)
+    manifest["padding"] = "x" * (backup_module.MAX_MANIFEST_BYTES + 1)
+    manifest_path.write_text(json.dumps(manifest))
+    assert manifest_path.stat().st_size > backup_module.MAX_MANIFEST_BYTES
 
+    clock.advance(301)
+    rebuilt = run_backup(conn, key="b11", owner="retry", target=backup, clock=clock,
+                         store=store)
+
+    assert len(calls) == 2
     assert manifest_path.stat().st_size <= backup_module.MAX_MANIFEST_BYTES
-    assert json.loads(manifest_path.read_text()) == manifest
-    assert manifest["backup_key"] == "b11"
+    assert json.loads(manifest_path.read_text()) == rebuilt
+    assert rebuilt["backup_key"] == "b11"
+
+
+def test_prior_manifest_with_extra_field_is_refused_after_lost_ack(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "b14", {}, clock=clock)
+    backup = tmp_path / "backup"
+
+    def crash(point):
+        if point == "after_manifest_before_ack":
+            raise RuntimeError("ack lost")
+
+    with pytest.raises(RuntimeError):
+        run_backup(conn, key="b14", owner="worker", target=backup, clock=clock,
+                   store=store, fault=crash)
+    manifest_path = backup / "b14.manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["irrelevant"] = "field"
+    manifest_path.write_text(json.dumps(manifest))
+
+    clock.advance(301)
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="b14", owner="retry", target=backup, clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
 
 
 def test_retry_removes_only_matching_crash_staging_files(tmp_path):
@@ -232,14 +281,20 @@ def test_backup_copy_failure_remains_retryable(tmp_path):
     store = ArtifactStore(tmp_path / "objects")
     ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
     prepare_backup(conn, "b2", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    old_destination = backup / "artifacts" / "evidence.bin"
+    old_destination.parent.mkdir(parents=True)
+    old_destination.write_bytes(b"old evidence")
     def crash(_name):
         raise RuntimeError("copy interrupted")
     with pytest.raises(RuntimeError):
-        run_backup(conn, key="b2", owner="worker", target=tmp_path / "backup", clock=clock,
+        run_backup(conn, key="b2", owner="worker", target=backup, clock=clock,
                    store=store, fault=crash)
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "running"
+    assert old_destination.read_bytes() == b"old evidence"
+    assert list(old_destination.parent.glob(".evidence.bin.*.pending")) == []
     clock.advance(301)
-    run_backup(conn, key="b2", owner="retry", target=tmp_path / "backup", clock=clock, store=store)
+    run_backup(conn, key="b2", owner="retry", target=backup, clock=clock, store=store)
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "delivered"
 
 
