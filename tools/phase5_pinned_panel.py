@@ -8,7 +8,7 @@ from pathlib import Path
 
 from engine.v2.data import errors, objects
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactError, ArtifactStore, CONTENT_HASH_PREFIX
+from engine.v2.foundation import CONTENT_HASH_PREFIX, ArtifactError, ArtifactStore
 
 PANEL_TABLE = "feature_panel"
 COPY_PREFIX = "panel_copy_"
