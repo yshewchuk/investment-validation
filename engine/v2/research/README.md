@@ -202,6 +202,17 @@ calendar plans and fresh per-arm pricing for exploratory fold reports.
 
 ## Consumers
 
+`magnitude_panel_daily.build_daily_blocks` constructs only reconstructed partial
+daily-market and SPY blocks from an exact parent panel plan and the opt-in grouped
+eligibility policy. It requires explicit source/event bounds, retains all horizons
+of each retained event, and shares one value scan per ticker/year. Missing/late
+market cap and zero implied quotes stay null with explicit reasons. Its separate
+context binds producer-declared label bounds without verifying them; neither the
+result nor the parent metadata-only context grants training, observed-PIT, holdout
+or stored-panel admission. There is no writer, CLI, fit or automatic execution.
+
+<!-- public-interface: magnitude_panel_daily.build_daily_blocks -->
+
 Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.

@@ -786,6 +786,37 @@ complementary, not interchangeable.
 
 ## External systems and libraries
 
+### Partial daily-market panel construction
+
+`magnitude_panel_daily.build_daily_blocks` is an opt-in library-only precursor
+to the stored panel writer. It preserves the metadata-only v1 panel context and
+derives a distinct versioned partial-build context binding the parent, explicit
+source window/limits, eligibility policy, exclusions, source fragment identities and
+explicit plain-JSON producer declaration (validated before detachment; not code-attested).
+It rechecks the shared grouped eligibility plan and exact forecast clocks before
+any daily-state values; declared label bounds remain unverified producer metadata,
+not training-label admission. Protected evaluation membership confers no reads.
+The result is explicitly non-admissible partial blocks, not a stored panel snapshot.
+
+Require `Repository(pin_snapshots=True)`; one bounded ticker/year scan is shared across all retained events and horizons;
+SPY is read once for the call. Source dates are sorted once per ticker, prefixes
+end at each forecast ceiling, and existing regime arithmetic is reused. Daily
+state retains only IV-surface rows, maps the fixed thirteen source aliases, and
+keeps zero quotes null with separate status. Market cap requires its own nonfuture
+`mcap_asof`; absent/late anchors withhold it. Source primary keys and the snapshot's
+daily fragment inventory are separate, never guessed as row-level membership or
+claimed as an exact consumed-fragment receipt.
+The imported daily contract lacks publication/finality stamps: every value is a
+reconstruction with unknown availability, never observed point-in-time evidence.
+
+Missing optional inputs produce explicit null reasons; malformed source values,
+duplicate dates, changed context/policy/clocks, invalid limits and scan-bound
+breaches refuse without partial return. Calls retain at most the explicit per-ticker
+row bound and event bound; there is no cross-call cache, retry or enclosing/write transaction.
+No history/runup block, outcome read, fit, table publication or runtime consumer is
+added. The function and synthetic tests are the only callers. Snapshot and shared
+admission failures propagate; repeat calls revalidate and reread pinned sources.
+
 Libraries: pandas/numpy for tables/numerics, pyarrow for stored-history Parquet.
 No network calls or third-party service; Polygon/ORATS pulls stay in legacy
 `engine/data/pulls/`. Snapshot access uses `ArtifactStore` and the supplied sqlite
