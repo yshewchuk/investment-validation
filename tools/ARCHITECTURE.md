@@ -20,7 +20,7 @@ Opt-in guard against a heavy job filling the host disk (WSL's virtual disk never
 
 ## `bounded_run.py` dependencies
 
-Callers are `tools/v2_resource_measurement.py`, `tools/land.py` and `tools/oc_check.py`; depends only on the stdlib and Linux `/proc`, `os.statvfs`.
+Callers are `tools/v2_resource_measurement.py`, `tools/land.py`, `tools/oc_check.py`, `checks/rearchitecture_phase2_render_parity.py` and the `ops/systemd/native-nightly-trigger.service` unit; depends only on the stdlib and Linux `/proc`, `os.statvfs`.
 
 ## `mutation_pilot.py run`: leftover-process sweep
 
