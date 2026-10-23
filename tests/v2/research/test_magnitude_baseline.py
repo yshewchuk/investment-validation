@@ -27,6 +27,7 @@ from tests.v2.research.magnitude_trial_support import (
     poison_outcomes,
     prediction_spec,
 )
+from tests.v2.research.scan_progress_support import assert_scan_boundaries, observe_scan_outcomes
 from tests.v2.research.test_native_outcomes import (
     read_ledger_rows,
     read_outcome_document,
@@ -99,10 +100,15 @@ def _args(source, action, *extra):
     return argv
 
 
-def _invoke(source, capsys, action, *extra, status=0):
-    assert cli.main(_args(source, action, *extra)) == status
+def _invoke(source, capsys, action, *extra, status=0, required_tables=None):
+    with observe_scan_outcomes({"earnings_events", "daily_market"}) as scans:
+        assert cli.main(_args(source, action, *extra)) == status
     captured = capsys.readouterr()
-    assert not captured.err and "Traceback" not in captured.out
+    # Replays still admit events, but only fresh evaluation needs calendar rows.
+    required = {"earnings_events"} if required_tables is None else required_tables
+    assert_scan_boundaries(captured.err, tables={"earnings_events", "daily_market"},
+                           expected_scans=scans, required_tables=required, allow_failures=status != 0)
+    assert "Traceback" not in captured.out
     return json.loads(captured.out)
 
 
@@ -407,7 +413,8 @@ def test_cli_metadata_registration_then_durable_smoke_never_touches_ledger(tmp_p
             for method in ("resolve", "open", "stat", "lstat", "mkdir", "touch"):
                 patch.setattr(Path, method, protect(getattr(Path, method)))
             patch.setattr(outcomes, "ledger_append", forbid_access)
-            output = _invoke(source, capsys, "run", "--no-ledger", "--ledger", poison)
+            output = _invoke(source, capsys, "run", "--no-ledger", "--ledger", poison,
+                             required_tables={"earnings_events", "daily_market"})
         result = result_from_report(output["report"])
         assert output["recording_mode"] == "smoke"
         assert result["target"]["target"] == "absolute_earnings_close_to_close_return"

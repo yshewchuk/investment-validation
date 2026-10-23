@@ -103,7 +103,7 @@ one; the library entrypoints below are this package's real public interface:
 `replay.replay_one`, `replay.ALPHA_GRID`, `_replay_run.run`,
 `_replay_run.events_frame`, `_plan.plan_events`, `_chains.ChainIndex`,
 `_chains.load_chain_index`, `_chains.filter_plan_by_availability`,
-`_chains.read_chain_keys`, `_chains.read_chain_keys_for`,
+`_chains.read_chain_keys`, `_chains.read_chain_keys_for`, `_chains.read_chains_for_years`,
 `_trades_table.to_trades_table`, `_build_run.run`,
 `reconcile_trades.run`, `_trades_publish.publish`, `build_trades.coverage`,
 `_pricing.STRUCTURES`, `_pricing.trading_calendar_from_snapshot`,
@@ -114,22 +114,16 @@ The RUNUP comparison's public entry-selection seams are
 `_pricing.MIN_MEANINGFUL_COST`, `ChainSnapshot`, `FillModel`, `StructureError`
 and `price_structure` (existing pure native selection/spread arithmetic).
 
-`experiment_trades.load_trades(repository, snapshot, strategy, *, as_of_month,
-purpose="training", event_ids=None)` is a second
-kind of entrypoint: a plain library call (no `tools/v2_*.py` CLI of its own),
-for a v2 platform caller that already holds a
-`Repository` and a resolved `SnapshotRef` and wants one strategy's committed
-`trades` rows, session-joined, with legacy-compatible trade columns plus
-holdout context. `_pricing.trading_calendar_from_snapshot`
-is a third: carved out of `_pricing.py`'s otherwise-internal contents the
-same way `_pricing.STRUCTURES` already is, for the same caller — a repricer
-built over a pinned snapshot needs the identical trading calendar `replay()`
-itself derives, not a second implementation and not the legacy CSV fallback
-(see Invariants). `_pricing.execution_variant_label` is a fourth, carved out
-for `experiments/v2_candidate_grid.py`'s `price_candidate_grid` (issue #266
-slice 2), which labels each priced grid-position step with the same
-execution-variant string `replay()` itself uses, rather than reimplementing
-that labeling.
+`experiment_trades.load_trades(repository, snapshot, strategy, *, as_of_month=None,
+purpose="training", event_ids=None)` is a library call, with no dedicated CLI.
+Omitted/`None` as-of month refuses with `HOLDOUT_ACCESS_DENIED`; there is no implicit month.
+Given a `Repository` and resolved `SnapshotRef`, it returns one strategy's
+committed, session-joined trades with legacy-compatible columns and holdout context.
+`_pricing.trading_calendar_from_snapshot` lets pinned-snapshot repricers share
+`replay()`'s calendar instead of a second implementation or legacy CSV fallback.
+`_pricing.execution_variant_label` supplies `experiments/v2_candidate_grid.py`'s
+`price_candidate_grid` with replay's execution-variant labels for each priced
+grid-position step.
 
 Experiment training, selection-fold and sweep reads exclude the union of the
 two holdouts specified in [#373](https://github.com/yshewchuk/investment-validation/pull/373).
@@ -179,7 +173,7 @@ training-label and opt-in evaluation omission lists (`omitted_history`, `omitted
 `skipped`; the magnitude search's `validate_targets` accepts exactly `skipped` and the writer's
 closed reason set, so a receipt with any other reason is `EXPERIMENT_IDENTITY_CONFLICT`), never a research-side re-derivation. Non-skipped rows the readers omit for
 availability keep the reader's own `unavailable` / `not_available_before_fit` reasons. The
-isolation guard of the history and magnitude readers (`_plans`) is unchanged: every
+isolation guard of the history and magnitude readers (`_plans`'s per-candidate checks, shared with `plan_with_reader`) is unchanged: every
 candidate still needs exactly one isolated fragment, and a candidate with no fragment
 refuses `HOLDOUT_ACCESS_DENIED`. `prediction_inputs` does not use that guard: it refuses a
 table whose contract is neither native contract with `CONTRACT_MISMATCH` before any target
@@ -555,8 +549,18 @@ returns its population or raises its typed refusal. Predicates, exact-pair
 filtering, batch filtering, successful row ordering and deduplication remain
 part of the read contract.
 
-The internal `_scan.read_table` and `_snapshot.read_table` readers accept an
-optional `batch_filter` callback. They invoke it immediately after each Arrow
+Shared `_scan` reads report decoded-row progress against the candidate-row bound
+on stderr at bounded cadence, with rate, ETA and the selected batch-row limit. Predicates and batch filtering
+may retain fewer rows; the denominator is an upper bound, not a final row count.
+Filtered scans also report cumulative retained/skipped rows at that same cadence.
+Every row scan logs start and completion/failure with elapsed time and peak RSS,
+including short scans; periodic ticks remain silent below their cadence.
+No additional scan is used for telemetry, and native errors propagate unchanged.
+
+Public `_chains.read_chains_for_years` delegates a nonempty iterable of years to
+internal `_snapshot.read_table`/`_scan.read_table`, with the fixed chain projection,
+optional key predicates and `batch_filter`. It materializes retained rows and
+performs no experiment holdout admission. The callback runs immediately after each Arrow
 batch becomes a pandas frame, before retaining frames; it returns narrowed
 rows or `None` for no rows. Omitting it or passing `None` preserves existing
 reads. `_chains.load_chain_index` uses it to keep exact requested ticker/date
@@ -626,37 +630,31 @@ This bounds retained unmatched rows, not total process RSS.
 
 ## Dependencies
 
-`engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `catalog`,
-`objects`, `manifests`, `query`, `computed_moves_table`, `iv_crush_table`), `engine.v2.
-contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`,
-`ObjectRef`, `TableContractRef`, `ColumnContract`, `TableContract`),
+`engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `incremental_tables`,
+`catalog`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`,
+`iv_crush_table`), `engine.v2.contracts` (`RevisionCandidate`, `CompletedCoverage`,
+`CoverageKey`, `CoverageOutcome`, `TimeInterval`), `engine.v2.contracts.data`
+(`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`, `ObjectRef`,
+`TableContractRef`, `ColumnContract`, `TableContract`),
 `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
 `engine.v2.features.panel_math` (`history_features`),
 `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`, `iter_canonical_json`,
-`content_hash`, `from_document`, `to_document`, `market_calendar`, `experiment_exits.valid_exit_recipe`,
+`content_hash`, `from_document`, `to_document`, `format_timestamp`, `market_calendar`,
+`experiment_exits.valid_exit_recipe`,
 `experiment_holdouts.calendar_date` (canonical days for IV input/anchor/clock validation),
 `experiment_holdouts.ExperimentHoldouts` (panel membership-policy versions), plus
-`final_holdout.request_from_document` and `typed.to_document` for `_final_population`) — the package's own
-lower-layer dependencies, consistent with the generic "may import anything
-at a lower layer" rule (`only_imports` is unset for this package in
-`checks/layer_map.py`, i.e. no narrower restriction than that generic
-rule). No import of `engine.v2.scoring`, `engine.v2.evaluation`,
-`engine.v2.ledger` or any sibling/higher package. `engine.v2.ops.
-bootstrap.open_catalog` is a CLI dependency, not a package one: the
-`tools/v2_*.py` leaves call it to open `--catalog` before handing the
-connection to this package (see Inputs); nothing under
-`engine/v2/research/` imports `engine.v2.ops` itself, even though layer
-7.0 (ops) is not below this package's own enforced layer (also 7.0) and
-so could not be imported under the generic rule regardless.
+`final_holdout.request_from_document` and `typed.to_document` for `_final_population`).
+Only lower-layer imports are allowed (`checks/layer_map.py`, `only_imports` unset):
+no `engine.v2.scoring`, `engine.v2.evaluation`, `engine.v2.ledger` or sibling/higher
+packages. Ops and research are both layer 7.0, so research cannot import ops.
+`engine.v2.ops.bootstrap.open_catalog` belongs to the `tools/v2_*.py` CLI leaves,
+which open `--catalog` and hand the connection to research (see Inputs).
 Stored history publishes new objects/manifests through `data.catalog.commit_snapshot`;
 this native write path advances only its dedicated context scope, never source heads.
-`_pricing.py` holds pure pricing primitives copied from legacy
-`engine.structures`/`engine.fills`/`engine.calendar` rather than reached
-through a legacy adapter (supervisor decision: no legacy adapter for this
-package). `polygon_fills.option_ticker` is likewise a verbatim copy of
-`engine.data.sources.polygon.option_ticker` rather than an import, for the
-same reason: a v2 package may not import legacy code without a declared
-adapter.
+`_pricing.py` copies pure primitives from legacy `engine.structures`,
+`engine.fills` and `engine.calendar`; `polygon_fills.option_ticker` is copied
+verbatim from `engine.data.sources.polygon.option_ticker`. Research has no legacy
+adapter; v2 cannot import legacy without a declared adapter.
 
 **Known duplication (issue #69):** `_scan.py` (used directly by
 `fill_quality.py`, `polygon_fills.py`, `signal_screen.py`, and
@@ -710,9 +708,9 @@ It does not authenticate arbitrary rehashed calendars as builder-derived.
 |---|---|
 | Inputs | Exact source snapshot, admitted temporal plan, history start, fixed 5/3/1 clocks, per-feature missingness and installed producer source/environment identity. No experiment outputs. |
 | Protected reads | The complete eligible singleton candidate union is preflighted before any outcome opens. Protected/ambiguous objects never open; admitted late labels may decode availability and be omitted before arithmetic. |
-| Build boundaries | Full candidate preflight completes before any outcome opens. Each admitted candidate outcome is decoded at most once per build; no cache persists across builds. Memory has no fixed byte cap; production scale is unmeasured. |
+| Build boundaries | Full candidate preflight completes before any outcome opens. An admitted candidate outcome is decoded once per build while its run stream stays open; a finished run's decoded rows stay for the build, as the per-event row cache already does. No cache persists across builds. Memory has no fixed byte cap; production scale is unmeasured. A scan failure propagates its native code and fails the build before any snapshot, receipt or head is published (see Publication). Batched outcome reads: the build reads candidate outcomes through `event_history.plan_with_reader`: the `plan_event_targets` preflight plus unique non-null `event_id`s; malformed candidates refuse `CONTRACT_MISMATCH`. Adjacent candidates of a ticker share one run scan, and a protected, mixed or unadmitted fragment is never opened. Membership that is not exactly the preflighted set, an unplanned event, or a mismatched day, ticker or request refuses `HOLDOUT_ACCESS_DENIED` before the run opens any outcome. Each outcome object is capped at 1 MiB (`MAX_OUTCOME_OBJECT_BYTES`); a larger one refuses `RESULT_LIMIT_EXCEEDED`. At most 32 run streams are live at once (a finished run does not count); the oldest live one is closed to make room and is re-scanned if asked for again. Rows equal per-candidate reads. One scan per run holds while a ticker's requests stay grouped, as the build's event order gives; interleaving beyond the cap costs extra scans only. |
 | Catalog reads | The CLI opens its `Repository` with `pin_snapshots=True`, so each scan and bound reuses the pinned snapshot's cached table membership instead of re-decoding it from the catalog (decodes were quadratic in candidates). `fragment_records` and a table's first use still decode membership; `earnings_events` is still read once by fold planning and once by preflight. Output, receipts and identities are unchanged; the pin is per process and immutable-identity keyed. |
-| Progress | Long passes write progress to stderr only (stdout stays the JSON result): `progress.stage` logs start/end with elapsed seconds and peak RSS for the build's `history preflight`, `history prepare` and `history materialize` stages (a full-universe `load_population` logs only its end, and only when it took 5 s or more); `progress.Progress` logs `done/total` (counted after an item finishes), rate, ETA and peak RSS at most once per interval (default 30 s, and not before the configured item count), never per item, and nothing for passes shorter than the interval. `progress.decision` emits aggregate control decisions; opt-in `stage(report_refusals=True)` adds the native DataError code only (no message, no details). The public helper is shared by package readers. Logging never changes results or errors. |
+| Progress | All canonical population scans, including explicit selections, report row-scan start/end/failure with elapsed seconds and peak RSS on stderr. Full-universe `load_population` additionally reports outer completion after 5 s. Build stages use the same `progress.stage`; periodic `progress.Progress` ticks report count/rate/ETA/RSS at most every 30 s, against the candidate-row bound for scans, with retained/skipped counts when batch-filtered. `progress.decision` emits aggregate control decisions; opt-in refusal stages include the native DataError code only, without messages or details. Telemetry never changes results, errors or stdout; native experiment CLIs retain JSON stdout, while replay/chain readers retain their existing stdout diagnostics. |
 | Per-forecast features | Shared history arithmetic preserves availability and numeric-refusal order. Consumed objects, omissions and availability accompany all eleven columns. Exclusion rosters remain transient; persisted lineage omits `holdout_exclusions` and the stored reader refuses it. Empty `n_prior` is zero; other missing values are null with `on_missing=null`. No runtime imputation or production v4 aggregates. |
 | Output | Features-only `research_magnitude_history.v1` snapshot, separate from unchanged source. Three ordered horizons per event-isolated object; primary key `(event_id, context_id, horizon_sessions)`, physical context field and context partition. |
 | Publication | Inspected objects/manifests and success receipt commit atomically under an initially empty deterministic scope. Failure admits no snapshot; complete unreferenced objects remain for normal cleanup. |
@@ -788,30 +786,21 @@ complementary, not interchangeable.
 
 ## External systems and libraries
 
-Direct libraries include pandas/numpy for tabular/numerical work and pyarrow
-for native stored-history Parquet. No network call (Polygon/ORATS pulls stay in
-`engine/data/pulls/`, legacy and unmoved). Snapshot access uses
-`ArtifactStore` and the sqlite catalog connection it is handed. Two
-exceptions, both plain local files outside `ArtifactStore` and never
-snapshot-store objects: report writers (`fill_quality.write_report`,
-`signal_screen.write_report`, `polygon_fills.run`'s own write step) write
-Markdown/parquet/CSV/JSON directly under the caller-provided
-`reports_dir`/`out_dir`; and `_pricing.trading_calendar()` reads a local
-CSV (`earnings_predictions/data/raw/polygon/gspc_daily.csv`, off
-`INVESTING_PLAN_ROOT` or the worktree root). That CSV reader is kept only
-for legacy-parity tests and direct library callers — no OTHER module in
-this package imports or calls it (`_plan.py` no longer does; a guard test,
-`test_trading_calendar_csv_fallback_is_not_reachable_from_the_package`,
-statically checks every file in this package but `_pricing.py` itself for
-an import or a call of the bare name). `_replay_run.run` and
-`_build_run.run` resolve the replay/build-trades calendar from the pinned
-snapshot's own `daily_market` table (`_pricing.trading_calendar_from_snapshot`)
-before calling `replay()`; `replay()` itself also derives one this same
-way, from its own `(repository, snapshot_ref)` arguments, for any OTHER
-caller that leaves `calendar` unset — so every path to a calendar in this
-package ends at a pinned snapshot or an explicit argument, never a local
-file, and a run's calendar is fixed by its `snapshot_id` like everything
-else it reads (see Failure semantics, Invariants). No third-party service.
+Libraries: pandas/numpy for tables/numerics, pyarrow for stored-history Parquet.
+No network calls or third-party service; Polygon/ORATS pulls stay in legacy
+`engine/data/pulls/`. Snapshot access uses `ArtifactStore` and the supplied sqlite
+catalog connection. Two local-file exceptions are outside the snapshot store:
+
+- `fill_quality.write_report`, `signal_screen.write_report`, `polygon_fills.run`,
+  `_replay_run.run`, `_build_run.run` and `reconcile_trades.run` write
+  Markdown/parquet/JSON under caller-provided `reports_dir`/`out_dir`.
+  Fill quality's optional CSV uses the independently supplied `csv` destination.
+- `_pricing.trading_calendar()` reads the local legacy S&P 500 daily CSV,
+  only for legacy-parity tests and direct library callers. No other research
+  module imports or calls it.
+
+Replay/build-trades calendars come from pinned snapshots or explicit arguments,
+never this CSV (see Invariants and Failure semantics).
 
 ## Failure semantics
 
@@ -824,22 +813,24 @@ One pre-existing data-path exception, called out below
 where it applies (`_snapshot.py`'s bare `ValueError`, issue #70), escapes as
 an uncaught traceback instead.
 
+| Shared row-scan condition | Outcome |
+| --- | --- |
+| `read_chains_for_years` receives an empty year iterable | Raise `ValueError("option_chains: years must not be empty")` before repository access or scan telemetry; never expand to all years. |
+| `read_chains_for_years` receives scalar str/bytes | Raise `ValueError("option_chains: years must be a non-string iterable")` before repository access; string elements inside an iterable remain supported. |
+| Scan iteration or batch filtering raises | Attempt the failed boundary on stderr with elapsed time/RSS; propagate the original exception unchanged, with no partial frame or retry. |
+| Default stderr emission fails | Suppress the telemetry error; preserve the scan's rows or original failure. |
+
 - **CLI argument parsing (before R1–R6).**
   - **A supplied replay `--alpha` is non-finite or outside `[0, 1]`.**
     The CLI parser exits 2 before `open_catalog` or `ArtifactStore` is
     called, so no replay runs.
 - **R1, missing input.**
   - **No committed scope head, and no explicit `--snapshot-id`.**
-    `resolve_pinned(scope)` (or, for the `_snapshot.py`-backed tools,
-    `head_generation`) raises `SNAPSHOT_NOT_READY` (`category="dependency"`,
-    **retryable**) — this is the closest this package comes to "refuses
-    rather than silently reading latest": a scope with nothing committed
-    to it has no head to read, so the run stops rather than resolving
-    nothing. A scope *with* a committed head and no explicit
-    `--snapshot-id` resolves that head deterministically and once; the
-    resolved id is always written into the output so the exact snapshot a
-    report came from is never ambiguous after the fact, and `--snapshot-id`
-    lets a later run reproduce it even after the head has since moved.
+    `resolve_pinned(scope)` (or `_snapshot.py`'s `head_generation`) raises
+    `SNAPSHOT_NOT_READY` (`category="dependency"`, **retryable**).
+    With a committed head, resolution is deterministic and once per run;
+    outputs carry its ID for later explicit `--snapshot-id` replay even after
+    the head moves.
   - **An explicit `--snapshot-id` that does not exist.**
     `Repository.resolve`/`resolve_full` raises `SNAPSHOT_NOT_FOUND`
     (`category="dependency"`, not retryable) — an unknown id is refused,
@@ -874,22 +865,14 @@ an uncaught traceback instead.
     used to have. Either way, exit 2 with a code, never an uncaught
     `ValueError`.
   - **No declared partition column, or no partition values available at
-    all** (`_snapshot.py`'s path only — `replay.py`/`_chains.py`/
-    `_trades_publish.py`, not `_scan.py`). `_snapshot.read_table` raises a
-    bare `ValueError`, not a `DataError`, when it cannot build even one
-    `KeyPredicate` — the table contract declares no partition column, or
-    no partition values are available at all, i.e. the snapshot has no
-    fragments for that table. An explicitly empty `partition_keys=[]` is
-    falsy in Python, so it is treated the same as omitted and falls back
-    to deriving values from the snapshot's own fragment records — it does
-    not by itself trigger this path. Partition keys that are simply
-    valid-but-non-matching still build a predicate and return an empty
-    frame, same as `_scan.py`. The
-    CLIs built on this path (`v2_replay.py`, `v2_build_trades.py`,
-    `v2_reconcile_trades.py`) catch only `DataError` at `main()`, so this
-    one condition escapes as an uncaught traceback rather than the typed
-    refusal every other condition here gets. Pre-existing, not introduced
-    or fixed by this doc; tracked as a follow-up (issue #70).
+    all** (no table fragments). `_snapshot.read_table` cannot build a
+    `KeyPredicate` and raises bare `ValueError`, not `DataError`.
+    Omitted or empty `partition_keys=[]` derives values from snapshot fragments;
+    empty keys alone do not cause this refusal. Valid nonmatching keys return an
+    empty frame. Affected readers: `_replay_run.py`, `replay.py`, `_chains.py` and
+    `_trades_publish.py`, not `_scan.py`. Their CLIs (`v2_replay.py`,
+    `v2_build_trades.py`, `v2_reconcile_trades.py`) catch only `DataError` at `main()`;
+    this condition escapes as an uncaught traceback.
   - **No overlap rows after a join/filter** (fill quality's
     `since`-filtered join, or `experiment_trades.load_trades`'s
     strategy/provenance filter on the read `trades` table).
@@ -956,12 +939,9 @@ an uncaught traceback instead.
 
 ## Invariants
 
-- Every run reads one selected snapshot. A CLI that resolves before its
-  first table read passes that `snapshot_id` to downstream runners, whose
-  later lookups use the explicit id; the id is threaded through every read
-  and written into every output
-  (root doc §5's "no silent default" invariant, applied to research reads) —
-  including the experiment loader's returned context columns (see Outputs).
+- Every run reads one selected snapshot: CLI-resolved IDs remain explicit in
+  downstream lookups, every read and output, including experiment context columns
+  (see Inputs/Outputs; root §5's "no silent default" invariant).
 - Every experiment runner reads from its pinned v2 snapshot, applying shared random/rolling holdout enforcement through the reader appropriate to its inputs:
   `experiment_trades.load_trades` for trades; `experiment_population.load_population` for populations and its prediction/history consumers. Inadmissible reads refuse.
   Direct parquet/file reads bypass snapshot pinning and both holdout sets and are inadmissible.
@@ -970,39 +950,20 @@ an uncaught traceback instead.
   snapshot.
 - Every scan carries its own partition predicate alongside caller key
   predicates, so result rows cannot duplicate across partitions.
-- No production entrypoint derives its calendar from a local file or
-  environment variable: `_replay_run.run` and `_build_run.run` resolve the
-  planning calendar from the pinned snapshot's own `daily_market` table
-  (`_pricing.trading_calendar_from_snapshot`) and pass it explicitly into
-  `replay()`; `replay()` itself does the same derivation, from its own
-  `(repository, snapshot_ref)`, for any caller that leaves `calendar`
-  unset, so the guarantee holds for every caller of `replay()`, not just
-  these two. Either path refuses rather than inventing one — a missing
-  `daily_market` table is `CONTRACT_MISMATCH`, one present but with no
-  valid dates is `CALENDAR_UNAVAILABLE` — and `plan_events` itself refuses
-  `CALENDAR_UNAVAILABLE` if it is ever reached with no calendar at all,
-  never falling back to `trading_calendar()`'s CSV read (that fallback has
-  been removed from `_plan.py`; `trading_calendar` is no longer imported
-  or called anywhere in this package outside `_pricing.py`'s own
-  definition, checked by
-  `test_trading_calendar_csv_fallback_is_not_reachable_from_the_package`).
-  Changing the CSV cannot change a replay or build-trades run's output;
-  only a different pinned `snapshot_id` can. `trading_calendar()` itself
-  stays, unchanged, for legacy-parity tests and direct library callers —
-  it is never reached from anywhere in this package's own code.
-- **A `--years`-scoped rebuild only ever tombstones rows inside its own
-  scope** (issue #108). `_build_run.run` narrows the REPLAY to `--years` via
-  `filter_events`, and passes the same `years` into
-  `_trades_revisions.revisions_for_rebuild`, which narrows its tombstone set
-  the same way: it tombstones an existing replay-provenance row of a
-  `rebuilt_strategies` member only when the row's own `year` column is also
-  inside the rebuilt `years` (when `years` is given) AND the rebuild no
-  longer produces its `trade_id`. A year outside the rebuilt scope is never
-  touched, so `tools/v2_build_trades.py --years Y` cannot delete another
-  year's already-published rows for the same strategy — the requested
-  year's own no-longer-produced rows are still tombstoned. Omitting
-  `--years` continues to rebuild (and tombstone) every year, unchanged
-  from before this fix.
+- No production entrypoint derives calendars from local files/environment variables.
+  `_replay_run.run` and `_build_run.run` pass the pinned snapshot's `daily_market`
+  calendar into `replay()` via `_pricing.trading_calendar_from_snapshot`; `replay()`
+  derives it from its own `(repository, snapshot_ref)` whenever `calendar` is unset.
+  Missing table: `CONTRACT_MISMATCH`; no valid dates: `CALENDAR_UNAVAILABLE`.
+  `plan_events` also refuses `CALENDAR_UNAVAILABLE` when no calendar is supplied.
+  CSV changes cannot affect replay/build-trades output; see External systems for
+  the isolated legacy CSV reader, Failure semantics for refusals.
+- **Year-scoped rebuilds cannot tombstone other years.**
+  `_build_run.run` passes the same `years` to `_trades_revisions.filter_events` and
+  `_trades_revisions.revisions_for_rebuild`. A tombstone requires replay provenance,
+  membership in `rebuilt_strategies`, a `trade_id` absent from the rebuild, and
+  (when `years` is supplied) the existing row's own `year` in that scope.
+  Omitting `--years` rebuilds and tombstones across all years.
 - Never mutates the legacy trades ledger and never calls a network
   provider; `engine/build_trades.py` and `engine/data/pulls` (legacy,
   unchanged) keep doing both.

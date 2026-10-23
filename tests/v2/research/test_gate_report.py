@@ -33,6 +33,7 @@ from tests.v2.research.magnitude_trial_support import (
     history_event,
     outcome_move,
 )
+from tests.v2.research.scan_progress_support import assert_scan_boundaries, observe_scan_outcomes
 
 REPO = Path(__file__).resolve().parents[3]
 MONTH = "2025-01"
@@ -145,8 +146,8 @@ def _register(source, spec=None, **kwargs):
     return spec, registered
 
 
-def _invoke(source, capsys, action, spec=None, *extra, status=0, exp_number="101",
-            allow_stderr=False):
+def _invoke(source, capsys, action, spec=None, *extra, status=0, required_tables=None,
+            exp_number="101"):
     path = source.root / "spec.json"
     path.write_text(json.dumps(asdict(spec or build_gate_spec())))
     arguments = [action, "--spec", str(path), "--catalog", str(source.root / "catalog.sqlite"),
@@ -155,10 +156,19 @@ def _invoke(source, capsys, action, spec=None, *extra, status=0, exp_number="101
         arguments += ["--experiments-root", str(source.root / "experiments")]
         if exp_number is not None:
             arguments += ["--exp-number", str(exp_number)]
-    assert cli.main(arguments) == status
+    with observe_scan_outcomes({"earnings_events", "daily_market", "option_chains"}) as scans:
+        assert cli.main(arguments) == status
     captured = capsys.readouterr()
-    if not allow_stderr:
-        assert captured.err == ""
+    stderr = captured.err
+    if action == "run" and "--no-record-export" in extra:
+        warning = "WARNING: no EXP number; run record NOT exported\n"
+        lines = stderr.splitlines(keepends=True)
+        assert lines.count(warning) == 1
+        stderr = "".join(line for line in lines if line != warning)
+    # Replays still admit events, but only fresh evaluation needs calendar/quotes.
+    required = {"earnings_events"} if required_tables is None else required_tables
+    assert_scan_boundaries(stderr, tables={"earnings_events", "daily_market", "option_chains"},
+                           expected_scans=scans, required_tables=required, allow_failures=status != 0)
     return json.loads(captured.out)
 
 
@@ -253,7 +263,8 @@ def test_two_real_cli_arms_consume_distinct_fill_record_and_replay_once(source, 
     ledger, results, outputs = source.root / "ledger.csv", [], []
     for spec in (build_gate_spec(), build_gate_spec(1.0, "control")):
         _invoke(source, capsys, "register", spec)
-        output = _invoke(source, capsys, "run", spec, "--ledger", ledger)
+        output = _invoke(source, capsys, "run", spec, "--ledger", ledger,
+                         required_tables={"earnings_events", "daily_market", "option_chains"})
         outputs.append(output)
         result = _result(output)
         results.append(result)
@@ -308,7 +319,7 @@ def test_smoke_never_accesses_ledger_and_changed_identity_refuses_before_evaluat
     assert "no-ledger smoke; not recorded" in Path(output["report"]).read_text()
     assert not poison.parent.exists() and not list(source.root.rglob("*.csv"))
     monkeypatch.setattr(gate, "gate_result", _forbid)
-    changed = _invoke(source, capsys, "run", build_gate_spec(1.0), "--no-ledger", status=2)
+    changed = _invoke(source, capsys, "run", build_gate_spec(1.0), "--no-ledger", status=2, required_tables=set())
     assert changed["refused"] == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
@@ -322,7 +333,7 @@ def test_unused_or_invalid_declarations_refuse_before_registration(source, capsy
     document = asdict(build_gate_spec())
     document.update(changes)
     spec = ExperimentSpec(**document)
-    response = _invoke(source, capsys, "register", spec, status=2)
+    response = _invoke(source, capsys, "register", spec, status=2, required_tables=set())
     assert response["refused"] == "INVALID_EXPERIMENT_SPEC"
     assert source.conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
 
@@ -338,7 +349,8 @@ def test_explicit_holdout_refuses_before_any_feature_quote_metric_or_report(sour
     monkeypatch.setattr(gate, "gate_result", _forbid)
     extra = ("--purpose", "final") if kind == "final" else ("--event-id",
         "absent" if kind == "unknown" else source.protected[0 if kind == "random" else 1]["event_id"])
-    response = _invoke(source, capsys, "register", None, *extra, status=2)
+    response = _invoke(source, capsys, "register", None, *extra, status=2,
+                       required_tables=set() if kind == "final" else {"earnings_events"})
     assert response["refused"] == "HOLDOUT_ACCESS_DENIED"
     assert not list(source.root.rglob("REPORT.md"))
     assert source.conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
@@ -481,7 +493,7 @@ def test_current_source_admission_precedes_saved_replay(source, capsys, monkeypa
     monkeypatch.setattr(native_registration, "source_closure", changed)
     monkeypatch.setattr(gate, "gate_result", _forbid)
     monkeypatch.setattr(native_outcomes, "replay_native_outcome", _forbid)
-    response = _invoke(source, capsys, "run", None, "--no-ledger", status=2)
+    response = _invoke(source, capsys, "run", None, "--no-ledger", status=2, required_tables=set())
     assert response["refused"] == "EXPERIMENT_IDENTITY_CONFLICT"
     assert Path(output["report"]).read_bytes() == report
 
@@ -655,16 +667,8 @@ def test_run_without_exp_number_refuses_and_creates_no_experiments_dir(source, c
 
 def test_run_no_record_export_skips_and_warns_no_exp_number(source, capsys):
     _invoke(source, capsys, "register")
-    path = source.root / "spec.json"
-    path.write_text(json.dumps(asdict(build_gate_spec())))
-    arguments = ["run", "--spec", str(path), "--catalog", str(source.root / "catalog.sqlite"),
-                 "--store-root", str(source.store.root), "--as-of-month", MONTH,
-                 "--no-ledger", "--no-record-export",
-                 "--experiments-root", str(source.root / "experiments")]
-    assert cli.main(arguments) == 0
-    captured = capsys.readouterr()
-    assert "no EXP number" in captured.err
-    output = json.loads(captured.out)
+    output = _invoke(source, capsys, "run", None, "--no-ledger", "--no-record-export",
+                     exp_number=None, required_tables={"earnings_events", "daily_market", "option_chains"})
     assert output["record_export"] == "skipped"
     assert not (source.root / "experiments").exists()
 
@@ -672,7 +676,7 @@ def test_run_no_record_export_skips_and_warns_no_exp_number(source, capsys):
 def test_run_no_record_export_still_validates_exp_number(source, capsys):
     _invoke(source, capsys, "register")
     response = _invoke(source, capsys, "run", None, "--no-ledger", "--no-record-export",
-                       status=2, exp_number="auto", allow_stderr=True)
+                       status=2, exp_number="auto")
     assert response["refused"] == "INVALID_EXPERIMENT_SPEC"
     assert not (source.root / "experiments").exists()
 

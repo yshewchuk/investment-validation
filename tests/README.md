@@ -114,9 +114,18 @@ domain-validation error. No timeout budget is increased by this safeguard.
 These are failures, not skips, on purpose: the check did not run, and a
 skip is easy to miss when the rest of the summary is green. To separate
 environment from code, `grep -E "RESOURCE WAIT|TIMEOUT:"` the output and rerun
-those files alone on a quieter box. `TEST_POLICY` caps every profile at
-256 MiB, so a memory `RESOURCE WAIT` means MemAvailable was below about
-0.75 GiB for a whole minute.
+those files alone on a quieter box. `TEST_POLICY` caps each profile at
+384 MiB (or its original lower limit); admission also reserves host headroom.
+Only the real snapshot-worker fixture raises `io_fetch` to 1 GiB when its
+already-imported `engine.v2.data.incremental` module has mutmut's actual
+generated wrapper; an instrumented sibling alone does not qualify. The
+authored-source fixture stays at 384 MiB; production `io_fetch` stays at
+512 MiB, and watchdog rejection still applies above either fixture limit.
+Generated-source compilation was measured near 674 MiB versus 197 MiB for
+the authored import. The mutation driver caps `data_incremental` at one
+child, including when CI requests `nproc`; other shards are unchanged.
+This limits concurrent fixture reservations, not total runner RSS, and
+does not provision a larger GitHub runner or increase a time budget.
 
 Timeout stderr lookup and post-signal growth polling use the Service's artifact
 root, even when the catalog is elsewhere. The tail still reads only the latest
@@ -467,21 +476,50 @@ does. And in both, the `report` job's merge is handed the plan's module list
 complete run: a missing, extra or duplicated module report -- or nothing
 downloaded at all -- yields an incomplete tool-error diagnostic with the score
 withheld, and the job fails. In the mutmut workflow a module whose recorded
-`run_exit_code` is nonzero (a step timeout kill is `-1`) propagates the same
-way: the aggregate is incomplete, the score is withheld and the merge exits
-nonzero, so a run that died part-way can never read as a completed one.
+`run_exit_code` is nonzero (a step timeout kill is `-1`) makes the aggregate
+incomplete and withholds the score, so it cannot read as a completed run.
+The merge exits nonzero except for the incremental driver's own clean
+time-box stop (`124`), which remains incomplete without being a tool error.
 
 The rest of this section is the mutmut workflow's own contract (the gremlins
 one is documented under "Backend: pytest-gremlins" below).
 `.github/workflows/mutation-mutmut.yml` runs mutmut per module with
-`--max-children $(nproc)` (4 on a standard runner). A job fails only when
-mutmut's clean test run fails, its state cannot be exported, or the run hits
-its 330-minute step timeout.
+`--max-children $(nproc)` (4 on a standard runner), except `data_incremental`,
+which the driver caps at one child. Incremental/full runs have 60/330-minute
+step limits; the driver requests a clean stop after 52/322 minutes first.
+Unexportable state, a step timeout, or a nonzero backend exit fails the job,
+except that incremental exit `124` (`TIME_BUDGET_STOP`) does not fail the
+module gate: the aggregate report remains incomplete and withholds its overall
+score; module reports retain numeric scores with a partial-results warning.
+If SIGINT does not finish within the 180-second grace period, the driver uses
+SIGKILL and returns `137`: both modes fail. Export is attempted for readable
+partial state; corrupt state can still fail export. A nonzero child exit during
+SIGINT grace is preserved, not relabeled a clean stop. Full-run `124` and all
+other nonzero exits remain failures.
 
 - **Diagnosing a failed stats run.** When mutmut's clean/stats run fails it
   prints only `failed to collect stats. runner returned 1` and swallows the
-  child pytest output that explains it. The remedy is mutmut's supported
-  `debug = true`, which the driver adds to the generated `setup.cfg [mutmut]`.
+  forked child's pytest output. The driver now loads the supported pytest
+  plugin `tools.mutation_stats_diagnostics`: failed setup/call/teardown,
+  collection and internal-error reports from the stats phase are written
+  directly to `stats-failure.txt` in the module work directory. CI retains
+  fresh evidence inside `mutation-mutmut-module-<module>`, beside its result
+  summaries, attempting the copy before result export even if export fails.
+  Captured output accompanies setup/call/teardown and collection tracebacks.
+  An unwritable diagnostic emits a best-effort warning without replacing the
+  test failure, even if original stderr is also unavailable. A failed cleanup
+  disables evidence for that run rather than appending or echoing stale bytes;
+  CI excludes sidecars older than its run-start marker. Copy failures warn and
+  still attempt result export.
+  The file is cleared before each run, capped at 64 KiB (keeping the start
+  and end of an oversized report), and never receives mutant-phase reports.
+  A nonzero backend result also echoes at most 64 KiB to stderr, without
+  changing that result if reading or writing diagnostics fails. This keeps
+  PR failures visible before the artifact-copy YAML reaches main:
+  `workflow_run` executes main's workflow, not the PR's updated YAML.
+  This does not rerun tests, change the backend exit code, or classify any
+  unmeasured mutant as killed. For extra output, mutmut also supports
+  `debug = true`, added to `setup.cfg [mutmut]` by the driver.
   Be honest about what it does: `debug` is **full-run verbosity**, not a
   stats-only hook -- with it on, mutmut echoes every mutant's child pytest
   output for the whole run, so the log grows large. Because that is expensive,
@@ -496,6 +534,9 @@ its 330-minute step timeout.
   was not reproduced, not a root cause.
   The `ops_catalog_state` CI shard enables the same debug setting under the
   same CI-only default (its stats step failed the same way in run 36025664817).
+  Authored-source size/import policies read `MUTATION_PILOT_SOURCE_ROOT`, the
+  driver's uninstrumented work snapshot, rather than mutmut's generated
+  wrappers; runtime assertions still import and exercise instrumented code.
 
 | trigger | mode | state |
 |---|---|---|
@@ -573,8 +614,9 @@ its 330-minute step timeout.
 ### Report files
 
 Each job uploads `mutation-mutmut-module-<module>` (90 days). It holds
-`results.jsonl`, `summary.json` and `summary.md`, which is also the job
-summary. The job summary shows the score table and each untriaged survivor in
+`results.jsonl`, `summary.json`, `summary.md` (also the job summary), and an
+optional `stats-failure.txt` containing bounded stats-failure diagnostics.
+The job summary shows the score table and each untriaged survivor in
 a function the push changed (`git diff <before>..<sha>`), with its diff. Runs
 that are not pushes list the survivors this run re-tested instead. The
 `report` job merges every module into one `mutation-mutmut-report` artifact
@@ -584,10 +626,13 @@ module artifacts arrived, and marks the aggregate `complete: false` /
 arrived) with `MISSING_MODULES` / `UNEXPECTED_MODULES` / `DUPLICATE_MODULES` /
 `NO_MODULE_REPORTS` reasons and a nonzero exit whenever the reported set is
 not exactly the planned one -- and, like the gremlins merge, when the inputs
-are not one run/SHA/mode -- or when any module's `run_exit_code` is nonzero:
-a timeout kill (-1) arrives as a `TIMEOUT_KILL` reason and any other nonzero
-exit as `RUN_INCOMPLETE`, both naming the module there and in
-`failed_run_modules`, with counts still covering only what really arrived.
+are not one run/SHA/mode -- or when a module's `run_exit_code` is nonzero
+(except incremental `124`, which stays incomplete without a tool error):
+a timeout kill (`-1`) arrives as `TIMEOUT_KILL`, `124` as `TIME_BUDGET_STOP`
+in either mode, and other nonzero exits as `RUN_INCOMPLETE`. Mode changes
+whether `124` is a tool error, not its reason. The reasons and
+`failed_run_modules` name affected modules, with counts still covering only
+what really arrived.
 The `report` job still uploads the diagnostic artifact (always()) before
 failing on that exit.
 

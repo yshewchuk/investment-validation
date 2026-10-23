@@ -123,12 +123,12 @@ def read_table(repository, snapshot_ref, table_name: str, columns: Sequence[str]
     identically. ``key_filter``, when given, is forwarded straight through to
     ``_scan.read_table``; omitted or ``()`` changes nothing.
 
-    The actual scan is delegated to ``_scan.read_table``, which bounds each
-    partition's read and splits it into calendar months, then days, on
-    ``RESULT_LIMIT_EXCEEDED`` (issue #107) — this function keeps its own
-    partition-key resolution, its own refusal when no partition column or
-    partition value is available at all (issue #70, unchanged), and its own
-    empty-result frame shape.
+    The actual scan is delegated to ``_scan.read_table``, which reads each
+    selected partition once within its candidate-row bound. Scan failures,
+    including ``RESULT_LIMIT_EXCEEDED``, propagate without month/day retries.
+    This function retains its partition-key resolution, refusal when no
+    partition column or value is available (issue #70), and empty-result
+    frame shape.
     """
     contract = repository.table_contract(snapshot_ref, table_name)
     keys = (_validated_partition_keys(contract, table_name, partition_keys)

@@ -509,7 +509,10 @@ def test_public_history_preflight_rederives_identity_before_payloads(native, mon
 def test_public_history_preflight_preserves_valid_admitted_metadata(native, monkeypatch):
     source, _, binding, _, _ = native
     scans = _metadata_only(monkeypatch, source.repository)
-    population, candidates = history.preflight_source(source.repository, source.snapshot, binding)
+    result = history.preflight_source(source.repository, source.snapshot, binding)
+    assert type(result) is tuple and len(result) == 2
+    assert not any(callable(value) for value in result), "metadata admission must not expose the native reader"
+    population, candidates = result
     assert scans
     assert {event["event_id"] for event in source.events} <= set(population.index)
     assert [event.event_id for event, _, _ in candidates] == [event["event_id"] for event in source.events[:-1]]

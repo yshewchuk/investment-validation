@@ -117,24 +117,18 @@ def _preflight_source(repository, snapshot, context):
     contract = repository.table_contract(snapshot, "computed_moves")
     if contract not in (COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT):
         raise errors.fail("CONTRACT_MISMATCH", "history requires native computed moves")
-    plans = event_history._plans(repository, snapshot,
+    plans, read_rows = event_history.plan_with_reader(repository, snapshot,
         candidates.sort_values(["event_date", "event_id"]), contract)
-    return indexed, plans
+    return indexed, plans, read_rows
 
 
 def _prepare_history(repository, snapshot, context):
-    """Lazily decode at most one row per admitted candidate; no cross-build cache."""
+    """Lazily decode each admitted candidate through run-batched streaming scans; no cross-build cache."""
     with stage("history preflight"):
-        population, plans = _preflight_source(repository, snapshot, context)
-    decoded, by_ticker = {}, {}
+        population, plans, read_rows = _preflight_source(repository, snapshot, context)
+    by_ticker = {}
     for event, request, record in plans:
         by_ticker.setdefault(event.ticker, []).append((event, request, record))
-    def read_rows(event, request):
-        """Read only when a forecast first needs this preflighted candidate."""
-        if event.event_id not in decoded:
-            decoded[event.event_id] = [row for batch in repository.scan(request, table_name="computed_moves")
-                                       for row in batch.to_pylist()]
-        return decoded[event.event_id]
     return population, by_ticker, read_rows
 
 
@@ -423,7 +417,8 @@ def preflight_source(repository, snapshot, context):
             raise ValueError
     except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):
         raise errors.fail("IDENTITY_CONFLICT", "history binding differs from source metadata") from None
-    return _preflight_source(repository, snapshot, context)
+    population, plans, _ = _preflight_source(repository, snapshot, context)
+    return population, plans
 
 
 def validate_features(row, count):

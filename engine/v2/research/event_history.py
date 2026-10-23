@@ -1,6 +1,10 @@
 """Holdout-admitted historical features over physically isolated native outcomes."""
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import date, timedelta
+
+from engine.v2.contracts.data import KeyPredicate, TimeInterval
 from engine.v2.data import errors
 from engine.v2.data import query as query_planner
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
@@ -9,11 +13,14 @@ from engine.v2.foundation import content_hash
 from engine.v2.foundation.experiment_holdouts import calendar_date
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.prediction_inputs import _parse_target, _target_filters, _target_query
-from engine.v2.research.progress import Progress, stage
+from engine.v2.research.progress import Progress, decision, stage
 
 _CONTEXT = ("snapshot_id", "holdout_as_of_month", "random_membership_version",
             "rolling_membership_version", "population_use")
 POPULATION_CONTEXT_COLUMNS = _CONTEXT
+
+_MAX_OPEN_RUN_STREAMS = 32  # interleaved tickers keep their streams; the oldest is closed beyond this
+MAX_OUTCOME_OBJECT_BYTES = 1 << 20  # per outcome object, as iv_crush_inputs.MAX_TARGET_OBJECT_BYTES
 
 
 def plan_event_targets(repository, snapshot, candidates, contract, *, columns=None):
@@ -22,17 +29,22 @@ def plan_event_targets(repository, snapshot, candidates, contract, *, columns=No
     Metadata only; callers still own population admission and payload validation.
     """
     with stage("plan event targets"):
-        try:
-            if not {"ticker", "event_date"}.issubset(candidates.columns):
-                raise ValueError
-            for event in candidates.itertuples(index=False):
-                if (not isinstance(event.ticker, str) or not event.ticker.strip()
-                        or event.ticker != event.ticker.strip()
-                        or calendar_date(event.event_date) != event.event_date.date()):
-                    raise ValueError
-        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
-            raise errors.fail("CONTRACT_MISMATCH", "event target candidates are malformed") from None
+        _check_candidates(candidates)
         return _plans(repository, snapshot, candidates, contract, columns=columns)
+
+
+def _check_candidates(candidates):
+    """Refuse malformed candidate frames before any planning."""
+    try:
+        if not {"ticker", "event_date"}.issubset(candidates.columns):
+            raise ValueError
+        for event in candidates.itertuples(index=False):
+            if (not isinstance(event.ticker, str) or not event.ticker.strip()
+                    or event.ticker != event.ticker.strip()
+                    or calendar_date(event.event_date) != event.event_date.date()):
+                raise ValueError
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        raise errors.fail("CONTRACT_MISMATCH", "event target candidates are malformed") from None
 
 
 def _window(history_start, decision_session):
@@ -127,8 +139,23 @@ def _indexed_records(index, ticker, day):
 
 def _plans(repository, snapshot, candidates, contract, *, columns=None):
     """Shared history/target guard: prove all object membership before any opens."""
-    projection = {} if columns is None else {"columns": columns}
     index = _record_index(repository.fragment_records(snapshot, contract.table_name), contract)
+    return _plans_from_index(index, repository, snapshot, candidates, contract, columns)
+
+
+def plan_with_reader(repository, snapshot, candidates, contract):
+    """`_plans` plus a run-batched ``read_rows(event, request)`` that shares the same record index."""
+    _check_candidates(candidates)
+    if ("event_id" not in candidates.columns or candidates.event_id.isna().any()
+            or candidates.event_id.duplicated().any()):
+        raise errors.fail("CONTRACT_MISMATCH", "event target candidates are malformed")
+    index = _record_index(repository.fragment_records(snapshot, contract.table_name), contract)
+    plans = _plans_from_index(index, repository, snapshot, candidates, contract, None)
+    return plans, _run_reader(repository, contract, plans, index)
+
+
+def _plans_from_index(index, repository, snapshot, candidates, contract, columns):
+    projection = {} if columns is None else {"columns": columns}
     plans = []
     progress = Progress("plan history candidates", len(candidates))
     for event in candidates.itertuples(index=False):
@@ -149,6 +176,112 @@ def _plans(repository, snapshot, candidates, contract, *, columns=None):
         plans.append((event, request, record))
         progress.tick()
     return plans
+
+
+def _runs(group, others):
+    """Cut date-ordered plans of one ticker where another fragment may lie between neighbours.
+
+    ``others`` holds the (lo, hi) day interval of every non-candidate fragment of the ticker, or
+    None for an unreadable one; None cuts every candidate into its own run."""
+    runs, current = [], []
+    for plan in group:
+        if current:
+            lo, hi = current[-1][2].time_min, plan[2].time_min
+            if any(o is None or (o[0] <= hi and o[1] >= lo) for o in others):
+                runs.append(current)
+                current = []
+        current.append(plan)
+    if current:
+        runs.append(current)
+    return runs
+
+
+def _check_planned(planned, event, day, request):
+    """The reader serves only the exact preflighted event, day and request."""
+    if (planned is None or planned[0].ticker != getattr(event, "ticker", None)
+            or planned[2].time_min != day
+            or planned[1] != request):
+        raise errors.fail("HOLDOUT_ACCESS_DENIED", "event or request was not preflighted for this reader")
+
+
+def _run_reader(repository, contract, plans, index):
+    """Run-batched candidate reads: one streaming scan per run, opened when first needed; refuses unless membership is exact."""
+    by_ticker, run_of, ticker_records, rows_by_event, plan_of = {}, {}, {}, {}, {}
+    for plan in plans:
+        by_ticker.setdefault(plan[0].ticker, []).append(plan)
+        plan_of[plan[0].event_id] = plan
+    partitions, invalid = index
+    for ticker, group in by_ticker.items():
+        group.sort(key=lambda plan: plan[2].time_min)
+        ids = {plan[2].fragment_id for plan in group}
+        records = [record for _, record in partitions.get(ticker, (None, (), ()))[2]]
+        ticker_records[ticker] = [*(record for _, record in invalid), *records]
+        others = [_canonical_interval(record) for record in records if record.fragment_id not in ids]
+        for run in _runs(group, others):
+            for plan in run:
+                run_of[plan[0].event_id] = run
+    decision("history batched reads", f"{len(plans)} candidates in {len({id(r) for r in run_of.values()})} "
+             f"runs over {len(by_ticker)} tickers")
+
+    def open_run(run):
+        """Prove the run's exact membership, then stream its rows one per batch."""
+        ticker = run[0][0].ticker
+        keys = (KeyPredicate(column="ticker", operator="eq", values=(ticker,)),)
+        interval = TimeInterval(column="event_date", start_inclusive=run[0][2].time_min,
+            end_exclusive=(date.fromisoformat(run[-1][2].time_max) + timedelta(days=1)).isoformat())
+        expected = {plan[2].fragment_id for plan in run}
+        population = query_planner.plan_scan_population(
+            contract, ticker_records[ticker], key_filter=keys, time_interval=interval)
+        if ({record.fragment_id for record in population.records} != expected
+                or population.row_count != len(expected)):
+            raise errors.fail("HOLDOUT_ACCESS_DENIED", "research outcome isolation cannot be proven")
+        request = replace(run[0][1], key_filter=keys, time_interval=interval,
+            max_batch_rows=1, max_result_rows=len(expected))
+        scan = repository.scan(request, table_name=contract.table_name,
+                               max_object_bytes=MAX_OUTCOME_OBJECT_BYTES)
+        return scan, (row for batch in scan for row in batch.to_pylist())
+
+    streams = {}  # id(run) -> [row iterator, rows by day, last day seen, scan generator]; live runs only, capped
+    finished = {}  # id(run) -> rows by day of a fully read run; not counted against the cap
+
+    def read_rows(event, request):
+        """Advance the run's stream only up to this candidate's day; later fragments stay unopened."""
+        planned = plan_of.get(getattr(event, "event_id", None))
+        stamp = getattr(event, "event_date", None)
+        day = stamp.date().isoformat() if hasattr(stamp, "date") else None
+        _check_planned(planned, event, day, request)
+        if event.event_id in rows_by_event:
+            return rows_by_event[event.event_id]
+        run = run_of[event.event_id]
+        if id(run) in finished:  # the run was read to its last day: every day is already decoded
+            rows_by_event[event.event_id] = finished[id(run)].get(day, [])
+            return rows_by_event[event.event_id]
+        state = streams.get(id(run))
+        if state is None:
+            while len(streams) >= _MAX_OPEN_RUN_STREAMS:  # close the oldest; its tail re-scans if asked for again
+                streams.pop(next(iter(streams)))[3].close()
+            scan, rows = open_run(run)
+            state = streams[id(run)] = [rows, {}, "", scan]
+        rows, by_day, _, scan = state
+        try:
+            while rows is not None and day not in by_day and not (state[2] and day < state[2]):
+                row = next(rows, None)
+                if row is None:
+                    break
+                by_day.setdefault(row["event_date"], []).append(row)
+                state[2] = row["event_date"]
+            if rows is not None and (day == run[-1][2].time_min or state[2] >= run[-1][2].time_min):
+                rows.close()  # last candidate of the run read: release the open object
+                scan.close()
+                finished[id(run)] = by_day
+                streams.pop(id(run), None)  # a finished run does not hold a cap slot
+        except BaseException:
+            streams.pop(id(run), None)  # a retry re-scans the run from its start
+            scan.close()
+            raise
+        rows_by_event[event.event_id] = by_day.get(day, [])
+        return rows_by_event[event.event_id]
+    return read_rows
 
 
 def skipped_reason(row):

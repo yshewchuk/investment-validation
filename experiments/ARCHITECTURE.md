@@ -731,7 +731,7 @@ The source seal explicitly includes the fixed child and its transitive fitting s
 | Interrupted execution or publication without a committed child result | Immutable claims cannot restart. Reconciliation refuses missing/incomplete result evidence, including a failure before the result association commits; unreferenced artifact bytes confer no authority. Selection remains blocked. |
 | `SearchTrials.reconcile(outer_year, inner_year, candidate_id, limits=...)` | Revalidate the sealed source/plan, exact limits, admitted cohort, durable result and complete fit-marker prefix; idempotently finish only missing execution/forecast/validation/terminal writes. Conflicting existing evidence refuses. No child launch, fitting, claim deletion/reset, forecast replacement or candidate-count reduction; sealed retries remain zero. |
 | Reconciliation needs validation evidence | Reuse independently checked durable shared validation without reopening labels/features; otherwise revalidate current native inputs and publish forecasts before native validation-label reads. Shared-input/resource errors propagate without candidate exclusion. Only estimator-local failure or candidate scoring refusal creates a candidate terminal. |
-| Reconciliation after terminal publication | Verify and return the original receipt without writes or native reads, under both no-fit guards. A refused terminal retains its successful fit receipt and does not rescore. |
+| Reconciliation after terminal publication | Re-read and verify the committed cohort, durable result and fit-marker evidence, then return the original receipt without writes or refitting, under both no-fit guards. A refused terminal retains its successful fit receipt and does not rescore. |
 | Fitting guard active | Both parent no-fit guards refuse before a new claim or subprocess launch; completed replay remains read-only. |
 
 The child uses standard-library subprocess, selectors, resource limits and JSON; no
@@ -853,6 +853,11 @@ submission semantics; outer wrappers require JSON-native numeric types. Target
 validation reconstructs the protected receipt from admitted physical preflight.
 Static imports include these helpers in recorder and outer source bindings.
 Completed replay verifies the complete evidence chain without native payloads or fitting.
+Native execution and reconciliation responses require valid terminal and durable
+execution evidence bound to the caller's exact attempt/limits. Completed replay
+is read-only and launch-free; each separate call observes current journal integrity.
+Freeze and submitted recording also require valid native evidence when present.
+No journal verification is cached across calls.
 
 Fresh inner/outer admission streams complete validation, retaining only fold participants'
 primary keys and registered numeric features. Full stored `inputs_id`, matrices and fits are preserved.

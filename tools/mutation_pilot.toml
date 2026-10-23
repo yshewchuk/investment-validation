@@ -127,7 +127,8 @@ always_run = [
 timeout_constant = 2.0
 timeout_multiplier = 5.0
 # Parallel mutant workers. Match bounded_run's --cores. CI overrides it with
-# --max-children $(nproc) (4 on a standard GitHub runner).
+# --max-children $(nproc) (4 on a standard GitHub runner), except that
+# mutation_pilot caps data_incremental at one child regardless of the request.
 max_children = 2
 # Passed to every pytest invocation both drivers make (mutmut's per-mutant
 # pytest calls and gremlin_pilot's gremlins run). NEVER disable pytest-xdist
@@ -403,6 +404,7 @@ mutate = [
     "engine/v2/data/massive_refresh.py",
 ]
 tests = [
+    "tests/v2/integration/test_mutation_worker_memory.py",
     "tests/v2/ops/test_massive_accounting_hooks.py",
     "tests/v2/ops/test_massive_acquisition.py",
     "tests/v2/data/test_computed_moves.py",
@@ -579,6 +581,7 @@ mutate = [
     "engine/v2/scoring/compatibility.py",
     "engine/v2/scoring/identity.py",
     "engine/v2/scoring/native_gate_features.py",
+    "engine/v2/scoring/gate_forecast_source.py",
 ]
 tests = [
     "tests/v2/scoring/test_runup_raw_outputs.py",
@@ -598,6 +601,7 @@ tests = [
     "tests/test_v2_scoring_frozen_record.py",
     "tests/test_v2_scoring_frozen_residuals.py",
     "tests/v2/scoring/test_driver_residual_array_cache.py",
+    "tests/v2/scoring/test_gate_forecast_source.py",
     "tests/test_v2_scoring_no_score_status.py",
     "tests/test_v2_scoring_r4_20_frozen_parity.py",
     "tests/test_v2_scoring_runup_frozen.py",
@@ -643,6 +647,7 @@ tests = [
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
     "tests/test_v2_scoring_runup_frozen.py",
     "tests/test_v2_scoring_source_inputs.py",
+    "tests/v2/scoring/test_gate_forecast_source.py",
     "tests/test_v2_scoring_stage_ownership.py",
 ]
 
@@ -692,6 +697,7 @@ tests = [
     "tests/v2/research/test_magnitude_search_trials.py",
     "tests/v2/research/test_magnitude_search_records.py",
     "tests/v2/research/test_magnitude_search_trial_integrity.py",
+    "tests/v2/research/test_magnitude_search_execution_integrity.py",
     "tests/v2/research/test_magnitude_search_normalization.py",
     "tests/v2/research/test_magnitude_search_reconcil*.py",
     "tests/v2/research/test_magnitude_search_outer.py",
@@ -896,6 +902,7 @@ tests = [
     "tests/v2/research/test_magnitude_search_trials.py",
     "tests/v2/research/test_magnitude_search_records.py",
     "tests/v2/research/test_magnitude_search_trial_integrity.py",
+    "tests/v2/research/test_magnitude_search_execution_integrity.py",
     "tests/v2/research/test_magnitude_search_normalization.py",
     "tests/v2/research/test_magnitude_search_reconcil*.py",
     "tests/v2/research/test_magnitude_search_outer.py",
@@ -1203,6 +1210,7 @@ tests = [
     "tests/v2/research/test_magnitude_search_trials.py",
     "tests/v2/research/test_magnitude_search_records.py",
     "tests/v2/research/test_magnitude_search_trial_integrity.py",
+    "tests/v2/research/test_magnitude_search_execution_integrity.py",
     "tests/v2/research/test_magnitude_search_normalization.py",
     "tests/v2/research/test_magnitude_search_reconcil*.py",
     "tests/v2/research/test_magnitude_search_outer.py",

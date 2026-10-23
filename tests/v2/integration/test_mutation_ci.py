@@ -391,16 +391,11 @@ def test_config_hash_refuses_an_unknown_module():
 
 # -- mutmut diagnostics on the ops_legacy CI shard (run 36001042208) ---------
 #
-# mutmut only logs "failed to collect stats. runner returned 1" and swallows the
-# child pytest output that explains it. The driver's remedy is mutmut's own
-# supported ``debug = true`` config (``mutmut_config_text``): it is full-run
-# verbosity, so it is on only when the environment opts in through
-# ``MUTATION_PILOT_DEBUG`` or on the ops_legacy CI shard by default. These are
-# mock tests: they never run mutmut or pytest; they check the config we hand
-# mutmut, that the environment and module name reach the generated ``setup.cfg``,
-# and that ``cmd_run`` keeps the real exit code without rerunning anything.
-# ops_catalog_state now shares that CI-only default; it is covered by separate
-# tests below so the ops_legacy ones above stay untouched.
+# Stats-only retained output is covered in test_mutation_stats_diagnostics.py.
+# This block covers mutmut's separate supported ``debug = true`` full-run
+# verbosity. ``MUTATION_PILOT_DEBUG`` overrides the CI-only defaults for
+# ops_legacy, ops_catalog_state and ops_runtime. Config tests mock the backend
+# and check generated ``setup.cfg``; driver tests preserve exits without reruns.
 
 DIAG_DEFAULTS = {"pytest_args": ["-p", "no:xdist", "-p", "no:cacheprovider"],
                  "deselect": ["tests/test_a.py::gate_needs_git"],
@@ -544,7 +539,8 @@ def test_ci_default_enables_debug_for_ops_catalog_state_setup_cfg(tmp_path, monk
     assert "debug = true" not in (other / "setup.cfg").read_text()
 
 
-def _cmd_run(monkeypatch, tmp_path, rc, budget=None):
+def run_mutation_command(monkeypatch, tmp_path, rc, budget=None, on_run=None, sweep=None,
+                         subreaper=None, module="toy", max_children=None):
     """Run cmd_run with mutmut's subprocess stubbed; return (rc_out, calls)."""
     work = tmp_path / "work"
     (work / "mutants").mkdir(parents=True)
@@ -554,21 +550,29 @@ def _cmd_run(monkeypatch, tmp_path, rc, budget=None):
     monkeypatch.setattr(pilot, "tests_digest", lambda *a: "digest")
     monkeypatch.setattr(pilot, "reset_on_test_change", lambda *a, **k: 0)
     monkeypatch.setattr(mr, "snapshot", lambda *a, **k: {})
+    monkeypatch.setattr(pilot, "_become_subreaper",
+                        subreaper if subreaper is not None else (lambda: False))
+    monkeypatch.setattr(pilot, "_reap_descendants",
+                        (lambda label: sweep.append(label)) if sweep is not None
+                        else (lambda label: 0))
     calls = []
 
     def fake_run(cmd, **kw):
         calls.append((cmd, kw))
+        if on_run is not None:
+            on_run(cmd, **kw)
         return types.SimpleNamespace(returncode=rc)
 
     monkeypatch.setattr(pilot.subprocess, "run", fake_run)
-    args = types.SimpleNamespace(module="toy", fresh=False, max_children=None, globs=[],
+    args = types.SimpleNamespace(module=module, fresh=False, max_children=max_children, globs=[],
                                  time_budget_seconds=budget)
-    return pilot.cmd_run({"defaults": DIAG_DEFAULTS, "modules": {"toy": {}}}, args), calls
+    return pilot.cmd_run({"defaults": DIAG_DEFAULTS, "modules": {module: {}}}, args), calls
 
 
-def test_cmd_run_preserves_the_exit_code_without_rerunning(monkeypatch, tmp_path):
-    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=1)
-    assert rc == 1  # the tool error still fails the job; scores are never silenced
+@pytest.mark.parametrize("backend_rc", [0, 1, 17, 124, 137])
+def test_cmd_run_preserves_the_exit_code_without_rerunning(monkeypatch, tmp_path, backend_rc):
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=backend_rc)
+    assert rc == backend_rc  # tool exits are forwarded; scores never replace them
     assert len(calls) == 1  # exactly one subprocess: no automatic pytest/mutmut rerun
     cmd, kw = calls[0]
     assert cmd[:5] == [sys.executable, "-u", "-m", "mutmut", "run"]
@@ -584,7 +588,7 @@ def test_cmd_run_no_longer_strips_the_harness_env(monkeypatch, tmp_path):
     monkeypatch.setenv("MUTANT_UNDER_TEST", "stats")
     monkeypatch.setenv("COVERAGE_PROCESS_START", "/rc")
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "t::u (call)")
-    _, calls = _cmd_run(monkeypatch, tmp_path, rc=0)
+    _, calls = run_mutation_command(monkeypatch, tmp_path, rc=0)
     env = calls[0][1]["env"]
     assert env["MUTANT_UNDER_TEST"] == "stats"
     assert env["COVERAGE_PROCESS_START"] == "/rc"
@@ -592,34 +596,51 @@ def test_cmd_run_no_longer_strips_the_harness_env(monkeypatch, tmp_path):
     assert env["OMP_NUM_THREADS"] == "1"  # the thread pin is still applied
 
 
-def test_cmd_run_passes_the_time_budget_to_the_bounded_runner(monkeypatch, tmp_path):
+@pytest.mark.parametrize("backend_rc", [0, 1, 17, 124, 137])
+def test_cmd_run_passes_the_time_budget_to_the_bounded_runner(monkeypatch, tmp_path, backend_rc):
     seen = {}
 
     def fake_bounded(cmd, cwd, env, budget):
         seen.update(cmd=cmd, cwd=cwd, budget=budget)
-        return pilot.TIME_BUDGET_STOP_RC
+        return backend_rc
 
     monkeypatch.setattr(pilot, "_run_with_time_budget", fake_bounded)
-    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=0, budget=3300)
-    assert rc == pilot.TIME_BUDGET_STOP_RC == 124
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=0, budget=3300)
+    assert rc == backend_rc
     assert calls == []  # the unbounded subprocess.run path was NOT taken
     assert seen["budget"] == 3300
     assert seen["cmd"][:5] == [sys.executable, "-u", "-m", "mutmut", "run"]
 
 
-def test_a_clean_time_box_stop_exits_the_process_with_status_124():
+@pytest.mark.parametrize("constant,status", [("TIME_BUDGET_STOP_RC", 124), ("TIME_BUDGET_KILL_RC", 137)])
+def test_time_box_status_survives_the_process_boundary(constant, status):
     """sys.exit(-1) exits 255; the workflow gate compares the process status, so the
     sentinel must be a valid status that survives the process boundary unchanged."""
     code = ("import sys; sys.path.insert(0, 'tools'); import mutation_pilot as p; "
-            "p.cmd_run = lambda cfg, args: p.TIME_BUDGET_STOP_RC; "
+            f"p.cmd_run = lambda cfg, args: p.{constant}; "
             "sys.exit(p.main(['run', 'ops_runtime']))")
     proc = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True)
-    assert proc.returncode == 124, proc.stderr
+    assert proc.returncode == status, proc.stderr
     src = (ROOT / "tools" / "mutation_pilot.py").read_text()
     assert 'if __name__ == "__main__":\n    sys.exit(main())' in src
 
 
-def test_run_with_time_budget_sigints_at_the_budget_and_reports_the_stop(monkeypatch, tmp_path):
+@pytest.mark.parametrize("backend_rc", [0, 1, 17, 124, 137])
+def test_actual_budget_runner_forwards_prebudget_exits(monkeypatch, tmp_path, backend_rc):
+    waits, signals = [], []
+    def wait(timeout=None):
+        waits.append(timeout)
+        return backend_rc
+    monkeypatch.setattr(pilot.subprocess, "Popen", lambda cmd, **kw: types.SimpleNamespace(pid=4242, wait=wait))
+    monkeypatch.setattr(pilot.os, "killpg", lambda *args: signals.append(args))
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=19, budget=5.0)
+    assert rc == backend_rc and calls == []
+    assert waits == [5.0] and signals == []
+
+
+@pytest.mark.parametrize("grace_rc", [0, 1, 17, -2, -9])
+def test_run_with_time_budget_sigints_at_the_budget_and_preserves_grace_failures(
+        monkeypatch, tmp_path, capsys, grace_rc):
     waits = []
 
     class FakeProc:
@@ -629,20 +650,24 @@ def test_run_with_time_budget_sigints_at_the_budget_and_reports_the_stop(monkeyp
             waits.append(timeout)
             if len(waits) == 1:
                 raise subprocess.TimeoutExpired(cmd="mutmut", timeout=timeout)
-            return 0
+            return grace_rc
 
     signals = []
     monkeypatch.setattr(pilot.subprocess, "Popen", lambda cmd, **kw: FakeProc())
     monkeypatch.setattr(pilot.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
     monkeypatch.setattr(pilot, "SIGINT_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(pilot, "time", types.SimpleNamespace(monotonic=lambda: 1000.0))
-    rc = pilot._run_with_time_budget([sys.executable, "-m", "mutmut", "run"], tmp_path, {}, 30.0)
-    assert rc == pilot.TIME_BUDGET_STOP_RC == 124
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=19, budget=30.0)
+    assert rc == (grace_rc if grace_rc else 124) and calls == []
     assert signals == [(4242, signal.SIGINT)]  # clean stop: no SIGKILL
     assert waits == [30.0, 0.01]  # budget, then the (patched) grace period
+    captured = capsys.readouterr()
+    assert ("stopped cleanly" in captured.out + captured.err) is (grace_rc == 0)
 
 
-def test_run_with_time_budget_escalates_to_sigkill_when_sigint_is_ignored(monkeypatch, tmp_path):
+@pytest.mark.parametrize("final_child_rc", [-9, 0])
+def test_run_with_time_budget_escalates_to_sigkill_when_sigint_is_ignored(
+        monkeypatch, tmp_path, capsys, final_child_rc):
     waits = []
 
     class FakeProc:
@@ -652,17 +677,20 @@ def test_run_with_time_budget_escalates_to_sigkill_when_sigint_is_ignored(monkey
             waits.append(timeout)
             if len(waits) <= 2:
                 raise subprocess.TimeoutExpired(cmd="mutmut", timeout=timeout)
-            return -9
+            return final_child_rc
 
     signals = []
     monkeypatch.setattr(pilot.subprocess, "Popen", lambda cmd, **kw: FakeProc())
     monkeypatch.setattr(pilot.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
     monkeypatch.setattr(pilot, "SIGINT_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(pilot, "time", types.SimpleNamespace(monotonic=lambda: 0.0))
-    rc = pilot._run_with_time_budget(["mutmut"], tmp_path, {}, 5.0)
-    assert rc == pilot.TIME_BUDGET_STOP_RC == 124
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=17, budget=5.0)
+    assert rc == pilot.TIME_BUDGET_KILL_RC == 137 and calls == []
     assert signals == [(777, signal.SIGINT), (777, signal.SIGKILL)]
     assert waits == [5.0, 0.01, None]  # budget, grace, then the final reap
+    captured = capsys.readouterr()
+    assert "reporting 137 (tool failure)" in captured.err
+    assert "stopped cleanly" not in captured.out + captured.err
 
 
 # -- config and workflow shape ----------------------------------------------------------
@@ -1811,6 +1839,65 @@ def test_merge_propagates_a_failed_module_run_as_an_incomplete_tool_error(tmp_pa
     # and the CLI -- the workflow's gate on its rc -- must not read it as success
     assert mr.main(["merge", "--out", str(tmp_path / "m2"), "--expected-modules", '["a", "b"]',
                     str(a), str(b)]) == 1
+
+
+def make_work_with_distinct_file_scores(tmp_path):
+    work = make_work(tmp_path, {ADD + "1": 1, ADD + "2": 0})
+    other = "engine/v2/other.py"
+    (work / other).write_text(SOURCE)
+    metadata = json.loads((work / "mutants" / (FILES[0] + ".meta")).read_text())
+    metadata["exit_code_by_key"] = {"engine.v2.other.x_add__mutmut_1": 1,
+                                    "engine.v2.other.x_add__mutmut_2": 1}
+    (work / "mutants" / (other + ".meta")).write_text(json.dumps(metadata))
+    return work, [*FILES, other]
+
+
+@pytest.mark.parametrize("run_exit_code", [0, 124, 137])
+def test_module_export_retains_numeric_scores_and_labels_partial_results(tmp_path, run_exit_code):
+    work, files = make_work_with_distinct_file_scores(tmp_path)
+    out = tmp_path / "report"
+    summary = mr.export_module(work, "toy", files, out, mode="incremental",
+                               run_exit_code=run_exit_code, diffs=False)
+    assert json.loads((out / "summary.json").read_text()) == summary
+    assert summary["run_exit_code"] == run_exit_code
+    assert summary["total"] == 4 and summary["checked"] == 4
+    assert summary["score"] == 0.75
+    assert summary["files"][files[0]]["score"] == 0.5 and summary["files"][files[1]]["score"] == 1.0
+    md = (out / "summary.md").read_text()
+    assert "| **module** | 4 | 3 | 1 | 0 | 0 | 0 | 0 | 75.0% |" in md
+    assert f"| `{FILES[0]}` | 2 | 1 | 1 | 0 | 0 | 0 | 0 | 50.0% |" in md
+    assert f"| `{files[1]}` | 2 | 2 | 0 | 0 | 0 | 0 | 0 | 100.0% |" in md
+    assert (f"**mutmut exited {run_exit_code}**: results are partial." in md) is (run_exit_code != 0)
+    if run_exit_code == 0:
+        assert "results are partial" not in md
+
+
+@pytest.mark.parametrize("mode,run_exit_code,expected_gate", [
+    ("incremental", 124, 0), ("incremental", 137, 1), ("full", 124, 1), ("full", 137, 1)])
+def test_time_box_exit_codes_reach_the_module_gate_and_aggregate(
+        tmp_path, mode, run_exit_code, expected_gate):
+    work, files = make_work_with_distinct_file_scores(tmp_path)
+    out = tmp_path / "report"
+    mr.export_module(work, "toy", files, out, mode=mode, run_exit_code=run_exit_code, diffs=False)
+    (tmp_path / "mutation-rc").write_text(str(run_exit_code))
+    gate = _step("mutate", lambda s: s.get("name", "").startswith("Fail only on a tool error"),
+                 MUT_JOBS)["run"]
+    result = subprocess.run(["bash", "-c", gate], cwd=tmp_path,
+        env=dict(os.environ, RUNNER_TEMP=str(tmp_path), MODE=mode),
+        capture_output=True, text=True, timeout=5)
+    assert result.returncode == expected_gate, result.stdout + result.stderr
+    assert mr.main(["merge", "--out", str(tmp_path / "merged"), "--expected-modules",
+                    '["toy"]', str(out)]) == expected_gate
+    merged = json.loads((tmp_path / "merged/summary.json").read_text())
+    assert merged["complete"] is False and merged["score"] is None
+    assert merged["tool_error"] is bool(expected_gate)
+    assert merged["failed_run_modules"] == {"toy": [run_exit_code]}
+    reason = "TIME_BUDGET_STOP" if run_exit_code == 124 else "RUN_INCOMPLETE"
+    assert len(merged["failure_reasons"]) == 1 and merged["failure_reasons"][0].startswith(reason)
+    partial = json.loads((out / "summary.json").read_text())
+    assert partial["score"] == 0.75
+    assert [partial["files"][file]["score"] for file in files] == [0.5, 1.0]
+    assert len(mr.read_jsonl(out / "results.jsonl")) == 4
 
 
 def test_merge_an_incremental_time_box_stop_is_incomplete_but_not_a_tool_error(tmp_path):
@@ -5783,3 +5870,219 @@ def test_the_real_tests_conftest_proven_root_insert_never_taints_every_test():
     assert selected is not None
     assert "tests/v2/ops/test_v2_ops_computed_moves_store.py" in selected
     assert len(selected) < len(tests)
+
+
+# -- descendant sweep after mutmut exits (#1115) ---------------------------------
+
+_SWEEP_PREAMBLE = (
+    "import os, subprocess, sys, time\n"
+    f"sys.path.insert(0, {str(ROOT / 'tools')!r})\n"
+    "import mutation_pilot as pilot\n"
+)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="child subreaper is Linux-only")
+def test_reap_descendants_kills_an_orphaned_session_detached_process():
+    inner = (
+        "import subprocess, sys\n"
+        "orphan = subprocess.Popen([sys.executable, '-c',"
+        " 'import time; time.sleep(300)'], start_new_session=True)\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
+        "print(orphan.pid, child.pid, flush=True)\n"
+    )
+    script = _SWEEP_PREAMBLE + (
+        "pilot._become_subreaper()\n"
+        f"inter = subprocess.Popen([sys.executable, '-c', {inner!r}],"
+        " stdout=subprocess.PIPE, start_new_session=True, text=True)\n"
+        "line = inter.stdout.readline().strip()\n"
+        "pids = [int(x) for x in line.split()]\n"
+        "inter.wait()\n"
+        "print('PIDS=' + ' '.join(str(p) for p in [inter.pid, *pids]), flush=True)\n"
+        "count = pilot._reap_descendants('t')\n"
+        "alive = 0\n"
+        "for pid in [inter.pid, *pids]:\n"
+        "    try:\n"
+        "        os.kill(pid, 0)\n"
+        "    except ProcessLookupError:\n"
+        "        continue\n"
+        "    alive += 1\n"
+        "print(f'COUNT={count} ALIVE={alive}', flush=True)\n"
+    )
+    pids: list[int] = []
+    try:
+        proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                              text=True, timeout=60)
+        match = re.search(r"PIDS=([\d ]+)", proc.stdout)
+        if match:
+            pids = [int(x) for x in match.group(1).split()]
+        final = re.search(r"COUNT=(\d+) ALIVE=(\d+)", proc.stdout)
+        assert final, proc.stderr
+        assert int(final.group(1)) == 2  # both workers re-parented to the subreaper
+        assert final.group(2) == "0"
+        assert "killed 2 leftover descendant process(es)" in proc.stderr
+        assert "time.sleep(300)" in proc.stderr
+    finally:
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="child subreaper is Linux-only")
+def test_reap_descendants_rescans_for_processes_forked_during_the_sweep():
+    worker = (
+        "import subprocess, sys, time\n"
+        "end = time.monotonic() + 0.3\n"
+        "while time.monotonic() < end:\n"
+        "    child = subprocess.Popen([sys.executable, '-c',"
+        " 'import time; time.sleep(300)'], start_new_session=True,"
+        " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "    print(child.pid, flush=True)\n"
+        "    time.sleep(0.01)\n"
+    )
+    script = _SWEEP_PREAMBLE + (
+        "pilot._become_subreaper()\n"
+        f"worker = subprocess.Popen([sys.executable, '-c', {worker!r}],"
+        " stdout=subprocess.PIPE, text=True)\n"
+        "first = int(worker.stdout.readline())\n"
+        "real_kill = os.kill\n"
+        "first_kill = [True]\n"
+        "def slow_kill(pid, sig):\n"
+        "    if first_kill[0]:\n"
+        "        first_kill[0] = False\n"
+        "        time.sleep(0.1)\n"
+        "    return real_kill(pid, sig)\n"
+        "pilot.os.kill = slow_kill\n"
+        "count = pilot._reap_descendants('t')\n"
+        "rest = worker.stdout.read().split()\n"
+        "pids = [worker.pid, first, *[int(x) for x in rest]]\n"
+        "print('PIDS=' + ' '.join(str(p) for p in pids), flush=True)\n"
+        "alive = 0\n"
+        "for pid in pids:\n"
+        "    try:\n"
+        "        os.kill(pid, 0)\n"
+        "    except ProcessLookupError:\n"
+        "        continue\n"
+        "    alive += 1\n"
+        "print(f'COUNT={count} ALIVE={alive}', flush=True)\n"
+    )
+    pids: list[int] = []
+    try:
+        proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                              text=True, timeout=60)
+        match = re.search(r"PIDS=([\d ]+)", proc.stdout)
+        if match:
+            pids = [int(x) for x in match.group(1).split()]
+        final = re.search(r"COUNT=(\d+) ALIVE=(\d+)", proc.stdout)
+        assert final, proc.stderr
+        assert final.group(2) == "0"
+    finally:
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="child subreaper is Linux-only")
+def test_reap_descendants_is_silent_and_zero_when_nothing_is_left():
+    script = _SWEEP_PREAMBLE + (
+        "pilot._become_subreaper()\n"
+        "count = pilot._reap_descendants('t')\n"
+        "print('COUNT=' + str(count), flush=True)\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                          text=True, timeout=60)
+    assert "COUNT=0" in proc.stdout, proc.stderr
+    assert proc.stderr == ""
+
+
+def test_cmd_run_sweeps_after_the_budget_stop(monkeypatch, tmp_path):
+    sweeps = []
+
+    monkeypatch.setattr(pilot, "_run_with_time_budget",
+                        lambda cmd, cwd, env, budget: pilot.TIME_BUDGET_STOP_RC)
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=0, budget=3300, sweep=sweeps)
+    assert rc == pilot.TIME_BUDGET_STOP_RC == 124
+    assert calls == []  # the unbounded subprocess.run path was NOT taken
+    assert sweeps == ["after mutmut exit"]
+
+
+def test_cmd_run_sweeps_on_an_exception(monkeypatch, tmp_path):
+    sweeps = []
+
+    def fake_bounded(cmd, cwd, env, budget):
+        raise RuntimeError("bounded runner failed")
+
+    monkeypatch.setattr(pilot, "_run_with_time_budget", fake_bounded)
+    with pytest.raises(RuntimeError):
+        run_mutation_command(monkeypatch, tmp_path, rc=0, budget=3300, sweep=sweeps)
+    assert sweeps == ["after mutmut exit"]
+
+
+def test_cmd_run_sweeps_once_on_a_normal_return(monkeypatch, tmp_path):
+    sweeps = []
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=3, sweep=sweeps)
+    assert rc == 3  # the subprocess exit code is returned unchanged
+    assert len(calls) == 1
+    assert sweeps == ["after mutmut exit"]
+
+
+def test_cmd_run_becomes_a_subreaper_once(monkeypatch, tmp_path):
+    seen = []
+    rc, _ = run_mutation_command(monkeypatch, tmp_path, rc=0,
+                     subreaper=lambda: seen.append(1) or False)
+    assert rc == 0
+    assert seen == [1]
+
+
+@pytest.mark.parametrize("supported,word", [(True, "yes"), (False, "no")])
+def test_cmd_run_becomes_subreaper_then_runs_then_sweeps(
+        monkeypatch, tmp_path, capsys, supported, word):
+    events = []
+    work = tmp_path / "work"
+    (work / "mutants").mkdir(parents=True)
+    monkeypatch.setattr(pilot, "sync_workdir", lambda *a, **k: work)
+    monkeypatch.setattr(pilot, "mutate_files", lambda cfg, name, tracked=None: ["engine/x.py"])
+    monkeypatch.setattr(pilot, "test_files", lambda cfg, name, tracked=None: ["tests/test_a.py"])
+    monkeypatch.setattr(pilot, "tests_digest", lambda *a: "digest")
+    monkeypatch.setattr(pilot, "reset_on_test_change", lambda *a, **k: 0)
+    monkeypatch.setattr(mr, "snapshot", lambda *a, **k: {})
+    monkeypatch.setattr(pilot, "_become_subreaper",
+                        lambda: events.append("subreaper") or supported)
+
+    def fake_run(cmd, **kw):
+        events.append("run")
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(pilot.subprocess, "run", fake_run)
+    monkeypatch.setattr(pilot, "_reap_descendants",
+                        lambda label: events.append("sweep") or 0)
+    args = types.SimpleNamespace(module="toy", fresh=False, max_children=None, globs=[],
+                                 time_budget_seconds=None)
+    assert pilot.cmd_run({"defaults": DIAG_DEFAULTS, "modules": {"toy": {}}}, args) == 0
+    assert events == ["subreaper", "run", "sweep"]
+    assert f"child subreaper: {word}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("exc", [OSError, RuntimeError])
+def test_reap_descendants_never_raises(monkeypatch, capsys, exc):
+    def boom(_path):
+        raise exc("boom")
+
+    monkeypatch.setattr(pilot.os, "listdir", boom)
+    assert pilot._reap_descendants("t") == 0
+    assert "descendant sweep failed" in capsys.readouterr().err
+
+
+def test_reap_descendants_returns_zero_when_logging_itself_fails(monkeypatch):
+    def boom(_path):
+        raise RuntimeError("boom")
+
+    def broken_print(*_args, **_kwargs):
+        raise OSError("stderr closed")
+
+    monkeypatch.setattr(pilot.os, "listdir", boom)
+    monkeypatch.setattr("builtins.print", broken_print)
+    assert pilot._reap_descendants("t") == 0

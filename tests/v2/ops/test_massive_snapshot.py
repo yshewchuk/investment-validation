@@ -1,12 +1,13 @@
 """Real catalog/input-binding/fenced native snapshots from synthetic raw pages."""
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from engine.v2.contracts import DataQuery, JobSpec, KeyPredicate, SubmitRequest
-from engine.v2.data import errors, massive_daily
+from engine.v2.data import errors, incremental, massive_daily
 from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, canonical_json, content_hash, to_document
@@ -24,6 +25,20 @@ from tests.v2.ops.test_massive_submission import alternate_source as alternate_s
 
 harness = support.harness
 forbid_network = support.forbid_network
+
+
+def snapshot_worker_policy():
+    from tests.ops_support import TEST_POLICY
+
+    # Generated incremental.py compilation alone peaks near 674 MiB. Identify
+    # actual mutmut wrappers, not an environment flag or a directory name.
+    trampoline = sys.modules.get("mutmut.mutation.trampoline")
+    wrapper = getattr(trampoline, "wrap_in_trampoline", None)
+    if wrapper is None or getattr(incremental, "_mutmut_mutated", None) is not wrapper:
+        return TEST_POLICY
+    return replace(TEST_POLICY, profiles=tuple(
+        replace(profile, memory_bytes=1 << 30) if profile.name == "io_fetch" else profile
+        for profile in TEST_POLICY.profiles))
 
 
 def committed_output(h, attempt, document):
@@ -578,7 +593,7 @@ def test_real_submission_service_worker_and_bounded_pinned_read(
     from engine.v2.ops.bootstrap import open_catalog
     from engine.v2.ops.provider_budget import configure_account
     from engine.v2.ops.supervisor import Service
-    from tests.ops_support import TEST_POLICY, run_until
+    from tests.ops_support import run_until
     from tests.v2.ops.test_massive_submission import arguments
 
     checkout, selected, _, _ = alternate_source
@@ -602,7 +617,7 @@ def test_real_submission_service_worker_and_bounded_pinned_read(
             "runpy.run_module('engine.v2.ops.worker', run_name='__main__')"]
         return original(guarded, **(kwargs | {"env": environment}))
     monkeypatch.setattr(executor.subprocess, "Popen", launch)
-    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
+    service = Service(conn, tmp_path, registry(), snapshot_worker_policy(), clock=clock,
                       code_source=code_source, store_root=tmp_path / "synthetic-legacy")
     service.start()
     try:

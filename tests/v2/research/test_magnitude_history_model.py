@@ -86,9 +86,9 @@ def _invoke(source, capsys, action, *extra, status=0):
 def forbid_history_model_payloads(monkeypatch):
     original = Repository.scan
 
-    def scan(repository, query, *, table_name):
+    def scan(repository, query, *, table_name, **kwargs):
         assert table_name in ("earnings_events", "daily_market"), "admission/replay opened payload"
-        yield from original(repository, query, table_name=table_name)
+        yield from original(repository, query, table_name=table_name, **kwargs)
 
     monkeypatch.setattr(Repository, "scan", scan)
     monkeypatch.setattr(model, "prediction_result", support.forbid_access)

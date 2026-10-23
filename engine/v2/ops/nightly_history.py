@@ -22,6 +22,9 @@ from engine.v2.ops.nightly_session import (
 
 __all__ = ["run_pinned_history_import"]
 
+INPUTS_SCHEMA = "nightly_history_inputs.v1"
+RECEIPT_SCHEMA = "nightly_history_receipt.v1"
+
 
 @contextmanager
 def _history_lock(root: Path, identity: SessionIdentity):
@@ -64,13 +67,24 @@ def _read_pins(path, run_id, through):
         raise fail("INTEGRITY_FAILED", "history file pins are unreadable") from exc
     if not isinstance(document, dict):
         raise fail("INTEGRITY_FAILED", "history file pins are unreadable")
-    if (document.get("schema") != "nightly_history_inputs.v1" or document.get("run_id") != run_id
+    if (document.get("schema") != INPUTS_SCHEMA
+            or document.get("run_id") != run_id
             or document.get("through") != through
             or not isinstance(document.get("files"), list)):
         raise fail("INTEGRITY_FAILED", "history file pins failed identity checks")
     if not _valid_pin_entries(document["files"]):
         raise fail("INTEGRITY_FAILED", "history file pins are malformed")
     return tuple(tuple(pair) for pair in document["files"])
+
+
+def _pin_document(schema, run_id, through, pins):
+    return {"schema": schema, "run_id": run_id, "through": through,
+            "files": [list(pair) for pair in pins]}
+
+
+def _write_inputs(path, run_id, through, pins):
+    atomic_write(path, json.dumps(
+        _pin_document(INPUTS_SCHEMA, run_id, through, pins), sort_keys=True))
 
 
 def _load_or_dry_run_pins(root, identity, generation, source_root, conn, clock):
@@ -85,9 +99,7 @@ def _load_or_dry_run_pins(root, identity, generation, source_root, conn, clock):
         pins = _pins(Path(source_root))
         import_history(conn, root, source_root, through=date.fromisoformat(through),
                        dry_run=True, clock=clock, pinned_files=pins)
-        doc = {"schema": "nightly_history_inputs.v1", "run_id": state.active.run_id,
-               "through": through, "files": [list(pair) for pair in pins]}
-        atomic_write(path, json.dumps(doc, sort_keys=True))
+        _write_inputs(path, state.active.run_id, through, pins)
     return state.active.run_id, through, pins
 
 
@@ -111,9 +123,8 @@ def run_pinned_history_import(root: Path, identity: SessionIdentity, generation:
         run_id, through, pins = _load_or_dry_run_pins(
             root, identity, generation, source_root, conn, clock)
         history_path = Path(root).joinpath(*STATE_DIR, f"{run_id}.history-complete.json")
-        history_text = json.dumps({"schema": "nightly_history_receipt.v1", "run_id": run_id,
-                                   "through": through, "files": [list(pair) for pair in pins]},
-                                  sort_keys=True)
+        history_text = json.dumps(
+            _pin_document(RECEIPT_SCHEMA, run_id, through, pins), sort_keys=True)
         history_hash = hashlib.sha256(history_text.encode()).hexdigest()
 
         def history_effect(_predecessor):
