@@ -376,3 +376,21 @@ def test_object_over_the_byte_cap_refuses_result_limit_exceeded(source, monkeypa
     monkeypatch.setattr(event_history, "MAX_OUTCOME_OBJECT_BYTES", 1)
     with pytest.raises(DataError, match="(?s)RESULT_LIMIT_EXCEEDED.*object exceeds max_object_bytes"):
         read_rows(plans[0][0], plans[0][1])
+
+
+def test_finished_run_does_not_hold_a_cap_slot_or_force_a_rescan(source, monkeypatch):
+    monkeypatch.setattr(event_history, "_MAX_OPEN_RUN_STREAMS", 1)
+    repository, snapshot = source
+    plans, read_rows = _plan(repository, snapshot)
+    original, calls = repository.scan, []
+
+    def counting(query, *, table_name, **kwargs):
+        calls.append(query)
+        yield from original(query, table_name=table_name, **kwargs)
+
+    monkeypatch.setattr(repository, "scan", counting)
+    read_rows(plans[4][0], plans[4][1])  # second run read to its last day: finished
+    read_rows(plans[0][0], plans[0][1])  # first run opens; the finished run must not be evicted for it
+    rows = read_rows(plans[3][0], plans[3][1])  # served from the finished run's decoded days
+    assert len(calls) == 2
+    assert rows == _per_candidate(repository, plans[3][1])
