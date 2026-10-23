@@ -48,6 +48,9 @@ load-bearing entrypoints:
 - `source_inputs.py` — `SourceBundle` (answer-free source dataclass, frozen,
   `kw_only=True`) and `build_native_score_inputs(bundle) -> NativeScoreInputs`,
   the boundary every acceptance/parity caller starts from.
+- `gate_forecast_source.py` — `GateForecastSource`, the optional
+  `SourceBundle.gate_forecast_source` carrying the selected size fold's
+  binding, release, inference and held-out pool for the gate's forecast.
 - `frozen_executor.py` — `FrozenStageExecutor`/`FrozenRecipeExecutor`,
   running one frozen-model binding and raising `FrozenStageRefusal(code,
   detail, reason_codes=...)` (code always `"MODEL_NOT_READY"`) — the refusal
