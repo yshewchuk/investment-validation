@@ -9,7 +9,7 @@ from datetime import date, timedelta
 import pandas as pd
 
 from engine.v2.contracts.data import DataQuery, KeyPredicate, TimeInterval
-from engine.v2.data import errors
+from engine.v2.data import errors, objects
 from engine.v2.features import panel_math, regime
 from engine.v2.foundation import canonical_json, content_hash, to_document
 from engine.v2.research import (
@@ -145,13 +145,13 @@ def _source_row(raw, ticker, year, start, end, seen):
     return row
 
 
-def _source_rows(repository, snapshot, ticker, start, end, limit):
+def _source_rows(repository, snapshot, ticker, start, end, limit, max_object_bytes):
     """One scan per ticker/year, bounded across years; no per-event source work."""
     rows, seen = [], set()
     meter = progress.Progress("daily block source years", int(end[:4]) - int(start[:4]) + 1)
     for year in range(int(start[:4]), int(end[:4]) + 1):
         request = _query(repository, snapshot, ticker, year, start, end, limit)
-        for batch in repository.scan(request, table_name="daily_market"):
+        for batch in repository.scan(request, table_name="daily_market", max_object_bytes=max_object_bytes):
             for raw in batch.to_pylist():
                 rows.append(_source_row(raw, ticker, year, start, end, seen))
                 if len(rows) > limit:
@@ -216,13 +216,14 @@ def _spy_blocks(events, rows):
 
 
 def build_daily_blocks(repository, source_snapshot, history_snapshot, panel_context, *,
-                       producer, policy, eligibility_metadata, source_start, max_source_rows, max_events):
+                       producer, policy, eligibility_metadata, source_start, max_source_rows, max_events, max_object_bytes):
     """Produce detached partial blocks, not a fit/read capability or stored snapshot.
 
     Label bounds are producer declarations, not verified outcome intervals. The
     imported daily table has no publication stamps; source dates only establish
     reconstructed prefixes. Never call this output observed-PIT or fit-admissible.
     """
+    objects.validate_max_object_bytes(max_object_bytes)
     source_start = magnitude_panel_table.canonical_day(source_start)
     max_source_rows, max_events = _limit(max_source_rows), _limit(max_events)
     producer = _producer(panel_context, producer)
@@ -243,18 +244,20 @@ def build_daily_blocks(repository, source_snapshot, history_snapshot, panel_cont
         "producer": producer, "producer_identity": "caller_declared_not_installed_attestation",
         "eligibility_plan": eligibility, "label_bounds": "unverified_producer_declaration",
         "source_start": source_start, "max_source_rows": max_source_rows, "max_events": max_events,
+        "max_object_bytes": max_object_bytes,
         "snapshot_daily_fragments": fragments, "daily_columns": list(_DAILY), "spy_columns": list(_SPY),
         "availability": "reconstructed_session_prefix_publication_unverified"}
     context = {**identity, "context_id": content_hash(identity)}
     with progress.stage("daily block sources", report_refusals=True):
-        spy_rows = _source_rows(repository, source_snapshot, "SPY", source_start, ends["SPY"], max_source_rows)
+        spy_rows = _source_rows(repository, source_snapshot, "SPY", source_start, ends["SPY"],
+            max_source_rows, max_object_bytes)
         spy = _spy_blocks(events, spy_rows)
     output = []
     meter = progress.Progress("daily block events", len(events))
     with progress.stage("daily block values", report_refusals=True):
         for ticker in sorted(by_ticker):
             rows = spy_rows if ticker == "SPY" else _source_rows(
-                repository, source_snapshot, ticker, source_start, ends[ticker], max_source_rows)
+                repository, source_snapshot, ticker, source_start, ends[ticker], max_source_rows, max_object_bytes)
             surface = [row for row in rows if pd.notna(row["src_iv"])]
             dates = [row["date"] for row in surface]
             for event in by_ticker[ticker]:

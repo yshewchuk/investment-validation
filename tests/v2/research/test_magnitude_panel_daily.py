@@ -48,7 +48,7 @@ def native(tmp_path_factory):
     for ticker in ("SYNTH", "SPY"):
         for index, day in enumerate(days):
             row = {name: float(i + 1) for i, name in enumerate(DAILY)}
-            row.update(ticker=ticker, date=pd.Timestamp(day), year=int(day[:4]), src_iv="synthetic",
+            row.update(ticker=ticker, date=pd.Timestamp(day), year=int(day[:4]), src_iv=f"synthetic-{index}-" + "x" * 256,
                        spot=100.0 + index, mcap_asof=pd.Timestamp(day), mcap_log=20.0)
             if day == "2024-08-13":
                 row.update(implied_move=0.0, mcap_asof=pd.Timestamp("2030-01-01"), mcap_log=999999.0)
@@ -103,7 +103,7 @@ def native(tmp_path_factory):
 def build(native, **changes):
     return daily.build_daily_blocks(native.repository, native.snapshot, native.stored, native.parent,
         **{"producer": native.producer, "policy": native.policy, "eligibility_metadata": native.metadata, "source_start": START,
-           "max_source_rows": 1000, "max_events": 10, **changes})
+           "max_source_rows": 1000, "max_events": 10, "max_object_bytes": 2**20, **changes})
 
 
 def test_vertical_native_sources_to_complete_partial_blocks(native, monkeypatch):
@@ -126,6 +126,7 @@ def test_vertical_native_sources_to_complete_partial_blocks(native, monkeypatch)
     counts = Counter((q.key_filter[0].values[0], q.key_filter[1].values[0]) for q in reads)
     assert counts == Counter({(ticker, year): 1 for ticker in ("SPY", "SYNTH") for year in (2022, 2023, 2024)})
     for row in result["rows"]:
+        assert row["row_id"] == content_hash({k: v for k, v in row.items() if k != "row_id"})
         assert row["daily_market"]["anchor"]["source_date"] <= row["source_session_ceiling"]
         assert row["daily_market"]["anchor"]["available_as_of"] is None
         assert max(row["spy"]["source_dates"]) <= row["source_session_ceiling"]
@@ -273,7 +274,7 @@ def test_snapshot_and_policy_drift_cannot_reuse_context(native):
     with pytest.raises(DataError) as caught:
         daily.build_daily_blocks(native.repository, replace(native.snapshot, calendar_version="changed"),
             native.stored, native.parent, producer=native.producer, policy=native.policy, eligibility_metadata=native.metadata,
-            source_start=START, max_source_rows=1000, max_events=10)
+            source_start=START, max_source_rows=1000, max_events=10, max_object_bytes=2**20)
     assert caught.value.code == "IDENTITY_CONFLICT"
     with pytest.raises(DataError, match="stage-two eligibility policy") as caught:
         build(native, policy=eligibility_policy.eligibility_policy(version="grouped_ticker_embargo.v1", embargo_days=0))
@@ -308,7 +309,7 @@ def test_unpinned_repository_refuses_before_access(native, monkeypatch):
     with pytest.raises(DataError, match="snapshot-pinned repository") as caught:
         daily.build_daily_blocks(repository, native.snapshot, native.stored, native.parent,
             producer=native.producer, policy=native.policy, eligibility_metadata=native.metadata,
-            source_start=START, max_source_rows=1000, max_events=10)
+            source_start=START, max_source_rows=1000, max_events=10, max_object_bytes=2**20)
     assert caught.value.code == "CONTRACT_MISMATCH"
 
 

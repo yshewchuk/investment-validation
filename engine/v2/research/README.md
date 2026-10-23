@@ -200,7 +200,7 @@ calendar plans and fresh per-arm pricing for exploratory fold reports.
 
 `magnitude_panel_daily.build_daily_blocks` constructs only reconstructed partial
 daily-market and SPY blocks from an exact parent panel plan and the opt-in grouped
-eligibility policy. It requires explicit source/event bounds, retains all horizons
+eligibility policy. It requires explicit source/event/physical-and-expanded byte bounds, retains all horizons
 of each retained event, and shares one value scan per ticker/year. Missing/late
 market cap and zero implied quotes stay null with explicit reasons. Its separate
 context binds producer-declared label bounds without verifying them; neither the
