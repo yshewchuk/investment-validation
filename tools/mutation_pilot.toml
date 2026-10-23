@@ -124,7 +124,8 @@ always_run = [
 timeout_constant = 2.0
 timeout_multiplier = 5.0
 # Parallel mutant workers. Match bounded_run's --cores. CI overrides it with
-# --max-children $(nproc) (4 on a standard GitHub runner).
+# --max-children $(nproc) (4 on a standard GitHub runner), except that
+# mutation_pilot caps data_incremental at one child regardless of the request.
 max_children = 2
 # Passed to every pytest invocation both drivers make (mutmut's per-mutant
 # pytest calls and gremlin_pilot's gremlins run). NEVER disable pytest-xdist

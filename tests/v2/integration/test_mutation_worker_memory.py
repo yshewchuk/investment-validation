@@ -32,9 +32,20 @@ def test_authored_worker_budget_ignores_environment_package_and_path(monkeypatch
     _instrument(monkeypatch, marker="lookalike")
     monkeypatch.setenv("MUTANT_UNDER_TEST", mode)
     monkeypatch.setattr(fixture.massive_daily, "__file__", "/tmp/mutants/massive_daily.py")
-    assert fixture._snapshot_worker_policy() is TEST_POLICY
+    assert fixture.snapshot_worker_policy() is TEST_POLICY
     monkeypatch.delattr(fixture.massive_daily, "_mutmut_mutated")
-    assert fixture._snapshot_worker_policy() is TEST_POLICY
+    assert fixture.snapshot_worker_policy() is TEST_POLICY
+    assert _memory(TEST_POLICY) == 384 << 20
+    assert _memory(DEFAULT_POLICY) == 512 << 20
+
+
+@pytest.mark.parametrize("modules", [{}, {"mutmut.mutation.trampoline": SimpleNamespace()},
+    {"mutmut.mutation.trampoline": SimpleNamespace(wrap_in_trampoline=None)}])
+def test_authored_worker_without_a_trampoline_keeps_its_budget(monkeypatch, modules):
+    monkeypatch.setattr(fixture, "sys", SimpleNamespace(modules=modules))
+    monkeypatch.delattr(fixture.massive_daily, "_mutmut_mutated", raising=False)
+    monkeypatch.setenv("MUTANT_UNDER_TEST", "stats")
+    assert fixture.snapshot_worker_policy() is TEST_POLICY
     assert _memory(TEST_POLICY) == 384 << 20
     assert _memory(DEFAULT_POLICY) == 512 << 20
 
@@ -42,7 +53,7 @@ def test_authored_worker_budget_ignores_environment_package_and_path(monkeypatch
 def test_only_instrumented_fixture_io_fetch_memory_changes(monkeypatch):
     _instrument(monkeypatch)
     monkeypatch.delenv("MUTANT_UNDER_TEST", raising=False)  # includes collection before stats mode
-    policy = fixture._snapshot_worker_policy()
+    policy = fixture.snapshot_worker_policy()
     assert _memory(policy) == 1 << 30
     assert _memory(TEST_POLICY) == 384 << 20
     assert _memory(DEFAULT_POLICY) == 512 << 20
@@ -54,24 +65,34 @@ def test_only_instrumented_fixture_io_fetch_memory_changes(monkeypatch):
 
 @pytest.mark.parametrize("instrumented", [False, True])
 @pytest.mark.parametrize("excess", [0, 1])
-def test_actual_watchdog_enforces_both_fixture_limits(monkeypatch, instrumented, excess):
+def test_actual_watchdog_enforces_both_fixture_limits(monkeypatch, tmp_path, instrumented, excess):
     with monkeypatch.context() as scope:
         _instrument(scope, marker="real" if instrumented else "lookalike")
-        limit = _memory(fixture._snapshot_worker_policy())
+        limit = _memory(fixture.snapshot_worker_policy())
     assert limit == (1 << 30 if instrumented else 384 << 20)
     observed = limit + excess  # synthetic observation, never allocate a GiB to test rejection
     claim = SimpleNamespace(attempt_id="synthetic", resources=SimpleNamespace(reserved_memory_bytes=limit))
-    running = executor.Running(claim, SimpleNamespace(poll=lambda: None), -1, (), 0)
     stops = []
     monkeypatch.setattr(executor, "observe", lambda *args: ((), True, observed))
     monkeypatch.setattr(executor, "persist_members", lambda *args: None)
-    monkeypatch.setattr(executor, "_read_result", lambda *args: None)
     monkeypatch.setattr(executor, "stop", lambda *args, **kwargs: stops.append(True))
-    status = executor.poll(None, running, boot_id="synthetic", clock=FakeClock())
-    assert running.failure == ("RESOURCE_LIMIT_EXCEEDED" if excess else None)
-    assert running.peak == observed and status["memory"] == observed
+    with (tmp_path / "worker-result").open("w+b") as result:
+        running = executor.Running(claim, SimpleNamespace(poll=lambda: None), result.fileno(), (), 0)
+        status = executor.poll(None, running, boot_id="synthetic", clock=FakeClock())
+        assert running.failure == ("RESOURCE_LIMIT_EXCEEDED" if excess else None)
+        assert running.peak == observed and status["memory"] == observed
+        assert stops == ([True] if excess else [])
+        assert status["done"] is False
+        # A later tick observes the worker and its whole family gone. This
+        # positive oracle rejects a completion calculation hardcoded to False.
+        exit_code = -15 if excess else 0
+        running.process = SimpleNamespace(poll=lambda: exit_code)
+        monkeypatch.setattr(executor, "observe", lambda *args: ((), False, 0))
+        status = executor.poll(None, running, boot_id="synthetic", clock=FakeClock())
+        assert status == {"done": True, "memory": 0, "exit_code": exit_code}
+        assert running.failure == ("RESOURCE_LIMIT_EXCEEDED" if excess else None)
+        assert running.peak == observed
     assert stops == ([True] if excess else [])
-    assert status["done"] is False
 
 
 @pytest.mark.parametrize("module,requested,expected", [
@@ -79,9 +100,9 @@ def test_actual_watchdog_enforces_both_fixture_limits(monkeypatch, instrumented,
     ("foundation", None, 2), ("foundation", 4, 4), ("foundation", 1, 1),
 ])
 def test_mutmut_child_cap_is_shard_specific(monkeypatch, tmp_path, module, requested, expected):
-    from tests.v2.integration.test_mutation_ci import _cmd_run
+    from tests.v2.integration.test_mutation_ci import run_mutation_command
 
-    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=1, module=module, max_children=requested)
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=1, module=module, max_children=requested)
     assert rc == 1 and len(calls) == 1
     command = calls[0][0]
     assert command[command.index("--max-children") + 1] == str(expected)

@@ -27,7 +27,7 @@ harness = support.harness
 forbid_network = support.forbid_network
 
 
-def _snapshot_worker_policy():
+def snapshot_worker_policy():
     from tests.ops_support import TEST_POLICY
 
     # Generated incremental.py compilation alone peaks near 674 MiB. Identify
@@ -617,7 +617,7 @@ def test_real_submission_service_worker_and_bounded_pinned_read(
             "runpy.run_module('engine.v2.ops.worker', run_name='__main__')"]
         return original(guarded, **(kwargs | {"env": environment}))
     monkeypatch.setattr(executor.subprocess, "Popen", launch)
-    service = Service(conn, tmp_path, registry(), _snapshot_worker_policy(), clock=clock,
+    service = Service(conn, tmp_path, registry(), snapshot_worker_policy(), clock=clock,
                       code_source=code_source, store_root=tmp_path / "synthetic-legacy")
     service.start()
     try:

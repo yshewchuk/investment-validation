@@ -4,9 +4,17 @@
 
 Standalone operator tools. `bounded_run.py` is the wrapper every heavy job runs under: CPU pinning, memory, swap and box-floor limits, test slots and the heavy reservation. Its module docstring is the flag reference; `engine/v2/ops/ARCHITECTURE.md` describes it as an executor adapter.
 
-## Mutation snapshot-worker budget (#581)
+## Mutation snapshot-worker budget
 
-`mutation_pilot.py` caps `data_incremental` at one mutmut child, even when a caller requests more. This contains concurrent reservations for its synthetic snapshot worker: only actual generated-code instrumentation permits that fixture's `io_fetch` reservation to rise from 384 MiB to 1 GiB. Authored-source and production policies, admission checks, watchdog enforcement and time budgets are unchanged. This is not a whole-run RSS limit or a larger GitHub runner. `tests/v2/integration/test_mutation_worker_memory.py` checks instrumentation identity, unchanged policies and rejection above both fixture ceilings.
+The mutation driver limits concurrent synthetic snapshot-worker reservations, not whole-run RSS. It neither provisions a larger runner nor changes time budgets.
+
+| Condition | Outcome |
+|---|---|
+| A caller runs the `data_incremental` mutation shard | At most one mutmut child runs, even when the requested or configured parallelism is higher. |
+| A caller runs another mutation shard | Requested or configured child parallelism is unchanged. |
+| The snapshot-worker fixture's imported data module has actual generated-code instrumentation | Only its `io_fetch` memory reservation rises to 1 GiB; every other resource-policy field is preserved. |
+| The fixture uses authored source, including environment flags or paths that merely resemble instrumentation | Its existing 384-MiB allowance remains; shared test and production policies are unchanged. |
+| Observed worker-family memory exceeds the selected reservation | The existing watchdog rejects it as `RESOURCE_LIMIT_EXCEEDED`; admission and enforcement are not bypassed. |
 
 ## `bounded_run.py`: disk-used ceiling (#1119)
 

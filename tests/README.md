@@ -477,7 +477,8 @@ nonzero, so a run that died part-way can never read as a completed one.
 The rest of this section is the mutmut workflow's own contract (the gremlins
 one is documented under "Backend: pytest-gremlins" below).
 `.github/workflows/mutation-mutmut.yml` runs mutmut per module with
-`--max-children $(nproc)` (4 on a standard runner). A job fails only when
+`--max-children $(nproc)` (4 on a standard runner), except `data_incremental`,
+which the driver caps at one child. A job fails only when
 mutmut's clean test run fails, its state cannot be exported, or the run hits
 its 330-minute step timeout.
 
