@@ -116,6 +116,26 @@ reviews:
           finding corrects a wrong claim, the fix must land at the right
           granularity (correct it, rewrite it at contract level, or remove
           it if inconsequential); more procedural prose is not a fix.
+        - For promised run/manifest behavior, compare run and manifest
+          identity, key derivation (legacy vs native keyspace), validation
+          inputs, the commit point, and partial-write/crash-midway
+          behavior against the mechanism. Flag a required check input the
+          described flow never passes, and a transition the mechanism
+          cannot perform.
+    - path: "guides/**"
+      instructions: |
+        Compare promised behavior against the mechanism: run/manifest
+        identity, key derivation and legacy/native keyspace, validation
+        inputs, the commit point, and partial-write/crash-midway behavior.
+        Flag a required check input the documented flow never passes, and a
+        transition the mechanism cannot perform.
+    - path: "docs/**"
+      instructions: |
+        Compare promised behavior against the mechanism: run/manifest
+        identity, key derivation and legacy/native keyspace, validation
+        inputs, the commit point, and partial-write/crash-midway behavior.
+        Flag a required check input the documented flow never passes, and a
+        transition the mechanism cannot perform.
     - path: "engine/v2/**"
       instructions: |
         Apply /ARCHITECTURE.md §5: a native row must never carry a
@@ -129,6 +149,22 @@ reviews:
         Path(__file__)-derived root. Check that the changed package's
         README Public-interface and Consumers sections were updated if any
         name or caller changed.
+    - path: "engine/v2/ops/**"
+      instructions: |
+        Failure containment: trace every raised exception to the actual
+        per-job or per-tick handler that catches it. Flag a failure in one
+        job, tick, or item that can stop unrelated work (an unguarded call
+        in a loop or batch whose exception escapes the supervisor or worker
+        loop). Under strict warning filters, flag a diagnostic that can
+        abort scoring, and a dedup key recorded before a diagnostic that
+        can still raise.
+    - path: "engine/data/**"
+      instructions: |
+        Scoring failure containment: trace exceptions from scoring to the
+        per-item or per-tick containment that actually handles them. Flag
+        one item's failure aborting unrelated items. Under strict warning
+        filters, flag a diagnostic that can abort scoring, and a dedup key
+        recorded before a diagnostic that can still raise.
     - path: "engine/v2/parity/**"
       instructions: |
         This package is the ONE comparator the Phase 4 checker and the
@@ -215,6 +251,12 @@ reviews:
 
         Same progress-logging check as for engine/** (AGENTS.md
         "Conventions"): rate by consequence, not as an automatic blocker.
+
+        Same durability and validation check as for engine/**:
+        temp-plus-replace fsync ordering (file before rename, directory
+        after), override keys validated before provider calls or durable
+        side effects, and no developer-local absolute paths in committed or
+        public artifacts.
     - path: "engine/**"
       instructions: |
         Long-running code must log progress (AGENTS.md "Conventions").
@@ -228,10 +270,23 @@ reviews:
         Rate by consequence, not as an automatic blocker: a multi-hour job
         with no progress output is a real finding; a two-second loop with
         none is not worth a comment.
+
+        Durability and validation (outside the dashboard packages, whose
+        publish and local-path checks are above): a durable temp-file-plus-
+        replace flow must fsync the file before the rename and the
+        containing directory after it. Validate every override key before a
+        provider call or durable side effect. Flag a developer-local
+        absolute path in committed or public artifacts.
     - path: "tools/**"
       instructions: |
         Same progress-logging check as for engine/** (AGENTS.md
         "Conventions"): rate by consequence, not as an automatic blocker.
+
+        Same durability and validation check as for engine/**:
+        temp-plus-replace fsync ordering (file before rename, directory
+        after), override keys validated before provider calls or durable
+        side effects, and no developer-local absolute paths in committed or
+        public artifacts.
     - path: "**/*.py"
       instructions: |
         Wrap standard tools; do not hand-roll standard formats
