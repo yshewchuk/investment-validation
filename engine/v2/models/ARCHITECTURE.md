@@ -55,6 +55,26 @@ Invalid shapes/nonfinite labels or predictions raise `ValueError`; the experimen
 caller translates fitting failures to `EXPERIMENT_VARIANT_FAILED`. The shared
 no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
 
+The add-only `magnitude_elasticnet_recipe.elasticnet_recipe` builds a closed,
+JSON-only research recipe without importing training or sklearn. Ordered selected
+columns and dictionary hash bind its preprocessing, fixed estimator parameters,
+seed and projection; the recipe hash is not a source/fold/candidate seal.
+`training.magnitude_elasticnet.fit_elasticnet_predictions` consumes that exact
+recipe and matching named numeric matrices, not an unselected full panel. It fits
+fresh median imputation, all-selected-column missing indicators, scaling and
+ElasticNet on supplied training rows only; sparse coefficient evidence distinguishes
+values from missing indicators and reports selected source columns in recipe order.
+Both no-fit guards precede input inspection. Invalid recipes, dimensions, infinities,
+negative/nonfinite labels, nonfinite results or nonconvergence raise `ValueError`;
+no partial result, retry, iteration increase, cache, I/O, transaction or publication
+occurs. Success reports iterations and dual gap; identical inputs/environment replay
+deterministically, but another call is a new fit, not journal replay.
+This foundation is intentionally unwired: the future v2 executor must enforce
+qualified inner/outer membership, resource/attempt caps and failure recording,
+choose subsets and regularization inside inner folds only, and bind source/row
+identities. It accepts no validation/outer targets for selection. It neither activates
+an ElasticNet grid nor changes v1 registrations, recipes or saved results.
+
 An automated nightly append cycle for the pool/residual/cutoff artifacts:
 release assembly is §2.1, staging §2.2, and the three-phase tick sidecar is §2.2.1; see #192.
 
