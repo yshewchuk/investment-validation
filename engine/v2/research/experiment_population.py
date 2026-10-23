@@ -6,6 +6,13 @@ from engine.v2.data import errors
 from engine.v2.research import progress
 from engine.v2.research._scan import read_table
 from engine.v2.research.experiment_trades import _exclude_holdouts, _holdout_context
+from engine.v2.research.snapshot_inputs import admit_snapshot
+
+
+def canonical_events(repository, snapshot):
+    """Read the six canonical metadata columns from a native snapshot reference."""
+    admit_snapshot(repository, snapshot)
+    return _canonical_events(repository, snapshot)
 
 
 def _canonical_events(repository, snapshot):
