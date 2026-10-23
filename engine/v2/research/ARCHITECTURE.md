@@ -46,7 +46,7 @@ Detached validation checks JSON types, closed event/request/recipe/producer sche
 native-derived folds, fragment lists and calendar-source consistency; repository
 preflight still authenticates membership and source truth.
 Reachability: no production path calls `magnitude_panel_plan`; it is a metadata-only
-foundation and authorizes no raw payload reads (`_POLICY["required_later"]` lists the gates).
+foundation and grants no authority to read raw payloads.
 Horizon cutoffs require native calendar reconstruction, not hashes alone.
 Public history interfaces `validate_context_identity`, `validate_event_forecasts`,
 `preflight_source` and `validate_features` share existing validation without new authority.
