@@ -90,6 +90,7 @@ __all__ = [
     "feature_model",
     "fold_start_of",
     "fit_fold",
+    "clear_prepared_frames",
     "build_forecasts",
     "build_producer",
     "write_forecasts",
@@ -579,6 +580,13 @@ def training_frames(panel: pd.DataFrame, model: FeatureModel):
     trainable = scorable[np.isfinite(target)].copy()
     _PREPARED[model.model_id] = (panel, scorable, trainable)
     return scorable.copy(), trainable.copy()
+
+
+def clear_prepared_frames() -> None:
+    """Drop the per-model prepared panel/scorable/trainable frames; the next
+    training_frames re-prepares.
+    """
+    _PREPARED.clear()
 
 
 # --------------------------------------------------------------------------

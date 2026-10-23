@@ -1699,7 +1699,11 @@ def run_nightly(
         del events, frontier, upcoming
         tier_result = None
         from engine.features import clear_panel_caches
+        from engine.data.features import tier4
+        from engine.data.normalize.n_daily import fetch_daily_index
         clear_panel_caches()
+        tier4.clear_prepared_frames()
+        fetch_daily_index.cache_clear()
         gc.collect()
         _log_rss("fetch-only before warm")
         from engine.dashboard import warm_serving

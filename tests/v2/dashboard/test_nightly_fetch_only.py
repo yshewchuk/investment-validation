@@ -220,6 +220,8 @@ def test_fetch_only_drops_frames_before_warm(tmp_path, monkeypatch):
     frame_refs: list = []
     rebuild_refs: list = []
     cache_clear_calls: list = []
+    prepared_clear_calls: list = []
+    daily_index_clear_calls: list = []
 
     class RebuildResult:
         elapsed_s = 1.0
@@ -247,9 +249,22 @@ def test_fetch_only_drops_frames_before_warm(tmp_path, monkeypatch):
     monkeypatch.setattr("engine.data.store.read_table", events_table)
 
     import engine.features as features_module
+    import engine.data.features.tier4 as tier4_module
+    import engine.data.normalize.n_daily as n_daily_module
 
     monkeypatch.setattr(features_module, "clear_panel_caches",
                         lambda: cache_clear_calls.append("cleared"))
+    monkeypatch.setattr(tier4_module, "clear_prepared_frames",
+                        lambda: prepared_clear_calls.append("cleared"))
+
+    def _fetch_daily_index(*args, **kwargs):
+        return {}
+
+    _fetch_daily_index.cache_clear = (
+        lambda: daily_index_clear_calls.append("cleared")
+    )
+    monkeypatch.setattr(n_daily_module, "fetch_daily_index",
+                        _fetch_daily_index)
 
     def warm(*args, **kwargs):
         fake.warm.append(args)
@@ -264,6 +279,13 @@ def test_fetch_only_drops_frames_before_warm(tmp_path, monkeypatch):
         )
         assert len(cache_clear_calls) == 1, (
             "clear_panel_caches was not called exactly once before warm"
+        )
+        assert len(prepared_clear_calls) == 1, (
+            "clear_prepared_frames was not called exactly once before warm"
+        )
+        assert len(daily_index_clear_calls) == 1, (
+            "fetch_daily_index.cache_clear was not called exactly once "
+            "before warm"
         )
         return {"folds": 0, "fitted": 0}
 
