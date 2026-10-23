@@ -197,7 +197,8 @@ def _runs(group, others):
 
 def _check_planned(planned, event, day, request):
     """The reader serves only the exact preflighted event, day and request."""
-    if (planned is None or planned[0].ticker != event.ticker or planned[2].time_min != day
+    if (planned is None or planned[0].ticker != getattr(event, "ticker", None)
+            or planned[2].time_min != day
             or planned[1] != request):
         raise errors.fail("HOLDOUT_ACCESS_DENIED", "event or request was not preflighted for this reader")
 
@@ -245,7 +246,8 @@ def _run_reader(repository, contract, plans, index):
         planned = plan_of.get(getattr(event, "event_id", None))
         if planned is None:
             raise errors.fail("HOLDOUT_ACCESS_DENIED", "event or request was not preflighted for this reader")
-        day = event.event_date.date().isoformat()
+        stamp = getattr(event, "event_date", None)
+        day = stamp.date().isoformat() if hasattr(stamp, "date") else None
         _check_planned(planned, event, day, request)
         if event.event_id in rows_by_event:
             return rows_by_event[event.event_id]

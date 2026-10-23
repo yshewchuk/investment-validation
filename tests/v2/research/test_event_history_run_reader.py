@@ -343,3 +343,14 @@ def test_cached_event_still_refuses_a_mismatched_day_or_request(source, monkeypa
     with pytest.raises(DataError, match="(?s)HOLDOUT_ACCESS_DENIED.*event or request was not preflighted for this reader"):
         read_rows(event, plans[1][1])
     assert len(opened) == base
+
+
+def test_planned_id_without_ticker_or_date_refuses_typed(source):
+    repository, snapshot = source
+    plans, read_rows = _plan(repository, snapshot)
+    event = plans[0][0]
+    for partial in (SimpleNamespace(event_id=event.event_id),
+                    SimpleNamespace(event_id=event.event_id, ticker=event.ticker),
+                    SimpleNamespace(event_id=event.event_id, event_date=event.event_date)):
+        with pytest.raises(DataError, match="(?s)HOLDOUT_ACCESS_DENIED.*event or request was not preflighted for this reader"):
+            read_rows(partial, plans[0][1])
