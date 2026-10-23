@@ -2,7 +2,7 @@
 import copy
 import json
 from dataclasses import replace
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 
@@ -13,7 +13,7 @@ from engine.v2.contracts.data import (
     TableContract,
     TimeInterval,
 )
-from engine.v2.data.errors import DataError
+from engine.v2.data.errors import DataError, fail
 from engine.v2.data.manifests import table_contract_hash
 from engine.v2.foundation import canonical_json, content_hash, to_document
 from engine.v2.research import magnitude_features
@@ -573,12 +573,12 @@ def test_public_calendar_requires_exact_snapshot_before_any_scan(native, monkeyp
     assert scans == []
 
 
-@pytest.mark.parametrize("boundary", ["source", "history", "calendar"])
+@pytest.mark.parametrize("boundary", ["source", "history", "preflight_source", "preflight_history", "calendar"])
 @pytest.mark.parametrize("snapshot_id", [[], {}, None, 0, False, "", " "])
 def test_malformed_snapshot_ids_refuse_before_resolution(native, monkeypatch, boundary, snapshot_id):
-    source, output, binding, producer, _ = native
+    source, output, binding, producer, context = native
     snapshots = [source.snapshot, output]
-    index = boundary == "history"
+    index = boundary.endswith("history")
     snapshots[index] = replace(snapshots[index], snapshot_id=snapshot_id)
     resolutions = []
     original = source.repository.resolve
@@ -593,6 +593,8 @@ def test_malformed_snapshot_ids_refuse_before_resolution(native, monkeypatch, bo
     with pytest.raises(DataError, match=code):
         if boundary == "calendar":
             magnitude_features.calendar_input(source.repository, snapshots[0])
+        elif boundary.startswith("preflight_"):
+            plan.preflight_context(source.repository, *snapshots, context)
         else:
             plan.build_context(source.repository, *snapshots, binding, producer=producer)
     assert resolutions == scans == []
@@ -1191,3 +1193,124 @@ def test_preflight_snapshot_document_depth_is_a_typed_refusal(native, snapshot_a
     # Context validation remains valid; only serialization of the explicit snapshot is deep.
     with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
         plan.preflight_context(source.repository, snapshots["source"], snapshots["history"], context)
+
+
+@pytest.mark.parametrize("key", ["source_snapshot", "history_snapshot"])
+@pytest.mark.parametrize("snapshot_id", ["", " "])
+def test_rehashed_blank_snapshot_ids_refuse_detached_boundaries(native, key, snapshot_id):
+    context = copy.deepcopy(native[-1])
+    context[key]["snapshot_id"] = snapshot_id
+    if key == "source_snapshot":
+        binding = context["history_context"]
+        binding["source_snapshot"]["snapshot_id"] = snapshot_id
+        binding["temporal_plan"]["snapshot_id"] = snapshot_id
+        binding["temporal_plan"]["calendar_input"]["snapshot_id"] = snapshot_id
+        context["forecast_calendar_source"]["snapshot_id"] = snapshot_id
+    _context_hash(context)
+    for validate in (lambda: plan.validate_context(context),
+                     lambda: table.validate_rows(_rows(context), context)):
+        with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+            validate()
+
+
+@pytest.mark.parametrize("key", ["context", "history", "temporal"])
+def test_isolated_outer_digest_guards(native, key):
+    context = copy.deepcopy(native[-1])
+    binding = context["history_context"]
+    if key == "context":
+        context["context_id"] = "sha256:" + "0" * 64
+    elif key == "history":
+        binding["context_id"] = "sha256:" + "0" * 64
+        _hash(context, "context_id")
+    else:
+        binding["temporal_plan"]["plan_id"] = "sha256:" + "0" * 64
+        _hash(binding, "context_id")
+        _hash(context, "context_id")
+    # All enclosing digests and every row binding agree; only the selected digest is stale.
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        plan.validate_context(context)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        table.validate_rows(_rows(context), context)
+
+
+def test_public_forecast_validator_returns_latest_causal_ceiling():
+    event = {"event_date": "2024-06-17", "session": "BMO"}
+    event["forecasts"] = [{**event, "horizon_sessions": horizon, "source_session_ceiling": ceiling}
+        for horizon, ceiling in ((3, "2024-06-12"), (1, "2024-06-14"), (5, "2024-06-10"))]
+    assert history.validate_event_forecasts(event, "2024-01-01", date(2024, 6, 17)) == "2024-06-14"
+    event["forecasts"][1]["source_session_ceiling"] = "2024-06-17"
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        history.validate_event_forecasts(event, "2024-01-01", date(2024, 6, 17))
+
+
+def test_public_feature_validator_rejects_matching_negative_count():
+    row = {name: None for name, _, _ in _EXPECTED_FIELDS[:11]}
+    row["n_prior"] = 0
+    assert history.validate_features(row, 0) is None
+    row["n_prior"] = -1
+    # Matching count and missingness isolate the public nonnegative-count guard.
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        history.validate_features(row, -1)
+
+
+def test_history_digest_refusals_distinguish_detached_panel_from_repository_binding(native):
+    source, output, binding, producer, context = native
+    binding = copy.deepcopy(binding)
+    binding["context_id"] = "sha256:" + "0" * 64
+    changed = copy.deepcopy(context)
+    changed["history_context"] = binding
+    _hash(changed, "context_id")
+    with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
+        history.validate_context_identity(binding)
+    with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
+        plan.build_context(source.repository, source.snapshot, output, binding, producer=producer)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        plan.validate_context(changed)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        plan.preflight_context(source.repository, source.snapshot, output, changed)
+
+
+@pytest.mark.parametrize("boundary", ["build", "preflight"])
+@pytest.mark.parametrize("upstream,code", [("resolve", "MANIFEST_CORRUPT"),
+    ("source", "POPULATION_COLLAPSED"), ("source", "HOLDOUT_ACCESS_DENIED"),
+    ("calendar", "CALENDAR_UNAVAILABLE")])
+def test_panel_boundaries_preserve_native_repository_refusals(native, monkeypatch, capsys, boundary, upstream, code):
+    source, output, binding, producer, context = native
+    _metadata_only(monkeypatch, source.repository)
+    refusal = fail(code, "DO_NOT_LOG_SOURCE_DETAILS")
+
+    def refuse(*args, **kwargs):
+        raise refusal
+
+    # Fault injection tests composition/propagation, not how a native catalog reaches that condition.
+    owner, attribute = {"resolve": (source.repository, "resolve"),
+        "source": (history, "preflight_source"), "calendar": (plan, "calendar_input")}[upstream]
+    monkeypatch.setattr(owner, attribute, refuse)
+    with pytest.raises(DataError) as caught:
+        if boundary == "build":
+            plan.build_context(source.repository, source.snapshot, output, binding, producer=producer)
+        else:
+            plan.preflight_context(source.repository, source.snapshot, output, context)
+    assert caught.value is refusal
+    captured = capsys.readouterr()
+    assert captured.out == "" and "DO_NOT_LOG_SOURCE_DETAILS" not in captured.err
+    if upstream != "resolve":
+        assert f"; refused {code}" in captured.err
+
+
+@pytest.mark.parametrize("boundary", ["clocks", "rows"])
+def test_panel_cohort_stages_log_safe_typed_refusal(native, capsys, boundary):
+    context = copy.deepcopy(native[-1])
+    rows = _rows(context)
+    if boundary == "clocks":
+        context["history_context"]["temporal_plan"]["events"][0]["session"] = "DO_NOT_LOG_ROW_DETAILS"
+        _context_hash(context)
+    else:
+        rows[0]["ret5"] = "DO_NOT_LOG_ROW_DETAILS"
+        _hash(rows[0], "row_id")
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        table.validate_rows(rows, context)
+    captured = capsys.readouterr()
+    assert captured.out == "" and "DO_NOT_LOG_ROW_DETAILS" not in captured.err
+    failed = [line for line in captured.err.splitlines() if f"[panel {boundary}] failed" in line]
+    assert len(failed) == 1 and "; refused CONTRACT_MISMATCH" in failed[0]

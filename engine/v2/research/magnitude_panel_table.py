@@ -159,9 +159,9 @@ def validate_rows(rows, context):
     expected = {(event["event_id"], cutoff["horizon_sessions"]): (event, cutoff)
         for event in context["history_context"]["temporal_plan"]["events"] for cutoff in event["forecasts"]}
     seen = set()
-    try:
-        progress = Progress("panel rows", len(expected))
-        with stage("panel rows"):
+    with stage("panel rows", report_refusals=True):
+        try:
+            progress = Progress("panel rows", len(expected))
             for row in rows:
                 key = row["event_id"], row["horizon_sessions"]
                 if (set(row) != set(METADATA) | set(FEATURES) or key in seen or key not in expected
@@ -182,5 +182,5 @@ def validate_rows(rows, context):
                 progress.tick()
             if seen != set(expected):
                 raise ValueError
-    except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):
-        raise errors.fail("CONTRACT_MISMATCH", "research panel rows differ from their closed contract") from None
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):
+            raise errors.fail("CONTRACT_MISMATCH", "research panel rows differ from their closed contract") from None

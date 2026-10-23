@@ -180,7 +180,7 @@ closed admission fragment shapes; only repository preflight authenticates their 
 This foundation has no CLI, materializer, panel reader, model or search integration.
 Raw market/price payload reads remain **not authorized** by its returned plan;
 this API does not implement raw-source protected-event policy or grant read authority.
-Session dates alone never establish publication evidence. See the stage-2
+Session dates alone never establish publication evidence. See the
 [stage-2 design](../../../experiments/SUPER_SIZE/STAGE2_DESIGN.md).
 
 The manual no-ledger `experiments.v2_gate_variant` CLI consumes

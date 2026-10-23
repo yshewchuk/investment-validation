@@ -4,7 +4,6 @@ from __future__ import annotations
 import math
 import weakref
 
-from engine.v2.contracts.data import SnapshotRef
 from engine.v2.data import errors
 from engine.v2.foundation import content_hash, market_calendar
 from engine.v2.foundation.experiment_holdouts import _calendar_date
@@ -12,6 +11,7 @@ from engine.v2.research._scan import read_table
 from engine.v2.research.event_history import load_event_history
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.magnitude_inputs import forecast_cutoff, magnitude_recipe
+from engine.v2.research.snapshot_inputs import snapshot_reference
 
 HISTORY_FEATURE_COLUMNS = ("n_prior", "mean_prior_move", "mean_prior_abs_move",
                            *(f"ema{span}_prior_{kind}" for span in (2, 4, 8, 12) for kind in ("move", "abs_move")))
@@ -89,9 +89,7 @@ def load_magnitude_history(repository, snapshot, *, event_id, as_of_month,
 
 def calendar_input(repository, snapshot):
     """Return observed session metadata only for an exact committed snapshot."""
-    if (not isinstance(snapshot, SnapshotRef) or not isinstance(snapshot.snapshot_id, str)
-            or not snapshot.snapshot_id.strip()):
-        raise errors.fail("SNAPSHOT_UNRESOLVED", "an exact committed calendar snapshot is required")
+    snapshot_reference(snapshot)
     if repository.resolve(snapshot.snapshot_id) != snapshot:
         raise errors.fail("SNAPSHOT_UNRESOLVED", "calendar snapshot differs from committed identity")
     return _calendar_input(repository, snapshot)

@@ -24,6 +24,7 @@ from engine.v2.research.magnitude_inputs import (
 )
 from engine.v2.research.magnitude_panel_table import canonical_day, recipe
 from engine.v2.research.progress import Progress, stage
+from engine.v2.research.snapshot_inputs import snapshot_reference
 
 _KEYS = {"schema_version", "source_snapshot", "history_snapshot", "history_context",
          "feature_recipe", "availability_lane", "producer", "admission", "context_id", "forecast_calendar",
@@ -147,14 +148,17 @@ def _clocks(binding, calendar):
         raise ValueError
     clocks = {}
     progress = Progress("panel clocks", len(events))
-    with stage("panel clocks"):
-        for event in events:
-            _event_schema(event)
-            day = canonical_day(event["event_date"])
-            history.validate_event_forecasts(event, binding["history_start"], date.fromisoformat(day))
-            for cutoff in event["forecasts"]:
-                _cutoff(cutoff, event, calendar, clocks)
-            progress.tick()
+    with stage("panel clocks", report_refusals=True):
+        try:
+            for event in events:
+                _event_schema(event)
+                day = canonical_day(event["event_date"])
+                history.validate_event_forecasts(event, binding["history_start"], date.fromisoformat(day))
+                for cutoff in event["forecasts"]:
+                    _cutoff(cutoff, event, calendar, clocks)
+                progress.tick()
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError, errors.DataError):
+            raise errors.fail("CONTRACT_MISMATCH", "invalid panel clocks") from None
     if len({event["event_id"] for event in events}) != len(events):
         raise ValueError
     _plan_metadata(plan, binding["source_snapshot"])
@@ -230,15 +234,17 @@ def validate_context(context):
                 or context["availability_lane"] != "reconstructed"):
             raise ValueError
         for key in ("source_snapshot", "history_snapshot"):
-            from_document(SnapshotRef, context[key])
+            _panel_snapshot(from_document(SnapshotRef, context[key]))
         _identity_parts(context)
     except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError, errors.DataError):
         raise errors.fail("CONTRACT_MISMATCH", "invalid research panel context") from None
 
 
-def _snapshot_has_id(snapshot):
-    return (isinstance(snapshot, SnapshotRef) and isinstance(snapshot.snapshot_id, str)
-            and bool(snapshot.snapshot_id.strip()))
+def _panel_snapshot(snapshot):
+    try:
+        snapshot_reference(snapshot)
+    except errors.DataError:
+        raise errors.fail("CONTRACT_MISMATCH", "invalid panel snapshot reference") from None
 
 
 def build_context(repository, source_snapshot, history_snapshot, history_context, *,
@@ -253,18 +259,19 @@ def build_context(repository, source_snapshot, history_snapshot, history_context
         _producer(producer)
     except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):
         raise errors.fail("CONTRACT_MISMATCH", "invalid panel producer metadata") from None
-    if (not _snapshot_has_id(source_snapshot) or not _snapshot_has_id(history_snapshot)
-            or type(history_context) is not dict):
+    for snapshot in (source_snapshot, history_snapshot):
+        _panel_snapshot(snapshot)
+    if type(history_context) is not dict:
         raise errors.fail("CONTRACT_MISMATCH", "explicit panel snapshot/context types required")
     if (repository.resolve(source_snapshot.snapshot_id) != source_snapshot
             or repository.resolve(history_snapshot.snapshot_id) != history_snapshot
             or history_context.get("source_snapshot") != to_document(source_snapshot)):
         raise errors.fail("IDENTITY_CONFLICT", "panel requires exact source and history snapshots")
-    with stage("panel source preflight"):
+    with stage("panel source preflight", report_refusals=True):
         _, plans = history.preflight_source(repository, source_snapshot, history_context)
-    with stage("panel stored preflight"):
+    with stage("panel stored preflight", report_refusals=True):
         history.preflight_stored(repository, history_snapshot, history_context)
-    with stage("panel calendar metadata"):
+    with stage("panel calendar metadata", report_refusals=True):
         calendar, calendar_source = calendar_input(repository, source_snapshot)
     if calendar_source != history_context["temporal_plan"]["calendar_input"]:
         raise errors.fail("IDENTITY_CONFLICT", "panel calendar source differs from history")
@@ -292,8 +299,8 @@ def build_context(repository, source_snapshot, history_snapshot, history_context
 def preflight_context(repository, source_snapshot, history_snapshot, context):
     """Recheck the complete metadata plan; no cache or implicit refresh is allowed."""
     validate_context(context)
-    if not all(isinstance(value, SnapshotRef) for value in (source_snapshot, history_snapshot)):
-        raise errors.fail("CONTRACT_MISMATCH", "explicit panel snapshot types required")
+    for snapshot in (source_snapshot, history_snapshot):
+        _panel_snapshot(snapshot)
     try:
         if (context["source_snapshot"] != to_document(source_snapshot)
                 or context["history_snapshot"] != to_document(history_snapshot)):

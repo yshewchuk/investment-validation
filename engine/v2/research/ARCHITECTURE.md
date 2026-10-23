@@ -35,7 +35,7 @@ H/HM/HMO raw dictionary, excluding learned Tier4 outputs and current-event outco
 Rows require exact cohort coverage, finite typed values, missing/quote status,
 and per-observation date, knowledge mode, row/fragment identity and content digest.
 The context is reconstructed-only; historical inputs cannot be relabeled observed.
-Each source `content_hash` is the canonical SHA-256 of that contributing observation.
+Each source declares a canonical SHA-256 `content_hash` for its contributing observation.
 Pure validation checks digest syntax/binding, not source membership or value equality.
 
 `magnitude_panel_plan` reconstructs protected population/calendar metadata and checks
@@ -56,16 +56,20 @@ refusing with `CONTRACT_MISMATCH`. No raw payload permission is issued;
 raw-source protected-event policy is not implemented by this plan. There is no writer,
 materializer, CLI, model or registration integration.
 
+All panel snapshot boundaries use shared `snapshot_inputs.snapshot_reference` shape checks.
+Detached panel validation, including nested history, uses `CONTRACT_MISMATCH`;
+builder/repository reconstruction retains native refusals instead of relabeling them.
+
 | Condition | Outcome |
 | --- | --- |
-| Invalid panel identity/schema, snapshot, dictionary, calendar, cutoff, row or missingness | `CONTRACT_MISMATCH` |
+| Invalid detached panel identity/schema, nested digest/folds, snapshot, calendar, cutoff or row | `CONTRACT_MISMATCH` |
 | Malformed or forged direct calendar snapshot | `SNAPSHOT_UNRESOLVED` |
 | Empty native observed session calendar | `CALENDAR_UNAVAILABLE` |
-| History digest, snapshot binding or recomputed admission differs | `IDENTITY_CONFLICT` |
+| Builder history digest, committed snapshot binding or recomputed admission differs | `IDENTITY_CONFLICT` |
 | Protected requested event or unprovable physical isolation | `HOLDOUT_ACCESS_DENIED` |
 | Snapshot ID is absent from the native catalog | `SNAPSHOT_NOT_FOUND` |
 | Catalog snapshot/manifest identity is inconsistent | `MANIFEST_CORRUPT` |
-| Admitted temporal population lacks required training/evaluation coverage | `POPULATION_COLLAPSED` |
+| Repository-reconstructed temporal population lacks training/evaluation coverage | `POPULATION_COLLAPSED` |
 
 ## Primary contracts and public interfaces
 
