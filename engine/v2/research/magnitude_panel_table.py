@@ -124,9 +124,16 @@ def _quote(quote, block, implied):
         raise ValueError
 
 
+_MAX_LINEAGE_BYTES = 1024 * 1024
+
+
 def _lineage(row):
     """Validate every block, with explicit unavailable values and quote status."""
-    blocks = json.loads(row["lineage"])
+    lineage = row["lineage"]
+    if (type(lineage) is not str or len(lineage) > _MAX_LINEAGE_BYTES
+            or len(lineage.encode("utf-8")) > _MAX_LINEAGE_BYTES):
+        raise ValueError
+    blocks = json.loads(lineage)
     if set(blocks) != set(BLOCKS) or canonical_json(blocks) != row["lineage"]:
         raise ValueError
     for block in BLOCKS:

@@ -1614,3 +1614,32 @@ def test_nonplain_availability_lane_refuses_before_normalization(native, monkeyp
             plan.preflight_context(source.repository, source.snapshot, output, context)
     assert (caught.value.code, caught.value.problem.message) == ("CONTRACT_MISMATCH", message)
     assert scans == []
+
+
+@pytest.mark.parametrize("extra", [-1, 0, 1])
+@pytest.mark.parametrize("character", ["x", "é"])
+def test_lineage_utf8_limit_accepts_boundary_and_refuses_before_decode(native, monkeypatch, extra, character):
+    rows = _rows(native[-1])
+    row = rows[0]
+    blocks = json.loads(row["lineage"])
+    budget = 1_048_576 + extra - len(row["lineage"].encode("utf-8"))
+    width = len(character.encode("utf-8"))
+    blocks["history"]["sources"][0]["row_id"] += character * (budget // width) + "x" * (budget % width)
+    row["lineage"] = canonical_json(blocks)
+    assert len(row["lineage"].encode("utf-8")) == 1_048_576 + extra
+    _hash(row, "row_id")
+    decoded = []
+    original = json.loads
+
+    def tracked(text):
+        decoded.append(len(text.encode("utf-8")))
+        return original(text)
+
+    monkeypatch.setattr(table.json, "loads", tracked)
+    if extra > 0:
+        with pytest.raises(DataError, match="^CONTRACT_MISMATCH: research panel rows differ from their closed contract$"):
+            table.validate_rows(rows, native[-1])
+        assert decoded == []
+    else:
+        assert table.validate_rows(rows, native[-1]) is None
+        assert decoded[0] == 1_048_576 + extra and len(decoded) == len(rows)

@@ -66,7 +66,8 @@ Detached validation uses `CONTRACT_MISMATCH`; repository reconstruction retains 
 | Malformed builder producer/snapshot, non-plain history metadata or invalid lane | `CONTRACT_MISMATCH` |
 | Native history identity/digest or committed binding differs | `IDENTITY_CONFLICT` |
 | Builder history metadata exceeds structural depth | Existing native `IDENTITY_CONFLICT` |
-| Caught structural/serialization error in direct `validate_context_identity` / `preflight_source` | `CONTRACT_MISMATCH` / `IDENTITY_CONFLICT`, respectively; native `DataError` passes through |
+| Structurally invalid direct history identity / source-admission input | `CONTRACT_MISMATCH` / `IDENTITY_CONFLICT`, respectively; native identity/safety refusals remain unchanged |
+| Lineage is not plain UTF-8 text or exceeds 1 MiB UTF-8 per row | `CONTRACT_MISMATCH` before JSON decoding |
 | Invalid `validate_event_forecasts`, `validate_features`, `canonical_day` or feature subset input | `CONTRACT_MISMATCH` |
 | Protected requested event or unprovable physical isolation | `HOLDOUT_ACCESS_DENIED` |
 | Snapshot ID is absent from the native catalog | `SNAPSHOT_NOT_FOUND` |
