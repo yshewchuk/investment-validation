@@ -59,13 +59,14 @@ materializer, CLI, model or registration integration.
 All panel snapshot boundaries use shared `snapshot_inputs.snapshot_reference` shape checks.
 Detached panel validation, including nested history, uses `CONTRACT_MISMATCH`;
 builder/repository reconstruction retains native refusals instead of relabeling them.
+History identity helpers retain `IDENTITY_CONFLICT` for invalid binding shape or digest.
 
 | Condition | Outcome |
 | --- | --- |
 | Invalid detached panel identity/schema, nested digest/folds, snapshot, calendar, cutoff or row | `CONTRACT_MISMATCH` |
 | Malformed or forged direct calendar snapshot | `SNAPSHOT_UNRESOLVED` |
 | Empty native observed session calendar | `CALENDAR_UNAVAILABLE` |
-| Builder history digest, committed snapshot binding or recomputed admission differs | `IDENTITY_CONFLICT` |
+| Builder history identity/shape, committed snapshot binding or recomputed admission differs | `IDENTITY_CONFLICT` |
 | Protected requested event or unprovable physical isolation | `HOLDOUT_ACCESS_DENIED` |
 | Snapshot ID is absent from the native catalog | `SNAPSHOT_NOT_FOUND` |
 | Catalog snapshot/manifest identity is inconsistent | `MANIFEST_CORRUPT` |

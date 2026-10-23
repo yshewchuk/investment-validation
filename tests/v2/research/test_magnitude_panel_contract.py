@@ -193,6 +193,7 @@ def test_complete_nullable_rows_and_all_horizons_are_valid(native):
 @pytest.mark.parametrize("change", [
     {"schema_version": "research_magnitude_panel.v2"}, {"extra": 1}, {"context_id": "wrong"},
     {"history_context_id": "wrong"}, {"event_id": "unknown"}, {"cutoff_id": "wrong"},
+    {"event_date": "2020-01-01"},
     {"n_prior": None}, {"n_prior": -1},
     {"n_prior": 1.5}, {"n_prior": True}, {"ret5": "1"}, {"implied_move": 0.0}, {"implied_move": -1.0},
     {"source_session_ceiling": "2099-01-01"}, {"row_id": "wrong"},
@@ -1314,3 +1315,123 @@ def test_panel_cohort_stages_log_safe_typed_refusal(native, capsys, boundary):
     assert captured.out == "" and "DO_NOT_LOG_ROW_DETAILS" not in captured.err
     failed = [line for line in captured.err.splitlines() if f"[panel {boundary}] failed" in line]
     assert len(failed) == 1 and "; refused CONTRACT_MISMATCH" in failed[0]
+
+
+@pytest.mark.parametrize("kind", ["missing_temporal", "untyped_temporal", "missing_start"])
+def test_malformed_history_binding_preserves_native_refusal_boundary(native, monkeypatch, kind):
+    source, output, binding, producer, context = native
+    binding = copy.deepcopy(binding)
+    if kind == "missing_temporal":
+        del binding["temporal_plan"]
+    elif kind == "untyped_temporal":
+        binding["temporal_plan"] = []
+    else:
+        del binding["history_start"]
+    _hash(binding, "context_id")
+    changed = copy.deepcopy(context)
+    changed["history_context"] = binding
+    _hash(changed, "context_id")
+    _metadata_only(monkeypatch, source.repository)
+    # Native identity validation owns catalog-binding refusals, including its closed minimum shape.
+    with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
+        history.validate_context_identity(binding)
+    with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
+        plan.build_context(source.repository, source.snapshot, output, binding, producer=producer)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        plan.validate_context(changed)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        plan.preflight_context(source.repository, source.snapshot, output, changed)
+
+
+@pytest.mark.parametrize("path,value", [
+    (("history_context", "schema_version"), "magnitude_materialization.v999"),
+    (("history_context", "source_snapshot", "source_priority_version"), "different-priority"),
+    (("history_context", "feature_recipe"), {}),
+    (("history_context", "temporal_plan", "schema_version"), "magnitude_temporal_plan.v999"),
+    (("history_context", "temporal_plan", "snapshot_id"), "different-snapshot"),
+    (("admission", "raw_payload_access"), "authorized"),
+    (("admission", "raw_policy_status"), "authorized"),
+    (("admission", "required_later"), []),
+])
+def test_isolated_detached_identity_and_admission_literals(native, path, value):
+    context = copy.deepcopy(native[-1])
+    parent = context
+    for key in path[:-1]:
+        parent = parent[key]
+    parent[path[-1]] = value
+    _context_hash(context)
+    # All enclosing hashes and generated row pins agree; only this semantic field differs.
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        plan.validate_context(context)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        table.validate_rows(_rows(context), context)
+
+
+@pytest.mark.parametrize("kind", ["order", "duplicate", "invalid_day", "observed_through"])
+def test_calendar_shape_with_consistent_cutoff_hashes(native, kind):
+    context = copy.deepcopy(native[-1])
+    calendar = context["forecast_calendar"]
+    if kind == "order":
+        calendar["days"][0:2] = reversed(calendar["days"][0:2])
+    elif kind == "duplicate":
+        calendar["days"].insert(0, calendar["days"][0])
+    elif kind == "invalid_day":
+        calendar["days"][0] = calendar["days"][0][:8] + "00"
+    else:
+        calendar["observed_through"] = calendar["days"][-2]
+    calendar_id = content_hash(calendar)
+    for event in context["history_context"]["temporal_plan"]["events"]:
+        for cutoff in event["forecasts"]:
+            cutoff["calendar_id"] = calendar_id
+    _context_hash(context)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        plan.validate_context(context)
+    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        table.validate_rows(_rows(context), context)
+
+
+def test_builder_calendar_source_comparison_has_native_identity_refusal(native, monkeypatch):
+    source, output, binding, producer, _ = native
+    _metadata_only(monkeypatch, source.repository)
+    original = plan.calendar_input
+    reached = []
+
+    def changed_calendar_metadata(*args):
+        calendar, metadata = original(*args)
+        metadata = copy.deepcopy(metadata)
+        metadata["objects"][0]["content_hash"] = "sha256:" + "f" * 64
+        reached.append(metadata)
+        return calendar, metadata
+
+    # Inject only the calendar metadata result, after real source/stored admission succeeds.
+    monkeypatch.setattr(plan, "calendar_input", changed_calendar_metadata)
+    with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
+        plan.build_context(source.repository, source.snapshot, output, binding, producer=producer)
+    assert len(reached) == 1
+
+
+@pytest.mark.parametrize("value", [-2.5, 0.0])
+def test_signed_history_returns_and_streak_accept_negative_and_zero(native, value):
+    rows = _populated_rows(native[-1])
+    for row in rows:
+        for field in ("mean_prior_move", "ema2_prior_move", "ema4_prior_move", "ema8_prior_move",
+                      "ema12_prior_move", "dist_high", "dist_ema", "ret5", "ret10", "ret20",
+                      "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252"):
+            row[field] = value
+        row["signed_streak"] = int(value)
+        _hash(row, "row_id")
+    assert table.validate_rows(rows, native[-1]) is None
+
+
+@pytest.mark.parametrize("block", ["prior_events", "runup", "spy", "daily_market", "all_optional"])
+def test_unavailable_optional_inputs_need_no_invented_source(native, block):
+    rows = _rows(native[-1])
+    for row in rows:
+        blocks = json.loads(row["lineage"])
+        for name in (blocks.keys() - {"history"}) if block == "all_optional" else [block]:
+            blocks[name]["sources"] = []
+            if name == "daily_market":
+                blocks[name]["quote_status"] = "unavailable"
+        row["lineage"] = canonical_json(blocks)
+        _hash(row, "row_id")
+    assert table.validate_rows(rows, native[-1]) is None

@@ -389,7 +389,7 @@ def read_stored_for_events(repository, snapshot, context, *, event_ids, columns)
 
 
 def validate_context_identity(context):
-    """Validate a detached history identity; this grants no repository read authority."""
+    """Check detached identity, retaining native IDENTITY_CONFLICT refusals; no read authority."""
     try:
         _names(context)
     except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):

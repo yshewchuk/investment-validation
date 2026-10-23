@@ -33,7 +33,7 @@ _UNITS = {"signed_streak": "count", "spy_vol20_rel252": "ratio", "spot": "usd",
 
 
 def feature_dictionary(subset="HMO"):
-    """Ordered raw aliases; unknown native units stay unknown, never guessed."""
+    """Fixed ordered aliases: native history units, declared overrides, otherwise percent."""
     if not isinstance(subset, str) or subset not in SETS:
         raise errors.fail("CONTRACT_MISMATCH", "unknown panel feature subset")
     history = {column.name: column for column in HISTORY_CONTRACT.columns}
