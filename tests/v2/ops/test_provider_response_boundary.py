@@ -1,5 +1,6 @@
 """Compatibility and import boundaries between providers and orchestration."""
 import ast
+import os
 from pathlib import Path
 
 from engine.v2.ops import incremental_data, provider_response
@@ -35,7 +36,9 @@ def test_existing_retry_policy_accepts_leaf_outcomes():
 
 
 def _source_imports(relative_path):
-    tree = ast.parse((ROOT / relative_path).read_text(encoding="utf-8"))
+    # Dependency contracts describe authored code, not mutmut's wrappers.
+    source_root = Path(os.environ.get("MUTATION_PILOT_SOURCE_ROOT", ROOT))
+    tree = ast.parse((source_root / relative_path).read_text(encoding="utf-8"))
     modules, targets = set(), set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

@@ -6,6 +6,7 @@ Pure stdlib layer-0.5 code: hand-built canonical session strings and fixed
 from __future__ import annotations
 
 import ast
+import os
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -427,7 +428,10 @@ def test_numpy_datetime64_nat_refused(calendar: CalendarSessions) -> None:
 
 
 def test_module_imports_are_stdlib_only() -> None:
-    source = MODULE_PATH.read_text(encoding="utf-8")
+    # This policy constrains authored source, not mutmut's generated wrappers.
+    # Behavioural tests above still import and exercise the instrumented module.
+    source_root = Path(os.environ.get("MUTATION_PILOT_SOURCE_ROOT", ROOT))
+    source = (source_root / MODULE_PATH.relative_to(ROOT)).read_text(encoding="utf-8")
     # Sharing calendar validation adds a small helper; retain a bounded module.
     assert len(source.splitlines()) < 210
     tree = ast.parse(source, filename=str(MODULE_PATH))

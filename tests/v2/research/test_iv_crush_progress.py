@@ -111,6 +111,8 @@ def test_real_iv_stages_ticks_refusals_and_metadata_only_preflight(tmp_path, mon
         expected = [
             "  [IV target admission] start, peak RSS 12 MB",
             "  [IV population] selection=" + ("explicit" if mode == "preflight" else "bulk"),
+            "  [read earnings_events rows] start, peak RSS 12 MB",
+            "  [read earnings_events rows] done in 0s, peak RSS 12 MB",
             "  [IV population] admitted=2; holdout_or_ambiguous_excluded=0; cutoff_excluded=0; cutoff="
             + ("none (preflight)" if mode == "preflight" else "2024-07-01"),
             "  [plan event targets] start, peak RSS 12 MB",
@@ -143,7 +145,7 @@ def test_broken_stderr_preserves_iv_result_and_original_refusal(tmp_path, monkey
         with pytest.raises(DataError) as caught:
             load(repository, snapshot, labels_before="2024-05-08")
         exact_problem(caught, "EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
-        assert len(attempts) == 18
+        assert len(attempts) == 22
 
 
 @pytest.mark.parametrize("selection", ["bulk", "explicit_future", "explicit_holdout", "explicit_holdouts"])
@@ -206,3 +208,59 @@ def test_input_refusal_reason_is_logged_without_repository_access(capsys, operat
     assert captured.out == ""
     assert captured.err.rstrip().endswith("; refused CONTRACT_MISMATCH")
     assert reason not in captured.err
+
+
+@pytest.mark.parametrize("mode", ["bulk", "explicit", "preflight", "holdout", "short"])
+def test_population_batches_report_before_scan_exhaustion(tmp_path, monkeypatch, capsys, mode):
+    events = [history_event(day, protected=mode == "holdout" and index == 3)
+              for index, day in enumerate(("2024-01-04", "2024-02-05", "2024-03-05", "2024-04-05"))]
+    clock, during = Clock(), []
+    original_progress, original_stage = progress.Progress, progress.stage
+    monkeypatch.setattr(progress, "Progress", lambda name, total: original_progress(name, total, clock=clock))
+    monkeypatch.setattr(progress, "stage", lambda name, **kwargs: original_stage(name, clock=clock, **kwargs))
+    monkeypatch.setattr(progress, "_rss", lambda: ", peak RSS 12 MB")
+    with committed(tmp_path, events, [target(event) for event in events]) as (_, repository, snapshot):
+        original_scan = repository.scan
+        def slow_population(query, *, table_name, **kwargs):
+            for batch in original_scan(query, table_name=table_name, **kwargs):
+                if table_name != "earnings_events":
+                    yield batch
+                    continue
+                assert batch.num_rows == 4
+                for start, count, elapsed in ((0, 1, 10), (1, 2, 20), (3, 1, 30)):
+                    clock.now += 1 if mode == "short" else elapsed
+                    yield batch.slice(start, count)
+                    during.append(capsys.readouterr())
+        monkeypatch.setattr(repository, "scan", slow_population)
+        capsys.readouterr()
+        if mode in ("holdout", "preflight"):
+            poison(monkeypatch, repository, snapshot)
+        if mode == "holdout":
+            with pytest.raises(DataError) as caught:
+                load(repository, snapshot, event_ids=[events[-1]["event_id"]])
+            exact_problem(caught, "HOLDOUT_ACCESS_DENIED", "requested events are excluded from experiment reads",
+                details={"snapshot_id": snapshot.snapshot_id, "holdout_as_of_month": MONTH,
+                    "random_membership_version": "canonical-event-sha256.v1", "rolling_membership_version": "calendar-months.v1",
+                    "purpose": "selection", "holdout_exclusions": [{"event_id": events[-1]["event_id"], "memberships": ["random"]}]})
+        elif mode == "preflight":
+            result = preflight_iv_crush_targets(repository, snapshot, as_of_month=MONTH,
+                                                event_ids=[events[-1]["event_id"]])
+            assert result["event_ids"] == [events[-1]["event_id"]]
+        else:
+            selected = [events[-1]["event_id"]] if mode == "explicit" else None
+            result = load(repository, snapshot, event_ids=selected)
+            assert result.event_id.tolist() == (selected or [event["event_id"] for event in events])
+            assert result.crush_pct_iv30.tolist() == ([-40.] if selected else [-40.] * 4)
+        assert [name for name, _ in repository.scans].count("earnings_events") == 1
+        assert [name for name, _ in repository.scans].count(TABLE) == (
+            0 if mode in ("holdout", "preflight") else 1 if mode == "explicit" else 4)
+    expected = [[], [], []] if mode == "short" else [[], [
+        "  [read earnings_events rows/candidate bound; batch limit 4] 3/4, 30s elapsed, 0.10/s, ETA 10s, peak RSS 12 MB"], [
+        "  [read earnings_events rows/candidate bound; batch limit 4] 4/4, 60s elapsed, 0.07/s, ETA 0s, peak RSS 12 MB"]]
+    assert [[line for line in part.err.splitlines() if "rows/candidate bound" in line] for part in during] == expected
+    after = capsys.readouterr()
+    assert all(part.out == "" for part in [*during, after])
+    assert "rows/candidate bound" not in after.err
+    assert "  [read earnings_events rows] start, peak RSS 12 MB" in during[0].err.splitlines()
+    assert "  [read earnings_events rows] done in " + ("3" if mode == "short" else "60") + "s, peak RSS 12 MB" in after.err.splitlines()
+    assert all(event["event_id"] not in "".join(part.err for part in [*during, after]) for event in events)

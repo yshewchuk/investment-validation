@@ -162,7 +162,8 @@ consume `no_fit.forbid_fitting` before native trial claims and fixed-child fitti
 before selected outer refit claims; completed evidence replay never fits.
 `tools/phase5_serving_folds.py` consumes the chooser policy/descriptor types
 and `semantic_release_hash`, plus `engine.v2.foundation` typed-document conversion,
-for offline fold metadata. `tools/phase5_prepare_release.py`
+for offline fold metadata; its helper `tools/phase5_serving_fold_checks.py` imports
+`FOLD_PANEL_SHA256_PATTERN`. `tools/phase5_prepare_release.py`
 consumes `ChooserFoldPolicy` and `chooser_fold_outputs`, obtains registered
 policies, and invokes `tools/phase5_serving_folds.py`'s `preflight_chooser_fold`
 before publication.
