@@ -140,7 +140,7 @@ inside function bodies):
   `store.file_sha256` and `paths.PANEL`, private `_serving_path`; the child
   temporarily reassigns `SERVING_DIR` to stage writes; `clear_prepared_frames`
   from `run_nightly`) and `engine.features`
-  (`load_panel`, child only).
+  (`load_panel` in the child; `clear_panel_caches` from `run_nightly`).
 - Lazy (function-local) only, never at module top level: `engine.calendar`
   (`model_evidence.py::_dataset_for`, `nightly.py::_date_change_flag`/
   `_panel_staleness_flags`/`refresh_forward_chains`/`run_nightly`);
