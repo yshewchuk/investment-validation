@@ -15,6 +15,8 @@ The mutation driver limits concurrent synthetic snapshot-worker reservations, no
 | The snapshot-worker fixture's imported `data.incremental` module has actual generated-code instrumentation | Only its `io_fetch` memory reservation rises to 1 GiB; every other resource-policy field is preserved. |
 | The fixture uses authored source, including environment flags or paths that merely resemble instrumentation | Its existing 384-MiB allowance remains; shared test and production policies are unchanged. |
 | Observed worker-family memory exceeds the selected reservation | The existing watchdog rejects it as `RESOURCE_LIMIT_EXCEEDED`; admission and enforcement are not bypassed. |
+| A mutation time budget expires and the child exits within the SIGINT grace period | The driver returns `124`; incremental results are incomplete without a tool error, while full runs fail. |
+| The SIGINT grace period expires and requires SIGKILL | The driver returns `137`; both modes fail, with exportable partial results retained. |
 
 ## `bounded_run.py`: disk-used ceiling (#1119)
 

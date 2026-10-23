@@ -2415,6 +2415,8 @@ def cmd_count(cfg: dict, args) -> int:
 # score, the module named in `failed_run_modules`, exempted from the gate only
 # in incremental mode) an unambiguous code of its own to key off.
 TIME_BUDGET_STOP_RC = 124
+# A forced kill is a tool failure in every mode, never a clean time-box stop.
+TIME_BUDGET_KILL_RC = 137
 # How long to let mutmut's own KeyboardInterrupt unwind (stop_all_workers +
 # shutdown/drain of the fork server, per mutmut/__main__.py's `run` command)
 # after SIGINT before concluding it is stuck and escalating to SIGKILL.
@@ -2423,7 +2425,8 @@ SIGINT_GRACE_SECONDS = 180
 
 def _run_with_time_budget(cmd: list[str], cwd: Path, env: dict, budget_s: float) -> int:
     """Run ``cmd`` for at most ``budget_s`` seconds; return its exit code if it
-    finishes in time, or ``TIME_BUDGET_STOP_RC`` if this function had to stop it.
+    finishes in time, ``TIME_BUDGET_STOP_RC`` after a SIGINT stop, or
+    ``TIME_BUDGET_KILL_RC`` when the grace period requires SIGKILL.
 
     mutmut's ``run`` command catches ``KeyboardInterrupt`` (SIGINT) and does a
     clean shutdown: it stops in-flight workers, drains what already finished
@@ -2459,12 +2462,14 @@ def _run_with_time_budget(cmd: list[str], cwd: Path, env: dict, budget_s: float)
               flush=True)
     except subprocess.TimeoutExpired:
         print(f"[mutation_pilot] mutmut did not exit within {SIGINT_GRACE_SECONDS}s of SIGINT; "
-              f"escalating to SIGKILL", flush=True)
+              f"escalating to SIGKILL; reporting {TIME_BUDGET_KILL_RC} (tool failure)",
+              file=sys.stderr, flush=True)
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         proc.wait()
+        return TIME_BUDGET_KILL_RC
     return TIME_BUDGET_STOP_RC
 
 
@@ -2631,7 +2636,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-children", type=int, default=None)
     p.add_argument("--time-budget-seconds", type=float, default=None,
                    help="stop mutmut cleanly (SIGINT) after this many seconds instead of "
-                        "letting it run unbounded; returns TIME_BUDGET_STOP_RC (124)")
+                        "letting it run unbounded; returns 124 after SIGINT or 137 "
+                        "if the grace period requires SIGKILL")
     p.add_argument("--fresh", action="store_true", help="delete the work copy and its results first")
     p = sub.add_parser("report")
     p.add_argument("modules", nargs="*")

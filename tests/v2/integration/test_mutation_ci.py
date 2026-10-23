@@ -566,7 +566,7 @@ def run_mutation_command(monkeypatch, tmp_path, rc, budget=None, module="toy", m
     return pilot.cmd_run({"defaults": DIAG_DEFAULTS, "modules": {module: {}}}, args), calls
 
 
-@pytest.mark.parametrize("backend_rc", [0, 1, 17, 124])
+@pytest.mark.parametrize("backend_rc", [0, 1, 17, 124, 137])
 def test_cmd_run_preserves_the_exit_code_without_rerunning(monkeypatch, tmp_path, backend_rc):
     rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=backend_rc)
     assert rc == backend_rc  # tool exits are forwarded; scores never replace them
@@ -593,7 +593,7 @@ def test_cmd_run_no_longer_strips_the_harness_env(monkeypatch, tmp_path):
     assert env["OMP_NUM_THREADS"] == "1"  # the thread pin is still applied
 
 
-@pytest.mark.parametrize("backend_rc", [0, 1, 17, 124])
+@pytest.mark.parametrize("backend_rc", [0, 1, 17, 124, 137])
 def test_cmd_run_passes_the_time_budget_to_the_bounded_runner(monkeypatch, tmp_path, backend_rc):
     seen = {}
 
@@ -609,14 +609,15 @@ def test_cmd_run_passes_the_time_budget_to_the_bounded_runner(monkeypatch, tmp_p
     assert seen["cmd"][:5] == [sys.executable, "-u", "-m", "mutmut", "run"]
 
 
-def test_a_clean_time_box_stop_exits_the_process_with_status_124():
+@pytest.mark.parametrize("constant,status", [("TIME_BUDGET_STOP_RC", 124), ("TIME_BUDGET_KILL_RC", 137)])
+def test_time_box_status_survives_the_process_boundary(constant, status):
     """sys.exit(-1) exits 255; the workflow gate compares the process status, so the
     sentinel must be a valid status that survives the process boundary unchanged."""
     code = ("import sys; sys.path.insert(0, 'tools'); import mutation_pilot as p; "
-            "p.cmd_run = lambda cfg, args: p.TIME_BUDGET_STOP_RC; "
+            f"p.cmd_run = lambda cfg, args: p.{constant}; "
             "sys.exit(p.main(['run', 'ops_runtime']))")
     proc = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True)
-    assert proc.returncode == 124, proc.stderr
+    assert proc.returncode == status, proc.stderr
     src = (ROOT / "tools" / "mutation_pilot.py").read_text()
     assert 'if __name__ == "__main__":\n    sys.exit(main())' in src
 
@@ -644,7 +645,9 @@ def test_run_with_time_budget_sigints_at_the_budget_and_reports_the_stop(monkeyp
     assert waits == [30.0, 0.01]  # budget, then the (patched) grace period
 
 
-def test_run_with_time_budget_escalates_to_sigkill_when_sigint_is_ignored(monkeypatch, tmp_path):
+@pytest.mark.parametrize("final_child_rc", [-9, 0])
+def test_run_with_time_budget_escalates_to_sigkill_when_sigint_is_ignored(
+        monkeypatch, tmp_path, capsys, final_child_rc):
     waits = []
 
     class FakeProc:
@@ -654,17 +657,20 @@ def test_run_with_time_budget_escalates_to_sigkill_when_sigint_is_ignored(monkey
             waits.append(timeout)
             if len(waits) <= 2:
                 raise subprocess.TimeoutExpired(cmd="mutmut", timeout=timeout)
-            return -9
+            return final_child_rc
 
     signals = []
     monkeypatch.setattr(pilot.subprocess, "Popen", lambda cmd, **kw: FakeProc())
     monkeypatch.setattr(pilot.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
     monkeypatch.setattr(pilot, "SIGINT_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(pilot, "time", types.SimpleNamespace(monotonic=lambda: 0.0))
-    rc = pilot._run_with_time_budget(["mutmut"], tmp_path, {}, 5.0)
-    assert rc == pilot.TIME_BUDGET_STOP_RC == 124
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=17, budget=5.0)
+    assert rc == pilot.TIME_BUDGET_KILL_RC == 137 and calls == []
     assert signals == [(777, signal.SIGINT), (777, signal.SIGKILL)]
     assert waits == [5.0, 0.01, None]  # budget, grace, then the final reap
+    captured = capsys.readouterr()
+    assert "reporting 137 (tool failure)" in captured.err
+    assert "stopped cleanly" not in captured.out + captured.err
 
 
 # -- config and workflow shape ----------------------------------------------------------
@@ -1813,6 +1819,50 @@ def test_merge_propagates_a_failed_module_run_as_an_incomplete_tool_error(tmp_pa
     # and the CLI -- the workflow's gate on its rc -- must not read it as success
     assert mr.main(["merge", "--out", str(tmp_path / "m2"), "--expected-modules", '["a", "b"]',
                     str(a), str(b)]) == 1
+
+
+@pytest.mark.parametrize("run_exit_code", [0, 124, 137])
+def test_module_export_retains_numeric_scores_and_labels_partial_results(tmp_path, run_exit_code):
+    work = make_work(tmp_path, {ADD + "1": 1, ADD + "2": 0})
+    out = tmp_path / "report"
+    summary = mr.export_module(work, "toy", FILES, out, mode="incremental",
+                               run_exit_code=run_exit_code, diffs=False)
+    assert json.loads((out / "summary.json").read_text()) == summary
+    assert summary["run_exit_code"] == run_exit_code
+    assert summary["total"] == 2 and summary["checked"] == 2
+    assert summary["score"] == 0.5 and summary["files"][FILES[0]]["score"] == 0.5
+    md = (out / "summary.md").read_text()
+    assert "| **module** | 2 | 1 | 1 | 0 | 0 | 0 | 0 | 50.0% |" in md
+    assert f"| `{FILES[0]}` | 2 | 1 | 1 | 0 | 0 | 0 | 0 | 50.0% |" in md
+    assert (f"**mutmut exited {run_exit_code}**: results are partial." in md) is (run_exit_code != 0)
+    if run_exit_code == 0:
+        assert "results are partial" not in md
+
+
+@pytest.mark.parametrize("mode,run_exit_code,expected_gate", [
+    ("incremental", 124, 0), ("incremental", 137, 1), ("full", 124, 1), ("full", 137, 1)])
+def test_time_box_exit_codes_reach_the_module_gate_and_aggregate(
+        tmp_path, mode, run_exit_code, expected_gate):
+    work = make_work(tmp_path, {ADD + "1": 1, ADD + "2": 0})
+    out = tmp_path / "report"
+    mr.export_module(work, "toy", FILES, out, mode=mode, run_exit_code=run_exit_code, diffs=False)
+    (tmp_path / "mutation-rc").write_text(str(run_exit_code))
+    gate = _step("mutate", lambda s: s.get("name", "").startswith("Fail only on a tool error"),
+                 MUT_JOBS)["run"]
+    result = subprocess.run(["bash", "-c", gate], cwd=tmp_path,
+        env=dict(os.environ, RUNNER_TEMP=str(tmp_path), MODE=mode),
+        capture_output=True, text=True, timeout=5)
+    assert result.returncode == expected_gate, result.stdout + result.stderr
+    assert mr.main(["merge", "--out", str(tmp_path / "merged"), "--expected-modules",
+                    '["toy"]', str(out)]) == expected_gate
+    merged = json.loads((tmp_path / "merged/summary.json").read_text())
+    assert merged["complete"] is False and merged["score"] is None
+    assert merged["tool_error"] is bool(expected_gate)
+    assert merged["failed_run_modules"] == {"toy": [run_exit_code]}
+    reason = "TIME_BUDGET_STOP" if run_exit_code == 124 else "RUN_INCOMPLETE"
+    assert len(merged["failure_reasons"]) == 1 and merged["failure_reasons"][0].startswith(reason)
+    assert json.loads((out / "summary.json").read_text())["score"] == 0.5
+    assert len(mr.read_jsonl(out / "results.jsonl")) == 2
 
 
 def test_merge_an_incremental_time_box_stop_is_incomplete_but_not_a_tool_error(tmp_path):
