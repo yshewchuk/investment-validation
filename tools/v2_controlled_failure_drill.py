@@ -73,11 +73,13 @@ from checks.rearchitecture_phase6_restore_drill import (  # noqa: E402
 from engine.v2.foundation import ArtifactStore, Clock, SystemClock, format_timestamp  # noqa: E402
 from engine.v2.ops import publication  # noqa: E402
 from engine.v2.ops.backup import (  # noqa: E402
+    MAX_MANIFEST_BYTES,
     manifest_database_path,
     prepare_backup,
     restore_backup,
     run_backup,
 )
+from engine.v2.ops.workflows.commands import read_bounded_bytes  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.fingerprints import file_hash  # noqa: E402
@@ -152,6 +154,19 @@ def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
         if not path.is_file() or file_hash(path) != info.get("content_hash"):
             return False
     return True
+
+
+def _read_verified_backup_manifest(path: Path, root: Path, key: str) -> tuple:
+    """The bounded manifest load as one decision: read at most
+    ``MAX_MANIFEST_BYTES`` through ``read_bounded_bytes``, then consistency-
+    check the bytes only if they parse as JSON. A missing, oversize,
+    malformed, symlinked or non-regular manifest is ``(None, False)`` --
+    never verified."""
+    try:
+        manifest = json.loads(read_bounded_bytes(path, MAX_MANIFEST_BYTES))
+    except (OSError, ValueError, RecursionError):
+        return None, False
+    return manifest, _manifest_is_consistent(manifest, root, key)
 
 
 def _run_after_good_release(deployment: _Deployment) -> dict:
@@ -251,9 +266,8 @@ def _run_before_any_release(deployment: _Deployment) -> dict:
 
         manifest_path = deployment.backup_root / (key + ".manifest.json")
         manifest_present = manifest_path.is_file()
-        manifest = json.loads(manifest_path.read_text()) if manifest_present else None
-        manifest_verified = manifest_present and _manifest_is_consistent(
-            manifest, deployment.backup_root, key)
+        manifest, manifest_verified = _read_verified_backup_manifest(
+            manifest_path, deployment.backup_root, key)
         row = conn.execute(
             "SELECT effect_id, claim_token, claimed_by, state FROM outbox "
             "WHERE kind='backup' AND logical_key=?", (key,)).fetchone()
