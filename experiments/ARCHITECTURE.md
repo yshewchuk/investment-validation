@@ -241,6 +241,37 @@ both flag states publish/verify the same plan and never write a ledger.
 | CLI typed refusal | Preserve the full `Problem` (including native spec conversion), return exit 2 and close an opened catalog connection. Filesystem/artifact unavailability, including an unopenable socket path, maps to `RESOURCE_UNAVAILABLE`; malformed or excessively nested JSON maps to `INVALID_EXPERIMENT_SPEC`. |
 | Unexpected builtin exception from catalog/registration/planning code | Propagate it after closing the catalog; do not misclassify it as malformed user JSON. |
 
+## Stage-2 request-only schedule preview
+
+`magnitude_search_request.compile_request(request)` consumes a plain-JSON
+`magnitude_search_request.v2` declaration and returns a detached
+`magnitude_search_schedule.v2` preview. Its only callers are synthetic tests;
+there is no CLI or runtime activation. Standard JSON/product and foundation
+canonical hashing implement normalization/enumeration. The owning research
+panel `recipe` supplies ordered subset dictionaries; shared `eligibility_policy`
+fixes the declared 30-day policy. The existing public search child-limit validator
+supplies the child resource domain. No estimator or source reader is called.
+
+The closed request names pinned snapshot IDs, dictionary hash, an identity-only
+eligibility-plan reference, H/HM/HMO, fixed Ridge/ElasticNet/HGB grids, ordered
+outer/inner years, candidate/fit caps, named comparison and explicit child,
+parent/build/job limits. Identity references prove neither existence nor
+provenance. The [published pre-code wire contract](https://github.com/yshewchuk/investment-validation/blob/34e0a165976653eafbec734536f8471b6b970749/experiments/SUPER_SIZE/STAGE2_DESIGN.md#6-stage-2-request-and-schedule-compiler-checkpoint)
+defines the closed nested fields. Scope is request compatibility, not native admission.
+
+| Condition | Enforced outcome |
+| --- | --- |
+| Plain finite JSON, closed grids/dictionary/policy and sufficient explicit caps | Normalize numeric grid aliases, return deterministic request/spec IDs, 33 sorted candidate specifications and an ordered year-only schedule. |
+| Malformed/extra/missing nested fields, non-JSON values, invalid references/years or insufficient caps | Nonretryable `INVALID_EXPERIMENT_SPEC`; no partial preview or I/O. |
+| Search counts | Three horizons times (candidates times total inner folds plus outer folds); comparison adds three logical/six component fits per outer fold. Counts describe attempted-fit limits, not completed fits. |
+| Changed valid references, years, caps or limits | Changed request/spec identity; identical normalized declarations replay identically without input mutation. |
+| Candidate specification returned | Contains subset recipe metadata and only grid knobs, not an executable estimator recipe or complete source/fold seal. |
+| Snapshot/eligibility reference has valid syntax | No repository resolution, membership check, embargo enforcement, event coverage or qualified-label proof. |
+
+The preview does not select a winner, fit or preprocess, reserve/register/publish,
+write a ledger, enforce resource containment, or authorize execution/holdout reads.
+Existing v1 planning, fitting, journals and replay are unchanged.
+
 ## Recorded magnitude-search selection
 
 `magnitude_search_trials.SearchTrials` exposes the journal API composed by the serial CLI. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies include contracts, foundation, ops migrations/catalog/fingerprints/errors, research target reads, `magnitude_search_evidence` and the `magnitude_search_inputs` cohort loader. That shared helper owns native admission through `magnitude_history_inputs.history_binding` and research stored-history/target reads; `magnitude_search_plan.read_search_plan` owns plan admission. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. Public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE. One `SearchTrials` instance admits each (plan, outer year, inner year) cohort once and shares the admitted inputs across that cohort's trials; `start` returns detached inputs (deep copies of the memoised ones). The in-memory memo holds one entry per cohort (bounded by the number of distinct (outer year, inner year) cohorts in the sealed plan), is never persisted and never holds a failed admission. Drift between instances is detected on re-admission by a fresh instance (see Input drift below); within one instance it is not re-read.
