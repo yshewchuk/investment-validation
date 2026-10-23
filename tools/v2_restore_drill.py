@@ -5,8 +5,10 @@ replay one original score offline, and reconcile ledger/report against it.
 UD-3 (decided): git push / private-mirror sync stays an operator action.
 This drill never pushes anything and never touches a remote -- it assumes a
 local backup (``engine.v2.ops.backup.run_backup`` output: a directory holding
-``<key>.manifest.json``, ``<key>.sqlite`` and ``artifacts/``) already exists,
-and only reads it.
+``<key>.manifest.json``, the immutable database file that manifest selects
+(``<key>.<unique>.sqlite``), and ``artifacts/``) already exists, and only reads
+it. Legacy backups whose manifest has no ``database_file`` fall back to
+``<key>.sqlite``.
 
 Three real production entrypoints, composed, nothing re-implemented:
 

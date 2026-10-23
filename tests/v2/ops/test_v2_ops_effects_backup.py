@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 
 import pytest
 
@@ -12,10 +13,17 @@ from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
 from engine.v2.ops.catalog import integrity_errors
 from engine.v2.ops.effects_graph import backup_effect
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
 from tests.ops_support import catalog
 from tests.v2.ops.test_v2_ops_effects_graph import (
-    SESSION, _commit, _open, _params, _row, _seed_decisions, _submit_and_claim,
+    SESSION,
+    _commit,
+    _open,
+    _params,
+    _row,
+    _seed_decisions,
+    _submit_and_claim,
 )
 
 
@@ -44,7 +52,8 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
 
 @pytest.mark.parametrize("stale_bytes", [b"", b"SQLite format 3\x00"],
                          ids=["zero-byte", "truncated-header"])
-def test_backup_replaces_stale_final_database_only_with_verified_copy(tmp_path, stale_bytes):
+def test_backup_publishes_verified_database_beside_unreferenced_stale_path(
+        tmp_path, stale_bytes):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "b7", {}, clock=clock)
@@ -56,8 +65,14 @@ def test_backup_replaces_stale_final_database_only_with_verified_copy(tmp_path, 
     manifest = run_backup(
         conn, key="b7", owner="worker", target=backup, clock=clock, store=store)
 
-    assert stale.stat().st_size > len(stale_bytes)
-    rebuilt = sqlite3.connect(stale)
+    # The stale key-named path is never the published database: the manifest
+    # selects a fresh immutable file, whatever remains at <key>.sqlite.
+    assert manifest["database_file"] != "b7.sqlite"
+    assert stale.read_bytes() == stale_bytes
+    published = backup / manifest["database_file"]
+    assert file_hash(published) == manifest["database"]
+    assert manifest["database_content_hash"].startswith("sha256:")
+    rebuilt = sqlite3.connect(published)
     try:
         assert integrity_errors(rebuilt) == []
         assert _row_counts(rebuilt) == _row_counts(conn)
@@ -74,8 +89,8 @@ def test_staged_row_count_mismatch_is_refused_with_table_details(tmp_path, monke
     prepare_backup(conn, "b8", {}, clock=clock)
     real_backup_to = backup_module.backup_to
 
-    def corrupt(conn, destination):
-        real_backup_to(conn, destination)
+    def corrupt(conn, destination, *, progress=None):
+        real_backup_to(conn, destination, progress=progress)
         damaged = sqlite3.connect(destination)
         try:
             damaged.execute("DELETE FROM outbox")
@@ -89,7 +104,7 @@ def test_staged_row_count_mismatch_is_refused_with_table_details(tmp_path, monke
                    clock=clock, store=store)
     assert refused.value.code == "INTEGRITY_FAILED"
     assert refused.value.problem.retryable is False
-    assert "outbox" in refused.value.problem.details["tables"]
+    assert refused.value.problem.details["tables"] == ["outbox"]
 
 
 def test_lost_ack_retry_reuses_prior_database(tmp_path, monkeypatch):
@@ -101,9 +116,9 @@ def test_lost_ack_retry_reuses_prior_database(tmp_path, monkeypatch):
     calls = []
     real_backup_to = backup_module.backup_to
 
-    def counted(conn, destination):
+    def counted(conn, destination, *, progress=None):
         calls.append(destination)
-        real_backup_to(conn, destination)
+        real_backup_to(conn, destination, progress=progress)
 
     monkeypatch.setattr(backup_module, "backup_to", counted)
 
@@ -130,9 +145,9 @@ def test_lost_ack_retry_rebuilds_when_source_changed(tmp_path, monkeypatch):
     calls = []
     real_backup_to = backup_module.backup_to
 
-    def counted(conn, destination):
+    def counted(conn, destination, *, progress=None):
         calls.append(destination)
-        real_backup_to(conn, destination)
+        real_backup_to(conn, destination, progress=progress)
 
     monkeypatch.setattr(backup_module, "backup_to", counted)
 
@@ -169,7 +184,7 @@ def test_backup_counts_and_copy_share_one_snapshot(tmp_path, monkeypatch):
     real_backup_to = backup_module.backup_to
     observed = []
 
-    def racing_backup_to(source, destination):
+    def racing_backup_to(source, destination, *, progress=None):
         writer = sqlite3.connect(database)
         try:
             writer.execute("INSERT INTO synthetic_change VALUES (1)")
@@ -177,7 +192,7 @@ def test_backup_counts_and_copy_share_one_snapshot(tmp_path, monkeypatch):
         finally:
             writer.close()
         observed.append(_row_counts(source))
-        real_backup_to(source, destination)
+        real_backup_to(source, destination, progress=progress)
 
     monkeypatch.setattr(backup_module, "backup_to", racing_backup_to)
     manifest = run_backup(conn, key="b13", owner="worker", target=tmp_path / "backup",
@@ -185,7 +200,7 @@ def test_backup_counts_and_copy_share_one_snapshot(tmp_path, monkeypatch):
 
     assert observed == [before]
     assert _row_counts(conn)["synthetic_change"] == 1
-    backup = sqlite3.connect(tmp_path / "backup" / "b13.sqlite")
+    backup = sqlite3.connect(tmp_path / "backup" / manifest["database_file"])
     try:
         assert _row_counts(backup) == before
         assert backup.execute("SELECT COUNT(*) FROM synthetic_change").fetchone()[0] == 0
@@ -202,9 +217,9 @@ def test_oversized_prior_manifest_is_ignored_and_rebuilt(tmp_path, monkeypatch):
     calls = []
     real_backup_to = backup_module.backup_to
 
-    def counted(conn, destination):
+    def counted(conn, destination, *, progress=None):
         calls.append(destination)
-        real_backup_to(conn, destination)
+        real_backup_to(conn, destination, progress=progress)
 
     monkeypatch.setattr(backup_module, "backup_to", counted)
 
@@ -233,11 +248,19 @@ def test_oversized_prior_manifest_is_ignored_and_rebuilt(tmp_path, monkeypatch):
     assert rebuilt["backup_key"] == "b11"
 
 
-def test_prior_manifest_with_extra_field_is_refused_after_lost_ack(tmp_path):
+def test_prior_manifest_with_extra_field_is_invalid_and_rebuilt(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "b14", {}, clock=clock)
     backup = tmp_path / "backup"
+    calls = []
+    real_backup_to = backup_module.backup_to
+
+    def counted(conn, destination, *, progress=None):
+        calls.append(destination)
+        real_backup_to(conn, destination, progress=progress)
+
+    monkeypatch.setattr(backup_module, "backup_to", counted)
 
     def crash(point):
         if point == "after_manifest_before_ack":
@@ -252,11 +275,12 @@ def test_prior_manifest_with_extra_field_is_refused_after_lost_ack(tmp_path):
     manifest_path.write_text(json.dumps(manifest))
 
     clock.advance(301)
-    with pytest.raises(OpsError) as refused:
-        run_backup(conn, key="b14", owner="retry", target=backup, clock=clock, store=store)
+    rebuilt = run_backup(conn, key="b14", owner="retry", target=backup, clock=clock,
+                         store=store)
 
-    assert refused.value.code == "INTEGRITY_FAILED"
-    assert refused.value.problem.retryable is False
+    assert len(calls) == 2
+    assert "irrelevant" not in rebuilt
+    assert json.loads(manifest_path.read_text()) == rebuilt
 
 
 def test_retry_removes_only_matching_crash_staging_files(tmp_path):
@@ -265,8 +289,8 @@ def test_retry_removes_only_matching_crash_staging_files(tmp_path):
     prepare_backup(conn, "b12", {}, clock=clock)
     backup = tmp_path / "backup"
     backup.mkdir()
-    stale = backup / ".b12.crash.staging.sqlite"
-    other = backup / ".b13.crash.staging.sqlite"
+    stale = backup / f"{backup_module._stage_prefix('b12')}crash.staging.sqlite"
+    other = backup / f"{backup_module._stage_prefix('b13')}crash.staging.sqlite"
     stale.write_bytes(b"junk")
     other.write_bytes(b"other")
 
@@ -338,6 +362,335 @@ def test_prepare_backup_retry_returns_same_effect_without_rebuilding_payload(tmp
                         (first_id,)).fetchone()[0] == original
     assert conn.execute("SELECT COUNT(*) FROM outbox WHERE kind='backup' AND logical_key='b6'"
                         ).fetchone()[0] == 1
+
+
+def test_staged_content_mismatch_is_refused_without_row_count_change(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    conn.execute("CREATE TABLE synthetic_content (value TEXT)")
+    conn.execute("INSERT INTO synthetic_content VALUES ('original')")
+    conn.commit()
+    prepare_backup(conn, "b15", {}, clock=clock)
+    real_backup_to = backup_module.backup_to
+
+    def corrupt_content(source, destination, *, progress=None):
+        real_backup_to(source, destination, progress=progress)
+        damaged = sqlite3.connect(destination)
+        try:
+            damaged.execute("UPDATE synthetic_content SET value='tampered'")
+            damaged.commit()
+        finally:
+            damaged.close()
+
+    monkeypatch.setattr(backup_module, "backup_to", corrupt_content)
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="b15", owner="worker", target=tmp_path / "backup",
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+    assert refused.value.problem.details["reason"] == "content_digest"
+
+
+def test_same_row_count_altered_prior_with_updated_file_hash_is_rebuilt(
+        tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    conn.execute("CREATE TABLE synthetic_content (value TEXT)")
+    conn.execute("INSERT INTO synthetic_content VALUES ('original')")
+    conn.commit()
+    prepare_backup(conn, "b16", {}, clock=clock)
+    backup = tmp_path / "backup"
+    calls = []
+    real_backup_to = backup_module.backup_to
+
+    def counted(conn, destination, *, progress=None):
+        calls.append(destination)
+        real_backup_to(conn, destination, progress=progress)
+
+    monkeypatch.setattr(backup_module, "backup_to", counted)
+
+    def crash(point):
+        if point == "after_manifest_before_ack":
+            raise RuntimeError("ack lost")
+
+    with pytest.raises(RuntimeError):
+        run_backup(conn, key="b16", owner="worker", target=backup, clock=clock,
+                   store=store, fault=crash)
+    first = json.loads((backup / "b16.manifest.json").read_text())
+    assert len(calls) == 1
+
+    prior_database = backup / first["database_file"]
+    altered = sqlite3.connect(prior_database)
+    try:
+        altered.execute("UPDATE synthetic_content SET value='altered'")
+        altered.commit()
+    finally:
+        altered.close()
+    manifest = json.loads((backup / "b16.manifest.json").read_text())
+    manifest["database"] = file_hash(prior_database)
+    (backup / "b16.manifest.json").write_text(json.dumps(manifest))
+
+    clock.advance(301)
+    rebuilt = run_backup(conn, key="b16", owner="retry", target=backup,
+                         clock=clock, store=store)
+
+    assert len(calls) == 2
+    assert rebuilt["database_file"] != first["database_file"]
+    assert rebuilt["database_content_hash"] == first["database_content_hash"]
+
+
+@pytest.mark.parametrize("corruption", ["integrity", "file-hash"])
+def test_corrupt_prior_database_falls_back_to_rebuild(tmp_path, monkeypatch, corruption):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "b17", {}, clock=clock)
+    backup = tmp_path / "backup"
+    calls = []
+    real_backup_to = backup_module.backup_to
+
+    def counted(conn, destination, *, progress=None):
+        calls.append(destination)
+        real_backup_to(conn, destination, progress=progress)
+
+    monkeypatch.setattr(backup_module, "backup_to", counted)
+
+    def crash(point):
+        if point == "after_manifest_before_ack":
+            raise RuntimeError("ack lost")
+
+    with pytest.raises(RuntimeError):
+        run_backup(conn, key="b17", owner="worker", target=backup, clock=clock,
+                   store=store, fault=crash)
+    first = json.loads((backup / "b17.manifest.json").read_text())
+    prior_database = backup / first["database_file"]
+    manifest_path = backup / "b17.manifest.json"
+    if corruption == "integrity":
+        prior_database.write_bytes(b"not a sqlite database")
+        first["database"] = file_hash(prior_database)
+    else:
+        first["database"] = "sha256:" + "0" * 64
+    manifest_path.write_text(json.dumps(first))
+
+    clock.advance(301)
+    rebuilt = run_backup(conn, key="b17", owner="retry", target=backup,
+                         clock=clock, store=store)
+
+    assert len(calls) == 2
+    assert rebuilt["database_file"] != first["database_file"]
+
+
+def test_structurally_valid_prior_with_different_artifact_metadata_is_refused(
+        tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "b18", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+
+    def crash(point):
+        if point == "after_manifest_before_ack":
+            raise RuntimeError("ack lost")
+
+    with pytest.raises(RuntimeError):
+        run_backup(conn, key="b18", owner="worker", target=backup, clock=clock,
+                   store=store, fault=crash)
+    manifest_path = backup / "b18.manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifacts"]["evidence.bin"]["content_hash"] = "sha256:" + "0" * 64
+    manifest_path.write_text(json.dumps(manifest))
+
+    clock.advance(301)
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="b18", owner="retry", target=backup, clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+
+
+def test_artifact_hash_mismatch_refuses_non_retryable_integrity_failure(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"good bytes", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "b19", {"evidence.bin": ref}, clock=clock)
+    wrong = tmp_path / "wrong.bin"
+    wrong.write_bytes(b"different bytes")
+    monkeypatch.setattr(store, "verify", lambda _ref: wrong)
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="b19", owner="worker", target=tmp_path / "backup",
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+
+
+def test_deeply_nested_prior_manifest_is_invalid_and_rebuilt(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "b20", {}, clock=clock)
+    backup = tmp_path / "backup"
+    calls = []
+    real_backup_to = backup_module.backup_to
+
+    def counted(conn, destination, *, progress=None):
+        calls.append(destination)
+        real_backup_to(conn, destination, progress=progress)
+
+    monkeypatch.setattr(backup_module, "backup_to", counted)
+
+    def crash(point):
+        if point == "after_manifest_before_ack":
+            raise RuntimeError("ack lost")
+
+    with pytest.raises(RuntimeError):
+        run_backup(conn, key="b20", owner="worker", target=backup, clock=clock,
+                   store=store, fault=crash)
+    (backup / "b20.manifest.json").write_text("[" * 100_000)
+
+    clock.advance(301)
+    rebuilt = run_backup(conn, key="b20", owner="retry", target=backup,
+                         clock=clock, store=store)
+
+    assert len(calls) == 2
+    assert rebuilt["backup_key"] == "b20"
+
+
+def test_unsafe_artifact_name_is_refused_before_database_install(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "b21", {"../escape": ref}, clock=clock)
+    backup = tmp_path / "backup"
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="b21", owner="worker", target=backup, clock=clock, store=store)
+
+    assert refused.value.code == "INVALID_REQUEST"
+    assert not list(backup.glob("*.sqlite"))
+
+
+def test_per_key_lock_serializes_two_threads(tmp_path):
+    target = tmp_path / "backup"
+    target.mkdir()
+    first_entered = threading.Event()
+    release = threading.Event()
+    order = []
+
+    def first():
+        with backup_module._backup_lock(target, "same-key"):
+            order.append("first-enter")
+            first_entered.set()
+            release.wait(5)
+            order.append("first-exit")
+
+    def second():
+        first_entered.wait(5)
+        with backup_module._backup_lock(target, "same-key"):
+            order.append("second-enter")
+
+    first_thread = threading.Thread(target=first)
+    second_thread = threading.Thread(target=second)
+    first_thread.start()
+    assert first_entered.wait(5)
+    second_thread.start()
+    assert second_thread.is_alive()
+    assert "second-enter" not in order
+    release.set()
+    first_thread.join(5)
+    second_thread.join(5)
+
+    assert order == ["first-enter", "first-exit", "second-enter"]
+
+
+def test_different_key_locks_are_independent(tmp_path):
+    target = tmp_path / "backup"
+    target.mkdir()
+    entered = threading.Event()
+
+    def other():
+        with backup_module._backup_lock(target, "other-key"):
+            entered.set()
+
+    with backup_module._backup_lock(target, "one-key"):
+        thread = threading.Thread(target=other)
+        thread.start()
+        assert entered.wait(5)
+        thread.join(5)
+
+
+def test_restore_reads_manifest_within_the_existing_bound(tmp_path):
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    (backup / "huge.manifest.json").write_text(
+        json.dumps({"padding": "x" * (backup_module.MAX_MANIFEST_BYTES + 1)}))
+    destination = tmp_path / "restored"
+
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, destination)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+    assert not destination.exists()
+
+
+def test_restore_catches_deeply_nested_manifest_json(tmp_path):
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    (backup / "nested.manifest.json").write_text("[" * 100_000)
+
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, tmp_path / "restored")
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+
+
+def test_restore_legacy_manifest_falls_back_to_key_named_database(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "legacy", {}, clock=clock)
+    backup = tmp_path / "backup"
+    manifest = run_backup(conn, key="legacy", owner="worker", target=backup,
+                          clock=clock, store=store)
+    (backup / manifest["database_file"]).rename(backup / "legacy.sqlite")
+    legacy = dict(manifest)
+    legacy.pop("database_file")
+    legacy.pop("database_content_hash")
+    (backup / "legacy.manifest.json").write_text(json.dumps(legacy))
+
+    restored = restore_backup(backup, tmp_path / "restored")
+
+    assert (restored / "ops.sqlite").is_file()
+
+
+def test_restore_rejects_unsafe_database_filename(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "unsafe", {}, clock=clock)
+    backup = tmp_path / "backup"
+    manifest = run_backup(conn, key="unsafe", owner="worker", target=backup,
+                          clock=clock, store=store)
+    manifest["database_file"] = "../escape.sqlite"
+    (backup / "unsafe.manifest.json").write_text(json.dumps(manifest))
+    destination = tmp_path / "restored"
+
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, destination)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert not destination.exists()
+
+
+def test_catalog_backup_to_reports_page_progress(tmp_path):
+    conn, _, _ = catalog(tmp_path)
+    destination = tmp_path / "copy.sqlite"
+    seen = []
+
+    backup_module.backup_to(conn, destination, progress=lambda *args: seen.append(args))
+
+    assert destination.is_file()
+    assert seen
 
 
 def test_backup_rejects_symlink_target_before_writing(tmp_path):
