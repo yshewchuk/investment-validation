@@ -673,8 +673,23 @@ def _remove_stale_stages(target, key):
                 pass
 
 
+def _refuse_oversized_snapshot(conn, *, stage="source database"):
+    """Refuse a snapshot whose page allocation already exceeds the byte cap.
+
+    ``backup_to`` copies and the database file hash/verification happen later,
+    so read the snapshot's own ``page_count * page_size`` up front: a database
+    that can never fit the cap is rejected non-retryably before any pages are
+    copied.
+    """
+    page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    if page_count * page_size > MAX_BACKUP_FILE_BYTES:
+        raise fail("INTEGRITY_FAILED", f"{stage} exceeds the file size limit")
+
+
 def _stage_copy(conn, target, key, keepalive=None):
     """Write the source's current snapshot into a fresh staging database."""
+    _refuse_oversized_snapshot(conn)
     stage_fd, stage_name = tempfile.mkstemp(
         dir=str(target), prefix=_stage_prefix(key), suffix=".staging.sqlite")
     os.close(stage_fd)
@@ -913,6 +928,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
         try:
             with _snapshot(conn) as (snapshot, separate):
                 heartbeat = keepalive if separate else None
+                _refuse_oversized_snapshot(snapshot)
                 source_rows = _table_row_counts(
                     snapshot, stage="source-row-counts", keepalive=heartbeat)
                 expected_lines = _expected_dump_lines(
