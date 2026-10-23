@@ -2425,8 +2425,8 @@ SIGINT_GRACE_SECONDS = 180
 
 def _run_with_time_budget(cmd: list[str], cwd: Path, env: dict, budget_s: float) -> int:
     """Run ``cmd`` for at most ``budget_s`` seconds; return its exit code if it
-    finishes in time, ``TIME_BUDGET_STOP_RC`` after a SIGINT stop, or
-    ``TIME_BUDGET_KILL_RC`` when the grace period requires SIGKILL.
+    finishes in time or fails during SIGINT grace, ``TIME_BUDGET_STOP_RC`` after
+    a zero-exit SIGINT stop, or ``TIME_BUDGET_KILL_RC`` when grace requires SIGKILL.
 
     mutmut's ``run`` command catches ``KeyboardInterrupt`` (SIGINT) and does a
     clean shutdown: it stops in-flight workers, drains what already finished
@@ -2457,6 +2457,8 @@ def _run_with_time_budget(cmd: list[str], cwd: Path, env: dict, budget_s: float)
         pass
     try:
         real_rc = proc.wait(timeout=SIGINT_GRACE_SECONDS)
+        if real_rc:
+            return real_rc
         print(f"[mutation_pilot] mutmut stopped cleanly after SIGINT (its own exit code "
               f"{real_rc}); reporting {TIME_BUDGET_STOP_RC} (TIME_BUDGET_STOP, not a tool error)",
               flush=True)
@@ -2636,7 +2638,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-children", type=int, default=None)
     p.add_argument("--time-budget-seconds", type=float, default=None,
                    help="stop mutmut cleanly (SIGINT) after this many seconds instead of "
-                        "letting it run unbounded; returns 124 after SIGINT or 137 "
+                        "letting it run unbounded; returns 124 after a zero-exit SIGINT stop or 137 "
                         "if the grace period requires SIGKILL")
     p.add_argument("--fresh", action="store_true", help="delete the work copy and its results first")
     p = sub.add_parser("report")

@@ -622,7 +622,22 @@ def test_time_box_status_survives_the_process_boundary(constant, status):
     assert 'if __name__ == "__main__":\n    sys.exit(main())' in src
 
 
-def test_run_with_time_budget_sigints_at_the_budget_and_reports_the_stop(monkeypatch, tmp_path):
+@pytest.mark.parametrize("backend_rc", [0, 1, 17, 124, 137])
+def test_actual_budget_runner_forwards_prebudget_exits(monkeypatch, tmp_path, backend_rc):
+    waits, signals = [], []
+    def wait(timeout=None):
+        waits.append(timeout)
+        return backend_rc
+    monkeypatch.setattr(pilot.subprocess, "Popen", lambda cmd, **kw: types.SimpleNamespace(pid=4242, wait=wait))
+    monkeypatch.setattr(pilot.os, "killpg", lambda *args: signals.append(args))
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=19, budget=5.0)
+    assert rc == backend_rc and calls == []
+    assert waits == [5.0] and signals == []
+
+
+@pytest.mark.parametrize("grace_rc", [0, 1, 17, -2, -9])
+def test_run_with_time_budget_sigints_at_the_budget_and_preserves_grace_failures(
+        monkeypatch, tmp_path, capsys, grace_rc):
     waits = []
 
     class FakeProc:
@@ -632,17 +647,19 @@ def test_run_with_time_budget_sigints_at_the_budget_and_reports_the_stop(monkeyp
             waits.append(timeout)
             if len(waits) == 1:
                 raise subprocess.TimeoutExpired(cmd="mutmut", timeout=timeout)
-            return 0
+            return grace_rc
 
     signals = []
     monkeypatch.setattr(pilot.subprocess, "Popen", lambda cmd, **kw: FakeProc())
     monkeypatch.setattr(pilot.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
     monkeypatch.setattr(pilot, "SIGINT_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(pilot, "time", types.SimpleNamespace(monotonic=lambda: 1000.0))
-    rc = pilot._run_with_time_budget([sys.executable, "-m", "mutmut", "run"], tmp_path, {}, 30.0)
-    assert rc == pilot.TIME_BUDGET_STOP_RC == 124
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=19, budget=30.0)
+    assert rc == (grace_rc if grace_rc else 124) and calls == []
     assert signals == [(4242, signal.SIGINT)]  # clean stop: no SIGKILL
     assert waits == [30.0, 0.01]  # budget, then the (patched) grace period
+    captured = capsys.readouterr()
+    assert ("stopped cleanly" in captured.out + captured.err) is (grace_rc == 0)
 
 
 @pytest.mark.parametrize("final_child_rc", [-9, 0])
@@ -1821,19 +1838,32 @@ def test_merge_propagates_a_failed_module_run_as_an_incomplete_tool_error(tmp_pa
                     str(a), str(b)]) == 1
 
 
+def make_work_with_distinct_file_scores(tmp_path):
+    work = make_work(tmp_path, {ADD + "1": 1, ADD + "2": 0})
+    other = "engine/v2/other.py"
+    (work / other).write_text(SOURCE)
+    metadata = json.loads((work / "mutants" / (FILES[0] + ".meta")).read_text())
+    metadata["exit_code_by_key"] = {"engine.v2.other.x_add__mutmut_1": 1,
+                                    "engine.v2.other.x_add__mutmut_2": 1}
+    (work / "mutants" / (other + ".meta")).write_text(json.dumps(metadata))
+    return work, [*FILES, other]
+
+
 @pytest.mark.parametrize("run_exit_code", [0, 124, 137])
 def test_module_export_retains_numeric_scores_and_labels_partial_results(tmp_path, run_exit_code):
-    work = make_work(tmp_path, {ADD + "1": 1, ADD + "2": 0})
+    work, files = make_work_with_distinct_file_scores(tmp_path)
     out = tmp_path / "report"
-    summary = mr.export_module(work, "toy", FILES, out, mode="incremental",
+    summary = mr.export_module(work, "toy", files, out, mode="incremental",
                                run_exit_code=run_exit_code, diffs=False)
     assert json.loads((out / "summary.json").read_text()) == summary
     assert summary["run_exit_code"] == run_exit_code
-    assert summary["total"] == 2 and summary["checked"] == 2
-    assert summary["score"] == 0.5 and summary["files"][FILES[0]]["score"] == 0.5
+    assert summary["total"] == 4 and summary["checked"] == 4
+    assert summary["score"] == 0.75
+    assert summary["files"][files[0]]["score"] == 0.5 and summary["files"][files[1]]["score"] == 1.0
     md = (out / "summary.md").read_text()
-    assert "| **module** | 2 | 1 | 1 | 0 | 0 | 0 | 0 | 50.0% |" in md
+    assert "| **module** | 4 | 3 | 1 | 0 | 0 | 0 | 0 | 75.0% |" in md
     assert f"| `{FILES[0]}` | 2 | 1 | 1 | 0 | 0 | 0 | 0 | 50.0% |" in md
+    assert f"| `{files[1]}` | 2 | 2 | 0 | 0 | 0 | 0 | 0 | 100.0% |" in md
     assert (f"**mutmut exited {run_exit_code}**: results are partial." in md) is (run_exit_code != 0)
     if run_exit_code == 0:
         assert "results are partial" not in md
@@ -1843,9 +1873,9 @@ def test_module_export_retains_numeric_scores_and_labels_partial_results(tmp_pat
     ("incremental", 124, 0), ("incremental", 137, 1), ("full", 124, 1), ("full", 137, 1)])
 def test_time_box_exit_codes_reach_the_module_gate_and_aggregate(
         tmp_path, mode, run_exit_code, expected_gate):
-    work = make_work(tmp_path, {ADD + "1": 1, ADD + "2": 0})
+    work, files = make_work_with_distinct_file_scores(tmp_path)
     out = tmp_path / "report"
-    mr.export_module(work, "toy", FILES, out, mode=mode, run_exit_code=run_exit_code, diffs=False)
+    mr.export_module(work, "toy", files, out, mode=mode, run_exit_code=run_exit_code, diffs=False)
     (tmp_path / "mutation-rc").write_text(str(run_exit_code))
     gate = _step("mutate", lambda s: s.get("name", "").startswith("Fail only on a tool error"),
                  MUT_JOBS)["run"]
@@ -1861,8 +1891,10 @@ def test_time_box_exit_codes_reach_the_module_gate_and_aggregate(
     assert merged["failed_run_modules"] == {"toy": [run_exit_code]}
     reason = "TIME_BUDGET_STOP" if run_exit_code == 124 else "RUN_INCOMPLETE"
     assert len(merged["failure_reasons"]) == 1 and merged["failure_reasons"][0].startswith(reason)
-    assert json.loads((out / "summary.json").read_text())["score"] == 0.5
-    assert len(mr.read_jsonl(out / "results.jsonl")) == 2
+    partial = json.loads((out / "summary.json").read_text())
+    assert partial["score"] == 0.75
+    assert [partial["files"][file]["score"] for file in files] == [0.5, 1.0]
+    assert len(mr.read_jsonl(out / "results.jsonl")) == 4
 
 
 def test_merge_an_incremental_time_box_stop_is_incomplete_but_not_a_tool_error(tmp_path):

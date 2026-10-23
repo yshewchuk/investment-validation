@@ -487,8 +487,10 @@ except that incremental exit `124` (`TIME_BUDGET_STOP`) does not fail the
 module gate: the aggregate report remains incomplete and withholds its overall
 score; module reports retain numeric scores with a partial-results warning.
 If SIGINT does not finish within the 180-second grace period, the driver uses
-SIGKILL and returns `137`: both modes fail while retaining exportable partial
-results. Full-run `124` and all other nonzero exits remain failures.
+SIGKILL and returns `137`: both modes fail. Export is attempted for readable
+partial state; corrupt state can still fail export. A nonzero child exit during
+SIGINT grace is preserved, not relabeled a clean stop. Full-run `124` and all
+other nonzero exits remain failures.
 
 - **Diagnosing a failed stats run.** When mutmut's clean/stats run fails it
   prints only `failed to collect stats. runner returned 1` and swallows the
