@@ -18,6 +18,7 @@ from urllib.parse import quote
 
 from engine.v2.contracts import ArtifactRef
 from engine.v2.foundation import (
+    CONTENT_HASH_PREFIX,
     ArtifactError,
     ensure_directory,
     format_timestamp,
@@ -754,9 +755,43 @@ def _remove_superseded_databases(target, key, keep):
         fsync_directory(target)
 
 
+def _artifact_object_path(store, ref):
+    """The validated object path ``ref`` names, without reading its bytes.
+
+    Mirrors ``ArtifactStore._object_parts`` so the preflight opens exactly the
+    object ``store.verify`` would: the storage key must be the store's
+    ``objects/<hash prefix>/<hash>`` layout for the reference's own content hash.
+    """
+    try:
+        parts = safe_relative_path(ref.storage_key)
+    except ArtifactError:
+        raise fail("INTEGRITY_FAILED", "backup artifact storage key is unsafe") from None
+    digest = ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)
+    if (len(parts) != 3 or parts[0] != "objects"
+            or parts[1] != digest[:2] or parts[2] != digest):
+        raise fail("INTEGRITY_FAILED", "backup artifact storage key is invalid")
+    return store.root.joinpath(*parts)
+
+
+def _preflight_artifact(store, ref):
+    """Refuse a backing object before ``ArtifactStore.verify`` scans it whole.
+
+    Opens the object as a regular, no-follow file bounded by
+    ``MAX_BACKUP_FILE_BYTES`` and matched to ``ref.byte_size``, so an oversized
+    or size-mismatched object is rejected without a full content read;
+    ``store.verify`` then re-hashes it for content-address integrity.
+    """
+    path = _artifact_object_path(store, ref)
+    stream, _size = _open_checked(
+        path, stage="artifact-preflight", expected_size=ref.byte_size,
+        oserror_code="INTEGRITY_FAILED")
+    stream.close()
+
+
 def _copy_artifact(store, target, name, ref, fault, keepalive=None):
     """Copy one artifact durably, verify its published hash and run the
     per-artifact fault hook before publication."""
+    _preflight_artifact(store, ref)
     source = store.verify(ref)
     destination = target / "artifacts" / name
     _stream_copy(source, destination, expected_hash=ref.content_hash,
