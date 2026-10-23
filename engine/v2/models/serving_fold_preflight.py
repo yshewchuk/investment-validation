@@ -1,7 +1,7 @@
 """Offline role-specific fold declarations from bounded bytes and registered policy.
 
 The descriptor is preparation metadata, not a runtime loader or inference view.
-Legacy cache decoding stays outside the native model package. Inputs must be
+The legacy joblib cache is decoded only inside the same-package checks (``serving_fold_checks``). Inputs must be
 trusted uncompressed output from the serving-fold writers; byte caps and hashes
 do not establish provenance or bound decoded memory.
 """

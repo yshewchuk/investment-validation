@@ -620,16 +620,18 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
 - `tools/phase5_state_stage_job.py` — publishes the staging-success record
   (`mark_staging_succeeded`) for a nightly pool candidate (§2.2).
 - `tools/phase5_prepare_release.py` and `tools/phase5_inventory.py` — release preparation and
-  inventory; `serving_fold_preflight.py`, `serving_fold_checks.py` and `pinned_panel.py` (this
-  package) hold fold metadata, its policy/header checks and the pinned panel check.
+  inventory; the former imports `serving_fold_preflight`, `serving_fold_checks` (fold metadata and
+  its policy/header checks) and `pinned_panel` (the pinned panel check), which live in this package.
 - `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_execution.py`
   — `no_fit.forbid_fitting` before native trial claims and fixed-child fitting.
 
 ## 6. External systems and libraries
 
-A local filesystem tree only (the release store root —§7.4's env-configured
-key names it for production). No network, no database, no third-party
-service. `hashlib.sha256` for every content hash; `os.fsync`/`os.replace`
+A local filesystem tree (the release store root —§7.4's env-configured
+key names it for production). `pinned_panel.verify_panel_copy` also opens the
+pinned snapshot's SQLite catalog read-only through `engine.v2.data`, and the
+serving-fold preflight decodes joblib bytes (`joblib`, `numpy`). No network, no
+third-party service. `hashlib.sha256` for every content hash; `os.fsync`/`os.replace`
 for the pointer's crash-proof write.
 
 ## 7. Failure semantics
