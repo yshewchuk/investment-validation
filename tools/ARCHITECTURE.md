@@ -4,6 +4,20 @@
 
 Standalone operator tools. `bounded_run.py` is the wrapper every heavy job runs under: CPU pinning, memory, swap and box-floor limits, test slots and the heavy reservation. Its module docstring is the flag reference; `engine/v2/ops/ARCHITECTURE.md` describes it as an executor adapter.
 
+## Mutation snapshot-worker budget
+
+The mutation driver limits concurrent synthetic snapshot-worker reservations, not whole-run RSS. It neither provisions a larger runner nor changes time budgets.
+
+| Condition | Outcome |
+|---|---|
+| A caller runs the `data_incremental` mutation shard | At most one mutmut child runs, even when the requested or configured parallelism is higher. |
+| A caller runs another mutation shard | Requested or configured child parallelism is unchanged. |
+| The snapshot-worker fixture's imported `data.incremental` module has actual generated-code instrumentation | Only its `io_fetch` memory reservation rises to 1 GiB; every other resource-policy field is preserved. |
+| The fixture uses authored source, including environment flags or paths that merely resemble instrumentation | Its existing 384-MiB allowance remains; shared test and production policies are unchanged. |
+| Observed worker-family memory exceeds the selected reservation | The existing watchdog rejects it as `RESOURCE_LIMIT_EXCEEDED`; admission and enforcement are not bypassed. |
+| A mutation time budget expires and the child exits zero within the SIGINT grace period | The driver returns `124`; incremental results are incomplete without a tool error, while full runs fail. Nonzero child exits during grace are preserved instead. |
+| The SIGINT grace period expires and requires SIGKILL | The driver returns `137`; both modes fail. Export is attempted for readable partial state; corrupt state can fail export. |
+
 ## `bounded_run.py`: disk-used ceiling (#1119)
 
 Opt-in guard against a heavy job filling the host disk (WSL's virtual disk never shrinks, so growth past its largest size takes host space). The ceiling is an absolute used-bytes figure, `--max-disk-used-gb G` or, when the flag is absent, the environment variable `BOUNDED_RUN_MAX_DISK_USED_GB`; no value is committed to the repository. Unset means off and nothing below applies. A value that is not a positive finite number is a usage error (exit 2).
