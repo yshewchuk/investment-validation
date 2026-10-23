@@ -295,3 +295,122 @@ feature blocks before sealing; keep causality and the legacy comparison mandator
 After code/review: authorized metadata/pilot checks, publish the concrete request for
 review, then separately register and let the user run locally. No actual data read,
 fit, registration or runtime implementation is part of this design PR.
+
+## 6. Stage-2 request and schedule compiler checkpoint
+
+Pre-code refinement of sections 2, 4 and 5 above.
+This checkpoint specifies a pure, add-only precursor to slice 5, not a runnable
+search, registration format migration or permission to read data. Existing v1
+APIs, source closures, artifacts and identities remain unchanged.
+
+### Boundary and reuse
+
+Proposed public API: `experiments.magnitude_search_request.compile_request(request)`.
+Input is a detached plain-JSON document, not JSON text, a file or a repository.
+Only built-in dict/list/string/int/float/bool/null types are allowed; dictionary
+keys are strings, numbers finite, and cycles/non-JSON aliases refuse. Integer
+fields exclude booleans. The caller's JSON parser must reject duplicate keys.
+Standard-library JSON/product and foundation canonical hashing suffice; use the
+existing panel `recipe(subset)`, shared `eligibility_policy`, and public child
+`validate_execution_limits`. Do not duplicate membership or source admission.
+
+The compiler makes no estimator, reads no catalog/source/artifact, and writes
+nothing. It does not qualify events/labels, enforce embargoes, learn preprocessing,
+score/select candidates, reserve an experiment, or launch a worker. References
+bind declared intent; syntax and a matching digest prove neither existence nor
+provenance. No runtime consumer is introduced in this slice.
+
+### Closed request encoding
+
+Keep exactly the thirteen top-level keys named in stage-2 section 4:
+`schema_version`, `feature_snapshot_id`, `history_snapshot_id`,
+`feature_dictionary_hash`, `eligibility_policy_ref`, `feature_sets`, `space`,
+`outer_years`, `inner_years`, `max_candidates`, `max_fits`, `comparison`, `limits`.
+The schema literal is `magnitude_search_request.v2`. No defaults or extra keys.
+
+| Field | Exact admission |
+| --- | --- |
+| Snapshot IDs | Strings matching native `snap_` plus 32 lowercase hex characters; no `latest`, path or resolver call. Full committed-reference comparison belongs to later admission. |
+| Hashes | `sha256:` plus 64 lowercase hex characters. |
+| `feature_dictionary_hash` | Equals the current full HMO dictionary hash returned by the owning panel recipe. This is dictionary-version compatibility, not snapshot membership. |
+| `eligibility_policy_ref` | Exactly `{"schema_ref":"group_eligibility_plan.v1","plan_id":<hash>,"policy_id":<hash>}`. Policy ID must equal the shared `grouped_ticker_embargo.v1` policy with 30 calendar days. This identity-only plan reference is not an ArtifactRef or read capability. |
+| `feature_sets` | Exactly `["H","HM","HMO"]`, in that order; no arbitrary subsets/columns. The owning panel helper supplies each ordered dictionary and quote/missing policy. |
+| `space` | Exactly the three grids below. Integer/float aliases for numerical grid values normalize to the shown numeric types; booleans, changed/reordered/duplicate/missing axes or values refuse. |
+| `outer_years` | Nonempty strictly increasing unique four-digit ASCII year strings, from `0002` through `9998`. |
+| `inner_years` | Object with exactly the outer-year keys; each value is a nonempty strictly increasing unique list of valid earlier year strings. No event coverage or cutoff availability is inferred. |
+| `max_candidates` | Explicit positive integer cap, at least the expanded count. The closed grid still contains only 33 candidates; a larger cap never adds candidates. |
+| `max_fits` | Explicit positive integer cap, at least the calculated search fit count. It counts attempted logical horizon fits, including failures; this compiler performs none. |
+
+```json
+{
+  "ridge": {"alpha": [0.1, 1.0, 10.0]},
+  "elasticnet": {"alpha": [0.01, 0.1, 1.0], "l1_ratio": [0.25, 0.75]},
+  "hgb": {"max_leaf_nodes": [7, 15]}
+}
+```
+
+`comparison` has exactly `reference="size_v1_4_causal_refit"`,
+`sanity_reference="history_mean"`, `max_logical_fits` and `max_component_fits`.
+Both caps are explicit positive integers; they must cover respectively three and
+six times the outer-year count. Each legacy horizon fit is one logical fit and
+two OLS/MLP component fits. History mean consumes no estimator fits. These names
+declare the accepted baseline protocol, not an implemented baseline recipe.
+
+`limits` has exactly four objects, with exactly these keys:
+
+```text
+child:  memory_bytes, cpu_seconds, wall_seconds
+parent: memory_bytes, wall_seconds
+build:  memory_bytes, wall_seconds
+job:    wall_seconds
+```
+
+Every value is a built-in positive integer below `sys.maxsize`; no null/unbounded
+value, coercion or implicit default. Reuse the current public child-limit
+validator; parent/build/job scalars use the same integer domain. Child limits
+describe one bounded trial/outer worker invocation, potentially containing three
+horizon fits, not three separately allocated budgets. Other limits describe the
+parent orchestrator, panel build and complete job respectively. This stage only
+binds declarations, not resource containment, feasibility or a measured pilot.
+Synthetic fixture values are not approved real-data budgets.
+
+### Deterministic preview, not a sealed plan
+
+Return a detached document with `schema_version="magnitude_search_schedule.v2"`,
+the normalized `request`, `request_id=content_hash(request)`, `horizons=[5,3,1]`,
+`candidate_specs`, `schedule`, and `counts`. Each candidate specification contains
+`family`, the owning `feature_recipe` for its subset, `parameters`, and
+`candidate_spec_id=content_hash({request_id, family, feature_recipe, parameters})`.
+Sort specifications by that ID. Parameters contain only the declared grid knobs;
+these are not executable fit recipes or complete model/fold/source identities.
+Fixed estimator/preprocessing knobs must be bound by later recipe assembly.
+
+`schedule` is ordered by outer year, each entry containing `outer_year` and its
+ordered `inner_years`. It carries no event IDs, target availability or fit cutoff.
+Let C be the candidate count, I the sum of inner-year counts, O the outer count:
+`counts` contains `candidates=C`, `inner_folds=I`, `outer_folds=O`,
+`search_fits=3*(C*I+O)`, `baseline_logical_fits=3*O`,
+`baseline_component_fits=6*O`, `total_logical_fits=search_fits+3*O`, and
+`total_component_fits=search_fits+6*O`. Caps are checked before expansion.
+The design schedule gives 33/603/9/18/612/621; 603 is not universal for other years.
+
+Malformed declarations, incompatible dictionary/policy, year-order violations,
+or insufficient caps raise nonretryable `INVALID_EXPERIMENT_SPEC`, with no partial
+preview. Identical semantic requests replay identically; dictionary-key order is
+irrelevant, list order is contractual. Changed valid references, years or limits
+change request/spec IDs. The later registrar must still enforce a new experiment
+ID on amendment and authenticate all references against the anchor.
+
+### Acceptance and implementation split
+
+First publish/review this checkpoint; then add the compiler, owning architecture
+contract and synthetic tests in a separate small runtime PR. Estimate: 180–280
+added code / 250–400 test / 30–60 documentation lines; no new dependency or framework.
+Tests cover exact grid/count arithmetic, all six ElasticNet pairs, smaller valid
+schedules, aliases, malformed nested documents and cap boundaries, dictionary
+and 30-day policy binding, deterministic non-mutating replay, identity changes,
+and poisoned repository/store/fit hooks. Verify v1 source closures stay unchanged.
+Native stored-panel admission/publication, fitted Ridge/HGB column generalization,
+ElasticNet recipe dispatch, journaling/selection and resource-contained execution
+remain later slices. No dummy runtime wiring, quantitative model recommendation,
+actual registration, protected read or real-data job is authorized here.
