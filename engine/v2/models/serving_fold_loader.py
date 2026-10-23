@@ -61,6 +61,16 @@ def _validate_descriptor(descriptor):
         raise ServingFoldError()
 
 
+def validate_serving_fold_descriptor(descriptor):
+    """Validate one serving-fold descriptor's intrinsic fields."""
+    try:
+        _validate_descriptor(descriptor)
+    except ServingFoldError:
+        raise
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        raise ServingFoldError() from None
+
+
 def _view(descriptor, parent, catalog_hash, *, role="size"):
     policy = descriptor.policy
     if (not _hash_valid(catalog_hash) or not _manifest_hash_matches(parent)

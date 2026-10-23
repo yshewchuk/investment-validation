@@ -7,11 +7,12 @@ from datetime import date, datetime
 from types import MappingProxyType
 from typing import Any
 
-from engine.v2.foundation import from_document
+from engine.v2.foundation import content_hash, from_document
 from engine.v2.models.deployment import StagedManifest
 from engine.v2.models.serving_fold_loader import (
     ServingFoldError,
     load_serving_fold,
+    validate_serving_fold_descriptor,
     validate_serving_fold_object,
 )
 from engine.v2.models.serving_folds import ServingFoldDescriptor
@@ -21,6 +22,7 @@ __all__ = ["SizeFoldCatalog", "index_size_folds", "select_gate_forecast_source"]
 
 _MEMBER_ID = "tier4_folds:size"
 _INVALID = "size fold catalog is not valid"
+_PHASE5_RELEASE_SCHEMA = "phase5_staged_release.v1.0"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -42,10 +44,16 @@ def index_size_folds(catalog: Mapping, parent: StagedManifest) -> SizeFoldCatalo
     if not isinstance(catalog, Mapping):
         raise ModelNotReady(_MEMBER_ID, _INVALID)
     try:
+        if catalog.get("schema_version") != _PHASE5_RELEASE_SCHEMA:
+            raise ValueError("schema_version")
+        if catalog.get("release_id") != parent.release.release_id:
+            raise ValueError("release_id")
+        digest = catalog.get("manifest_hash")
+        if digest != content_hash({k: v for k, v in catalog.items() if k != "manifest_hash"}):
+            raise ValueError("manifest_hash")
         rows = _size_fold_rows(catalog)
         if len(rows) != 1 or rows[0].get("status") != "STAGED":
-            return SizeFoldCatalog(
-                parent=parent, catalog_hash=catalog.get("manifest_hash"), descriptors={})
+            return SizeFoldCatalog(parent=parent, catalog_hash=digest, descriptors={})
         objects = rows[0].get("objects")
         if not isinstance(objects, list):
             raise ValueError("objects")
@@ -55,8 +63,7 @@ def index_size_folds(catalog: Mapping, parent: StagedManifest) -> SizeFoldCatalo
             if descriptor.fold_start in descriptors:
                 raise ValueError("duplicate")
             descriptors[descriptor.fold_start] = descriptor
-        return SizeFoldCatalog(
-            parent=parent, catalog_hash=catalog.get("manifest_hash"), descriptors=descriptors)
+        return SizeFoldCatalog(parent=parent, catalog_hash=digest, descriptors=descriptors)
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
         raise ModelNotReady(_MEMBER_ID, _INVALID) from None
 
@@ -65,9 +72,11 @@ def _size_fold_rows(catalog: Mapping) -> list:
     from engine.v2.scoring.release_bindings import ModelNotReady
 
     members = catalog.get("members")
-    rows = ([row for row in members
-             if isinstance(row, Mapping) and row.get("member_id") == _MEMBER_ID]
-            if isinstance(members, list) else [])
+    if not isinstance(members, list):
+        raise ModelNotReady(_MEMBER_ID, _INVALID)
+    if any(not isinstance(row, Mapping) for row in members):
+        raise ModelNotReady(_MEMBER_ID, _INVALID)
+    rows = [row for row in members if row.get("member_id") == _MEMBER_ID]
     if len(rows) > 1:
         raise ModelNotReady(_MEMBER_ID, _INVALID)
     return rows
@@ -80,6 +89,10 @@ def _descriptor_of(obj: Any) -> ServingFoldDescriptor:
     if not isinstance(path, str) or not isinstance(digest, str):
         raise ValueError("identity")
     descriptor = from_document(ServingFoldDescriptor, obj["serving_fold"])
+    try:
+        validate_serving_fold_descriptor(descriptor)
+    except ServingFoldError:
+        raise ValueError("descriptor") from None
     if (descriptor.estimator.path != path
             or descriptor.estimator.content_hash != digest):
         raise ValueError("estimator")

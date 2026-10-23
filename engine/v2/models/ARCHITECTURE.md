@@ -596,7 +596,9 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
 `from engine.v2.models import deployment`, checked against `README.md`'s
 `<!-- consumers: ... -->` directive):
 
-- `engine.v2.scoring` — the verified frozen inference contract/loader for
+- `engine.v2.scoring` — `gate_fold_selection.py` calls `load_serving_fold`,
+  `validate_serving_fold_object` and `validate_serving_fold_descriptor` from
+  `serving_fold_loader`; the verified frozen inference contract/loader for
   the model stage, the payoff-calibration artifact type, and
   `release_bindings.py`'s reads of `deployment.current_pointer`,
   `deployment._read_manifest`, `deployment._manifest_hash_matches`,

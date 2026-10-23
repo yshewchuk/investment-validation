@@ -101,7 +101,8 @@ runs in production today versus only in tests.
 `select_gate_forecast_source`: `resolve_release_binding` indexes the release's
 staged size-fold descriptors into `ScoringReleaseBinding.size_folds` (descriptors
 only), and the selector loads the one fold for the earlier of the event's and the
-decision's month as a `GateForecastSource`, or raises `ModelNotReady`.
+decision's month as a `GateForecastSource`, or raises `ModelNotReady` (a bad
+`event_date`/`as_of` raises `ValueError`).
 
 `gate_forecast_source` provides `GateForecastSource`, the optional
 `SourceBundle.gate_forecast_source` input carrying the selected size fold's
