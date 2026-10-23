@@ -380,3 +380,52 @@ def read_stored_for_events(repository, snapshot, context, *, event_ids, columns)
         inputs_id = _stream_identity(context, snapshot, rows)
     return {"context": context, "feature_snapshot": to_document(snapshot),
             "rows": retained, "inputs_id": inputs_id}
+
+
+def validate_context_identity(context):
+    """Check detached identity, retaining native IDENTITY_CONFLICT refusals; no read authority."""
+    try:
+        _names(context)
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):
+        raise errors.fail("CONTRACT_MISMATCH", "invalid detached history identity") from None
+
+
+def validate_event_forecasts(event, history_start, event_day):
+    """Share exact horizon coverage and causal history-window validation."""
+    try:
+        return _event_ceiling(event, history_start, event_day)
+    except (KeyError, TypeError, ValueError):
+        raise errors.fail("CONTRACT_MISMATCH", "history forecast coverage or window differs") from None
+
+
+def preflight_source(repository, snapshot, context):
+    """Reconstruct exact context before admitting metadata-only prior-outcome plans."""
+    try:
+        _names(context)
+        plan = context["temporal_plan"]
+        if (type(plan["horizons"]) is not list
+                or any(type(horizon) is not int for horizon in plan["horizons"])
+                or context["source_snapshot"] != to_document(snapshot)
+                or plan["snapshot_id"] != snapshot.snapshot_id
+                or repository.resolve(snapshot.snapshot_id) != snapshot):
+            raise ValueError
+        expected = build_context(repository, snapshot, producer=context["producer"],
+            history_start=context["history_start"], as_of_month=plan["holdout_as_of_month"],
+            evaluation_years=plan["evaluation_years"], training_start=plan["training_start"],
+            event_ids=[event["event_id"] for event in plan["events"]])
+        if context != expected:
+            raise ValueError
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):
+        raise errors.fail("IDENTITY_CONFLICT", "history binding differs from source metadata") from None
+    population, plans, _ = _preflight_source(repository, snapshot, context)
+    return population, plans
+
+
+def validate_features(row, count):
+    """Share typed stored history count, finite-value and missingness invariants."""
+    try:
+        if not isinstance(row, dict) or type(count) is not int or count < 0:
+            raise ValueError
+        _validate_features(row, count)
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+        raise errors.fail("CONTRACT_MISMATCH", "invalid history features or count") from None
