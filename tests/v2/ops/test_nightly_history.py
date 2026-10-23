@@ -15,6 +15,7 @@ from engine.v2.ops import ledger_history_import as history_import
 from engine.v2.ops import nightly_history
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.nightly_receipts import Effect, begin_step, complete_step
 from engine.v2.ops.nightly_session import SessionIdentity, ensure_session, mark_started
 from tests.ops_support import catalog
 
@@ -461,4 +462,151 @@ def test_overlapping_same_run_calls_keep_pins_stable_and_resume(tmp_path, monkey
     assert resumed.executed == ()
     assert resumed.skipped == ("history_import",)
     assert json.loads(pin_path.read_text()) == persisted
+    conn.close()
+
+
+def test_import_history_reports_exact_through_coverage_and_keeps_older_rows(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-30.jsonl",
+                       _prediction("older-row", "2023-12-30"))
+    _write_predictions(source, "2023-12-31.jsonl",
+                       _prediction("through-row-a", "2023-12-31"),
+                       _prediction("through-row-b", "2023-12-31"))
+    _write_outcomes(source, "2023-12-30.jsonl",
+                    _outcome("older-outcome", "2023-12-30"))
+
+    dry = history_import.import_history(
+        conn, ops_root, source, through=date.fromisoformat("2023-12-31"),
+        dry_run=True, clock=clock)
+    assert dry["coverage"] == {
+        "through": "2023-12-31",
+        "families": {
+            "predictions": {"rows": 2, "status": "present"},
+            "outcomes": {"rows": 0, "status": "no_rows"},
+        },
+    }
+
+    real = history_import.import_history(
+        conn, ops_root, source, through=date.fromisoformat("2023-12-31"), clock=clock)
+    assert real["coverage"] == dry["coverage"]
+    imported = [row[0] for row in conn.execute(
+        "SELECT decision_id FROM decisions ORDER BY decision_id").fetchall()]
+    assert imported[1:] == [
+        "prediction:older-row", "prediction:through-row-a", "prediction:through-row-b"]
+    assert imported[0].startswith("outcome:older-outcome:")
+    conn.close()
+
+
+def test_pinned_history_receipt_carries_dry_run_coverage_and_stays_idempotent(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-30.jsonl",
+                       _prediction("older-row", "2023-12-30"))
+    _write_predictions(source, "2023-12-31.jsonl",
+                       _prediction("through-row", "2023-12-31"))
+    expected = {
+        "through": "2023-12-31",
+        "families": {
+            "predictions": {"rows": 1, "status": "present"},
+            "outcomes": {"rows": 0, "status": "no_rows"},
+        },
+    }
+
+    _run(ops_root, conn, clock, source)
+    state = nightly_history.load_session(ops_root, IDENTITY)
+    inputs_path = ops_root.joinpath(
+        *nightly_history.STATE_DIR, f"{state.active.run_id}.history-inputs.json")
+    inputs = json.loads(inputs_path.read_text())
+    assert inputs["schema"] == "nightly_history_inputs.v1.1"
+    assert inputs["coverage"] == expected
+
+    receipt_path = ops_root.joinpath(
+        *nightly_history.STATE_DIR, f"{state.active.run_id}.history-complete.json")
+    receipt_bytes = receipt_path.read_bytes()
+    receipt = json.loads(receipt_bytes)
+    assert receipt["schema"] == "nightly_history_receipt.v1.1"
+    assert receipt["coverage"] == expected
+
+    resumed = _run(ops_root, conn, clock, source)
+    assert resumed.skipped == ("history_import",)
+    assert receipt_path.read_bytes() == receipt_bytes
+    conn.close()
+
+
+def test_legacy_pin_document_without_coverage_is_upgraded_from_pinned_dry_run(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-31.jsonl",
+                       _prediction("through-row", "2023-12-31"))
+    state = nightly_history.load_session(ops_root, IDENTITY)
+    path = ops_root.joinpath(
+        *nightly_history.STATE_DIR, f"{state.active.run_id}.history-inputs.json")
+    path.write_text(json.dumps({
+        "schema": "nightly_history_inputs.v1", "run_id": state.active.run_id,
+        "through": "2023-12-31",
+        "files": [list(pair) for pair in nightly_history._pins(source)]}))
+
+    result = _run(ops_root, conn, clock, source)
+    assert result.executed == ("history_import",)
+    upgraded = json.loads(path.read_text())
+    assert upgraded["schema"] == "nightly_history_inputs.v1.1"
+    assert upgraded["coverage"]["families"]["predictions"] == {
+        "rows": 1, "status": "present"}
+    receipt = json.loads(ops_root.joinpath(
+        *nightly_history.STATE_DIR, f"{state.active.run_id}.history-complete.json").read_text())
+    assert receipt["coverage"] == upgraded["coverage"]
+    conn.close()
+
+
+def test_both_families_can_report_no_rows_without_blocking_older_rows(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-30.jsonl",
+                       _prediction("older-prediction", "2023-12-30"))
+    _write_outcomes(source, "2023-12-30.jsonl", _outcome("older-outcome", "2023-12-30"))
+
+    result = history_import.import_history(
+        conn, ops_root, source, through=date.fromisoformat("2023-12-31"), clock=clock)
+    assert result["coverage"] == {
+        "through": "2023-12-31",
+        "families": {
+            "predictions": {"rows": 0, "status": "no_rows"},
+            "outcomes": {"rows": 0, "status": "no_rows"},
+        },
+    }
+    decision_ids = [row[0] for row in conn.execute(
+        "SELECT decision_id FROM decisions ORDER BY decision_id").fetchall()]
+    assert decision_ids[1:] == ["prediction:older-prediction"]
+    assert decision_ids[0].startswith("outcome:older-outcome:")
+    conn.close()
+
+
+def test_completed_legacy_receipt_is_reused_without_reimport(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-31.jsonl", _prediction("row", "2023-12-31"))
+    state = nightly_history.load_session(ops_root, IDENTITY)
+    state_dir = ops_root.joinpath(*nightly_history.STATE_DIR)
+    artifact = state_dir / f"{state.active.run_id}.history-complete.json"
+    pins = nightly_history._pins(source)
+    legacy_text = json.dumps({
+        "schema": "nightly_history_receipt.v1", "run_id": state.active.run_id,
+        "through": "2023-12-31", "files": [list(pair) for pair in pins]}, sort_keys=True)
+    artifact.write_text(legacy_text)
+    (state_dir / f"{state.active.run_id}.history-inputs.json").write_text(json.dumps({
+        "schema": "nightly_history_inputs.v1", "run_id": state.active.run_id,
+        "through": "2023-12-31", "files": [list(pair) for pair in pins]}))
+
+    digest = hashlib.sha256(
+        b"history_import\0snapshot-after-price-history").hexdigest()
+    effect = Effect("artifact", str(artifact),
+                    hashlib.sha256(legacy_text.encode()).hexdigest())
+    begin_step(ops_root, IDENTITY, 1, "history_import", digest, effect)
+    complete_step(ops_root, IDENTITY, 1, "history_import", conn=conn)
+
+    result = _run(ops_root, conn, clock, source)
+    assert result.executed == ()
+    assert result.skipped == ("history_import",)
+    assert artifact.read_text() == legacy_text
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    inputs = json.loads((state_dir / f"{state.active.run_id}.history-inputs.json").read_text())
+    assert inputs["schema"] == "nightly_history_inputs.v1.1"
+    assert inputs["coverage"]["families"]["predictions"] == {
+        "rows": 1, "status": "present"}
     conn.close()
