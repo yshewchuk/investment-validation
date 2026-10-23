@@ -60,6 +60,8 @@ _FAMILIES = (
 
 
 def _row_date(date_field, payload):
+    if not isinstance(payload, dict):
+        raise fail("VALIDATION_FAILED", "legacy ledger line is not a JSON object")
     value = payload.get(date_field)
     if not value:
         raise fail("VALIDATION_FAILED", "legacy row is missing its date field",

@@ -77,10 +77,14 @@ def _read_pins(path, run_id, through):
     return tuple(tuple(pair) for pair in document["files"])
 
 
+def _pin_document(schema, run_id, through, pins):
+    return {"schema": schema, "run_id": run_id, "through": through,
+            "files": [list(pair) for pair in pins]}
+
+
 def _write_inputs(path, run_id, through, pins):
-    document = {"schema": INPUTS_SCHEMA, "run_id": run_id, "through": through,
-                "files": [list(pair) for pair in pins]}
-    atomic_write(path, json.dumps(document, sort_keys=True))
+    atomic_write(path, json.dumps(
+        _pin_document(INPUTS_SCHEMA, run_id, through, pins), sort_keys=True))
 
 
 def _load_or_dry_run_pins(root, identity, generation, source_root, conn, clock):
@@ -119,9 +123,8 @@ def run_pinned_history_import(root: Path, identity: SessionIdentity, generation:
         run_id, through, pins = _load_or_dry_run_pins(
             root, identity, generation, source_root, conn, clock)
         history_path = Path(root).joinpath(*STATE_DIR, f"{run_id}.history-complete.json")
-        history_text = json.dumps({"schema": RECEIPT_SCHEMA, "run_id": run_id,
-                                   "through": through,
-                                   "files": [list(pair) for pair in pins]}, sort_keys=True)
+        history_text = json.dumps(
+            _pin_document(RECEIPT_SCHEMA, run_id, through, pins), sort_keys=True)
         history_hash = hashlib.sha256(history_text.encode()).hexdigest()
 
         def history_effect(_predecessor):
