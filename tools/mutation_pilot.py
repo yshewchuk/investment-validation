@@ -2267,6 +2267,7 @@ def mutmut_config_text(defaults: dict, mutate: list[str], tests: list[str],
              + lines("also_copy", also_copy)
              + lines("pytest_add_cli_args_test_selection", tests)
              + lines("pytest_add_cli_args", defaults["pytest_args"]
+                     + ["-p", "tools.mutation_stats_diagnostics"]
                      + [f"--deselect={d}" for d in defaults.get("deselect", [])])
              + f"timeout_constant = {float(defaults['timeout_constant'])}\n"
              + f"timeout_multiplier = {float(defaults['timeout_multiplier'])}\n"
@@ -2470,6 +2471,7 @@ def _run_with_time_budget(cmd: list[str], cwd: Path, env: dict, budget_s: float)
 
 def cmd_run(cfg: dict, args) -> int:
     from mutation_results import SNAPSHOT_NAME, snapshot
+    from mutation_stats_diagnostics import LIMIT_BYTES, warn_unavailable
 
     work = sync_workdir(args.module, cfg, fresh=args.fresh)
     files = mutate_files(cfg, args.module)
@@ -2498,6 +2500,16 @@ def cmd_run(cfg: dict, args) -> int:
     # ops_catalog_state now shares that CI-only default, so the same echo
     # covers its shard too.
     env = os.environ.copy()
+    # A stats-only pytest plugin writes outside the fork-local stdout buffer.
+    # Source-policy tests inspect the authored snapshot, never generated wrappers.
+    diagnostic = work / "stats-failure.txt"
+    try:
+        diagnostic.unlink(missing_ok=True)
+    except OSError as error:
+        warn_unavailable(error)
+        diagnostic = None  # never append to or echo evidence from an earlier run
+    env["MUTATION_PILOT_STATS_DIAGNOSTIC"] = str(diagnostic) if diagnostic is not None else ""
+    env["MUTATION_PILOT_SOURCE_ROOT"] = str(work)
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         env[var] = "1"
@@ -2505,6 +2517,14 @@ def cmd_run(cfg: dict, args) -> int:
         rc = _run_with_time_budget(cmd, work, env, args.time_budget_seconds)
     else:
         rc = subprocess.run(cmd, cwd=work, env=env).returncode
+    if rc and diagnostic is not None:
+        # workflow_run uses main's YAML until merge. Keep failures visible even
+        # before that workflow knows to upload the sidecar; never dump the env.
+        try:
+            with diagnostic.open("rb") as stream:
+                sys.stderr.write(stream.read(LIMIT_BYTES).decode("utf-8", "ignore"))
+        except (OSError, ValueError):
+            pass  # unavailable diagnostics must not replace the backend outcome
     # On a first run mutants/ did not exist before mutmut; record the digest now
     # so the next run compares against this one.
     reset_on_test_change(work, [], digest)

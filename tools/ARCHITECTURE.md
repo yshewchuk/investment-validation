@@ -18,6 +18,20 @@ Opt-in guard against a heavy job filling the host disk (WSL's virtual disk never
 | heartbeat | the once-a-minute line adds `disk used <G>G/<ceiling>G` when the check is on. |
 | resource-measurement record (`tools/v2_resource_measurement.py`, caller of bounded_run) | `killed` is true for exit 76 as well as 137; `kill_reason` is `DISK LIMIT` only for exit 76, when a terminal breach line (`DISK LIMIT:` or `DISK LIMIT unreadable for N ticks`) appears in the output, and `None` otherwise (an earlier `DISK LIMIT unreadable:` warning does not count); exit 137 reports the memory strings only (match priority BOX FLOOR, SWAP, CAP), never `DISK LIMIT`. |
 
-## Dependencies
+## `bounded_run.py` dependencies
 
 Callers are `tools/v2_resource_measurement.py`, `tools/land.py` and `tools/oc_check.py`; depends only on the stdlib and Linux `/proc`, `os.statvfs`.
+
+## Mutation stats diagnostics
+
+Mutation diagnostics are optional evidence, never authority over a backend result or score. The mutation workflow calls `mutation_pilot.py`, which configures pytest to load `mutation_stats_diagnostics.py`. That plugin consumes pytest's stats-phase reports (including captured setup/call/teardown and collection output, plus internal errors) and writes at most 64 KiB per module to a sidecar. The driver clears stale evidence before launch and consumes the sidecar afterward, exposing at most 64 KiB on stderr after a failed backend. CI attempts to retain fresh evidence before result export; neither collection nor delivery reruns tests or enables per-mutant debug output.
+
+| Condition | Outcome |
+|---|---|
+| No stats failure, or a mutant-phase report | No diagnostic report is added; ordinary backend behavior is unchanged. |
+| Stale sidecar cannot be cleared | Evidence is disabled for this run with a best-effort warning; the backend still runs, old bytes are not echoed, and CI excludes files older than the run start. |
+| Sidecar creation/write or its warning fails | Best-effort evidence is abandoned; pytest's original outcome remains authoritative. |
+| Failure echo cannot be read/written, or CI cannot copy evidence | The backend exit remains unchanged and result export is still attempted. An export failure remains a failure, not a fabricated result. |
+| Evidence exceeds its byte budget | The retained evidence is truncated, not the failure outcome. |
+
+Authored-source import/size policies consume the uninstrumented work snapshot selected by the driver; behavioral tests still exercise instrumented imports. Operator details and artifact names are in [the testing guide](../tests/README.md).
