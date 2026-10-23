@@ -449,6 +449,65 @@ def _chooser_preflight(release, states, panel_identity=None):
     return validated
 
 
+def _rebase_member_paths(release: ModelRelease, states: list[StateBuild],
+                         pinned_panel: PinnedPanelContext | None) -> tuple[ModelRelease, list[StateBuild]]:
+    """Fold-carrying or pinned releases name binding members by object path and copy their payloads."""
+    if pinned_panel is None and not any(build.chooser_fold_policy is not None
+                                        or build.size_fold_policy is not None for build in states):
+        return release, states
+    states = [dataclasses.replace(build, payloads=dict(build.payloads)) for build in states]
+    release = dataclasses.replace(release, bindings=tuple(
+        dataclasses.replace(binding, members=tuple(dataclasses.replace(
+            member, path=object_relpath(member.content_hash)) for member in binding.members))
+        for binding in release.bindings))
+    return release, states
+
+
+def _run_preflights(release: ModelRelease, states: list[StateBuild],
+                    pinned_panel: PinnedPanelContext | None, sources):
+    """Size and chooser fold preflights; the pinned identity (if any) joins ``sources``."""
+    if pinned_panel is not None:
+        identity, validated = _pinned_preflight(release, states, pinned_panel)
+        sources = {**dict(sources or {}), **identity}
+    else:
+        identity, validated = None, _size_preflight(release, states)
+    return sources, validated, _chooser_preflight(release, states, identity)
+
+
+def _store_object(out: Path, build: StateBuild, data: bytes, pinned_panel: PinnedPanelContext | None):
+    try:
+        return write_object(out, data)
+    except ObjectVerificationError as exc:
+        if build.chooser_fold_policy is None and build.size_fold_policy is None:
+            raise
+        if isinstance(exc.__cause__, OSError):
+            raise PrepareRefused("serving fold cannot be read") from exc.__cause__
+        prefix = f"{COPY_PREFIX}refused: " if pinned_panel is not None else ""
+        message = ("chooser fold object bytes differ from preflight" if build.chooser_fold_policy is not None
+                   else f"{prefix}size fold object bytes differ")
+        raise PrepareRefused(message) from None
+
+
+def _object_entry(out: Path, build: StateBuild, name: str, data: bytes, validated, chooser_validated,
+                  staged, pinned_panel: PinnedPanelContext | None) -> dict:
+    digest, rel = _store_object(out, build, data, pinned_panel)
+    is_size = build.spec.member_id == "tier4_folds:size"
+    if pinned_panel is not None and is_size:
+        if _destination_digest(deployment_root(out) / rel) != validated[name].digest:
+            raise PrepareRefused(f"{COPY_PREFIX}refused: size fold object bytes differ")
+    entry = {"name": name, "path": rel, "content_hash": digest, "bytes": len(data)}
+    if is_size and build.size_fold_policy is not None:
+        descriptor = descriptor_from_preflight(validated[name], build.size_fold_policy, staged)
+        entry["serving_fold"] = to_document(descriptor)
+    if build.chooser_fold_policy is not None:
+        preflight = chooser_validated[build.spec.member_id, name]
+        if _destination_digest(deployment_root(out) / rel) != preflight.digest:
+            raise PrepareRefused("chooser fold object bytes differ from preflight")
+        entry["serving_fold"] = to_document(descriptor_from_preflight(
+            preflight, build.chooser_fold_policy, staged))
+    return entry
+
+
 def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInventory,
                   payloads: Mapping[str, bytes], states: list[StateBuild], *,
                   sources: Mapping[str, str] | None = None,
@@ -456,19 +515,8 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
     """Stage the model bindings, write the state objects, write the manifest."""
     if sources and any(str(key).startswith(COPY_PREFIX) for key in sources):
         raise PrepareRefused(f"{COPY_PREFIX}refused: caller-supplied pinned sources")
-    if pinned_panel is not None or any(build.chooser_fold_policy is not None
-                                       or build.size_fold_policy is not None for build in states):
-        states = [dataclasses.replace(build, payloads=dict(build.payloads)) for build in states]
-        release = dataclasses.replace(release, bindings=tuple(
-            dataclasses.replace(binding, members=tuple(dataclasses.replace(
-                member, path=object_relpath(member.content_hash)) for member in binding.members))
-            for binding in release.bindings))
-    if pinned_panel is not None:
-        identity, validated = _pinned_preflight(release, states, pinned_panel)
-        sources = {**dict(sources or {}), **identity}
-    else:
-        validated = _size_preflight(release, states)
-    chooser_validated = _chooser_preflight(release, states, None if pinned_panel is None else identity)
+    release, states = _rebase_member_paths(release, states, pinned_panel)
+    sources, validated, chooser_validated = _run_preflights(release, states, pinned_panel, sources)
     out = Path(out)
     root = deployment_root(out)
     root.mkdir(parents=True, exist_ok=True)
@@ -478,33 +526,8 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
     staged = deployment.stage_release(root, release, inventory, dict(payloads))
     rows = []
     for build in states:
-        objects = []
-        for name, data in sorted(build.payloads.items()):
-            try:
-                digest, rel = write_object(out, data)
-            except ObjectVerificationError as exc:
-                if build.chooser_fold_policy is None and build.size_fold_policy is None:
-                    raise
-                if isinstance(exc.__cause__, OSError):
-                    raise PrepareRefused("serving fold cannot be read") from exc.__cause__
-                prefix = f"{COPY_PREFIX}refused: " if pinned_panel is not None else ""
-                message = ("chooser fold object bytes differ from preflight" if build.chooser_fold_policy is not None
-                           else f"{prefix}size fold object bytes differ")
-                raise PrepareRefused(message) from None
-            if pinned_panel is not None and build.spec.member_id == "tier4_folds:size":
-                if _destination_digest(deployment_root(out) / rel) != validated[name].digest:
-                    raise PrepareRefused(f"{COPY_PREFIX}refused: size fold object bytes differ")
-            objects.append({"name": name, "path": rel, "content_hash": digest,
-                            "bytes": len(data)})
-            if build.spec.member_id == "tier4_folds:size" and build.size_fold_policy is not None:
-                descriptor = descriptor_from_preflight(validated[name], build.size_fold_policy, staged)
-                objects[-1]["serving_fold"] = to_document(descriptor)
-            if build.chooser_fold_policy is not None:
-                preflight = chooser_validated[build.spec.member_id, name]
-                if _destination_digest(deployment_root(out) / rel) != preflight.digest:
-                    raise PrepareRefused("chooser fold object bytes differ from preflight")
-                objects[-1]["serving_fold"] = to_document(descriptor_from_preflight(
-                    preflight, build.chooser_fold_policy, staged))
+        objects = [_object_entry(out, build, name, data, validated, chooser_validated, staged, pinned_panel)
+                   for name, data in sorted(build.payloads.items())]
         rows.append(member_row(build.spec, build.status, objects, build.detail))
     body = manifest_body(release.release_id, release.deployment_id, rows, sources or {})
     return write_manifest(out, body)
@@ -543,29 +566,26 @@ def _pinned_context(args) -> PinnedPanelContext | None:
     return None if all(value is None for value in values) else PinnedPanelContext(*values)
 
 
-def _real_inputs(args, pinned_panel: PinnedPanelContext | None = None
-                 ) -> tuple[ModelRelease, ModelReleaseInventory, dict, list[StateBuild]]:
+def _resolve_snapshot(args, pinned_panel: PinnedPanelContext | None) -> str:
     from engine import paths
-    from engine.data.features import tier4
-    from engine.v2.models.inventory import current_release_inventory
 
-    inventory, drift = current_release_inventory()
-    if drift:
-        raise PrepareRefused("registry drift: " + ", ".join(sorted({i.code for i in drift})))
-    inventory = dataclasses.replace(inventory, release_id=args.release_id)
-    release, payloads = model_release(
-        inventory, resolve=lambda ref: Path(ref) if Path(ref).is_absolute() else paths.ROOT / ref)
     snapshot = args.tier3_snapshot
     if pinned_panel is not None:
         digest = verify_panel_copy(pinned_panel)["panel_copy_sha256"]
         if snapshot != "auto" and snapshot.removeprefix(CONTENT_HASH_PREFIX) != digest:
             raise PrepareRefused(f"{COPY_PREFIX}refused: --tier3-snapshot does not match the pinned panel")
-        snapshot = digest
-    elif snapshot == "auto":
+        return digest
+    if snapshot == "auto":
         from engine.data import store
 
-        snapshot = store.file_sha256(paths.PANEL)
-    feature_ids = {b.role: b.artifact_id for b in inventory.bindings if b.strategy_id == "*"}
+        return store.file_sha256(paths.PANEL)
+    return snapshot
+
+
+def _collect_payloads(args, snapshot: str, feature_ids: Mapping[str, str]) -> dict[str, dict[str, bytes]]:
+    from engine import paths
+    from engine.data.features import tier4
+
     found: dict[str, dict[str, bytes]] = {}
     _merge(found, tier4_fold_payloads(Path(args.tier4_dir or tier4.SERVING_DIR),
                                      feature_ids, snapshot, args.fold_month))
@@ -578,6 +598,12 @@ def _real_inputs(args, pinned_panel: PinnedPanelContext | None = None
         _merge(found, frozen_state_payloads(args.frozen_state or ()))
     if modules_available(("engine.v2.models.chooser_analog_pool",))[0]:
         _merge(found, chooser_pool_payloads(paths.FEATURES / "chooser_analog_pool.parquet"))
+    return found
+
+
+def _fold_policies(found: Mapping[str, Mapping[str, bytes]], snapshot: str):
+    from engine.data.features import tier4
+
     producer = tier4.size_feature_model()
     if producer.produces != "pred_abs_move":
         raise PrepareRefused("unsupported size serving output")
@@ -596,6 +622,24 @@ def _real_inputs(args, pinned_panel: PinnedPanelContext | None = None
             chooser_policies[role] = ChooserFoldPolicy(
                 role=role, model_id=chooser_producer.model_id, feature_order=chooser_producer.features,
                 panel_sha256=snapshot, interval_floor=chooser_producer.interval_floor)
+    return policy, chooser_policies
+
+
+def _real_inputs(args, pinned_panel: PinnedPanelContext | None = None
+                 ) -> tuple[ModelRelease, ModelReleaseInventory, dict, list[StateBuild]]:
+    from engine import paths
+    from engine.v2.models.inventory import current_release_inventory
+
+    inventory, drift = current_release_inventory()
+    if drift:
+        raise PrepareRefused("registry drift: " + ", ".join(sorted({i.code for i in drift})))
+    inventory = dataclasses.replace(inventory, release_id=args.release_id)
+    release, payloads = model_release(
+        inventory, resolve=lambda ref: Path(ref) if Path(ref).is_absolute() else paths.ROOT / ref)
+    snapshot = _resolve_snapshot(args, pinned_panel)
+    feature_ids = {b.role: b.artifact_id for b in inventory.bindings if b.strategy_id == "*"}
+    found = _collect_payloads(args, snapshot, feature_ids)
+    policy, chooser_policies = _fold_policies(found, snapshot)
     return release, inventory, payloads, build_states(
         found, size_fold_policy=policy, chooser_fold_policies=chooser_policies)
 
