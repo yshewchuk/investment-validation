@@ -136,6 +136,8 @@ def _add_snapshot_commands(commands):
     snapshot = commands.add_parser("snapshot")
     snapshot.add_argument("--root", default=argparse.SUPPRESS)
     snapshot_sub = snapshot.add_subparsers(dest="snapshot_command", required=True)
+    from engine.v2.ops.legacy_preflight import add_preflight_subcommand
+    add_preflight_subcommand(snapshot_sub)
     plan_import_p = snapshot_sub.add_parser("plan-import")
     plan_import_p.add_argument("--source-root", required=True, type=Path)
     plan_import_p.add_argument("--scope", required=True)
@@ -660,7 +662,7 @@ def whatif_result_action(root: Path, job_id: str, *, clock=None) -> tuple[int, d
 
 
 def snapshot_command(args, root, conn, clock):
-    """``ops snapshot plan-import|submit|promote|rollback`` — see
+    """``ops snapshot preflight|plan-import|submit|promote|rollback`` — see
     ``engine.v2.data.import_snapshot``/``engine.v2.ops.snapshot_import``/
     ``engine.v2.ops.snapshot_promotion`` for what each step actually does.
     """
@@ -670,6 +672,11 @@ def snapshot_command(args, root, conn, clock):
     from engine.v2.ops.snapshot_promotion import rollback as rollback_snapshot
 
     store = ArtifactStore(root)
+    if args.snapshot_command == "preflight":
+        from engine.v2.ops.legacy_adapter import run_snapshot_preflight
+        return run_snapshot_preflight(conn, store, source_root=args.source_root,
+                             materialization_root=args.materialization_root,
+                             receipt_id=args.receipt_id)
     repo_root = Path(__file__).resolve().parents[3]
     if args.snapshot_command == "plan-import":
         plan = plan_import(args.source_root, scope=args.scope,

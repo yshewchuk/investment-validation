@@ -9,7 +9,7 @@
       "session_backfill", "session_resolution", "store_barrier", "submission", "worker_progress"],
     "runtime": ["executor", "supervisor", "worker", "nightly_chain", "nightly_completion", "nightly_history", "nightly_readiness", "nightly_receipts", "nightly_repair", "nightly_session", "nightly_trigger"],
     "workflows": ["workflows", "workflows.commands", "backup", "decision_commit", "decision_evidence", "effects_graph", "experiment_folds", "experiments", "health",
-      "final_holdout", "nightly", "pool_refresh", "publication", "publication_submit", "stages", "state_stage", "training"],
+      "final_holdout", "legacy_preflight", "nightly", "pool_refresh", "publication", "publication_submit", "stages", "state_stage", "training"],
     "legacy": ["capture_inputs", "features_compare", "finality", "generation_binding", "ledger_history_import", "legacy_actions",
       "legacy_adapter", "materialization_worker", "render_inputs", "snapshot_roots", "snapshot_stages"],
     "stores": ["calendar_moves_jobs", "computed_moves_store", "forward_calendar_store", "incremental_data", "massive_plan", "pinned_partition_reader",

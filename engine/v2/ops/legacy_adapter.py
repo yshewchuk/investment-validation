@@ -665,16 +665,40 @@ def _check_features_current(root, parameters=None):
                    details={"mismatches": mismatches})
 
 
-def _compare_to_pinned(materialization_root, hashes):
+def _feature_file_hashes(root):
+    """Current panel and Tier-4 hashes beneath an explicit legacy root."""
+    from engine.data import store
+
+    base = Path(root)
+    return {
+        "panel_sha256": store.file_sha256(base / "data/features/panel.parquet")
+            if (base / "data/features/panel.parquet").is_file() else None,
+        "tier4_sha256": store.file_sha256(base / "data/features/tier4_forecasts.parquet")
+            if (base / "data/features/tier4_forecasts.parquet").is_file() else None,
+    }
+
+
+def _compare_to_pinned(materialization_root, hashes, *, rebuilt_root=None):
     from engine import paths
     from engine.data import store
     from engine.v2.ops import features_compare as fc
 
     root = Path(materialization_root)
+    if rebuilt_root is None:
+        sources = (("panel", paths.PANEL, paths.PANEL.relative_to(paths.ROOT)),
+                   ("tier4", paths.TIER4, paths.TIER4.relative_to(paths.ROOT)))
+    else:
+        rebuilt_root = Path(rebuilt_root)
+        sources = (
+            ("panel", rebuilt_root / "data/features/panel.parquet",
+             Path("data/features/panel.parquet")),
+            ("tier4", rebuilt_root / "data/features/tier4_forecasts.parquet",
+             Path("data/features/tier4_forecasts.parquet")),
+        )
     pinned = {}
     tables = {}
-    for name, rebuilt in (("panel", paths.PANEL), ("tier4", paths.TIER4)):
-        pinned_path = root / rebuilt.relative_to(paths.ROOT)
+    for name, rebuilt, relative in sources:
+        pinned_path = root / relative
         pinned[name] = store.file_sha256(pinned_path) if pinned_path.is_file() else None
         # Byte-identical tables skip the diff; provenance stamps are still validated (stamp columns only).
         if hashes[f"{name}_sha256"] is not None and hashes[f"{name}_sha256"] == pinned[name]:
@@ -688,6 +712,34 @@ def _compare_to_pinned(materialization_root, hashes):
             "pinned_panel_sha256": pinned["panel"],
             "pinned_tier4_sha256": pinned["tier4"],
             "tables": tables}
+
+
+def run_snapshot_preflight(conn, store, *, source_root, materialization_root, receipt_id):
+    """Read-only import-generation and numeric feature check for the nightly CLI."""
+    from engine.v2.ops.generation_binding import (
+        accepted_generation_refs,
+        refuse_generation_mismatch,
+    )
+
+    accepted = accepted_generation_refs(conn, store, receipt_id=str(receipt_id))
+    current_manifest = manifest_files(
+        source_root, tuple(accepted) if accepted is not None else ())
+    barrier_manifest = {"file_refs": [
+        {"path": path, "content_hash": entry["content_hash"]}
+        for path, entry in current_manifest.items()]}
+    refuse_generation_mismatch(conn, store, receipt_id=str(receipt_id),
+                               barrier_manifest=barrier_manifest)
+
+    source = Path(source_root)
+    pinned = Path(materialization_root)
+    source_hashes = _feature_file_hashes(source)
+    comparison = _compare_to_pinned(pinned, source_hashes, rebuilt_root=source)
+    pinned_hashes = {
+        "panel_sha256": comparison["pinned_panel_sha256"],
+        "tier4_sha256": comparison["pinned_tier4_sha256"],
+    }
+    _check_snapshot_features(comparison, pinned_hashes)
+    return {"generation": "match", "features": comparison}
 
 
 def _action_features(parameters, root, cross_check=None):
