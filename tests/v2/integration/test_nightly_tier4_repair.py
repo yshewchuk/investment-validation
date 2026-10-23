@@ -1106,6 +1106,11 @@ def _patch_run_nightly(monkeypatch, *, rebuild_results, finalize_calls, marker_p
     from engine.dashboard import nightly
     from engine.data import store
     from engine.data.pulls import computed_moves
+    from engine.data.pulls import gspc_refresh
+
+    monkeypatch.setattr(gspc_refresh, "refresh_gspc_daily",
+                        lambda *a, **k: {"ok": True, "last_date": "2026-10-12",
+                                         "rows": 1})
 
     if events is None:
         events = pd.DataFrame({
@@ -1191,6 +1196,44 @@ def _run(monkeypatch, tmp_path, *, rebuild_results, finalize_calls):
             bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
         )
     return calls, sentinel, captured, marker_writes
+
+
+@pytest.mark.parametrize("fetch_only", [False, True])
+def test_run_nightly_refuses_stale_panel_input_when_gspc_refresh_fails(
+        monkeypatch, tmp_path, fetch_only):
+    finalize_calls = []
+    nightly, _calls, captured, marker_writes = _patch_run_nightly(
+        monkeypatch, rebuild_results=[], finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path), events=_events_stub(["AAA"]))
+    from engine.data.pulls import gspc_refresh
+    attempted = []
+
+    def fail_gspc(fetcher, path, *, refetch_token=None):
+        attempted.append((fetcher, path, refetch_token))
+        return {"ok": False, "reason": "fetch_failed"}
+
+    monkeypatch.setattr(gspc_refresh, "refresh_gspc_daily", fail_gspc)
+    monkeypatch.setattr(nightly, "refresh_calendar_data",
+                        lambda *a, **k: pytest.fail("calendar refresh ran after GSPC refusal"))
+    sentinel = _ScorerSentinel()
+
+    with pytest.raises(NightlyStop) as caught:
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=["AAA"], refresh=True, tiers=True,
+            publish=False, scorer=sentinel, fetch_only=fetch_only,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+
+    assert caught.value.step == "gspc_refresh"
+    assert caught.value.detail == "GSPC_REFRESH_FAILED: fetch_failed"
+    assert attempted and attempted[0][2].startswith("legacy-nightly-")
+    assert captured["report"].steps["gspc_refresh"] == {
+        "ok": False, "reason": "fetch_failed"}
+    assert set(captured["report"].as_dict()) == {
+        "as_of", "requested_as_of", "resolved_as_of", "finality", "steps",
+        "timeline", "flags", "stopped", "elapsed_s"}
+    assert not sentinel.touched
+    assert marker_writes == []
 
 
 def test_run_nightly_repairs_a_gap_then_scores(monkeypatch, tmp_path):

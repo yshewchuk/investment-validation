@@ -21,6 +21,12 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 
 ## Primary contracts and public interfaces
 
+- `nightly.py` refreshes the guarded legacy `^GSPC` daily series before the
+  calendar refresh and any Tier-3 panel rebuild, for both full and fetch-only
+  runs. A refresh result with `ok: false` stops the run with typed
+  `NightlyStop` step `gspc_refresh`; the panel is not built from stale input.
+  The v2 `price-refresh` stage keeps its existing behaviour.
+
 - `nightly.py` — the orchestrator; run as the legacy nightly entrypoint
   (root doc §4). Public helpers for the Tier-4 gap repair:
   `repair_tier4_gap`, `repair_tier4_gap_if_needed`, `mark_tiers_degraded`.
@@ -191,6 +197,13 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 `fcntl` for the nightly's own run lock.
 
 ## Failure semantics
+
+- **`^GSPC` refresh failure** — a refused refresh stops full and fetch-only
+  runs with `NightlyStop` at `gspc_refresh` before the calendar refresh,
+  validation, panel rebuild, or scoring. The existing report JSON fields are
+  unchanged. A successful refresh may rewrite only through the existing
+  guarded `refresh_gspc_daily` helper; its own fetch and write refusal rules
+  remain authoritative.
 
 - **CLI report** — after `run_nightly` returns a report, the CLI atomically
   writes `reports/nightly_<requested date>.json`; a distinct `--json`

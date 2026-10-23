@@ -1479,6 +1479,20 @@ def run_nightly(
                                        "(the calendar may need a refresh)"})
 
     report.mark("universe", started=started)
+    if tiers:
+        from engine.data.fetch import Fetcher, CredentialRotated
+        from engine.data.pulls.gspc_refresh import refresh_gspc_daily
+        if fetcher is None:
+            fetcher = Fetcher()
+        try:
+            refetch_token = f"legacy-nightly-{time.time_ns()}"
+            result = refresh_gspc_daily(fetcher, paths.GSPC_DAILY, refetch_token=refetch_token)
+            report.steps["gspc_refresh"] = result
+            if not result.get("ok"):
+                raise _refuse(report, "gspc_refresh", "GSPC_REFRESH_FAILED: " + str(result.get("reason", "unknown")))
+        except CredentialRotated as exc:
+            report.steps["gspc_refresh"] = {"ok": False, "reason": "credential_rotated"}
+            raise _refuse(report, "gspc_refresh", "GSPC_REFRESH_FAILED: credential_rotated") from exc
     # -- 1. refresh -----------------------------------------------------------
     if refresh and calendar_tickers:
         from engine.data.fetch import CredentialRotated, FetchError
