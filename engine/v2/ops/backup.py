@@ -243,8 +243,8 @@ def _open_checked(path, *, stage, expected_size=None, oserror_code=None):
         raise
 
 
-def _hash_file(path, *, stage, keepalive=None, announce=True):
-    stream, size = _open_checked(path, stage=stage)
+def _hash_file(path, *, stage, expected_size=None, keepalive=None, announce=True):
+    stream, size = _open_checked(path, stage=stage, expected_size=expected_size)
     digest = hashlib.sha256()
     progress = _Progress(stage, total=size, keepalive=keepalive, announce=announce)
     read = 0
@@ -788,26 +788,32 @@ def _artifact_object_path(store, ref):
     return store.root.joinpath(*parts)
 
 
-def _preflight_artifact(store, ref):
-    """Refuse a backing object before ``ArtifactStore.verify`` scans it whole.
+def _preflight_artifact(store, ref, keepalive=None):
+    """Validate a backing object within one bounded descriptor; return its path.
 
     Opens the object as a regular, no-follow file bounded by
-    ``MAX_BACKUP_FILE_BYTES`` and matched to ``ref.byte_size``, so an oversized
-    or size-mismatched object is rejected without a full content read;
-    ``store.verify`` then re-hashes it for content-address integrity.
+    ``MAX_BACKUP_FILE_BYTES`` and matched to ``ref.byte_size``, then hashes the
+    same descriptor and compares the digest to ``ref.content_hash``. The
+    content-addressed digest plus the bounded size replaces a second unbounded
+    ``ArtifactStore.verify`` pass.
     """
     path = _artifact_object_path(store, ref)
-    stream, _size = _open_checked(
-        path, stage="artifact-preflight", expected_size=ref.byte_size,
-        oserror_code="INTEGRITY_FAILED")
-    stream.close()
+    try:
+        digest = _hash_file(path, stage="artifact-preflight",
+                            expected_size=ref.byte_size, keepalive=keepalive,
+                            announce=False)
+    except OSError:
+        raise fail("INTEGRITY_FAILED",
+                   "backup artifact is missing or unreadable") from None
+    if digest != ref.content_hash:
+        raise fail("INTEGRITY_FAILED", "backup artifact hash mismatch")
+    return path
 
 
 def _copy_artifact(store, target, name, ref, fault, keepalive=None):
     """Copy one artifact durably, verify its published hash and run the
     per-artifact fault hook before publication."""
-    _preflight_artifact(store, ref)
-    source = store.verify(ref)
+    source = _preflight_artifact(store, ref, keepalive)
     destination = target / "artifacts" / name
     _stream_copy(source, destination, expected_hash=ref.content_hash,
                  expected_size=ref.byte_size, stage="artifact-copy",

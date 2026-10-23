@@ -527,9 +527,16 @@ def test_artifact_hash_mismatch_refuses_non_retryable_integrity_failure(tmp_path
     store = ArtifactStore(tmp_path / "objects")
     ref = store.publish_bytes(b"good bytes", schema_ref="evidence.v1.0")
     prepare_backup(conn, "b19", {"evidence.bin": ref}, clock=clock)
-    wrong = tmp_path / "wrong.bin"
-    wrong.write_bytes(b"different bytes")
-    monkeypatch.setattr(store, "verify", lambda _ref: wrong)
+    object_path = backup_module._artifact_object_path(store, ref)
+    data = bytearray(object_path.read_bytes())
+    data[0] ^= 0xFF
+    object_path.unlink()
+    object_path.write_bytes(bytes(data))
+
+    def forbid(_ref):
+        raise AssertionError("store.verify must not run")
+
+    monkeypatch.setattr(store, "verify", forbid)
 
     with pytest.raises(OpsError) as refused:
         run_backup(conn, key="b19", owner="worker", target=tmp_path / "backup",
@@ -537,6 +544,40 @@ def test_artifact_hash_mismatch_refuses_non_retryable_integrity_failure(tmp_path
 
     assert refused.value.code == "INTEGRITY_FAILED"
     assert refused.value.problem.retryable is False
+
+
+def test_grown_object_after_preflight_is_refused_without_verify(tmp_path, monkeypatch):
+    """A backing object that grows after the bounded preflight must fail the
+    copy as a typed integrity error, and must never fall back to the
+    unbounded ``ArtifactStore.verify`` re-read the preflight replaced."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "b30", {"evidence.bin": ref}, clock=clock)
+
+    real_preflight = backup_module._preflight_artifact
+
+    def preflight_then_grow(store, ref, keepalive=None):
+        path = real_preflight(store, ref, keepalive)
+        data = path.read_bytes()
+        path.unlink()
+        path.write_bytes(data + b"grown after preflight")
+        return path
+
+    monkeypatch.setattr(backup_module, "_preflight_artifact", preflight_then_grow)
+
+    def forbid(_ref):
+        raise AssertionError("store.verify must not run")
+
+    monkeypatch.setattr(store, "verify", forbid)
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="b30", owner="worker", target=tmp_path / "backup",
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+    assert not list((tmp_path / "backup").rglob("evidence.bin"))
 
 
 def test_oversized_backing_object_is_refused_before_verify(tmp_path, monkeypatch):
