@@ -9,6 +9,8 @@ from the source itself.
 """
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from engine.v2.models.contracts import ArtifactMember, ModelBinding, ModelRelease
@@ -105,11 +107,18 @@ def test_source_with_a_declared_gate_forecast_pool_is_refused(tmp_path):
 @pytest.mark.parametrize("case,overrides,message", [
     ("blank_binding_id", {"binding_id": ""}, "binding_id must be non-empty"),
     ("binding_absent_from_release", {"binding_id": "b-absent"}, "exactly one"),
-    ("binding_of_role_gate", {"binding_id": "b-gate"}, "exactly one"),
-], ids=["blank", "missing", "wrong-role"])
+], ids=["blank", "missing"])
 def test_source_binding_must_be_exactly_one_size_binding(tmp_path, case, overrides, message):
     with pytest.raises(ValueError, match=message):
         build_native_score_inputs(_bundle(tmp_path, _source(tmp_path, **overrides)))
+
+
+def test_binding_of_a_non_size_role_is_refused(tmp_path):
+    """The duplicated ``role == "size"`` check was removed: exactly-one stays
+    here; a non-size role reaches the executor build, which refuses it by
+    role (``_binding_output``)."""
+    with pytest.raises(ValueError, match="of role 'gate'"):
+        build_native_score_inputs(_bundle(tmp_path, _source(tmp_path, binding_id="b-gate")))
 
 
 @pytest.mark.parametrize("case,overrides,message", [
@@ -119,6 +128,85 @@ def test_source_binding_must_be_exactly_one_size_binding(tmp_path, case, overrid
 def test_source_pool_must_be_ragged_free_and_finite(tmp_path, case, overrides, message):
     with pytest.raises(ValueError, match=message):
         build_native_score_inputs(_bundle(tmp_path, _source(tmp_path, **overrides)))
+
+
+def test_source_builds_a_thin_pool_and_carries_the_executor_inference(tmp_path):
+    """The Builds assertions: interval_floor rides into the pool, the
+    executor's inference is the source's OWN object (identity), while a
+    DIFFERENT champion ``frozen_inference`` sits on the bundle so a champion
+    fallback would be caught."""
+    source = _source(tmp_path, pool_pred=(1.0,), pool_res=(0.1,),
+                     interval_floor=0.25)
+    champion = FrozenInference(tmp_path)
+    bundle = dataclasses.replace(_bundle(tmp_path, source),
+                                 frozen_inference=champion)
+    gate = build_native_score_inputs(bundle).gate
+    executor = gate["forecast_executor"]
+    assert gate["forecast_pool"]["interval_floor"] == 0.25
+    assert executor._executor.inference is source.inference
+    assert source.inference is not champion
+    # Thin pool (one or two points) still builds without error: only the
+    # band columns become unavailable at stage time (ARCHITECTURE.md).
+    thin = _source(tmp_path, pool_pred=(1.0, 2.0), pool_res=(0.1, 0.2),
+                   interval_floor=None)
+    build_native_score_inputs(_bundle(tmp_path, thin))
+
+
+def test_source_not_a_gate_forecast_source_instance(tmp_path):
+    with pytest.raises(ValueError, match="must be a GateForecastSource"):
+        build_native_score_inputs(
+            _bundle(tmp_path, {"binding_id": "b-size-fold"}))
+
+
+def test_release_not_a_model_release(tmp_path):
+    source = _source(tmp_path, release="rel-not-a-release")
+    with pytest.raises(ValueError, match="release must be a ModelRelease"):
+        build_native_score_inputs(_bundle(tmp_path, source))
+
+
+def test_none_inference_is_refused(tmp_path):
+    source = _source(tmp_path, inference=None)
+    with pytest.raises(ValueError, match="inference must be a FrozenInference"):
+        build_native_score_inputs(_bundle(tmp_path, source))
+
+
+def test_duplicate_binding_id_in_release_is_refused(tmp_path):
+    release = ModelRelease(release_id="rel-dup", deployment_id="dep-1", bindings=(
+        _binding("b-size-fold", "size"),
+        _binding("b-size-fold", "size"),
+    ))
+    source = _source(tmp_path, release=release)
+    with pytest.raises(ValueError, match="exactly one"):
+        build_native_score_inputs(_bundle(tmp_path, source))
+
+
+@pytest.mark.parametrize("bad,overrides", [
+    (float("nan"), {"pool_pred": [1.0, float("nan"), 3.0]}),
+    (float("nan"), {"pool_res": [0.1, float("nan"), 0.3]}),
+    (float("inf"), {"pool_res": [0.1, float("inf"), 0.3]}),
+], ids=["nan-pred", "nan-res", "inf-res"])
+def test_non_finite_pool_values_are_refused(tmp_path, bad, overrides):
+    with pytest.raises(ValueError, match="pool values must be finite"):
+        build_native_score_inputs(_bundle(tmp_path, _source(tmp_path, **overrides)))
+
+
+def test_non_finite_interval_floor_is_refused(tmp_path):
+    source = _source(tmp_path, interval_floor=float("inf"))
+    with pytest.raises(ValueError, match="interval_floor must be finite"):
+        build_native_score_inputs(_bundle(tmp_path, source))
+
+
+def test_absent_source_still_builds_a_gate_naming_a_forecast_column(tmp_path):
+    """The ordinary path: a gate naming a forecast column with no source still
+    builds the gate block (executor declared-but-unresolved here, since the
+    bundle carries no champion release); the stage then refuses
+    MISSING_GATE_INPUT:forecast at execution time (ARCHITECTURE.md)."""
+    recipe = {"model": {"intercept": 1.0, "coefficients": {}}, "threshold": 0.5,
+              "forecast": {"binding_id": "b-size-fold"}}
+    gate = build_native_score_inputs(
+        _bundle(tmp_path, None, gate_recipe=recipe)).gate
+    assert gate["forecast_executor"].binding_id == "b-size-fold"
+    assert "forecast_pool" not in gate
 
 
 def test_absent_source_leaves_the_gate_block_unchanged(tmp_path):

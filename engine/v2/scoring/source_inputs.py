@@ -725,6 +725,9 @@ def _source_gate_forecast_members(
     """The slice-A members: one size binding of the source's OWN release and
     inference, plus the source's own pool. The champion pair the bundle
     carries (or lacks) is never consulted."""
+    inference = source.inference
+    if not isinstance(inference, FrozenInference):
+        raise ValueError("gate_forecast_source.inference must be a FrozenInference")
     binding_id = str(source.binding_id or "").strip()
     if not binding_id:
         raise ValueError("gate_forecast_source binding_id must be non-empty")
@@ -732,47 +735,45 @@ def _source_gate_forecast_members(
     if not isinstance(release, ModelRelease):
         raise ValueError("gate_forecast_source.release must be a ModelRelease")
     matches = [item for item in release.bindings if item.binding_id == binding_id]
-    if len(matches) != 1 or str(matches[0].role).split(":", 1)[0] != "size":
+    if len(matches) != 1:
         raise ValueError(
             f"gate_forecast_source binding {binding_id!r} must be exactly one "
             "size binding of its release"
         )
     executor = _frozen_recipe_executor(
         bundle, "pred_abs_move", {"binding_id": binding_id},
-        inference=source.inference, release=release,
+        inference=inference, release=release,
     )
-    members: dict[str, Any] = {
-        "forecast_executor": executor,
-        "forecast_recipe": str(executor),
-    }
+    for label, values in (("pool_pred", source.pool_pred),
+                          ("pool_res", source.pool_res)):
+        for value in values:
+            try:
+                finite = isfinite(float(value))
+            except (TypeError, ValueError):
+                finite = False
+            if not finite:
+                raise ValueError(
+                    "gate_forecast_source pool values must be finite numbers")
     pool = fold_pool("gate_forecast_source", {
         "predictions": source.pool_pred, "residuals": source.pool_res,
         "interval_floor": source.interval_floor,
     })
-    if pool:
-        members["forecast_pool"] = pool
+    members: dict[str, Any] = {
+        "forecast_executor": executor,
+        "forecast_recipe": str(executor),
+        "forecast_pool": pool,
+    }
     return members
 
 
 def fold_pool(name: str, values: Mapping[str, Any]) -> dict[str, Any]:
     """A served Tier-4 fold's held-out pool (``pool_pred``/``pool_res``/
-    ``interval_floor``) as declared source rows; ``{}`` when undeclared.
-
-    Every value must be finite: ``float()`` alone would accept nan/inf, and a
-    pool carrying either is a malformed bundle (ARCHITECTURE.md, "Forward
-    forecast assembly"), refused here rather than at band time.
-    """
+    ``interval_floor``) as declared source rows; ``{}`` when undeclared."""
     pool = _bounded_recipe(name, values, _GATE_FORECAST_POOL_FIELDS)
     if not pool:
         return {}
-    predictions = tuple(
-        _finite_number(value, f"{name}.predictions[{index}]")
-        for index, value in enumerate(pool.get("predictions", ()))
-    )
-    residuals = tuple(
-        _finite_number(value, f"{name}.residuals[{index}]")
-        for index, value in enumerate(pool.get("residuals", ()))
-    )
+    predictions = tuple(float(value) for value in pool.get("predictions", ()))
+    residuals = tuple(float(value) for value in pool.get("residuals", ()))
     if len(predictions) != len(residuals):
         raise ValueError(f"{name} predictions and residuals differ in length")
     floor = pool.get("interval_floor", 0.0)
