@@ -543,6 +543,24 @@ def test_both_families_can_report_no_rows_without_blocking_older_rows(tmp_path):
     conn.close()
 
 
+def test_family_with_only_later_rows_reports_no_rows_and_imports_nothing(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-31.jsonl",
+                       _prediction("later-prediction", "2023-12-31"))
+
+    result = history_import.import_history(
+        conn, ops_root, source, through=date.fromisoformat("2023-12-30"), clock=clock)
+    assert result["coverage"] == {
+        "through": "2023-12-30",
+        "families": {
+            "predictions": {"rows": 0, "status": "no_rows"},
+            "outcomes": {"rows": 0, "status": "no_rows"},
+        },
+    }
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    conn.close()
+
+
 def test_absent_family_reports_no_rows_without_blocking_older_rows(tmp_path):
     ops_root, conn, clock, source = _setup(tmp_path)
     _write_predictions(source, "2023-12-30.jsonl",
@@ -636,6 +654,50 @@ def test_malformed_json_syntax_is_typed_validation_failure(tmp_path, through):
     path.write_text(
         json.dumps(_prediction("older-row", "2023-12-30")) + "\n"
         + '{"row_id": "broken", "as_of": "2023-12-31"\n')
+
+    with pytest.raises(OpsError) as exc:
+        history_import.import_history(
+            conn, ops_root, source, through=through, dry_run=True, clock=clock)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize("through", [None, date(2023, 12, 31)])
+def test_missing_date_field_is_typed_validation_failure(tmp_path, through):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    row = _prediction("missing-date", "2023-12-31")
+    del row["as_of"]
+    _write_predictions(source, "2023-12-31.jsonl", row)
+
+    with pytest.raises(OpsError) as exc:
+        history_import.import_history(
+            conn, ops_root, source, through=through, dry_run=True, clock=clock)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize("through", [None, date(2023, 12, 31)])
+def test_invalid_date_field_is_typed_validation_failure(tmp_path, through):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-31.jsonl",
+                       _prediction("invalid-date", "2023-13-40"))
+
+    with pytest.raises(OpsError) as exc:
+        history_import.import_history(
+            conn, ops_root, source, through=through, dry_run=True, clock=clock)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize("through", [None, date(2023, 12, 31)])
+def test_invalid_utf8_is_typed_validation_failure(tmp_path, through):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    path = source / "ledger" / "predictions" / "2023-12-31.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'{"row_id": "\xff", "as_of": "2023-12-31"}\n')
 
     with pytest.raises(OpsError) as exc:
         history_import.import_history(
