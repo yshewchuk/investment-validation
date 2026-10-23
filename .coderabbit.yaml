@@ -271,12 +271,12 @@ reviews:
         with no progress output is a real finding; a two-second loop with
         none is not worth a comment.
 
-        Durability and validation (outside the dashboard packages, whose
-        publish and local-path checks are above): a durable temp-file-plus-
-        replace flow must fsync the file before the rename and the
-        containing directory after it. Validate every override key before a
-        provider call or durable side effect. Flag a developer-local
-        absolute path in committed or public artifacts.
+        Durability and validation: a durable temp-file-plus-replace flow
+        must fsync the durable file content before replacing it and fsync
+        the containing directory after; for a symlink flip, fsync the
+        containing directory after replacement. Validate every override key
+        before a provider call or durable side effect. Flag a
+        developer-local absolute path in committed or public artifacts.
     - path: "tools/**"
       instructions: |
         Same progress-logging check as for engine/** (AGENTS.md
