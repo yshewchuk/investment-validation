@@ -129,6 +129,7 @@ strategy-eligible expiries and calendar-row inputs; `nightly_raw_row_producer` c
 `nightly_calendar_inputs.make_spot_reader(repository, snapshot)` creates a frozen
 `SpotReader` bound to those exact objects; at most 128 `(ticker, session)` spot rows or
 missing values are retained. Full histories and exceptions are never cached.
+Direct calls validate a nonempty string ticker and naive midnight session before cache access.
 After existing key/date/chain validation, the calendar helper refuses a wrong reader
 type or repository/snapshot binding, and wrong row type/session, as `INVALID_REQUEST`.
 

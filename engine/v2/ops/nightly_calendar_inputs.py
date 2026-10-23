@@ -221,7 +221,9 @@ class SpotReader:
             partial(_read_spot, self.repository, self.snapshot)))
 
     def __call__(self, ticker: str, session_day: str) -> PriceSeriesRow | None:
-        return self._read(ticker, session_day)
+        if not isinstance(ticker, str) or not ticker.strip():
+            raise fail("INVALID_REQUEST", "spot ticker must be a non-empty string")
+        return self._read(ticker, _calendar_day(session_day, "decision_session"))
 
 
 def make_spot_reader(repository: Repository, snapshot: SnapshotRef) -> SpotReader:

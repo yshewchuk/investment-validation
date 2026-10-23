@@ -1017,11 +1017,11 @@ def test_spot_reader_rejects_wrong_type_or_pinned_inputs_before_read(monkeypatch
     assert failure.value.problem.retryable is False
 
 
-@pytest.mark.parametrize("malformed", [True, False])
-def test_spot_reader_rejects_wrong_row_type_or_session(monkeypatch, malformed):
+@pytest.mark.parametrize("returned_day", [None, "2024-01-04", "2024-01-08"])
+def test_spot_reader_rejects_wrong_row_type_or_session(monkeypatch, returned_day):
     from engine.v2.contracts import PriceSeriesRow
-    row = (object() if malformed else PriceSeriesRow(
-        date="2024-01-04", close_adj=9., close_raw=10., high_raw=10.,
+    row = (object() if returned_day is None else PriceSeriesRow(
+        date=returned_day, close_adj=9., close_raw=10., high_raw=10.,
         retrieved_at=None, source_hash=None))
     monkeypatch.setattr(nci.SpotReader, "__call__", lambda *args: row)
     with pytest.raises(OpsError) as failure:
@@ -1030,3 +1030,45 @@ def test_spot_reader_rejects_wrong_row_type_or_session(monkeypatch, malformed):
     assert failure.value.code == "INVALID_REQUEST"
     assert failure.value.problem.message == "spot_reader must return an exact-session PriceSeriesRow"
     assert failure.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("ticker,day,message", [
+    (value, _SESSION, "spot ticker must be a non-empty string")
+    for value in (None, True, 12, "", "  ", [], {})
+] + [
+    ("AAA", value, "decision_session must be a valid naive calendar day")
+    for value in (None, True, 20240105, pd.NaT, "not-a-date", [], {},
+                  "2024-01-05T00:00:00Z")
+] + [("AAA", "2024-01-05T01:00:00", "decision_session must be a midnight calendar day")])
+def test_direct_spot_reader_validates_before_cache(monkeypatch, ticker, day, message):
+    def forbidden(*args):
+        raise AssertionError("invalid direct input reached cache")
+
+    read = nci.make_spot_reader(None, None)
+    object.__setattr__(read, "_read", forbidden)
+    with pytest.raises(OpsError) as failure:
+        read(ticker, day)
+    assert failure.value.code == "INVALID_REQUEST"
+    assert failure.value.problem.message == message
+    assert failure.value.problem.retryable is False
+
+
+def test_spot_reader_rejects_equal_but_distinct_snapshot(tmp_path, monkeypatch):
+    repository, snapshot = _snapshot(tmp_path, price={"AAA": [_price_row("AAA", _SESSION)]})
+    copied = replace(snapshot)
+    assert copied == snapshot and copied is not snapshot
+
+    def forbidden(*args):
+        raise AssertionError("equal but distinct snapshot reached read")
+
+    monkeypatch.setattr(nci, "get_price_series", forbidden)
+    try:
+        with pytest.raises(OpsError) as failure:
+            scan_calendar_row_inputs(repository, copied, _STRADDLE_KEY,
+                                     decision_session=_SESSION, calendar=_CALENDAR,
+                                     spot_reader=nci.make_spot_reader(repository, snapshot))
+        assert failure.value.code == "INVALID_REQUEST"
+        assert failure.value.problem.message == (
+            "spot_reader must be bound to this repository and snapshot")
+    finally:
+        repository._conn.close()
