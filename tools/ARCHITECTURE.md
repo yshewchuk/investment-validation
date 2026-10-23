@@ -18,6 +18,10 @@ Opt-in guard against a heavy job filling the host disk (WSL's virtual disk never
 | heartbeat | the once-a-minute line adds `disk used <G>G/<ceiling>G` when the check is on. |
 | resource-measurement record (`tools/v2_resource_measurement.py`, caller of bounded_run) | `killed` is true for exit 76 as well as 137; `kill_reason` is `DISK LIMIT` only for exit 76, when a terminal breach line (`DISK LIMIT:` or `DISK LIMIT unreadable for N ticks`) appears in the output, and `None` otherwise (an earlier `DISK LIMIT unreadable:` warning does not count); exit 137 reports the memory strings only (match priority BOX FLOOR, SWAP, CAP), never `DISK LIMIT`. |
 
+## `bounded_run.py` dependencies
+
+Callers are `tools/v2_resource_measurement.py`, `tools/land.py`, `tools/oc_check.py`, `checks/rearchitecture_phase2_render_parity.py` and the `ops/systemd/native-nightly-trigger.service` unit; depends only on the stdlib and Linux `/proc`, `os.statvfs`.
+
 ## `mutation_pilot.py run`: leftover-process sweep
 
 `cmd_run` makes the pilot a Linux child subreaper (`prctl(PR_SET_CHILD_SUBREAPER)`) before launching mutmut, so a test worker orphaned when mutmut kills a timed-out mutant reparents to the pilot instead of init. After mutmut returns (normally, after the time-budget stop, or on an exception) `_reap_descendants` SIGKILLs every descendant it finds, so a leftover process normally cannot keep the CI step's stdout pipe open. This is best effort, not a guarantee: a process that survives SIGKILL, or whose parent was not reparented to the pilot, can still hold the pipe (see the table).
@@ -26,16 +30,12 @@ Opt-in guard against a heavy job filling the host disk (WSL's virtual disk never
 |---|---|
 | mutmut exits normally, by budget stop (124) or by exception | the sweep runs in `finally`; the mutmut exit code is returned unchanged and the exception still propagates. |
 | subreaper unavailable (non-Linux or `prctl` fails) | `child subreaper: no` is printed; only descendants still attached to the process tree are found, orphans reparented to init are not. Off Linux the sweep is a silent no-op. |
-| descendants found | one stderr line `killed N leftover descendant process(es)` plus at most 20 `pid=… cmd=…` lines (command cut to 200 characters, read from the first 4096 bytes of `/proc/<pid>/cmdline`); zombies are not counted. |
-| a descendant forks during the sweep | the sweep rescans until no unsignalled live descendant remains or the 5 s deadline passes. |
-| a process survives SIGKILL | logged as `did not exit after SIGKILL` and abandoned; the wait is bounded at about 5 s. |
+| descendants found | one stderr line `killed N leftover descendant process(es)` plus a bounded number of `pid=… cmd=…` lines with a truncated command; if more were killed than lines shown, a final `... and N more` line follows; zombies are not counted. |
+| a descendant forks during the sweep | the sweep rescans until no unsignalled live descendant remains or a bounded deadline passes. |
+| a process survives SIGKILL | logged as `did not exit after SIGKILL` and abandoned; the wait is bounded. |
 | any error inside the sweep | logged as `descendant sweep failed`, returns 0, never raises and never changes the exit code. |
 
 No mutant is excluded or skipped by the sweep.
-
-## `bounded_run.py` dependencies
-
-Callers are `tools/v2_resource_measurement.py`, `tools/land.py` and `tools/oc_check.py`; depends only on the stdlib and Linux `/proc`, `os.statvfs`.
 
 ## Mutation stats diagnostics
 
