@@ -30,6 +30,6 @@ Opt-in guard against a heavy job filling the host disk (WSL's virtual disk never
 | heartbeat | the once-a-minute line adds `disk used <G>G/<ceiling>G` when the check is on. |
 | resource-measurement record (`tools/v2_resource_measurement.py`, caller of bounded_run) | `killed` is true for exit 76 as well as 137; `kill_reason` is `DISK LIMIT` only for exit 76, when a terminal breach line (`DISK LIMIT:` or `DISK LIMIT unreadable for N ticks`) appears in the output, and `None` otherwise (an earlier `DISK LIMIT unreadable:` warning does not count); exit 137 reports the memory strings only (match priority BOX FLOOR, SWAP, CAP), never `DISK LIMIT`. |
 
-## Dependencies
+## `bounded_run.py` dependencies
 
 Callers are `tools/v2_resource_measurement.py`, `tools/land.py` and `tools/oc_check.py`; depends only on the stdlib and Linux `/proc`, `os.statvfs`.

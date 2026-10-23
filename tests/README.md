@@ -595,9 +595,11 @@ arrived) with `MISSING_MODULES` / `UNEXPECTED_MODULES` / `DUPLICATE_MODULES` /
 not exactly the planned one -- and, like the gremlins merge, when the inputs
 are not one run/SHA/mode -- or when a module's `run_exit_code` is nonzero
 (except incremental `124`, which stays incomplete without a tool error):
-a timeout kill (-1) arrives as a `TIMEOUT_KILL` reason and any other nonzero
-exit as `RUN_INCOMPLETE`, both naming the module there and in
-`failed_run_modules`, with counts still covering only what really arrived.
+a timeout kill (`-1`) arrives as `TIMEOUT_KILL`, `124` as `TIME_BUDGET_STOP`
+in either mode, and other nonzero exits as `RUN_INCOMPLETE`. Mode changes
+whether `124` is a tool error, not its reason. The reasons and
+`failed_run_modules` name affected modules, with counts still covering only
+what really arrived.
 The `report` job still uploads the diagnostic artifact (always()) before
 failing on that exit.
 
