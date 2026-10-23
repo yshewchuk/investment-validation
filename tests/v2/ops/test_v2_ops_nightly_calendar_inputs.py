@@ -8,7 +8,9 @@ providers, no data/fixtures contents.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+import gc
+import weakref
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime
 
 import pandas as pd
@@ -20,7 +22,7 @@ from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT
 from engine.v2.data.repository import Repository
 from engine.v2.domain import generation
 from engine.v2.domain.generation import GeometryRefusal
-from engine.v2.foundation.market_calendar import CalendarSessions
+from engine.v2.foundation.market_calendar import CalendarSessions, build_calendar_sessions
 from engine.v2.ops import nightly_calendar_inputs as nci
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_board_universe import BoardRequest
@@ -768,3 +770,305 @@ def test_calendar_row_inputs_rejects_bad_event_date_before_source(bad_event_date
         scan_calendar_row_inputs(None, None, key,
                                  decision_session=_SESSION, calendar=_CALENDAR)
     assert exc.value.code == "INVALID_REQUEST"
+
+
+@pytest.mark.parametrize("close_raw", [10.0, None, 0.0])
+def test_producer_spot_reuse_preserves_all_documents_and_reads_afresh_per_build(
+        tmp_path, monkeypatch, close_raw):
+    from engine.v2.features.panel_row_inputs import PanelRowInputs
+    from engine.v2.ops import nightly_raw_row_producer as producer
+
+    prices = {ticker: [_price_row(ticker, day.date().isoformat(), close_raw=close_raw)
+                       for day in pd.bdate_range(end=_SESSION, periods=300)]
+              for ticker in ("AAA", "BBB")}
+    chains = [_chain_row(ticker, datetime(2024, 1, 5), datetime(2024, 2, 16), 10., right=right)
+              for ticker in prices for right in ("C", "P")]
+    repository, snapshot = _snapshot(tmp_path, price=prices, chains=chains,
+                                    events=[_event_row(t, _EVENT, "BMO") for t in prices])
+    historical = build_calendar_sessions(("2022-01-03",), event_through=_SESSION)
+    calendar = build_calendar_sessions(
+        tuple(day for day in historical.days if day <= _SESSION), event_through="2024-02-16")
+    monkeypatch.setattr(producer, "scan_decision_calendar", lambda *a, **k: calendar)
+    monkeypatch.setattr(producer, "scan_panel_row", lambda *a, **k: PanelRowInputs(
+        panel_row={"spy_ret252": 0.0}, panel_anchor=pd.Timestamp(_SESSION)))
+    queries = []
+    original = nci.get_price_series
+
+    def counted(repo, query, snap):
+        queries.append((snap.snapshot_id, query.ticker, query.session_date))
+        return original(repo, query, snap)
+
+    monkeypatch.setattr(nci, "get_price_series", counted)
+    try:
+        with monkeypatch.context() as uncached:
+            uncached.setattr(producer, "make_spot_reader", lambda *a: None)
+            expected = producer.build_native_score_batch_events(
+                repository, snapshot, as_of=_SESSION, horizon_days=35)
+        assert len(queries) == 20
+        queries.clear()
+        actual = producer.build_native_score_batch_events(
+            repository, snapshot, as_of=_SESSION, horizon_days=35)
+        assert actual == expected
+        assert actual == _spot_fixture_documents(close_raw)
+        assert queries == [(snapshot.snapshot_id, t, _SESSION) for t in ("AAA", "BBB")]
+        events, refusals = actual
+        if close_raw == 10.0:
+            assert len(events) == 20
+            assert len(refusals["refusals"]) == 4  # main now enumerates disabled strategies
+            assert {row["code"] for row in refusals["refusals"]} == {"UNSUPPORTED_STRATEGY"}
+            assert {event["calendar_row"]["spot"] for event in events} == {10.0}
+        else:
+            assert events == []
+            assert len(refusals["refusals"]) == 24
+            assert {row["code"] for row in refusals["refusals"]} == {
+                "PRICE_HISTORY_NOT_AVAILABLE", "UNSUPPORTED_STRATEGY"}
+        assert producer.build_native_score_batch_events(
+            repository, snapshot, as_of=_SESSION, horizon_days=35) == expected
+        assert len(queries) == 4  # no memo survives the preceding build
+    finally:
+        repository._conn.close()
+
+
+def test_spot_reader_keeps_ticker_session_snapshot_and_provenance_separate(tmp_path):
+    (tmp_path / "first").mkdir()
+    (tmp_path / "second").mkdir()
+    first_rows = [_price_row("AAA", "2024-01-04", close_raw=9.),
+                  _price_row("AAA", _SESSION, close_raw=10.)]
+    correction = {**first_rows[-1], "close_raw": 20., "retrieved_at": "2024-01-07T00:00:00Z",
+                  "source_hash": fake_hash("correction"), "capture_id": "correction"}
+    first, snapshot = _snapshot(tmp_path / "first", price={
+        "AAA": first_rows + [correction], "BBB": [_price_row("BBB", _SESSION, close_raw=30.)]})
+    second, newer = _snapshot(tmp_path / "second", price={
+        "AAA": first_rows + [{**correction, "deleted": True}]})
+    try:
+        read = nci.make_spot_reader(first, snapshot)
+        row = read("AAA", _SESSION)
+        assert (row.close_raw, row.retrieved_at, row.source_hash) == (
+            20., correction["retrieved_at"], correction["source_hash"])
+        assert read("AAA", _SESSION) is row
+        assert read("AAA", "2024-01-04").close_raw == 9.
+        assert read("BBB", _SESSION).close_raw == 30.
+        assert nci.make_spot_reader(second, newer)("AAA", _SESSION) is None
+        assert read("AAA", _SESSION) is row
+    finally:
+        first._conn.close()
+        second._conn.close()
+
+
+def test_spot_reader_is_bounded_retains_only_spot_rows_and_never_caches_exceptions(monkeypatch):
+    from engine.v2.contracts import PriceSeriesRow
+
+    calls = []
+    problem = data_fail("CONTRACT_MISMATCH", "synthetic source refusal")
+    row = PriceSeriesRow(date=_SESSION, close_adj=9., close_raw=10., high_raw=10.,
+                         retrieved_at=None, source_hash=None)
+
+    def source(repo, query, snapshot):
+        calls.append(query.ticker)
+        if len(calls) == 1:
+            raise problem
+        return (row,)
+
+    monkeypatch.setattr(nci, "get_price_series", source)
+    read = nci.make_spot_reader(None, None)
+    with pytest.raises(DataError) as failure:
+        read("AAA", _SESSION)
+    assert failure.value is problem
+    assert read("AAA", _SESSION) is row
+    assert read("AAA", _SESSION) is row
+    assert calls == ["AAA", "AAA"]
+    for index in range(128):
+        assert read(f"T{index}", _SESSION) is row
+    assert len(calls) == 130
+    assert read("T0", _SESSION) is row  # all 128 new entries remain, not 127
+    assert len(calls) == 130
+    read("AAA", _SESSION)
+    assert len(calls) == 131  # the 129th distinct entry was evicted, not retained
+
+
+def test_spot_reader_caches_absent_rows_but_not_across_readers(monkeypatch):
+    calls = []
+
+    def source(repo, query, snapshot):
+        calls.append((query.ticker, query.session_date))
+        return ()
+
+    monkeypatch.setattr(nci, "get_price_series", source)
+    read = nci.make_spot_reader(None, None)
+    assert read("AAA", _SESSION) is None
+    assert read("AAA", _SESSION) is None
+    assert calls == [("AAA", _SESSION)]
+    assert nci.make_spot_reader(None, None)("AAA", _SESSION) is None
+    assert calls == [("AAA", _SESSION), ("AAA", _SESSION)]
+
+
+@pytest.mark.parametrize("attribute", ["repository", "snapshot"])
+def test_spot_reader_binding_cannot_be_reassigned(attribute):
+    repository, snapshot = object(), object()
+    read = nci.make_spot_reader(repository, snapshot)
+    with pytest.raises(FrozenInstanceError):
+        setattr(read, attribute, object())
+    assert read.repository is repository
+    assert read.snapshot is snapshot
+
+
+def test_spot_reader_releases_history_evicted_rows_and_build_state(monkeypatch):
+    from engine.v2.contracts import PriceSeriesRow
+
+    observed = []
+
+    def source(repo, query, snapshot):
+        rows = tuple(PriceSeriesRow(
+            date=day, close_adj=9., close_raw=10., high_raw=10.,
+            retrieved_at=None, source_hash=None)
+            for day in ("2024-01-04", _SESSION, "2024-01-08"))
+        observed.append(tuple(weakref.ref(row) for row in rows))
+        return rows
+
+    monkeypatch.setattr(nci, "get_price_series", source)
+    read = nci.make_spot_reader(None, None)
+    assert read("AAA", _SESSION) is observed[0][1]()
+    gc.collect()
+    assert observed[0][0]() is None and observed[0][2]() is None
+    assert observed[0][1]() is not None  # only the selected row is held
+    for index in range(128):
+        read(f"T{index}", _SESSION)
+    gc.collect()
+    assert all(ref() is None for ref in observed[0])  # evicted selected row
+    assert sum(ref() is not None for rows in observed for ref in rows) == 128
+    del read
+    gc.collect()
+    assert all(ref() is None for rows in observed for ref in rows)
+
+
+def test_cached_spot_does_not_move_key_date_or_chain_validation(monkeypatch):
+    def forbidden(*args):
+        raise AssertionError("spot read preceded existing validation")
+
+    monkeypatch.setattr(nci, "get_price_series", forbidden)
+    read = nci.make_spot_reader(None, None)
+    for key, session, chains, message in [
+        (replace(_STRADDLE_KEY, strategy="not-a-strategy"), _SESSION, None,
+         "calendar input key has an unsupported strategy"),
+        (_STRADDLE_KEY, "2024-01-05T01:00:00", None,
+         "decision_session must be a midnight calendar day"),
+        (_STRADDLE_KEY, _SESSION, [{"ticker": "AAA"}],
+         "chain rows must carry every chain column"),
+    ]:
+        with pytest.raises(OpsError) as failure:
+            scan_calendar_row_inputs(None, None, key, decision_session=session,
+                                     calendar=_CALENDAR, chain_rows=chains,
+                                     spot_reader=read)
+        assert failure.value.code == "INVALID_REQUEST"
+        assert failure.value.problem.message == message
+        assert failure.value.problem.retryable is False
+
+
+def _spot_fixture_documents(close_raw):
+    """Literal fixture oracle, independent of production document/refusal helpers."""
+    events, refusals = [], []
+    for ticker in ("AAA", "BBB"):
+        for strategy in ("BFLY-P", "BFLY-P5", "CAL-P", "CND-P", "CND-PS", "CTR5", "RAMP7",
+                         "STR-RUNUP", "STR-THRU", "TWIN-P", "TWIN-P5", "DYN-SV"):
+            key = {"ticker": ticker, "strategy": strategy, "event_date": "2024-01-16",
+                   "session": "BMO"}
+            if strategy in ("CAL-P", "CND-P"):
+                refusals.append({
+                    "key": key, "code": "UNSUPPORTED_STRATEGY",
+                    "detail": "the strategy has no native scoring support"})
+                continue
+            if close_raw != 10.0:
+                refusals.append({
+                    "key": key, "code": "PRICE_HISTORY_NOT_AVAILABLE",
+                    "detail": "the pinned snapshot has no usable exact-session close for this ticker"})
+                continue
+            calendar_row = {
+                "event_id": f"{ticker}_2024-01-16", "ticker": ticker, "event_date": "2024-01-16",
+                "session": "BMO", "entry_date": "2024-01-05",
+                "exit_date": "2024-01-12" if strategy == "STR-RUNUP" else "2024-01-16",
+                "expiry": "2024-02-16", "spot": 10.0, "calendar_observed_through": "2024-01-05"}
+            if strategy == "STR-RUNUP":
+                calendar_row["days_before_print"] = 5
+            events.append({
+                "key": key, "calendar_row": calendar_row, "panel_row": {"spy_ret252": 0.0},
+                "panel_anchor": "2024-01-05", "tier4_row": {}, "quote_status": "recorded",
+                "quote_rows": [
+                    {"ticker": ticker, "right": right, "strike": 10.0, "expiry": "2024-02-16",
+                     "bid": 1.0, "ask": 1.2, "observed_at": "2024-01-05"}
+                    for right in ("C", "P")]})
+    return events, {"schema_version": "native_score_batch_producer_refusals.v1.0",
+                    "refusals": refusals}
+
+
+@pytest.mark.parametrize("reader", [
+    object(), lambda *a: None, nci.make_spot_reader(object(), None),
+    nci.make_spot_reader(None, object()),
+])
+def test_spot_reader_rejects_wrong_type_or_pinned_inputs_before_read(monkeypatch, reader):
+    def forbidden(*args):
+        raise AssertionError("mismatched reader performed a source read")
+    monkeypatch.setattr(nci, "get_price_series", forbidden)
+    with pytest.raises(OpsError) as failure:
+        scan_calendar_row_inputs(None, None, _STRADDLE_KEY, decision_session=_SESSION,
+                                 calendar=_CALENDAR, spot_reader=reader)
+    assert failure.value.code == "INVALID_REQUEST"
+    assert failure.value.problem.message == (
+        "spot_reader must be bound to this repository and snapshot")
+    assert failure.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("returned_day", [None, "2024-01-04", "2024-01-08"])
+def test_spot_reader_rejects_wrong_row_type_or_session(monkeypatch, returned_day):
+    from engine.v2.contracts import PriceSeriesRow
+    row = (object() if returned_day is None else PriceSeriesRow(
+        date=returned_day, close_adj=9., close_raw=10., high_raw=10.,
+        retrieved_at=None, source_hash=None))
+    monkeypatch.setattr(nci.SpotReader, "__call__", lambda *args: row)
+    with pytest.raises(OpsError) as failure:
+        scan_calendar_row_inputs(None, None, _STRADDLE_KEY, decision_session=_SESSION,
+                                 calendar=_CALENDAR, spot_reader=nci.make_spot_reader(None, None))
+    assert failure.value.code == "INVALID_REQUEST"
+    assert failure.value.problem.message == "spot_reader must return an exact-session PriceSeriesRow"
+    assert failure.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("ticker,day,message", [
+    (value, _SESSION, "spot ticker must be a non-empty string")
+    for value in (None, True, 12, "", "  ", [], {})
+] + [
+    ("AAA", value, "decision_session must be a valid naive calendar day")
+    for value in (None, True, 20240105, pd.NaT, "not-a-date", [], {},
+                  "2024-01-05T00:00:00Z")
+] + [("AAA", "2024-01-05T01:00:00", "decision_session must be a midnight calendar day")])
+def test_direct_spot_reader_validates_before_cache(monkeypatch, ticker, day, message):
+    def forbidden(*args):
+        raise AssertionError("invalid direct input reached cache")
+
+    read = nci.make_spot_reader(None, None)
+    object.__setattr__(read, "_read", forbidden)
+    with pytest.raises(OpsError) as failure:
+        read(ticker, day)
+    assert failure.value.code == "INVALID_REQUEST"
+    assert failure.value.problem.message == message
+    assert failure.value.problem.retryable is False
+
+
+def test_spot_reader_rejects_equal_but_distinct_snapshot(tmp_path, monkeypatch):
+    repository, snapshot = _snapshot(tmp_path, price={"AAA": [_price_row("AAA", _SESSION)]})
+    copied = replace(snapshot)
+    assert copied == snapshot and copied is not snapshot
+
+    def forbidden(*args):
+        raise AssertionError("equal but distinct snapshot reached read")
+
+    monkeypatch.setattr(nci, "get_price_series", forbidden)
+    try:
+        with pytest.raises(OpsError) as failure:
+            scan_calendar_row_inputs(repository, copied, _STRADDLE_KEY,
+                                     decision_session=_SESSION, calendar=_CALENDAR,
+                                     spot_reader=nci.make_spot_reader(repository, snapshot))
+        assert failure.value.code == "INVALID_REQUEST"
+        assert failure.value.problem.message == (
+            "spot_reader must be bound to this repository and snapshot")
+    finally:
+        repository._conn.close()

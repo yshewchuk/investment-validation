@@ -11,6 +11,7 @@ from threading import Barrier, Event, Lock
 
 import pytest
 
+from engine.v2.foundation import content_hash
 from engine.v2.ops import ledger_history_import as history_import
 from engine.v2.ops import nightly_history
 from engine.v2.ops.bootstrap import open_catalog
@@ -38,6 +39,11 @@ def _outcome(row_id: str, resolved_at: str) -> dict:
     return {"row_id": row_id, "resolved_at": resolved_at, "ticker": "AAA",
             "strategy": "TWIN-P", "event_date": "2024-02-01",
             "status": "unresolvable", "reason": "test"}
+
+
+def _outcome_decision_id(row_id: str, resolved_at: str) -> str:
+    suffix = content_hash([row_id, resolved_at]).split(":")[1][:24]
+    return f"outcome:{row_id}:{suffix}"
 
 
 def _write_outcomes(source: Path, name: str, *rows: dict) -> None:
@@ -294,11 +300,10 @@ def test_d1_history_import_includes_outcomes_and_excludes_session_date(tmp_path)
 
     result = _run(ops_root, conn, clock, source)
     assert result.executed == ("history_import",)
-    assert conn.execute(
-        "SELECT COUNT(*) FROM decisions WHERE decision_id LIKE 'outcome:row:%'").fetchone()[0] == 1
-    assert conn.execute(
-        "SELECT COUNT(*) FROM decisions "
-        "WHERE decision_id LIKE 'outcome:session-row:%'").fetchone()[0] == 0
+    decision_ids = [row[0] for row in conn.execute(
+        "SELECT decision_id FROM decisions").fetchall()]
+    assert _outcome_decision_id("row", "2023-12-31") in decision_ids
+    assert _outcome_decision_id("session-row", "2024-01-01") not in decision_ids
     conn.close()
 
 
@@ -461,4 +466,276 @@ def test_overlapping_same_run_calls_keep_pins_stable_and_resume(tmp_path, monkey
     assert resumed.executed == ()
     assert resumed.skipped == ("history_import",)
     assert json.loads(pin_path.read_text()) == persisted
+    conn.close()
+
+
+def test_import_history_reports_exact_through_coverage_and_keeps_older_rows(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-30.jsonl",
+                       _prediction("older-row", "2023-12-30"))
+    _write_predictions(source, "2023-12-31.jsonl",
+                       _prediction("through-row-a", "2023-12-31"),
+                       _prediction("through-row-b", "2023-12-31"),
+                       _prediction("session-row", "2024-01-01"),
+                       _prediction("late-exact-row", "2023-12-31"))
+    _write_outcomes(source, "2023-12-30.jsonl",
+                    _outcome("older-outcome", "2023-12-30"))
+    _write_outcomes(source, "2023-12-31.jsonl",
+                    _outcome("through-outcome-a", "2023-12-31"),
+                    _outcome("through-outcome-b", "2023-12-31"),
+                    _outcome("session-outcome", "2024-01-01"))
+
+    expected_coverage = {
+        "through": "2023-12-31",
+        "families": {
+            "predictions": {"rows": 2, "status": "present"},
+            "outcomes": {"rows": 2, "status": "present"},
+        },
+    }
+    dry = history_import.import_history(
+        conn, ops_root, source, through=date.fromisoformat("2023-12-31"),
+        dry_run=True, clock=clock)
+    assert dry["schema_version"] == "ledger_history_import.v1.1"
+    assert dry["dry_run"] is True
+    assert dry["through"] == "2023-12-31"
+    assert dry["date_range"] == {"min": "2023-12-30", "max": "2023-12-31"}
+    assert dry["coverage"] == expected_coverage
+
+    real = history_import.import_history(
+        conn, ops_root, source, through=date.fromisoformat("2023-12-31"), clock=clock)
+    assert real["schema_version"] == "ledger_history_import.v1.1"
+    assert real["dry_run"] is False
+    assert real["coverage"] == dry["coverage"]
+    imported = [row[0] for row in conn.execute(
+        "SELECT decision_id FROM decisions").fetchall()]
+    assert set(imported) == {
+        "prediction:older-row", "prediction:through-row-a", "prediction:through-row-b",
+        _outcome_decision_id("older-outcome", "2023-12-30"),
+        _outcome_decision_id("through-outcome-a", "2023-12-31"),
+        _outcome_decision_id("through-outcome-b", "2023-12-31"),
+    }
+    assert "prediction:session-row" not in imported
+    assert "prediction:late-exact-row" not in imported
+    assert _outcome_decision_id("session-outcome", "2024-01-01") not in imported
+    conn.close()
+
+
+def test_both_families_can_report_no_rows_without_blocking_older_rows(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-30.jsonl",
+                       _prediction("older-prediction", "2023-12-30"))
+    _write_outcomes(source, "2023-12-30.jsonl", _outcome("older-outcome", "2023-12-30"))
+
+    result = history_import.import_history(
+        conn, ops_root, source, through=date.fromisoformat("2023-12-31"), clock=clock)
+    assert result["schema_version"] == "ledger_history_import.v1.1"
+    assert result["coverage"] == {
+        "through": "2023-12-31",
+        "families": {
+            "predictions": {"rows": 0, "status": "no_rows"},
+            "outcomes": {"rows": 0, "status": "no_rows"},
+        },
+    }
+    decision_ids = [row[0] for row in conn.execute(
+        "SELECT decision_id FROM decisions ORDER BY decision_id").fetchall()]
+    assert decision_ids[1:] == ["prediction:older-prediction"]
+    assert decision_ids[0] == _outcome_decision_id("older-outcome", "2023-12-30")
+    conn.close()
+
+
+def test_family_with_only_later_rows_reports_no_rows_and_imports_nothing(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-31.jsonl",
+                       _prediction("later-prediction", "2023-12-31"))
+
+    result = history_import.import_history(
+        conn, ops_root, source, through=date.fromisoformat("2023-12-30"), clock=clock)
+    assert result["coverage"] == {
+        "through": "2023-12-30",
+        "families": {
+            "predictions": {"rows": 0, "status": "no_rows"},
+            "outcomes": {"rows": 0, "status": "no_rows"},
+        },
+    }
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    conn.close()
+
+
+def test_absent_family_reports_no_rows_without_blocking_older_rows(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-30.jsonl",
+                       _prediction("older-prediction", "2023-12-30"),
+                       _prediction("through-prediction", "2023-12-31"))
+
+    result = history_import.import_history(
+        conn, ops_root, source, through=date.fromisoformat("2023-12-31"), clock=clock)
+    assert result["schema_version"] == "ledger_history_import.v1.1"
+    assert result["coverage"] == {
+        "through": "2023-12-31",
+        "families": {
+            "predictions": {"rows": 1, "status": "present"},
+            "outcomes": {"rows": 0, "status": "no_rows"},
+        },
+    }
+    decision_ids = [row[0] for row in conn.execute(
+        "SELECT decision_id FROM decisions").fetchall()]
+    assert set(decision_ids) == {
+        "prediction:older-prediction", "prediction:through-prediction"}
+    assert not (source / "ledger" / "outcomes").exists()
+    conn.close()
+
+
+def test_exact_through_rows_accumulate_across_files(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-30.jsonl",
+                       _prediction("pred-a", "2023-12-31"))
+    _write_predictions(source, "2023-12-31.jsonl",
+                       _prediction("pred-b", "2023-12-31"),
+                       _prediction("pred-c", "2023-12-31"))
+    _write_outcomes(source, "2023-12-29.jsonl",
+                    _outcome("outcome-a", "2023-12-31"))
+    _write_outcomes(source, "2023-12-31.jsonl",
+                    _outcome("outcome-b", "2023-12-31"))
+
+    result = history_import.import_history(
+        conn, ops_root, source, through=date.fromisoformat("2023-12-31"), clock=clock)
+    assert result["coverage"] == {
+        "through": "2023-12-31",
+        "families": {
+            "predictions": {"rows": 3, "status": "present"},
+            "outcomes": {"rows": 2, "status": "present"},
+        },
+    }
+    decision_ids = [row[0] for row in conn.execute(
+        "SELECT decision_id FROM decisions").fetchall()]
+    assert set(decision_ids) == {
+        "prediction:pred-a", "prediction:pred-b", "prediction:pred-c",
+        _outcome_decision_id("outcome-a", "2023-12-31"),
+        _outcome_decision_id("outcome-b", "2023-12-31"),
+    }
+    conn.close()
+
+
+def test_import_history_without_through_reports_no_coverage(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-31.jsonl",
+                       _prediction("row", "2023-12-31"))
+
+    result = history_import.import_history(conn, ops_root, source, clock=clock)
+    assert result["schema_version"] == "ledger_history_import.v1.1"
+    assert result["through"] is None
+    assert result["coverage"] is None
+    assert result["families"]["predictions"]["lines"] == 1
+    assert [row[0] for row in conn.execute(
+        "SELECT decision_id FROM decisions").fetchall()] == ["prediction:row"]
+    conn.close()
+
+
+@pytest.mark.parametrize("through", [None, date(2023, 12, 31)])
+def test_non_object_json_line_is_typed_validation_failure(tmp_path, through):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    path = source / "ledger" / "predictions" / "2023-12-31.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text('["not", "an", "object"]\n')
+
+    with pytest.raises(OpsError) as exc:
+        history_import.import_history(
+            conn, ops_root, source, through=through, dry_run=True, clock=clock)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize("through", [None, date(2023, 12, 31)])
+def test_malformed_json_syntax_is_typed_validation_failure(tmp_path, through):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    path = source / "ledger" / "predictions" / "2023-12-31.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(_prediction("older-row", "2023-12-30")) + "\n"
+        + '{"row_id": "broken", "as_of": "2023-12-31"\n')
+
+    with pytest.raises(OpsError) as exc:
+        history_import.import_history(
+            conn, ops_root, source, through=through, dry_run=True, clock=clock)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize("through", [None, date(2023, 12, 31)])
+def test_missing_date_field_is_typed_validation_failure(tmp_path, through):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    row = _prediction("missing-date", "2023-12-31")
+    del row["as_of"]
+    _write_predictions(source, "2023-12-31.jsonl", row)
+
+    with pytest.raises(OpsError) as exc:
+        history_import.import_history(
+            conn, ops_root, source, through=through, dry_run=True, clock=clock)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize("through", [None, date(2023, 12, 31)])
+def test_invalid_date_field_is_typed_validation_failure(tmp_path, through):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    _write_predictions(source, "2023-12-31.jsonl",
+                       _prediction("invalid-date", "2023-13-40"))
+
+    with pytest.raises(OpsError) as exc:
+        history_import.import_history(
+            conn, ops_root, source, through=through, dry_run=True, clock=clock)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize("through", [None, date(2023, 12, 31)])
+def test_invalid_utf8_is_typed_validation_failure(tmp_path, through):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    path = source / "ledger" / "predictions" / "2023-12-31.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'{"row_id": "\xff", "as_of": "2023-12-31"}\n')
+
+    with pytest.raises(OpsError) as exc:
+        history_import.import_history(
+            conn, ops_root, source, through=through, dry_run=True, clock=clock)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    conn.close()
+
+
+def test_pinned_helper_persists_identity_through_and_complete_pins(tmp_path):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    prediction_path = source / "ledger" / "predictions" / "2023-12-31.jsonl"
+    _write_predictions(source, prediction_path.name,
+                       _prediction("row", "2023-12-31"))
+    outcome_path = source / "ledger" / "outcomes" / "2023-12-30.jsonl"
+    _write_outcomes(source, outcome_path.name, _outcome("outcome-row", "2023-12-30"))
+
+    _run(ops_root, conn, clock, source)
+    state = nightly_history.load_session(ops_root, IDENTITY)
+    state_dir = ops_root.joinpath(*nightly_history.STATE_DIR)
+    expected_files = [
+        ["ledger/outcomes/2023-12-30.jsonl",
+         hashlib.sha256(outcome_path.read_bytes()).hexdigest()],
+        ["ledger/predictions/2023-12-31.jsonl",
+         hashlib.sha256(prediction_path.read_bytes()).hexdigest()],
+    ]
+    expected_inputs = {
+        "schema": "nightly_history_inputs.v1",
+        "run_id": state.active.run_id,
+        "through": "2023-12-31",
+        "files": expected_files,
+    }
+    inputs = json.loads(state_dir.joinpath(
+        f"{state.active.run_id}.history-inputs.json").read_text())
+    assert inputs == expected_inputs
+
+    completion = json.loads(state_dir.joinpath(
+        f"{state.active.run_id}.history-complete.json").read_text())
+    assert completion == expected_inputs | {"schema": "nightly_history_receipt.v1"}
+    assert set(completion) == {"schema", "run_id", "through", "files"}
     conn.close()
