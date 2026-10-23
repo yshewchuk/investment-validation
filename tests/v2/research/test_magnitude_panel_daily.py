@@ -117,7 +117,7 @@ def test_vertical_native_sources_to_complete_partial_blocks(native, monkeypatch)
     assert result["context"]["status"] == "reconstructed_partial_blocks_not_fit_admissible"
     assert result["context"]["label_bounds"] == "unverified_producer_declaration"
     assert result["context"]["daily_columns"] == DAILY and result["context"]["spy_columns"] == SPY
-    assert len(result["rows"]) == 6  # June event removed whole by the random-event embargo.
+    assert len(result["rows"]) == 6  # All horizons of the June 2024 event are embargoed.
     assert {r["event_id"] for r in result["rows"]} == {native.events[1]["event_id"], native.events[3]["event_id"]}
     assert all(r["status"] == "reconstructed_partial_blocks_not_fit_admissible" for r in result["rows"])
     assert all(set(r["daily_market"]["values"]) == set(DAILY) and set(r["spy"]["values"]) == set(SPY)
@@ -157,8 +157,9 @@ def test_spy_independent_return_oracles(native):
 @pytest.mark.parametrize("field,value", [("max_events", 0), ("max_source_rows", True), ("max_events", 1_000_001)])
 def test_invalid_limits_refuse_before_repository(native, monkeypatch, field, value):
     monkeypatch.setattr(native.repository, "resolve", lambda *a: pytest.fail("access before limit admission"))
-    with pytest.raises(DataError, match="bounded panel limits"):
+    with pytest.raises(DataError, match="bounded panel limits") as caught:
         build(native, **{field: value})
+    assert caught.value.code == "CONTRACT_MISMATCH"
 
 
 def test_changed_forecast_clock_refuses_before_value_reads(native, monkeypatch):
@@ -170,8 +171,9 @@ def test_changed_forecast_clock_refuses_before_value_reads(native, monkeypatch):
         assert "spot" not in query.columns
         yield from original(query, table_name=table_name, **kwargs)
     monkeypatch.setattr(native.repository, "scan", no_values)
-    with pytest.raises(DataError, match="clocks differ"):
+    with pytest.raises(DataError, match="clocks differ") as caught:
         build(native, eligibility_metadata=metadata)
+    assert caught.value.code == "CONTRACT_MISMATCH"
 
 
 def test_source_bound_refuses_without_partial_return(native):
@@ -200,14 +202,16 @@ def test_late_cap_poison_is_not_numerically_consumed():
 def test_source_duplicate_refuses():
     row = dict.fromkeys(DAILY, 1.0)
     row.update(ticker="SYNTH", date="2024-01-02", src_iv="synthetic", mcap_asof=None)
-    with pytest.raises(DataError, match="invalid daily block source row"):
+    with pytest.raises(DataError, match="invalid daily block source row") as caught:
         daily._source_row(row, "SYNTH", 2024, "2024-01-01", "2024-01-03", {"2024-01-02"})
+    assert caught.value.code == "CONTRACT_MISMATCH"
 
 
 def test_partial_blocks_are_rejected_as_stored_panel_rows(native):
     result = build(native)
-    with pytest.raises(DataError, match="closed contract"):
+    with pytest.raises(DataError, match="closed contract") as caught:
         magnitude_panel_table.validate_rows(result["rows"], native.parent)
+    assert caught.value.code == "CONTRACT_MISMATCH"
 
 
 def test_future_source_changes_cannot_change_earlier_spy_prefix():
@@ -243,8 +247,9 @@ def test_malformed_source_rows_refuse(changes):
     row = dict.fromkeys(DAILY, 1.0)
     row.update(ticker="SYNTH", date="2024-01-02", src_iv="synthetic", mcap_asof=None)
     row.update(changes)
-    with pytest.raises(DataError, match="invalid daily block source row"):
+    with pytest.raises(DataError, match="invalid daily block source row") as caught:
         daily._source_row(row, "SYNTH", 2024, "2024-01-01", "2024-01-03", set())
+    assert caught.value.code == "CONTRACT_MISMATCH"
 
 
 def test_no_source_or_iv_surface_is_explicitly_missing():
@@ -259,29 +264,35 @@ def test_unknown_source_contract_refuses_before_values(native, monkeypatch):
         contract = original(snapshot, table)
         return replace(contract, contract_id="legacy.daily_market.v99") if table == "daily_market" else contract
     monkeypatch.setattr(native.repository, "table_contract", changed)
-    with pytest.raises(DataError, match="unsupported daily block source contract"):
+    with pytest.raises(DataError, match="unsupported daily block source contract") as caught:
         daily._query(native.repository, native.snapshot, "SPY", 2024, "2024-01-01", "2024-02-01", 100)
+    assert caught.value.code == "CONTRACT_MISMATCH"
 
 
 def test_snapshot_and_policy_drift_cannot_reuse_context(native):
-    with pytest.raises(DataError):
+    with pytest.raises(DataError) as caught:
         daily.build_daily_blocks(native.repository, replace(native.snapshot, calendar_version="changed"),
             native.stored, native.parent, producer=native.producer, policy=native.policy, eligibility_metadata=native.metadata,
             source_start=START, max_source_rows=1000, max_events=10)
-    with pytest.raises(DataError, match="stage-two eligibility policy"):
+    assert caught.value.code == "IDENTITY_CONFLICT"
+    with pytest.raises(DataError, match="stage-two eligibility policy") as caught:
         build(native, policy=eligibility_policy.eligibility_policy(version="grouped_ticker_embargo.v1", embargo_days=0))
+    assert caught.value.code == "CONTRACT_MISMATCH"
 
 
 def test_event_and_source_start_bounds(native):
-    with pytest.raises(DataError, match="event bound exceeded"):
+    with pytest.raises(DataError, match="event bound exceeded") as caught:
         build(native, max_events=1)
-    with pytest.raises(DataError, match="source start exceeds"):
+    assert caught.value.code == "RESULT_LIMIT_EXCEEDED"
+    with pytest.raises(DataError, match="source start exceeds") as caught:
         build(native, source_start="2024-08-01")
+    assert caught.value.code == "CONTRACT_MISMATCH"
 
 
 def test_producer_identity_is_required_detached_and_context_bound(native):
-    with pytest.raises(DataError, match="producer identity"):
+    with pytest.raises(DataError, match="producer identity") as caught:
         build(native, producer=native.parent["producer"])
+    assert caught.value.code == "CONTRACT_MISMATCH"
     original = build(native)
     changed = deepcopy(native.producer)
     changed["environment"]["synthetic_change"] = "new"
@@ -294,10 +305,11 @@ def test_producer_identity_is_required_detached_and_context_bound(native):
 def test_unpinned_repository_refuses_before_access(native, monkeypatch):
     repository = TrackingRepository(native.conn, native.repository._store)
     monkeypatch.setattr(repository, "resolve", lambda *args: pytest.fail("unpinned access"))
-    with pytest.raises(DataError, match="snapshot-pinned repository"):
+    with pytest.raises(DataError, match="snapshot-pinned repository") as caught:
         daily.build_daily_blocks(repository, native.snapshot, native.stored, native.parent,
             producer=native.producer, policy=native.policy, eligibility_metadata=native.metadata,
             source_start=START, max_source_rows=1000, max_events=10)
+    assert caught.value.code == "CONTRACT_MISMATCH"
 
 
 class NonPlainList(list):

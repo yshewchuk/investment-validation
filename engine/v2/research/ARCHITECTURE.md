@@ -76,6 +76,34 @@ Detached validation uses `CONTRACT_MISMATCH`; repository reconstruction retains 
 | Cache / retry | Observed days are reused per weak-referenceable pinned repository and snapshot ID; failures are not cached. `preflight_context` reconstructs metadata through native repository APIs (including their catalog caches); no panel-layer retries. |
 | Transaction / partial write / idempotency | No enclosing/write transaction or durable writes; native repository resolution/table reads use read transactions. No partial artifact; identical inputs and metadata give the same `context_id`. |
 
+## Partial daily-market blocks
+
+`magnitude_panel_daily.build_daily_blocks` is an opt-in library-only reader; only synthetic tests call it.
+Inputs are pinned source/history snapshots, the unchanged metadata-only v1 plan,
+plain-JSON producer metadata, grouped eligibility declarations and explicit source/event bounds.
+Output has a distinct versioned context and detached daily-market/SPY blocks, never stored-panel admission.
+The context binds the parent, bounds, policy, exclusions, snapshot fragment inventory and producer.
+Producer and label bounds are declarations, not installed-code attestation or verified outcome intervals.
+Protected evaluation membership confers no reads; grouped exclusions retain or remove all event horizons.
+
+The fixed thirteen daily fields and nine SPY regime values use each forecast's source ceiling.
+The source has no publication/finality stamps: availability is unknown and values are reconstructed,
+never observed-PIT or fit-admissible. Source primary keys and snapshot fragment inventory remain
+separate; the latter is not an exact consumed-fragment receipt. Individual SPY source dates are retained.
+Read budget: one bounded ticker/year value scan shared across events/horizons, with SPY shared per call.
+Row bounds apply across years per ticker; event bounds apply before exclusions. No cross-call cache/retry.
+No enclosing/write transaction, durable write, CLI, fit, registration or runtime consumer; native read transactions remain.
+No history/runup block or outcomes are read. Repeat calls revalidate and reread pinned sources.
+
+| Condition | Outcome |
+| --- | --- |
+| Non-plain/malformed producer or detached parent, changed policy/clocks, unpinned repository, invalid limit/window or source contract | `CONTRACT_MISMATCH`; no partial result |
+| Duplicate/malformed source date or value, negative implied quote, nonpositive SPY close or infinite regime result | `CONTRACT_MISMATCH`; no partial result |
+| Declared event or cumulative source row limit exceeded | `RESULT_LIMIT_EXCEEDED`; no partial result |
+| No events survive shared eligibility | `POPULATION_COLLAPSED`; no value reads |
+| Snapshot, parent-binding, catalog or shared admission failure | Native refusal propagates unchanged; no partial result |
+| Missing optional field/history, zero implied quote, absent/late market-cap anchor | Null with explicit missing/quote status; no cohort complete-case filtering |
+
 ## Primary contracts and public interfaces
 
 CLI leaves (`tools/`, one process per run, each takes `--catalog`,
@@ -542,7 +570,7 @@ filtering. The manifest population bound limits candidate rows, not RSS or
 process memory — the recorded row-count sum of pinned fragments surviving
 pruning ([data scan population rule](../data/ARCHITECTURE.md#invariants)).
 Each scan uses that same bound for its snapshot, contract and predicates;
-research adds no second result limit. Empty selected membership
+the partial daily builder additionally enforces its explicit cumulative row bound. Empty selected membership
 allows zero result rows with a positive batch size. Month/day retries and
 null-overflow refusals are not part of this contract: a complete read either
 returns its population or raises its typed refusal. Predicates, exact-pair
@@ -637,7 +665,8 @@ This bounds retained unmatched rows, not total process RSS.
 (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`, `ObjectRef`,
 `TableContractRef`, `ColumnContract`, `TableContract`),
 `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
-`engine.v2.features.panel_math` (`history_features`),
+`engine.v2.features.panel_math` (`history_features`, `DAILY_STATE_FIELDS`) and
+`engine.v2.features.regime` (`add_regime_features`),
 `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`, `iter_canonical_json`,
 `content_hash`, `from_document`, `to_document`, `format_timestamp`, `market_calendar`,
 `experiment_exits.valid_exit_recipe`,
@@ -785,37 +814,6 @@ Long-memory/cross-ticker effects remain; chronological and random holdouts are
 complementary, not interchangeable.
 
 ## External systems and libraries
-
-### Partial daily-market panel construction
-
-`magnitude_panel_daily.build_daily_blocks` is an opt-in library-only precursor
-to the stored panel writer. It preserves the metadata-only v1 panel context and
-derives a distinct versioned partial-build context binding the parent, explicit
-source window/limits, eligibility policy, exclusions, source fragment identities and
-explicit plain-JSON producer declaration (validated before detachment; not code-attested).
-It rechecks the shared grouped eligibility plan and exact forecast clocks before
-any daily-state values; declared label bounds remain unverified producer metadata,
-not training-label admission. Protected evaluation membership confers no reads.
-The result is explicitly non-admissible partial blocks, not a stored panel snapshot.
-
-Require `Repository(pin_snapshots=True)`; one bounded ticker/year scan is shared across all retained events and horizons;
-SPY is read once for the call. Source dates are sorted once per ticker, prefixes
-end at each forecast ceiling, and existing regime arithmetic is reused. Daily
-state retains only IV-surface rows, maps the fixed thirteen source aliases, and
-keeps zero quotes null with separate status. Market cap requires its own nonfuture
-`mcap_asof`; absent/late anchors withhold it. Source primary keys and the snapshot's
-daily fragment inventory are separate, never guessed as row-level membership or
-claimed as an exact consumed-fragment receipt.
-The imported daily contract lacks publication/finality stamps: every value is a
-reconstruction with unknown availability, never observed point-in-time evidence.
-
-Missing optional inputs produce explicit null reasons; malformed source values,
-duplicate dates, changed context/policy/clocks, invalid limits and scan-bound
-breaches refuse without partial return. Calls retain at most the explicit per-ticker
-row bound and event bound; there is no cross-call cache, retry or enclosing/write transaction.
-No history/runup block, outcome read, fit, table publication or runtime consumer is
-added. The function and synthetic tests are the only callers. Snapshot and shared
-admission failures propagate; repeat calls revalidate and reread pinned sources.
 
 Libraries: pandas/numpy for tables/numerics, pyarrow for stored-history Parquet.
 No network calls or third-party service; Polygon/ORATS pulls stay in legacy

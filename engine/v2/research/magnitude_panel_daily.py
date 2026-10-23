@@ -55,7 +55,7 @@ def _day(value):
     return stamp.date().isoformat()
 
 
-def _number(value):
+def _optional_number(value):
     if value is None or (not isinstance(value, bool) and pd.isna(value)):
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -137,7 +137,7 @@ def _source_row(raw, ticker, year, start, end, seen):
         row["mcap_asof"] = cap
         for name in _DAILY:
             row[name] = (None if name == "mcap_log" and (cap is None or cap > day)
-                         else _number(raw[name]))
+                         else _optional_number(raw[name]))
         if row["implied_move"] is not None and row["implied_move"] < 0:
             raise ValueError
     except (KeyError, TypeError, ValueError, OverflowError):
@@ -185,7 +185,7 @@ def _daily(rows, dates, ceiling):
 
 def _spy_record(calculated, inputs):
     try:
-        values = {name: _number(float(calculated[name])) for name in _SPY}
+        values = {name: _optional_number(float(calculated[name])) for name in _SPY}
     except ValueError:
         raise errors.fail("CONTRACT_MISMATCH", "nonfinite SPY block calculation") from None
     windows = {"spy_ret21": 21, "spy_ret63": 63, "spy_vol5": 5, "spy_vol20": 20, "spy_vol60": 60}
