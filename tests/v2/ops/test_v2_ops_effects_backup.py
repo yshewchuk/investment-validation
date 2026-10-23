@@ -9,6 +9,7 @@ import pytest
 
 from engine.v2.foundation import ArtifactStore, to_document
 from engine.v2.ops import backup as backup_module
+from engine.v2.ops import catalog as catalog_module
 from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
 from engine.v2.ops.catalog import integrity_errors
 from engine.v2.ops.effects_graph import backup_effect
@@ -46,8 +47,10 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
     restored = restore_backup(backup, tmp_path / "restored")
     assert (restored / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "delivered"
-    with pytest.raises(Exception):
+    with pytest.raises(OpsError) as refused:
         restore_backup(backup, tmp_path / "restored")
+    assert refused.value.code == "INVALID_REQUEST"
+    assert refused.value.problem.retryable is False
 
 
 @pytest.mark.parametrize("stale_bytes", [b"", b"SQLite format 3\x00"],
@@ -572,6 +575,7 @@ def test_unsafe_artifact_name_is_refused_before_database_install(tmp_path):
         run_backup(conn, key="b21", owner="worker", target=backup, clock=clock, store=store)
 
     assert refused.value.code == "INVALID_REQUEST"
+    assert refused.value.problem.retryable is False
     assert not list(backup.glob("*.sqlite"))
 
 
@@ -765,8 +769,24 @@ def test_backup_rejects_symlink_target_before_writing(tmp_path):
     with pytest.raises(OpsError) as refused:
         run_backup(conn, key="b4", owner="worker", target=target, clock=clock, store=store)
     assert refused.value.code == "INVALID_REQUEST"
+    assert refused.value.problem.retryable is False
     assert not list(outside.glob("b4.*.sqlite"))
     assert not (outside / "b4.sqlite").exists()
+
+
+@pytest.mark.parametrize("key", ["../escape", "/absolute", "a/b", "", ".", "a\\b"])
+def test_run_backup_rejects_unsafe_key_before_creating_target(tmp_path, key):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    target = tmp_path / "backup"
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key=key, owner="worker", target=target, clock=clock,
+                   store=store)
+
+    assert refused.value.code == "INVALID_REQUEST"
+    assert refused.value.problem.retryable is False
+    assert not target.exists()
 
 
 def test_run_backup_retry_after_the_effect_already_delivered_succeeds(tmp_path):
@@ -893,6 +913,13 @@ def test_manifest_database_path_uses_current_name_or_legacy_fallback(tmp_path):
         tmp_path, {"backup_key": "b1"}) == tmp_path / "b1.sqlite"
 
 
+def test_single_filename_rejects_unsafe_names():
+    assert backup_module._single_filename("plain.sqlite") == "plain.sqlite"
+    for name in ("../escape", "/absolute", "a/b", "", ".", "a\\b"):
+        with pytest.raises(ValueError):
+            backup_module._single_filename(name)
+
+
 def test_file_backed_snapshot_uses_a_separate_read_only_connection(tmp_path):
     conn, _, _ = catalog(tmp_path)
     try:
@@ -903,6 +930,35 @@ def test_file_backed_snapshot_uses_a_separate_read_only_connection(tmp_path):
             conn.execute("CREATE TABLE snapshot_probe (value INTEGER)")
             conn.commit()
         assert not conn.in_transaction
+    finally:
+        conn.close()
+
+
+def test_in_memory_snapshot_reuses_the_connection_without_keepalive():
+    conn = sqlite3.connect(":memory:")
+    try:
+        with backup_module._snapshot(conn) as (snapshot, separate):
+            assert separate is False
+            assert snapshot is conn
+            assert snapshot.execute("SELECT 1").fetchone()[0] == 1
+        assert not conn.in_transaction
+    finally:
+        conn.close()
+
+
+def test_expected_dump_lines_includes_schema_statements(tmp_path):
+    conn, _, _ = catalog(tmp_path)
+    try:
+        baseline = backup_module._schema_statement_count(conn)
+        conn.execute("CREATE TABLE synthetic_indexed (value INTEGER)")
+        conn.execute("CREATE INDEX synthetic_indexed_value ON synthetic_indexed(value)")
+        conn.commit()
+        rows = _row_counts(conn)
+        statements = backup_module._schema_statement_count(conn)
+        assert statements == baseline + 1
+        assert backup_module._expected_dump_lines(
+            rows, statements, backup_module._sqlite_sequence_lines(conn)) == len(
+            list(conn.iterdump()))
     finally:
         conn.close()
 
@@ -919,6 +975,7 @@ def test_restore_refuses_database_over_the_byte_cap(tmp_path, monkeypatch):
     with pytest.raises(OpsError) as refused:
         restore_backup(backup, tmp_path / "restored")
     assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
 
 
 def test_restore_refuses_a_published_database_size_mismatch(tmp_path):
@@ -933,6 +990,7 @@ def test_restore_refuses_a_published_database_size_mismatch(tmp_path):
     with pytest.raises(OpsError) as refused:
         restore_backup(backup, tmp_path / "restored")
     assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
 
 
 def test_fresh_copy_outbox_state_tamper_is_refused_as_content_digest(tmp_path, monkeypatch):
@@ -1068,6 +1126,7 @@ def test_file_backed_backup_renews_keepalive_during_the_copy(tmp_path, monkeypat
     prepare_backup(conn, "b25", {}, clock=clock)
     renewals = []
     in_backup = {"active": False}
+    returned = {"value": False}
     real_backup_to = backup_module.backup_to
 
     def wrapped(source, destination, *, progress=None):
@@ -1079,15 +1138,20 @@ def test_file_backed_backup_renews_keepalive_during_the_copy(tmp_path, monkeypat
                 in_backup["active"] = False
 
         real_backup_to(source, destination, progress=marked)
+        returned["value"] = True
 
     monkeypatch.setattr(backup_module, "backup_to", wrapped)
     monkeypatch.setattr(backup_module, "_HEARTBEAT_SECONDS", 0)
+    # Force many bounded page batches so more than one in-copy renewal occurs.
+    monkeypatch.setattr(catalog_module, "_BACKUP_PAGE_BATCH", 1)
 
     run_backup(conn, key="b25", owner="worker", target=tmp_path / "backup",
                clock=clock, store=store,
-               keepalive=lambda: renewals.append(in_backup["active"]))
+               keepalive=lambda: renewals.append(
+                   (in_backup["active"], returned["value"])))
 
-    assert True in renewals
+    in_copy = [active for active, done in renewals if active and not done]
+    assert len(in_copy) > 1
 
 
 def test_superseded_uuid_database_is_removed_after_the_new_manifest(
