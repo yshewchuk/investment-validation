@@ -7,7 +7,7 @@ import threading
 
 import pytest
 
-from engine.v2.foundation import ArtifactStore
+from engine.v2.foundation import ArtifactStore, to_document
 from engine.v2.ops import backup as backup_module
 from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
 from engine.v2.ops.catalog import integrity_errors
@@ -212,7 +212,8 @@ def test_backup_counts_and_copy_share_one_snapshot(tmp_path, monkeypatch):
 def test_oversized_prior_manifest_is_ignored_and_rebuilt(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    prepare_backup(conn, "b11", {}, clock=clock)
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "b11", {"evidence.bin": ref}, clock=clock)
     backup = tmp_path / "backup"
     calls = []
     real_backup_to = backup_module.backup_to
@@ -234,7 +235,10 @@ def test_oversized_prior_manifest_is_ignored_and_rebuilt(tmp_path, monkeypatch):
     manifest = json.loads(manifest_path.read_text())
     assert len(calls) == 1
 
-    manifest["padding"] = "x" * (backup_module.MAX_MANIFEST_BYTES + 1)
+    manifest["artifacts"]["evidence.bin"]["padding"] = (
+        "x" * (backup_module.MAX_MANIFEST_BYTES + 1))
+    # The manifest is still shape-valid: only the byte cap distinguishes it.
+    backup_module._validated_manifest_shape(manifest, current=True)
     manifest_path.write_text(json.dumps(manifest))
     assert manifest_path.stat().st_size > backup_module.MAX_MANIFEST_BYTES
 
@@ -246,6 +250,7 @@ def test_oversized_prior_manifest_is_ignored_and_rebuilt(tmp_path, monkeypatch):
     assert manifest_path.stat().st_size <= backup_module.MAX_MANIFEST_BYTES
     assert json.loads(manifest_path.read_text()) == rebuilt
     assert rebuilt["backup_key"] == "b11"
+    assert "padding" not in rebuilt["artifacts"]["evidence.bin"]
 
 
 def test_prior_manifest_with_extra_field_is_invalid_and_rebuilt(tmp_path, monkeypatch):
@@ -620,10 +625,23 @@ def test_different_key_locks_are_independent(tmp_path):
 
 
 def test_restore_reads_manifest_within_the_existing_bound(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "cap", {"evidence.bin": ref}, clock=clock)
     backup = tmp_path / "backup"
-    backup.mkdir()
-    (backup / "huge.manifest.json").write_text(
-        json.dumps({"padding": "x" * (backup_module.MAX_MANIFEST_BYTES + 1)}))
+    manifest = run_backup(conn, key="cap", owner="worker", target=backup,
+                          clock=clock, store=store)
+    (backup / manifest["database_file"]).rename(backup / "cap.sqlite")
+    legacy = {name: manifest[name] for name in
+              ("schema_version", "backup_key", "cutoff", "database", "artifacts")}
+    legacy["artifacts"]["evidence.bin"]["padding"] = (
+        "x" * (backup_module.MAX_MANIFEST_BYTES + 1))
+    # The manifest is still shape-valid: only the byte cap distinguishes it.
+    backup_module._validated_manifest_shape(legacy, current=False)
+    (backup / "cap.manifest.json").write_text(json.dumps(legacy))
+    assert (backup / "cap.manifest.json").stat().st_size > \
+        backup_module.MAX_MANIFEST_BYTES
     destination = tmp_path / "restored"
 
     with pytest.raises(OpsError) as refused:
@@ -649,19 +667,29 @@ def test_restore_catches_deeply_nested_manifest_json(tmp_path):
 def test_restore_legacy_manifest_falls_back_to_key_named_database(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    prepare_backup(conn, "legacy", {}, clock=clock)
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "legacy", {"evidence.bin": ref}, clock=clock)
     backup = tmp_path / "backup"
     manifest = run_backup(conn, key="legacy", owner="worker", target=backup,
                           clock=clock, store=store)
+    source_rows = _row_counts(conn)
     (backup / manifest["database_file"]).rename(backup / "legacy.sqlite")
-    legacy = dict(manifest)
-    legacy.pop("database_file")
-    legacy.pop("database_content_hash")
+    legacy = {name: manifest[name] for name in
+              ("schema_version", "backup_key", "cutoff", "database", "artifacts")}
     (backup / "legacy.manifest.json").write_text(json.dumps(legacy))
 
     restored = restore_backup(backup, tmp_path / "restored")
 
+    assert set(legacy) == {"schema_version", "backup_key", "cutoff", "database",
+                           "artifacts"}
     assert (restored / "ops.sqlite").is_file()
+    restored_db = sqlite3.connect(restored / "ops.sqlite")
+    try:
+        assert integrity_errors(restored_db) == []
+        assert _row_counts(restored_db) == source_rows
+    finally:
+        restored_db.close()
+    assert (restored / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
 
 
 def test_restore_rejects_unsafe_database_filename(tmp_path):
@@ -679,7 +707,36 @@ def test_restore_rejects_unsafe_database_filename(tmp_path):
         restore_backup(backup, destination)
 
     assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
     assert not destination.exists()
+
+
+@pytest.mark.parametrize("referenced", ["database", "artifact"])
+@pytest.mark.parametrize("damage", ["missing", "symlink"])
+def test_restore_missing_or_symlinked_source_is_an_integrity_failure(
+        tmp_path, referenced, damage):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "restore", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    manifest = run_backup(conn, key="restore", owner="worker", target=backup,
+                          clock=clock, store=store)
+    source = (backup / manifest["database_file"] if referenced == "database"
+              else backup / "artifacts" / "evidence.bin")
+    if damage == "missing":
+        source.unlink()
+    else:
+        replacement = tmp_path / "replacement.bin"
+        replacement.write_bytes(b"replacement")
+        source.unlink()
+        source.symlink_to(replacement)
+
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, tmp_path / "restored")
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
 
 
 def test_catalog_backup_to_reports_page_progress(tmp_path):
@@ -691,6 +748,9 @@ def test_catalog_backup_to_reports_page_progress(tmp_path):
 
     assert destination.is_file()
     assert seen
+    _status, remaining, total = seen[-1]
+    assert remaining == 0
+    assert total > 0
 
 
 def test_backup_rejects_symlink_target_before_writing(tmp_path):
@@ -702,8 +762,9 @@ def test_backup_rejects_symlink_target_before_writing(tmp_path):
     outside.mkdir()
     target = tmp_path / "backup"
     target.symlink_to(outside, target_is_directory=True)
-    with pytest.raises(Exception):
+    with pytest.raises(OpsError) as refused:
         run_backup(conn, key="b4", owner="worker", target=target, clock=clock, store=store)
+    assert refused.value.code == "INVALID_REQUEST"
     assert not list(outside.glob("b4.*.sqlite"))
     assert not (outside / "b4.sqlite").exists()
 
@@ -936,6 +997,30 @@ def test_malformed_prior_artifact_metadata_is_rebuilt(tmp_path, monkeypatch):
         json.loads(manifest_path.read_text())["artifacts"]["evidence.bin"]["content_hash"], str)
 
 
+@pytest.mark.parametrize("mutation", [
+    {"artifact_id": 123},
+    {"storage_key": None},
+    {"unexpected": "field"},
+], ids=["wrong-type", "null-storage-key", "unknown-field"])
+def test_malformed_payload_artifact_metadata_is_refused_before_backup(
+        tmp_path, mutation):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    malformed = {**to_document(ref), **mutation}
+    prepare_backup(conn, "bad-ref", {"evidence.bin": malformed}, clock=clock)
+    backup = tmp_path / "backup"
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="bad-ref", owner="worker", target=backup,
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INVALID_REQUEST"
+    assert refused.value.problem.retryable is False
+    assert not list(backup.glob("*.sqlite"))
+    assert not list(backup.glob("*.manifest.json"))
+
+
 def test_restore_refuses_a_published_database_hash_mismatch(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
@@ -982,12 +1067,27 @@ def test_file_backed_backup_renews_keepalive_during_the_copy(tmp_path, monkeypat
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "b25", {}, clock=clock)
     renewals = []
+    in_backup = {"active": False}
+    real_backup_to = backup_module.backup_to
+
+    def wrapped(source, destination, *, progress=None):
+        def marked(*args):
+            in_backup["active"] = True
+            try:
+                progress(*args)
+            finally:
+                in_backup["active"] = False
+
+        real_backup_to(source, destination, progress=marked)
+
+    monkeypatch.setattr(backup_module, "backup_to", wrapped)
     monkeypatch.setattr(backup_module, "_HEARTBEAT_SECONDS", 0)
 
     run_backup(conn, key="b25", owner="worker", target=tmp_path / "backup",
-               clock=clock, store=store, keepalive=lambda: renewals.append(1))
+               clock=clock, store=store,
+               keepalive=lambda: renewals.append(in_backup["active"]))
 
-    assert renewals
+    assert True in renewals
 
 
 def test_superseded_uuid_database_is_removed_after_the_new_manifest(
