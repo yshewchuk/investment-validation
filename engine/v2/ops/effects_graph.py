@@ -46,6 +46,7 @@ from engine.v2.ops.legacy_adapter import verify_export_generation as _verify_gen
 from engine.v2.ops.outbox import fail_effect, watermark
 from engine.v2.ops.publication import current as release_current
 from engine.v2.ops.publication import publish_local, stage_release
+from engine.v2.ops.retention import enforce_retention
 from engine.v2.ops.session_resolution import resolve_effective_session
 
 __all__ = ["EXPORT_PURPOSES", "backup_effect", "effect_scope", "engineering_gate_effect",
@@ -853,6 +854,11 @@ def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=
     with transaction(conn):
         watermark(conn, "nightly", scope, "backup", session, content_hash(manifest), clock=clock,
                  generation=generation)
+    # Retention runs only after the backup and its watermark are durable; a
+    # refusal propagates as a typed OpsError so the next nightly retries it.
+    # Both steps are idempotent, so a retry after a partial prune re-verifies
+    # the same scopes and deletes only what is still unreferenced.
+    enforce_retention(ops_root, conn=conn, store=store)
     return None, ()
 
 
