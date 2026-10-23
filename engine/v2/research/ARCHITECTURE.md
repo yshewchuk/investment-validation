@@ -65,8 +65,9 @@ The RUNUP comparison's public entry-selection seams are
 `_pricing.MIN_MEANINGFUL_COST`, `ChainSnapshot`, `FillModel`, `StructureError`
 and `price_structure` (existing pure native selection/spread arithmetic).
 
-`experiment_trades.load_trades(repository, snapshot, strategy, *, as_of_month,
+`experiment_trades.load_trades(repository, snapshot, strategy, *, as_of_month=None,
 purpose="training", event_ids=None)` is a library call, with no dedicated CLI.
+Omitted/`None` as-of month refuses with `HOLDOUT_ACCESS_DENIED`; there is no implicit month.
 Given a `Repository` and resolved `SnapshotRef`, it returns one strategy's
 committed, session-joined trades with legacy-compatible columns and holdout context.
 `_pricing.trading_calendar_from_snapshot` lets pinned-snapshot repricers share
@@ -580,14 +581,17 @@ This bounds retained unmatched rows, not total process RSS.
 
 ## Dependencies
 
-`engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `catalog`,
-`objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`, `iv_crush_table`), `engine.v2.
-contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`,
-`ObjectRef`, `TableContractRef`, `ColumnContract`, `TableContract`),
+`engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `incremental_tables`,
+`catalog`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`,
+`iv_crush_table`), `engine.v2.contracts` (`RevisionCandidate`, `CompletedCoverage`,
+`CoverageKey`, `CoverageOutcome`, `TimeInterval`), `engine.v2.contracts.data`
+(`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`, `ObjectRef`,
+`TableContractRef`, `ColumnContract`, `TableContract`),
 `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
 `engine.v2.features.panel_math` (`history_features`),
 `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`, `iter_canonical_json`,
-`content_hash`, `to_document`, `market_calendar`, `experiment_exits.valid_exit_recipe`,
+`content_hash`, `to_document`, `format_timestamp`, `market_calendar`,
+`experiment_exits.valid_exit_recipe`,
 `experiment_holdouts.calendar_date` (canonical days for IV input/anchor/clock validation), plus
 `final_holdout.request_from_document` and `typed.to_document` for `_final_population`).
 Only lower-layer imports are allowed (`checks/layer_map.py`, `only_imports` unset):
@@ -737,8 +741,10 @@ No network calls or third-party service; Polygon/ORATS pulls stay in legacy
 `engine/data/pulls/`. Snapshot access uses `ArtifactStore` and the supplied sqlite
 catalog connection. Two local-file exceptions are outside the snapshot store:
 
-- `fill_quality.write_report`, `signal_screen.write_report` and `polygon_fills.run`
-  write Markdown/parquet/CSV/JSON under caller-provided `reports_dir`/`out_dir`.
+- `fill_quality.write_report`, `signal_screen.write_report`, `polygon_fills.run`,
+  `_replay_run.run`, `_build_run.run` and `reconcile_trades.run` write
+  Markdown/parquet/JSON under caller-provided `reports_dir`/`out_dir`.
+  Fill quality's optional CSV uses the independently supplied `csv` destination.
 - `_pricing.trading_calendar()` reads the local legacy S&P 500 daily CSV,
   only for legacy-parity tests and direct library callers. No other research
   module imports or calls it.
