@@ -65,22 +65,16 @@ The RUNUP comparison's public entry-selection seams are
 `_pricing.MIN_MEANINGFUL_COST`, `ChainSnapshot`, `FillModel`, `StructureError`
 and `price_structure` (existing pure native selection/spread arithmetic).
 
-`experiment_trades.load_trades(repository, snapshot, strategy, *, as_of_month,
-purpose="training", event_ids=None)` is a second
-kind of entrypoint: a plain library call (no `tools/v2_*.py` CLI of its own),
-for a v2 platform caller that already holds a
-`Repository` and a resolved `SnapshotRef` and wants one strategy's committed
-`trades` rows, session-joined, with legacy-compatible trade columns plus
-holdout context. `_pricing.trading_calendar_from_snapshot`
-is a third: carved out of `_pricing.py`'s otherwise-internal contents the
-same way `_pricing.STRUCTURES` already is, for the same caller — a repricer
-built over a pinned snapshot needs the identical trading calendar `replay()`
-itself derives, not a second implementation and not the legacy CSV fallback
-(see Invariants). `_pricing.execution_variant_label` is a fourth, carved out
-for `experiments/v2_candidate_grid.py`'s `price_candidate_grid` (issue #266
-slice 2), which labels each priced grid-position step with the same
-execution-variant string `replay()` itself uses, rather than reimplementing
-that labeling.
+`experiment_trades.load_trades(repository, snapshot, strategy, *, as_of_month=None,
+purpose="training", event_ids=None)` is a library call, with no dedicated CLI.
+Omitted/`None` as-of month refuses with `HOLDOUT_ACCESS_DENIED`; there is no implicit month.
+Given a `Repository` and resolved `SnapshotRef`, it returns one strategy's
+committed, session-joined trades with legacy-compatible columns and holdout context.
+`_pricing.trading_calendar_from_snapshot` lets pinned-snapshot repricers share
+`replay()`'s calendar instead of a second implementation or legacy CSV fallback.
+`_pricing.execution_variant_label` supplies `experiments/v2_candidate_grid.py`'s
+`price_candidate_grid` with replay's execution-variant labels for each priced
+grid-position step.
 
 Experiment training, selection-fold and sweep reads exclude the union of the
 two holdouts specified in [#373](https://github.com/yshewchuk/investment-validation/pull/373).
@@ -587,36 +581,30 @@ This bounds retained unmatched rows, not total process RSS.
 
 ## Dependencies
 
-`engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `catalog`,
-`objects`, `manifests`, `query`, `computed_moves_table`, `iv_crush_table`), `engine.v2.
-contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`,
-`ObjectRef`, `TableContractRef`, `ColumnContract`, `TableContract`),
+`engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `incremental_tables`,
+`catalog`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`,
+`iv_crush_table`), `engine.v2.contracts` (`RevisionCandidate`, `CompletedCoverage`,
+`CoverageKey`, `CoverageOutcome`, `TimeInterval`), `engine.v2.contracts.data`
+(`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`, `ObjectRef`,
+`TableContractRef`, `ColumnContract`, `TableContract`),
 `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
 `engine.v2.features.panel_math` (`history_features`),
 `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`, `iter_canonical_json`,
-`content_hash`, `to_document`, `market_calendar`, `experiment_exits.valid_exit_recipe`,
+`content_hash`, `to_document`, `format_timestamp`, `market_calendar`,
+`experiment_exits.valid_exit_recipe`,
 `experiment_holdouts.calendar_date` (canonical days for IV input/anchor/clock validation), plus
-`final_holdout.request_from_document` and `typed.to_document` for `_final_population`) — the package's own
-lower-layer dependencies, consistent with the generic "may import anything
-at a lower layer" rule (`only_imports` is unset for this package in
-`checks/layer_map.py`, i.e. no narrower restriction than that generic
-rule). No import of `engine.v2.scoring`, `engine.v2.evaluation`,
-`engine.v2.ledger` or any sibling/higher package. `engine.v2.ops.
-bootstrap.open_catalog` is a CLI dependency, not a package one: the
-`tools/v2_*.py` leaves call it to open `--catalog` before handing the
-connection to this package (see Inputs); nothing under
-`engine/v2/research/` imports `engine.v2.ops` itself, even though layer
-7.0 (ops) is not below this package's own enforced layer (also 7.0) and
-so could not be imported under the generic rule regardless.
+`final_holdout.request_from_document` and `typed.to_document` for `_final_population`).
+Only lower-layer imports are allowed (`checks/layer_map.py`, `only_imports` unset):
+no `engine.v2.scoring`, `engine.v2.evaluation`, `engine.v2.ledger` or sibling/higher
+packages. Ops and research are both layer 7.0, so research cannot import ops.
+`engine.v2.ops.bootstrap.open_catalog` belongs to the `tools/v2_*.py` CLI leaves,
+which open `--catalog` and hand the connection to research (see Inputs).
 Stored history publishes new objects/manifests through `data.catalog.commit_snapshot`;
 this native write path advances only its dedicated context scope, never source heads.
-`_pricing.py` holds pure pricing primitives copied from legacy
-`engine.structures`/`engine.fills`/`engine.calendar` rather than reached
-through a legacy adapter (supervisor decision: no legacy adapter for this
-package). `polygon_fills.option_ticker` is likewise a verbatim copy of
-`engine.data.sources.polygon.option_ticker` rather than an import, for the
-same reason: a v2 package may not import legacy code without a declared
-adapter.
+`_pricing.py` copies pure primitives from legacy `engine.structures`,
+`engine.fills` and `engine.calendar`; `polygon_fills.option_ticker` is copied
+verbatim from `engine.data.sources.polygon.option_ticker`. Research has no legacy
+adapter; v2 cannot import legacy without a declared adapter.
 
 **Known duplication (issue #69):** `_scan.py` (used directly by
 `fill_quality.py`, `polygon_fills.py`, `signal_screen.py`, and
@@ -748,30 +736,21 @@ complementary, not interchangeable.
 
 ## External systems and libraries
 
-Direct libraries include pandas/numpy for tabular/numerical work and pyarrow
-for native stored-history Parquet. No network call (Polygon/ORATS pulls stay in
-`engine/data/pulls/`, legacy and unmoved). Snapshot access uses
-`ArtifactStore` and the sqlite catalog connection it is handed. Two
-exceptions, both plain local files outside `ArtifactStore` and never
-snapshot-store objects: report writers (`fill_quality.write_report`,
-`signal_screen.write_report`, `polygon_fills.run`'s own write step) write
-Markdown/parquet/CSV/JSON directly under the caller-provided
-`reports_dir`/`out_dir`; and `_pricing.trading_calendar()` reads a local
-CSV (`earnings_predictions/data/raw/polygon/gspc_daily.csv`, off
-`INVESTING_PLAN_ROOT` or the worktree root). That CSV reader is kept only
-for legacy-parity tests and direct library callers — no OTHER module in
-this package imports or calls it (`_plan.py` no longer does; a guard test,
-`test_trading_calendar_csv_fallback_is_not_reachable_from_the_package`,
-statically checks every file in this package but `_pricing.py` itself for
-an import or a call of the bare name). `_replay_run.run` and
-`_build_run.run` resolve the replay/build-trades calendar from the pinned
-snapshot's own `daily_market` table (`_pricing.trading_calendar_from_snapshot`)
-before calling `replay()`; `replay()` itself also derives one this same
-way, from its own `(repository, snapshot_ref)` arguments, for any OTHER
-caller that leaves `calendar` unset — so every path to a calendar in this
-package ends at a pinned snapshot or an explicit argument, never a local
-file, and a run's calendar is fixed by its `snapshot_id` like everything
-else it reads (see Failure semantics, Invariants). No third-party service.
+Libraries: pandas/numpy for tables/numerics, pyarrow for stored-history Parquet.
+No network calls or third-party service; Polygon/ORATS pulls stay in legacy
+`engine/data/pulls/`. Snapshot access uses `ArtifactStore` and the supplied sqlite
+catalog connection. Two local-file exceptions are outside the snapshot store:
+
+- `fill_quality.write_report`, `signal_screen.write_report`, `polygon_fills.run`,
+  `_replay_run.run`, `_build_run.run` and `reconcile_trades.run` write
+  Markdown/parquet/JSON under caller-provided `reports_dir`/`out_dir`.
+  Fill quality's optional CSV uses the independently supplied `csv` destination.
+- `_pricing.trading_calendar()` reads the local legacy S&P 500 daily CSV,
+  only for legacy-parity tests and direct library callers. No other research
+  module imports or calls it.
+
+Replay/build-trades calendars come from pinned snapshots or explicit arguments,
+never this CSV (see Invariants and Failure semantics).
 
 ## Failure semantics
 
@@ -797,16 +776,11 @@ an uncaught traceback instead.
     called, so no replay runs.
 - **R1, missing input.**
   - **No committed scope head, and no explicit `--snapshot-id`.**
-    `resolve_pinned(scope)` (or, for the `_snapshot.py`-backed tools,
-    `head_generation`) raises `SNAPSHOT_NOT_READY` (`category="dependency"`,
-    **retryable**) — this is the closest this package comes to "refuses
-    rather than silently reading latest": a scope with nothing committed
-    to it has no head to read, so the run stops rather than resolving
-    nothing. A scope *with* a committed head and no explicit
-    `--snapshot-id` resolves that head deterministically and once; the
-    resolved id is always written into the output so the exact snapshot a
-    report came from is never ambiguous after the fact, and `--snapshot-id`
-    lets a later run reproduce it even after the head has since moved.
+    `resolve_pinned(scope)` (or `_snapshot.py`'s `head_generation`) raises
+    `SNAPSHOT_NOT_READY` (`category="dependency"`, **retryable**).
+    With a committed head, resolution is deterministic and once per run;
+    outputs carry its ID for later explicit `--snapshot-id` replay even after
+    the head moves.
   - **An explicit `--snapshot-id` that does not exist.**
     `Repository.resolve`/`resolve_full` raises `SNAPSHOT_NOT_FOUND`
     (`category="dependency"`, not retryable) — an unknown id is refused,
@@ -841,22 +815,14 @@ an uncaught traceback instead.
     used to have. Either way, exit 2 with a code, never an uncaught
     `ValueError`.
   - **No declared partition column, or no partition values available at
-    all** (`_snapshot.py`'s path only — `replay.py`/`_chains.py`/
-    `_trades_publish.py`, not `_scan.py`). `_snapshot.read_table` raises a
-    bare `ValueError`, not a `DataError`, when it cannot build even one
-    `KeyPredicate` — the table contract declares no partition column, or
-    no partition values are available at all, i.e. the snapshot has no
-    fragments for that table. An explicitly empty `partition_keys=[]` is
-    falsy in Python, so it is treated the same as omitted and falls back
-    to deriving values from the snapshot's own fragment records — it does
-    not by itself trigger this path. Partition keys that are simply
-    valid-but-non-matching still build a predicate and return an empty
-    frame, same as `_scan.py`. The
-    CLIs built on this path (`v2_replay.py`, `v2_build_trades.py`,
-    `v2_reconcile_trades.py`) catch only `DataError` at `main()`, so this
-    one condition escapes as an uncaught traceback rather than the typed
-    refusal every other condition here gets. Pre-existing, not introduced
-    or fixed by this doc; tracked as a follow-up (issue #70).
+    all** (no table fragments). `_snapshot.read_table` cannot build a
+    `KeyPredicate` and raises bare `ValueError`, not `DataError`.
+    Omitted or empty `partition_keys=[]` derives values from snapshot fragments;
+    empty keys alone do not cause this refusal. Valid nonmatching keys return an
+    empty frame. Affected readers: `_replay_run.py`, `replay.py`, `_chains.py` and
+    `_trades_publish.py`, not `_scan.py`. Their CLIs (`v2_replay.py`,
+    `v2_build_trades.py`, `v2_reconcile_trades.py`) catch only `DataError` at `main()`;
+    this condition escapes as an uncaught traceback.
   - **No overlap rows after a join/filter** (fill quality's
     `since`-filtered join, or `experiment_trades.load_trades`'s
     strategy/provenance filter on the read `trades` table).
@@ -923,12 +889,9 @@ an uncaught traceback instead.
 
 ## Invariants
 
-- Every run reads one selected snapshot. A CLI that resolves before its
-  first table read passes that `snapshot_id` to downstream runners, whose
-  later lookups use the explicit id; the id is threaded through every read
-  and written into every output
-  (root doc §5's "no silent default" invariant, applied to research reads) —
-  including the experiment loader's returned context columns (see Outputs).
+- Every run reads one selected snapshot: CLI-resolved IDs remain explicit in
+  downstream lookups, every read and output, including experiment context columns
+  (see Inputs/Outputs; root §5's "no silent default" invariant).
 - Every experiment runner reads from its pinned v2 snapshot, applying shared random/rolling holdout enforcement through the reader appropriate to its inputs:
   `experiment_trades.load_trades` for trades; `experiment_population.load_population` for populations and its prediction/history consumers. Inadmissible reads refuse.
   Direct parquet/file reads bypass snapshot pinning and both holdout sets and are inadmissible.
@@ -937,39 +900,20 @@ an uncaught traceback instead.
   snapshot.
 - Every scan carries its own partition predicate alongside caller key
   predicates, so result rows cannot duplicate across partitions.
-- No production entrypoint derives its calendar from a local file or
-  environment variable: `_replay_run.run` and `_build_run.run` resolve the
-  planning calendar from the pinned snapshot's own `daily_market` table
-  (`_pricing.trading_calendar_from_snapshot`) and pass it explicitly into
-  `replay()`; `replay()` itself does the same derivation, from its own
-  `(repository, snapshot_ref)`, for any caller that leaves `calendar`
-  unset, so the guarantee holds for every caller of `replay()`, not just
-  these two. Either path refuses rather than inventing one — a missing
-  `daily_market` table is `CONTRACT_MISMATCH`, one present but with no
-  valid dates is `CALENDAR_UNAVAILABLE` — and `plan_events` itself refuses
-  `CALENDAR_UNAVAILABLE` if it is ever reached with no calendar at all,
-  never falling back to `trading_calendar()`'s CSV read (that fallback has
-  been removed from `_plan.py`; `trading_calendar` is no longer imported
-  or called anywhere in this package outside `_pricing.py`'s own
-  definition, checked by
-  `test_trading_calendar_csv_fallback_is_not_reachable_from_the_package`).
-  Changing the CSV cannot change a replay or build-trades run's output;
-  only a different pinned `snapshot_id` can. `trading_calendar()` itself
-  stays, unchanged, for legacy-parity tests and direct library callers —
-  it is never reached from anywhere in this package's own code.
-- **A `--years`-scoped rebuild only ever tombstones rows inside its own
-  scope** (issue #108). `_build_run.run` narrows the REPLAY to `--years` via
-  `filter_events`, and passes the same `years` into
-  `_trades_revisions.revisions_for_rebuild`, which narrows its tombstone set
-  the same way: it tombstones an existing replay-provenance row of a
-  `rebuilt_strategies` member only when the row's own `year` column is also
-  inside the rebuilt `years` (when `years` is given) AND the rebuild no
-  longer produces its `trade_id`. A year outside the rebuilt scope is never
-  touched, so `tools/v2_build_trades.py --years Y` cannot delete another
-  year's already-published rows for the same strategy — the requested
-  year's own no-longer-produced rows are still tombstoned. Omitting
-  `--years` continues to rebuild (and tombstone) every year, unchanged
-  from before this fix.
+- No production entrypoint derives calendars from local files/environment variables.
+  `_replay_run.run` and `_build_run.run` pass the pinned snapshot's `daily_market`
+  calendar into `replay()` via `_pricing.trading_calendar_from_snapshot`; `replay()`
+  derives it from its own `(repository, snapshot_ref)` whenever `calendar` is unset.
+  Missing table: `CONTRACT_MISMATCH`; no valid dates: `CALENDAR_UNAVAILABLE`.
+  `plan_events` also refuses `CALENDAR_UNAVAILABLE` when no calendar is supplied.
+  CSV changes cannot affect replay/build-trades output; see External systems for
+  the isolated legacy CSV reader, Failure semantics for refusals.
+- **Year-scoped rebuilds cannot tombstone other years.**
+  `_build_run.run` passes the same `years` to `_trades_revisions.filter_events` and
+  `_trades_revisions.revisions_for_rebuild`. A tombstone requires replay provenance,
+  membership in `rebuilt_strategies`, a `trade_id` absent from the rebuild, and
+  (when `years` is supplied) the existing row's own `year` in that scope.
+  Omitting `--years` rebuilds and tombstones across all years.
 - Never mutates the legacy trades ledger and never calls a network
   provider; `engine/build_trades.py` and `engine/data/pulls` (legacy,
   unchanged) keep doing both.
