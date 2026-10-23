@@ -42,11 +42,11 @@ _MANIFEST_KEYS = frozenset({
     "database_content_hash", "database_rows", "database_size", "artifacts",
 })
 
-#: Keys every manifest carries, including legacy manifests that predate
-#: ``database_file``, ``database_content_hash`` and ``database_size``.
+#: Keys every manifest carries, including the pre-change legacy schema that
+#: predates ``database_rows``, ``database_file``, ``database_content_hash`` and
+#: ``database_size``.
 _BASE_MANIFEST_KEYS = frozenset({
-    "schema_version", "backup_key", "cutoff", "database", "database_rows",
-    "artifacts",
+    "schema_version", "backup_key", "cutoff", "database", "artifacts",
 })
 
 _CHUNK = 1 << 20
@@ -201,9 +201,14 @@ def _retry_logical_digest(conn, key, *, stage, expected_lines=None, keepalive=No
     return "sha256:" + digest.hexdigest()
 
 
-def _open_checked(path, *, stage, expected_size=None):
+def _open_checked(path, *, stage, expected_size=None, oserror_code=None):
     """Open a regular non-symlink file within the byte cap; refuse otherwise."""
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        if oserror_code is not None:
+            raise fail(oserror_code, f"{stage} is missing or unreadable") from None
+        raise
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
@@ -244,9 +249,10 @@ def _hash_file(path, *, stage, keepalive=None):
 
 
 def _stream_copy(source, destination, *, expected_hash=None, expected_size=None,
-                 stage, fault=None, keepalive=None):
+                 stage, fault=None, keepalive=None, oserror_code=None):
     """Copy ``source`` to ``destination`` in bounded chunks, durably and atomically."""
-    stream, size = _open_checked(source, stage=stage, expected_size=expected_size)
+    stream, size = _open_checked(source, stage=stage, expected_size=expected_size,
+                                 oserror_code=oserror_code)
     try:
         ensure_directory(destination.parent)
         progress = _Progress(stage, total=size, keepalive=keepalive)
@@ -442,7 +448,7 @@ def _validated_manifest_shape(manifest, *, current):
     """Validate a current or legacy manifest shape without doing I/O.
 
     ``current`` requires exactly the current key set. A legacy restore manifest
-    may omit ``database_file``, ``database_content_hash`` and
+    may omit ``database_rows``, ``database_file``, ``database_content_hash`` and
     ``database_size``; it then reads ``<backup_key>.sqlite`` and hashes/sizes
     that file directly.
     """
@@ -457,7 +463,8 @@ def _validated_manifest_shape(manifest, *, current):
     for name in ("schema_version", "backup_key", "cutoff", "database"):
         if not isinstance(manifest.get(name), str):
             raise ValueError(f"manifest {name} is invalid")
-    _validated_row_counts(manifest.get("database_rows"))
+    if "database_rows" in manifest:
+        _validated_row_counts(manifest["database_rows"])
     artifacts = _validated_artifacts_shape(manifest.get("artifacts"))
     name, size = _validated_optional_manifest_fields(manifest)
     if name is None:
@@ -668,24 +675,24 @@ def _copy_artifact(store, target, name, ref, fault, keepalive=None):
     return {"content_hash": ref.content_hash, "byte_size": ref.byte_size}
 
 
-def _copy_artifacts(payload, store, target, fault, keepalive):
-    """Copy every payload artifact into the target and return their manifest entries."""
+def _copy_artifacts(refs, store, target, fault, keepalive):
+    """Copy every parsed payload artifact into the target and return its entries."""
     copied = {}
-    for name, document in payload.get("artifacts", {}).items():
+    for name, ref in refs.items():
         keepalive()
-        ref = from_document(ArtifactRef, document)
         copied[name] = _copy_artifact(store, target, name, ref, fault, keepalive)
     return copied
 
 
 def _validated_artifact_names(payload):
-    """Validate every artifact name before any database is installed."""
+    """Parse every payload artifact reference before any database is installed."""
     artifacts = payload.get("artifacts", {})
     try:
         _validated_artifacts_shape(artifacts)
-    except ValueError:
-        raise fail("INVALID_REQUEST", "unsafe backup artifact name") from None
-    return artifacts
+        return {name: from_document(ArtifactRef, document)
+                for name, document in artifacts.items()}
+    except (ValueError, TypeError):
+        raise fail("INVALID_REQUEST", "invalid backup artifact metadata") from None
 
 
 def _publish_manifest(manifest_path, manifest, prior):
@@ -758,7 +765,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
     if target.exists() and target.is_symlink():
         raise fail("INVALID_REQUEST", "backup target is a symlink")
     ensure_directory(target)
-    _validated_artifact_names(payload)
+    artifact_refs = _validated_artifact_names(payload)
     manifest_path = target / (key + ".manifest.json")
     started = time.monotonic()
     _log(f"run_backup {key}: start target={target} rss_mb={_rss_mb()}")
@@ -798,7 +805,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
         else:
             database_file = Path(prior["database_file"]).name
         database = target / database_file
-        copied = _copy_artifacts(payload, store, target, fault, keepalive)
+        copied = _copy_artifacts(artifact_refs, store, target, fault, keepalive)
         manifest = {"schema_version": payload["schema_version"], "backup_key": key,
                     "cutoff": payload["cutoff"], "database": _hash_file(
                         database, stage="database-file-hash", keepalive=keepalive),
@@ -859,7 +866,7 @@ def restore_backup(source, destination):
     database = destination / "ops.sqlite"
     _stream_copy(source_database, database,
                  expected_hash=manifest["database"], expected_size=database_size,
-                 stage="restore database")
+                 stage="restore database", oserror_code="INTEGRITY_FAILED")
     probe = sqlite3.connect(database)
     try:
         if integrity_errors(probe):
@@ -872,7 +879,8 @@ def restore_backup(source, destination):
         _stream_copy(source / "artifacts" / name, path,
                      expected_hash=info["content_hash"],
                      expected_size=expected_size if isinstance(expected_size, int) else None,
-                     stage=f"restore artifact {name}")
+                     stage=f"restore artifact {name}",
+                     oserror_code="INTEGRITY_FAILED")
     _log(f"restore_backup: complete destination={destination} "
          f"elapsed={time.monotonic() - started:.1f}s rss_mb={_rss_mb()}")
     return destination
