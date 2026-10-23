@@ -19,8 +19,9 @@ def _instrument(monkeypatch, marker="real"):
     # Replace only this test module's view, never mutmut's live global module.
     monkeypatch.setattr(fixture, "sys", SimpleNamespace(modules={
         "mutmut.mutation.trampoline": SimpleNamespace(wrap_in_trampoline=wrapper)}))
-    monkeypatch.setattr(fixture.massive_daily, "_mutmut_mutated",
+    monkeypatch.setattr(fixture.incremental, "_mutmut_mutated",
                         wrapper if marker == "real" else lambda *args: None, raising=False)
+    return wrapper
 
 
 def _memory(policy):
@@ -31,9 +32,9 @@ def _memory(policy):
 def test_authored_worker_budget_ignores_environment_package_and_path(monkeypatch, mode):
     _instrument(monkeypatch, marker="lookalike")
     monkeypatch.setenv("MUTANT_UNDER_TEST", mode)
-    monkeypatch.setattr(fixture.massive_daily, "__file__", "/tmp/mutants/massive_daily.py")
+    monkeypatch.setattr(fixture.incremental, "__file__", "/tmp/mutants/incremental.py")
     assert fixture.snapshot_worker_policy() is TEST_POLICY
-    monkeypatch.delattr(fixture.massive_daily, "_mutmut_mutated")
+    monkeypatch.delattr(fixture.incremental, "_mutmut_mutated")
     assert fixture.snapshot_worker_policy() is TEST_POLICY
     assert _memory(TEST_POLICY) == 384 << 20
     assert _memory(DEFAULT_POLICY) == 512 << 20
@@ -43,7 +44,7 @@ def test_authored_worker_budget_ignores_environment_package_and_path(monkeypatch
     {"mutmut.mutation.trampoline": SimpleNamespace(wrap_in_trampoline=None)}])
 def test_authored_worker_without_a_trampoline_keeps_its_budget(monkeypatch, modules):
     monkeypatch.setattr(fixture, "sys", SimpleNamespace(modules=modules))
-    monkeypatch.delattr(fixture.massive_daily, "_mutmut_mutated", raising=False)
+    monkeypatch.delattr(fixture.incremental, "_mutmut_mutated", raising=False)
     monkeypatch.setenv("MUTANT_UNDER_TEST", "stats")
     assert fixture.snapshot_worker_policy() is TEST_POLICY
     assert _memory(TEST_POLICY) == 384 << 20
@@ -61,6 +62,20 @@ def test_only_instrumented_fixture_io_fetch_memory_changes(monkeypatch):
         replace(profile, memory_bytes=1 << 30) if profile.name == "io_fetch" else profile
         for profile in TEST_POLICY.profiles))
     assert policy == expected  # all CPU/thread/admission/other-profile settings stay unchanged
+
+
+@pytest.mark.parametrize("generated_module,expected", [
+    ("massive_daily", 384 << 20), ("incremental", 1 << 30),
+])
+def test_allowance_tracks_incremental_instrumentation_not_its_sibling(
+        monkeypatch, generated_module, expected):
+    wrapper = _instrument(monkeypatch)
+    for module in (fixture.incremental, fixture.massive_daily):
+        monkeypatch.delattr(module, "_mutmut_mutated", raising=False)
+    monkeypatch.setattr(getattr(fixture, generated_module), "_mutmut_mutated", wrapper, raising=False)
+    assert _memory(fixture.snapshot_worker_policy()) == expected
+    assert _memory(TEST_POLICY) == 384 << 20
+    assert _memory(DEFAULT_POLICY) == 512 << 20
 
 
 @pytest.mark.parametrize("instrumented", [False, True])

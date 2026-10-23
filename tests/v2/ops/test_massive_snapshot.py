@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from engine.v2.contracts import DataQuery, JobSpec, KeyPredicate, SubmitRequest
-from engine.v2.data import errors, massive_daily
+from engine.v2.data import errors, incremental, massive_daily
 from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, canonical_json, content_hash, to_document
@@ -34,7 +34,7 @@ def snapshot_worker_policy():
     # actual mutmut wrappers, not an environment flag or a directory name.
     trampoline = sys.modules.get("mutmut.mutation.trampoline")
     wrapper = getattr(trampoline, "wrap_in_trampoline", None)
-    if wrapper is None or getattr(massive_daily, "_mutmut_mutated", None) is not wrapper:
+    if wrapper is None or getattr(incremental, "_mutmut_mutated", None) is not wrapper:
         return TEST_POLICY
     return replace(TEST_POLICY, profiles=tuple(
         replace(profile, memory_bytes=1 << 30) if profile.name == "io_fetch" else profile
