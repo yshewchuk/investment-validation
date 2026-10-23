@@ -1,10 +1,13 @@
 """Durable local backup effect; remote mirroring is deliberately out of scope."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sqlite3
+import stat
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from engine.v2.contracts import ArtifactRef
@@ -18,6 +21,9 @@ from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.outbox import claim, complete, enqueue
+
+#: Prior manifests are advisory metadata; reads beyond this bound are invalid.
+MAX_MANIFEST_BYTES = 1024 * 1024
 
 
 def prepare_backup(conn, key, artifacts, *, clock):
@@ -70,6 +76,27 @@ def _delivered_or_stale(conn, kind, logical_key):
     return delivered
 
 
+@contextmanager
+def _read_snapshot(conn):
+    """One explicit deferred read transaction, so counts and a backup agree.
+
+    ``BEGIN`` (not ``BEGIN IMMEDIATE``) only takes a read lock on first access,
+    leaving writers free in WAL mode. Commit on success, roll back on anything
+    else. Callers keep this open only around counting and ``backup_to``: never
+    around artifact copying or manifest publication.
+    """
+    if conn.in_transaction:
+        raise RuntimeError("nested catalog transaction: backup needs a clean connection")
+    conn.execute("BEGIN")
+    try:
+        yield conn
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+
+
 def _table_row_counts(conn):
     """Deterministic row count per non-internal table, keyed and ordered by name."""
     tables = [row[0] for row in conn.execute(
@@ -82,19 +109,42 @@ def _table_row_counts(conn):
     return counts
 
 
+def _read_manifest(manifest_path):
+    """Parse a prior manifest without following non-regular files or reading
+    past ``MAX_MANIFEST_BYTES``; any invalid prior is reported as ``None``."""
+    try:
+        fd = os.open(manifest_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        chunks = []
+        remaining = MAX_MANIFEST_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(data) > MAX_MANIFEST_BYTES:
+        return None
+    try:
+        return json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
 def _verified_prior_backup(manifest_path, database, source_rows, key, payload):
     """The existing manifest when it and ``database`` are a verified prior
-    result for this payload, else ``None``.
-
-    A retry after the manifest was published but before the acknowledgement
-    rebuilds a byte-different SQLite copy from the same source. Reusing this
-    verified pair keeps such a retry byte-idempotent instead of refusing the
-    rebuilt database's different hash.
-    """
-    try:
-        manifest = json.loads(manifest_path.read_text())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
+    result for this payload, else ``None``."""
+    manifest = _read_manifest(manifest_path)
     if not isinstance(manifest, dict):
         return None
     if (manifest.get("backup_key") != key
@@ -120,11 +170,13 @@ def _verified_prior_backup(manifest_path, database, source_rows, key, payload):
 
 
 def _verify_staged(staged, source_rows):
-    """Verify a staged copy against the source row counts and integrity."""
+    """Verify a staged copy's per-table row counts against the source.
+
+    ``backup_to`` already owns the integrity/foreign-key check.
+    """
     probe = sqlite3.connect(staged)
     try:
         staged_rows = _table_row_counts(probe)
-        problems = integrity_errors(probe)
     finally:
         probe.close()
     if staged_rows != source_rows:
@@ -132,13 +184,35 @@ def _verify_staged(staged, source_rows):
                      if source_rows.get(name) != staged_rows.get(name)]
         raise fail("INTEGRITY_FAILED", "backup row counts differ from source",
                    details={"tables": differing})
-    if problems:
-        raise fail("INTEGRITY_FAILED", "backup integrity check failed",
-                   details={"first_problem": problems[0]})
 
 
-def _stage_database(conn, target, key, database, source_rows):
-    """Build, verify and atomically install a fresh staged database copy."""
+@contextmanager
+def _backup_lock(target, key):
+    """Serialize overlapping attempts for one target/key while they inspect,
+    replace and publish that key's database and manifest."""
+    path = target / f".{key}.lock"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _remove_stale_stages(target, key):
+    """Remove crash-leftover staging databases for this key only."""
+    prefix = f".{key}."
+    suffix = ".staging.sqlite"
+    for entry in target.iterdir():
+        if entry.name.startswith(prefix) and entry.name.endswith(suffix):
+            try:
+                entry.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _stage_copy(conn, target, key):
+    """Write the source's current snapshot into a fresh staging database."""
     stage_fd, stage_name = tempfile.mkstemp(
         dir=str(target), prefix=f".{key}.", suffix=".staging.sqlite")
     os.close(stage_fd)
@@ -146,6 +220,22 @@ def _stage_database(conn, target, key, database, source_rows):
     staged = Path(stage_name)
     try:
         backup_to(conn, staged)
+    except BaseException:
+        _discard_staged(staged)
+        raise
+    return staged
+
+
+def _discard_staged(staged):
+    try:
+        staged.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _install_stage(staged, target, database, source_rows):
+    """Verify and atomically install a staged copy after the read snapshot ends."""
+    try:
         _verify_staged(staged, source_rows)
         with staged.open("rb") as stream:
             os.fsync(stream.fileno())
@@ -154,10 +244,7 @@ def _stage_database(conn, target, key, database, source_rows):
         fsync_directory(target)
     finally:
         if staged is not None:
-            try:
-                staged.unlink()
-            except FileNotFoundError:
-                pass
+            _discard_staged(staged)
 
 
 def _copy_artifact(store, target, name, ref, fault):
@@ -191,12 +278,24 @@ def _publish_manifest(manifest_path, manifest, prior):
         if prior != manifest:
             raise fail("INTEGRITY_FAILED", "backup manifest differs")
         return
-    temporary = manifest_path.with_suffix(".pending")
-    temporary.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
-    with temporary.open("rb") as stream:
-        os.fsync(stream.fileno())
-    os.replace(temporary, manifest_path)
-    fsync_directory(manifest_path.parent)
+    fd, name = tempfile.mkstemp(
+        dir=str(manifest_path.parent), prefix=f".{manifest_path.name}.",
+        suffix=".pending")
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, manifest_path)
+        temporary = None
+        fsync_directory(manifest_path.parent)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=_no_keepalive):
@@ -209,16 +308,27 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
         raise fail("INVALID_REQUEST", "backup target is a symlink")
     target.mkdir(parents=True, exist_ok=True)
     database = target / (key + ".sqlite")
-    source_rows = _table_row_counts(conn)
     manifest_path = target / (key + ".manifest.json")
-    prior = _verified_prior_backup(manifest_path, database, source_rows, key, payload)
-    if prior is None:
-        _stage_database(conn, target, key, database, source_rows)
-    copied = _copy_artifacts(payload, store, target, fault, keepalive)
-    manifest = {"schema_version": payload["schema_version"], "backup_key": key,
-                "cutoff": payload["cutoff"], "database": file_hash(database),
-                "database_rows": source_rows, "artifacts": copied}
-    _publish_manifest(manifest_path, manifest, prior)
+    with _backup_lock(target, key):
+        _remove_stale_stages(target, key)
+        staged = None
+        try:
+            with _read_snapshot(conn):
+                source_rows = _table_row_counts(conn)
+                prior = _verified_prior_backup(manifest_path, database, source_rows, key, payload)
+                if prior is None:
+                    staged = _stage_copy(conn, target, key)
+        except BaseException:
+            if staged is not None:
+                _discard_staged(staged)
+            raise
+        if staged is not None:
+            _install_stage(staged, target, database, source_rows)
+        copied = _copy_artifacts(payload, store, target, fault, keepalive)
+        manifest = {"schema_version": payload["schema_version"], "backup_key": key,
+                    "cutoff": payload["cutoff"], "database": file_hash(database),
+                    "database_rows": source_rows, "artifacts": copied}
+        _publish_manifest(manifest_path, manifest, prior)
     if fault:
         fault("after_manifest_before_ack")
     complete(conn, effect["effect_id"], manifest, owner=owner,

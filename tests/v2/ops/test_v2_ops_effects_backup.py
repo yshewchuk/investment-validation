@@ -1,15 +1,17 @@
 """Local immutable backup and isolated restore controls."""
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
 
 from engine.v2.foundation import ArtifactStore
+from engine.v2.ops import backup as backup_module
 from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
 from engine.v2.ops.catalog import integrity_errors
 from engine.v2.ops.effects_graph import backup_effect
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
 from tests.ops_support import catalog
 from tests.v2.ops.test_v2_ops_effects_graph import (
@@ -64,6 +66,165 @@ def test_backup_replaces_stale_final_database_only_with_verified_copy(tmp_path, 
     assert manifest["database_rows"] == _row_counts(conn)
     assert conn.execute(
         "SELECT state FROM outbox WHERE logical_key='b7'").fetchone()[0] == "delivered"
+
+
+def test_staged_row_count_mismatch_is_refused_with_table_details(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "b8", {}, clock=clock)
+    real_backup_to = backup_module.backup_to
+
+    def corrupt(conn, destination):
+        real_backup_to(conn, destination)
+        damaged = sqlite3.connect(destination)
+        try:
+            damaged.execute("DELETE FROM outbox")
+            damaged.commit()
+        finally:
+            damaged.close()
+
+    monkeypatch.setattr(backup_module, "backup_to", corrupt)
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="b8", owner="worker", target=tmp_path / "backup",
+                   clock=clock, store=store)
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert "outbox" in refused.value.problem.details["tables"]
+
+
+def test_lost_ack_retry_reuses_prior_database(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "b9", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    calls = []
+    real_backup_to = backup_module.backup_to
+
+    def counted(conn, destination):
+        calls.append(destination)
+        real_backup_to(conn, destination)
+
+    monkeypatch.setattr(backup_module, "backup_to", counted)
+
+    def crash(point):
+        if point == "after_manifest_before_ack":
+            raise RuntimeError("ack lost")
+
+    with pytest.raises(RuntimeError):
+        run_backup(conn, key="b9", owner="worker", target=backup, clock=clock,
+                   store=store, fault=crash)
+    assert len(calls) == 1
+    clock.advance(301)
+    run_backup(conn, key="b9", owner="retry", target=backup, clock=clock, store=store)
+    assert len(calls) == 1
+
+
+def test_lost_ack_retry_rebuilds_when_source_changed(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "b10", {}, clock=clock)
+    conn.execute("CREATE TABLE synthetic_change (value INTEGER)")
+    conn.commit()
+    backup = tmp_path / "backup"
+    calls = []
+    real_backup_to = backup_module.backup_to
+
+    def counted(conn, destination):
+        calls.append(destination)
+        real_backup_to(conn, destination)
+
+    monkeypatch.setattr(backup_module, "backup_to", counted)
+
+    def crash(point):
+        if point == "after_manifest_before_ack":
+            raise RuntimeError("ack lost")
+
+    with pytest.raises(RuntimeError):
+        run_backup(conn, key="b10", owner="worker", target=backup, clock=clock,
+                   store=store, fault=crash)
+    first = json.loads((backup / "b10.manifest.json").read_text())
+    assert len(calls) == 1
+
+    conn.execute("INSERT INTO synthetic_change VALUES (1)")
+    conn.commit()
+    clock.advance(301)
+    second = run_backup(conn, key="b10", owner="retry", target=backup, clock=clock, store=store)
+
+    assert len(calls) == 2
+    assert second["database"] != first["database"]
+    assert second["database_rows"]["synthetic_change"] == 1
+
+
+def test_backup_counts_and_copy_share_one_snapshot(tmp_path, monkeypatch):
+    """A writer that commits after the source counts are read must not leak
+    its row into the backup: counts and ``backup_to`` use one read snapshot."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    conn.execute("CREATE TABLE synthetic_change (value INTEGER)")
+    conn.commit()
+    prepare_backup(conn, "b13", {}, clock=clock)
+    before = _row_counts(conn)
+    database = tmp_path / "ops.sqlite"
+    real_backup_to = backup_module.backup_to
+    observed = []
+
+    def racing_backup_to(source, destination):
+        writer = sqlite3.connect(database)
+        try:
+            writer.execute("INSERT INTO synthetic_change VALUES (1)")
+            writer.commit()
+        finally:
+            writer.close()
+        observed.append(_row_counts(source))
+        real_backup_to(source, destination)
+
+    monkeypatch.setattr(backup_module, "backup_to", racing_backup_to)
+    manifest = run_backup(conn, key="b13", owner="worker", target=tmp_path / "backup",
+                          clock=clock, store=store)
+
+    assert observed == [before]
+    assert _row_counts(conn)["synthetic_change"] == 1
+    backup = sqlite3.connect(tmp_path / "backup" / "b13.sqlite")
+    try:
+        assert _row_counts(backup) == before
+        assert backup.execute("SELECT COUNT(*) FROM synthetic_change").fetchone()[0] == 0
+    finally:
+        backup.close()
+    assert manifest["database_rows"] == before
+
+
+def test_oversized_prior_manifest_is_ignored_and_rebuilt(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "b11", {}, clock=clock)
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    manifest_path = backup / "b11.manifest.json"
+    manifest_path.write_bytes(b"{" + b" " * backup_module.MAX_MANIFEST_BYTES + b"}")
+
+    manifest = run_backup(conn, key="b11", owner="worker", target=backup, clock=clock,
+                          store=store)
+
+    assert manifest_path.stat().st_size <= backup_module.MAX_MANIFEST_BYTES
+    assert json.loads(manifest_path.read_text()) == manifest
+    assert manifest["backup_key"] == "b11"
+
+
+def test_retry_removes_only_matching_crash_staging_files(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "b12", {}, clock=clock)
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    stale = backup / ".b12.crash.staging.sqlite"
+    other = backup / ".b13.crash.staging.sqlite"
+    stale.write_bytes(b"junk")
+    other.write_bytes(b"other")
+
+    run_backup(conn, key="b12", owner="worker", target=backup, clock=clock, store=store)
+
+    assert not stale.exists()
+    assert other.exists()
 
 
 def test_backup_copy_failure_remains_retryable(tmp_path):
