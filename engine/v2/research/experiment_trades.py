@@ -12,10 +12,12 @@ import pandas as pd
 from engine.v2.data import errors
 from engine.v2.foundation import SystemClock
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
+from engine.v2.research import progress
 from engine.v2.research._trades_publish import read_event_rows, read_existing_trades
 from engine.v2.research._trades_revisions import PROVENANCE
+from engine.v2.research.snapshot_inputs import snapshot_reference
 
-__all__ = ["PROVENANCE", "load_trades"]
+__all__ = ["PROVENANCE", "load_trades", "classify_events"]
 
 
 def load_trades(repository, snapshot, strategy: str, *, as_of_month=None,
@@ -127,14 +129,20 @@ def _ambiguous(row, duplicates):
             or pd.isna(row.date_conflict) or bool(row.date_conflict))
 
 
-def _membership_labels(rows, events, policy):
-    """Shared membership/ambiguity labelling: (rows merged with canonical events, event_id -> labels)."""
-    events["event_date"] = pd.to_datetime(events["event_date"], errors="coerce")
+def _duplicate_ids(events):
+    """Structural identity collisions, independent of rolling-month membership."""
     duplicates = set(events.loc[events["event_id"].duplicated(False), "event_id"])
     duplicates.update(events.loc[events["event_cluster_id"].notna()
         & events.duplicated(["ticker", "event_cluster_id"], keep=False), "event_id"])
     duplicates.update(events.loc[
         events.duplicated(["ticker", "event_date", "session"], keep=False), "event_id"])
+    return duplicates
+
+
+def _membership_labels(rows, events, policy, *, meter=None, structural=None):
+    """Shared membership/ambiguity labelling: (rows merged with canonical events, event_id -> labels)."""
+    events["event_date"] = pd.to_datetime(events["event_date"], errors="coerce")
+    duplicates = _duplicate_ids(events)
     rows = rows.merge(
         events.rename(columns={"event_date": "canonical_date", "ticker": "canonical_ticker"})
         .drop_duplicates("event_id"),
@@ -145,6 +153,10 @@ def _membership_labels(rows, events, policy):
         labels = policy.classify(row.event_id, row.canonical_date)
         if _ambiguous(row, duplicates):
             labels = labels | {"ambiguous"}
+            if structural is not None:
+                structural.add(row.event_id)
+        if meter is not None:
+            meter.tick()
         if labels:
             key = row.event_id if isinstance(row.event_id, str) else None
             exclusions.setdefault(key, set()).update(labels)
@@ -167,3 +179,26 @@ def _exclude_holdouts(rows, events, policy, context, purpose, event_ids):
     rows["population_use"] = "post-release selection"
     rows.attrs["holdout_exclusions"] = labels
     return rows
+
+
+def classify_events(events, snapshot, *, as_of_month):
+    """Classify canonical six-column metadata without outcomes or read authority.
+
+    Return merged canonical rows, membership labels, structural ambiguous IDs,
+    and pinned context. Input frames are detached; malformed columns refuse.
+    """
+    snapshot_reference(snapshot)
+    required = {"event_id", "ticker", "event_date", "session", "date_conflict", "event_cluster_id"}
+    if not isinstance(events, pd.DataFrame) or not required <= set(events.columns) or not events.columns.is_unique:
+        raise errors.fail("CONTRACT_MISMATCH", "canonical event metadata columns required")
+    if any(type(key) is not str or not key or key != key.strip() for key in events.event_id):
+        raise errors.fail("CONTRACT_MISMATCH", "canonical event metadata values are malformed")
+    policy, context = _holdout_context(snapshot, as_of_month, "selection", None)
+    ambiguous = set()
+    try:
+        canonical, labels = _membership_labels(events[["event_id", "ticker", "event_date"]].copy(),
+            events[list(sorted(required))].copy(), policy,
+            meter=progress.Progress("eligibility membership", len(events)), structural=ambiguous)
+    except (TypeError, ValueError):
+        raise errors.fail("CONTRACT_MISMATCH", "canonical event metadata values are malformed") from None
+    return canonical, labels, ambiguous, context

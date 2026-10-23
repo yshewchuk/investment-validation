@@ -45,7 +45,8 @@ failure rather than a stale sentence.
 engine.v2.scoring imports the generator and pricing functions for native
 geometry and same-input comparisons. engine.v2.ops.cli imports `Geometry` and
 `Pricing` to reconstruct a captured `NativeScoreInputs` document for the
-read-only `ops rescore` command.
+read-only `ops rescore` command. `native_board_universe` and
+`nightly_raw_row_producer` import `DISABLED` to enumerate and refuse CAL-P/CND-P.
 
 <!-- consumers: engine.v2.scoring, engine.v2.ops -->
 

@@ -1402,8 +1402,15 @@ def run_nightly(
     scorer=None,
     max_staleness_days: int = MAX_STALENESS_DAYS,
     require_as_of: bool = False,
+    fetch_only: bool = False,
 ) -> NightlyReport:
-    """One nightly pass. Raises :class:`NightlyStop` when a gating step fails."""
+    """One nightly pass. Raises :class:`NightlyStop` when a gating step fails.
+
+    Raises ValueError when fetch_only is combined with refresh=False,
+    tiers=False or backup=True.
+    """
+    if fetch_only and (not refresh or not tiers or backup):
+        raise ValueError("fetch_only requires refresh and tiers on and no backup")
     from engine import ledger
     from engine.dashboard.publish import PublishError, publish_bundle
     from engine.dashboard.render import (
@@ -1682,6 +1689,30 @@ def run_nightly(
             report.flags.append(change_flag)
 
     report.mark("tiers", started=started)
+    if fetch_only:
+        # Refresh half plus warm_serving: the v2 snapshot import reads the Tier-2/3/4
+        # files, SNAPSHOT and the Tier-4 serving caches that warm writes. Scoring and
+        # later steps are skipped (issue #1146).
+        report.steps["tiers"].setdefault("degraded", False)
+        from engine.dashboard import warm_serving
+
+        try:
+            report.steps["warm_serving"] = warm_serving.warm(
+                list(upcoming["event_date"]), as_of, as_of
+            )
+        except warm_serving.WarmError as exc:
+            raise _refuse(report, "warm_serving", f"WARM_SERVING_FAILED: {exc}") from exc
+        report.mark("warm_serving", started=started)
+        for skipped in ("score", "ledger", "settle", "ladder", "backfill",
+                        "model_evidence", "render", "selfcheck", "publish", "backup"):
+            report.steps[skipped] = {"skipped": True, "reason": "fetch_only"}
+        _log_rss("fetch-only done")
+        flag_path = _write_flag_report(as_of, report.flags, report.steps)
+        report.steps["flags"] = {"path": str(flag_path), "count": len(report.flags)}
+        report.elapsed_s = time.time() - started
+        print(f"[nightly] fetch-only: scoring half skipped, elapsed {report.elapsed_s:.0f}s",
+              file=sys.stderr, flush=True)
+        return report
     # -- 3. score -------------------------------------------------------------
     # The board is scored ATM-only; the strike ladder comes after, for the rows
     # the gate passed (see :func:`strike_ladder`).
@@ -2104,7 +2135,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--max-staleness", type=int, default=MAX_STALENESS_DAYS)
     parser.add_argument("--json", default=None, help="write the run report to this path")
+    parser.add_argument("--fetch-only", action="store_true",
+                        help="refresh half only (data, moves, Tier 3/4, SNAPSHOT, "
+                             "serving-model warm) for the v2 "
+                             "snapshot import; skips scoring and everything after it")
     args = parser.parse_args(argv)
+    if args.fetch_only and (args.no_refresh or args.no_tiers or args.backup):
+        parser.error("--fetch-only cannot be combined with --no-refresh, --no-tiers or --backup")
 
     tickers = [t.strip().upper() for t in args.tickers.split(",")] if args.tickers else None
     try:
@@ -2129,6 +2166,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 chain_sessions=args.chain_sessions,
                 max_staleness_days=args.max_staleness,
                 require_as_of=args.require_as_of,
+                fetch_only=args.fetch_only,
             )
     except NightlyStop as exc:
         print(f"NIGHTLY STOPPED — {exc}", file=sys.stderr)

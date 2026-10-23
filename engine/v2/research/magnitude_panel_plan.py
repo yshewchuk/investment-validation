@@ -236,6 +236,11 @@ def validate_context(context):
         raise errors.fail("CONTRACT_MISMATCH", "invalid research panel context") from None
 
 
+def _snapshot_has_id(snapshot):
+    return (isinstance(snapshot, SnapshotRef) and isinstance(snapshot.snapshot_id, str)
+            and bool(snapshot.snapshot_id.strip()))
+
+
 def build_context(repository, source_snapshot, history_snapshot, history_context, *,
                   producer, availability_lane="reconstructed"):
     """Bind exact artifacts, protected population and isolated fragments before payloads.
@@ -248,7 +253,7 @@ def build_context(repository, source_snapshot, history_snapshot, history_context
         _producer(producer)
     except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):
         raise errors.fail("CONTRACT_MISMATCH", "invalid panel producer metadata") from None
-    if (not isinstance(source_snapshot, SnapshotRef) or not isinstance(history_snapshot, SnapshotRef)
+    if (not _snapshot_has_id(source_snapshot) or not _snapshot_has_id(history_snapshot)
             or type(history_context) is not dict):
         raise errors.fail("CONTRACT_MISMATCH", "explicit panel snapshot/context types required")
     if (repository.resolve(source_snapshot.snapshot_id) != source_snapshot

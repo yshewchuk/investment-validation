@@ -26,7 +26,8 @@ For `python -m experiments.v2_prediction register|run`, supply the spec, existin
 catalog/store, scope and holdout month, plus `--target absolute_move`,
 `--magnitude-training-start`, `--magnitude-labels-before`, `--magnitude-model history_mean`,
 `--magnitude-feature-snapshot-id` and `--magnitude-history-start`. Repeat the same
-request for run; use `--no-ledger` for smoke before recorded execution with `--ledger`.
+request for run; pass `--exp-number N` (N >= 101) for a new experiment; use
+`--no-ledger` for smoke before recorded execution with `--ledger`.
 
 Random and rolling holdouts remain excluded. Native evidence binds consumed
 stored rows and original source identities; schedules/publication remain unverified
@@ -129,3 +130,5 @@ or release is established by this development implementation.
 
 See [the stage-2 design](STAGE2_DESIGN.md) for causal panel features, bounded
 inner-only selection and a proposed matched legacy comparison; it is not implemented.
+Stage-2 scope, acceptance criteria and the PR split (design section 5) live in that
+design; this Spec adds nothing until a stage-2 PR is accepted.

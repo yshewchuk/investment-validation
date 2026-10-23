@@ -100,9 +100,14 @@ python3 -m pytest -q -n 4 --dist loadgroup -rfEs --durations=15 tests/ 2>&1 | ta
 
 Nothing in the suite waits unboundedly any more:
 
+Expired per-test budgets always raise pytest's `TIMEOUT` failure, even if the
+traceback dump fails. Dumps use original stderr, not a `capsys`/redirected
+stream without `fileno()`, so diagnostic I/O cannot masquerade as a caught
+domain-validation error. No timeout budget is increased by this safeguard.
+
 | Guard | What it does | Knob |
 |---|---|---|
-| Per-test timeout (`conftest.py`) | Each setup/call/teardown phase gets 600 s; past that the test **fails** as `TIMEOUT: <node id> ...` with the stack it was waiting in, and the run continues. pytest-timeout is not installed; this is a SIGALRM equivalent that switches itself off if pytest-timeout is ever installed. The first `ui_dist_dir` setup (npm ci + build) gets a longer budget. | `--test-timeout N`, env `PYTEST_TEST_TIMEOUT`, `@pytest.mark.test_timeout(N)`; `0` disables |
+| Per-test timeout (`conftest.py`) | Each setup/call/teardown phase gets 600 s; past that the test **fails** as `TIMEOUT: <node id> ...` and attempts a stack dump. Even if the dump fails, the timeout fails the test and the run continues. pytest-timeout is not installed; this is a SIGALRM equivalent that switches itself off if pytest-timeout is ever installed. The first `ui_dist_dir` setup (npm ci + build) gets a longer budget. | `--test-timeout N`, env `PYTEST_TEST_TIMEOUT`, `@pytest.mark.test_timeout(N)`; `0` disables |
 | Ops job polling (`ops_support.run_until`) | Polling has an overall deadline shorter than the per-test timeout. If a job has not reached a terminal state by then, the test fails with the job id, last state, admission/retry/execution status, attempts, and the latest worker heartbeat and log tail available from the ops query helpers; the diagnostics expose the attempt lease's `heartbeat_at` stamp and exact worker process-family liveness separately from the latest progress event/step — a latest progress row of `kind="heartbeat"` is a throttled observation/progress event, not lease renewal. A real-`Service` job left queued on a host-resource reason still fails with `RESOURCE WAIT (environment, not a code failure): ...`; `PROFILE_EXCEEDS_CAPACITY` fails at once and `MEMORY_HEADROOM`, `CPU_UNAVAILABLE`, `DISK_SPACE` and `RESERVATION_BUDGET` fail after 60 s continuously queued. Reasons from the test's own catalog (dependencies, heavy slot, store lease) remain subject to the overall polling deadline. | env `OPS_TEST_ADMISSION_WAIT_S` |
 | `ui/.npm-ci.lock` | Waits for another process's `npm ci` for at most 660 s, then fails, naming the lock. | none |
 

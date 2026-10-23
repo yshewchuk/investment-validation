@@ -112,6 +112,9 @@ always_run = [
 # whenever a changed path matches the pattern. fnmatch, `*` matches `/`.
 [pr_selection.path_tests]
 "engine/v2/*" = ["tests/v2/foundation/test_v2_ops_foundation.py"]
+".coderabbit.yaml" = ["tests/v2/integration/test_performance_review_config.py"]
+"AGENTS.md" = ["tests/v2/integration/test_performance_review_config.py"]
+"docs/performance_review.md" = ["tests/v2/integration/test_performance_review_config.py"]
 
 [defaults]
 # Per-mutant timeout. mutmut sets an RLIMIT_CPU of
@@ -1195,6 +1198,7 @@ mutate = [
     "engine/v2/research/*.py",
 ]
 tests = [
+    "tests/v2/research/test_eligibility_policy.py",
     "tests/v2/research/test_magnitude_search_plan.py",
     "tests/v2/research/test_magnitude_search_trials.py",
     "tests/v2/research/test_magnitude_search_records.py",

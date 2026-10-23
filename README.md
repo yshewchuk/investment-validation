@@ -105,7 +105,10 @@ assumptions did not survive contact with Phase 0's output.
 
 The grandfathered research trees (`earnings_predictions/`, `bt/`,
 `polygon_cache/`) are registered in `engine/paths.py` and are **read-only**;
-`paths.assert_writable()` makes writing to them raise.
+`paths.assert_writable()` makes writing to them raise. The one exception is
+`earnings_predictions/data/raw/polygon/gspc_daily.csv` (and its staging
+siblings): `paths.WRITABLE_EXCEPTIONS` lets `engine.data.pulls.gspc_refresh`
+refresh that re-fetchable series (#1103).
 
 ---
 

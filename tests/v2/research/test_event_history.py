@@ -4,7 +4,7 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
-from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.data.errors import DataError, fail
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.research.event_history import load_event_history
@@ -293,5 +293,39 @@ def test_supplied_target_bound_preserves_query_limits_without_lookup(tmp_path, m
         assert query.max_result_rows == min(bound, 2)
         assert query.max_batch_rows == max(1, min(bound, 2))
         assert repository.scans == []
+    finally:
+        conn.close()
+
+
+def test_v5_history_omissions_report_the_writers_reason(tmp_path):
+    target = history_event("2024-06-20")
+    orats, few_events, nameless = (history_event(day) for day in
+        ("2023-01-02", "2023-02-02", "2023-03-02"))
+    conn, repository, snapshot = commit_history_inputs(tmp_path, [target, orats, few_events, nameless], [
+        outcome_move(orats, None, skipped=True, available_as_of_date=None,
+                     not_computed_reason="not_orats"),
+        outcome_move(few_events, None, skipped=True, available_as_of_date=None,
+                     not_computed_reason="ticker_too_few_events"),
+        outcome_move(nameless, None, skipped=True, available_as_of_date=None),
+        outcome_move(target, None)],
+        contract=COMPUTED_MOVES_V5_CONTRACT, include_calendar=False)
+    try:
+        result = read_event_history(repository, snapshot, target)
+        assert result["omitted_history"] == [
+            {"event_id": orats["event_id"], "reason": "not_orats"},
+            {"event_id": few_events["event_id"], "reason": "ticker_too_few_events"},
+            {"event_id": nameless["event_id"], "reason": "skipped"}]
+    finally:
+        conn.close()
+
+
+def test_v5_candidate_without_a_fragment_still_refuses_holdout_access(tmp_path):
+    prior, target = history_event("2023-01-02"), history_event("2024-06-20")
+    conn, repository, snapshot = commit_history_inputs(tmp_path, [prior, target], [],
+        contract=COMPUTED_MOVES_V5_CONTRACT, include_calendar=False)
+    try:
+        with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+            read_event_history(repository, snapshot, target)
+        assert all(name == "earnings_events" for name, _ in repository.scans)
     finally:
         conn.close()

@@ -5,12 +5,14 @@ from datetime import date
 import pandas as pd
 import pytest
 
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.data.errors import DataError, fail
 from engine.v2.foundation import content_hash
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.research import magnitude_inputs
 from tests.v2.research.magnitude_trial_support import (
     calendar_sessions,
+    commit_history_inputs,
     history_event,
     outcome_move,
     poison_outcomes,
@@ -263,5 +265,27 @@ def test_wrong_snapshot_and_late_repository_failure_never_return_partial_or_retr
         with pytest.raises(DataError, match="OBJECT_CORRUPT"):
             _load(repository, snapshot)
         assert calls == ["2024-01-04", "2024-03-05"]
+    finally:
+        conn.close()
+
+
+def test_v5_skipped_training_label_omits_with_the_writers_reason(tmp_path):
+    qualified, no_session, no_prices = (history_event(day) for day in
+        ("2024-01-04", "2024-03-05", "2024-05-06"))
+    conn, repository, snapshot = commit_history_inputs(tmp_path, [qualified, no_session, no_prices], [
+        outcome_move(qualified, -2.0),
+        outcome_move(no_session, None, skipped=True, available_as_of_date=None,
+                     not_computed_reason="no_session"),
+        outcome_move(no_prices, None, skipped=True, available_as_of_date=None,
+                     not_computed_reason="no_price_history")],
+        contract=COMPUTED_MOVES_V5_CONTRACT, include_calendar=False)
+    try:
+        rows = magnitude_inputs.qualify_magnitude_training_targets(repository, snapshot,
+            as_of_month=MONTH, labels_before=CUTOFF,
+            event_ids=[qualified["event_id"], no_session["event_id"], no_prices["event_id"]])
+        assert rows.event_id.tolist() == [qualified["event_id"]]
+        assert rows.attrs["omitted_labels"] == [
+            {"event_id": no_session["event_id"], "reason": "no_session"},
+            {"event_id": no_prices["event_id"], "reason": "no_price_history"}]
     finally:
         conn.close()

@@ -122,6 +122,8 @@ Callers (checked by grep against the real tree, matching this package's
 - `engine/v2/scoring/source_inputs.py` — imports `DISABLED`, `STRATEGIES`.
 - `engine/v2/scoring/__init__.py` — re-exports `Geometry`/`Pricing` under
   private aliases.
+- `engine/v2/ops/native_board_universe.py`, `engine/v2/ops/nightly_raw_row_producer.py` —
+  import `DISABLED` to enumerate and refuse CAL-P/CND-P.
 - `engine/v2/ops/cli.py` — imports `Geometry`, `Pricing` to reconstruct a
   captured `NativeScoreInputs` document for the read-only `ops rescore`
   command.

@@ -151,7 +151,7 @@ The exhaustive name-by-name list is `README.md`'s checker-enforced Public
 interface section; this names only the load-bearing entry points.
 
 `documents.reject_duplicate_keys(pairs)` is the public, pure stdlib JSON hook
-used by `loads_document`, `experiments.v2_runup_exits` and `experiments.v2_magnitude_search_run`; it returns an object
+used by `loads_document`, `experiments.v2_runup_exits`, `experiments.v2_runup_study` and `experiments.v2_magnitude_search_run`; it returns an object
 dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
 
 - **Snapshot commit** — `catalog.commit_snapshot`/`.record_failed_import`/
@@ -168,7 +168,7 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   planned-unit key validation, `normalizer_id` versioning, coverage
   completeness, and mcap carry-forward.
 - **Snapshot resolution and bounded reads** — `repository.Repository`:
-  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`; opt-in `pin_snapshots=True` memoises per instance `resolve` by snapshot id and the scan/bound path's table contract and membership by `(dataset_version_id, contract_id)`, not `fragment_records`, default off, a failure is never cached; a pinned `scan` or `scan_population_bound` whose `key_filter` names a partition column plans only the matching partitions' fragments (invalid key bounds in any fragment, including unselected fragments, refuse every pinned scan or bound lookup), each call returns an independent copy), a bounded Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/`get_close`, and `explain_dependencies`.
+  exact re-verifying `resolve`/`resolve_full` (+ `_pinned`; opt-in `pin_snapshots=True` memoises per instance `resolve` by snapshot id and the scan/bound path's table contract and membership by `(dataset_version_id, contract_id)`, not `fragment_records`, default off, a failure is never cached; a pinned `scan` or `scan_population_bound` whose `key_filter` names a partition column plans only the matching partitions' fragments (invalid key bounds in any fragment, including unselected fragments, refuse every pinned scan or bound lookup), each call returns an independent copy; the read-only property `pins_snapshots` reports the flag), a bounded Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/`get_close`, and `explain_dependencies`.
   Metadata-only `scan_population_bound` sums recorded counts of surviving
   fragments of the supplied snapshot, with no head fallback or object reads,
   with the same strict predicate refusals and membership-bound semantics as `scan` and
@@ -557,7 +557,7 @@ pinned snapshots and calls `generic_incremental.commit_generic_table_candidate`
 `engine.v2.models.training` uses `errors`, `Repository`, `reference_catalog` and
 `computed_moves` for snapshot/receipt-pinned D14 datasets and calendar sessions.
 `experiments.v2_magnitude_search_run` consumes `repository.Repository`,
-`errors.DataError` and `documents.reject_duplicate_keys` for serial CLI admission.
+`errors.DataError` and `documents.reject_duplicate_keys` for serial CLI admission, as does `experiments.v2_runup_study`; `experiments.registered_runup` consumes `errors.DataError` for typed comparison refusals.
 `tools/*`, `checks/*`, `tests/test_v2_data_*.py` exercise this package
 directly.
 

@@ -35,7 +35,9 @@ delta rather than papering over it.
 from __future__ import annotations
 
 import json
+import sys
 import time
+import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import Sequence
@@ -353,6 +355,14 @@ def build_events(moves_dir: Path | None = None,
 # --------------------------------------------------------------------------
 
 
+# #1103 — file versions whose staleness was already reported. Keyed on
+# (path, mtime), the same identity _gspc_series caches on, so a refreshed file
+# that is still behind the frame's decision dates can warn again. Bounded: a
+# long-lived process that reads many distinct file versions clears the set at
+# 64 rather than growing it without limit.
+_STALE_REGIME_WARNED: set[tuple[str, float]] = set()
+
+
 @lru_cache(maxsize=2)
 def _gspc_series(path_str: str, mtime: float) -> pd.DataFrame:
     """The S&P daily series, read once per process.
@@ -387,7 +397,8 @@ def add_regime_features(
     be the observation's own date rather than an assumption about it.
     """
     gspc_path = Path(gspc_path or paths.GSPC_DAILY)
-    raw = _gspc_series(str(gspc_path), gspc_path.stat().st_mtime)
+    mtime = gspc_path.stat().st_mtime
+    raw = _gspc_series(str(gspc_path), mtime)
 
     closes = raw["close"].to_numpy(dtype=float)
     dates = raw["date"].to_numpy()
@@ -409,6 +420,31 @@ def add_regime_features(
         out["date"].to_numpy(),
         out[as_of_column].to_numpy() if as_of_column != "date" else None,
     )
+    # Staleness diagnostic (#1103): nothing but the price-refresh op touches
+    # the legacy series, so a frame whose decision dates trail its end was
+    # silently served stale market state. One warning and one stderr line per
+    # (path, mtime); every computed value below is unchanged.
+    if len(out) and len(dates):
+        asked = pd.to_datetime(out[as_of_column]).max()
+        if not pd.isna(asked):
+            last = pd.Timestamp(dates[-1])
+            if asked - last > pd.Timedelta(days=7):
+                key = (str(gspc_path), mtime)
+                if key not in _STALE_REGIME_WARNED:
+                    if len(_STALE_REGIME_WARNED) >= 64:
+                        _STALE_REGIME_WARNED.clear()
+                    _STALE_REGIME_WARNED.add(key)
+                    detail = (f"gspc series ends {last.date()}, decision date "
+                              f"{asked.date()}: regime features are stale")
+                    # Print first, then warn inside try/except Warning: a
+                    # caller running under ``-W error`` turns ``warnings.warn``
+                    # into a raised UserWarning, and a staleness diagnostic
+                    # must never abort the calculation it reports on.
+                    print(f"[regime] WARNING {detail}", file=sys.stderr, flush=True)
+                    try:
+                        warnings.warn(detail)
+                    except Warning:
+                        pass
     for i, j in enumerate(idx):
         if j < 0 or j >= len(closes):
             continue

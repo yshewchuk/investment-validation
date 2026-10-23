@@ -117,10 +117,13 @@ def calendar_sessions(start="2024-06-03", end="2024-06-14"):
     return market_calendar.CalendarSessions(days, days[-1])
 
 
-def commit_history_inputs(tmp_path, events, moves, *, days=None, mixed_days=(), include_calendar=True, marker=None):
+def commit_history_inputs(tmp_path, events, moves, *, days=None, mixed_days=(), include_calendar=True,
+                          marker=None, contract=None):
+    if contract is None:
+        contract = COMPUTED_MOVES_CONTRACT
     tmp_path.mkdir(parents=True, exist_ok=True)
     conn, clock, store = catalog_and_store(tmp_path)
-    contracts = {"earnings_events": contract_for("earnings_events"), "computed_moves": COMPUTED_MOVES_CONTRACT}
+    contracts = {"earnings_events": contract_for("earnings_events"), "computed_moves": contract}
     inputs = {"earnings_events": events, "computed_moves": moves}
     if include_calendar:
         contracts["daily_market"] = contract_for("daily_market")

@@ -43,14 +43,14 @@ Limit: a sample cannot prove the provider never revises. A pass supports R as an
 
 Run from a checkout of this branch. The output directory must be outside any repository, for example `~/finality-probe` (directories are created 0700 and files 0600, a response over 64 MiB is recorded as a failed unit, and the directory is never mirrored). Keys come from the environment (`ORATS_API_KEY`, and `MASSIVE_API_KEY` for `--massive`); the script never prints or stores them. Source the nightly env file in the same shell, do not paste keys into commands.
 
-Pick a recent normal full session `S` (not a half day). Eastern times:
+Pick a recent normal full session `S` (not a half day). Offsets count trading days, so a Friday `S` has `next_morning` on Monday, or Tuesday if Monday is a market holiday. Eastern times:
 
 | Label | When (ET) |
 |---|---|
-| `close_plus_15m` | S 16:20 |
+| `close_plus_15m` | S 16:15 |
 | `evening` | S 21:00 |
-| `next_morning` | S+1 08:00 |
-| `plus_1d` | S+2 (next trading day after S+1) 08:00 |
+| `next_morning` | next trading day after S, 08:00 |
+| `plus_1d` | second trading day after S, 08:00 |
 
 ```
 S=2026-10-16                              # the session date, YYYY-MM-DD

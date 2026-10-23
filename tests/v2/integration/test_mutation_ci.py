@@ -2815,7 +2815,11 @@ def test_select_pr_tests_path_tests_add_the_tree_scanner_to_a_reached_path(
 
 def test_shipped_toml_declares_the_engine_v2_tree_scanner_test():
     assert pilot.load_config()["pr_selection"]["path_tests"] == {
-        "engine/v2/*": ["tests/v2/foundation/test_v2_ops_foundation.py"]}
+        "engine/v2/*": ["tests/v2/foundation/test_v2_ops_foundation.py"],
+        ".coderabbit.yaml": ["tests/v2/integration/test_performance_review_config.py"],
+        "AGENTS.md": ["tests/v2/integration/test_performance_review_config.py"],
+        "docs/performance_review.md": ["tests/v2/integration/test_performance_review_config.py"],
+    }
 
 
 @pytest.mark.parametrize("literal", ["scripts/worker_x.py", "scripts.worker_x"])

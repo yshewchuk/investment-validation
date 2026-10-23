@@ -573,6 +573,46 @@ def test_public_calendar_requires_exact_snapshot_before_any_scan(native, monkeyp
     assert scans == []
 
 
+@pytest.mark.parametrize("boundary", ["source", "history", "calendar"])
+@pytest.mark.parametrize("snapshot_id", [[], {}, None, 0, False, "", " "])
+def test_malformed_snapshot_ids_refuse_before_resolution(native, monkeypatch, boundary, snapshot_id):
+    source, output, binding, producer, _ = native
+    snapshots = [source.snapshot, output]
+    index = boundary == "history"
+    snapshots[index] = replace(snapshots[index], snapshot_id=snapshot_id)
+    resolutions = []
+    original = source.repository.resolve
+
+    def resolve(value):
+        resolutions.append(value)
+        return original(value)
+
+    monkeypatch.setattr(source.repository, "resolve", resolve)
+    scans = _metadata_only(monkeypatch, source.repository)
+    code = "SNAPSHOT_UNRESOLVED" if boundary == "calendar" else "CONTRACT_MISMATCH"
+    with pytest.raises(DataError, match=code):
+        if boundary == "calendar":
+            magnitude_features.calendar_input(source.repository, snapshots[0])
+        else:
+            plan.build_context(source.repository, *snapshots, binding, producer=producer)
+    assert resolutions == scans == []
+
+
+@pytest.mark.parametrize("boundary", ["source", "history", "calendar"])
+def test_unknown_snapshot_ids_keep_native_refusal(native, monkeypatch, boundary):
+    source, output, binding, producer, _ = native
+    snapshots = [source.snapshot, output]
+    index = boundary == "history"
+    snapshots[index] = replace(snapshots[index], snapshot_id="sha256:" + "0" * 64)
+    scans = _metadata_only(monkeypatch, source.repository)
+    with pytest.raises(DataError, match="SNAPSHOT_NOT_FOUND"):
+        if boundary == "calendar":
+            magnitude_features.calendar_input(source.repository, snapshots[0])
+        else:
+            plan.build_context(source.repository, *snapshots, binding, producer=producer)
+    assert scans == []
+
+
 def test_public_calendar_and_history_plans_have_full_independent_metadata(native, monkeypatch):
     source, _, binding, _, _ = native
     _metadata_only(monkeypatch, source.repository)
