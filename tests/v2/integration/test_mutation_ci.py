@@ -566,9 +566,10 @@ def run_mutation_command(monkeypatch, tmp_path, rc, budget=None, module="toy", m
     return pilot.cmd_run({"defaults": DIAG_DEFAULTS, "modules": {module: {}}}, args), calls
 
 
-def test_cmd_run_preserves_the_exit_code_without_rerunning(monkeypatch, tmp_path):
-    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=1)
-    assert rc == 1  # the tool error still fails the job; scores are never silenced
+@pytest.mark.parametrize("backend_rc", [0, 1, 17, 124])
+def test_cmd_run_preserves_the_exit_code_without_rerunning(monkeypatch, tmp_path, backend_rc):
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=backend_rc)
+    assert rc == backend_rc  # tool exits are forwarded; scores never replace them
     assert len(calls) == 1  # exactly one subprocess: no automatic pytest/mutmut rerun
     cmd, kw = calls[0]
     assert cmd[:5] == [sys.executable, "-u", "-m", "mutmut", "run"]
@@ -592,16 +593,17 @@ def test_cmd_run_no_longer_strips_the_harness_env(monkeypatch, tmp_path):
     assert env["OMP_NUM_THREADS"] == "1"  # the thread pin is still applied
 
 
-def test_cmd_run_passes_the_time_budget_to_the_bounded_runner(monkeypatch, tmp_path):
+@pytest.mark.parametrize("backend_rc", [0, 1, 17, 124])
+def test_cmd_run_passes_the_time_budget_to_the_bounded_runner(monkeypatch, tmp_path, backend_rc):
     seen = {}
 
     def fake_bounded(cmd, cwd, env, budget):
         seen.update(cmd=cmd, cwd=cwd, budget=budget)
-        return pilot.TIME_BUDGET_STOP_RC
+        return backend_rc
 
     monkeypatch.setattr(pilot, "_run_with_time_budget", fake_bounded)
     rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=0, budget=3300)
-    assert rc == pilot.TIME_BUDGET_STOP_RC == 124
+    assert rc == backend_rc
     assert calls == []  # the unbounded subprocess.run path was NOT taken
     assert seen["budget"] == 3300
     assert seen["cmd"][:5] == [sys.executable, "-u", "-m", "mutmut", "run"]

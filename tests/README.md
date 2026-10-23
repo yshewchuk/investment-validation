@@ -484,8 +484,9 @@ which the driver caps at one child. Incremental/full runs have 60/330-minute
 step limits; the driver requests a clean stop after 52/322 minutes first.
 Unexportable state, a step timeout, or a nonzero backend exit fails the job,
 except that incremental exit `124` (`TIME_BUDGET_STOP`) does not fail the
-module gate: its report is still incomplete and its score withheld. Full-run
-`124` and all other nonzero exits remain failures.
+module gate: the aggregate report remains incomplete and withholds its overall
+score; module reports retain numeric scores with a partial-results warning.
+Full-run `124` and all other nonzero exits remain failures.
 
 - **Diagnosing a failed stats run.** When mutmut's clean/stats run fails it
   prints only `failed to collect stats. runner returned 1` and swallows the
