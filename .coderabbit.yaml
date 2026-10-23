@@ -160,11 +160,12 @@ reviews:
         can still raise.
     - path: "engine/data/**"
       instructions: |
-        Scoring failure containment: trace exceptions from scoring to the
-        per-item or per-tick containment that actually handles them. Flag
-        one item's failure aborting unrelated items. Under strict warning
-        filters, flag a diagnostic that can abort scoring, and a dedup key
-        recorded before a diagnostic that can still raise.
+        Failure containment: trace ingestion and feature calculation
+        exceptions to the per-item or per-tick handler that catches them.
+        Flag one item's failure aborting unrelated work. Under strict warning
+        filters, flag a diagnostic that can abort feature calculation or
+        downstream scoring, and a dedup key recorded before a diagnostic
+        that can still raise.
     - path: "engine/v2/parity/**"
       instructions: |
         This package is the ONE comparator the Phase 4 checker and the
