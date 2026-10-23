@@ -51,6 +51,7 @@ __all__ = [
 BUSY_TIMEOUT_MS = 5_000
 MAX_JOB_FAILURE_BYTES = 1024 * 1024
 _SYNC_FULL = 2
+_BACKUP_PAGE_BATCH = 128
 
 
 def connect(path: Path | str, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS,
@@ -96,15 +97,17 @@ def backup_to(conn: sqlite3.Connection, dest: Path | str, *,
               progress: Callable[[int, int, int], None] | None = None) -> None:
     """A consistent copy through the online backup API, integrity-checked.
 
-    ``progress`` receives sqlite's ``(status, remaining, total)`` page counts;
-    the default preserves the original blocking call.
+    Pages are copied in bounded batches (a positive ``pages`` argument), so
+    ``progress`` receives sqlite's ``(status, remaining, total)`` page counts
+    once per batch and a large copy can renew its lease while it runs. Small
+    and in-memory databases still receive the callback on their one batch.
     """
     dest = Path(dest)
     if dest.exists():
         raise FileExistsError(dest)
     target = sqlite3.connect(str(dest))
     try:
-        conn.backup(target, progress=progress)
+        conn.backup(target, pages=_BACKUP_PAGE_BATCH, progress=progress)
         problems = integrity_errors(target)
     finally:
         target.close()

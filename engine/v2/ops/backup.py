@@ -127,6 +127,17 @@ def _single_filename(value):
     return parts[0]
 
 
+def _validated_key(key):
+    """Refuse a key that is not exactly one safe path component."""
+    try:
+        parts = safe_relative_path(key)
+    except ArtifactError:
+        raise fail("INVALID_REQUEST", "unsafe backup key") from None
+    if len(parts) != 1:
+        raise fail("INVALID_REQUEST", "unsafe backup key")
+    return key
+
+
 def manifest_database_path(root, manifest):
     """The database path a manifest names, falling back to legacy ``<key>.sqlite``."""
     name = manifest.get("database_file")
@@ -311,8 +322,7 @@ def prepare_backup(conn, key, artifacts, *, clock):
     fail with ``IDEMPOTENCY_CONFLICT`` (P2-C07). So an existing ``backup``
     effect for this key is returned as-is, with no new payload built at all.
     """
-    if len(safe_relative_path(key)) != 1:
-        raise fail("INVALID_REQUEST", "unsafe backup key")
+    _validated_key(key)
     with transaction(conn):
         existing = conn.execute("SELECT effect_id FROM outbox WHERE kind='backup' AND logical_key=?",
                                 (key,)).fetchone()
@@ -472,12 +482,34 @@ def _validated_manifest_shape(manifest, *, current):
     return name, artifacts, size
 
 
-def _expected_dump_lines(rows):
-    return sum(rows.values()) + len(rows) + 2
+def _schema_statement_count(conn):
+    """The number of index/view/trigger statements ``iterdump`` will emit."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('index', 'view', 'trigger') "
+        "AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").fetchone()[0]
+
+
+def _sqlite_sequence_lines(conn):
+    """The ``sqlite_sequence`` dump output: the DELETE statement when the
+    internal table exists, plus one INSERT per sequence row (``_row_counts``
+    excludes ``sqlite_%`` tables, so neither appears elsewhere)."""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'"
+    ).fetchone()
+    if exists is None:
+        return 0
+    return 1 + conn.execute("SELECT COUNT(*) FROM sqlite_sequence").fetchone()[0]
+
+
+def _expected_dump_lines(rows, schema_statements=0, sequence_lines=0):
+    """Expected logical-dump lines: BEGIN/COMMIT, CREATE TABLE per table,
+    each index/view/trigger statement, the sqlite_sequence DELETE/INSERT
+    output and one INSERT per row."""
+    return sum(rows.values()) + len(rows) + schema_statements + sequence_lines + 2
 
 
 def _verified_prior_backup(manifest_path, target, source_rows, source_retry_digest,
-                           key, payload, keepalive=None):
+                           key, payload, expected_lines, keepalive=None):
     """The existing manifest when it and its named database are a verified prior
     result for this payload, else ``None``.
 
@@ -514,12 +546,12 @@ def _verified_prior_backup(manifest_path, target, source_rows, source_retry_dige
                 return None
             if _full_logical_digest(
                     probe, stage="prior-logical-digest",
-                    expected_lines=_expected_dump_lines(source_rows),
+                    expected_lines=expected_lines,
                     keepalive=keepalive) != manifest.get("database_content_hash"):
                 return None
             if _retry_logical_digest(
                     probe, key, stage="prior-retry-digest",
-                    expected_lines=_expected_dump_lines(source_rows),
+                    expected_lines=expected_lines,
                     keepalive=keepalive) != source_retry_digest:
                 return None
         finally:
@@ -532,7 +564,7 @@ def _verified_prior_backup(manifest_path, target, source_rows, source_retry_dige
     return manifest
 
 
-def _verify_staged(staged, source_rows, source_digest, keepalive=None):
+def _verify_staged(staged, source_rows, source_digest, expected_lines, keepalive=None):
     """Verify a staged copy's rows and logical content against the source.
 
     ``backup_to`` already owns the integrity/foreign-key check.
@@ -548,7 +580,7 @@ def _verify_staged(staged, source_rows, source_digest, keepalive=None):
                        details={"tables": differing})
         staged_digest = _full_logical_digest(
             probe, stage="staged-logical-digest",
-            expected_lines=_expected_dump_lines(source_rows), keepalive=keepalive)
+            expected_lines=expected_lines, keepalive=keepalive)
     finally:
         probe.close()
     if staged_digest != source_digest:
@@ -621,14 +653,16 @@ def _unique_database_name(target, key):
     raise fail("WORKER_FAILED", "could not allocate a unique backup database name")
 
 
-def _install_stage(staged, target, key, source_rows, source_digest, keepalive=None):
+def _install_stage(staged, target, key, source_rows, source_digest, expected_lines,
+                   keepalive=None):
     """Verify and durably install a staged copy under a unique immutable name.
 
     The currently published database path is never replaced: a crash before the
     manifest replace leaves the old manifest naming the old intact database,
     while the newly installed database is simply unreferenced."""
     try:
-        _verify_staged(staged, source_rows, source_digest, keepalive=keepalive)
+        _verify_staged(staged, source_rows, source_digest, expected_lines,
+                       keepalive=keepalive)
         with staged.open("rb") as stream:
             os.fsync(stream.fileno())
         name = _unique_database_name(target, key)
@@ -655,8 +689,8 @@ def _remove_superseded_databases(target, key, keep):
             removed = True
         except FileNotFoundError:
             continue
-        except OSError as exc:
-            _log(f"superseded database cleanup failed for {entry.name}: {exc}")
+        except OSError:
+            _log(f"superseded database cleanup failed for {entry.name}")
     if removed:
         fsync_directory(target)
 
@@ -676,11 +710,20 @@ def _copy_artifact(store, target, name, ref, fault, keepalive=None):
 
 
 def _copy_artifacts(refs, store, target, fault, keepalive):
-    """Copy every parsed payload artifact into the target and return its entries."""
+    """Copy every parsed payload artifact into the target and return its entries.
+
+    One bounded aggregate progress stage covers the whole artifact set, so a
+    large set renews its lease between files without logging per file.
+    """
     copied = {}
-    for name, ref in refs.items():
-        keepalive()
-        copied[name] = _copy_artifact(store, target, name, ref, fault, keepalive)
+    progress = _Progress("artifact-copy", total=len(refs), keepalive=keepalive)
+    progress.start()
+    try:
+        for name, ref in refs.items():
+            copied[name] = _copy_artifact(store, target, name, ref, fault, keepalive)
+            progress.advance()
+    finally:
+        progress.end()
     return copied
 
 
@@ -757,18 +800,19 @@ def _snapshot(conn):
 
 
 def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=_no_keepalive):
+    _validated_key(key)
     effect = claim(conn, "backup", owner=owner, clock=clock, logical_key=key)
     if effect is None:
         return _delivered_or_stale(conn, "backup", key)
     payload = json.loads(effect["payload_json"])
+    artifact_refs = _validated_artifact_names(payload)
     target = Path(target)
     if target.exists() and target.is_symlink():
         raise fail("INVALID_REQUEST", "backup target is a symlink")
     ensure_directory(target)
-    artifact_refs = _validated_artifact_names(payload)
     manifest_path = target / (key + ".manifest.json")
     started = time.monotonic()
-    _log(f"run_backup {key}: start target={target} rss_mb={_rss_mb()}")
+    _log(f"run_backup {key}: start rss_mb={_rss_mb()}")
     with _backup_lock(target, key):
         _remove_stale_stages(target, key)
         staged = None
@@ -777,17 +821,20 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
                 heartbeat = keepalive if separate else None
                 source_rows = _table_row_counts(
                     snapshot, stage="source-row-counts", keepalive=heartbeat)
+                expected_lines = _expected_dump_lines(
+                    source_rows, _schema_statement_count(snapshot),
+                    _sqlite_sequence_lines(snapshot))
                 source_digest = _full_logical_digest(
                     snapshot, stage="source-logical-digest",
-                    expected_lines=_expected_dump_lines(source_rows),
+                    expected_lines=expected_lines,
                     keepalive=heartbeat)
                 source_retry_digest = _retry_logical_digest(
                     snapshot, key, stage="source-retry-digest",
-                    expected_lines=_expected_dump_lines(source_rows),
+                    expected_lines=expected_lines,
                     keepalive=heartbeat)
                 prior = _verified_prior_backup(
                     manifest_path, target, source_rows, source_retry_digest, key,
-                    payload, keepalive=heartbeat)
+                    payload, expected_lines, keepalive=heartbeat)
                 if prior is None:
                     _log(f"run_backup {key}: prior invalid or absent, rebuilding")
                     staged = _stage_copy(snapshot, target, key, keepalive=heartbeat)
@@ -800,7 +847,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
             raise
         if staged is not None:
             database_file = _install_stage(
-                staged, target, key, source_rows, source_digest,
+                staged, target, key, source_rows, source_digest, expected_lines,
                 keepalive=keepalive)
         else:
             database_file = Path(prior["database_file"]).name
@@ -820,8 +867,8 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
         _remove_superseded_databases(target, key, database_file)
     if fault:
         fault("after_manifest_before_ack")
-    _log(f"run_backup {key}: complete database={manifest['database_file']} "
-         f"elapsed={time.monotonic() - started:.1f}s rss_mb={_rss_mb()}")
+    _log(f"run_backup {key}: complete elapsed={time.monotonic() - started:.1f}s "
+         f"rss_mb={_rss_mb()}")
     complete(conn, effect["effect_id"], manifest, owner=owner,
              claim_token=effect["claim_token"], clock=clock)
     return manifest
@@ -860,8 +907,7 @@ def restore_backup(source, destination):
     database_name, artifacts, database_size = _validated_restore_manifest(manifest)
     source_database = manifest_database_path(source, manifest)
     started = time.monotonic()
-    _log(f"restore_backup: start source={source} database={database_name} "
-         f"rss_mb={_rss_mb()}")
+    _log(f"restore_backup: start database={database_name} rss_mb={_rss_mb()}")
     ensure_directory(destination)
     database = destination / "ops.sqlite"
     _stream_copy(source_database, database,
@@ -881,6 +927,6 @@ def restore_backup(source, destination):
                      expected_size=expected_size if isinstance(expected_size, int) else None,
                      stage=f"restore artifact {name}",
                      oserror_code="INTEGRITY_FAILED")
-    _log(f"restore_backup: complete destination={destination} "
-         f"elapsed={time.monotonic() - started:.1f}s rss_mb={_rss_mb()}")
+    _log(f"restore_backup: complete elapsed={time.monotonic() - started:.1f}s "
+         f"rss_mb={_rss_mb()}")
     return destination
