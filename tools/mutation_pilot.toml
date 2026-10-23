@@ -579,6 +579,7 @@ mutate = [
     "engine/v2/scoring/compatibility.py",
     "engine/v2/scoring/identity.py",
     "engine/v2/scoring/native_gate_features.py",
+    "engine/v2/scoring/gate_forecast_source.py",
 ]
 tests = [
     "tests/v2/scoring/test_runup_raw_outputs.py",
@@ -598,6 +599,7 @@ tests = [
     "tests/test_v2_scoring_frozen_record.py",
     "tests/test_v2_scoring_frozen_residuals.py",
     "tests/v2/scoring/test_driver_residual_array_cache.py",
+    "tests/v2/scoring/test_gate_forecast_source.py",
     "tests/test_v2_scoring_no_score_status.py",
     "tests/test_v2_scoring_r4_20_frozen_parity.py",
     "tests/test_v2_scoring_runup_frozen.py",
@@ -643,6 +645,7 @@ tests = [
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
     "tests/test_v2_scoring_runup_frozen.py",
     "tests/test_v2_scoring_source_inputs.py",
+    "tests/v2/scoring/test_gate_forecast_source.py",
     "tests/test_v2_scoring_stage_ownership.py",
 ]
 
