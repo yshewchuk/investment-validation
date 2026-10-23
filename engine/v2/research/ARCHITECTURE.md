@@ -47,6 +47,9 @@ These CLI files sit outside `checks/import_layers.py`'s hook (it only parses
 `engine*` importers), so no `engine` package is recorded as importing this
 one; the library entrypoints below are this package's real public interface:
 
+`eligibility_policy.eligibility_policy`, `eligibility_policy.plan_eligibility`,
+`experiment_population.canonical_events`, `experiment_trades.classify_events`,
+`snapshot_inputs.snapshot_reference`, `snapshot_inputs.admit_snapshot`,
 `signal_screen.run`, `fill_quality.run`, `polygon_fills.run`, `replay.replay`,
 `replay.replay_one`, `replay.ALPHA_GRID`, `_replay_run.run`,
 `_replay_run.events_frame`, `_plan.plan_events`, `_chains.ChainIndex`,
@@ -692,6 +695,46 @@ numeric features, without lineage strings. Full-snapshot lineage is not retained
 memory still scales with metadata and selected rows, with no fixed overall byte cap.
 A prior successful read never substitutes for fresh validation.
 The original full-row `read_stored` API and its returned envelope remain unchanged.
+
+## Opt-in eligibility policy boundary
+
+`eligibility_policy.eligibility_policy` declares an explicit supported version and
+nonnegative integer calendar-day width. `plan_eligibility` is metadata-only and
+opt-in; existing consumers are unchanged. It uses `experiment_population.canonical_events`
+for exact committed-snapshot admission and the six-column metadata projection and `experiment_trades.classify_events`
+for detached membership/structural ambiguity labels and caller-pinned context.
+Shared `snapshot_inputs` validates reference shape and exact committed identity;
+the pure classifier checks shape only, without claiming repository commitment.
+
+The closed producer envelope binds snapshot/month/policy and event groups with
+explicit label bounds and every declared horizon's decision/source ceiling.
+Bounds contain the event, with source ceiling <= decision <= event. These are
+producer declarations, not proof of price-bracketing or publication times.
+No calendar guessing, outcome/feature decoding, write, registration or fit occurs.
+
+Random-held windows are merged per ticker. Inclusive event/label interval or
+forecast-point overlap excludes an entire development group; shared random,
+rolling and ambiguous labels also exclude it. Results bind sorted groups, policy,
+metadata identity, merged windows, retained IDs, reasons, coverage and a separately
+preserved evaluation manifest into `plan_id`. Supplied documents are detached.
+There are no retries, persistence, cache or partial results. Bounded membership,
+metadata, window and group progress plus stage timing/RSS go to stderr; admission
+and planning refusals report only the native error code, not row values.
+
+| Condition | Outcome |
+| --- | --- |
+| Unknown, malformed or mismatched snapshot reference | `SNAPSHOT_UNRESOLVED` |
+| Repository integrity failure other than unknown snapshot | Original native error propagates |
+| Unsupported policy, stale digest/envelope, malformed bounds, duplicate declared group IDs or malformed/duplicate evaluation IDs | `CONTRACT_MISMATCH` |
+| Missing/duplicate classifier columns, malformed event IDs or metadata values that prevent classification | `CONTRACT_MISMATCH` |
+| Invalid scalar dates/sessions or structural collisions handled by membership classification | Successful classification with `ambiguous` membership; structural ambiguity IDs returned |
+| Invalid as-of month, unknown group/evaluation identity or colliding canonical population IDs | `HOLDOUT_ACCESS_DENIED` |
+| Ambiguous random-event identity or overflowing window bounds | `HOLDOUT_ACCESS_DENIED` |
+| Valid protected/overlapping development group | Excluded whole event with reasons; evaluation IDs preserved |
+
+This is neither a physical-read capability nor a statistical isolation guarantee.
+Long-memory/cross-ticker effects remain; chronological and random holdouts are
+complementary, not interchangeable.
 
 ## External systems and libraries
 
