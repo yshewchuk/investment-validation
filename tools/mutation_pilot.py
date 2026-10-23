@@ -2471,7 +2471,7 @@ def _run_with_time_budget(cmd: list[str], cwd: Path, env: dict, budget_s: float)
 
 def cmd_run(cfg: dict, args) -> int:
     from mutation_results import SNAPSHOT_NAME, snapshot
-    from mutation_stats_diagnostics import LIMIT_BYTES
+    from mutation_stats_diagnostics import LIMIT_BYTES, warn_unavailable
 
     work = sync_workdir(args.module, cfg, fresh=args.fresh)
     files = mutate_files(cfg, args.module)
@@ -2503,8 +2503,12 @@ def cmd_run(cfg: dict, args) -> int:
     # A stats-only pytest plugin writes outside the fork-local stdout buffer.
     # Source-policy tests inspect the authored snapshot, never generated wrappers.
     diagnostic = work / "stats-failure.txt"
-    diagnostic.unlink(missing_ok=True)
-    env["MUTATION_PILOT_STATS_DIAGNOSTIC"] = str(diagnostic)
+    try:
+        diagnostic.unlink(missing_ok=True)
+    except OSError as error:
+        warn_unavailable(error)
+        diagnostic = None  # never append to or echo evidence from an earlier run
+    env["MUTATION_PILOT_STATS_DIAGNOSTIC"] = str(diagnostic) if diagnostic is not None else ""
     env["MUTATION_PILOT_SOURCE_ROOT"] = str(work)
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
@@ -2513,7 +2517,7 @@ def cmd_run(cfg: dict, args) -> int:
         rc = _run_with_time_budget(cmd, work, env, args.time_budget_seconds)
     else:
         rc = subprocess.run(cmd, cwd=work, env=env).returncode
-    if rc:
+    if rc and diagnostic is not None:
         # workflow_run uses main's YAML until merge. Keep failures visible even
         # before that workflow knows to upload the sidecar; never dump the env.
         try:

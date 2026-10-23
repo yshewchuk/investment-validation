@@ -479,9 +479,14 @@ its 330-minute step timeout.
   plugin `tools.mutation_stats_diagnostics`: failed setup/call/teardown,
   collection and internal-error reports from the stats phase are written
   directly to `stats-failure.txt` in the module work directory. CI retains
-  that file inside `mutation-mutmut-module-<module>`, beside its result summaries,
-  even if result export fails. Captured output accompanies the traceback;
-  an unwritable diagnostic emits a warning without replacing the test failure.
+  fresh evidence inside `mutation-mutmut-module-<module>`, beside its result
+  summaries, attempting the copy before result export even if export fails.
+  Captured output accompanies setup/call/teardown and collection tracebacks.
+  An unwritable diagnostic emits a best-effort warning without replacing the
+  test failure, even if original stderr is also unavailable. A failed cleanup
+  disables evidence for that run rather than appending or echoing stale bytes;
+  CI excludes sidecars older than its run-start marker. Copy failures warn and
+  still attempt result export.
   The file is cleared before each run, capped at 64 KiB (keeping the start
   and end of an oversized report), and never receives mutant-phase reports.
   A nonzero backend result also echoes at most 64 KiB to stderr, without
@@ -585,8 +590,9 @@ its 330-minute step timeout.
 ### Report files
 
 Each job uploads `mutation-mutmut-module-<module>` (90 days). It holds
-`results.jsonl`, `summary.json` and `summary.md`, which is also the job
-summary. The job summary shows the score table and each untriaged survivor in
+`results.jsonl`, `summary.json`, `summary.md` (also the job summary), and an
+optional `stats-failure.txt` containing bounded stats-failure diagnostics.
+The job summary shows the score table and each untriaged survivor in
 a function the push changed (`git diff <before>..<sha>`), with its diff. Runs
 that are not pushes list the survivors this run re-tested instead. The
 `report` job merges every module into one `mutation-mutmut-report` artifact

@@ -24,6 +24,14 @@ Callers are `tools/v2_resource_measurement.py`, `tools/land.py` and `tools/oc_ch
 
 ## Mutation stats diagnostics (#581)
 
-`mutation_pilot.py` loads `mutation_stats_diagnostics.py` through pytest's supported plugin interface. In the stats child only, it appends failure reports directly to a fresh, 64-KiB-bounded module sidecar; this survives mutmut's fork-local output capture without enabling per-mutant debug noise or running tests twice. The mutation workflow includes the sidecar in the existing module artifact. A failed backend also echoes at most 64 KiB to stderr, so diagnostics are visible before the `workflow_run` artifact-copy YAML reaches main. Diagnostic I/O cannot replace the backend outcome. Backend exit codes and scoring remain authoritative and unchanged.
+Mutation diagnostics are optional evidence, never authority over a backend result or score. The mutation driver consumes pytest's stats-phase failures (including captured setup/call/teardown and collection output, plus internal errors). It exposes at most 64 KiB per module as a fresh sidecar and at most 64 KiB on stderr after a failed backend. CI attempts to retain fresh evidence before result export; neither collection nor delivery reruns tests or enables per-mutant debug output.
 
-The driver also identifies the uninstrumented work snapshot through `MUTATION_PILOT_SOURCE_ROOT`. Authored-source import/size policies use that snapshot; behavioral tests keep using mutmut's instrumented imports. No production source, test selection, assertion or dependency allowance is weakened.
+| Condition | Outcome |
+|---|---|
+| No stats failure, or a mutant-phase report | No diagnostic report is added; ordinary backend behavior is unchanged. |
+| Stale sidecar cannot be cleared | Evidence is disabled for this run with a best-effort warning; the backend still runs, old bytes are not echoed, and CI excludes files older than the run start. |
+| Sidecar creation/write or its warning fails | Best-effort evidence is abandoned; pytest's original outcome remains authoritative. |
+| Failure echo cannot be read/written, or CI cannot copy evidence | The backend exit remains unchanged and result export is still attempted. An export failure remains a failure, not a fabricated result. |
+| Evidence exceeds its byte budget | The retained evidence is truncated, not the failure outcome. |
+
+Authored-source import/size policies consume the uninstrumented work snapshot selected by the driver; behavioral tests still exercise instrumented imports. Production sources, selected tests and dependency allowances are unchanged. Operator details and artifact names are in [the testing guide](../tests/README.md).

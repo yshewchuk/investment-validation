@@ -544,7 +544,7 @@ def test_ci_default_enables_debug_for_ops_catalog_state_setup_cfg(tmp_path, monk
     assert "debug = true" not in (other / "setup.cfg").read_text()
 
 
-def _cmd_run(monkeypatch, tmp_path, rc, budget=None):
+def run_mutation_command(monkeypatch, tmp_path, rc, budget=None, on_run=None):
     """Run cmd_run with mutmut's subprocess stubbed; return (rc_out, calls)."""
     work = tmp_path / "work"
     (work / "mutants").mkdir(parents=True)
@@ -558,6 +558,8 @@ def _cmd_run(monkeypatch, tmp_path, rc, budget=None):
 
     def fake_run(cmd, **kw):
         calls.append((cmd, kw))
+        if on_run is not None:
+            on_run(cmd, **kw)
         return types.SimpleNamespace(returncode=rc)
 
     monkeypatch.setattr(pilot.subprocess, "run", fake_run)
@@ -567,7 +569,7 @@ def _cmd_run(monkeypatch, tmp_path, rc, budget=None):
 
 
 def test_cmd_run_preserves_the_exit_code_without_rerunning(monkeypatch, tmp_path):
-    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=1)
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=1)
     assert rc == 1  # the tool error still fails the job; scores are never silenced
     assert len(calls) == 1  # exactly one subprocess: no automatic pytest/mutmut rerun
     cmd, kw = calls[0]
@@ -584,7 +586,7 @@ def test_cmd_run_no_longer_strips_the_harness_env(monkeypatch, tmp_path):
     monkeypatch.setenv("MUTANT_UNDER_TEST", "stats")
     monkeypatch.setenv("COVERAGE_PROCESS_START", "/rc")
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "t::u (call)")
-    _, calls = _cmd_run(monkeypatch, tmp_path, rc=0)
+    _, calls = run_mutation_command(monkeypatch, tmp_path, rc=0)
     env = calls[0][1]["env"]
     assert env["MUTANT_UNDER_TEST"] == "stats"
     assert env["COVERAGE_PROCESS_START"] == "/rc"
@@ -600,7 +602,7 @@ def test_cmd_run_passes_the_time_budget_to_the_bounded_runner(monkeypatch, tmp_p
         return pilot.TIME_BUDGET_STOP_RC
 
     monkeypatch.setattr(pilot, "_run_with_time_budget", fake_bounded)
-    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=0, budget=3300)
+    rc, calls = run_mutation_command(monkeypatch, tmp_path, rc=0, budget=3300)
     assert rc == pilot.TIME_BUDGET_STOP_RC == 124
     assert calls == []  # the unbounded subprocess.run path was NOT taken
     assert seen["budget"] == 3300

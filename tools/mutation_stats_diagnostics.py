@@ -11,6 +11,15 @@ LIMIT_BYTES = 64 * 1024
 TRUNCATED = b"\n[stats diagnostic truncated]\n"
 
 
+def warn_unavailable(error):
+    # Even a closed original stderr must not replace the underlying outcome.
+    try:
+        if sys.__stderr__ is not None:
+            print(f"[mutation_pilot] stats diagnostic unavailable: {error}", file=sys.__stderr__)
+    except (OSError, ValueError):
+        pass
+
+
 def pytest_configure(config):
     destination = os.environ.get("MUTATION_PILOT_STATS_DIAGNOSTIC")
     if destination and os.environ.get("MUTANT_UNDER_TEST") == "stats":
@@ -27,14 +36,11 @@ class StatsDiagnostics:
             return
         try:
             self._write(text)
-        except OSError as error:
+        except (OSError, ValueError) as error:
             self.unavailable = True
             # Telemetry must not replace the original pytest outcome. Bypass
             # mutmut's fork-local capture so loss of diagnostics is explicit.
-            try:
-                print(f"[mutation_pilot] stats diagnostic unavailable: {error}", file=sys.__stderr__)
-            except OSError:
-                pass
+            warn_unavailable(error)
 
     def _write(self, text):
         # The stats runner is serial. Keep a hard byte cap across reports and
@@ -61,7 +67,8 @@ class StatsDiagnostics:
 
     def pytest_collectreport(self, report):
         if report.failed:
-            self._record(f"\nCOLLECTION FAILED {report.nodeid}\n{report.longreprtext}\n")
+            sections = "".join(f"\n--- {name} ---\n{content}" for name, content in report.sections)
+            self._record(f"\nCOLLECTION FAILED {report.nodeid}\n{report.longreprtext}\n{sections}")
 
     def pytest_internalerror(self, excrepr):
         self._record(f"\nPYTEST INTERNAL ERROR\n{excrepr}\n")
