@@ -1698,6 +1698,8 @@ def run_nightly(
         warm_dates = list(upcoming["event_date"])
         del events, frontier, upcoming
         tier_result = None
+        from engine.features import clear_panel_caches
+        clear_panel_caches()
         gc.collect()
         _log_rss("fetch-only before warm")
         from engine.dashboard import warm_serving

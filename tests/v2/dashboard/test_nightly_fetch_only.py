@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import gc
 import weakref
 from types import SimpleNamespace
 
@@ -220,6 +219,7 @@ def test_fetch_only_red_validation_stops_the_run(tmp_path, monkeypatch):
 def test_fetch_only_drops_frames_before_warm(tmp_path, monkeypatch):
     frame_refs: list = []
     rebuild_refs: list = []
+    cache_clear_calls: list = []
 
     class RebuildResult:
         elapsed_s = 1.0
@@ -246,9 +246,13 @@ def test_fetch_only_drops_frames_before_warm(tmp_path, monkeypatch):
 
     monkeypatch.setattr("engine.data.store.read_table", events_table)
 
+    import engine.features as features_module
+
+    monkeypatch.setattr(features_module, "clear_panel_caches",
+                        lambda: cache_clear_calls.append("cleared"))
+
     def warm(*args, **kwargs):
         fake.warm.append(args)
-        gc.collect()
         assert args[0] == [pd.Timestamp("2026-10-25")]
         assert frame_refs, "no events frame was tracked"
         assert all(ref() is None for ref in frame_refs), (
@@ -257,6 +261,9 @@ def test_fetch_only_drops_frames_before_warm(tmp_path, monkeypatch):
         assert rebuild_refs, "no rebuild result was tracked"
         assert all(ref() is None for ref in rebuild_refs), (
             "rebuild result still alive when warm is called"
+        )
+        assert len(cache_clear_calls) == 1, (
+            "clear_panel_caches was not called exactly once before warm"
         )
         return {"folds": 0, "fitted": 0}
 

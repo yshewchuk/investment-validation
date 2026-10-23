@@ -29,10 +29,7 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   `reference_inputs._tier4_caches`): universe, refresh (Tier 2
   `data/curated/*`), finality, validate, moves, tiers (panel, Tier 4,
   SNAPSHOT), the panel-staleness flags and warm_serving (the import refuses
-  `TIER4_CACHE_STALE` without a serving cache for the current panel sha). In
-  `--fetch-only` the run drops the events/frontier/upcoming frames and the
-  Tier rebuild result and runs `gc.collect()` before `warm_serving`, so the
-  warm subprocess does not stack on the parent's panel memory (#1195). It
+  `TIER4_CACHE_STALE` without a serving cache for the current panel sha). It
   skips score, ledger, settle, ladder, backfill, model_evidence, render,
   selfcheck, publish and backup. Each skipped step is reported as
   `{"skipped": true, "reason": "fetch_only"}` and the report keeps the usual
@@ -230,11 +227,11 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   running anything. Gating failures behave as in a full run (red validate,
   non-final session, rotated credential, typed `TIER4_*` stop: `NightlyStop`,
   exit 1, no report), and so does a warm_serving failure
-  (`WARM_SERVING_FAILED`, see the table). Before warm the run drops the
-  events/frontier/upcoming frames and the Tier rebuild result and runs
-  `gc.collect()` so the warm subprocess does not stack on the parent's panel
-  memory (#1195); the failure contract is unchanged (`WARM_SERVING_FAILED`,
-  exit 1). `run_nightly(fetch_only=True)` with
+  (`WARM_SERVING_FAILED`, see the table). Before warm_serving the run releases
+  its event frames, the Tier rebuild result and the cached panel
+  (`engine.features.clear_panel_caches`), so the warm subprocess does not
+  overlap the parent's panel memory; the failure contract is unchanged.
+  `run_nightly(fetch_only=True)` with
   refresh off, tiers off or backup on raises `ValueError` before any work
   (the CLI turns the same rule into the exit 2 above). Refresh and tiers degrade as in a full run and are
   recorded in `steps`/`flags`. The run writes the flag report and the
