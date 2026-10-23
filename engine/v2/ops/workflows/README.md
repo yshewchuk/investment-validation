@@ -33,6 +33,8 @@ bounded, no-follow regular-file readers `read_bounded_json(path, max_bytes)` and
 (`read_bounded_bytes`) and by `nightly_trigger` (with
 `MAX_EXPECTED_POPULATION_BYTES`).
 
+`read_bounded_bytes` is also the one bounded manifest reader in `engine.v2.ops.backup`: prior admission and restore parse a backup manifest through it under `MAX_MANIFEST_BYTES`, so symlinked, non-regular or oversize manifests are rejected before JSON decoding.
+
 <!-- public-interface: _plan_command, _submit_command, read_bounded_json, read_bounded_bytes, MAX_EXPECTED_POPULATION_BYTES, require_valid_population_keys, MAX_INPUT_MANIFEST_BYTES -->
 
 ## Consumers
