@@ -70,7 +70,7 @@ def _log(message):
 class _Progress:
     """Bounded stderr progress: start/end plus a periodic rate and ETA."""
 
-    def __init__(self, stage, total=None, keepalive=None):
+    def __init__(self, stage, total=None, keepalive=None, announce=True):
         self.stage = stage
         self.total = total
         self.count = 0
@@ -78,9 +78,12 @@ class _Progress:
         self.last = None
         self.keepalive = keepalive
         self.last_keepalive = None
+        self.announce = announce
 
     def start(self):
         self.started = self.last = time.monotonic()
+        if not self.announce:
+            return
         total = "?" if self.total is None else self.total
         _log(f"{self.stage}: start total={total} rss_mb={_rss_mb()}")
 
@@ -109,6 +112,8 @@ class _Progress:
              f"rss_mb={_rss_mb()}")
 
     def end(self):
+        if not self.announce:
+            return
         now = time.monotonic()
         elapsed = max(now - self.started, 1e-9)
         rate = self.count / elapsed
@@ -235,10 +240,10 @@ def _open_checked(path, *, stage, expected_size=None, oserror_code=None):
         raise
 
 
-def _hash_file(path, *, stage, keepalive=None):
+def _hash_file(path, *, stage, keepalive=None, announce=True):
     stream, size = _open_checked(path, stage=stage)
     digest = hashlib.sha256()
-    progress = _Progress(stage, total=size, keepalive=keepalive)
+    progress = _Progress(stage, total=size, keepalive=keepalive, announce=announce)
     read = 0
     progress.start()
     try:
@@ -260,13 +265,14 @@ def _hash_file(path, *, stage, keepalive=None):
 
 
 def _stream_copy(source, destination, *, expected_hash=None, expected_size=None,
-                 stage, fault=None, keepalive=None, oserror_code=None):
+                 stage, fault=None, keepalive=None, oserror_code=None,
+                 announce=True):
     """Copy ``source`` to ``destination`` in bounded chunks, durably and atomically."""
     stream, size = _open_checked(source, stage=stage, expected_size=expected_size,
                                  oserror_code=oserror_code)
     try:
         ensure_directory(destination.parent)
-        progress = _Progress(stage, total=size, keepalive=keepalive)
+        progress = _Progress(stage, total=size, keepalive=keepalive, announce=announce)
         fd, temporary_name = tempfile.mkstemp(
             dir=str(destination.parent), prefix=f".{destination.name}.", suffix=".pending")
         temporary = Path(temporary_name)
@@ -390,13 +396,40 @@ def _table_row_counts(conn, *, stage="row counts", keepalive=None):
         "ORDER BY name")]
     progress = _Progress(stage, total=len(tables), keepalive=keepalive)
     counts = {}
+    captured = []
+    last_poll = []
     progress.start()
+    if keepalive is not None:
+        last_poll.append(time.monotonic())
+
+        def poll_keepalive():
+            try:
+                now = time.monotonic()
+                if now - last_poll[0] < _HEARTBEAT_SECONDS:
+                    return 0
+                keepalive()
+                last_poll[0] = now
+                return 0
+            except BaseException as exc:
+                captured.append(exc)
+                return 1
+
+        conn.set_progress_handler(poll_keepalive, 1000)
     try:
         for name in tables:
             quoted = '"' + name.replace('"', '""') + '"'
-            counts[name] = conn.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0]
+            try:
+                counts[name] = conn.execute(
+                    f"SELECT COUNT(1) FROM {quoted}").fetchone()[0]
+            except BaseException:
+                if not captured:
+                    raise
+            if captured:
+                raise captured[0]
             progress.advance()
     finally:
+        if keepalive is not None:
+            conn.set_progress_handler(None, 0)
         progress.end()
     return counts
 
@@ -701,10 +734,10 @@ def _copy_artifact(store, target, name, ref, fault, keepalive=None):
     source = store.verify(ref)
     destination = target / "artifacts" / name
     _stream_copy(source, destination, expected_hash=ref.content_hash,
-                 expected_size=ref.byte_size, stage=f"artifact {name}",
-                 fault=fault, keepalive=keepalive)
-    if _hash_file(destination, stage=f"artifact-hash {name}",
-                  keepalive=keepalive) != ref.content_hash:
+                 expected_size=ref.byte_size, stage="artifact-copy",
+                 fault=fault, keepalive=keepalive, announce=False)
+    if _hash_file(destination, stage="artifact-hash", keepalive=keepalive,
+                  announce=False) != ref.content_hash:
         raise fail("INTEGRITY_FAILED", "backup artifact hash mismatch")
     return {"content_hash": ref.content_hash, "byte_size": ref.byte_size}
 

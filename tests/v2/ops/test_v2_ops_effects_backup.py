@@ -28,6 +28,10 @@ from tests.v2.ops.test_v2_ops_effects_graph import (
 )
 
 
+class _InjectedCrash(Exception):
+    pass
+
+
 def _row_counts(conn):
     tables = [row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
@@ -127,9 +131,9 @@ def test_lost_ack_retry_reuses_prior_database(tmp_path, monkeypatch):
 
     def crash(point):
         if point == "after_manifest_before_ack":
-            raise RuntimeError("ack lost")
+            raise _InjectedCrash("ack lost")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(_InjectedCrash):
         run_backup(conn, key="b9", owner="worker", target=backup, clock=clock,
                    store=store, fault=crash)
     assert len(calls) == 1
@@ -156,9 +160,9 @@ def test_lost_ack_retry_rebuilds_when_source_changed(tmp_path, monkeypatch):
 
     def crash(point):
         if point == "after_manifest_before_ack":
-            raise RuntimeError("ack lost")
+            raise _InjectedCrash("ack lost")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(_InjectedCrash):
         run_backup(conn, key="b10", owner="worker", target=backup, clock=clock,
                    store=store, fault=crash)
     first = json.loads((backup / "b10.manifest.json").read_text())
@@ -229,9 +233,9 @@ def test_oversized_prior_manifest_is_ignored_and_rebuilt(tmp_path, monkeypatch):
 
     def crash(point):
         if point == "after_manifest_before_ack":
-            raise RuntimeError("ack lost")
+            raise _InjectedCrash("ack lost")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(_InjectedCrash):
         run_backup(conn, key="b11", owner="worker", target=backup, clock=clock,
                    store=store, fault=crash)
     manifest_path = backup / "b11.manifest.json"
@@ -272,9 +276,9 @@ def test_prior_manifest_with_extra_field_is_invalid_and_rebuilt(tmp_path, monkey
 
     def crash(point):
         if point == "after_manifest_before_ack":
-            raise RuntimeError("ack lost")
+            raise _InjectedCrash("ack lost")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(_InjectedCrash):
         run_backup(conn, key="b14", owner="worker", target=backup, clock=clock,
                    store=store, fault=crash)
     manifest_path = backup / "b14.manifest.json"
@@ -318,8 +322,8 @@ def test_backup_copy_failure_remains_retryable(tmp_path):
     old_destination.parent.mkdir(parents=True)
     old_destination.write_bytes(b"old evidence")
     def crash(_name):
-        raise RuntimeError("copy interrupted")
-    with pytest.raises(RuntimeError):
+        raise _InjectedCrash("copy interrupted")
+    with pytest.raises(_InjectedCrash):
         run_backup(conn, key="b2", owner="worker", target=backup, clock=clock,
                    store=store, fault=crash)
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "running"
@@ -334,14 +338,16 @@ def test_manifest_success_before_ack_is_idempotent_and_keys_are_safe(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    with pytest.raises(Exception):
+    with pytest.raises(OpsError) as refused:
         prepare_backup(conn, "../escape", {"evidence.bin": ref}, clock=clock)
+    assert refused.value.code == "INVALID_REQUEST"
+    assert refused.value.problem.retryable is False
     prepare_backup(conn, "b3", {"evidence.bin": ref}, clock=clock)
     backup = tmp_path / "backup"
     def crash(point):
         if point == "after_manifest_before_ack":
-            raise RuntimeError("ack lost")
-    with pytest.raises(RuntimeError):
+            raise _InjectedCrash("ack lost")
+    with pytest.raises(_InjectedCrash):
         run_backup(conn, key="b3", owner="worker", target=backup, clock=clock, store=store,
                    fault=crash)
     first = (backup / "b3.manifest.json").read_bytes()
@@ -420,9 +426,9 @@ def test_same_row_count_altered_prior_with_updated_file_hash_is_rebuilt(
 
     def crash(point):
         if point == "after_manifest_before_ack":
-            raise RuntimeError("ack lost")
+            raise _InjectedCrash("ack lost")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(_InjectedCrash):
         run_backup(conn, key="b16", owner="worker", target=backup, clock=clock,
                    store=store, fault=crash)
     first = json.loads((backup / "b16.manifest.json").read_text())
@@ -465,9 +471,9 @@ def test_corrupt_prior_database_falls_back_to_rebuild(tmp_path, monkeypatch, cor
 
     def crash(point):
         if point == "after_manifest_before_ack":
-            raise RuntimeError("ack lost")
+            raise _InjectedCrash("ack lost")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(_InjectedCrash):
         run_backup(conn, key="b17", owner="worker", target=backup, clock=clock,
                    store=store, fault=crash)
     first = json.loads((backup / "b17.manifest.json").read_text())
@@ -498,9 +504,9 @@ def test_structurally_valid_prior_with_different_artifact_metadata_is_refused(
 
     def crash(point):
         if point == "after_manifest_before_ack":
-            raise RuntimeError("ack lost")
+            raise _InjectedCrash("ack lost")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(_InjectedCrash):
         run_backup(conn, key="b18", owner="worker", target=backup, clock=clock,
                    store=store, fault=crash)
     manifest_path = backup / "b18.manifest.json"
@@ -549,9 +555,9 @@ def test_deeply_nested_prior_manifest_is_invalid_and_rebuilt(tmp_path, monkeypat
 
     def crash(point):
         if point == "after_manifest_before_ack":
-            raise RuntimeError("ack lost")
+            raise _InjectedCrash("ack lost")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(_InjectedCrash):
         run_backup(conn, key="b20", owner="worker", target=backup, clock=clock,
                    store=store, fault=crash)
     (backup / "b20.manifest.json").write_text("[" * 100_000)
@@ -684,8 +690,9 @@ def test_restore_legacy_manifest_falls_back_to_key_named_database(tmp_path):
 
     restored = restore_backup(backup, tmp_path / "restored")
 
-    assert set(legacy) == {"schema_version", "backup_key", "cutoff", "database",
-                           "artifacts"}
+    on_disk = json.loads((backup / "legacy.manifest.json").read_text())
+    assert set(on_disk) == {"schema_version", "backup_key", "cutoff", "database",
+                            "artifacts"}
     assert (restored / "ops.sqlite").is_file()
     restored_db = sqlite3.connect(restored / "ops.sqlite")
     try:
@@ -732,7 +739,7 @@ def test_restore_missing_or_symlinked_source_is_an_integrity_failure(
         source.unlink()
     else:
         replacement = tmp_path / "replacement.bin"
-        replacement.write_bytes(b"replacement")
+        replacement.write_bytes(source.read_bytes())
         source.unlink()
         source.symlink_to(replacement)
 
@@ -848,10 +855,10 @@ def test_backup_coordinator_retry_after_delivery_before_commit_attempt_succeeds(
         # coordinator dies right after backup_effect returned, leaving the
         # delivered effect durably DONE but the attempt uncommitted.
         def crash(*args, **kwargs):
-            raise RuntimeError("crash before commit_attempt")
+            raise _InjectedCrash("crash before commit_attempt")
 
         monkeypatch.setattr("tests.v2.ops.test_v2_ops_effects_graph.commit_attempt", crash)
-        with pytest.raises(RuntimeError, match="crash before commit_attempt"):
+        with pytest.raises(_InjectedCrash, match="crash before commit_attempt"):
             _commit(conn, clock, first, result)
         monkeypatch.undo()
         assert conn.execute("SELECT state FROM attempts WHERE attempt_id=?",
@@ -913,11 +920,16 @@ def test_manifest_database_path_uses_current_name_or_legacy_fallback(tmp_path):
         tmp_path, {"backup_key": "b1"}) == tmp_path / "b1.sqlite"
 
 
-def test_single_filename_rejects_unsafe_names():
+def test_single_filename_rejects_unsafe_names(tmp_path):
     assert backup_module._single_filename("plain.sqlite") == "plain.sqlite"
     for name in ("../escape", "/absolute", "a/b", "", ".", "a\\b"):
         with pytest.raises(ValueError):
             backup_module._single_filename(name)
+        with pytest.raises(ValueError):
+            backup_module.manifest_database_path(
+                tmp_path, {"backup_key": "safe", "database_file": name})
+        with pytest.raises(ValueError):
+            backup_module.manifest_database_path(tmp_path, {"backup_key": name})
 
 
 def test_file_backed_snapshot_uses_a_separate_read_only_connection(tmp_path):
@@ -926,6 +938,8 @@ def test_file_backed_snapshot_uses_a_separate_read_only_connection(tmp_path):
         with backup_module._snapshot(conn) as (snapshot, separate):
             assert separate is True
             assert snapshot is not conn
+            with pytest.raises(sqlite3.OperationalError):
+                snapshot.execute("CREATE TABLE snapshot_probe (value INTEGER)")
             assert snapshot.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 0
             conn.execute("CREATE TABLE snapshot_probe (value INTEGER)")
             conn.commit()
@@ -961,6 +975,17 @@ def test_expected_dump_lines_includes_schema_statements(tmp_path):
             list(conn.iterdump()))
     finally:
         conn.close()
+
+
+def test_full_logical_digest_changes_on_schema_change():
+    conn = sqlite3.connect(":memory:")
+    try:
+        before = backup_module._full_logical_digest(conn, stage="schema-test")
+        conn.execute("CREATE TABLE schema_probe (value TEXT)")
+        after = backup_module._full_logical_digest(conn, stage="schema-test")
+    finally:
+        conn.close()
+    assert after != before
 
 
 def test_restore_refuses_database_over_the_byte_cap(tmp_path, monkeypatch):
@@ -1035,9 +1060,9 @@ def test_malformed_prior_artifact_metadata_is_rebuilt(tmp_path, monkeypatch):
 
     def crash(point):
         if point == "after_manifest_before_ack":
-            raise RuntimeError("ack lost")
+            raise _InjectedCrash("ack lost")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(_InjectedCrash):
         run_backup(conn, key="b23", owner="worker", target=backup, clock=clock,
                    store=store, fault=crash)
     manifest_path = backup / "b23.manifest.json"
@@ -1154,6 +1179,25 @@ def test_file_backed_backup_renews_keepalive_during_the_copy(tmp_path, monkeypat
     assert len(in_copy) > 1
 
 
+def test_table_row_counts_keepalive_fires_inside_one_long_count(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE synthetic_rows (value INTEGER)")
+        conn.executemany("INSERT INTO synthetic_rows VALUES (?)",
+                         ((i,) for i in range(5000)))
+        conn.commit()
+        monkeypatch.setattr(backup_module, "_HEARTBEAT_SECONDS", 0)
+        calls = []
+
+        counts = backup_module._table_row_counts(
+            conn, keepalive=lambda: calls.append(1))
+
+        assert counts["synthetic_rows"] == 5000
+        assert len(calls) > 1
+    finally:
+        conn.close()
+
+
 def test_superseded_uuid_database_is_removed_after_the_new_manifest(
         tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
@@ -1165,9 +1209,9 @@ def test_superseded_uuid_database_is_removed_after_the_new_manifest(
 
     def crash(point):
         if point == "after_manifest_before_ack":
-            raise RuntimeError("ack lost")
+            raise _InjectedCrash("ack lost")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(_InjectedCrash):
         run_backup(conn, key="b26", owner="worker", target=backup,
                    clock=clock, store=store, fault=crash)
     first = json.loads((backup / "b26.manifest.json").read_text())
