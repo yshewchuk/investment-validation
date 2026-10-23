@@ -739,10 +739,9 @@ catalog connection. Two local-file exceptions are outside the snapshot store:
 
 - `fill_quality.write_report`, `signal_screen.write_report` and `polygon_fills.run`
   write Markdown/parquet/CSV/JSON under caller-provided `reports_dir`/`out_dir`.
-- `_pricing.trading_calendar()` reads
-  `earnings_predictions/data/raw/polygon/gspc_daily.csv` relative to
-  `INVESTING_PLAN_ROOT` or the worktree root, only for legacy-parity tests and direct
-  library callers. No other research module imports or calls it.
+- `_pricing.trading_calendar()` reads the local legacy S&P 500 daily CSV,
+  only for legacy-parity tests and direct library callers. No other research
+  module imports or calls it.
 
 Replay/build-trades calendars come from pinned snapshots or explicit arguments,
 never this CSV (see Invariants and Failure semantics).
