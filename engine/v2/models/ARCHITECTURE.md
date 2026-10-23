@@ -367,8 +367,8 @@ Split list (code, in order; estimates in #822): 1 catalog `retrain_cutoff`, stag
 ## 3. Inputs
 
 **Forward serving-fold contract.** Offline descriptor authoring is described
-below; verified loading is defined below, while selection and scoring
-integration remain design only.
+below; verified loading is defined below. Size-fold selection is implemented in
+`engine/v2/scoring/gate_fold_selection.py`; batch wiring remains design only.
 Monthly folds
 are separate from the full-refit champion bindings. A `ServingFoldRef`
 identifies one release-owned `tier4_folds:size` estimator object, its model,

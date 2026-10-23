@@ -258,6 +258,7 @@ loads that one fold through `load_serving_fold` and the binding's shared
 | Catalog `schema_version`, `release_id` (against the parent manifest) or self `manifest_hash` not verifying (`index_size_folds` re-checks them; it never trusts a caller-built catalog) | `ModelNotReady` |
 | `members` not a list, a member row that is not a mapping, more than one `tier4_folds:size` row, `objects` not a list, an object that is not a mapping or lacks string `path`/`content_hash`, no `serving_fold` descriptor, undecodable descriptor, descriptor failing the loader's descriptor check (first-of-month `fold_start`, policy, pool count, estimator), descriptor `estimator` path or hash differing from the catalog object, catalog object `name` or `bytes` failing the serving-fold object check (name derived from the descriptor, `0 < bytes <= MAX_FOLD_BYTES`), duplicate `fold_start` | `ModelNotReady` at `resolve_release_binding` |
 | `binding.size_folds` is `None` (hand-built binding) | `ModelNotReady` at selection |
+| `SizeFoldCatalog` constructed outside `index_size_folds` | `TypeError`: only the verified indexer can issue one, so selection never loads a descriptor the hashed catalog did not list |
 | No staged fold for the selected month, or the catalog entry's descriptor `fold_start` differs from its key (caller-built catalog) | `ModelNotReady("tier4_folds:size", ...)`; never an older fold |
 | Fold fails verification or loading (`ServingFoldError`) | `ModelNotReady`; no fallback to another fold |
 | `event_date` or `as_of` not an ISO date | `ValueError` |
@@ -360,6 +361,12 @@ One declared legacy adapter (`checks/legacy_adapters.json`, package
 `engine.v2.scoring`, module `compatibility.py`): `engine.score.Scorer`,
 `engine.score.ScoreRequest`, `engine.fills.FillModel`, confined to
 `score_legacy_request`, removal targeted at "phase-5 scoring extraction."
+
+`release_bindings.py` and `gate_fold_selection.py` import each other
+(`resolve_release_binding` calls `index_size_folds`; the selector raises
+`ModelNotReady`); both imports are function-local, so no import-time cycle.
+`gate_fold_selection.py` also imports `engine.v2.models.serving_fold_loader`
+and `serving_folds`, and `gate_forecast_source.py`.
 
 `nightly_source_bundle.py` adds one new intra-package import edge
 (`.source_inputs`, for its own leakage check). It does not import

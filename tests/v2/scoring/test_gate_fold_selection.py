@@ -5,7 +5,7 @@ import copy
 import json
 from dataclasses import replace
 from datetime import date, datetime
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -112,9 +112,9 @@ def _fold(tmp_path, fold_start):
     path = tmp_path / descriptor.estimator.path
     path.parent.mkdir(exist_ok=True)
     path.write_bytes(fold_bytes(cache))
-    catalog_hash = content_hash("catalog")
-    catalog = SizeFoldCatalog(parent=parent, catalog_hash=catalog_hash,
-                              descriptors={descriptor.fold_start: descriptor})
+    catalog_dict = _catalog(parent, _row([descriptor]))
+    catalog = index_size_folds(catalog_dict, parent)
+    catalog_hash = catalog.catalog_hash
     binding = SimpleNamespace(frozen_inference=FrozenInference(tmp_path), size_folds=catalog)
     return SimpleNamespace(binding=binding, descriptor=descriptor, parent=parent,
                            path=path, catalog_hash=catalog_hash, cache=cache)
@@ -219,10 +219,15 @@ def test_size_fold_catalog_descriptors_are_read_only(tmp_path):
     cache = _cache()
     parent = _staged(tmp_path, cache)
     descriptor = _descriptor(cache, parent)
-    catalog = SizeFoldCatalog(parent=parent, catalog_hash=content_hash("catalog"),
-                              descriptors={descriptor.fold_start: descriptor})
+    catalog = index_size_folds(_catalog(parent, _row([descriptor])), parent)
     with pytest.raises(TypeError):
         catalog.descriptors["2026-11-01"] = descriptor
+
+
+def test_size_fold_catalog_requires_issuing(tmp_path):
+    parent = _staged(tmp_path, _cache())
+    with pytest.raises(TypeError):
+        SizeFoldCatalog(parent=parent, catalog_hash="x", descriptors={})
 
 
 @pytest.mark.parametrize("mutate", [
@@ -296,9 +301,12 @@ def test_selection_refuses_catalog_keyed_to_wrong_month(november_fold, monkeypat
         raise AssertionError("load_serving_fold must not run for a miskeyed catalog")
 
     monkeypatch.setattr("engine.v2.scoring.gate_fold_selection.load_serving_fold", fail)
-    catalog = SizeFoldCatalog(
-        parent=november_fold.parent, catalog_hash=november_fold.catalog_hash,
-        descriptors={"2026-10-01": november_fold.descriptor})
+    catalog = index_size_folds(
+        _catalog(november_fold.parent, _row([november_fold.descriptor])),
+        november_fold.parent)
+    object.__setattr__(
+        catalog, "descriptors",
+        MappingProxyType({"2026-10-01": november_fold.descriptor}))
     binding = SimpleNamespace(
         frozen_inference=november_fold.binding.frozen_inference, size_folds=catalog)
     with pytest.raises(ModelNotReady) as caught:
@@ -317,9 +325,7 @@ def test_selection_uses_fold_policy_interval_floor(tmp_path):
     path = tmp_path / descriptor.estimator.path
     path.parent.mkdir(exist_ok=True)
     path.write_bytes(fold_bytes(cache))
-    catalog_hash = content_hash("catalog")
-    catalog = SizeFoldCatalog(parent=parent, catalog_hash=catalog_hash,
-                              descriptors={descriptor.fold_start: descriptor})
+    catalog = index_size_folds(_catalog(parent, _row([descriptor])), parent)
     binding = SimpleNamespace(frozen_inference=FrozenInference(tmp_path), size_folds=catalog)
     source = select_gate_forecast_source(binding, "2026-10-05", "2026-10-06")
     assert source.interval_floor == 0.037

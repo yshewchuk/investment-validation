@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from types import MappingProxyType
 from typing import Any
@@ -23,6 +23,7 @@ __all__ = ["SizeFoldCatalog", "index_size_folds", "select_gate_forecast_source"]
 _MEMBER_ID = "tier4_folds:size"
 _INVALID = "size fold catalog is not valid"
 _PHASE5_RELEASE_SCHEMA = "phase5_staged_release.v1.0"
+_ISSUED = object()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -32,8 +33,11 @@ class SizeFoldCatalog:
     parent: StagedManifest
     catalog_hash: str
     descriptors: Mapping[str, ServingFoldDescriptor]
+    _issued: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self._issued is not _ISSUED:
+            raise TypeError("SizeFoldCatalog is issued only by index_size_folds")
         object.__setattr__(self, "descriptors", MappingProxyType(dict(self.descriptors)))
 
 
@@ -53,7 +57,8 @@ def index_size_folds(catalog: Mapping, parent: StagedManifest) -> SizeFoldCatalo
             raise ValueError("manifest_hash")
         rows = _size_fold_rows(catalog)
         if len(rows) != 1 or rows[0].get("status") != "STAGED":
-            return SizeFoldCatalog(parent=parent, catalog_hash=digest, descriptors={})
+            return SizeFoldCatalog(
+                parent=parent, catalog_hash=digest, descriptors={}, _issued=_ISSUED)
         objects = rows[0].get("objects")
         if not isinstance(objects, list):
             raise ValueError("objects")
@@ -63,7 +68,8 @@ def index_size_folds(catalog: Mapping, parent: StagedManifest) -> SizeFoldCatalo
             if descriptor.fold_start in descriptors:
                 raise ValueError("duplicate")
             descriptors[descriptor.fold_start] = descriptor
-        return SizeFoldCatalog(parent=parent, catalog_hash=digest, descriptors=descriptors)
+        return SizeFoldCatalog(
+            parent=parent, catalog_hash=digest, descriptors=descriptors, _issued=_ISSUED)
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
         raise ModelNotReady(_MEMBER_ID, _INVALID) from None
 
