@@ -476,7 +476,8 @@ def test_import_history_reports_exact_through_coverage_and_keeps_older_rows(tmp_
     _write_predictions(source, "2023-12-31.jsonl",
                        _prediction("through-row-a", "2023-12-31"),
                        _prediction("through-row-b", "2023-12-31"),
-                       _prediction("session-row", "2024-01-01"))
+                       _prediction("session-row", "2024-01-01"),
+                       _prediction("late-exact-row", "2023-12-31"))
     _write_outcomes(source, "2023-12-30.jsonl",
                     _outcome("older-outcome", "2023-12-30"))
     _write_outcomes(source, "2023-12-31.jsonl",
@@ -514,6 +515,7 @@ def test_import_history_reports_exact_through_coverage_and_keeps_older_rows(tmp_
         _outcome_decision_id("through-outcome-b", "2023-12-31"),
     }
     assert "prediction:session-row" not in imported
+    assert "prediction:late-exact-row" not in imported
     assert _outcome_decision_id("session-outcome", "2024-01-01") not in imported
     conn.close()
 
@@ -626,6 +628,23 @@ def test_non_object_json_line_is_typed_validation_failure(tmp_path, through):
     conn.close()
 
 
+@pytest.mark.parametrize("through", [None, date(2023, 12, 31)])
+def test_malformed_json_syntax_is_typed_validation_failure(tmp_path, through):
+    ops_root, conn, clock, source = _setup(tmp_path)
+    path = source / "ledger" / "predictions" / "2023-12-31.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(_prediction("older-row", "2023-12-30")) + "\n"
+        + '{"row_id": "broken", "as_of": "2023-12-31"\n')
+
+    with pytest.raises(OpsError) as exc:
+        history_import.import_history(
+            conn, ops_root, source, through=through, dry_run=True, clock=clock)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+    conn.close()
+
+
 def test_pinned_helper_persists_identity_through_and_complete_pins(tmp_path):
     ops_root, conn, clock, source = _setup(tmp_path)
     prediction_path = source / "ledger" / "predictions" / "2023-12-31.jsonl"
@@ -644,7 +663,7 @@ def test_pinned_helper_persists_identity_through_and_complete_pins(tmp_path):
          hashlib.sha256(prediction_path.read_bytes()).hexdigest()],
     ]
     expected_inputs = {
-        "schema": nightly_history.INPUTS_SCHEMA,
+        "schema": "nightly_history_inputs.v1",
         "run_id": state.active.run_id,
         "through": "2023-12-31",
         "files": expected_files,
@@ -655,6 +674,6 @@ def test_pinned_helper_persists_identity_through_and_complete_pins(tmp_path):
 
     completion = json.loads(state_dir.joinpath(
         f"{state.active.run_id}.history-complete.json").read_text())
-    assert completion == expected_inputs | {"schema": nightly_history.RECEIPT_SCHEMA}
+    assert completion == expected_inputs | {"schema": "nightly_history_receipt.v1"}
     assert set(completion) == {"schema", "run_id", "through", "files"}
     conn.close()

@@ -110,9 +110,21 @@ def _read_lines(path, *, expected_sha256=None, source_root=None):
     return [line.strip() for line in text.splitlines() if line.strip()], source_hash
 
 
+def _decode_row(raw):
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raise fail("VALIDATION_FAILED", "legacy ledger line is not valid JSON") from None
+
+
 def _included_prefix(lines, date_field, through):
     """The longest leading run of ``lines`` whose own date field is on or
     before ``through``, plus the count of those rows dated exactly ``through``.
+    With ``through`` set, each row is decoded and validated before its date is
+    compared; the first later-dated row is decoded and date-validated before
+    scanning stops, but it and the subsequent tail are excluded, and only the
+    subsequent tail is never inspected. With ``through`` omitted every line is returned, then
+    decoded and validated by :func:`_date_span`.
     Ledger files are append-only and written in chronological order
     (``engine/ledger.py`` ``write_predictions``/``_write_outcomes``), so a
     prefix is exact; stopping at the first later-dated row is the conservative
@@ -131,10 +143,7 @@ def _included_prefix(lines, date_field, through):
     included = []
     exact_rows = 0
     for raw in lines:
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            raise fail("VALIDATION_FAILED", "legacy ledger line is not valid JSON") from None
+        payload = _decode_row(raw)
         row_date = _row_date(date_field, payload)
         if row_date > through:
             break
@@ -203,8 +212,10 @@ def import_history(conn, root, source_root, *, through=None, dry_run=False, cloc
 
 def _date_span(included, date_field):
     """The (min, max) row date across an already-filtered line list, or
-    ``(None, None)`` for an empty one."""
-    dates = [_row_date(date_field, json.loads(raw)) for raw in included]
+    ``(None, None)`` for an empty one. Every line is decoded through the same
+    guarded helper as the prefix scan, so malformed JSON syntax is a typed
+    ``VALIDATION_FAILED`` rather than a raw ``JSONDecodeError``."""
+    dates = [_row_date(date_field, _decode_row(raw)) for raw in included]
     return (min(dates), max(dates)) if dates else (None, None)
 
 
