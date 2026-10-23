@@ -1,10 +1,13 @@
 """Local immutable backup and isolated restore controls."""
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from engine.v2.foundation import ArtifactStore
 from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
+from engine.v2.ops.catalog import integrity_errors
 from engine.v2.ops.effects_graph import backup_effect
 from engine.v2.ops.errors import fail
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
@@ -12,6 +15,14 @@ from tests.ops_support import catalog
 from tests.v2.ops.test_v2_ops_effects_graph import (
     SESSION, _commit, _open, _params, _row, _seed_decisions, _submit_and_claim,
 )
+
+
+def _row_counts(conn):
+    tables = [row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+        "ORDER BY name")]
+    return {name: conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+            for name in tables}
 
 
 def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
@@ -27,6 +38,32 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "delivered"
     with pytest.raises(Exception):
         restore_backup(backup, tmp_path / "restored")
+
+
+@pytest.mark.parametrize("stale_bytes", [b"", b"SQLite format 3\x00"],
+                         ids=["zero-byte", "truncated-header"])
+def test_backup_replaces_stale_final_database_only_with_verified_copy(tmp_path, stale_bytes):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "b7", {}, clock=clock)
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    stale = backup / "b7.sqlite"
+    stale.write_bytes(stale_bytes)
+
+    manifest = run_backup(
+        conn, key="b7", owner="worker", target=backup, clock=clock, store=store)
+
+    assert stale.stat().st_size > len(stale_bytes)
+    rebuilt = sqlite3.connect(stale)
+    try:
+        assert integrity_errors(rebuilt) == []
+        assert _row_counts(rebuilt) == _row_counts(conn)
+    finally:
+        rebuilt.close()
+    assert manifest["database_rows"] == _row_counts(conn)
+    assert conn.execute(
+        "SELECT state FROM outbox WHERE logical_key='b7'").fetchone()[0] == "delivered"
 
 
 def test_backup_copy_failure_remains_retryable(tmp_path):

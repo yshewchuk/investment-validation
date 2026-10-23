@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import tempfile
 from pathlib import Path
 
 from engine.v2.contracts import ArtifactRef
@@ -69,6 +70,135 @@ def _delivered_or_stale(conn, kind, logical_key):
     return delivered
 
 
+def _table_row_counts(conn):
+    """Deterministic row count per non-internal table, keyed and ordered by name."""
+    tables = [row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+        "ORDER BY name")]
+    counts = {}
+    for name in tables:
+        quoted = '"' + name.replace('"', '""') + '"'
+        counts[name] = conn.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0]
+    return counts
+
+
+def _verified_prior_backup(manifest_path, database, source_rows, key, payload):
+    """The existing manifest when it and ``database`` are a verified prior
+    result for this payload, else ``None``.
+
+    A retry after the manifest was published but before the acknowledgement
+    rebuilds a byte-different SQLite copy from the same source. Reusing this
+    verified pair keeps such a retry byte-idempotent instead of refusing the
+    rebuilt database's different hash.
+    """
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    if (manifest.get("backup_key") != key
+            or manifest.get("schema_version") != payload["schema_version"]
+            or manifest.get("cutoff") != payload["cutoff"]
+            or manifest.get("database_rows") != source_rows):
+        return None
+    expected_hash = manifest.get("database")
+    if not isinstance(expected_hash, str) or not database.exists():
+        return None
+    try:
+        probe = sqlite3.connect(database)
+        try:
+            if integrity_errors(probe) or _table_row_counts(probe) != source_rows:
+                return None
+        finally:
+            probe.close()
+        if file_hash(database) != expected_hash:
+            return None
+    except (OSError, sqlite3.Error):
+        return None
+    return manifest
+
+
+def _verify_staged(staged, source_rows):
+    """Verify a staged copy against the source row counts and integrity."""
+    probe = sqlite3.connect(staged)
+    try:
+        staged_rows = _table_row_counts(probe)
+        problems = integrity_errors(probe)
+    finally:
+        probe.close()
+    if staged_rows != source_rows:
+        differing = [name for name in sorted(set(source_rows) | set(staged_rows))
+                     if source_rows.get(name) != staged_rows.get(name)]
+        raise fail("INTEGRITY_FAILED", "backup row counts differ from source",
+                   details={"tables": differing})
+    if problems:
+        raise fail("INTEGRITY_FAILED", "backup integrity check failed",
+                   details={"first_problem": problems[0]})
+
+
+def _stage_database(conn, target, key, database, source_rows):
+    """Build, verify and atomically install a fresh staged database copy."""
+    stage_fd, stage_name = tempfile.mkstemp(
+        dir=str(target), prefix=f".{key}.", suffix=".staging.sqlite")
+    os.close(stage_fd)
+    os.unlink(stage_name)
+    staged = Path(stage_name)
+    try:
+        backup_to(conn, staged)
+        _verify_staged(staged, source_rows)
+        with staged.open("rb") as stream:
+            os.fsync(stream.fileno())
+        os.replace(staged, database)
+        staged = None
+        fsync_directory(target)
+    finally:
+        if staged is not None:
+            try:
+                staged.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _copy_artifact(store, target, name, ref, fault):
+    """Copy one artifact, verify its hash and run the per-artifact fault hook."""
+    source = store.verify(ref)
+    destination = target / "artifacts" / name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(source.read_bytes())
+    if fault:
+        fault(name)
+    if file_hash(destination) != ref.content_hash:
+        raise fail("INTEGRITY_FAILED", "backup artifact hash mismatch")
+    return {"content_hash": ref.content_hash, "byte_size": ref.byte_size}
+
+
+def _copy_artifacts(payload, store, target, fault, keepalive):
+    """Copy every payload artifact into the target and return their manifest entries."""
+    copied = {}
+    for name, document in payload.get("artifacts", {}).items():
+        keepalive()
+        ref = from_document(ArtifactRef, document)
+        if "/" in name or name in ("", ".", ".."):
+            raise fail("INVALID_REQUEST", "unsafe backup artifact name")
+        copied[name] = _copy_artifact(store, target, name, ref, fault)
+    return copied
+
+
+def _publish_manifest(manifest_path, manifest, prior):
+    """Match a prior manifest, or atomically write a new one with a directory fsync."""
+    if prior is not None:
+        if prior != manifest:
+            raise fail("INTEGRITY_FAILED", "backup manifest differs")
+        return
+    temporary = manifest_path.with_suffix(".pending")
+    temporary.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
+    with temporary.open("rb") as stream:
+        os.fsync(stream.fileno())
+    os.replace(temporary, manifest_path)
+    fsync_directory(manifest_path.parent)
+
+
 def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=_no_keepalive):
     effect = claim(conn, "backup", owner=owner, clock=clock, logical_key=key)
     if effect is None:
@@ -79,41 +209,16 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
         raise fail("INVALID_REQUEST", "backup target is a symlink")
     target.mkdir(parents=True, exist_ok=True)
     database = target / (key + ".sqlite")
-    if not database.exists():
-        backup_to(conn, database)
-    probe = sqlite3.connect(database)
-    try:
-        if integrity_errors(probe):
-            raise fail("INTEGRITY_FAILED", "backup integrity check failed")
-    finally:
-        probe.close()
-    copied = {}
-    for name, document in payload.get("artifacts", {}).items():
-        keepalive()
-        ref = from_document(ArtifactRef, document)
-        if "/" in name or name in ("", ".", ".."):
-            raise fail("INVALID_REQUEST", "unsafe backup artifact name")
-        source = store.verify(ref)
-        destination = target / "artifacts" / name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(source.read_bytes())
-        if fault:
-            fault(name)
-        if file_hash(destination) != ref.content_hash:
-            raise fail("INTEGRITY_FAILED", "backup artifact hash mismatch")
-        copied[name] = {"content_hash": ref.content_hash, "byte_size": ref.byte_size}
+    source_rows = _table_row_counts(conn)
+    manifest_path = target / (key + ".manifest.json")
+    prior = _verified_prior_backup(manifest_path, database, source_rows, key, payload)
+    if prior is None:
+        _stage_database(conn, target, key, database, source_rows)
+    copied = _copy_artifacts(payload, store, target, fault, keepalive)
     manifest = {"schema_version": payload["schema_version"], "backup_key": key,
                 "cutoff": payload["cutoff"], "database": file_hash(database),
-                "artifacts": copied}
-    manifest_path = target / (key + ".manifest.json")
-    if manifest_path.exists() and json.loads(manifest_path.read_text()) != manifest:
-        raise fail("INTEGRITY_FAILED", "backup manifest differs")
-    temporary = manifest_path.with_suffix(".pending")
-    temporary.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
-    with temporary.open("rb") as stream:
-        os.fsync(stream.fileno())
-    os.replace(temporary, manifest_path)
-    fsync_directory(manifest_path.parent)
+                "database_rows": source_rows, "artifacts": copied}
+    _publish_manifest(manifest_path, manifest, prior)
     if fault:
         fault("after_manifest_before_ack")
     complete(conn, effect["effect_id"], manifest, owner=owner,
