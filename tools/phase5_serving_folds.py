@@ -8,21 +8,23 @@ do not establish provenance or bound decoded memory.
 from __future__ import annotations
 
 import hashlib
-import io
-import math
 from dataclasses import dataclass
-from datetime import date
 
 from engine.v2.foundation import from_document, to_document
 from engine.v2.models import ArtifactMember, ModelRelease
 from engine.v2.models.deployment import StagedManifest, semantic_release_hash
 from engine.v2.models.serving_folds import (
-    FOLD_PANEL_SHA256_PATTERN,
     ChooserFoldPolicy,
     ChooserServingFoldDescriptor,
     ServingFoldDescriptor,
     SizeFoldPolicy,
     chooser_fold_outputs,
+)
+from tools.phase5_serving_fold_checks import (
+    check_size_policy,
+    fold_month,
+    held_out_pools,
+    load_stored_fold,
 )
 
 MAX_FOLD_BYTES = 32 * 1024 * 1024
@@ -71,57 +73,28 @@ def preflight_chooser_fold(data: bytes, name: str, policy: ChooserFoldPolicy,
                            interval_policy="chooser-heldout-deciles.v1", result_type=ValidatedChooserFold)
 
 
-def _preflight_fold(data, name, policy, release, *, role, output, interval_policy, result_type):
-    if len(data) > MAX_FOLD_BYTES:
-        raise ValueError("serving fold exceeds byte limit")
-    if role == "size" and (not isinstance(policy.panel_sha256, str)
-            or not FOLD_PANEL_SHA256_PATTERN.fullmatch(policy.panel_sha256)
-            or not policy.feature_order
-            or any(not isinstance(key, str) or not key for key in policy.feature_order)
-            or len(set(policy.feature_order)) != len(policy.feature_order)
-            or policy.interval_policy != interval_policy
-            or (policy.interval_floor is not None
-                and (type(policy.interval_floor) not in (int, float)
-                     or not math.isfinite(policy.interval_floor)))):
-        raise ValueError(f"invalid {role} serving policy")
+def _release_binding(release, policy, role, output):
     bindings = [b for b in release.bindings if b.role == role and b.strategy_id == "*"]
     if (len(bindings) != 1 or bindings[0].model_id != policy.model_id
             or bindings[0].feature_order != policy.feature_order
             or bindings[0].output_names != (output,)):
         raise ValueError(f"{role} serving policy disagrees with release binding")
-    try:
-        import joblib
+    return bindings[0]
 
-        stored = joblib.load(io.BytesIO(data))
-    except Exception as exc:
-        raise ValueError("serving fold cannot be decoded") from exc
-    if (not isinstance(stored, dict) or not callable(getattr(stored.get("estimator"), "predict", None))
-            or stored.get("model_id") != policy.model_id
-            or stored.get("tier3_snapshot") != policy.panel_sha256
-            or not isinstance(stored.get("features"), (list, tuple))
-            or tuple(stored["features"]) != policy.feature_order):
-        raise ValueError("serving fold header disagrees with policy")
-    try:
-        fold = date.fromisoformat(stored["fold_start"])
-        if fold.day != 1 or fold.isoformat() != stored["fold_start"]:
-            raise ValueError("not an exact month start")
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("invalid serving fold month") from exc
-    expected = f"{policy.model_id}_{fold:%Y%m}_{policy.panel_sha256[:12]}.joblib"
-    if name != expected:
+
+def _preflight_fold(data, name, policy, release, *, role, output, interval_policy, result_type):
+    if len(data) > MAX_FOLD_BYTES:
+        raise ValueError("serving fold exceeds byte limit")
+    if role == "size":
+        check_size_policy(policy, interval_policy)
+    binding = _release_binding(release, policy, role, output)
+    stored = load_stored_fold(data, policy)
+    fold = fold_month(stored)
+    if name != f"{policy.model_id}_{fold:%Y%m}_{policy.panel_sha256[:12]}.joblib":
         raise ValueError("serving fold filename disagrees with header")
-    try:
-        import numpy as np
-
-        pools = [np.asarray(stored[key]) for key in ("pool_pred", "pool_res")]
-        if (any(pool.ndim != 1 or pool.dtype.kind not in "fiu"
-                or not np.isfinite(pool).all() for pool in pools)
-                or pools[0].shape != pools[1].shape):
-            raise ValueError("invalid paired arrays")
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("invalid serving fold held-out pool") from exc
+    pools = held_out_pools(stored)
     return result_type(fold_start=fold.isoformat(),
-                       decision_clock_id=bindings[0].decision_clock_id,
+                       decision_clock_id=binding.decision_clock_id,
                        digest=hashlib.sha256(data).hexdigest(), pool_count=len(pools[0]),
                        policy=policy, release=release)
 

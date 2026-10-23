@@ -100,9 +100,14 @@ python3 -m pytest -q -n 4 --dist loadgroup -rfEs --durations=15 tests/ 2>&1 | ta
 
 Nothing in the suite waits unboundedly any more:
 
+Expired per-test budgets always raise pytest's `TIMEOUT` failure, even if the
+traceback dump fails. Dumps use original stderr, not a `capsys`/redirected
+stream without `fileno()`, so diagnostic I/O cannot masquerade as a caught
+domain-validation error. No timeout budget is increased by this safeguard.
+
 | Guard | What it does | Knob |
 |---|---|---|
-| Per-test timeout (`conftest.py`) | Each setup/call/teardown phase gets 600 s; past that the test **fails** as `TIMEOUT: <node id> ...` with the stack it was waiting in, and the run continues. pytest-timeout is not installed; this is a SIGALRM equivalent that switches itself off if pytest-timeout is ever installed. The first `ui_dist_dir` setup (npm ci + build) gets a longer budget. | `--test-timeout N`, env `PYTEST_TEST_TIMEOUT`, `@pytest.mark.test_timeout(N)`; `0` disables |
+| Per-test timeout (`conftest.py`) | Each setup/call/teardown phase gets 600 s; past that the test **fails** as `TIMEOUT: <node id> ...` and attempts a stack dump. Even if the dump fails, the timeout fails the test and the run continues. pytest-timeout is not installed; this is a SIGALRM equivalent that switches itself off if pytest-timeout is ever installed. The first `ui_dist_dir` setup (npm ci + build) gets a longer budget. | `--test-timeout N`, env `PYTEST_TEST_TIMEOUT`, `@pytest.mark.test_timeout(N)`; `0` disables |
 | Ops job polling (`ops_support.run_until`) | Polling has an overall deadline shorter than the per-test timeout. If a job has not reached a terminal state by then, the test fails with the job id, last state, admission/retry/execution status, attempts, and the latest worker heartbeat and log tail available from the ops query helpers; the diagnostics expose the attempt lease's `heartbeat_at` stamp and exact worker process-family liveness separately from the latest progress event/step — a latest progress row of `kind="heartbeat"` is a throttled observation/progress event, not lease renewal. A real-`Service` job left queued on a host-resource reason still fails with `RESOURCE WAIT (environment, not a code failure): ...`; `PROFILE_EXCEEDS_CAPACITY` fails at once and `MEMORY_HEADROOM`, `CPU_UNAVAILABLE`, `DISK_SPACE` and `RESERVATION_BUDGET` fail after 60 s continuously queued. Reasons from the test's own catalog (dependencies, heavy slot, store lease) remain subject to the overall polling deadline. | env `OPS_TEST_ADMISSION_WAIT_S` |
 | `ui/.npm-ci.lock` | Waits for another process's `npm ci` for at most 660 s, then fails, naming the lock. | none |
 
@@ -494,8 +499,27 @@ other nonzero exits remain failures.
 
 - **Diagnosing a failed stats run.** When mutmut's clean/stats run fails it
   prints only `failed to collect stats. runner returned 1` and swallows the
-  child pytest output that explains it. The remedy is mutmut's supported
-  `debug = true`, which the driver adds to the generated `setup.cfg [mutmut]`.
+  forked child's pytest output. The driver now loads the supported pytest
+  plugin `tools.mutation_stats_diagnostics`: failed setup/call/teardown,
+  collection and internal-error reports from the stats phase are written
+  directly to `stats-failure.txt` in the module work directory. CI retains
+  fresh evidence inside `mutation-mutmut-module-<module>`, beside its result
+  summaries, attempting the copy before result export even if export fails.
+  Captured output accompanies setup/call/teardown and collection tracebacks.
+  An unwritable diagnostic emits a best-effort warning without replacing the
+  test failure, even if original stderr is also unavailable. A failed cleanup
+  disables evidence for that run rather than appending or echoing stale bytes;
+  CI excludes sidecars older than its run-start marker. Copy failures warn and
+  still attempt result export.
+  The file is cleared before each run, capped at 64 KiB (keeping the start
+  and end of an oversized report), and never receives mutant-phase reports.
+  A nonzero backend result also echoes at most 64 KiB to stderr, without
+  changing that result if reading or writing diagnostics fails. This keeps
+  PR failures visible before the artifact-copy YAML reaches main:
+  `workflow_run` executes main's workflow, not the PR's updated YAML.
+  This does not rerun tests, change the backend exit code, or classify any
+  unmeasured mutant as killed. For extra output, mutmut also supports
+  `debug = true`, added to `setup.cfg [mutmut]` by the driver.
   Be honest about what it does: `debug` is **full-run verbosity**, not a
   stats-only hook -- with it on, mutmut echoes every mutant's child pytest
   output for the whole run, so the log grows large. Because that is expensive,
@@ -510,6 +534,9 @@ other nonzero exits remain failures.
   was not reproduced, not a root cause.
   The `ops_catalog_state` CI shard enables the same debug setting under the
   same CI-only default (its stats step failed the same way in run 36025664817).
+  Authored-source size/import policies read `MUTATION_PILOT_SOURCE_ROOT`, the
+  driver's uninstrumented work snapshot, rather than mutmut's generated
+  wrappers; runtime assertions still import and exercise instrumented code.
 
 | trigger | mode | state |
 |---|---|---|
@@ -587,8 +614,9 @@ other nonzero exits remain failures.
 ### Report files
 
 Each job uploads `mutation-mutmut-module-<module>` (90 days). It holds
-`results.jsonl`, `summary.json` and `summary.md`, which is also the job
-summary. The job summary shows the score table and each untriaged survivor in
+`results.jsonl`, `summary.json`, `summary.md` (also the job summary), and an
+optional `stats-failure.txt` containing bounded stats-failure diagnostics.
+The job summary shows the score table and each untriaged survivor in
 a function the push changed (`git diff <before>..<sha>`), with its diff. Runs
 that are not pushes list the survivors this run re-tested instead. The
 `report` job merges every module into one `mutation-mutmut-report` artifact

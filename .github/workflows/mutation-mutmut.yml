@@ -42,7 +42,8 @@
 #   export that cannot read the module's state. Incremental exit 124 is an
 #   incomplete clean time-box stop, not a tool error. Survivors/score are
 #   report-only. Every module job uploads report/<module>/ (results.jsonl,
-#   summary.json, summary.md) as `mutation-mutmut-module-<module>`; the
+#   summary.json, summary.md, and optional stats-failure.txt diagnostics) as
+#   `mutation-mutmut-module-<module>`; the
 #   `report` job merges every module into one `mutation-mutmut-report`
 #   artifact. Like the gremlins `report` job it does so even when the merge
 #   exits nonzero: merge's rc is captured, the summary it did write is
@@ -443,6 +444,13 @@ jobs:
           SKIP_ARGS=()
           if [ "$PR_OPEN" = "false" ]; then
             SKIP_ARGS=(--skipped-reason pr_closed_mid_run)
+          fi
+          diagnostic="$HOME/.cache/investing-plan-mutation-pilot/$MODULE/stats-failure.txt"
+          if [ -f "$diagnostic" ] && [ -f "$RUNNER_TEMP/mutation-start" ] \
+              && [ "$diagnostic" -nt "$RUNNER_TEMP/mutation-start" ]; then
+            if ! { mkdir -p "report/$MODULE" && cp "$diagnostic" "report/$MODULE/stats-failure.txt"; }; then
+              echo "::warning::Stats diagnostic copy failed; continuing result export" >&2 || true
+            fi
           fi
           # set -e: mutation_results.py export is the gate for a module whose
           # state cannot be read at all; a nonzero mutmut rc still writes an

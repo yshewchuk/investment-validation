@@ -2267,6 +2267,7 @@ def mutmut_config_text(defaults: dict, mutate: list[str], tests: list[str],
              + lines("also_copy", also_copy)
              + lines("pytest_add_cli_args_test_selection", tests)
              + lines("pytest_add_cli_args", defaults["pytest_args"]
+                     + ["-p", "tools.mutation_stats_diagnostics"]
                      + [f"--deselect={d}" for d in defaults.get("deselect", [])])
              + f"timeout_constant = {float(defaults['timeout_constant'])}\n"
              + f"timeout_multiplier = {float(defaults['timeout_multiplier'])}\n"
@@ -2423,6 +2424,154 @@ TIME_BUDGET_KILL_RC = 137
 SIGINT_GRACE_SECONDS = 180
 
 
+def _become_subreaper() -> bool:
+    """Reparent orphaned descendants here; False (never raises) off Linux or on failure."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+        return ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
+    except Exception:
+        return False
+
+
+def _sweep_log(msg: str) -> None:
+    try:
+        print(msg, file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
+# Best-effort and bounded (<= ~5 s of waiting). Without a child subreaper a
+# descendant orphaned to init is not found at all -- only descendants still
+# attached below this process in the tree are seen (the `subreaper: no` line
+# says so). A process that survives SIGKILL (D state) is logged, including one
+# that is not this process's own child (re-checked with a signal-0 probe), and
+# abandoned, never waited on forever. No mutant is excluded or skipped by this
+# change.
+def _reap_descendants(label: str) -> int:
+    if not sys.platform.startswith("linux"):
+        return 0
+    try:
+        def scan() -> tuple[list[int], dict[int, str]]:
+            ppid: dict[int, int] = {}
+            proc_state: dict[int, str] = {}
+            for entry in os.listdir("/proc"):
+                try:
+                    with open(f"/proc/{entry}/stat", "rb") as fh:
+                        raw = fh.read(4096)
+                    fields = raw.decode("utf-8", "replace").rpartition(")")[2].split()
+                    ppid[int(entry)] = int(fields[1])
+                    proc_state[int(entry)] = fields[0]
+                except (OSError, ValueError, IndexError):
+                    continue
+            kids: dict[int, list[int]] = {}
+            for pid, parent in ppid.items():
+                kids.setdefault(parent, []).append(pid)
+            victims: list[int] = []
+            stack = list(kids.get(os.getpid(), []))
+            while stack:
+                pid = stack.pop()
+                victims.append(pid)
+                stack.extend(kids.get(pid, []))
+            return victims, proc_state
+
+        def read_cmdline(pid: int) -> str:
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                    raw = fh.read(4096)
+                return raw.replace(b"\0", b" ").decode("utf-8", "replace")[:200]
+            except OSError:
+                return ""
+
+        cmdlines: dict[int, str] = {}
+        killed: list[int] = []
+        victims, proc_state = scan()
+        signalled = set(victims)
+        for pid in victims:
+            cmdlines[pid] = read_cmdline(pid)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                continue
+            except OSError as exc:
+                _sweep_log(f"[mutation_pilot] {label}: could not kill pid={pid}: {exc}")
+                continue
+            if proc_state.get(pid) != "Z":
+                killed.append(pid)
+        deadline, pending = time.monotonic() + 5.0, set(victims)
+        not_children: set[int] = set()
+        while time.monotonic() < deadline:
+            found_new = False
+            descendants, proc_state = scan()
+            for pid in descendants:
+                if pid in signalled or proc_state.get(pid) == "Z":
+                    continue
+                found_new = True
+                signalled.add(pid)
+                pending.add(pid)
+                cmdlines[pid] = read_cmdline(pid)
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    continue
+                except OSError as exc:
+                    _sweep_log(f"[mutation_pilot] {label}: could not kill pid={pid}: {exc}")
+                    continue
+                killed.append(pid)
+            for pid in list(pending):
+                try:
+                    if os.waitpid(pid, os.WNOHANG)[0]:
+                        pending.discard(pid)
+                except ChildProcessError:
+                    not_children.add(pid)
+                    pending.discard(pid)
+            for pid in list(not_children):
+                try:
+                    if os.waitpid(pid, os.WNOHANG)[0]:
+                        not_children.discard(pid)
+                        continue
+                except ChildProcessError:
+                    pass
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    not_children.discard(pid)
+            if not found_new and not pending and not not_children:
+                break
+            time.sleep(0.05)
+        alive = set(pending)
+        for pid in not_children:
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0]:
+                    continue
+            except ChildProcessError:
+                pass
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except OSError:
+                alive.add(pid)
+            else:
+                if proc_state.get(pid) != "Z":
+                    alive.add(pid)
+        if alive:
+            _sweep_log(f"[mutation_pilot] {label}: {len(alive)} process(es) did not exit "
+                       f"after SIGKILL: {' '.join(str(p) for p in sorted(alive))}")
+        if not killed:
+            return 0
+        _sweep_log(f"[mutation_pilot] {label}: killed {len(killed)} leftover descendant process(es)")
+        for pid in killed[:20]:
+            _sweep_log(f"[mutation_pilot]   pid={pid} cmd={cmdlines.get(pid, '')}")
+        if len(killed) > 20:
+            _sweep_log(f"[mutation_pilot]   ... and {len(killed) - 20} more")
+        return len(killed)
+    except Exception as exc:
+        _sweep_log(f"[mutation_pilot] {label}: descendant sweep failed: {exc}")
+        return 0
+
+
 def _run_with_time_budget(cmd: list[str], cwd: Path, env: dict, budget_s: float) -> int:
     """Run ``cmd`` for at most ``budget_s`` seconds; return its exit code if it
     finishes in time or fails during SIGINT grace, ``TIME_BUDGET_STOP_RC`` after
@@ -2477,6 +2626,7 @@ def _run_with_time_budget(cmd: list[str], cwd: Path, env: dict, budget_s: float)
 
 def cmd_run(cfg: dict, args) -> int:
     from mutation_results import SNAPSHOT_NAME, snapshot
+    from mutation_stats_diagnostics import LIMIT_BYTES, warn_unavailable
 
     work = sync_workdir(args.module, cfg, fresh=args.fresh)
     files = mutate_files(cfg, args.module)
@@ -2509,13 +2659,36 @@ def cmd_run(cfg: dict, args) -> int:
     # ops_catalog_state now shares that CI-only default, so the same echo
     # covers its shard too.
     env = os.environ.copy()
+    # A stats-only pytest plugin writes outside the fork-local stdout buffer.
+    # Source-policy tests inspect the authored snapshot, never generated wrappers.
+    diagnostic = work / "stats-failure.txt"
+    try:
+        diagnostic.unlink(missing_ok=True)
+    except OSError as error:
+        warn_unavailable(error)
+        diagnostic = None  # never append to or echo evidence from an earlier run
+    env["MUTATION_PILOT_STATS_DIAGNOSTIC"] = str(diagnostic) if diagnostic is not None else ""
+    env["MUTATION_PILOT_SOURCE_ROOT"] = str(work)
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         env[var] = "1"
-    if args.time_budget_seconds:
-        rc = _run_with_time_budget(cmd, work, env, args.time_budget_seconds)
-    else:
-        rc = subprocess.run(cmd, cwd=work, env=env).returncode
+    subreaper = _become_subreaper()
+    print(f"[mutation_pilot] child subreaper: {'yes' if subreaper else 'no'}", flush=True)
+    try:
+        if args.time_budget_seconds:
+            rc = _run_with_time_budget(cmd, work, env, args.time_budget_seconds)
+        else:
+            rc = subprocess.run(cmd, cwd=work, env=env).returncode
+    finally:
+        _reap_descendants("after mutmut exit")
+    if rc and diagnostic is not None:
+        # workflow_run uses main's YAML until merge. Keep failures visible even
+        # before that workflow knows to upload the sidecar; never dump the env.
+        try:
+            with diagnostic.open("rb") as stream:
+                sys.stderr.write(stream.read(LIMIT_BYTES).decode("utf-8", "ignore"))
+        except (OSError, ValueError):
+            pass  # unavailable diagnostics must not replace the backend outcome
     # On a first run mutants/ did not exist before mutmut; record the digest now
     # so the next run compares against this one.
     reset_on_test_change(work, [], digest)

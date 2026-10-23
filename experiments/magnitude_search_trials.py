@@ -221,12 +221,16 @@ class SearchTrials:
         if completed is not None and canonical_json(completed) != canonical_json(evidence):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
         if self._read("terminal:" + key) is not None:
-            return self._executed(plan, outer_year, inner_year, candidate_id, attempt)
+            _, terminal = self._terminal_record(plan, outer_year, inner_year, candidate_id)
+            return self._execution_receipt(plan, outer_year, inner_year, candidate_id, terminal, attempt,
+                                           verified_evidence=evidence)
         self._append("execution:" + key, evidence)
         self._record(outer_year, inner_year, candidate_id, native=True, reconcile=True,
             **({"forecasts": result["forecasts"]} if result["event"] == "succeeded" else
                {"failure": fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed").problem}))
-        return self._executed(plan, outer_year, inner_year, candidate_id, attempt)
+        _, terminal = self._terminal_record(plan, outer_year, inner_year, candidate_id)
+        return self._execution_receipt(plan, outer_year, inner_year, candidate_id, terminal, attempt,
+                                       verified_evidence=evidence)
 
     def _result_evidence(self, plan, outer_year, inner_year, candidate_id, attempt):
         """Independently verify durable result, admission, and exact progress prefix."""
@@ -294,10 +298,10 @@ class SearchTrials:
         return fit_evidence(inputs, inner, plan, execution)
 
     def _executed(self, plan, outer_year, inner_year, candidate_id, attempt):
-        _, terminal = self._terminal(plan, outer_year, inner_year, candidate_id)
+        _, terminal = self._terminal_record(plan, outer_year, inner_year, candidate_id)
         return self._execution_receipt(plan, outer_year, inner_year, candidate_id, terminal, attempt)
 
-    def _execution_receipt(self, plan, outer_year, inner_year, candidate_id, terminal, attempt):
+    def _execution_receipt(self, plan, outer_year, inner_year, candidate_id, terminal, attempt, *, verified_evidence=None):
         key, _, _ = self._trial(plan, outer_year, inner_year, candidate_id)
         record = self._read("execution:" + key)
         if (not isinstance(record, dict) or not isinstance(attempt, dict)
@@ -309,7 +313,10 @@ class SearchTrials:
             validate_execution_limits(attempt["limits"])
         except OpsError:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs") from None
-        _, receipt = self._result_evidence(plan, outer_year, inner_year, candidate_id, attempt)
+        # Reconcile may supply evidence freshly checked earlier in this same call.
+        receipt = verified_evidence
+        if receipt is None:
+            _, receipt = self._result_evidence(plan, outer_year, inner_year, candidate_id, attempt)
         if (canonical_json(record) != canonical_json(receipt)
                 or (receipt["status"] == "succeeded") != (terminal["status"] in ("succeeded", "refused"))):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
@@ -352,8 +359,9 @@ class SearchTrials:
                 raise OpsError(from_document(Problem, problem))
             if self._read("inputs:" + key) is None:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial has no admitted native inputs")
-            self._append("terminal:" + key, {"status": "failed", "problem": problem}, absent=("forecasts:" + key,))
-            return self._terminal(plan, outer_year, inner_year, candidate_id)[1]
+            terminal = self._append("terminal:" + key, {"status": "failed", "problem": problem}, absent=("forecasts:" + key,))
+            # Native execute/reconcile verifies the receipt once at its return boundary.
+            return terminal if native else self._terminal(plan, outer_year, inner_year, candidate_id)[1]
         if submitted is None:
             submitted = self._forecasts(forecasts, inner, plan["horizons"])
         terminal = self._read("terminal:" + key)
@@ -406,6 +414,14 @@ class SearchTrials:
         validate_targets(inputs["preflight"], inner, validation["evaluation_inputs"], validation["targets"])
 
     def _terminal(self, plan, outer_year, inner_year, candidate_id):
+        key, record = self._terminal_record(plan, outer_year, inner_year, candidate_id)
+        attempt = self._read("execution-start:" + key)
+        if attempt is not None:
+            self._execution_receipt(plan, outer_year, inner_year, candidate_id, record, attempt)
+        return key, record
+
+    def _terminal_record(self, plan, outer_year, inner_year, candidate_id):
+        """Verify terminal evidence; the caller also verifies any native receipt."""
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
         record = self._read("terminal:" + key)
         if record is None:
@@ -466,9 +482,6 @@ class SearchTrials:
                     raise ValueError
         except (ValueError, TypeError, KeyError, OverflowError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial evidence chain differs") from None
-        attempt = self._read("execution-start:" + key)
-        if attempt is not None:
-            self._execution_receipt(plan, outer_year, inner_year, candidate_id, record, attempt)
         return key, record
 
     def freeze(self):

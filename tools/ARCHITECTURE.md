@@ -34,4 +34,33 @@ Opt-in guard against a heavy job filling the host disk (WSL's virtual disk never
 
 ## `bounded_run.py` dependencies
 
-Callers are `tools/v2_resource_measurement.py`, `tools/land.py` and `tools/oc_check.py`; depends only on the stdlib and Linux `/proc`, `os.statvfs`.
+Callers are `tools/v2_resource_measurement.py`, `tools/land.py`, `tools/oc_check.py`, `checks/rearchitecture_phase2_render_parity.py` and the `ops/systemd/native-nightly-trigger.service` unit; depends only on the stdlib and Linux `/proc`, `os.statvfs`.
+
+## `mutation_pilot.py run`: leftover-process sweep
+
+`cmd_run` makes the pilot a Linux child subreaper (`prctl(PR_SET_CHILD_SUBREAPER)`) before launching mutmut, so a test worker orphaned when mutmut kills a timed-out mutant reparents to the pilot instead of init. After mutmut returns (normally, after the time-budget stop, or on an exception) `_reap_descendants` SIGKILLs every descendant it finds, so a leftover process normally cannot keep the CI step's stdout pipe open. This is best effort, not a guarantee: a process that survives SIGKILL, or whose parent was not reparented to the pilot, can still hold the pipe (see the table).
+
+| Condition | Outcome |
+|---|---|
+| mutmut exits normally, by budget stop (124) or by exception | the sweep runs in `finally`; the mutmut exit code is returned unchanged and the exception still propagates. |
+| subreaper unavailable (non-Linux or `prctl` fails) | `child subreaper: no` is printed; only descendants still attached to the process tree are found, orphans reparented to init are not. Off Linux the sweep is a silent no-op. |
+| descendants found | one stderr line `killed N leftover descendant process(es)` plus a bounded number of `pid=… cmd=…` lines with a truncated command; if more were killed than lines shown, a final `... and N more` line follows; zombies are not counted. |
+| a descendant forks during the sweep | the sweep rescans until no unsignalled live descendant remains or a bounded deadline passes. |
+| a process survives SIGKILL | logged as `did not exit after SIGKILL` and abandoned; the wait is bounded. |
+| any error inside the sweep | logged as `descendant sweep failed`, returns 0, never raises and never changes the exit code. |
+
+No mutant is excluded or skipped by the sweep.
+
+## Mutation stats diagnostics
+
+Mutation diagnostics are optional evidence, never authority over a backend result or score. The mutation workflow calls `mutation_pilot.py`, which configures pytest to load `mutation_stats_diagnostics.py`. That plugin consumes pytest's stats-phase reports (including captured setup/call/teardown and collection output, plus internal errors) and writes at most 64 KiB per module to a sidecar. The driver clears stale evidence before launch and consumes the sidecar afterward, exposing at most 64 KiB on stderr after a failed backend. CI attempts to retain fresh evidence before result export; neither collection nor delivery reruns tests or enables per-mutant debug output.
+
+| Condition | Outcome |
+|---|---|
+| No stats failure, or a mutant-phase report | No diagnostic report is added; ordinary backend behavior is unchanged. |
+| Stale sidecar cannot be cleared | Evidence is disabled for this run with a best-effort warning; the backend still runs, old bytes are not echoed, and CI excludes files older than the run start. |
+| Sidecar creation/write or its warning fails | Best-effort evidence is abandoned; pytest's original outcome remains authoritative. |
+| Failure echo cannot be read/written, or CI cannot copy evidence | The backend exit remains unchanged and result export is still attempted. An export failure remains a failure, not a fabricated result. |
+| Evidence exceeds its byte budget | The retained evidence is truncated, not the failure outcome. |
+
+Authored-source import/size policies consume the uninstrumented work snapshot selected by the driver; behavioral tests still exercise instrumented imports. Operator details and artifact names are in [the testing guide](../tests/README.md).
