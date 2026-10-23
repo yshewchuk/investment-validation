@@ -756,10 +756,12 @@ def test_builder_deeply_detaches_nested_caller_objects(native):
     producer["environment"]["libraries"]["numpy"] = "caller-poison"
     assert context == original
     assert plan.validate_context(context) is None
+    caller_binding, caller_producer = copy.deepcopy(binding), copy.deepcopy(producer)
     context["history_context"]["temporal_plan"]["events"].clear()
+    context["history_context"]["producer"]["environment"]["numerical_threads"] = 999
     context["producer"]["environment"]["libraries"]["numpy"] = "result-poison"
-    assert binding["temporal_plan"]["events"]
-    assert producer["environment"]["libraries"]["numpy"] == "caller-poison"
+    assert binding == caller_binding
+    assert producer == caller_producer
 
 
 @pytest.mark.parametrize("missing", ["source", "history"])
@@ -1547,4 +1549,68 @@ def test_equal_float_horizons_refuse_before_reconstruction_or_normalization(nati
         else:
             plan.preflight_context(source.repository, source.snapshot, output, context)
     assert (caught.value.code, caught.value.problem.message) == (code, message)
+    assert scans == []
+
+
+@pytest.mark.parametrize("field", ["numerical_threads", "python", "libraries", "events"])
+@pytest.mark.parametrize("boundary", ["builder", "detached", "preflight"])
+def test_nested_history_nonplain_types_refuse_before_normalization(native, monkeypatch, field, boundary):
+    source, output, binding, producer, original = native
+    changed = copy.deepcopy(binding)
+    parent = changed["temporal_plan"] if field == "events" else changed["producer"]["environment"]
+    value = parent[field]
+    parent[field] = type("NonPlain", (type(value),), {})(value)
+    assert changed == binding and content_hash(changed) == content_hash(binding)
+    context = copy.deepcopy(original)
+    context["history_context"] = changed
+    assert content_hash(context) == content_hash(original)
+    scans = _metadata_only(monkeypatch, source.repository)
+    message = "invalid panel history metadata" if boundary == "builder" else "invalid research panel context"
+    with pytest.raises(DataError) as caught:
+        if boundary == "builder":
+            plan.build_context(source.repository, source.snapshot, output, changed, producer=producer)
+        elif boundary == "detached":
+            plan.validate_context(context)
+        else:
+            plan.preflight_context(source.repository, source.snapshot, output, context)
+    assert (caught.value.code, caught.value.problem.message) == ("CONTRACT_MISMATCH", message)
+    assert scans == []
+
+
+def test_rows_construct_dictionary_once_per_validation_not_per_row(native, monkeypatch):
+    context = native[-1]
+    rows = _rows(context)
+    assert len(rows) > 2
+    original = table.feature_dictionary
+    calls = []
+
+    def counted(subset="HMO"):
+        calls.append(subset)
+        return original(subset)
+
+    monkeypatch.setattr(table, "feature_dictionary", counted)
+    for _ in range(2):
+        assert table.validate_rows(rows, context) is None
+    # Each call independently validates the recipe and builds one row-check dictionary.
+    assert calls == ["HMO", "HMO", "HMO", "HMO"]
+
+
+@pytest.mark.parametrize("boundary", ["builder", "detached", "preflight"])
+def test_nonplain_availability_lane_refuses_before_normalization(native, monkeypatch, boundary):
+    source, output, binding, producer, original = native
+    lane = type("NonPlainLane", (str,), {})("reconstructed")
+    context = copy.deepcopy(original)
+    context["availability_lane"] = lane
+    assert context == original and content_hash(context) == content_hash(original)
+    scans = _metadata_only(monkeypatch, source.repository)
+    message = "invalid panel availability lane" if boundary == "builder" else "invalid research panel context"
+    with pytest.raises(DataError) as caught:
+        if boundary == "builder":
+            plan.build_context(source.repository, source.snapshot, output, binding,
+                               producer=producer, availability_lane=lane)
+        elif boundary == "detached":
+            plan.validate_context(context)
+        else:
+            plan.preflight_context(source.repository, source.snapshot, output, context)
+    assert (caught.value.code, caught.value.problem.message) == ("CONTRACT_MISMATCH", message)
     assert scans == []

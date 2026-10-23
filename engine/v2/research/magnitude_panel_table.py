@@ -136,10 +136,10 @@ def _lineage(row):
             raise ValueError
 
 
-def _values(row):
+def _values(row, dictionary):
     """Closed finite numeric types; never convert a missing quote to numeric zero."""
     validate_features(row, row["n_prior"])
-    for field in feature_dictionary():
+    for field in dictionary:
         value = row[field["name"]]
         if value is None:
             if not field["nullable"]:
@@ -162,6 +162,7 @@ def validate_rows(rows, context):
     with stage("panel rows", report_refusals=True):
         try:
             progress = Progress("panel rows", len(expected))
+            dictionary = feature_dictionary()
             for row in rows:
                 key = row["event_id"], row["horizon_sessions"]
                 if (set(row) != set(METADATA) | set(FEATURES) or key in seen or key not in expected
@@ -174,7 +175,7 @@ def validate_rows(rows, context):
                         "source_session_ceiling": cutoff["source_session_ceiling"]}
                 if any(row[name] != value for name, value in pins.items()):
                     raise ValueError
-                _values(row)
+                _values(row, dictionary)
                 _lineage(row)
                 if row["row_id"] != content_hash({k: v for k, v in row.items() if k != "row_id"}):
                     raise ValueError

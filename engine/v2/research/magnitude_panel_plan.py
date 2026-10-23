@@ -247,6 +247,17 @@ def _panel_snapshot(snapshot):
         raise errors.fail("CONTRACT_MISMATCH", "invalid panel snapshot reference") from None
 
 
+def _builder_producer(producer, availability_lane):
+    """Refuse non-plain producer/lane metadata before repository admission."""
+    try:
+        _json_document(producer)
+        _producer(producer)
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):
+        raise errors.fail("CONTRACT_MISMATCH", "invalid panel producer metadata") from None
+    if type(availability_lane) is not str or availability_lane != "reconstructed":
+        raise errors.fail("CONTRACT_MISMATCH", "invalid panel availability lane")
+
+
 def build_context(repository, source_snapshot, history_snapshot, history_context, *,
                   producer, availability_lane="reconstructed"):
     """Bind exact artifacts, protected population and isolated fragments before payloads.
@@ -254,15 +265,17 @@ def build_context(repository, source_snapshot, history_snapshot, history_context
     Only population/calendar metadata is scanned. No history, outcomes, price or
     daily-state values are decoded. The returned plan expressly grants no raw reads.
     """
-    try:
-        _json_document(producer)
-        _producer(producer)
-    except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):
-        raise errors.fail("CONTRACT_MISMATCH", "invalid panel producer metadata") from None
+    _builder_producer(producer, availability_lane)
     for snapshot in (source_snapshot, history_snapshot):
         _panel_snapshot(snapshot)
     if type(history_context) is not dict:
         raise errors.fail("CONTRACT_MISMATCH", "explicit panel snapshot/context types required")
+    try:
+        _json_document(history_context)
+    except RecursionError:
+        raise errors.fail("IDENTITY_CONFLICT", "history binding differs from source metadata") from None
+    except ValueError:
+        raise errors.fail("CONTRACT_MISMATCH", "invalid panel history metadata") from None
     if (repository.resolve(source_snapshot.snapshot_id) != source_snapshot
             or repository.resolve(history_snapshot.snapshot_id) != history_snapshot
             or history_context.get("source_snapshot") != to_document(source_snapshot)):

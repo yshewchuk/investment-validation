@@ -45,8 +45,7 @@ and the complete observed forecast calendar with its separately bound source met
 Detached validation checks JSON types, closed event/request/recipe/producer schemas,
 native-derived folds, fragment lists and calendar-source consistency; repository
 preflight still authenticates membership and source truth.
-Detached validation reconstructs each
-horizon cutoff through `magnitude_inputs.forecast_cutoff`; hashes alone are insufficient.
+Horizon cutoffs require native calendar reconstruction, not hashes alone.
 Public history interfaces `validate_context_identity`, `validate_event_forecasts`,
 `preflight_source` and `validate_features` share existing validation without new authority.
 `magnitude_features.calendar_input` exposes session metadata;
@@ -56,19 +55,19 @@ refusing with `CONTRACT_MISMATCH`. No raw payload permission is issued;
 raw-source protected-event policy is not implemented by this plan. There is no writer,
 materializer, CLI, model or registration integration.
 
-Panel `validate_context`, `build_context` and `preflight_context` use shared snapshot shape checks.
-Detached panel validation, including nested history, uses `CONTRACT_MISMATCH`;
-builder/repository reconstruction retains native refusals instead of relabeling them.
-Direct history `validate_context_identity` retains native `IDENTITY_CONFLICT`, but maps caught
-serialization/structural errors to `CONTRACT_MISMATCH`; `preflight_source` maps those errors to `IDENTITY_CONFLICT`.
+Panel boundaries require plain JSON, including nested history before normalization.
+Detached validation uses `CONTRACT_MISMATCH`; repository reconstruction retains native refusals.
 
 | Condition | Outcome |
 | --- | --- |
 | Invalid detached panel identity/schema, nested digest/folds, snapshot, calendar, cutoff or row | `CONTRACT_MISMATCH` |
 | Malformed or forged direct calendar snapshot | `SNAPSHOT_UNRESOLVED` |
 | Empty native observed session calendar | `CALENDAR_UNAVAILABLE` |
-| Malformed builder producer/snapshot reference or non-dict history context | `CONTRACT_MISMATCH` |
-| Dict history digest/minimum shape, committed snapshot binding or recomputed admission differs | `IDENTITY_CONFLICT` |
+| Malformed builder producer/snapshot, non-plain history metadata or invalid lane | `CONTRACT_MISMATCH` |
+| Native history identity/digest or committed binding differs | `IDENTITY_CONFLICT` |
+| Builder history metadata exceeds structural depth | Existing native `IDENTITY_CONFLICT` |
+| Caught structural/serialization error in direct `validate_context_identity` / `preflight_source` | `CONTRACT_MISMATCH` / `IDENTITY_CONFLICT`, respectively; native `DataError` passes through |
+| Invalid `validate_event_forecasts`, `validate_features`, `canonical_day` or feature subset input | `CONTRACT_MISMATCH` |
 | Protected requested event or unprovable physical isolation | `HOLDOUT_ACCESS_DENIED` |
 | Snapshot ID is absent from the native catalog | `SNAPSHOT_NOT_FOUND` |
 | Catalog snapshot/manifest identity is inconsistent | `MANIFEST_CORRUPT` |
