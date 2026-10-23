@@ -238,6 +238,26 @@ Failure semantics: building the source members does no I/O, caching, retry or
 fallback; a refusal returns no bundle. Choosing which fold to supply is the
 caller's duty and this input does not select or fall back.
 
+`resolve_release_binding` indexes the release's staged size folds (catalog
+member `tier4_folds:size`) into `ScoringReleaseBinding.size_folds`
+(`SizeFoldCatalog`: the verified parent manifest, the catalog hash and each
+object's `ServingFoldDescriptor` by `fold_start`). Indexing reads descriptors
+only; no estimator is loaded. `select_gate_forecast_source(binding, event_date,
+as_of) -> GateForecastSource` picks the fold by the legacy rule
+`tier4.serving_fold` (the earlier of the event's month and the decision month),
+loads that one fold through `load_serving_fold` and the binding's shared
+`FrozenInference`, and returns the source.
+
+| Condition | Outcome |
+| --- | --- |
+| Release stages no `tier4_folds:size` member, or it is not `STAGED` | Empty catalog; selection raises `ModelNotReady` |
+| Object without a `serving_fold` descriptor, undecodable descriptor, descriptor `estimator` path or hash differing from the catalog object, duplicate `fold_start` | `ModelNotReady` at `resolve_release_binding` |
+| No staged fold for the selected month | `ModelNotReady("tier4_folds:size", ...)`; never an older fold |
+| Fold fails verification or loading (`ServingFoldError`) | `ModelNotReady`; no fallback to another fold |
+| `event_date` or `as_of` not an ISO date | `ValueError` |
+
+Selection does no writes and keeps no state beyond the shared inference cache.
+
 Raw feature names exclude stage-owned forecast/analog/pricing answers; the
 gate's declared feature order still includes them for stage-time derivation.
 6c must provide the required raw inputs and observation anchor for the driver,
