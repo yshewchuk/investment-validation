@@ -250,6 +250,9 @@ def _run_reader(repository, contract, plans, index):
         run = run_of[event.event_id]
         state = streams.get(id(run))
         if state is None:
+            for other in list(streams.values()):  # at most one run stream stays open
+                other[3].close()
+            streams.clear()
             scan, rows = open_run(run)
             state = streams[id(run)] = [rows, {}, "", scan]
         rows, by_day, _, scan = state
