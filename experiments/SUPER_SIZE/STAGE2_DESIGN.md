@@ -154,7 +154,7 @@ Do not use coefficients from all data to preselect inner-fold features.
 Cross each of H/HM/HMO with Ridge alpha [0.1, 1, 10], ElasticNet's six combinations,
 and two HGB configurations: current fixed defaults with max_leaf_nodes [7, 15].
 All remaining HGB knobs stay fixed as in SPEC. This yields **33 candidates**.
-Candidate identity binds family, ordered dictionary hash, all parameters, preprocessing, seed 0, projection and feature/source identities. No greedy subset
+Executable candidate identity binds family, ordered dictionary hash, all parameters, preprocessing, seed 0, projection and feature/source identities. Section 6's `candidate_spec_id` is a precursor, not this fit identity. No greedy subset
 search, recursive elimination, global importance screen or outer-score tuning.
 
 Inner years/complete labels precede the outer fit cutoff; expanding training uses earlier, strictly available labels;
@@ -204,8 +204,8 @@ spec reservations or key collisions refuse without overwrite. One plan per ancho
 (run_id, slot) journal keys bind the v2 request/plan hash and limits. Artifact publication
 precedes catalog commit; orphan bytes confer no reservation. Replay never restarts fits.
 
-Proposed development schedule: outer_years [2022, 2023, 2024]; inner_years
-{"2022": [2020, 2021], "2023": [2021, 2022], "2024": [2022, 2023]}.
+Proposed development schedule: outer_years ["2022", "2023", "2024"]; inner_years
+{"2022": ["2020", "2021"], "2023": ["2021", "2022"], "2024": ["2022", "2023"]}.
 Training begins at the anchor's explicit training_start, before the first inner year.
 These are prospective choices, not verified coverage. Metadata-only admission must
 confirm source coverage and holdout eligibility before sealing; insufficient years
@@ -280,15 +280,17 @@ Re-estimate before each PR and split at repository limits; these estimates grant
 
 | Order | PR / dependency | Acceptance | Added lines: code / tests / docs | Rough effort |
 | --- | --- | --- | --- | --- |
-| 0 | This design + SPEC link | Design reviewed before code | 0 / 0 / 280–300 | This PR |
+| 0 | Initial design + SPEC link (historical estimate) | Design reviewed before code | 0 / 0 / 280–300 | Initial PR |
+| 0C | Section 6 checkpoint | Publish before compiler code | 0 / 0 / 120–150 | This design refinement |
 | P | Shared versioned eligibility policy / 0 | Grouped ticker/time exclusions, stable eval membership, cross-consumer identity/admission tests; no v1 migration | 200–320 / 250–400 / 35–60 | 0.5 day |
 | 1 | Versioned panel schema + metadata-only plan | Closed dictionary, protected fragment refusal, identity tests | 220–340 / 250–400 / 30–60 | 0.5 day |
 | 2 | Batched causal feature materializer / 1,P | Horizon/availability, poisoned future/protected rows, batch invariance, read-count tests | 300–400 / 350–550 / 40–70 | 1 day |
 | 3 | Stored reader + snapshot join / 2 | Missingness/coverage and mismatch refusal; no runtime build | 200–320 / 250–400 / 30–60 | 0.5 day |
 | 4 | ElasticNet recipe + subset identity / 3 | Train-only preprocessing, convergence/failure, sparse selection tests | 160–280 / 200–350 / 25–50 | 0.5 day |
-| 5 | v2 bounded planner/executor wiring / 4,P | Exact 33/603 counts, temporal rejection, immutable replay | 280–400 / 300–500 / 40–80 | 0.5–1 day |
+| 5a | Pure request/schedule compiler / 0C,1,P | Closed specifications/counts, identity, no source reads or execution | 180–280 / 250–400 / 30–60 | 0.5 day |
+| 5b | v2 bounded planner/executor wiring / 5a,4,P | Fixture-specific 33/603 counts, temporal rejection, immutable replay | 280–400 / 300–500 / 40–80 | 0.5–1 day |
 | 6 | Causal legacy comparison adapter / 3 | Pinned recipe parity, same clocks, protected implied history | 250–380 / 300–500 / 35–70 | 0.5–1 day |
-| 7 | Matched report + request fixture / 5,6 | Paired membership/weights, bootstrap determinism, coverage, receipt checks | 220–350 / 250–400 / 40–80 | 0.5 day |
+| 7 | Matched report + request fixture / 5b,6 | Paired membership/weights, bootstrap determinism, coverage, receipt checks | 220–350 / 250–400 / 40–80 | 0.5 day |
 
 PRs P, 2 and 6 are schedule risks. If they exceed their slices, narrow optional
 feature blocks before sealing; keep causality and the legacy comparison mandatory.
@@ -309,7 +311,8 @@ Proposed public API: `experiments.magnitude_search_request.compile_request(reque
 Input is a detached plain-JSON document, not JSON text, a file or a repository.
 Only built-in dict/list/string/int/float/bool/null types are allowed; dictionary
 keys are strings, numbers finite, and cycles/non-JSON aliases refuse. Integer
-fields exclude booleans. The caller's JSON parser must reject duplicate keys.
+fields exclude booleans. Any future text/CLI parser must reject duplicate keys;
+the current object-only API cannot recover duplicate keys already discarded.
 Standard-library JSON/product and foundation canonical hashing suffice; use the
 existing panel `recipe(subset)`, shared `eligibility_policy`, and public child
 `validate_execution_limits`. Do not duplicate membership or source admission.
@@ -335,10 +338,10 @@ The schema literal is `magnitude_search_request.v2`. No defaults or extra keys.
 | `feature_dictionary_hash` | Equals the current full HMO dictionary hash returned by the owning panel recipe. This is dictionary-version compatibility, not snapshot membership. |
 | `eligibility_policy_ref` | Exactly `{"schema_ref":"group_eligibility_plan.v1","plan_id":<hash>,"policy_id":<hash>}`. Policy ID must equal the shared `grouped_ticker_embargo.v1` policy with 30 calendar days. This identity-only plan reference is not an ArtifactRef or read capability. |
 | `feature_sets` | Exactly `["H","HM","HMO"]`, in that order; no arbitrary subsets/columns. The owning panel helper supplies each ordered dictionary and quote/missing policy. |
-| `space` | Exactly the three grids below. Integer/float aliases for numerical grid values normalize to the shown numeric types; booleans, changed/reordered/duplicate/missing axes or values refuse. |
+| `space` | Exactly the three grids below. Integer/float aliases for numerical grid values normalize to the shown numeric types. Object-key order (families and axes) is irrelevant; changed/missing/extra axes and reordered/duplicate/changed/missing values refuse, as do booleans. |
 | `outer_years` | Nonempty strictly increasing unique four-digit ASCII year strings, from `0002` through `9998`. |
 | `inner_years` | Object with exactly the outer-year keys; each value is a nonempty strictly increasing unique list of valid earlier year strings. No event coverage or cutoff availability is inferred. |
-| `max_candidates` | Explicit positive integer cap, at least the expanded count. The closed grid still contains only 33 candidates; a larger cap never adds candidates. |
+| `max_candidates` | Explicit positive integer cap, at least the calculated Cartesian-product count, checked before enumeration. The closed grid still contains only 33 candidates; a larger cap never adds candidates. |
 | `max_fits` | Explicit positive integer cap, at least the calculated search fit count. It counts attempted logical horizon fits, including failures; this compiler performs none. |
 
 ```json
@@ -367,7 +370,8 @@ job:    wall_seconds
 
 Every value is a built-in positive integer below `sys.maxsize`; no null/unbounded
 value, coercion or implicit default. Reuse the current public child-limit
-validator; parent/build/job scalars use the same integer domain. Child limits
+validator `validate_execution_limits`; validate parent/build/job shapes separately with
+the same integer domain, without calling the CPU-resolving `execution_limits`. Child limits
 describe one bounded trial/outer worker invocation, potentially containing three
 horizon fits, not three separately allocated budgets. Other limits describe the
 parent orchestrator, panel build and complete job respectively. This stage only
@@ -392,7 +396,9 @@ Let C be the candidate count, I the sum of inner-year counts, O the outer count:
 `search_fits=3*(C*I+O)`, `baseline_logical_fits=3*O`,
 `baseline_component_fits=6*O`, `total_logical_fits=search_fits+3*O`, and
 `total_component_fits=search_fits+6*O`. Caps are checked before expansion.
-The design schedule gives 33/603/9/18/612/621; 603 is not universal for other years.
+The proposed schedule has `candidates=33`, `inner_folds=6`, `outer_folds=3`,
+`search_fits=603`, `baseline_logical_fits=9`, `baseline_component_fits=18`,
+`total_logical_fits=612`, `total_component_fits=621`; 603 is not universal.
 
 Malformed declarations, incompatible dictionary/policy, year-order violations,
 or insufficient caps raise nonretryable `INVALID_EXPERIMENT_SPEC`, with no partial
