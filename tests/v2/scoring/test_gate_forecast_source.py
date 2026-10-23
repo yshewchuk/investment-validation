@@ -10,12 +10,14 @@ from the source itself.
 from __future__ import annotations
 
 import dataclasses
+import math
 
 import pytest
 
 from engine.v2.models.contracts import ArtifactMember, ModelBinding, ModelRelease
 from engine.v2.models.loader import FrozenInference
 from engine.v2.scoring.gate_forecast_source import GateForecastSource
+from engine.v2.scoring.native_gate_features import gate_forecast_columns
 from engine.v2.scoring.source_inputs import SourceBundle, build_native_score_inputs
 
 EVENT = "2026-09-16"
@@ -149,7 +151,14 @@ def test_source_builds_a_thin_pool_and_carries_the_executor_inference(tmp_path):
     # band columns become unavailable at stage time (ARCHITECTURE.md).
     thin = _source(tmp_path, pool_pred=(1.0, 2.0), pool_res=(0.1, 0.2),
                    interval_floor=None)
-    build_native_score_inputs(_bundle(tmp_path, thin))
+    thin_gate = build_native_score_inputs(_bundle(tmp_path, thin)).gate
+    thin_pool = thin_gate["forecast_pool"]
+    assert thin_pool == {"predictions": (1.0, 2.0), "residuals": (0.1, 0.2),
+                         "interval_floor": None}
+    band = gate_forecast_columns(1.0, thin_pool, None)
+    assert math.isnan(band["pred_abs_move_p10"])
+    assert math.isnan(band["pred_abs_move_p90"])
+    assert math.isnan(band["pred_abs_move_sd"])
 
 
 def test_source_not_a_gate_forecast_source_instance(tmp_path):
@@ -186,8 +195,20 @@ def test_duplicate_binding_id_in_release_is_refused(tmp_path):
     (float("inf"), {"pool_res": [0.1, float("inf"), 0.3]}),
 ], ids=["nan-pred", "nan-res", "inf-res"])
 def test_non_finite_pool_values_are_refused(tmp_path, bad, overrides):
-    with pytest.raises(ValueError, match="pool values must be finite"):
+    with pytest.raises(ValueError, match="must be finite"):
         build_native_score_inputs(_bundle(tmp_path, _source(tmp_path, **overrides)))
+
+
+@pytest.mark.parametrize("field", ["gate_forecast_pool", "forecast_pool"])
+def test_non_finite_legacy_pool_values_are_refused(tmp_path, field):
+    pool = {"predictions": [1.0, float("nan"), 3.0],
+            "residuals": [0.1, 0.2, 0.3], "interval_floor": 0.0}
+    if field == "gate_forecast_pool":
+        bundle = _bundle(tmp_path, None, pool=pool)
+    else:
+        bundle = dataclasses.replace(_bundle(tmp_path, None), forecast_pool=pool)
+    with pytest.raises(ValueError, match="must be finite"):
+        build_native_score_inputs(bundle)
 
 
 def test_non_finite_interval_floor_is_refused(tmp_path):

@@ -216,16 +216,15 @@ ordinary bundle path remains valid when the source is absent.
 | Condition | Outcome |
 | --- | --- |
 | Source plus `gate_recipe.forecast`, or plus a non-empty `gate_forecast_pool` | `ValueError` at bundle build (row refused `NATIVE_INPUT_BUILD_FAILED`); never resolved by precedence |
-| Not a `GateForecastSource`, missing inference, blank `binding_id`, `binding_id` not exactly one `size` binding in its release, ragged or non-finite source pool | `ValueError` at bundle build |
+| Not a `GateForecastSource`, `release` not a `ModelRelease`, `inference` not a `FrozenInference`, blank `binding_id`, `binding_id` not exactly one binding of its release, that binding not role `size`, ragged pool | `ValueError` at bundle build |
+| Non-finite value in any declared fold pool (`gate_forecast_pool`, `forecast_pool`, source pool, `interval_floor`) | `ValueError` at bundle build (`fold_pool` applies this to every pool) |
 | Gate names no forecast column | Executor and pool are built but the stage never calls them; no flag |
-| Source absent, gate names a forecast column | `MISSING_GATE_INPUT:forecast` at the stage |
-| Thin pool | Band columns unavailable, not an error |
+| Source absent, gate names a forecast column | Bundle builds; the stage flags `MISSING_GATE_INPUT:forecast` |
+| Thin pool | Bundle builds; the stage leaves the band columns unavailable |
 
 Failure semantics: building the source members does no I/O, caching, retry or
-fallback; a refusal returns no bundle. The caller selects the fold by the
-legacy rule `tier4.serving_fold` (the earlier of the event's month and the
-decision month); a month with no staged fold is `ModelNotReady`, never an older
-fold.
+fallback; a refusal returns no bundle. Choosing which fold to supply is the
+caller's duty and this input does not select or fall back.
 
 Raw feature names exclude stage-owned forecast/analog/pricing answers; the
 gate's declared feature order still includes them for stage-time derivation.

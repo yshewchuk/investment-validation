@@ -734,26 +734,15 @@ def _source_gate_forecast_members(
     release = source.release
     if not isinstance(release, ModelRelease):
         raise ValueError("gate_forecast_source.release must be a ModelRelease")
-    matches = [item for item in release.bindings if item.binding_id == binding_id]
-    if len(matches) != 1:
-        raise ValueError(
-            f"gate_forecast_source binding {binding_id!r} must be exactly one "
-            "size binding of its release"
-        )
     executor = _frozen_recipe_executor(
         bundle, "pred_abs_move", {"binding_id": binding_id},
         inference=inference, release=release,
     )
-    for label, values in (("pool_pred", source.pool_pred),
-                          ("pool_res", source.pool_res)):
-        for value in values:
-            try:
-                finite = isfinite(float(value))
-            except (TypeError, ValueError):
-                finite = False
-            if not finite:
-                raise ValueError(
-                    "gate_forecast_source pool values must be finite numbers")
+    if executor.role is None:
+        raise ValueError(
+            f"gate_forecast_source binding {binding_id!r} must be exactly one "
+            "size binding of its release"
+        )
     pool = fold_pool("gate_forecast_source", {
         "predictions": source.pool_pred, "residuals": source.pool_res,
         "interval_floor": source.interval_floor,
@@ -772,8 +761,14 @@ def fold_pool(name: str, values: Mapping[str, Any]) -> dict[str, Any]:
     pool = _bounded_recipe(name, values, _GATE_FORECAST_POOL_FIELDS)
     if not pool:
         return {}
-    predictions = tuple(float(value) for value in pool.get("predictions", ()))
-    residuals = tuple(float(value) for value in pool.get("residuals", ()))
+    predictions = tuple(
+        _finite_number(value, f"{name}.predictions[{i}]")
+        for i, value in enumerate(pool.get("predictions", ()))
+    )
+    residuals = tuple(
+        _finite_number(value, f"{name}.residuals[{i}]")
+        for i, value in enumerate(pool.get("residuals", ()))
+    )
     if len(predictions) != len(residuals):
         raise ValueError(f"{name} predictions and residuals differ in length")
     floor = pool.get("interval_floor", 0.0)
