@@ -143,6 +143,9 @@ def _plans(repository, snapshot, candidates, contract, *, columns=None):
 def plan_with_reader(repository, snapshot, candidates, contract):
     """`_plans` plus a run-batched ``read_rows(event, request)`` that shares the same record index."""
     _check_candidates(candidates)
+    if ("event_id" not in candidates.columns or candidates.event_id.isna().any()
+            or candidates.event_id.duplicated().any()):
+        raise errors.fail("CONTRACT_MISMATCH", "event target candidates are malformed")
     index = _record_index(repository.fragment_records(snapshot, contract.table_name), contract)
     plans = _plans_from_index(index, repository, snapshot, candidates, contract, None)
     return plans, _run_reader(repository, contract, plans, index)

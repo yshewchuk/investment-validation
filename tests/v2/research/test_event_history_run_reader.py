@@ -40,6 +40,10 @@ def _outcome_scans(repository, start):
     return [query for name, query in repository.scans[start:] if name == "computed_moves"]
 
 
+def _per_candidate(repository, request):
+    return [row for batch in repository.scan(request, table_name="computed_moves") for row in batch.to_pylist()]
+
+
 def test_rows_match_per_candidate_scans_with_one_scan_per_run_and_protected_unopened(source, monkeypatch):
     repository, snapshot = source
     poison_outcomes(monkeypatch, repository, snapshot, [PROTECTED])
@@ -66,6 +70,7 @@ def test_stream_opens_one_object_per_requested_candidate_and_caches(source, monk
     start = len(repository.scans)
     assert read_rows(plans[0][0], plans[0][1]) is first
     assert len(repository.scans) == start and len(opened) == base + 2
+    assert first == _per_candidate(repository, plans[0][1])  # after the opened-count assertions
 
 
 def test_membership_mismatch_refuses_before_any_object_opens(source, monkeypatch):
@@ -146,7 +151,9 @@ def test_retry_after_rows_accumulated_returns_full_rows(source, monkeypatch):
         raise errors.fail("MANIFEST_CORRUPT", "synthetic scan failure")
 
     monkeypatch.setattr(repository, "scan", flaky)
-    assert read_rows(plans[0][0], plans[0][1])  # the first batch succeeds
+    first = read_rows(plans[0][0], plans[0][1])  # the first batch succeeds
+    assert first == [row for batch in original(plans[0][1], table_name="computed_moves")
+                     for row in batch.to_pylist()]
     with pytest.raises(DataError, match="(?s)MANIFEST_CORRUPT.*synthetic scan failure"):
         read_rows(plans[1][0], plans[1][1])
     rows = read_rows(plans[1][0], plans[1][1])  # a retry re-scans the run from its start
@@ -216,7 +223,9 @@ def test_unplanned_event_refuses_and_malformed_candidates_refuse_contract_mismat
         read_rows(stranger, plans[0][1])
     population = load_population(repository, snapshot, as_of_month=MONTH, purpose="selection")
     for bad in (population.drop(columns=["ticker"]), population.assign(ticker=" " + population.ticker),
-                population.assign(event_date=population.event_date + pd.Timedelta(hours=1))):
+                population.assign(event_date=population.event_date + pd.Timedelta(hours=1)),
+                population.drop(columns=["event_id"]), population.assign(event_id=population.event_id.iloc[0]),
+                population.assign(event_id=None)):
         with pytest.raises(DataError, match="(?s)CONTRACT_MISMATCH.*event target candidates are malformed"):
             event_history.plan_with_reader(repository, snapshot, bad, COMPUTED_MOVES_CONTRACT)
 
@@ -245,6 +254,7 @@ def test_run_stream_is_closed_after_its_last_candidate(source, monkeypatch):
     read_rows(plans[2][0], plans[2][1])
     assert closed == [DAYS[0]]  # the run's last candidate closes it immediately
     assert read_rows(plans[1][0], plans[1][1])[0]["event_date"] == DAYS[1]
+    assert read_rows(plans[1][0], plans[1][1]) == _per_candidate(repository, plans[1][1])
 
 
 def _plan_at(day):
@@ -267,7 +277,8 @@ def test_cached_event_still_refuses_a_mismatched_day_or_request(source):
     repository, snapshot = source
     plans, read_rows = _plan(repository, snapshot)
     event, request, _ = plans[0]
-    read_rows(event, request)  # now cached
+    first = read_rows(event, request)  # now cached
+    assert first == _per_candidate(repository, request)
     wrong_day = SimpleNamespace(event_id=event.event_id, ticker=event.ticker, event_date=plans[1][0].event_date)
     with pytest.raises(DataError, match="(?s)HOLDOUT_ACCESS_DENIED.*event or request was not preflighted for this reader"):
         read_rows(wrong_day, request)
