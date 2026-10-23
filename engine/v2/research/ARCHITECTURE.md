@@ -73,7 +73,7 @@ committed, session-joined trades with legacy-compatible columns and holdout cont
 `replay()`'s calendar instead of a second implementation or legacy CSV fallback.
 `_pricing.execution_variant_label` supplies `experiments/v2_candidate_grid.py`'s
 `price_candidate_grid` with replay's execution-variant labels for each priced
-grid-position step (issue #266 slice 2).
+grid-position step.
 
 Experiment training, selection-fold and sweep reads exclude the union of the
 two holdouts specified in [#373](https://github.com/yshewchuk/investment-validation/pull/373).
@@ -581,7 +581,7 @@ This bounds retained unmatched rows, not total process RSS.
 ## Dependencies
 
 `engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `catalog`,
-`objects`, `manifests`, `query`, `computed_moves_table`, `iv_crush_table`), `engine.v2.
+`objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`, `iv_crush_table`), `engine.v2.
 contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`,
 `ObjectRef`, `TableContractRef`, `ColumnContract`, `TableContract`),
 `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
@@ -599,8 +599,8 @@ Stored history publishes new objects/manifests through `data.catalog.commit_snap
 this native write path advances only its dedicated context scope, never source heads.
 `_pricing.py` copies pure primitives from legacy `engine.structures`,
 `engine.fills` and `engine.calendar`; `polygon_fills.option_ticker` is copied
-verbatim from `engine.data.sources.polygon.option_ticker`. Supervisor decision:
-no legacy adapter for research; v2 cannot import legacy without a declared adapter.
+verbatim from `engine.data.sources.polygon.option_ticker`. Research has no legacy
+adapter; v2 cannot import legacy without a declared adapter.
 
 **Known duplication (issue #69):** `_scan.py` (used directly by
 `fill_quality.py`, `polygon_fills.py`, `signal_screen.py`, and
@@ -742,9 +742,7 @@ catalog connection. Two local-file exceptions are outside the snapshot store:
 - `_pricing.trading_calendar()` reads
   `earnings_predictions/data/raw/polygon/gspc_daily.csv` relative to
   `INVESTING_PLAN_ROOT` or the worktree root, only for legacy-parity tests and direct
-  library callers. No other research module imports or calls it; the static guard
-  `test_trading_calendar_csv_fallback_is_not_reachable_from_the_package` checks
-  every package file except `_pricing.py` for imports or bare-name calls.
+  library callers. No other research module imports or calls it.
 
 Replay/build-trades calendars come from pinned snapshots or explicit arguments,
 never this CSV (see Invariants and Failure semantics).
@@ -813,13 +811,13 @@ an uncaught traceback instead.
     `ValueError`.
   - **No declared partition column, or no partition values available at
     all** (no table fragments). `_snapshot.read_table` cannot build a
-    `KeyPredicate` and raises bare `ValueError`, not `DataError` (issue #70).
+    `KeyPredicate` and raises bare `ValueError`, not `DataError`.
     Omitted or empty `partition_keys=[]` derives values from snapshot fragments;
     empty keys alone do not cause this refusal. Valid nonmatching keys return an
-    empty frame. This applies to `replay.py`/`_chains.py`/`_trades_publish.py`, not
-    `_scan.py`. Their `v2_replay.py`, `v2_build_trades.py` and
-    `v2_reconcile_trades.py` CLIs catch only `DataError` at `main()`, so this
-    pre-existing condition escapes as an uncaught traceback.
+    empty frame. Affected readers: `_replay_run.py`, `replay.py`, `_chains.py` and
+    `_trades_publish.py`, not `_scan.py`. Their CLIs (`v2_replay.py`,
+    `v2_build_trades.py`, `v2_reconcile_trades.py`) catch only `DataError` at `main()`;
+    this condition escapes as an uncaught traceback.
   - **No overlap rows after a join/filter** (fill quality's
     `since`-filtered join, or `experiment_trades.load_trades`'s
     strategy/provenance filter on the read `trades` table).
@@ -904,9 +902,9 @@ an uncaught traceback instead.
   Missing table: `CONTRACT_MISMATCH`; no valid dates: `CALENDAR_UNAVAILABLE`.
   `plan_events` also refuses `CALENDAR_UNAVAILABLE` when no calendar is supplied.
   CSV changes cannot affect replay/build-trades output; see External systems for
-  the isolated legacy CSV reader and its static guard, Failure semantics for refusals.
-- **Year-scoped rebuilds cannot tombstone other years** (issue #108).
-  `_build_run.run` passes the same `years` to replay's `filter_events` and
+  the isolated legacy CSV reader, Failure semantics for refusals.
+- **Year-scoped rebuilds cannot tombstone other years.**
+  `_build_run.run` passes the same `years` to `_trades_revisions.filter_events` and
   `_trades_revisions.revisions_for_rebuild`. A tombstone requires replay provenance,
   membership in `rebuilt_strategies`, a `trade_id` absent from the rebuild, and
   (when `years` is supplied) the existing row's own `year` in that scope.
