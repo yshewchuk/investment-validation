@@ -300,9 +300,11 @@ def test_public_child_validator_receives_exact_original_scalar_types(monkeypatch
     assert type(seen[-1]["memory_bytes"]) is float
 
 
-def test_v1_planner_does_not_accept_the_new_request():
-    from experiments.magnitude_search_plan import _request
+def test_v1_planner_does_not_accept_the_new_request(monkeypatch):
+    from experiments import magnitude_search_plan
+    monkeypatch.setattr(magnitude_search_plan, "verify_native_registration", fail_if_called)
     with pytest.raises(OpsError) as caught:
-        _request(request())
+        magnitude_search_plan.seal_search_plan(None, None, None, request())
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
     assert caught.value.problem.message == "search requires explicit valid axes, inner years and count caps"

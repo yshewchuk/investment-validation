@@ -251,12 +251,13 @@ canonical hashing implement normalization/enumeration. The owning research
 panel `recipe` supplies ordered subset dictionaries; shared `eligibility_policy`
 fixes the declared 30-day policy. The existing public search child-limit validator
 supplies the child resource domain. No estimator or source reader is called.
+Direct `ops.errors.fail` supplies typed, nonretryable request refusals.
 
 The closed request names pinned snapshot IDs, dictionary hash, an identity-only
 eligibility-plan reference, H/HM/HMO, fixed Ridge/ElasticNet/HGB grids, ordered
 outer/inner years, candidate/fit caps, named comparison and explicit child,
 parent/build/job limits. Identity references prove neither existence nor
-provenance. The [clarified wire contract](https://github.com/yshewchuk/investment-validation/blob/4095cb7fc953811bbcbf2a61ff390251dae3bbce/experiments/SUPER_SIZE/STAGE2_DESIGN.md#6-stage-2-request-and-schedule-compiler-checkpoint), based on the published pre-code checkpoint,
+provenance. The [wire contract](https://github.com/yshewchuk/investment-validation/blob/4095cb7fc953811bbcbf2a61ff390251dae3bbce/experiments/SUPER_SIZE/STAGE2_DESIGN.md#6-stage-2-request-and-schedule-compiler-checkpoint)
 defines the closed nested fields. Scope is request compatibility, not native admission.
 
 | Condition | Enforced outcome |
