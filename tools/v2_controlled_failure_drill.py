@@ -72,7 +72,12 @@ from checks.rearchitecture_phase6_restore_drill import (  # noqa: E402
 )
 from engine.v2.foundation import ArtifactStore, Clock, SystemClock, format_timestamp  # noqa: E402
 from engine.v2.ops import publication  # noqa: E402
-from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup  # noqa: E402
+from engine.v2.ops.backup import (  # noqa: E402
+    manifest_database_path,
+    prepare_backup,
+    restore_backup,
+    run_backup,
+)
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.fingerprints import file_hash  # noqa: E402
@@ -126,14 +131,20 @@ class _Deployment:
 
 
 def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
-    """The same byte-level checks ``run_backup`` itself makes: the manifest
-    names the key and schema, and every file it hashes (the database, and each
-    artifact copy) still hashes to the recorded digest."""
+    """This drill's own byte-level consistency check: the manifest names the
+    key and schema, the database file it selects (falling back to legacy
+    ``<key>.sqlite``) still hashes to the recorded digest, and each artifact
+    copy still hashes to its recorded digest."""
+    if not isinstance(manifest, dict):
+        return False
     if manifest.get("schema_version") != "catalog_backup.v1.0":
         return False
     if manifest.get("backup_key") != key:
         return False
-    database = root / (key + ".sqlite")
+    try:
+        database = manifest_database_path(root, manifest)
+    except ValueError:
+        return False
     if not database.is_file() or file_hash(database) != manifest.get("database"):
         return False
     for name, info in manifest.get("artifacts", {}).items():

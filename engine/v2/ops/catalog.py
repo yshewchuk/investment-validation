@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -92,14 +92,19 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         raise
 
 
-def backup_to(conn: sqlite3.Connection, dest: Path | str) -> None:
-    """A consistent copy through the online backup API, integrity-checked."""
+def backup_to(conn: sqlite3.Connection, dest: Path | str, *,
+              progress: Callable[[int, int, int], None] | None = None) -> None:
+    """A consistent copy through the online backup API, integrity-checked.
+
+    ``progress`` receives sqlite's ``(status, remaining, total)`` page counts;
+    the default preserves the original blocking call.
+    """
     dest = Path(dest)
     if dest.exists():
         raise FileExistsError(dest)
     target = sqlite3.connect(str(dest))
     try:
-        conn.backup(target)
+        conn.backup(target, progress=progress)
         problems = integrity_errors(target)
     finally:
         target.close()
