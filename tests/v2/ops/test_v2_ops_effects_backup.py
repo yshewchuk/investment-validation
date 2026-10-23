@@ -1365,3 +1365,28 @@ def test_legacy_manifest_omitting_optional_fields_validates():
     assert name == "b-shape.sqlite"
     assert size is None
     assert artifacts == {"evidence.bin": {"content_hash": "sha256:" + "2" * 64}}
+
+
+def test_oversized_source_snapshot_is_refused_before_backup_to(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "b29", {}, clock=clock)
+    allocation = (conn.execute("PRAGMA page_count").fetchone()[0]
+                  * conn.execute("PRAGMA page_size").fetchone()[0])
+    monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", allocation - 1)
+    calls = []
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("backup_to must not run before the size preflight")
+
+    monkeypatch.setattr(backup_module, "backup_to", spy)
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="b29", owner="worker", target=tmp_path / "backup",
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+    assert calls == []
+    assert not list((tmp_path / "backup").glob("*.sqlite"))
