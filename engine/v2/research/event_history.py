@@ -230,22 +230,26 @@ def _run_reader(repository, contract, plans, index):
             raise errors.fail("HOLDOUT_ACCESS_DENIED", "research outcome isolation cannot be proven")
         request = replace(run[0][1], key_filter=keys, time_interval=interval,
             max_batch_rows=1, max_result_rows=len(expected))
-        return (row for batch in repository.scan(request, table_name=contract.table_name)
-                for row in batch.to_pylist())
+        scan = repository.scan(request, table_name=contract.table_name)
+        return scan, (row for batch in scan for row in batch.to_pylist())
 
-    streams = {}  # id(run) -> [row iterator, rows by day, last day seen]
+    streams = {}  # id(run) -> [row iterator, rows by day, last day seen, scan generator]
 
     def read_rows(event, request):
         """Advance the run's stream only up to this candidate's day; later fragments stay unopened."""
+        planned = plan_of.get(getattr(event, "event_id", None))
+        if planned is None:
+            raise errors.fail("HOLDOUT_ACCESS_DENIED", "event or request was not preflighted for this reader")
         day = event.event_date.date().isoformat()
-        _check_planned(plan_of.get(event.event_id), event, day, request)
+        _check_planned(planned, event, day, request)
         if event.event_id in rows_by_event:
             return rows_by_event[event.event_id]
         run = run_of[event.event_id]
         state = streams.get(id(run))
         if state is None:
-            state = streams[id(run)] = [open_run(run), {}, ""]
-        rows, by_day, _ = state
+            scan, rows = open_run(run)
+            state = streams[id(run)] = [rows, {}, "", scan]
+        rows, by_day, _, scan = state
         try:
             while rows is not None and day not in by_day and not (state[2] and day < state[2]):
                 row = next(rows, None)
@@ -255,9 +259,11 @@ def _run_reader(repository, contract, plans, index):
                 state[2] = row["event_date"]
             if rows is not None and (day == run[-1][2].time_min or state[2] >= run[-1][2].time_min):
                 rows.close()  # last candidate of the run read: release the open object
+                scan.close()
                 state[0] = None
         except BaseException:
             streams.pop(id(run), None)  # a retry re-scans the run from its start
+            scan.close()
             raise
         rows_by_event[event.event_id] = by_day.get(day, [])
         return rows_by_event[event.event_id]

@@ -82,7 +82,7 @@ def test_membership_mismatch_refuses_before_any_object_opens(source, monkeypatch
         return population
 
     monkeypatch.setattr(query_planner, "plan_scan_population", short)
-    with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+    with pytest.raises(DataError, match="(?s)HOLDOUT_ACCESS_DENIED.*research outcome isolation cannot be proven"):
         read_rows(plans[0][0], plans[0][1])
     assert len(opened) == base
 
@@ -108,7 +108,7 @@ def test_run_membership_refuses_on_each_clause(source, monkeypatch, clause):
         return population
 
     monkeypatch.setattr(query_planner, "plan_scan_population", mismatched)
-    with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+    with pytest.raises(DataError, match="(?s)HOLDOUT_ACCESS_DENIED.*research outcome isolation cannot be proven"):
         read_rows(plans[0][0], plans[0][1])
     assert len(opened) == base
 
@@ -125,10 +125,36 @@ def test_scan_failure_drops_the_stream_and_a_retry_rescans(source, monkeypatch):
         yield from original(query, table_name=table_name)
 
     monkeypatch.setattr(repository, "scan", flaky)
-    with pytest.raises(DataError, match="MANIFEST_CORRUPT"):
+    with pytest.raises(DataError, match="(?s)MANIFEST_CORRUPT.*synthetic scan failure"):
         read_rows(plans[0][0], plans[0][1])
     rows = read_rows(plans[0][0], plans[0][1])
     assert len(calls) == 2 and len(rows) == 1 and rows[0]["event_date"] == DAYS[0]
+
+
+def test_retry_after_rows_accumulated_returns_full_rows(source, monkeypatch):
+    repository, snapshot = source
+    plans, read_rows = _plan(repository, snapshot)
+    original, calls = repository.scan, []
+
+    def flaky(query, *, table_name):
+        calls.append(query)
+        if len(calls) > 1:  # only the first call of the stream fails
+            yield from original(query, table_name=table_name)
+            return
+        batches = original(query, table_name=table_name)
+        yield next(batches)  # one batch reaches the reader, then the stream dies
+        raise errors.fail("MANIFEST_CORRUPT", "synthetic scan failure")
+
+    monkeypatch.setattr(repository, "scan", flaky)
+    assert read_rows(plans[0][0], plans[0][1])  # the first batch succeeds
+    with pytest.raises(DataError, match="(?s)MANIFEST_CORRUPT.*synthetic scan failure"):
+        read_rows(plans[1][0], plans[1][1])
+    rows = read_rows(plans[1][0], plans[1][1])  # a retry re-scans the run from its start
+    assert rows == [row for batch in original(plans[1][1], table_name="computed_moves")
+                    for row in batch.to_pylist()]
+    assert read_rows(plans[2][0], plans[2][1]) == [
+        row for batch in original(plans[2][1], table_name="computed_moves")
+        for row in batch.to_pylist()]  # no duplicated rows from the restarted stream
 
 
 def test_extra_fragment_beyond_the_run_refuses_before_any_object_opens(source, monkeypatch):
@@ -146,7 +172,7 @@ def test_extra_fragment_beyond_the_run_refuses_before_any_object_opens(source, m
         return population
 
     monkeypatch.setattr(query_planner, "plan_scan_population", widened)
-    with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+    with pytest.raises(DataError, match="(?s)HOLDOUT_ACCESS_DENIED.*research outcome isolation cannot be proven"):
         read_rows(plans[0][0], plans[0][1])
     assert len(opened) == base
 
@@ -171,20 +197,27 @@ def test_read_rows_refuses_a_mismatched_date_ticker_or_request(source):
                                    event_date=event.event_date)
     for candidate, request in ((wrong_date, plans[0][1]), (wrong_ticker, plans[0][1]),
                                (event, plans[1][1])):
-        with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+        with pytest.raises(DataError, match="(?s)HOLDOUT_ACCESS_DENIED.*event or request was not preflighted for this reader"):
             read_rows(candidate, request)
+
+
+def test_event_without_identity_refuses_not_attribute_error(source):
+    repository, snapshot = source
+    plans, read_rows = _plan(repository, snapshot)
+    with pytest.raises(DataError, match="(?s)HOLDOUT_ACCESS_DENIED.*event or request was not preflighted for this reader"):
+        read_rows(SimpleNamespace(), plans[0][1])
 
 
 def test_unplanned_event_refuses_and_malformed_candidates_refuse_contract_mismatch(source):
     repository, snapshot = source
     plans, read_rows = _plan(repository, snapshot)
     stranger = SimpleNamespace(event_id="not-planned", event_date=pd.Timestamp(DAYS[0]))
-    with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+    with pytest.raises(DataError, match="(?s)HOLDOUT_ACCESS_DENIED.*event or request was not preflighted for this reader"):
         read_rows(stranger, plans[0][1])
     population = load_population(repository, snapshot, as_of_month=MONTH, purpose="selection")
     for bad in (population.drop(columns=["ticker"]), population.assign(ticker=" " + population.ticker),
                 population.assign(event_date=population.event_date + pd.Timedelta(hours=1))):
-        with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+        with pytest.raises(DataError, match="(?s)CONTRACT_MISMATCH.*event target candidates are malformed"):
             event_history.plan_with_reader(repository, snapshot, bad, COMPUTED_MOVES_CONTRACT)
 
 
@@ -192,12 +225,17 @@ def test_run_stream_is_closed_after_its_last_candidate(source, monkeypatch):
     repository, snapshot = source
     plans, read_rows = _plan(repository, snapshot)
     original, closed = repository.scan, []
+    held = []
 
     def tracked(query, *, table_name):
-        try:
-            yield from original(query, table_name=table_name)
-        finally:
-            closed.append(query.time_interval.start_inclusive)
+        def body():
+            try:
+                yield from original(query, table_name=table_name)
+            finally:
+                closed.append(query.time_interval.start_inclusive)
+        generator = body()
+        held.append(generator)  # a strong reference: only an explicit close() can run the finally
+        return generator
 
     monkeypatch.setattr(repository, "scan", tracked)
     read_rows(plans[0][0], plans[0][1])
@@ -231,7 +269,7 @@ def test_cached_event_still_refuses_a_mismatched_day_or_request(source):
     event, request, _ = plans[0]
     read_rows(event, request)  # now cached
     wrong_day = SimpleNamespace(event_id=event.event_id, ticker=event.ticker, event_date=plans[1][0].event_date)
-    with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+    with pytest.raises(DataError, match="(?s)HOLDOUT_ACCESS_DENIED.*event or request was not preflighted for this reader"):
         read_rows(wrong_day, request)
-    with pytest.raises(DataError, match="HOLDOUT_ACCESS_DENIED"):
+    with pytest.raises(DataError, match="(?s)HOLDOUT_ACCESS_DENIED.*event or request was not preflighted for this reader"):
         read_rows(event, plans[1][1])
