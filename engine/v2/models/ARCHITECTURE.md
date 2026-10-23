@@ -620,7 +620,9 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
 - `tools/phase5_state_stage_job.py` — publishes the staging-success record
   (`mark_staging_succeeded`) for a nightly pool candidate (§2.2).
 - `tools/phase5_prepare_release.py`, `tools/phase5_inventory.py` and
-  `tools/phase5_serving_folds.py` — release preparation, inventory and fold metadata.
+  `tools/phase5_serving_folds.py` — release preparation, inventory and fold metadata;
+  `tools/phase5_serving_fold_checks.py` (its policy/header checks) imports
+  `FOLD_PANEL_SHA256_PATTERN` from `serving_folds`.
 - `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_execution.py`
   — `no_fit.forbid_fitting` before native trial claims and fixed-child fitting.
 
