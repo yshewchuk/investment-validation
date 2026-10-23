@@ -488,8 +488,9 @@ Training frame-value, membership and label receipts do not supply that proof.
 descriptor against a verified parent manifest and catalog identity, returning
 a `ServingFoldRef` with immutable metadata/pools, its shared `FrozenInference`
 owner and an ephemeral single-binding inference view. The view identity binds
-parent, catalog and descriptor; it is never staged or promoted. Selection,
-catalog discovery and source-bundle wiring remain separate work. Loaders are read-only:
+parent, catalog and descriptor; it is never staged or promoted. Size-fold catalog
+indexing and causal selection live in `engine/v2/scoring/gate_fold_selection.py`
+(see the scoring ARCHITECTURE). Loaders are read-only:
 no writes/transactions/retries. Refused calls return no reference but may retain a
 hash-verified decoded artifact in the shared cache; each call still validates its
 metadata and descriptor. Identical verified inputs produce identical references.

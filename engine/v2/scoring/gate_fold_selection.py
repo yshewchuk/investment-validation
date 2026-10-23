@@ -9,7 +9,11 @@ from typing import Any
 
 from engine.v2.foundation import from_document
 from engine.v2.models.deployment import StagedManifest
-from engine.v2.models.serving_fold_loader import ServingFoldError, load_serving_fold
+from engine.v2.models.serving_fold_loader import (
+    ServingFoldError,
+    load_serving_fold,
+    validate_serving_fold_object,
+)
 from engine.v2.models.serving_folds import ServingFoldDescriptor
 from engine.v2.scoring.gate_forecast_source import GateForecastSource
 
@@ -79,6 +83,10 @@ def _descriptor_of(obj: Any) -> ServingFoldDescriptor:
     if (descriptor.estimator.path != path
             or descriptor.estimator.content_hash != digest):
         raise ValueError("estimator")
+    try:
+        validate_serving_fold_object(obj, descriptor)
+    except ServingFoldError:
+        raise ValueError("catalog object") from None
     return descriptor
 
 
@@ -87,9 +95,9 @@ def select_gate_forecast_source(binding, event_date, as_of) -> GateForecastSourc
     from engine.v2.scoring.release_bindings import ModelNotReady
 
     fold_start = min(_month(event_date), _month(as_of)).isoformat()
-    catalog = binding.size_folds
+    catalog = getattr(binding, "size_folds", None)
     descriptor = catalog.descriptors.get(fold_start) if catalog is not None else None
-    if descriptor is None:
+    if descriptor is None or getattr(binding, "frozen_inference", None) is None:
         raise ModelNotReady(_MEMBER_ID, f"no staged size fold for {fold_start}")
     try:
         ref = load_serving_fold(

@@ -48,6 +48,9 @@ load-bearing entrypoints:
 - `source_inputs.py` — `SourceBundle` (answer-free source dataclass, frozen,
   `kw_only=True`) and `build_native_score_inputs(bundle) -> NativeScoreInputs`,
   the boundary every acceptance/parity caller starts from.
+- `gate_fold_selection.py` — `SizeFoldCatalog`, `index_size_folds` and
+  `select_gate_forecast_source`: the release's staged size-fold descriptors
+  (`ScoringReleaseBinding.size_folds`) and the causal choice of one fold.
 - `gate_forecast_source.py` — `GateForecastSource`, the optional
   `SourceBundle.gate_forecast_source` carrying the selected size fold's
   binding, release, inference and held-out pool for the gate's forecast.
@@ -86,7 +89,8 @@ load-bearing entrypoints:
   (`engine.v2.models.deployment.production_release_root()`, config key
   `MODEL_RELEASE_ROOT` — see `engine/v2/models/ARCHITECTURE.md` §7.4).
   `ScoringReleaseBinding` (frozen dataclass, every mapping field a read-only
-  `MappingProxyType`) fields: `release_id: str`; `model_identity: Mapping[str,
+  `MappingProxyType`) fields (plus `size_folds: SizeFoldCatalog | None`, the
+  indexed `tier4_folds:size` descriptors, see "Forward forecast assembly"): `release_id: str`; `model_identity: Mapping[str,
   ModelIdentity]` **keyed `"{role}:{strategy_id}"`** (never by `role` alone —
   a release can bind `role="gate"` once per strategy, so two bindings
   resolving to the same key is a release defect, refused as `ModelNotReady`
@@ -251,7 +255,8 @@ loads that one fold through `load_serving_fold` and the binding's shared
 | Condition | Outcome |
 | --- | --- |
 | Release stages no `tier4_folds:size` member, or it is not `STAGED` | Empty catalog; selection raises `ModelNotReady` |
-| Object without a `serving_fold` descriptor, undecodable descriptor, descriptor `estimator` path or hash differing from the catalog object, duplicate `fold_start` | `ModelNotReady` at `resolve_release_binding` |
+| More than one `tier4_folds:size` row, `objects` not a list, an object that is not a mapping or lacks string `path`/`content_hash`, no `serving_fold` descriptor, undecodable descriptor, descriptor `estimator` path or hash differing from the catalog object, catalog object `name` or `bytes` failing the serving-fold object check (name derived from the descriptor, `0 < bytes <= MAX_FOLD_BYTES`), duplicate `fold_start` | `ModelNotReady` at `resolve_release_binding` |
+| `binding.size_folds` is `None` (hand-built binding) | `ModelNotReady` at selection |
 | No staged fold for the selected month | `ModelNotReady("tier4_folds:size", ...)`; never an older fold |
 | Fold fails verification or loading (`ServingFoldError`) | `ModelNotReady`; no fallback to another fold |
 | `event_date` or `as_of` not an ISO date | `ValueError` |

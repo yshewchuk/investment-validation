@@ -54,7 +54,7 @@ deployment pointer's model identity/artifact refs and the release's frozen
 payoff/recalibration/board-analog-matcher artifacts, plus the
 role-keyed `driver_residual_artifacts` mapping (empty when no driver pool
 member is staged) and `chooser_analog_artifacts`/`chooser_admissible_artifacts`
-tuples, plus `paired_residual_artifacts` and `trailing_cutoff_artifacts` tuples (each empty independently when its family is absent), into one immutable
+tuples, plus the `size_folds` descriptor index (`None` only for a hand-built binding), `paired_residual_artifacts` and `trailing_cutoff_artifacts` tuples (each empty independently when its family is absent), into one immutable
 `ScoringReleaseBinding`. Chooser tuples retain all distinct artifact keys;
 each declared chooser object must be a regular file no larger than 32 MiB.
 Request-specific selection and nightly chooser wiring are not performed here.
@@ -97,6 +97,12 @@ production for eligible pinned-snapshot identities. See
 `ARCHITECTURE.md` for what
 runs in production today versus only in tests.
 
+`gate_fold_selection` provides `SizeFoldCatalog`, `index_size_folds` and
+`select_gate_forecast_source`: `resolve_release_binding` indexes the release's
+staged size-fold descriptors into `ScoringReleaseBinding.size_folds` (descriptors
+only), and the selector loads the one fold for the earlier of the event's and the
+decision's month as a `GateForecastSource`, or raises `ModelNotReady`.
+
 `gate_forecast_source` provides `GateForecastSource`, the optional
 `SourceBundle.gate_forecast_source` input carrying the selected size fold's
 binding, fold-view release, inference and held-out pool for the gate's forecast
@@ -107,7 +113,7 @@ columns.
 is `DYNAMIC_MENU_REFUSAL_CODES`. These are pure preparatory accounting contracts,
 currently consumed only by focused tests. No runtime dispatcher uses them.
 
-<!-- public-interface: application, compatibility, dynamic_outcomes, DynamicMenuIdentity, DynamicCandidateOutcome, validate_dynamic_menu, DynamicMenuRefusal, DYNAMIC_MENU_REFUSAL_CODES, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, gate_forecast_source, GateForecastSource, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, resolve_release_binding, resolve_gate_policy, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
+<!-- public-interface: application, compatibility, dynamic_outcomes, DynamicMenuIdentity, DynamicCandidateOutcome, validate_dynamic_menu, DynamicMenuRefusal, DYNAMIC_MENU_REFUSAL_CODES, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, gate_fold_selection, SizeFoldCatalog, index_size_folds, select_gate_forecast_source, gate_forecast_source, GateForecastSource, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, resolve_release_binding, resolve_gate_policy, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
 
 ## Consumers
 

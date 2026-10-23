@@ -132,6 +132,11 @@ def _validate_catalog_object(obj, descriptor):
         raise ServingFoldError()
 
 
+def validate_serving_fold_object(obj, descriptor):
+    """Validate a catalog object against the serving-fold descriptor."""
+    _validate_catalog_object(obj, descriptor)
+
+
 def _chooser_catalog_hash(catalog, descriptor, parent):
     if (not isinstance(catalog, dict)
             or catalog.get("schema_version") != "phase5_staged_release.v1.0"
