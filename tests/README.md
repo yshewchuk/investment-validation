@@ -114,9 +114,18 @@ domain-validation error. No timeout budget is increased by this safeguard.
 These are failures, not skips, on purpose: the check did not run, and a
 skip is easy to miss when the rest of the summary is green. To separate
 environment from code, `grep -E "RESOURCE WAIT|TIMEOUT:"` the output and rerun
-those files alone on a quieter box. `TEST_POLICY` caps every profile at
-256 MiB, so a memory `RESOURCE WAIT` means MemAvailable was below about
-0.75 GiB for a whole minute.
+those files alone on a quieter box. `TEST_POLICY` caps each profile at
+384 MiB (or its original lower limit); admission also reserves host headroom.
+Only the real snapshot-worker fixture raises `io_fetch` to 1 GiB when its
+already-imported `engine.v2.data.incremental` module has mutmut's actual
+generated wrapper; an instrumented sibling alone does not qualify. The
+authored-source fixture stays at 384 MiB; production `io_fetch` stays at
+512 MiB, and watchdog rejection still applies above either fixture limit.
+Generated-source compilation was measured near 674 MiB versus 197 MiB for
+the authored import. The mutation driver caps `data_incremental` at one
+child, including when CI requests `nproc`; other shards are unchanged.
+This limits concurrent fixture reservations, not total runner RSS, and
+does not provision a larger GitHub runner or increase a time budget.
 
 Timeout stderr lookup and post-signal growth polling use the Service's artifact
 root, even when the catalog is elsewhere. The tail still reads only the latest
@@ -467,16 +476,26 @@ does. And in both, the `report` job's merge is handed the plan's module list
 complete run: a missing, extra or duplicated module report -- or nothing
 downloaded at all -- yields an incomplete tool-error diagnostic with the score
 withheld, and the job fails. In the mutmut workflow a module whose recorded
-`run_exit_code` is nonzero (a step timeout kill is `-1`) propagates the same
-way: the aggregate is incomplete, the score is withheld and the merge exits
-nonzero, so a run that died part-way can never read as a completed one.
+`run_exit_code` is nonzero (a step timeout kill is `-1`) makes the aggregate
+incomplete and withholds the score, so it cannot read as a completed run.
+The merge exits nonzero except for the incremental driver's own clean
+time-box stop (`124`), which remains incomplete without being a tool error.
 
 The rest of this section is the mutmut workflow's own contract (the gremlins
 one is documented under "Backend: pytest-gremlins" below).
 `.github/workflows/mutation-mutmut.yml` runs mutmut per module with
-`--max-children $(nproc)` (4 on a standard runner). A job fails only when
-mutmut's clean test run fails, its state cannot be exported, or the run hits
-its 330-minute step timeout.
+`--max-children $(nproc)` (4 on a standard runner), except `data_incremental`,
+which the driver caps at one child. Incremental/full runs have 60/330-minute
+step limits; the driver requests a clean stop after 52/322 minutes first.
+Unexportable state, a step timeout, or a nonzero backend exit fails the job,
+except that incremental exit `124` (`TIME_BUDGET_STOP`) does not fail the
+module gate: the aggregate report remains incomplete and withholds its overall
+score; module reports retain numeric scores with a partial-results warning.
+If SIGINT does not finish within the 180-second grace period, the driver uses
+SIGKILL and returns `137`: both modes fail. Export is attempted for readable
+partial state; corrupt state can still fail export. A nonzero child exit during
+SIGINT grace is preserved, not relabeled a clean stop. Full-run `124` and all
+other nonzero exits remain failures.
 
 - **Diagnosing a failed stats run.** When mutmut's clean/stats run fails it
   prints only `failed to collect stats. runner returned 1` and swallows the
@@ -607,10 +626,13 @@ module artifacts arrived, and marks the aggregate `complete: false` /
 arrived) with `MISSING_MODULES` / `UNEXPECTED_MODULES` / `DUPLICATE_MODULES` /
 `NO_MODULE_REPORTS` reasons and a nonzero exit whenever the reported set is
 not exactly the planned one -- and, like the gremlins merge, when the inputs
-are not one run/SHA/mode -- or when any module's `run_exit_code` is nonzero:
-a timeout kill (-1) arrives as a `TIMEOUT_KILL` reason and any other nonzero
-exit as `RUN_INCOMPLETE`, both naming the module there and in
-`failed_run_modules`, with counts still covering only what really arrived.
+are not one run/SHA/mode -- or when a module's `run_exit_code` is nonzero
+(except incremental `124`, which stays incomplete without a tool error):
+a timeout kill (`-1`) arrives as `TIMEOUT_KILL`, `124` as `TIME_BUDGET_STOP`
+in either mode, and other nonzero exits as `RUN_INCOMPLETE`. Mode changes
+whether `124` is a tool error, not its reason. The reasons and
+`failed_run_modules` name affected modules, with counts still covering only
+what really arrived.
 The `report` job still uploads the diagnostic artifact (always()) before
 failing on that exit.
 
