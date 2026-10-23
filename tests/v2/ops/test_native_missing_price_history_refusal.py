@@ -182,7 +182,7 @@ def _patch_context(
         return
 
     def calendar_row(repository, snapshot, key, *, decision_session, calendar,
-                     chain_rows=None):
+                     chain_rows=None, spot_reader=None):
         """One fixture calendar row with a usable pinned spot for ``key``."""
         return CalendarRowInputs(
             calendar_revision="cal-v1",
