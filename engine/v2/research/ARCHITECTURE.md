@@ -56,21 +56,25 @@ refusing with `CONTRACT_MISMATCH`. No raw payload permission is issued;
 raw-source protected-event policy is not implemented by this plan. There is no writer,
 materializer, CLI, model or registration integration.
 
-All panel snapshot boundaries use shared `snapshot_inputs.snapshot_reference` shape checks.
+Panel `validate_context`, `build_context` and `preflight_context` use shared snapshot shape checks.
 Detached panel validation, including nested history, uses `CONTRACT_MISMATCH`;
 builder/repository reconstruction retains native refusals instead of relabeling them.
-History identity helpers retain `IDENTITY_CONFLICT` for invalid binding shape or digest.
+Direct history `validate_context_identity` retains native `IDENTITY_CONFLICT`, but maps caught
+serialization/structural errors to `CONTRACT_MISMATCH`; `preflight_source` maps those errors to `IDENTITY_CONFLICT`.
 
 | Condition | Outcome |
 | --- | --- |
 | Invalid detached panel identity/schema, nested digest/folds, snapshot, calendar, cutoff or row | `CONTRACT_MISMATCH` |
 | Malformed or forged direct calendar snapshot | `SNAPSHOT_UNRESOLVED` |
 | Empty native observed session calendar | `CALENDAR_UNAVAILABLE` |
-| Builder history identity/shape, committed snapshot binding or recomputed admission differs | `IDENTITY_CONFLICT` |
+| Malformed builder producer/snapshot reference or non-dict history context | `CONTRACT_MISMATCH` |
+| Dict history digest/minimum shape, committed snapshot binding or recomputed admission differs | `IDENTITY_CONFLICT` |
 | Protected requested event or unprovable physical isolation | `HOLDOUT_ACCESS_DENIED` |
 | Snapshot ID is absent from the native catalog | `SNAPSHOT_NOT_FOUND` |
 | Catalog snapshot/manifest identity is inconsistent | `MANIFEST_CORRUPT` |
 | Repository-reconstructed temporal population lacks training/evaluation coverage | `POPULATION_COLLAPSED` |
+| Cache / retry | Observed days are reused per weak-referenceable pinned repository and snapshot ID; failures are not cached. `preflight_context` reconstructs metadata through native repository APIs (including their catalog caches); no panel-layer retries. |
+| Transaction / partial write / idempotency | No enclosing/write transaction or durable writes; native repository resolution/table reads use read transactions. No partial artifact; identical inputs and metadata give the same `context_id`. |
 
 ## Primary contracts and public interfaces
 

@@ -3,6 +3,7 @@ import copy
 import json
 from dataclasses import replace
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -122,14 +123,20 @@ def _lineage(row, block, edit):
 def _metadata_only(monkeypatch, repository):
     original = repository.scan
     scans = []
+    metadata = {"earnings_events": ("event_id", "ticker", "event_date", "session", "date_conflict", "event_cluster_id"),
+                "daily_market": ("date",)}
 
-    def scan(request, *, table_name):
+    def scan(request, *, table_name, **kwargs):
         scans.append((table_name, request.columns))
-        assert table_name not in ("computed_moves", "research_magnitude_history", table.TABLE)
-        assert table_name != "daily_market" or request.columns == ("date",)
-        yield from original(request, table_name=table_name)
+        assert table_name in metadata and request.columns == metadata[table_name], "metadata-only scan required"
+        yield from original(request, table_name=table_name, **kwargs)
+
+    def forbid_payload(*args, **kwargs):
+        raise AssertionError("metadata-only path forbids payload getters")
 
     monkeypatch.setattr(repository, "scan", scan)
+    for name in ("get_chain", "get_price_series", "get_close"):
+        monkeypatch.setattr(repository, name, forbid_payload)
     return scans
 
 
@@ -1435,3 +1442,68 @@ def test_unavailable_optional_inputs_need_no_invented_source(native, block):
         row["lineage"] = canonical_json(blocks)
         _hash(row, "row_id")
     assert table.validate_rows(rows, native[-1]) is None
+
+
+@pytest.mark.parametrize("path", ["get_chain", "get_price_series", "get_close", "price_history", "daily_state"])
+def test_metadata_only_oracle_catches_alternate_payload_paths(native, monkeypatch, path):
+    source, output, binding, producer, _ = native
+    repository = source.repository
+    reached = []
+    original_scan, original_preflight = repository.scan, history.preflight_source
+
+    def scan(request, *, table_name, **kwargs):
+        if table_name in ("price_history", "daily_state"):
+            reached.append(table_name)
+            return iter(())
+        return original_scan(request, table_name=table_name, **kwargs)
+
+    monkeypatch.setattr(repository, "scan", scan)
+    for name in ("get_chain", "get_price_series", "get_close"):
+        monkeypatch.setattr(repository, name, lambda *args: reached.append("payload getter"))
+
+    def accidental_payload_read(*args):
+        if path.startswith("get_"):
+            getattr(repository, path)(None)
+        else:
+            list(repository.scan(SimpleNamespace(columns=("close",)), table_name=path))
+        return original_preflight(*args)
+
+    # Harmless stand-ins isolate oracle sensitivity; no actual price/chain/provider access occurs.
+    monkeypatch.setattr(history, "preflight_source", accidental_payload_read)
+    _metadata_only(monkeypatch, repository)
+    with pytest.raises(AssertionError, match="metadata-only"):
+        plan.build_context(repository, source.snapshot, output, binding, producer=producer)
+    assert reached == []
+
+
+@pytest.mark.parametrize("kind", ["none", "mapping", "list", "id_list", "id_mapping", "id_none",
+                                 "id_integer", "id_boolean", "id_empty", "id_whitespace"])
+def test_direct_history_preflight_refuses_malformed_snapshot_before_resolution(native, monkeypatch, kind):
+    source, _, binding, _, _ = native
+    ids = {"id_list": [], "id_mapping": {}, "id_none": None, "id_integer": 0,
+           "id_boolean": False, "id_empty": "", "id_whitespace": " "}
+    supplied = (replace(source.snapshot, snapshot_id=ids[kind]) if kind in ids else
+                {"none": None, "mapping": to_document(source.snapshot), "list": []}[kind])
+    resolutions = []
+    monkeypatch.setattr(source.repository, "resolve", lambda value: resolutions.append(value))
+    scans = _metadata_only(monkeypatch, source.repository)
+    # This direct history API retains its native binding refusal; it is not the panel shape adapter.
+    with pytest.raises(DataError, match="IDENTITY_CONFLICT"):
+        history.preflight_source(source.repository, supplied, binding)
+    assert resolutions == scans == []
+
+
+@pytest.mark.parametrize("code", ["SNAPSHOT_NOT_FOUND", "MANIFEST_CORRUPT", "HOLDOUT_ACCESS_DENIED"])
+def test_direct_history_preflight_preserves_native_resolution_refusal(native, monkeypatch, code):
+    source, _, binding, _, _ = native
+    refusal = fail(code, "native refusal sentinel")
+
+    def refuse(snapshot_id):
+        assert snapshot_id == source.snapshot.snapshot_id
+        raise refusal
+
+    monkeypatch.setattr(source.repository, "resolve", refuse)
+    scans = _metadata_only(monkeypatch, source.repository)
+    with pytest.raises(DataError) as caught:
+        history.preflight_source(source.repository, source.snapshot, binding)
+    assert caught.value is refusal and scans == []
