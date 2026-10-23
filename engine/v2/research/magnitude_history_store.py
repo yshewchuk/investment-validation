@@ -123,7 +123,7 @@ def _preflight_source(repository, snapshot, context):
 
 
 def _prepare_history(repository, snapshot, context):
-    """Lazily decode each admitted candidate once, one scan per run of adjacent candidates; no cross-build cache."""
+    """Lazily decode each admitted candidate through run-batched streaming scans; no cross-build cache."""
     with stage("history preflight"):
         population, plans, read_rows = _preflight_source(repository, snapshot, context)
     by_ticker = {}

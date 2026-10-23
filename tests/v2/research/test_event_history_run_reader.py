@@ -121,17 +121,21 @@ def test_run_membership_refuses_on_each_clause(source, monkeypatch, clause):
 def test_scan_failure_drops_the_stream_and_a_retry_rescans(source, monkeypatch):
     repository, snapshot = source
     plans, read_rows = _plan(repository, snapshot)
-    original, calls = repository.scan, []
+    original, calls, closed = repository.scan, [], []
 
     def flaky(query, *, table_name):
         calls.append(query)
-        if len(calls) == 1:
-            raise errors.fail("MANIFEST_CORRUPT", "synthetic scan failure")
-        yield from original(query, table_name=table_name)
+        try:
+            if len(calls) == 1:
+                raise errors.fail("MANIFEST_CORRUPT", "synthetic scan failure")
+            yield from original(query, table_name=table_name)
+        finally:
+            closed.append(query)
 
     monkeypatch.setattr(repository, "scan", flaky)
     with pytest.raises(DataError, match="(?s)MANIFEST_CORRUPT.*synthetic scan failure"):
         read_rows(plans[0][0], plans[0][1])
+    assert closed  # the failed generator was closed
     rows = read_rows(plans[0][0], plans[0][1])
     assert len(calls) == 2
     assert rows == [row for batch in original(plans[0][1], table_name="computed_moves")
@@ -265,7 +269,8 @@ def test_run_stream_is_closed_after_its_last_candidate(source, monkeypatch):
     assert read_rows(plans[1][0], plans[1][1]) == _per_candidate(repository, plans[1][1])
 
 
-def test_opening_another_run_closes_the_previous_stream(source, monkeypatch):
+def test_streams_beyond_the_cap_close_the_oldest(source, monkeypatch):
+    monkeypatch.setattr(event_history, "_MAX_OPEN_RUN_STREAMS", 1)
     repository, snapshot = source
     plans, read_rows = _plan(repository, snapshot)
     original, closed = repository.scan, []
@@ -289,6 +294,23 @@ def test_opening_another_run_closes_the_previous_stream(source, monkeypatch):
     assert read_rows(plans[1][0], plans[1][1]) == [
         row for batch in original(plans[1][1], table_name="computed_moves")
         for row in batch.to_pylist()]  # re-scan after close gives correct rows
+
+
+def test_interleaved_runs_keep_their_streams_and_scan_once(source, monkeypatch):
+    repository, snapshot = source
+    plans, read_rows = _plan(repository, snapshot)
+    original, calls = repository.scan, []
+
+    def counting(query, *, table_name):
+        calls.append(query)
+        yield from original(query, table_name=table_name)
+
+    monkeypatch.setattr(repository, "scan", counting)
+    order = (0, 3, 1, 4, 2)  # two runs interleaved, under the default cap
+    rows = [read_rows(plans[index][0], plans[index][1]) for index in order]
+    assert len(calls) == 2
+    assert rows == [[row for batch in original(plans[index][1], table_name="computed_moves")
+                     for row in batch.to_pylist()] for index in order]
 
 
 def _plan_at(day):

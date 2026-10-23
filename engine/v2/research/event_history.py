@@ -19,6 +19,8 @@ _CONTEXT = ("snapshot_id", "holdout_as_of_month", "random_membership_version",
             "rolling_membership_version", "population_use")
 POPULATION_CONTEXT_COLUMNS = _CONTEXT
 
+_MAX_OPEN_RUN_STREAMS = 32  # interleaved tickers keep their streams; the oldest is closed beyond this
+
 
 def plan_event_targets(repository, snapshot, candidates, contract, *, columns=None):
     """Prove singleton object membership for already holdout-admitted candidates.
@@ -201,7 +203,7 @@ def _check_planned(planned, event, day, request):
 
 
 def _run_reader(repository, contract, plans, index):
-    """One scan per run of adjacent preflighted candidates; refuses unless membership is exact."""
+    """Run-batched candidate reads: one streaming scan per run, opened when first needed; refuses unless membership is exact."""
     by_ticker, run_of, ticker_records, rows_by_event, plan_of = {}, {}, {}, {}, {}
     for plan in plans:
         by_ticker.setdefault(plan[0].ticker, []).append(plan)
@@ -250,9 +252,8 @@ def _run_reader(repository, contract, plans, index):
         run = run_of[event.event_id]
         state = streams.get(id(run))
         if state is None:
-            for other in list(streams.values()):  # at most one run stream stays open
-                other[3].close()
-            streams.clear()
+            while len(streams) >= _MAX_OPEN_RUN_STREAMS:  # close the oldest; its tail re-scans if asked for again
+                streams.pop(next(iter(streams)))[3].close()
             scan, rows = open_run(run)
             state = streams[id(run)] = [rows, {}, "", scan]
         rows, by_day, _, scan = state
