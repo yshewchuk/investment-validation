@@ -241,7 +241,8 @@ def _run_reader(repository, contract, plans, index):
                                max_object_bytes=MAX_OUTCOME_OBJECT_BYTES)
         return scan, (row for batch in scan for row in batch.to_pylist())
 
-    streams = {}  # id(run) -> [row iterator, rows by day, last day seen, scan generator]
+    streams = {}  # id(run) -> [row iterator, rows by day, last day seen, scan generator]; live runs only, capped
+    finished = {}  # id(run) -> rows by day of a fully read run; not counted against the cap
 
     def read_rows(event, request):
         """Advance the run's stream only up to this candidate's day; later fragments stay unopened."""
@@ -252,6 +253,9 @@ def _run_reader(repository, contract, plans, index):
         if event.event_id in rows_by_event:
             return rows_by_event[event.event_id]
         run = run_of[event.event_id]
+        if id(run) in finished:  # the run was read to its last day: every day is already decoded
+            rows_by_event[event.event_id] = finished[id(run)].get(day, [])
+            return rows_by_event[event.event_id]
         state = streams.get(id(run))
         if state is None:
             while len(streams) >= _MAX_OPEN_RUN_STREAMS:  # close the oldest; its tail re-scans if asked for again
@@ -269,7 +273,8 @@ def _run_reader(repository, contract, plans, index):
             if rows is not None and (day == run[-1][2].time_min or state[2] >= run[-1][2].time_min):
                 rows.close()  # last candidate of the run read: release the open object
                 scan.close()
-                state[0] = None
+                finished[id(run)] = by_day
+                streams.pop(id(run), None)  # a finished run does not hold a cap slot
         except BaseException:
             streams.pop(id(run), None)  # a retry re-scans the run from its start
             scan.close()
