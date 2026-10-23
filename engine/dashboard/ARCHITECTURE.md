@@ -24,11 +24,14 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 - `nightly.py` refreshes the guarded legacy `^GSPC` daily series before the
   calendar refresh and any Tier-3 panel rebuild when both `refresh` and
   `tiers` are enabled (including fetch-only runs). A failed refresh, or a
-  successful refresh whose `last_date` is before the decision date's previous
-  trading session, stops the run with typed `NightlyStop` step `gspc_refresh`;
-  stale input is not used to build the panel. With refresh disabled, both
-  refresh and panel rebuild are skipped. The v2 `price-refresh` stage keeps
-  its existing behaviour.
+  successful refresh whose source ends before the last NYSE session strictly
+  before the decision date, stops with typed `NightlyStop` step
+  `gspc_refresh`. This cutoff uses `projected_trading_days`, so checking it
+  does not read the stored GSPC file. The helper checks minimum coverage before
+  reading or replacing the stored file; a stale source leaves it untouched.
+  With refresh disabled, both refresh and panel rebuild are skipped. The v2
+  `price-refresh` stage omits the new optional cutoff and keeps its existing
+  behaviour.
 
 - `nightly.py` — the orchestrator; run as the legacy nightly entrypoint
   (root doc §4). Public helpers for the Tier-4 gap repair:
@@ -203,16 +206,20 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 ## Failure semantics
 
 - **`^GSPC` refresh failure or stale success** — when both refresh and tiers
-  are enabled, a refused refresh or a returned `last_date` before the
-  decision date's previous trading session stops full and fetch-only runs
-  with `NightlyStop` at `gspc_refresh` before calendar refresh, validation,
-  panel rebuild or scoring. `refresh=False` skips this refresh and the panel
-  rebuild. The existing report JSON top-level fields are unchanged. A
-  successful refresh may rewrite only through the existing guarded
-  `refresh_gspc_daily` helper; its fetch and write refusal rules remain
-  authoritative. A rotated fetch credential uses the fixed detail
-  `GSPC_REFRESH_FAILED: credential_rotated`; the operator must repair the
-  credential before retrying.
+  are enabled, ordinary helper refusal stops full and fetch-only runs with
+  `GSPC_REFRESH_FAILED: <reason>`; credential rotation uses the fixed detail
+  `GSPC_REFRESH_FAILED: credential_rotated`. A source response that does not
+  cover the last NYSE session strictly before the decision date stops with
+  `GSPC_REFRESH_STALE: expected through <date>, got source ending before
+  cutoff`. Both are `NightlyStop` at `gspc_refresh`, before calendar refresh,
+  validation, panel rebuild or scoring. The source coverage cutoff is computed
+  from the rule-based NYSE calendar without reading `GSPC_DAILY`; the guarded
+  helper enforces it before touching that file. A refused source therefore
+  leaves the stored file unchanged. `refresh=False` skips this refresh and
+  the panel rebuild. Existing report JSON top-level fields are unchanged. The
+  optional helper cutoff is omitted by the v2 adapter, so its behavior is
+  unchanged. On refusal, the operator may correct the source/credential and
+  retry on the next nightly or a manual rerun.
 
 - **CLI report** — after `run_nightly` returns a report, the CLI atomically
   writes `reports/nightly_<requested date>.json`; a distinct `--json`
@@ -237,7 +244,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 
   | Condition | Outcome |
   | --- | --- |
-  | `^GSPC` refresh refuses or ends before the decision date's previous trading session (with refresh and tiers on) | `NightlyStop` at `gspc_refresh`; exit 1 before calendar refresh, panel rebuild, warm or score; previous panel and published board remain |
+  | `^GSPC` refresh refuses (`GSPC_REFRESH_FAILED`) or source ends before the last NYSE session strictly before the decision date (`GSPC_REFRESH_STALE`; with refresh and tiers on) | `NightlyStop` at `gspc_refresh`; exit 1 before calendar refresh, panel rebuild, warm or score; previous panel and published board remain; stale source is refused before the stored series is read or written |
   | Warm step (default scorer, or `--fetch-only`): subprocess exits non-zero, cannot start, times out (3 h), fails to plan/verify, leaves a fit missing or not ready, or the panel changed under it | `NightlyStop` `WARM_SERVING_FAILED`; exit 1; nothing scored; no in-process refit |
   | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`); no gap flag once repaired |
   | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no new SNAPSHOT (the previous one is kept), so the native import sees no new session for the night (`not_yet`, unless an earlier run that night already wrote one) |

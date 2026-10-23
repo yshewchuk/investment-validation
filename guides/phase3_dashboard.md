@@ -43,6 +43,10 @@ dashboard/earnings_app.py     # FastAPI, port 8711 (the semis scanner that used 
 ## 2. Nightly job (`nightly.py`, via cron)
 
 Order matters; each step gates the next:
+0. Refresh the guarded `^GSPC` series before rebuilding the panel. A failed
+   fetch or source history ending before the previous NYSE session stops the
+   nightly with `GSPC_REFRESH_FAILED` or `GSPC_REFRESH_STALE`; the old panel is
+   kept and the source is retried on the next nightly or a manual rerun.
 1. Refresh Tier 1/2 for calendar names (through the fetch wrapper; budget
    from the 3k/month reserve; ORATS quota guard active).
 2. Validation battery on the fresh data — red stops the pipeline (yesterday's

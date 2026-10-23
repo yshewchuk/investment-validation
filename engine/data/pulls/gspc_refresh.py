@@ -157,16 +157,20 @@ def _finish(result: dict, started: float) -> dict:
     return result
 
 
-def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> dict:
+def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None,
+                       minimum_last_date=None) -> dict:
     """Fetch ^GSPC max history and refresh ``path`` in the legacy layout.
 
     Never raises for an ordinary per-source failure (the ``price_refresh.
     fetch_one`` lesson; ``CredentialRotated`` propagates because it is a
     whole-run condition). Returns ``{"ok": True, "last_date":
     "YYYY-MM-DD", "rows": N}`` or ``{"ok": False, "reason": ...}`` with the
-    reason in ``fetch_failed`` / ``unparseable`` / ``shrunk`` /
-    ``older_than_existing`` / ``history_changed`` / ``unreadable`` /
-    ``unwritable``.
+    reason in ``fetch_failed`` / ``unparseable`` / ``stale_source`` /
+    ``shrunk`` / ``older_than_existing`` / ``history_changed`` /
+    ``unreadable`` / ``unwritable``. When ``minimum_last_date`` is given,
+    the fresh series must reach it; minimum coverage is checked after the
+    parse and before the lock or any file read or write, so a source that
+    ends too early leaves the target file untouched.
     """
     from engine.data.sources.base import CredentialRotated, FetchError
 
@@ -201,6 +205,11 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
     frame = _parse_body(rec.body)
     if frame is None:
         return _finish({"ok": False, "reason": "unparseable"}, started)
+
+    if minimum_last_date is not None:
+        minimum = pd.Timestamp(minimum_last_date).normalize()
+        if frame["date"].max().normalize() < minimum:
+            return _finish({"ok": False, "reason": "stale_source"}, started)
 
     # The read-compare-replace section below is serialized against a
     # concurrent refresh of the same file through an exclusive flock on a

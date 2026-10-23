@@ -1268,10 +1268,11 @@ def test_run_nightly_refuses_stale_gspc_coverage_and_rotation(
         monkeypatch, rebuild_results=[], finalize_calls=finalize_calls,
         marker_path=_marker(tmp_path), events=_events_stub(["AAA"]))
     from engine.data.pulls import gspc_refresh
+    import pandas as pd
     attempted = []
 
-    def fail_gspc(fetcher, path, *, refetch_token=None):
-        attempted.append(refetch_token)
+    def fail_gspc(fetcher, path, *, refetch_token=None, minimum_last_date=None):
+        attempted.append((refetch_token, minimum_last_date))
         if failure_kind == "rotated":
             from engine.data.sources.base import CredentialRotated
             raise CredentialRotated("test credential rotation")
@@ -1289,7 +1290,8 @@ def test_run_nightly_refuses_stale_gspc_coverage_and_rotation(
             bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
         )
 
-    assert attempted and attempted[0].startswith("legacy-nightly-")
+    assert attempted and attempted[0][0].startswith("legacy-nightly-")
+    assert attempted[0][1] == pd.Timestamp("2026-10-12")
     assert caught.value.step == "gspc_refresh"
     if failure_kind == "rotated":
         assert caught.value.detail == "GSPC_REFRESH_FAILED: credential_rotated"
@@ -1297,7 +1299,7 @@ def test_run_nightly_refuses_stale_gspc_coverage_and_rotation(
             "ok": False, "reason": "credential_rotated"}
     else:
         assert caught.value.detail == (
-            "GSPC_REFRESH_STALE: expected through 2026-10-13, got 2026-10-10")
+            "GSPC_REFRESH_STALE: expected through 2026-10-12, got 2026-10-10")
         assert captured["report"].steps["gspc_refresh"]["last_date"] == "2026-10-10"
     assert calls == []
     assert marker_writes == []

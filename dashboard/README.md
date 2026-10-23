@@ -307,9 +307,14 @@ Order matters; each step gates the next.
 1. **Refresh**, cheapest and most load-bearing first: the forward calendar
    (unmetered, above), then one ORATS call each for market-wide summaries and
    cores, then batched ORATS confirmation for names that printed in the last 10
-   days. A dead credential stops the run; any other failure degrades to cached
-   data and raises `refresh_degraded` — staleness stays visible in `meta.json`
-   instead of going silent.
+   days. A dead credential stops the run; any other calendar refresh failure
+   degrades to cached data and raises `refresh_degraded` — staleness stays
+   visible in `meta.json` instead of going silent. The separate guarded `^GSPC`
+   refresh runs before the panel rebuild; a failed fetch or source ending
+   before the prior NYSE session refuses the nightly with
+   `GSPC_REFRESH_FAILED` or `GSPC_REFRESH_STALE`, preserving the old panel and
+   stored series. Correct the source or credential and retry on the next
+   nightly or a manual rerun.
 2. **Validate** the store it is about to score from. Red stops the pipeline:
    yesterday's snapshot stays published and a flag is written.
 2a. **Warm** the Tier-4 serving models the score will touch: any missing for

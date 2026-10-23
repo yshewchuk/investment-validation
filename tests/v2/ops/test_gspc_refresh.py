@@ -109,6 +109,20 @@ def test_success_writes_exact_legacy_layout(tmp_path):
     assert [int(v) for v in raw[6]] == [1000 + i for i in range(len(DATES))]
 
 
+def test_stale_source_leaves_file_untouched(tmp_path):
+    """A source ending before the minimum is refused; bytes and mtime stay."""
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, DATES)
+    mtime = path.stat().st_mtime_ns
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path,
+                                minimum_last_date="2026-08-28")
+
+    assert result == {"ok": False, "reason": "stale_source"}
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == mtime
+
+
 def test_identical_second_call_leaves_file_untouched(tmp_path):
     """Same bytes => no rewrite, so the panel's mtime-keyed cache stays warm."""
     path = tmp_path / "gspc_daily.csv"

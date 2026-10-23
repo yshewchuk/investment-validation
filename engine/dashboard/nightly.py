@@ -1482,25 +1482,41 @@ def run_nightly(
 
     report.mark("universe", started=started)
     if refresh and tiers:
-        from engine.calendar import trading_calendar
+        from engine.calendar import projected_trading_days
         from engine.data.fetch import Fetcher, CredentialRotated
         from engine.data.pulls.gspc_refresh import refresh_gspc_daily
         if fetcher is None:
             fetcher = Fetcher()
         _log_rss("gspc refresh start")
         try:
+            previous_sessions = projected_trading_days(
+                as_of - pd.Timedelta(days=14), as_of - pd.Timedelta(days=1)
+            )
+            expected = previous_sessions[-1]
             refetch_token = f"legacy-nightly-{time.time_ns()}"
-            result = refresh_gspc_daily(fetcher, paths.GSPC_DAILY, refetch_token=refetch_token)
+            result = refresh_gspc_daily(
+                fetcher, paths.GSPC_DAILY, refetch_token=refetch_token,
+                minimum_last_date=expected,
+            )
             _log_rss("gspc refresh end")
             report.mark("gspc_refresh", started=started)
             report.steps["gspc_refresh"] = result
             if not result.get("ok"):
+                if result.get("reason") == "stale_source":
+                    raise _refuse(
+                        report, "gspc_refresh",
+                        f"GSPC_REFRESH_STALE: expected through {pd.Timestamp(expected).date()}, "
+                        "got source ending before cutoff",
+                    )
                 raise _refuse(report, "gspc_refresh", "GSPC_REFRESH_FAILED: " + str(result.get("reason", "unknown")))
-            expected = trading_calendar().shift(as_of, -1)
             last_date = pd.to_datetime(result.get("last_date"), errors="coerce")
             if pd.isna(last_date) or last_date.normalize() < pd.Timestamp(expected).normalize():
                 got = "missing" if pd.isna(last_date) else str(last_date.date())
-                raise _refuse(report, "gspc_refresh", f"GSPC_REFRESH_STALE: expected through {pd.Timestamp(expected).date()}, got {got}")
+                raise _refuse(
+                    report, "gspc_refresh",
+                    f"GSPC_REFRESH_STALE: expected through {pd.Timestamp(expected).date()}, "
+                    f"got {got}",
+                )
         except CredentialRotated as exc:
             _log_rss("gspc refresh end")
             report.mark("gspc_refresh", started=started)
