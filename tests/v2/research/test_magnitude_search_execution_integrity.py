@@ -5,10 +5,11 @@ import copy
 import pytest
 
 from engine.models.no_fit import no_fit_guard as legacy_guard
-from engine.v2.foundation import content_hash, to_document
+from engine.v2.foundation import canonical_json, content_hash, to_document
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.native_registration import magnitude_fitted_execution_document
+from engine.v2.research.magnitude_inputs import magnitude_recipe
 from experiments import magnitude_search_execution as execution
 from experiments import magnitude_search_trials as trials
 from tests.v2.research.test_magnitude_search_execution import LIMITS
@@ -449,3 +450,163 @@ def test_parent_refuses_child_completion_before_receipt_or_labels(native, monkey
     assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit completion differs from admitted attempts").problem
     slots = [row[0] for row in native.conn.execute("SELECT slot FROM magnitude_search_records")]
     assert not any(slot.startswith(("execution:", "terminal:", "forecasts:")) for slot in slots)
+
+
+def expected_native_manifest_id(inputs):
+    """Literal small-fixture wire oracle: no publisher, builder, store or returned ID."""
+    sections = {}
+    members = {"features": inputs["features"], "training": inputs["training"],
+        "preflight.event_ids": inputs["preflight"]["event_ids"],
+        "preflight.planned_inputs": inputs["preflight"]["planned_inputs"],
+        **{"training_inputs." + name: [] for name in (
+            "candidate_event_ids", "qualified_event_ids", "read_inputs", "omitted_labels",
+            "target_recipe.secondary_diagnostics", "holdout_exclusions")}}
+    for section, values in members.items():
+        section_rows = (values if section == "features" else
+                        [{"position": index, "row": row} for index, row in enumerate(values)])
+        entries = []
+        if section_rows:
+            document = {"schema_version": "magnitude_search_shard.v1", "section": section, "rows": section_rows}
+            digest = content_hash(document)
+            hex_digest = digest.removeprefix("sha256:")
+            identity = content_hash({"content_hash": digest, "schema_ref": "magnitude_search_shard.v1"})
+            keys = ([[row["event_id"], row["horizon_sessions"]] for row in values]
+                    if section == "features" else [[index] for index in range(len(values))])
+            entries = [{"ref": {"schema_version": "artifact_ref.v1.0", "artifact_id": "art_" + identity[7:39],
+                "content_hash": digest, "schema_ref": "magnitude_search_shard.v1",
+                "byte_size": len(canonical_json(document).encode()),
+                "storage_key": f"objects/{hex_digest[:2]}/{hex_digest}"},
+                "rows": len(values), "first_key": keys[0], "last_key": keys[-1]}]
+        sections[section] = {"row_count": len(values), "shards": entries}
+    inline = {"preflight." + name: value for name, value in inputs["preflight"].items()
+              if name not in ("event_ids", "planned_inputs")}
+    return content_hash({"schema_version": "magnitude_search_cohort_manifest.v1",
+                         "inline": inline, "sections": sections})
+
+
+def expected_native_receipt(succeeded=True):
+    """Derive the oracle from synthetic fixture data, never a returned receipt."""
+    columns = magnitude_fitted_execution_document("2025-01-01", "history_ridge")["features"]
+    inputs = {**native_inputs(), "training": [{"event_id": "train", "absolute_move_pct": 2.0}],
+              "features": [{"event_id": event, "context_id": "history", "horizon_sessions": horizon,
+                  **dict.fromkeys(columns, 0.0)}
+                  for event in ("event", "train") for horizon in (1, 3, 5)]}
+    inputs_id = expected_native_manifest_id(inputs)
+    fits = []
+    for horizon in (5, 3, 1):
+        training = {"columns": columns, "row_keys": [["train", "history", horizon]],
+                    "values": [[0.0] * 11], "absolute_move_pct": [2.0]}
+        prediction = {"columns": columns, "row_keys": [["event", "history", horizon]], "values": [[0.0] * 11]}
+        fits.append({"horizon_sessions": horizon, "training_event_ids": ["train"],
+            "evaluation_event_ids": ["event"], "training_matrix_id": content_hash(training),
+            "prediction_matrix_id": content_hash(prediction)})
+    preflight, recipe = inputs["preflight"], magnitude_recipe()
+    evaluation = {"schema_version": "research_magnitude_targets.v1",
+        **{name: preflight[name] for name in ("snapshot_id", "holdout_as_of_month", "random_membership_version",
+            "rolling_membership_version", "population_use", "purpose", "computed_moves_version")},
+        "labels_before": "2024-01-01", "target_recipe": recipe, "target_recipe_id": content_hash(recipe),
+        "consumed_inputs": preflight["planned_inputs"], "excluded_future_events": []}
+    validation = {"inputs_id": inputs_id,
+        "evaluation_inputs": {**evaluation, "inputs_id": content_hash(evaluation), "holdout_exclusions": []},
+        "targets": [{"event_id": "event", "absolute_move_pct": 4.0}]}
+    terminal = ({"status": "succeeded", "inputs_id": inputs_id,
+        "validation_id": content_hash(validation), "evaluation_inputs": validation["evaluation_inputs"],
+        "predictions": [{**row, "absolute_move_pct": 4.0} for row in rows(2.0)],
+        "metrics": {"count": 3, "rmse": 2.0, "mae": 2.0}} if succeeded else
+        {"status": "failed", "problem": to_document(fail("EXPERIMENT_VARIANT_FAILED",
+            "search trial did not complete").problem)})
+    return {"attempt": {"limits": LIMITS, "candidate_id": "a-first",
+            "trial_id": content_hash(["plan", "2024", "2023", "a-first"])},
+        "fit_attempt_count": 3 if succeeded else 1, "completed_fit_count": 3 if succeeded else 0,
+        "fits": fits if succeeded else [], "status": "succeeded" if succeeded else "failed",
+        "forecasts_id": content_hash(rows(2.0)) if succeeded else None,
+        "terminal": terminal, "evaluation_authority": "none"}
+
+
+@pytest.mark.parametrize("replay_method", ["execute", "reconcile"])
+@pytest.mark.parametrize("succeeded", [True, False])
+@pytest.mark.parametrize("recovery_stage", [None, "execution", "terminal"])
+def test_native_response_verifies_each_fit_marker_once_and_replays_fresh(
+        native, monkeypatch, succeeded, replay_method, recovery_stage):
+    import json
+    from collections import Counter
+
+    from engine.v2.foundation import ArtifactStore
+    from experiments.magnitude_search_inputs import load_inputs
+
+    if not succeeded:
+        def failed(source, inner, plan, execution, limits, progress):
+            inputs = load_inputs(ArtifactStore(source["store_root"]), source["manifest"], source["inputs_id"])
+            progress("started", trials.fit_evidence(inputs, inner, plan, execution)[0])
+            return {"event": "failed"}
+        monkeypatch.setattr(trials, "run_fitted_trial", failed)
+    opened = Counter()
+    read = ArtifactStore.read_verified
+
+    def verified(store, ref):
+        payload = read(store, ref)
+        record = json.loads(payload)
+        if record.get("schema_version") == "magnitude_search_record.v1":
+            opened[record["slot"].split(":", 1)[0]] += 1
+        return payload
+
+    monkeypatch.setattr(ArtifactStore, "read_verified", verified)
+    if recovery_stage is None:
+        result = native.recorder.execute("2024", "2023", "a-first", limits=LIMITS)
+    else:
+        from tests.v2.research.test_magnitude_search_reconciliation import interrupt, no_launch
+
+        interrupt(monkeypatch, native.recorder, recovery_stage, after=False)
+        no_launch(monkeypatch)
+        opened.clear()
+        with no_fit_guard(), legacy_guard():
+            result = native.recorder.reconcile("2024", "2023", "a-first", limits=LIMITS)
+    expected = expected_native_receipt(succeeded)
+    assert result == expected
+    assert opened["execution-result"] == 1
+    assert opened["fit-started"] == (3 if succeeded else 1)
+    assert opened["fit-completed"] == (3 if succeeded else 0)
+    replay = getattr(native.recorder, replay_method)
+    before = native.conn.total_changes
+    for _ in range(2):
+        opened.clear()
+        with no_fit_guard(), legacy_guard():
+            assert replay("2024", "2023", "a-first", limits=LIMITS) == expected
+        assert opened["execution-result"] == 1
+        assert opened["fit-started"] == (3 if succeeded else 1)
+        assert opened["fit-completed"] == (3 if succeeded else 0)
+        assert native.conn.total_changes == before
+    with pytest.raises(OpsError) as caught:
+        replay("2024", "2023", "a-first", limits={**LIMITS, "cpu_seconds": 31})
+    message = ("search execution accounting differs" if replay_method == "execute"
+               else "search durable execution result differs")
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", message).problem
+
+
+@pytest.mark.parametrize("replay_method", ["execute", "reconcile"])
+@pytest.mark.parametrize("cpu_seconds", [30, 37])
+def test_completed_replay_rechecks_durable_result_after_prior_success(native, replay_method, cpu_seconds):
+    import json
+
+    from engine.v2.contracts import ArtifactRef
+    from engine.v2.foundation import from_document
+
+    limits = {**LIMITS, "cpu_seconds": cpu_seconds}
+    expected = expected_native_receipt()
+    expected["attempt"]["limits"] = limits
+    replay = getattr(native.recorder, replay_method)
+    assert native.recorder.execute("2024", "2023", "a-first", limits=limits) == expected
+    repeated = replay("2024", "2023", "a-first", limits=limits)
+    assert repeated == expected
+    assert repeated["attempt"]["limits"]["cpu_seconds"] == cpu_seconds
+    key = content_hash(["plan", "2024", "2023", "a-first"])
+    ref_json = native.conn.execute("SELECT ref_json FROM magnitude_search_records WHERE slot=?",
+                                  ("execution-result:" + key,)).fetchone()[0]
+    ref = from_document(ArtifactRef, json.loads(ref_json))
+    path = native.store.root / ref.storage_key
+    path.chmod(0o644)
+    path.write_bytes(b"corrupt after successful replay")
+    with pytest.raises(OpsError) as caught:
+        replay("2024", "2023", "a-first", limits=limits)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.message == "search journal artifact could not be verified"
