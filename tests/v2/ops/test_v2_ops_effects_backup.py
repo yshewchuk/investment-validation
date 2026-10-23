@@ -1244,3 +1244,77 @@ def test_superseded_uuid_database_is_removed_after_the_new_manifest(
     assert not first_path.exists()
     assert not stale.exists()
     assert (backup / second["database_file"]).exists()
+
+
+def _current_manifest(**overrides):
+    """A current-shaped manifest: every current key, with non-null database
+    fields and an artifact byte_size."""
+    manifest = {
+        "schema_version": "catalog_backup.v1.0",
+        "backup_key": "b-shape",
+        "cutoff": "2026-09-12T00:00:00.000000Z",
+        "database": "sha256:" + "0" * 64,
+        "database_file": "b-shape.abc.sqlite",
+        "database_content_hash": "sha256:" + "1" * 64,
+        "database_rows": {"outbox": 1},
+        "database_size": 4096,
+        "artifacts": {"evidence.bin": {"content_hash": "sha256:" + "2" * 64,
+                                       "byte_size": 8}},
+    }
+    manifest.update(overrides)
+    return manifest
+
+
+def _legacy_manifest(**overrides):
+    """A legacy-shaped manifest that predates the current-only optional keys."""
+    manifest = {
+        "schema_version": "catalog_backup.v1.0",
+        "backup_key": "b-shape",
+        "cutoff": "2026-09-12T00:00:00.000000Z",
+        "database": "sha256:" + "0" * 64,
+        "artifacts": {"evidence.bin": {"content_hash": "sha256:" + "2" * 64}},
+    }
+    manifest.update(overrides)
+    return manifest
+
+
+@pytest.mark.parametrize("field", ["database_file", "database_content_hash",
+                                   "database_size"])
+def test_current_manifest_rejects_explicit_null_database_field(field):
+    manifest = _current_manifest()
+    manifest[field] = None
+
+    with pytest.raises(ValueError):
+        backup_module._validated_manifest_shape(manifest, current=True)
+
+
+@pytest.mark.parametrize("artifact", [
+    {"content_hash": "sha256:" + "2" * 64},
+    {"content_hash": "sha256:" + "2" * 64, "byte_size": None},
+], ids=["missing", "null"])
+def test_current_manifest_requires_artifact_byte_size(artifact):
+    manifest = _current_manifest(artifacts={"evidence.bin": artifact})
+
+    with pytest.raises(ValueError):
+        backup_module._validated_manifest_shape(manifest, current=True)
+
+
+@pytest.mark.parametrize("field", ["database_file", "database_content_hash",
+                                   "database_size"])
+def test_legacy_manifest_present_null_optional_field_is_rejected(field):
+    manifest = _legacy_manifest()
+    manifest[field] = None
+
+    with pytest.raises(ValueError):
+        backup_module._validated_manifest_shape(manifest, current=False)
+
+
+def test_legacy_manifest_omitting_optional_fields_validates():
+    manifest = _legacy_manifest()
+
+    name, artifacts, size = backup_module._validated_manifest_shape(
+        manifest, current=False)
+
+    assert name == "b-shape.sqlite"
+    assert size is None
+    assert artifacts == {"evidence.bin": {"content_hash": "sha256:" + "2" * 64}}

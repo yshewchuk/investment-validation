@@ -123,6 +123,8 @@ class _Progress:
 
 def _single_filename(value):
     """A safe, plain single path component (no separators or traversal)."""
+    if not isinstance(value, str):
+        raise ValueError("not a safe single filename")
     try:
         parts = safe_relative_path(value)
     except ArtifactError:
@@ -445,8 +447,13 @@ def _read_manifest(manifest_path):
         return None
 
 
-def _validated_artifacts_shape(artifacts):
-    """Validate an artifact mapping (shared by prior admission and restore)."""
+def _validated_artifacts_shape(artifacts, *, current):
+    """Validate an artifact mapping (shared by prior admission and restore).
+
+    A current manifest requires ``byte_size`` on every artifact. A legacy
+    manifest may omit it, but a present value is validated the same way: only
+    genuine absence is an omission, never a null value.
+    """
     if not isinstance(artifacts, dict):
         raise ValueError("artifacts is not a mapping")
     for name, info in artifacts.items():
@@ -456,7 +463,10 @@ def _validated_artifacts_shape(artifacts):
         if not isinstance(info.get("content_hash"), str):
             raise ValueError("artifact content hash is invalid")
         size = info.get("byte_size")
-        if size is not None and (
+        if "byte_size" not in info:
+            if current:
+                raise ValueError("artifact byte size is missing")
+        elif size is None or (
                 not isinstance(size, int) or isinstance(size, bool) or size < 0):
             raise ValueError("artifact byte size is invalid")
     return artifacts
@@ -472,28 +482,44 @@ def _validated_row_counts(rows):
     return rows
 
 
-def _validated_optional_manifest_fields(manifest):
-    """Validate current-only fields when present; return the database name."""
+def _validated_optional_manifest_fields(manifest, *, current):
+    """Validate the current-only database fields; return the name and size.
+
+    A current manifest must carry a valid non-null ``database_file``,
+    ``database_content_hash`` and ``database_size``. A legacy manifest may
+    omit any of them, but a present key is validated the same way: a null or
+    invalid value is rejected, never treated as an omission.
+    """
     name = manifest.get("database_file")
-    if name is not None:
+    if "database_file" in manifest:
         _single_filename(name)
+    elif current:
+        raise ValueError("manifest database file is missing")
     content_hash = manifest.get("database_content_hash")
-    if content_hash is not None and not isinstance(content_hash, str):
-        raise ValueError("manifest database content hash is invalid")
+    if "database_content_hash" in manifest:
+        if not isinstance(content_hash, str):
+            raise ValueError("manifest database content hash is invalid")
+    elif current:
+        raise ValueError("manifest database content hash is missing")
     size = manifest.get("database_size")
-    if size is not None and (
-            not isinstance(size, int) or isinstance(size, bool) or size < 0):
-        raise ValueError("manifest database size is invalid")
+    if "database_size" in manifest:
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise ValueError("manifest database size is invalid")
+    elif current:
+        raise ValueError("manifest database size is missing")
     return name, size
 
 
 def _validated_manifest_shape(manifest, *, current):
     """Validate a current or legacy manifest shape without doing I/O.
 
-    ``current`` requires exactly the current key set. A legacy restore manifest
-    may omit ``database_rows``, ``database_file``, ``database_content_hash`` and
-    ``database_size``; it then reads ``<backup_key>.sqlite`` and hashes/sizes
-    that file directly.
+    ``current`` requires exactly the current key set and valid non-null
+    ``database_file``, ``database_content_hash`` and ``database_size`` fields.
+    A legacy restore manifest may omit ``database_rows``, ``database_file``,
+    ``database_content_hash`` and ``database_size``; it then reads
+    ``<backup_key>.sqlite`` and hashes/sizes that file directly. A present
+    optional field is validated even in a legacy manifest, so a null value is
+    never mistaken for an omission.
     """
     if not isinstance(manifest, dict):
         raise ValueError("manifest is not a mapping")
@@ -508,8 +534,8 @@ def _validated_manifest_shape(manifest, *, current):
             raise ValueError(f"manifest {name} is invalid")
     if "database_rows" in manifest:
         _validated_row_counts(manifest["database_rows"])
-    artifacts = _validated_artifacts_shape(manifest.get("artifacts"))
-    name, size = _validated_optional_manifest_fields(manifest)
+    artifacts = _validated_artifacts_shape(manifest.get("artifacts"), current=current)
+    name, size = _validated_optional_manifest_fields(manifest, current=current)
     if name is None:
         name = _single_filename(manifest["backup_key"]) + ".sqlite"
     return name, artifacts, size
@@ -557,7 +583,7 @@ def _verified_prior_backup(manifest_path, target, source_rows, source_retry_dige
     try:
         database_name, _artifacts, database_size = _validated_manifest_shape(
             manifest, current=True)
-    except ValueError:
+    except (AttributeError, TypeError, ValueError):
         return None
     if (manifest.get("backup_key") != key
             or manifest.get("schema_version") != payload["schema_version"]
@@ -764,7 +790,7 @@ def _validated_artifact_names(payload):
     """Parse every payload artifact reference before any database is installed."""
     artifacts = payload.get("artifacts", {})
     try:
-        _validated_artifacts_shape(artifacts)
+        _validated_artifacts_shape(artifacts, current=True)
         return {name: from_document(ArtifactRef, document)
                 for name, document in artifacts.items()}
     except (ValueError, TypeError):

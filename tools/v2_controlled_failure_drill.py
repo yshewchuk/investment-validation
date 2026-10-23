@@ -74,7 +74,9 @@ from engine.v2.foundation import ArtifactStore, Clock, SystemClock, format_times
 from engine.v2.ops import publication  # noqa: E402
 from engine.v2.ops.backup import (  # noqa: E402
     MAX_MANIFEST_BYTES,
-    manifest_database_path,
+    _hash_file,
+    _open_checked,
+    _validated_manifest_shape,
     prepare_backup,
     restore_backup,
     run_backup,
@@ -82,7 +84,6 @@ from engine.v2.ops.backup import (  # noqa: E402
 from engine.v2.ops.workflows.commands import read_bounded_bytes  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
-from engine.v2.ops.fingerprints import file_hash  # noqa: E402
 from engine.v2.ops.outbox import fail_effect  # noqa: E402
 
 __all__ = ["OpsFailureDrillError", "run_drill", "main"]
@@ -132,11 +133,30 @@ class _Deployment:
     backup_root: Path
 
 
+def _file_matches(path: Path, *, digest, expected_size, stage: str) -> bool:
+    """One manifest-selected file: a regular, non-symlink file within the byte
+    cap, matching the size the manifest records (when it records one) and
+    hashing to the digest it records. Every malformed path or I/O or hash
+    refusal is a FAIL, never a raise."""
+    try:
+        stream, _ = _open_checked(path, stage=stage, expected_size=expected_size)
+        stream.close()
+    except (OSError, OpsError, ValueError):
+        return False
+    try:
+        return _hash_file(path, stage=stage, announce=False) == digest
+    except (OSError, OpsError, ValueError):
+        return False
+
+
 def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
     """This drill's own byte-level consistency check: the manifest names the
-    key and schema, the database file it selects (falling back to legacy
-    ``<key>.sqlite``) still hashes to the recorded digest, and each artifact
-    copy still hashes to its recorded digest."""
+    key and schema, has a valid legacy shape with safe single-filename paths,
+    and the database file it selects (falling back to legacy ``<key>.sqlite``)
+    and each artifact copy are regular non-symlink files within the byte cap
+    that match their recorded size (where the manifest records one) and hash to
+    their recorded digest. Malformed shape/path and any I/O or hash failure is
+    never verified."""
     if not isinstance(manifest, dict):
         return False
     if manifest.get("schema_version") != "catalog_backup.v1.0":
@@ -144,14 +164,18 @@ def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
     if manifest.get("backup_key") != key:
         return False
     try:
-        database = manifest_database_path(root, manifest)
-    except ValueError:
+        database_name, artifacts, database_size = _validated_manifest_shape(
+            manifest, current=False)
+    except (AttributeError, TypeError, ValueError):
         return False
-    if not database.is_file() or file_hash(database) != manifest.get("database"):
+    if not _file_matches(root / database_name, digest=manifest.get("database"),
+                         expected_size=database_size, stage="drill database"):
         return False
-    for name, info in manifest.get("artifacts", {}).items():
-        path = root / "artifacts" / name
-        if not path.is_file() or file_hash(path) != info.get("content_hash"):
+    for name, info in artifacts.items():
+        if not _file_matches(root / "artifacts" / name,
+                             digest=info.get("content_hash"),
+                             expected_size=info.get("byte_size"),
+                             stage="drill artifact"):
             return False
     return True
 

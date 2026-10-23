@@ -11,10 +11,27 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from engine.v2.ops import backup as backup_module
 from engine.v2.ops.fingerprints import file_hash
 from tools import v2_controlled_failure_drill as drill
 
 KEY = "focused-drill"
+
+
+def _base_manifest(root, artifacts=None):
+    """A minimal legacy-shaped manifest with the database file it names."""
+    database = root / f"{KEY}.sqlite"
+    database.write_bytes(b"synthetic catalog bytes")
+    manifest = {
+        "schema_version": "catalog_backup.v1.0",
+        "backup_key": KEY,
+        "cutoff": "2026-09-12T00:00:00.000000Z",
+        "database": file_hash(database),
+        "artifacts": {} if artifacts is None else artifacts,
+    }
+    return database, manifest
 
 
 def _record_consistency_checks(monkeypatch):
@@ -28,14 +45,7 @@ def _record_consistency_checks(monkeypatch):
 
 
 def test_valid_json_manifest_parses_and_verifies(tmp_path):
-    database = tmp_path / f"{KEY}.sqlite"
-    database.write_bytes(b"synthetic catalog bytes")
-    manifest = {
-        "schema_version": "catalog_backup.v1.0",
-        "backup_key": KEY,
-        "database": file_hash(database),
-        "artifacts": {},
-    }
+    _, manifest = _base_manifest(tmp_path)
     path = tmp_path / f"{KEY}.manifest.json"
     path.write_text(json.dumps(manifest))
 
@@ -79,3 +89,75 @@ def test_symlinked_manifest_is_never_verified(tmp_path, monkeypatch):
 
     assert (loaded, verified) == (None, False)
     assert calls == []
+
+
+def test_valid_shape_and_hashes_is_consistent(tmp_path):
+    _, manifest = _base_manifest(tmp_path)
+    assert drill._manifest_is_consistent(manifest, tmp_path, KEY) is True
+
+
+def test_malformed_shape_is_inconsistent(tmp_path):
+    _, manifest = _base_manifest(tmp_path)
+    del manifest["cutoff"]
+
+    assert drill._manifest_is_consistent(manifest, tmp_path, KEY) is False
+
+
+def test_list_artifacts_is_inconsistent(tmp_path):
+    _, manifest = _base_manifest(tmp_path)
+    manifest["artifacts"] = ["evidence.bin"]
+
+    assert drill._manifest_is_consistent(manifest, tmp_path, KEY) is False
+
+
+@pytest.mark.parametrize("name", ["../escape.bin", "a/b.bin"])
+def test_traversal_artifact_name_is_inconsistent(tmp_path, name):
+    _, manifest = _base_manifest(tmp_path)
+    manifest["artifacts"] = {name: {"content_hash": "sha256:" + "0" * 64}}
+
+    assert drill._manifest_is_consistent(manifest, tmp_path, KEY) is False
+
+
+def test_traversal_database_file_is_inconsistent(tmp_path):
+    _, manifest = _base_manifest(tmp_path)
+    manifest["database_file"] = "../escape.sqlite"
+
+    assert drill._manifest_is_consistent(manifest, tmp_path, KEY) is False
+
+
+def test_symlinked_artifact_is_inconsistent(tmp_path):
+    _, manifest = _base_manifest(tmp_path)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"evidence")
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "evidence.bin").symlink_to(outside)
+    manifest["artifacts"] = {"evidence.bin": {"content_hash": file_hash(outside)}}
+
+    assert drill._manifest_is_consistent(manifest, tmp_path, KEY) is False
+
+
+def test_oversized_selected_file_is_inconsistent(tmp_path, monkeypatch):
+    monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", 4)
+    _, manifest = _base_manifest(tmp_path)
+
+    assert drill._manifest_is_consistent(manifest, tmp_path, KEY) is False
+
+
+def test_hash_mismatch_is_inconsistent(tmp_path):
+    _, manifest = _base_manifest(tmp_path)
+    manifest["database"] = "sha256:" + "0" * 64
+
+    assert drill._manifest_is_consistent(manifest, tmp_path, KEY) is False
+
+
+def test_artifact_byte_size_mismatch_is_inconsistent(tmp_path):
+    _, manifest = _base_manifest(tmp_path)
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "evidence.bin").write_bytes(b"evidence")
+    manifest["artifacts"] = {
+        "evidence.bin": {"content_hash": file_hash(artifacts / "evidence.bin"),
+                         "byte_size": 1024}}
+
+    assert drill._manifest_is_consistent(manifest, tmp_path, KEY) is False
