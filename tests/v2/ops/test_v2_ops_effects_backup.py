@@ -539,6 +539,53 @@ def test_artifact_hash_mismatch_refuses_non_retryable_integrity_failure(tmp_path
     assert refused.value.problem.retryable is False
 
 
+def test_oversized_backing_object_is_refused_before_verify(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "b27", {"evidence.bin": ref}, clock=clock)
+    monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", ref.byte_size - 1)
+    calls = []
+
+    def spy(_ref):
+        calls.append(_ref)
+        raise AssertionError("verify must not run before the size preflight")
+
+    monkeypatch.setattr(store, "verify", spy)
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="b27", owner="worker", target=tmp_path / "backup",
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+    assert calls == []
+    assert not list((tmp_path / "backup").rglob("evidence.bin"))
+
+
+def test_size_mismatched_backing_object_is_refused_before_verify(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    mismatched = {**to_document(ref), "byte_size": ref.byte_size - 1}
+    prepare_backup(conn, "b28", {"evidence.bin": mismatched}, clock=clock)
+    calls = []
+
+    def spy(_ref):
+        calls.append(_ref)
+        raise AssertionError("verify must not run before the size preflight")
+
+    monkeypatch.setattr(store, "verify", spy)
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="b28", owner="worker", target=tmp_path / "backup",
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+    assert calls == []
+
+
 def test_deeply_nested_prior_manifest_is_invalid_and_rebuilt(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
