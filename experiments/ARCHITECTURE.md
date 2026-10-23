@@ -256,7 +256,7 @@ The closed request names pinned snapshot IDs, dictionary hash, an identity-only
 eligibility-plan reference, H/HM/HMO, fixed Ridge/ElasticNet/HGB grids, ordered
 outer/inner years, candidate/fit caps, named comparison and explicit child,
 parent/build/job limits. Identity references prove neither existence nor
-provenance. The [published pre-code wire contract](https://github.com/yshewchuk/investment-validation/blob/34e0a165976653eafbec734536f8471b6b970749/experiments/SUPER_SIZE/STAGE2_DESIGN.md#6-stage-2-request-and-schedule-compiler-checkpoint)
+provenance. The [clarified wire contract](https://github.com/yshewchuk/investment-validation/blob/4095cb7fc953811bbcbf2a61ff390251dae3bbce/experiments/SUPER_SIZE/STAGE2_DESIGN.md#6-stage-2-request-and-schedule-compiler-checkpoint), based on the published pre-code checkpoint,
 defines the closed nested fields. Scope is request compatibility, not native admission.
 
 | Condition | Enforced outcome |
