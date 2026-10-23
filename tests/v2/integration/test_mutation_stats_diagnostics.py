@@ -3,6 +3,7 @@
 # packages: ops
 """
 import io
+import json
 import os
 import signal
 import subprocess
@@ -14,6 +15,7 @@ import pytest
 import yaml
 
 from tools import mutation_pilot as pilot
+from tools import mutation_results as results
 from tools import mutation_stats_diagnostics as diagnostics
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -229,7 +231,7 @@ def test_source_policy_still_checks_authored_imports_and_size(tmp_path, monkeypa
             checks.test_module_imports_are_stdlib_only()
 
 
-@pytest.mark.parametrize("housekeeping", ["ok", "mkdir", "cp", "stale"])
+@pytest.mark.parametrize("housekeeping", ["ok", "mkdir", "cp", "stale", "no-marker"])
 def test_workflow_retains_fresh_stats_diagnostic_and_never_blocks_export(tmp_path, housekeeping):
     workflow = (ROOT / ".github/workflows/mutation-mutmut.yml").read_text()
     assert 'if [ "$rc" != 0 ]; then echo "::error::mutmut run exited $rc"; exit 1; fi' in workflow
@@ -239,8 +241,9 @@ def test_workflow_retains_fresh_stats_diagnostic_and_never_blocks_export(tmp_pat
     diagnostic.parent.mkdir(parents=True)
     diagnostic.write_text("original stats failure detail")
     marker = tmp_path / "mutation-start"
-    marker.write_text("100")
-    os.utime(marker, (100, 100))
+    if housekeeping != "no-marker":
+        marker.write_text("100")
+        os.utime(marker, (100, 100))
     os.utime(diagnostic, (50, 50) if housekeeping == "stale" else (200, 200))
     env = dict(os.environ, HOME=str(tmp_path), RUNNER_TEMP=str(tmp_path), MODULE="toy",
                MODE="incremental", PR_OPEN="true", BEFORE="")
@@ -260,7 +263,23 @@ def test_workflow_retains_fresh_stats_diagnostic_and_never_blocks_export(tmp_pat
         assert artifact.read_text() == "original stats failure detail"
     else:
         assert not artifact.exists()
-    assert not (tmp_path / "report/toy/summary.json").exists()  # not a fabricated success
+
+
+def test_real_export_failure_preserves_diagnostic_without_fabricating_results(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / results.SNAPSHOT_NAME).write_text("{")
+    report = tmp_path / "report/toy"
+    report.mkdir(parents=True)
+    diagnostic = report / "stats-failure.txt"
+    diagnostic.write_text("original stats failure detail")
+
+    with pytest.raises(json.JSONDecodeError, match="Expecting property name enclosed in double quotes"):
+        results.export_module(work, "toy", [], report, mode="incremental", run_exit_code=1)
+
+    assert diagnostic.read_text() == "original stats failure detail"
+    for name in ("results.jsonl", "summary.json", "summary.md"):
+        assert not (report / name).exists()
 
 
 def _provider_contract_sources():
@@ -396,10 +415,12 @@ def test_driver_echo_is_bounded_and_preserves_backend_result(monkeypatch, tmp_pa
 
     monkeypatch.setenv("MASSIVE_API_KEY", "synthetic-env-value-must-not-be-logged")
     result, calls = run_mutation_command(monkeypatch, tmp_path, rc=rc, on_run=retain_diagnostic)
-    echoed = capsys.readouterr().err
+    captured = capsys.readouterr()
+    echoed = captured.err
     assert result == rc and len(calls) == 1
     assert echoed == (payload[:65536].decode("utf-8", "ignore") if rc else "")
     assert len(echoed.encode()) <= 65536
+    assert "synthetic-env-value-must-not-be-logged" not in captured.out + captured.err
 
 
 def test_driver_delivers_stats_paths_and_diagnostic_through_the_actual_budget_runner(
