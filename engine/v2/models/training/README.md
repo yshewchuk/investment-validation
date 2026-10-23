@@ -31,8 +31,8 @@ The fitter restores HGB's integral JSON `max_features` fraction to float for skl
 
 `magnitude_elasticnet.fit_elasticnet_predictions(recipe, train_features, train_labels,
 prediction_features, *, columns)` is an add-only research adapter for explicit
-selected-column matrices. It returns predictions, recipe ID, sparse coefficient
-and convergence evidence after one guarded training-only fit. `columns` must match
+selected-column matrices. It returns predictions, recipe ID, the full coefficient
+vector, selected source columns and convergence evidence after one guarded training-only fit. `columns` must match
 the recipe order. The caller owns causal membership, source identity, fit caps and
 inner-only choice of subset/alpha/l1_ratio; this API cannot certify those from arrays.
 No runtime caller, grid activation, validation-target selection, cache or persistence
@@ -72,7 +72,7 @@ P5-3 (current dataset/training recipes):
 - `fold_receipts` / `receipt_issues` — the per-fold training-membership and
   label-availability receipts and the check that refuses future members,
   future labels and upstream in-sample leakage.
-- `run_training_job` — the only entry that fits a recipe; resumable per fold,
+- `run_training_job` — fits the current release recipes; resumable per fold,
   guarded by the shared no-fit switch.
 
 `build_d14_dataset` builds the two monthly D14 datasets from explicit catalog,

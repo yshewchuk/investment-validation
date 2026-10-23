@@ -464,6 +464,7 @@ skip = [
     "*/training/trailing_cutoff.py",
 ]
 tests = [
+    "tests/v2/models/training/test_magnitude_elasticnet.py",
     "tests/v2/models/training/test_magnitude_estimators.py",
     "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/test_v2_models_p5_2_acceptance.py",
@@ -496,6 +497,7 @@ skip = [
     "*/trailing_cutoff_artifact.py",
 ]
 tests = [
+    "tests/v2/models/training/test_magnitude_elasticnet.py",
     "tests/test_v2_models_admissible_table.py",
     "tests/test_v2_models_deployment.py",
     "tests/test_v2_models_inference.py",
