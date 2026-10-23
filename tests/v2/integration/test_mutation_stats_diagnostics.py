@@ -4,6 +4,7 @@
 """
 import io
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -399,6 +400,43 @@ def test_driver_echo_is_bounded_and_preserves_backend_result(monkeypatch, tmp_pa
     assert result == rc and len(calls) == 1
     assert echoed == (payload[:65536].decode("utf-8", "ignore") if rc else "")
     assert len(echoed.encode()) <= 65536
+
+
+def test_driver_delivers_stats_paths_and_diagnostic_through_the_actual_budget_runner(
+        monkeypatch, tmp_path, capsys):
+    from tests.v2.integration.test_mutation_ci import run_mutation_command
+
+    launches, waits, signals = [], [], []
+    work = tmp_path / "work"
+    diagnostic = work / "stats-failure.txt"
+    payload = "retained stats failure before the time-budget stop\n"
+
+    def launch(cmd, **kwargs):
+        launches.append((cmd, kwargs))
+        assert kwargs["cwd"] == work and kwargs["start_new_session"] is True
+        assert isinstance(kwargs["env"], dict)
+        assert kwargs["env"]["MUTATION_PILOT_SOURCE_ROOT"] == str(work)
+        assert kwargs["env"]["MUTATION_PILOT_STATS_DIAGNOSTIC"] == str(diagnostic)
+        Path(kwargs["env"]["MUTATION_PILOT_STATS_DIAGNOSTIC"]).write_text(payload)
+
+        def wait(timeout=None):
+            waits.append(timeout)
+            if len(waits) == 1:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            return 0  # clean SIGINT unwind still reports the budget-stop sentinel
+
+        return SimpleNamespace(pid=123456, wait=wait)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(subprocess, "Popen", launch)
+        scoped.setattr(os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+        result, unbounded_calls = run_mutation_command(scoped, tmp_path, rc=17, budget=7)
+    assert result == 124 and unbounded_calls == []
+    assert len(launches) == 1 and launches[0][0][:5] == [sys.executable, "-u", "-m", "mutmut", "run"]
+    assert len(waits) == 2 and waits[0] == 7
+    assert signals == [(123456, signal.SIGINT)]
+    assert diagnostic.read_text() == payload
+    assert capsys.readouterr().err == payload
 
 
 @pytest.mark.parametrize("failure", ["read", OSError, ValueError])
