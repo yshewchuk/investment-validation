@@ -5989,3 +5989,15 @@ def test_reap_descendants_never_raises(monkeypatch, capsys, exc):
     monkeypatch.setattr(pilot.os, "listdir", boom)
     assert pilot._reap_descendants("t") == 0
     assert "descendant sweep failed" in capsys.readouterr().err
+
+
+def test_reap_descendants_returns_zero_when_logging_itself_fails(monkeypatch):
+    def boom(_path):
+        raise RuntimeError("boom")
+
+    def broken_print(*_args, **_kwargs):
+        raise OSError("stderr closed")
+
+    monkeypatch.setattr(pilot.os, "listdir", boom)
+    monkeypatch.setattr("builtins.print", broken_print)
+    assert pilot._reap_descendants("t") == 0

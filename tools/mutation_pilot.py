@@ -2433,6 +2433,13 @@ def _become_subreaper() -> bool:
         return False
 
 
+def _sweep_log(msg: str) -> None:
+    try:
+        print(msg, file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
 # Best-effort and bounded (<= ~5 s of waiting). Without a child subreaper a
 # descendant orphaned to init is not found at all -- only descendants still
 # attached below this process in the tree are seen (the `subreaper: no` line
@@ -2449,7 +2456,9 @@ def _reap_descendants(label: str) -> int:
             proc_state: dict[int, str] = {}
             for entry in os.listdir("/proc"):
                 try:
-                    fields = Path(f"/proc/{entry}/stat").read_text().rpartition(")")[2].split()
+                    with open(f"/proc/{entry}/stat", "rb") as fh:
+                        raw = fh.read(4096)
+                    fields = raw.decode("utf-8", "replace").rpartition(")")[2].split()
                     ppid[int(entry)] = int(fields[1])
                     proc_state[int(entry)] = fields[0]
                 except (OSError, ValueError, IndexError):
@@ -2484,8 +2493,7 @@ def _reap_descendants(label: str) -> int:
             except ProcessLookupError:
                 continue
             except OSError as exc:
-                print(f"[mutation_pilot] {label}: could not kill pid={pid}: {exc}",
-                      file=sys.stderr, flush=True)
+                _sweep_log(f"[mutation_pilot] {label}: could not kill pid={pid}: {exc}")
                 continue
             if proc_state.get(pid) != "Z":
                 killed.append(pid)
@@ -2506,8 +2514,7 @@ def _reap_descendants(label: str) -> int:
                 except ProcessLookupError:
                     continue
                 except OSError as exc:
-                    print(f"[mutation_pilot] {label}: could not kill pid={pid}: {exc}",
-                          file=sys.stderr, flush=True)
+                    _sweep_log(f"[mutation_pilot] {label}: could not kill pid={pid}: {exc}")
                     continue
                 killed.append(pid)
             for pid in list(pending):
@@ -2548,23 +2555,18 @@ def _reap_descendants(label: str) -> int:
                 if proc_state.get(pid) != "Z":
                     alive.add(pid)
         if alive:
-            print(f"[mutation_pilot] {label}: {len(alive)} process(es) did not exit "
-                  f"after SIGKILL: {' '.join(str(p) for p in sorted(alive))}",
-                  file=sys.stderr, flush=True)
+            _sweep_log(f"[mutation_pilot] {label}: {len(alive)} process(es) did not exit "
+                       f"after SIGKILL: {' '.join(str(p) for p in sorted(alive))}")
         if not killed:
             return 0
-        print(f"[mutation_pilot] {label}: killed {len(killed)} leftover descendant process(es)",
-              file=sys.stderr, flush=True)
+        _sweep_log(f"[mutation_pilot] {label}: killed {len(killed)} leftover descendant process(es)")
         for pid in killed[:20]:
-            print(f"[mutation_pilot]   pid={pid} cmd={cmdlines.get(pid, '')}",
-                  file=sys.stderr, flush=True)
+            _sweep_log(f"[mutation_pilot]   pid={pid} cmd={cmdlines.get(pid, '')}")
         if len(killed) > 20:
-            print(f"[mutation_pilot]   ... and {len(killed) - 20} more",
-                  file=sys.stderr, flush=True)
+            _sweep_log(f"[mutation_pilot]   ... and {len(killed) - 20} more")
         return len(killed)
     except Exception as exc:
-        print(f"[mutation_pilot] {label}: descendant sweep failed: {exc}",
-              file=sys.stderr, flush=True)
+        _sweep_log(f"[mutation_pilot] {label}: descendant sweep failed: {exc}")
         return 0
 
 
