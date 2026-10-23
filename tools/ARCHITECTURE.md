@@ -18,13 +18,13 @@ Opt-in guard against a heavy job filling the host disk (WSL's virtual disk never
 | heartbeat | the once-a-minute line adds `disk used <G>G/<ceiling>G` when the check is on. |
 | resource-measurement record (`tools/v2_resource_measurement.py`, caller of bounded_run) | `killed` is true for exit 76 as well as 137; `kill_reason` is `DISK LIMIT` only for exit 76, when a terminal breach line (`DISK LIMIT:` or `DISK LIMIT unreadable for N ticks`) appears in the output, and `None` otherwise (an earlier `DISK LIMIT unreadable:` warning does not count); exit 137 reports the memory strings only (match priority BOX FLOOR, SWAP, CAP), never `DISK LIMIT`. |
 
-## Dependencies
+## `bounded_run.py` dependencies
 
 Callers are `tools/v2_resource_measurement.py`, `tools/land.py` and `tools/oc_check.py`; depends only on the stdlib and Linux `/proc`, `os.statvfs`.
 
-## Mutation stats diagnostics (#581)
+## Mutation stats diagnostics
 
-Mutation diagnostics are optional evidence, never authority over a backend result or score. The mutation driver consumes pytest's stats-phase failures (including captured setup/call/teardown and collection output, plus internal errors). It exposes at most 64 KiB per module as a fresh sidecar and at most 64 KiB on stderr after a failed backend. CI attempts to retain fresh evidence before result export; neither collection nor delivery reruns tests or enables per-mutant debug output.
+Mutation diagnostics are optional evidence, never authority over a backend result or score. The mutation workflow calls `mutation_pilot.py`, which configures pytest to load `mutation_stats_diagnostics.py`. That plugin consumes pytest's stats-phase reports (including captured setup/call/teardown and collection output, plus internal errors) and writes at most 64 KiB per module to a sidecar. The driver clears stale evidence before launch and consumes the sidecar afterward, exposing at most 64 KiB on stderr after a failed backend. CI attempts to retain fresh evidence before result export; neither collection nor delivery reruns tests or enables per-mutant debug output.
 
 | Condition | Outcome |
 |---|---|

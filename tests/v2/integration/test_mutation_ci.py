@@ -391,16 +391,11 @@ def test_config_hash_refuses_an_unknown_module():
 
 # -- mutmut diagnostics on the ops_legacy CI shard (run 36001042208) ---------
 #
-# mutmut only logs "failed to collect stats. runner returned 1" and swallows the
-# child pytest output that explains it. The driver's remedy is mutmut's own
-# supported ``debug = true`` config (``mutmut_config_text``): it is full-run
-# verbosity, so it is on only when the environment opts in through
-# ``MUTATION_PILOT_DEBUG`` or on the ops_legacy CI shard by default. These are
-# mock tests: they never run mutmut or pytest; they check the config we hand
-# mutmut, that the environment and module name reach the generated ``setup.cfg``,
-# and that ``cmd_run`` keeps the real exit code without rerunning anything.
-# ops_catalog_state now shares that CI-only default; it is covered by separate
-# tests below so the ops_legacy ones above stay untouched.
+# Stats-only retained output is covered in test_mutation_stats_diagnostics.py.
+# This block covers mutmut's separate supported ``debug = true`` full-run
+# verbosity. ``MUTATION_PILOT_DEBUG`` overrides the CI-only defaults for
+# ops_legacy, ops_catalog_state and ops_runtime. Config tests mock the backend
+# and check generated ``setup.cfg``; driver tests preserve exits without reruns.
 
 DIAG_DEFAULTS = {"pytest_args": ["-p", "no:xdist", "-p", "no:cacheprovider"],
                  "deselect": ["tests/test_a.py::gate_needs_git"],

@@ -307,7 +307,7 @@ def _provider_contract_sources():
     ("__import__('subprocess')\n", False), ("eval('1')\n", False), ("exec('pass')\n", False),
     ("from . import leaf\n", False),
 ])
-def test_provider_boundary_still_rejects_authored_dynamic_imports(tmp_path, monkeypatch, extra, allowed):
+def test_provider_boundary_still_rejects_disallowed_authored_imports(tmp_path, monkeypatch, extra, allowed):
     from tests.v2.ops import test_provider_response_boundary as checks
 
     sources = _provider_contract_sources()
