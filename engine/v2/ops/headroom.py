@@ -1,5 +1,6 @@
-"""Nightly limit headroom check that writes no data or artifacts (it opens
-the ops catalog like every ops command): usage against fixed repo limits.
+"""Nightly limit headroom check that reads no data rows and writes no data
+or artifacts, but -- like every ops command -- opens the ops catalog, which
+may run the outcome-session backfill: usage against fixed repo limits.
 
 One ``headroom_report`` pass answers "how close is tonight's plan to a hard
 limit" from catalog metadata only -- no object payloads beyond the plan and
@@ -48,6 +49,11 @@ _GIB = 1024 ** 3
 #: Bounded-read cap for JSON artifact loads (repo convention, cf.
 #: d14_inputs.MAX_CALENDAR_BYTES): refuse before verified read of an oversize blob.
 _MAX_JSON_BYTES = 16 * 1024 * 1024
+#: Bounded cap for the stored ArtifactRef metadata ``registered_artifact``
+#: decodes (cf. native_sweep_collection's MAX_NATIVE_EVIDENCE_BYTES pass):
+#: an oversize or malformed ref row is an unreadable artifact, refused
+#: INVALID_REQUEST, not a payload-size signal.
+_MAX_METADATA_BYTES = 1024 * 1024
 
 _NOT_COVERED = (
     "max-registration-bytes (run-script flag, not in repo)",
@@ -73,9 +79,11 @@ def status_for(pct: float) -> str:
 
 
 def _entry(name, usage, limit, unit, detail):
-    pct = round(100.0 * usage / limit, 1) if limit > 0 else 0.0
+    # status_for runs on the unrounded ratio: 80.04% displayed as 80.0 is
+    # still WARN, and a rounding-to-boundary must never soften a tier.
+    ratio = 100.0 * usage / limit if limit > 0 else 0.0
     return {"name": name, "usage": int(usage), "limit": int(limit), "unit": unit,
-            "pct": pct, "status": status_for(pct),
+            "pct": round(ratio, 1), "status": status_for(ratio),
             "projected_days_to_limit": None, "detail": detail}
 
 
@@ -103,11 +111,16 @@ def _json_object(conn, store, artifact_id, label):
     ``INVALID_REQUEST`` refusal rather than a traceback. But a registered
     artifact whose bytes fail content-address verification
     (``ArtifactError`` from ``read_verified``) is corruption, not input error,
-    so it becomes ``INTEGRITY_FAILED``. The size check runs on catalog
-    metadata (``registered_artifact``) before any bytes are hashed.
+    so it becomes ``INTEGRITY_FAILED``. The ref row is read with bounded
+    metadata (``max_metadata_bytes=_MAX_METADATA_BYTES``, cf.
+    native_sweep_collection): oversize or malformed reference metadata is
+    refused as unreadable, like an unknown id; only the payload cap keeps
+    ``RESOURCE_LIMIT_EXCEEDED``, and both size checks run on catalog metadata
+    before any bytes are hashed.
     """
     try:
-        ref = registered_artifact(conn, artifact_id)
+        ref = registered_artifact(conn, artifact_id,
+                                  max_metadata_bytes=_MAX_METADATA_BYTES)
     except OpsError:
         raise fail("INVALID_REQUEST", f"the {label} artifact is not readable") from None
     if ref.byte_size > _MAX_JSON_BYTES:
@@ -130,9 +143,27 @@ def _json_object(conn, store, artifact_id, label):
 def _manifest_total(conn, store, manifest_id, totals):
     if manifest_id not in totals:
         manifest = _json_object(conn, store, manifest_id, "manifest")
-        totals[manifest_id] = sum(int(item["byte_size"])
-                                  for item in manifest.get("file_refs", []))
+        file_refs = manifest.get("file_refs")
+        if not isinstance(file_refs, list):
+            raise fail("INVALID_REQUEST", "the manifest artifact has no file_refs list")
+        sizes = []
+        for item in file_refs:
+            size = item.get("byte_size") if isinstance(item, dict) else None
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                raise fail("INVALID_REQUEST",
+                           "the manifest file_refs need non-negative integer byte_size")
+            sizes.append(size)
+        totals[manifest_id] = sum(sizes)
     return totals[manifest_id]
+
+
+def _snapshot_estimate(snapshot):
+    """The validated pinned ``scratch_estimate_bytes``, or an INVALID_REQUEST refusal."""
+    estimate = (snapshot or {}).get("scratch_estimate_bytes")
+    if isinstance(estimate, bool) or not isinstance(estimate, int) or estimate < 0:
+        raise fail("INVALID_REQUEST",
+                   "snapshot scratch_estimate_bytes must be a non-negative integer")
+    return estimate
 
 
 def _scratch_entries(conn, store, plan):
@@ -159,7 +190,7 @@ def _scratch_entries(conn, store, plan):
     for stage in nightly._stage_sequence(plan, False, snapshot, refresh_mode):
         kind = nightly._action_for(stage, refresh_mode=refresh_mode)
         if kind == "legacy_materialize":
-            needed = int((snapshot or {}).get("scratch_estimate_bytes", 0))
+            needed = _snapshot_estimate(snapshot)
             detail = "pinned snapshot scratch_estimate_bytes (legacy_materialize)"
         elif snapshot is not None and stage in nightly.SNAPSHOT_STAGES:
             continue

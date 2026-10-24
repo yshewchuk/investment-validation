@@ -28,6 +28,18 @@ def test_status_boundaries(pct, expected):
     assert headroom.status_for(pct) == expected
 
 
+@pytest.mark.parametrize("usage,limit,status,pct", [
+    (8004, 10000, "WARN", 80.0),  # unrounded 80.04% rounds DOWN to 80.0 for display
+    (9504, 10000, "FAIL", 95.0),  # unrounded 95.04% rounds DOWN to 95.0 for display
+    (8000, 10000, "OK", 80.0),
+    (9500, 10000, "WARN", 95.0),
+])
+def test_entry_classifies_the_unrounded_ratio(usage, limit, status, pct):
+    """Status tiers run on the exact ratio; the 1-decimal pct is display only."""
+    entry = headroom._entry("t", usage, limit, "bytes", "")
+    assert (entry["status"], entry["pct"]) == (status, pct)
+
+
 @pytest.fixture
 def catalog(tmp_path):
     clock = FakeClock()
@@ -145,6 +157,53 @@ def test_snapshot_plan_scratch_entry_uses_pinned_estimate(catalog):
     assert "snapshot scratch_estimate_bytes" in entry["detail"]
 
 
+@pytest.mark.parametrize("manifest", [
+    {},                                      # file_refs missing (must not default to 0)
+    {"file_refs": {"byte_size": 5}},         # not a list
+    {"file_refs": [{"size": 5}]},            # item lacks byte_size (no KeyError)
+    {"file_refs": ["ref"]},                  # item is not an object
+    {"file_refs": [{"byte_size": True}]},    # bool is not an int here
+    {"file_refs": [{"byte_size": -1}]},      # negative
+    {"file_refs": [{"byte_size": "5"}]},     # non-int
+    {"file_refs": [{"byte_size": 5.5}]},     # non-int
+], ids=["missing", "not-a-list", "no-byte-size", "non-object-item",
+         "bool", "negative", "str", "float"])
+def test_malformed_manifest_scratch_input_refuses_invalid_request(catalog, manifest):
+    conn, store, clock = catalog
+    manifest_id = publish(conn, store, clock, manifest, "legacy_input_manifest.v1.0")
+    with pytest.raises(OpsError) as excinfo:
+        report_for(catalog, nightly_plan_document(manifest_id))
+    assert excinfo.value.code == "INVALID_REQUEST"
+
+
+def test_empty_manifest_file_refs_is_zero_usage_ok(catalog):
+    conn, store, clock = catalog
+    manifest_id = publish(conn, store, clock, {"file_refs": []},
+                          "legacy_input_manifest.v1.0")
+    document = report_for(catalog, nightly_plan_document(manifest_id))
+    scratch = [item for item in document["limits"] if item["name"].startswith("scratch_bytes")]
+    assert scratch and all(item["usage"] == 0 and item["status"] == "OK" for item in scratch)
+
+
+@pytest.mark.parametrize("snapshot_inputs", [
+    None, {},                                      # estimate missing (must not default to 0)
+    {"scratch_estimate_bytes": None},
+    {"scratch_estimate_bytes": True},
+    {"scratch_estimate_bytes": -1},
+    {"scratch_estimate_bytes": "1024"},
+    {"scratch_estimate_bytes": 1.5},
+], ids=["absent", "empty", "null", "bool", "negative", "str", "float"])
+def test_bad_snapshot_scratch_estimate_refuses_invalid_request(catalog, snapshot_inputs):
+    plan = nightly_plan_document(input_mode="snapshot")
+    if snapshot_inputs is not None:
+        plan["snapshot_inputs"] = snapshot_inputs
+    with pytest.raises(OpsError) as excinfo:
+        report_for(catalog, plan)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert excinfo.value.problem.message == \
+        "snapshot scratch_estimate_bytes must be a non-negative integer"
+
+
 def test_not_covered_lists_the_static_names(catalog):
     document = report_for(catalog, nightly_plan_document())
     assert document["not_covered"] == list(headroom._NOT_COVERED)
@@ -205,6 +264,20 @@ def test_unknown_plan_id_refuses_invalid_request(catalog):
     assert excinfo.value.code == "INVALID_REQUEST"
 
 
+def test_oversize_ref_metadata_refuses_invalid_request(catalog, monkeypatch):
+    """registered_artifact reads the ref row bounded by _MAX_METADATA_BYTES;
+    an oversize (or malformed) ref row maps to the same unreadable-artifact
+    INVALID_REQUEST as an unknown id, not to RESOURCE_LIMIT_EXCEEDED."""
+    conn, store, clock = catalog
+    plan_id = publish(conn, store, clock, nightly_plan_document())
+    monkeypatch.setattr(headroom, "_MAX_METADATA_BYTES", 8)
+    with pytest.raises(OpsError) as excinfo:
+        headroom.headroom_command(_headroom_args(conn, store, clock, plan_id),
+                                  store.root, conn, clock)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert excinfo.value.problem.message == "the plan artifact is not readable"
+
+
 def test_non_object_plan_json_refuses_invalid_request(catalog):
     conn, store, clock = catalog
     plan_id = publish(conn, store, clock, [1, 2, 3])
@@ -228,18 +301,23 @@ def test_tampered_plan_artifact_refuses_integrity_failed(catalog):
 
 def test_oversize_json_artifact_refuses_resource_limit(catalog, monkeypatch):
     conn, store, clock = catalog
+    plan_id = publish(conn, store, clock, nightly_plan_document())
     monkeypatch.setattr(headroom, "_MAX_JSON_BYTES", 1)
+    byte_accesses = []
 
     def _no_byte_access(*args, **kwargs):
+        byte_accesses.append("byte access")
         raise AssertionError("oversize refusal must not hash or read artifact bytes")
-    monkeypatch.setattr(store, "verify", _no_byte_access)
-    monkeypatch.setattr(store, "read_verified", _no_byte_access)
-    plan_id = publish(conn, store, clock, nightly_plan_document())
+    # headroom_command builds its own ArtifactStore(root), so the class methods
+    # are the ones actually used; an instance patch on this fixture store is not.
+    monkeypatch.setattr(ArtifactStore, "verify", _no_byte_access)
+    monkeypatch.setattr(ArtifactStore, "read_verified", _no_byte_access)
     with pytest.raises(OpsError) as excinfo:
         headroom.headroom_command(_headroom_args(conn, store, clock, plan_id),
                                   store.root, conn, clock)
     assert excinfo.value.code == "RESOURCE_LIMIT_EXCEEDED"
     assert excinfo.value.problem.message == "the plan artifact exceeds 1 bytes"
+    assert byte_accesses == []  # verify/read_verified were never called
 
 
 @pytest.mark.parametrize("plan", [[1, 2, 3], None])
