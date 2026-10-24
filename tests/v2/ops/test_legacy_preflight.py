@@ -83,6 +83,48 @@ def test_preflight_preserves_generation_input_changed_code(case, tmp_path):
     assert err.value.problem.details["reason"] == "generation_mismatch"
 
 
+def test_preflight_rejects_symlinked_read_set_ancestor(case, tmp_path):
+    source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
+    _accept(case, source, "preflight-symlinked-ancestor")
+    raw_dir = source / "data/raw"
+    replacement = tmp_path / "replacement-raw"
+    replacement.mkdir()
+    (replacement / "source.csv").write_text("accepted\n")
+    raw_dir.rename(tmp_path / "original-raw")
+    raw_dir.symlink_to(replacement, target_is_directory=True)
+
+    with pytest.raises(OpsError) as err:
+        run_preflight(case.conn, case.store, source_root=source,
+                      materialization_root=pinned,
+                      receipt_id="preflight-symlinked-ancestor")
+
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.details["path"] == "data/raw/source.csv"
+
+
+def test_preflight_maps_generation_read_error_to_input_changed(case, tmp_path, monkeypatch):
+    from engine.v2.ops import legacy_adapter
+
+    source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
+    _accept(case, source, "preflight-generation-read-error")
+    original_digest = legacy_adapter._digest
+    source_file = source / "data/raw/source.csv"
+
+    def fail_source_read(path, **kwargs):
+        if path == source_file:
+            raise PermissionError("synthetic unreadable source")
+        return original_digest(path, **kwargs)
+
+    monkeypatch.setattr(legacy_adapter, "_digest", fail_source_read)
+    with pytest.raises(OpsError) as err:
+        run_preflight(case.conn, case.store, source_root=source,
+                      materialization_root=pinned,
+                      receipt_id="preflight-generation-read-error")
+
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.details["reason"] == "generation_read_failed"
+
+
 def test_cli_registers_and_dispatches_snapshot_preflight(monkeypatch, tmp_path):
     source = tmp_path / "source"
     pinned = tmp_path / "pinned"
@@ -113,6 +155,16 @@ def test_preflight_rejects_empty_receipt_id(case, tmp_path):
     assert err.value.problem.details["reason"] == "generation_receipt_missing"
 
 
+def test_preflight_rejects_uncommitted_receipt_id(case, tmp_path):
+    source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
+    with pytest.raises(OpsError) as err:
+        run_preflight(case.conn, case.store, source_root=source,
+                      materialization_root=pinned,
+                      receipt_id="not-a-committed-receipt")
+
+    assert err.value.code == "INPUT_CHANGED"
+
+
 def test_preflight_preserves_features_stale_code_for_tier4_difference(case, tmp_path):
     source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
     _accept(case, source, "preflight-tier4-stale")
@@ -140,6 +192,38 @@ def test_preflight_preserves_features_stale_code_for_corrupt_pinned_table(case, 
 
     assert err.value.code == "FEATURES_STALE"
     assert err.value.problem.details["reason"] == "comparison_failed"
+    assert isinstance(err.value.problem.details["exception_type"], str)
+    assert err.value.problem.details["exception_type"]
+
+
+def test_preflight_reject_identical_tables_over_whole_table_cap(
+        case, tmp_path, monkeypatch):
+    from engine.v2.ops import features_compare
+
+    source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
+    _accept(case, source, "preflight-identical-table-over-cap")
+    monkeypatch.setattr(features_compare, "TABLE_MAX_ROWS", 0)
+
+    with pytest.raises(OpsError) as err:
+        run_preflight(case.conn, case.store, source_root=source,
+                      materialization_root=pinned,
+                      receipt_id="preflight-identical-table-over-cap")
+
+    assert err.value.code == "FEATURES_STALE"
+    mismatch = err.value.problem.details["comparison"]["tables"]["panel"]
+    assert mismatch["mismatches"][0]["reason"] == "table_rows_over_cap"
+
+
+def test_digest_enforces_streaming_hash_byte_cap(tmp_path):
+    from engine.v2.ops.legacy_adapter import _digest
+
+    path = tmp_path / "payload"
+    path.write_bytes(b"12345")
+    with pytest.raises(OpsError) as err:
+        _digest(path, max_bytes=4)
+
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.details["reason"] == "hash_file_over_cap"
 
 
 def test_preflight_bounds_generation_read_set_hash(case, tmp_path, monkeypatch):

@@ -185,12 +185,21 @@ def manifest_files(root: Path | str, paths: tuple[str, ...] | list[str], *,
     long hash pass -- even ONE huge file -- cannot starve other live
     attempts' leases. Omitting it is exactly the old behavior.
     """
-    base = Path(root).resolve()
+    root_path = Path(root)
+    if root_path.is_symlink():
+        raise fail("INPUT_CHANGED", "legacy read-set root is indirect")
+    base = root_path.resolve()
     result = {}
     for relative in paths:
         if keepalive is not None:
             keepalive()
         safe_relative_path(relative)
+        current = base
+        for component in Path(relative).parts[:-1]:
+            current = current / component
+            if current.is_symlink():
+                raise fail("INPUT_CHANGED", "legacy read-set ancestor is indirect",
+                           details={"path": relative})
         source = base / relative
         if source.is_symlink() or not source.is_file():
             raise fail("INPUT_CHANGED", "legacy read-set member is missing or indirect",
@@ -760,9 +769,13 @@ def run_snapshot_preflight(conn, store, *, source_root, materialization_root, re
     worker_progress.step_start("snapshot_preflight_generation")
     try:
         accepted = accepted_generation_refs(conn, store, receipt_id=str(receipt_id))
-        current_manifest = manifest_files(
-            source_root, tuple(accepted) if accepted is not None else (),
-            max_file_bytes=PREFLIGHT_MAX_HASH_BYTES)
+        try:
+            current_manifest = manifest_files(
+                source_root, tuple(accepted) if accepted is not None else (),
+                max_file_bytes=PREFLIGHT_MAX_HASH_BYTES)
+        except OSError as exc:
+            raise fail("INPUT_CHANGED", "legacy read-set could not be read",
+                       details={"reason": "generation_read_failed"}) from exc
         barrier_manifest = {"file_refs": [
             {"path": path, "content_hash": entry["content_hash"]}
             for path, entry in current_manifest.items()]}
