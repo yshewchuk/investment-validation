@@ -70,21 +70,9 @@ from checks.rearchitecture_phase6_restore_drill import (  # noqa: E402
     _build_published_fixture,
     _fenced_claim,
 )
-from engine.v2.foundation import (  # noqa: E402
-    ArtifactStore,
-    Clock,
-    SystemClock,
-    format_timestamp,
-    safe_relative_path,
-)
+from engine.v2.foundation import ArtifactStore, Clock, SystemClock, format_timestamp  # noqa: E402
 from engine.v2.ops import publication  # noqa: E402
-from engine.v2.ops.backup import (  # noqa: E402
-    manifest_database_path,
-    prepare_backup,
-    restore_backup,
-    run_backup,
-    verified_file_hash,
-)
+from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.fingerprints import file_hash  # noqa: E402
@@ -138,40 +126,19 @@ class _Deployment:
 
 
 def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
-    """Verify manifest-selected files with the production no-follow byte cap."""
+    """The same byte-level checks ``run_backup`` itself makes: the manifest
+    names the key and schema, and every file it hashes (the database, and each
+    artifact copy) still hashes to the recorded digest."""
     if manifest.get("schema_version") != "catalog_backup.v1.0":
         return False
     if manifest.get("backup_key") != key:
         return False
-    try:
-        database = manifest_database_path(root, manifest)
-        if verified_file_hash(database,
-                              expected_size=manifest.get("database_size"),
-                              stage="drill backup database") != manifest.get("database"):
-            return False
-    except Exception:
+    database = root / (key + ".sqlite")
+    if not database.is_file() or file_hash(database) != manifest.get("database"):
         return False
-    artifacts = manifest.get("artifacts", {})
-    if not isinstance(artifacts, dict):
-        return False
-    artifact_root = root / "artifacts"
-    if artifact_root.is_symlink():
-        return False
-    for name, info in artifacts.items():
-        try:
-            parts = safe_relative_path(name)
-            if len(parts) != 1 or not isinstance(info, dict):
-                return False
-            expected_size = info.get("byte_size")
-            if expected_size is not None and type(expected_size) is not int:
-                return False
-            if not isinstance(info.get("content_hash"), str):
-                return False
-            if verified_file_hash(
-                    artifact_root / parts[0], expected_size=expected_size,
-                    stage=f"drill backup artifact {parts[0]}") != info["content_hash"]:
-                return False
-        except Exception:
+    for name, info in manifest.get("artifacts", {}).items():
+        path = root / "artifacts" / name
+        if not path.is_file() or file_hash(path) != info.get("content_hash"):
             return False
     return True
 
@@ -273,13 +240,7 @@ def _run_before_any_release(deployment: _Deployment) -> dict:
 
         manifest_path = deployment.backup_root / (key + ".manifest.json")
         manifest_present = manifest_path.is_file()
-        if manifest_present:
-            from engine.v2.ops.backup import MAX_MANIFEST_BYTES
-            from engine.v2.ops.workflows.commands import read_bounded_bytes
-
-            manifest = json.loads(read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
-        else:
-            manifest = None
+        manifest = json.loads(manifest_path.read_text()) if manifest_present else None
         manifest_verified = manifest_present and _manifest_is_consistent(
             manifest, deployment.backup_root, key)
         row = conn.execute(

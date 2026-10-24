@@ -11,11 +11,6 @@ happens inside one (contracts §11.2). Nesting is refused, because a nested
 block that silently committed the outer work is exactly how an effect escapes
 its fence.
 
-``transaction()`` is that short ``BEGIN IMMEDIATE`` write transaction. A backup
-uses a separate deferred read snapshot instead (``backup._read_snapshot``): its
-plain ``BEGIN`` can span row counts and the SQLite online backup without
-blocking WAL writers, and it ends before artifact or manifest publication.
-
 Backups use the SQLite online backup API. Copying only the main database file
 while WAL holds committed pages is not a consistent backup (§6.1), and
 ``tests/test_v2_ops_catalog.py`` demonstrates the rows it loses.
@@ -95,13 +90,7 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 
 def backup_to(conn: sqlite3.Connection, dest: Path | str, *,
               progress: Callable[[int, int, int], None] | None = None) -> None:
-    """A consistent copy through the online backup API, integrity-checked.
-
-    Pages are copied in bounded batches (a positive ``pages`` argument), so
-    ``progress`` receives sqlite's ``(status, remaining, total)`` page counts
-    once per batch and a large copy can renew its lease while it runs. Small
-    and in-memory databases still receive the callback on their one batch.
-    """
+    """A consistent copy through the online backup API, integrity-checked."""
     dest = Path(dest)
     if dest.exists():
         raise FileExistsError(dest)
