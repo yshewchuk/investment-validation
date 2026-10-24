@@ -135,14 +135,14 @@ def test_orphan_partial_roots_follow_the_same_rule(world):
 
 
 def test_a_failed_removal_is_reported_and_the_rest_still_run(world, monkeypatch):
-    real = reclaim_module._remove
+    real = reclaim_module.remove_tree
 
     def flaky(path, keepalive):
         if world.ids["succeeded"] in str(path):
             raise PermissionError("denied")
         real(path, keepalive)
 
-    monkeypatch.setattr(reclaim_module, "_remove", flaky)
+    monkeypatch.setattr(reclaim_module, "remove_tree", flaky)
     entries = reclaim(world.conn, world.root, apply=True)
     by_id = {entry["attempt_id"]: entry for entry in entries}
     assert by_id[world.ids["succeeded"]]["error"] == "PermissionError"

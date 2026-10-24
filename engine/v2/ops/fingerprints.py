@@ -17,10 +17,15 @@ from engine.v2.ops.errors import fail
 
 
 def file_hash(path, *, keepalive: Callable[[], None] | None = None,
-              max_bytes: int | None = None):
+              max_bytes: int | None = None,
+              on_progress: Callable[[int], None] | None = None):
     """SHA-256 of ``path``; ``keepalive`` per 1MB chunk; ``max_bytes`` bounds
     each read to the remaining ceiling plus one probe byte, failed typed
-    before that probe byte is hashed."""
+    before that probe byte is hashed; ``on_progress`` (if given) receives the
+    cumulative bytes read after each hashed chunk."""
+    if max_bytes is not None and max_bytes < 0:
+        raise fail("INVALID_REQUEST", "max_bytes must not be negative",
+                   details={"max_bytes": max_bytes})
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
         while True:
@@ -35,6 +40,7 @@ def file_hash(path, *, keepalive: Callable[[], None] | None = None,
                            details={"reason_key": "stream_too_large", "max_bytes": max_bytes})
             digest.update(chunk)
             keepalive() if keepalive is not None else None
+            on_progress(stream.tell()) if on_progress is not None else None
     return "sha256:" + digest.hexdigest()
 
 

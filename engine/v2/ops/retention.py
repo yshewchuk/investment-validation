@@ -90,7 +90,26 @@ def _safe_name(name, *, artifact=False):
 
 def _digest(path, keepalive=None):
     try:
-        return file_hash(path, keepalive=keepalive, max_bytes=MAX_BACKUP_STREAM_BYTES)
+        total = path.stat().st_size
+        started = time.monotonic()
+        last = started
+
+        def on_progress(bytes_read):
+            nonlocal last
+            now = time.monotonic()
+            if now - last < 60.0:
+                return
+            last = now
+            elapsed = now - started
+            rate = bytes_read / elapsed if elapsed > 0 else 0.0
+            eta = (total - bytes_read) / rate if rate > 0 and total > bytes_read else None
+            _stderr("RETENTION_PROGRESS", stage="verify_backup_file", done=bytes_read,
+                    total=total, bytes_per_s=round(rate, 3),
+                    eta_s=None if eta is None else round(eta, 1),
+                    rss_peak_mb=_rss_peak_mb())
+
+        return file_hash(path, keepalive=keepalive, max_bytes=MAX_BACKUP_STREAM_BYTES,
+                         on_progress=on_progress)
     except OSError:
         raise fail("INTEGRITY_FAILED", "backup file could not be read",
                    details={"reason_key": "backup_file_unreadable"}) from None
@@ -164,7 +183,7 @@ def _manifest(key, path, database, artifacts_dir, keepalive=None):
             raise fail("INTEGRITY_FAILED", "backup manifest is too large",
                        details={"reason_key": "backup_manifest_too_large"})
         document = json.loads(raw)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         raise fail("INTEGRITY_FAILED", "backup manifest could not be read",
                    details={"reason_key": "backup_manifest_unreadable"}) from None
     if not isinstance(document, dict) or set(document) != _MANIFEST_KEYS:
@@ -279,7 +298,7 @@ def _live_spec(attempt_id, spec_bytes, spec_json, encoding, limit):
         raise _live_spec_too_large(attempt_id, spec_bytes) from None
     try:
         spec = json.loads(text) if text is not None else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         spec = None
     if not isinstance(spec, dict):
         raise _live_spec_malformed(attempt_id)
@@ -404,7 +423,7 @@ def _remove_tree(path, keepalive=None):
                    details={"reason_key": "materialization_delete_failed"}) from None
 
 def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=None, keepalive=None, materialization_base=None):
-    """Keep the newest verified backups and materialization roots; return deleted backup keys and omit removed root paths."""
+    """Keep verified backups and unreferenced roots; return deleted backup keys only."""
     try:
         return _enforce_retention(ops_root, conn=conn, store=store, keep=keep,
                                   materialization_keep=materialization_keep,

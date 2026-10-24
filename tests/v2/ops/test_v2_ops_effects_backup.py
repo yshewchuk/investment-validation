@@ -6,7 +6,7 @@ import pytest
 from engine.v2.foundation import ArtifactStore
 from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
 from engine.v2.ops.effects_graph import backup_effect
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
 from tests.ops_support import catalog
 from tests.v2.ops.test_v2_ops_effects_graph import (
@@ -213,5 +213,46 @@ def test_backup_coordinator_retry_after_delivery_before_commit_attempt_succeeds(
         crashed = conn.execute("SELECT state, process_state FROM attempts WHERE attempt_id=?",
                                (first.attempt_id,)).fetchone()
         assert (crashed["state"], crashed["process_state"]) == ("failed", "verified_dead")
+    finally:
+        conn.close()
+
+
+def test_backup_effect_propagates_retention_sentinel_after_successful_backup(tmp_path, monkeypatch):
+    """Synthetic: ``enforce_retention`` refuses with a typed ``OpsError`` after the
+    backup and its watermark are already durable. The refusal must leave
+    ``backup_effect`` unchanged — same code and ``reason_key`` — with the backup
+    effect delivered. Both the ``retention`` module attribute (the requested
+    patch site) and the ``effects_graph`` binding ``backup_effect`` actually
+    calls (the name is imported at module scope) point at the same stub."""
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        _seed_decisions(conn, clock, scope, SESSION, predictions=[_row("evt-1", "pred")])
+        claim = _submit_and_claim(conn, clock, supervisor, kind="backup", key="backup-1",
+                                  parameters=_params("backup", SESSION, scope))
+        sentinel = fail("INTEGRITY_FAILED", "synthetic retention refusal",
+                        details={"reason_key": "synthetic_retention_failed"})
+        calls = []
+
+        def boom(*args, **kwargs):
+            state = conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0]
+            calls.append((args, kwargs, state))
+            raise sentinel
+
+        monkeypatch.setattr("engine.v2.ops.retention.enforce_retention", boom)
+        monkeypatch.setattr("engine.v2.ops.effects_graph.enforce_retention", boom)
+        with pytest.raises(OpsError) as raised:
+            backup_effect(conn, store, claim, root, clock=clock)
+
+        assert len(calls) == 1
+        assert calls[0][2] == "delivered"
+        assert raised.value is sentinel
+        assert raised.value.code == sentinel.code == "INTEGRITY_FAILED"
+        assert raised.value.problem.details["reason_key"] == "synthetic_retention_failed"
+        assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == \
+            "delivered"
+        backup_wm = conn.execute("SELECT occurrence FROM watermarks WHERE pipeline='nightly' "
+                                 "AND scope=? AND stage='backup'", (scope,)).fetchone()
+        assert backup_wm["occurrence"] == SESSION
     finally:
         conn.close()

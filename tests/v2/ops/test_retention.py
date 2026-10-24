@@ -458,6 +458,25 @@ def test_file_hash_stream_cap_reads_no_chunk_past_the_limit(tmp_path, monkeypatc
     assert reads["total"] <= limit + 1
 
 
+def test_file_hash_negative_max_bytes_refuses_empty_file(tmp_path):
+    path = tmp_path / "payload.bin"
+    path.write_bytes(b"")
+
+    with pytest.raises(OpsError) as caught:
+        file_hash(path, max_bytes=-1)
+
+    assert caught.value.code == "INVALID_REQUEST"
+    assert caught.value.problem.details["max_bytes"] == -1
+
+
+def test_file_hash_reports_cumulative_bytes_to_on_progress(tmp_path):
+    path = tmp_path / "payload.bin"
+    path.write_bytes(b"x" * 2304000)
+    seen = []
+    file_hash(path, on_progress=seen.append)
+    assert seen == [1 << 20, 2 << 20, 2304000]
+
+
 def test_oversized_manifest_refuses_with_typed_error(tmp_path, catalog, monkeypatch):
     ops = tmp_path / "ops"
     scope = ops / "backups" / "shadow"
@@ -646,3 +665,57 @@ def test_integrity_progress_handler_lease_lost_propagates_and_deletes_nothing(
     assert caught.value.problem.details.get("reason_key") != "backup_database_verify_failed"
     assert state["calls"] > 0
     assert _files(ops) == before
+
+
+def test_hidden_in_progress_materialization_root_survives_while_old_visible_roots_prune(
+        tmp_path, catalog):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    hidden = base / ("." + "ef" * 32 + ".partial-att_partial")
+    hidden.mkdir()
+    (hidden / "partial.bin").write_bytes(b"in flight")
+    (hidden / "nested").mkdir()
+    (hidden / "nested" / "part.bin").write_bytes(b"partial")
+    os.utime(hidden, ns=(1, 1))
+    old = _materialization_dir(base, "root-old", 2)
+    newest = _materialization_dir(base, "root-new", 3)
+
+    enforce_retention(ops, conn=catalog, store=object(),
+                      keep=1, materialization_keep=1)
+
+    assert hidden.is_dir()
+    assert (hidden / "partial.bin").read_bytes() == b"in flight"
+    assert (hidden / "nested" / "part.bin").read_bytes() == b"partial"
+    assert newest.is_dir() and (newest / "sentinel.bin").is_file()
+    assert not old.exists()
+
+
+def test_completed_attempt_snapshot_binding_does_not_retain_old_root(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    bound = _materialization_dir(base, "cd" * 32, 1)
+    newest = _materialization_dir(base, "root-new", 2)
+    spec = {"kind": "legacy_materialize", "parameters": {"input_mode": "snapshot"}}
+    catalog.execute("INSERT INTO jobs VALUES (?, ?, ?)",
+                    ("job_done", "legacy_materialize", json.dumps(spec)))
+    catalog.execute("INSERT INTO attempts VALUES (?, ?, ?)",
+                    ("att_done", "job_done", "succeeded"))
+    catalog.execute("INSERT INTO attempt_input_bindings VALUES (?, ?, ?)",
+                    ("att_done", REQUEST_BINDING, "art_done"))
+    captured = []
+
+    def request_from_artifact(conn, store, artifact_id):
+        captured.append(artifact_id)
+        return SimpleNamespace(request_hash="sha256:" + "cd" * 32)
+
+    monkeypatch.setattr(retention_module, "request_from_artifact", request_from_artifact)
+
+    enforce_retention(ops, conn=catalog, store=object(),
+                      keep=1, materialization_keep=1)
+
+    assert captured == []
+    assert newest.is_dir() and (newest / "sentinel.bin").is_file()
+    assert not bound.exists()
