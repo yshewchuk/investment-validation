@@ -1,11 +1,14 @@
 """Local immutable backup and isolated restore controls."""
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 
 import pytest
 
 from engine.v2.foundation import ArtifactStore
+from engine.v2.foundation.artifacts import ArtifactError
 from engine.v2.ops import backup as backup_module
 from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
 from engine.v2.ops.catalog import integrity_errors
@@ -14,8 +17,15 @@ from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
 from tests.ops_support import catalog
 from tests.v2.ops.test_v2_ops_effects_graph import (
-    SESSION, _commit, _open, _params, _row, _seed_decisions, _submit_and_claim,
+    SESSION,
+    _commit,
+    _open,
+    _params,
+    _row,
+    _seed_decisions,
+    _submit_and_claim,
 )
+from tools import v2_controlled_failure_drill as drill_module
 
 
 def _row_counts(conn):
@@ -48,7 +58,8 @@ def test_sqlite_backup_copy_error_is_retryable(tmp_path, monkeypatch):
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "copy-error", {}, clock=clock)
 
-    def fail_copy(*_args, **_kwargs):
+    def fail_copy(_conn, staged):
+        staged.write_bytes(b"partial staging bytes")
         raise sqlite3.OperationalError("synthetic copy failure")
 
     monkeypatch.setattr("engine.v2.ops.backup.backup_to", fail_copy)
@@ -119,6 +130,14 @@ def test_bounded_reader_rejects_oversize_and_nonregular_inputs(tmp_path):
         backup_module._read_bounded_bytes(oversized, backup_module.MAX_MANIFEST_BYTES)
     with pytest.raises(ValueError, match="bounded regular file"):
         backup_module._read_bounded_bytes(tmp_path, backup_module.MAX_MANIFEST_BYTES)
+    symlink = tmp_path / "manifest-link.json"
+    symlink.symlink_to(oversized)
+    with pytest.raises(ValueError):
+        backup_module._read_bounded_bytes(symlink, backup_module.MAX_MANIFEST_BYTES)
+    fifo = tmp_path / "manifest-fifo.json"
+    os.mkfifo(fifo)
+    with pytest.raises(ValueError, match="bounded regular file"):
+        backup_module._read_bounded_bytes(fifo, backup_module.MAX_MANIFEST_BYTES)
 
 
 @pytest.mark.parametrize("stale_bytes", [b"", b"SQLite format 3\x00"],
@@ -181,6 +200,42 @@ def test_oversized_prior_manifest_is_rebuilt(tmp_path):
         "SELECT state FROM outbox WHERE logical_key='large-prior'").fetchone()[0] == "delivered"
 
 
+@pytest.mark.parametrize("unsafe_prior", ["symlink", "oversized"])
+def test_retry_rebuilds_unsafe_prior_database(tmp_path, monkeypatch, unsafe_prior):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "unsafe-prior", {}, clock=clock)
+    backup = tmp_path / "backup"
+
+    def crash_after_publish(point):
+        if point == "after_manifest_before_ack":
+            raise RuntimeError("ack lost")
+
+    with pytest.raises(RuntimeError, match="ack lost"):
+        run_backup(conn, key="unsafe-prior", owner="worker", target=backup,
+                   clock=clock, store=store, fault=crash_after_publish)
+    database = backup / "unsafe-prior.sqlite"
+    external = tmp_path / "external.sqlite"
+    external_bytes = None
+    if unsafe_prior == "symlink":
+        external.write_bytes(database.read_bytes())
+        external_bytes = external.read_bytes()
+        database.unlink()
+        database.symlink_to(external)
+    else:
+        monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", 8)
+        assert database.stat().st_size > backup_module.MAX_BACKUP_FILE_BYTES
+    clock.advance(301)
+
+    result = run_backup(conn, key="unsafe-prior", owner="retry", target=backup,
+                        clock=clock, store=store)
+
+    assert result["database_rows"] == _row_counts(conn)
+    assert not database.is_symlink()
+    if external_bytes is not None:
+        assert external.read_bytes() == external_bytes
+
+
 def test_retry_refuses_changed_source_without_replacing_manifest(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
@@ -196,6 +251,9 @@ def test_retry_refuses_changed_source_without_replacing_manifest(tmp_path):
                    clock=clock, store=store, fault=crash_after_publish)
     manifest = backup / "changed-source.manifest.json"
     original = manifest.read_bytes()
+    manifest_doc = json.loads(backup_module._read_bounded_bytes(
+        manifest, backup_module.MAX_MANIFEST_BYTES))
+    assert drill_module._manifest_is_consistent(manifest_doc, backup, "changed-source", conn)
     conn.execute("CREATE TABLE synthetic_change (value TEXT)")
     conn.commit()
     clock.advance(301)
@@ -205,6 +263,7 @@ def test_retry_refuses_changed_source_without_replacing_manifest(tmp_path):
                    clock=clock, store=store)
 
     assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
     assert manifest.read_bytes() == original
 
 
@@ -221,7 +280,7 @@ def test_manifest_success_before_ack_is_idempotent_and_keys_are_safe(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    with pytest.raises(Exception):
+    with pytest.raises(ArtifactError, match="UNSAFE_PATH"):
         prepare_backup(conn, "../escape", {"evidence.bin": ref}, clock=clock)
     prepare_backup(conn, "b3", {"evidence.bin": ref}, clock=clock)
     backup = tmp_path / "backup"
@@ -268,8 +327,9 @@ def test_backup_rejects_symlink_target_before_writing(tmp_path):
     outside.mkdir()
     target = tmp_path / "backup"
     target.symlink_to(outside, target_is_directory=True)
-    with pytest.raises(Exception):
+    with pytest.raises(OpsError) as refused:
         run_backup(conn, key="b4", owner="worker", target=target, clock=clock, store=store)
+    assert refused.value.code == "INVALID_REQUEST"
     assert not (outside / "b4.sqlite").exists()
 
 

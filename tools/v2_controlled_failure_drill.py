@@ -72,10 +72,17 @@ from checks.rearchitecture_phase6_restore_drill import (  # noqa: E402
 )
 from engine.v2.foundation import ArtifactStore, Clock, SystemClock, format_timestamp  # noqa: E402
 from engine.v2.ops import publication  # noqa: E402
-from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup  # noqa: E402
+from engine.v2.ops.backup import (  # noqa: E402
+    MAX_MANIFEST_BYTES,
+    _read_bounded_bytes,
+    _table_row_counts,
+    _verified_prior_backup,
+    prepare_backup,
+    restore_backup,
+    run_backup,
+)
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
-from engine.v2.ops.fingerprints import file_hash  # noqa: E402
 from engine.v2.ops.outbox import fail_effect  # noqa: E402
 
 __all__ = ["OpsFailureDrillError", "run_drill", "main"]
@@ -125,22 +132,21 @@ class _Deployment:
     backup_root: Path
 
 
-def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
-    """The same byte-level checks ``run_backup`` itself makes: the manifest
-    names the key and schema, and every file it hashes (the database, and each
-    artifact copy) still hashes to the recorded digest."""
-    if manifest.get("schema_version") != "catalog_backup.v1.0":
+def _manifest_is_consistent(manifest: dict, root: Path, key: str,
+                            conn: sqlite3.Connection) -> bool:
+    if not isinstance(manifest, dict) or manifest.get("artifacts") != {}:
         return False
-    if manifest.get("backup_key") != key:
+    row = conn.execute(
+        "SELECT payload_json FROM outbox WHERE kind='backup' AND logical_key=?", (key,)
+    ).fetchone()
+    if row is None:
         return False
-    database = root / (key + ".sqlite")
-    if not database.is_file() or file_hash(database) != manifest.get("database"):
+    try:
+        return _verified_prior_backup(
+            root / (key + ".manifest.json"), root / (key + ".sqlite"),
+            _table_row_counts(conn), key, json.loads(row[0])) == manifest
+    except OpsError:
         return False
-    for name, info in manifest.get("artifacts", {}).items():
-        path = root / "artifacts" / name
-        if not path.is_file() or file_hash(path) != info.get("content_hash"):
-            return False
-    return True
 
 
 def _run_after_good_release(deployment: _Deployment) -> dict:
@@ -239,10 +245,14 @@ def _run_before_any_release(deployment: _Deployment) -> dict:
                 "drill will not report on an unexercised crash window")
 
         manifest_path = deployment.backup_root / (key + ".manifest.json")
-        manifest_present = manifest_path.is_file()
-        manifest = json.loads(manifest_path.read_text()) if manifest_present else None
+        manifest_present = manifest_path.exists()
+        try:
+            manifest = json.loads(_read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES)) \
+                if manifest_present else None
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            manifest = None
         manifest_verified = manifest_present and _manifest_is_consistent(
-            manifest, deployment.backup_root, key)
+            manifest, deployment.backup_root, key, conn)
         row = conn.execute(
             "SELECT effect_id, claim_token, claimed_by, state FROM outbox "
             "WHERE kind='backup' AND logical_key=?", (key,)).fetchone()

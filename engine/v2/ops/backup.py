@@ -17,7 +17,7 @@ from engine.v2.foundation import (
     safe_relative_path,
 )
 from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.outbox import claim, complete, enqueue
 
@@ -66,6 +66,22 @@ def _open_checked_file(path, *, expected_size, stage):
     finally:
         if fd >= 0:
             os.close(fd)
+
+
+def _checked_file_hash(path, *, stage, expected_size=None):
+    stream, size = _open_checked_file(path, expected_size=expected_size, stage=stage)
+    digest = hashlib.sha256()
+    copied = 0
+    with stream:
+        while copied <= size:
+            chunk = stream.read(min(_COPY_CHUNK, size + 1 - copied))
+            if not chunk:
+                break
+            copied += len(chunk)
+            digest.update(chunk)
+    if copied != size:
+        raise fail("INTEGRITY_FAILED", f"{stage} size changed while reading")
+    return "sha256:" + digest.hexdigest()
 
 
 def _copy_verified_file(source, destination, *, expected_size, expected_hash, stage):
@@ -164,6 +180,23 @@ def _table_row_counts(conn):
     return counts
 
 
+def _prior_database_matches(database, expected_hash, source_rows):
+    try:
+        if _checked_file_hash(database, stage="prior backup database") != expected_hash:
+            return False
+        probe = sqlite3.connect(database)
+        try:
+            return not integrity_errors(probe) and _table_row_counts(probe) == source_rows
+        finally:
+            probe.close()
+    except OpsError as exc:
+        if exc.code == "INTEGRITY_FAILED":
+            return False
+        raise
+    except (OSError, sqlite3.Error):
+        return False
+
+
 def _verified_prior_backup(manifest_path, database, source_rows, key, payload):
     """The existing manifest when it and ``database`` are a verified prior
     result for this payload, else ``None``.
@@ -191,18 +224,7 @@ def _verified_prior_backup(manifest_path, database, source_rows, key, payload):
     expected_hash = manifest.get("database")
     if not isinstance(expected_hash, str) or not database.exists():
         return None
-    try:
-        probe = sqlite3.connect(database)
-        try:
-            if integrity_errors(probe) or _table_row_counts(probe) != source_rows:
-                return None
-        finally:
-            probe.close()
-        if file_hash(database) != expected_hash:
-            return None
-    except (OSError, sqlite3.Error):
-        return None
-    return manifest
+    return manifest if _prior_database_matches(database, expected_hash, source_rows) else None
 
 
 def _verify_staged(staged, source_rows):
