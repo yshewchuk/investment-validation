@@ -1,9 +1,11 @@
 """Durable local backup effect; remote mirroring is deliberately out of scope."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
+import stat
 import tempfile
 from pathlib import Path
 
@@ -18,6 +20,86 @@ from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.outbox import claim, complete, enqueue
+
+MAX_MANIFEST_BYTES = 1024 * 1024
+MAX_BACKUP_FILE_BYTES = 1 << 40
+_COPY_CHUNK = 1024 * 1024
+
+
+def _read_bounded_bytes(path, max_bytes):
+    """Read a capped regular file without following links or blocking on FIFOs."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise ValueError("file cannot be read safely") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+            raise ValueError("file is not a bounded regular file")
+        data = bytearray()
+        while len(data) <= max_bytes:
+            chunk = os.read(fd, min(_COPY_CHUNK, max_bytes + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > max_bytes:
+            raise ValueError("file grew beyond its byte limit")
+        return bytes(data)
+    finally:
+        os.close(fd)
+
+
+def _open_checked_file(path, *, expected_size, stage):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise fail("INTEGRITY_FAILED", f"{stage} is missing or unsafe") from exc
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BACKUP_FILE_BYTES
+                or (expected_size is not None
+                    and (type(expected_size) is not int or expected_size != info.st_size))):
+            raise fail("INTEGRITY_FAILED", f"{stage} is not a bounded regular file")
+        stream = os.fdopen(fd, "rb")
+        fd = -1
+        return stream, info.st_size
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _copy_verified_file(source, destination, *, expected_size, expected_hash, stage):
+    stream, size = _open_checked_file(source, expected_size=expected_size, stage=stage)
+    digest = hashlib.sha256()
+    copied = 0
+    with stream:
+        try:
+            output = Path(destination).open("wb")
+        except OSError as exc:
+            raise fail("WORKER_FAILED", f"{stage} output could not be opened") from exc
+        with output:
+            while True:
+                try:
+                    chunk = stream.read(_COPY_CHUNK)
+                except OSError as exc:
+                    raise fail("INTEGRITY_FAILED", f"{stage} could not be read") from exc
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > size:
+                    raise fail("INTEGRITY_FAILED", f"{stage} grew while reading")
+                digest.update(chunk)
+                try:
+                    output.write(chunk)
+                except OSError as exc:
+                    raise fail("WORKER_FAILED", f"{stage} output could not be written") from exc
+            try:
+                output.flush()
+                os.fsync(output.fileno())
+            except OSError as exc:
+                raise fail("WORKER_FAILED", f"{stage} output could not be synced") from exc
+    if copied != size or "sha256:" + digest.hexdigest() != expected_hash:
+        raise fail("INTEGRITY_FAILED", f"{stage} size or hash mismatch")
 
 
 def prepare_backup(conn, key, artifacts, *, clock):
@@ -92,15 +174,19 @@ def _verified_prior_backup(manifest_path, database, source_rows, key, payload):
     rebuilt database's different hash.
     """
     try:
-        manifest = json.loads(manifest_path.read_text())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        manifest = json.loads(_read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
         return None
     if not isinstance(manifest, dict):
         return None
     if (manifest.get("backup_key") != key
             or manifest.get("schema_version") != payload["schema_version"]
-            or manifest.get("cutoff") != payload["cutoff"]
-            or manifest.get("database_rows") != source_rows):
+            or manifest.get("cutoff") != payload["cutoff"]):
+        return None
+    prior_rows = manifest.get("database_rows")
+    if prior_rows is not None and prior_rows != source_rows:
+        raise fail("INTEGRITY_FAILED", "backup source rows changed after manifest publication")
+    if prior_rows is None:
         return None
     expected_hash = manifest.get("database")
     if not isinstance(expected_hash, str) or not database.exists():
@@ -139,10 +225,13 @@ def _verify_staged(staged, source_rows):
 
 def _stage_database(conn, target, key, database, source_rows):
     """Build, verify and atomically install a fresh staged database copy."""
-    stage_fd, stage_name = tempfile.mkstemp(
-        dir=str(target), prefix=f".{key}.", suffix=".staging.sqlite")
-    os.close(stage_fd)
-    os.unlink(stage_name)
+    try:
+        stage_fd, stage_name = tempfile.mkstemp(
+            dir=str(target), prefix=f".{key}.", suffix=".staging.sqlite")
+        os.close(stage_fd)
+        os.unlink(stage_name)
+    except OSError as exc:
+        raise fail("WORKER_FAILED", "backup database staging failed") from exc
     staged = Path(stage_name)
     try:
         try:
@@ -155,6 +244,8 @@ def _stage_database(conn, target, key, database, source_rows):
         os.replace(staged, database)
         staged = None
         fsync_directory(target)
+    except OSError as exc:
+        raise fail("WORKER_FAILED", "backup database publication failed") from exc
     finally:
         if staged is not None:
             try:
@@ -164,15 +255,34 @@ def _stage_database(conn, target, key, database, source_rows):
 
 
 def _copy_artifact(store, target, name, ref, fault):
-    """Copy one artifact, verify its hash and run the per-artifact fault hook."""
-    source = store.verify(ref)
-    destination = target / "artifacts" / name
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(source.read_bytes())
+    """Atomically publish one verified artifact and run its fault hook."""
+    try:
+        source = store.verify(ref)
+        destination = target / "artifacts" / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        stage_fd, stage_name = tempfile.mkstemp(
+            dir=str(destination.parent), prefix=f".{name}.", suffix=".staging")
+        os.close(stage_fd)
+        os.unlink(stage_name)
+    except OSError as exc:
+        raise fail("WORKER_FAILED", "backup artifact staging failed") from exc
+    staged = Path(stage_name)
+    try:
+        _copy_verified_file(source, staged, expected_size=ref.byte_size,
+                            expected_hash=ref.content_hash, stage="backup artifact")
+        os.replace(staged, destination)
+        staged = None
+        fsync_directory(destination.parent)
+    except OSError as exc:
+        raise fail("WORKER_FAILED", "backup artifact publication failed") from exc
+    finally:
+        if staged is not None:
+            try:
+                staged.unlink()
+            except FileNotFoundError:
+                pass
     if fault:
         fault(name)
-    if file_hash(destination) != ref.content_hash:
-        raise fail("INTEGRITY_FAILED", "backup artifact hash mismatch")
     return {"content_hash": ref.content_hash, "byte_size": ref.byte_size}
 
 
@@ -195,11 +305,14 @@ def _publish_manifest(manifest_path, manifest, prior):
             raise fail("INTEGRITY_FAILED", "backup manifest differs")
         return
     temporary = manifest_path.with_suffix(".pending")
-    temporary.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
-    with temporary.open("rb") as stream:
-        os.fsync(stream.fileno())
-    os.replace(temporary, manifest_path)
-    fsync_directory(manifest_path.parent)
+    try:
+        temporary.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
+        with temporary.open("rb") as stream:
+            os.fsync(stream.fileno())
+        os.replace(temporary, manifest_path)
+        fsync_directory(manifest_path.parent)
+    except OSError as exc:
+        raise fail("WORKER_FAILED", "backup manifest publication failed") from exc
 
 
 def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=_no_keepalive):
@@ -237,20 +350,30 @@ def restore_backup(source, destination):
     manifests = list(source.glob("*.manifest.json"))
     if len(manifests) != 1:
         raise fail("INTEGRITY_FAILED", "backup manifest is missing or ambiguous")
-    manifest = json.loads(manifests[0].read_text())
+    try:
+        manifest = json.loads(_read_bounded_bytes(manifests[0], MAX_MANIFEST_BYTES))
+        backup_key = manifest["backup_key"]
+        if not isinstance(backup_key, str) or len(safe_relative_path(backup_key)) != 1:
+            raise ValueError("unsafe backup key")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, KeyError) as exc:
+        raise fail("INTEGRITY_FAILED", "backup manifest is invalid") from exc
     destination.mkdir(parents=True)
     database = destination / "ops.sqlite"
-    database.write_bytes((source / (manifest["backup_key"] + ".sqlite")).read_bytes())
+    _copy_verified_file(source / (backup_key + ".sqlite"), database,
+                        expected_size=None, expected_hash=manifest["database"],
+                        stage="restore database")
     probe = sqlite3.connect(database)
     try:
-        if integrity_errors(probe) or file_hash(database) != manifest["database"]:
-            raise fail("INTEGRITY_FAILED", "restored catalog failed verification")
+        if integrity_errors(probe):
+            raise fail("INTEGRITY_FAILED", "restored catalog failed integrity check")
     finally:
         probe.close()
     for name, info in manifest["artifacts"].items():
+        if not isinstance(name, str) or len(safe_relative_path(name)) != 1:
+            raise fail("INTEGRITY_FAILED", "backup artifact name is unsafe")
         path = destination / "artifacts" / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes((source / "artifacts" / name).read_bytes())
-        if file_hash(path) != info["content_hash"]:
-            raise fail("INTEGRITY_FAILED", "restored artifact failed verification")
+        _copy_verified_file(source / "artifacts" / name, path,
+                            expected_size=info.get("byte_size"),
+                            expected_hash=info["content_hash"], stage="restore artifact")
     return destination
