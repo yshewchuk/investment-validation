@@ -136,6 +136,8 @@ and none below layer 6 may. Standalone real-data entry points are
 `tools/phase5_training_job.py` and `tools/phase5_d14_inputs.py`, outside v2 packages.
 
 `experiments/magnitude_fitted.py` consumes `fit_magnitude_predictions` after native admission.
+`experiments/magnitude_candidate_fit.py` dispatches one numeric call to the public
+ElasticNet/Ridge/HGB fitters; its synthetic-only callers grant no source admission.
 
 <!-- consumers: engine.v2.ops -->
 

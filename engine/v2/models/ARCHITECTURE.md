@@ -679,6 +679,9 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   its policy/header checks) and `pinned_panel` (the pinned panel check), which live in this package.
 - `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_execution.py`
   — `no_fit.forbid_fitting` before native trial claims and fixed-child fitting.
+- `experiments/magnitude_candidate_recipe.py` consumes the closed ElasticNet/Ridge/HGB
+  recipe constructors; `magnitude_candidate_fit.py` checks both legacy/v2 no-fit
+  guards before recipe, column or array inspection, then delegates to the public fitter.
 
 ## 6. External systems and libraries
 
