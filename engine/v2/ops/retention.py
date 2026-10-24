@@ -29,7 +29,7 @@ _REQUEST_BINDING = "materialization_request.json"
 _MAX_MANIFEST_BYTES = 10 * 1024 * 1024
 _MAX_JOURNAL_BYTES = 64 * 1024 * 1024
 _JOURNAL_NAME = ".retention-journal.json"
-_JOURNAL_SCHEMA = "retention_journal.v1.1"
+_JOURNAL_SCHEMA = "retention_journal.v1.2"
 _JOURNAL_KEYS = frozenset({"schema_version", "files", "roots", "backup_keep"})
 _JOURNAL_FILE_KEYS = frozenset({"path", "content_hash", "byte_size"})
 MAX_BACKUP_STREAM_BYTES = 4 * 1024 * 1024 * 1024
@@ -235,7 +235,17 @@ def _journal_entry(entry):
     return parts, digest, size
 
 def _journal_tree_record(root, base, keepalive=None):
-    directories, files = [""], []
+    try:
+        root_info = root.lstat()
+    except OSError:
+        raise fail("INTEGRITY_FAILED", "materialization root could not be verified",
+                   details={"reason_key": "materialization_root_incomplete"}) from None
+    if not stat.S_ISDIR(root_info.st_mode):
+        raise _journal_invalid()
+    directories, paths = [""], []
+    stage = "enumerate_materialization_tree"
+    started, done = _stage(stage, None), 0
+    progress = _Progress(stage, None)
 
     def walk_error(error):
         raise error
@@ -251,36 +261,68 @@ def _journal_tree_record(root, base, keepalive=None):
                 if not stat.S_ISDIR(info.st_mode):
                     raise _journal_invalid()
                 directories.append(child.relative_to(root).as_posix())
+                done += 1
+                progress.tick(done)
             for name in filenames:
                 _renew(keepalive)
                 child = parent / name
-                try:
-                    digest, size = atomic_file_info(
-                        child, keepalive=keepalive,
-                        max_bytes=MAX_BACKUP_STREAM_BYTES,
-                        on_progress=_journal_progress("verify_backup_file"))
-                except NotRegularFile:
-                    raise _journal_invalid() from None
-                files.append({"path": child.relative_to(root).as_posix(),
-                              "content_hash": digest, "byte_size": size})
+                paths.append(child.relative_to(root).as_posix())
+                done += 1
+                progress.tick(done)
     except OSError:
         raise fail("INTEGRITY_FAILED", "materialization root could not be verified",
                    details={"reason_key": "materialization_root_incomplete"}) from None
-    return {"base": str(Path(base).resolve()), "name": root.name,
-            "mtime_ns": root.stat().st_mtime_ns,
-            "directories": sorted(directories), "files": sorted(files, key=lambda x: x["path"])}
+    finally:
+        _stage_end(stage, started, done, None)
+
+    stage = "record_materialization_tree"
+    total = len(paths)
+    started, done = _stage(stage, total), 0
+    progress, files = _Progress(stage, total), []
+    try:
+        for relative in paths:
+            _renew(keepalive)
+            try:
+                digest, size = atomic_file_info(
+                    root / relative, keepalive=keepalive,
+                    max_bytes=MAX_BACKUP_STREAM_BYTES,
+                    on_progress=_journal_progress("journal_materialization_file"))
+            except NotRegularFile:
+                raise _journal_invalid() from None
+            files.append({"path": relative, "content_hash": digest, "byte_size": size})
+            done += 1
+            progress.tick(done)
+        try:
+            current = root.lstat()
+        except OSError:
+            raise fail("INTEGRITY_FAILED", "materialization root changed during verification",
+                       details={"reason_key": "materialization_root_incomplete"}) from None
+        if (current.st_dev, current.st_ino, current.st_mtime_ns) != \
+                (root_info.st_dev, root_info.st_ino, root_info.st_mtime_ns):
+            raise fail("INTEGRITY_FAILED", "materialization root changed during verification",
+                       details={"reason_key": "materialization_root_incomplete"})
+        return {"base": str(Path(base).resolve()), "name": root.name,
+                "device": root_info.st_dev, "inode": root_info.st_ino,
+                "mtime_ns": root_info.st_mtime_ns,
+                "directories": sorted(directories),
+                "files": sorted(files, key=lambda x: x["path"])}
+    finally:
+        _stage_end(stage, started, done, total)
 
 def _journal_tree_entry(entry):
-    keys = {"base", "name", "mtime_ns", "directories", "files"}
+    keys = {"base", "name", "device", "inode", "mtime_ns", "directories", "files"}
     if not isinstance(entry, dict) or set(entry) != keys:
         raise _journal_invalid()
-    base, name, mtime = entry["base"], entry["name"], entry["mtime_ns"]
+    base, name = entry["base"], entry["name"]
+    device, inode, mtime = entry["device"], entry["inode"], entry["mtime_ns"]
     if not isinstance(base, str) or not Path(base).is_absolute() \
             or not isinstance(name, str) or name in ("", ".", "..") \
             or "/" in name or "\\" in name or "\x00" in name \
-            or isinstance(mtime, bool) or not isinstance(mtime, int):
+            or any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+                   for value in (device, inode, mtime)):
         raise _journal_invalid()
-    return {"base": base, "name": name, "mtime_ns": mtime,
+    return {"base": base, "name": name, "device": device, "inode": inode,
+            "mtime_ns": mtime,
             "directories": _journal_tree_directories(entry["directories"]),
             "files": _journal_tree_files(entry["files"])}
 
@@ -354,27 +396,37 @@ def _journal_tree_file_matches(path, info, expected, keepalive):
         and info.st_size == expected["byte_size"] \
         and _digest(path, keepalive) == expected["content_hash"]
 
-def _verify_journal_tree(entry, keepalive=None):
-    root = Path(entry["base"]) / entry["name"]
+def _raise_walk_error(error):
+    raise error
+
+
+def _journal_root_info(root, entry, *, missing_ok=False, changed=False):
     try:
         info = root.lstat()
     except FileNotFoundError:
-        return None
-    except OSError:
-        raise fail("INTEGRITY_FAILED", "materialization journal root could not be read",
+        if missing_ok:
+            return None
+        raise fail("INTEGRITY_FAILED", "materialization journal root changed during verification",
                    details={"reason_key": "materialization_root_incomplete"}) from None
-    if not stat.S_ISDIR(info.st_mode):
+    except OSError:
+        message = ("materialization journal root changed during verification" if changed
+                   else "materialization journal root could not be read")
+        raise fail("INTEGRITY_FAILED", message,
+                   details={"reason_key": "materialization_root_incomplete"}) from None
+    if not stat.S_ISDIR(info.st_mode) \
+            or (info.st_dev, info.st_ino) != (entry["device"], entry["inode"]):
         raise _journal_invalid()
-    expected_dirs = set(entry["directories"])
-    expected_files = {item["path"]: item for item in entry["files"]}
+    return info
+
+
+def _scan_journal_tree(root, expected_files, keepalive, total):
+    stage = "verify_journal_materialization_tree"
+    started, done = _stage(stage, total), 1
+    progress = _Progress(stage, total)
     actual_dirs, actual_files = {""}, set()
-
-    def walk_error(error):
-        raise error
-
     try:
         for directory, names, filenames in os.walk(
-                root, topdown=True, followlinks=False, onerror=walk_error):
+                root, topdown=True, followlinks=False, onerror=_raise_walk_error):
             _renew(keepalive)
             parent = Path(directory)
             for name in names:
@@ -382,20 +434,42 @@ def _verify_journal_tree(entry, keepalive=None):
                 if not stat.S_ISDIR(child.lstat().st_mode):
                     raise _journal_invalid()
                 actual_dirs.add(child.relative_to(root).as_posix())
+                done += 1
+                progress.tick(done)
             for name in filenames:
                 _renew(keepalive)
                 child = parent / name
                 file_info = child.lstat()
                 relative = child.relative_to(root).as_posix()
-                expected = expected_files.get(relative)
-                if not _journal_tree_file_matches(child, file_info, expected, keepalive):
+                if not _journal_tree_file_matches(
+                        child, file_info, expected_files.get(relative), keepalive):
                     raise _journal_invalid()
                 actual_files.add(relative)
+                done += 1
+                progress.tick(done)
     except OSError:
         raise fail("INTEGRITY_FAILED", "materialization journal root could not be verified",
                    details={"reason_key": "materialization_root_incomplete"}) from None
+    finally:
+        _stage_end(stage, started, done, total)
+    return actual_dirs, actual_files
+
+
+def _verify_journal_tree(entry, keepalive=None):
+    root = Path(entry["base"]) / entry["name"]
+    if _journal_root_info(root, entry, missing_ok=True) is None:
+        return None
+    expected_dirs = set(entry["directories"])
+    expected_files = {item["path"]: item for item in entry["files"]}
+    total = len(expected_dirs) + len(expected_files)
+    actual_dirs, actual_files = _scan_journal_tree(root, expected_files, keepalive, total)
     if not actual_dirs <= expected_dirs or not actual_files <= set(expected_files):
         raise _journal_invalid()
+    complete = actual_dirs == expected_dirs and actual_files == set(expected_files)
+    current = _journal_root_info(root, entry, changed=True)
+    if complete and current.st_mtime_ns != entry["mtime_ns"]:
+        raise _journal_invalid()
+    entry["_partial"] = not complete
     return root
 
 def _read_journal_or_discard_pending(journal):
@@ -441,18 +515,32 @@ def _check_journal_roots_live(base, trees, conn, store, keepalive):
 def _journal_root_candidates(base, tree_by_name):
     if not tree_by_name or not base.exists():
         return []
+    stage = "rank_journal_materialization_roots"
+    started, done = _stage(stage, None), 0
+    progress = _Progress(stage, None)
     candidates = []
-    for item in base.iterdir():
-        if item.name.startswith("."):
-            continue
-        if item.is_symlink() or not item.is_dir():
-            raise fail("INTEGRITY_FAILED", "materialization entry is not a directory",
-                       details={"reason_key": "materialization_entry_invalid"})
-        if item.name not in tree_by_name \
-                and stat.S_IMODE(os.lstat(item).st_mode) != 0o555:
-            raise fail("INTEGRITY_FAILED", "materialization root is incomplete",
-                       details={"reason_key": "materialization_root_incomplete"})
-        candidates.append(item)
+    try:
+        for item in base.iterdir():
+            done += 1
+            progress.tick(done)
+            if item.name.startswith("."):
+                continue
+            info = item.lstat()
+            if item.is_symlink() or not stat.S_ISDIR(info.st_mode):
+                raise fail("INTEGRITY_FAILED", "materialization entry is not a directory",
+                           details={"reason_key": "materialization_entry_invalid"})
+            entry = tree_by_name.get(item.name)
+            if entry is not None and (
+                    (info.st_dev, info.st_ino) != (entry["device"], entry["inode"])
+                    or (not entry.get("_partial", False)
+                        and info.st_mtime_ns != entry["mtime_ns"])):
+                raise _journal_invalid()
+            if entry is None and stat.S_IMODE(info.st_mode) != 0o555:
+                raise fail("INTEGRITY_FAILED", "materialization root is incomplete",
+                           details={"reason_key": "materialization_root_incomplete"})
+            candidates.append(item)
+    finally:
+        _stage_end(stage, started, done, None)
     candidates.sort(key=lambda item: tree_by_name.get(item.name, {}).get(
         "mtime_ns", item.stat().st_mtime_ns), reverse=True)
     return candidates
@@ -463,31 +551,53 @@ def _check_journal_roots_not_retained(candidates, tree_by_name, keep):
                    details={"reason_key": "materialization_root_retained"})
 
 def _verify_journal_files(root, files, keepalive):
-    verified = []
-    for parts, digest, size in files:
-        path = root.joinpath(*parts)
-        try:
-            info = path.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError:
-            raise fail("INTEGRITY_FAILED", "retention journal entry could not be read",
-                       details={"reason_key": "retention_journal_entry_unreadable"}) from None
-        if not stat.S_ISREG(info.st_mode) or info.st_size != size \
-                or _digest(path, keepalive) != digest:
-            raise fail("INTEGRITY_FAILED", "retention journal entry does not match its record",
-                       details={"reason_key": "retention_journal_entry_mismatch"})
-        verified.append(path)
-    return verified
+    stage = "verify_journal_files"
+    total = len(files)
+    started, done = _stage(stage, total), 0
+    progress, verified = _Progress(stage, total), []
+    try:
+        for parts, digest, size in files:
+            _renew(keepalive)
+            path = root.joinpath(*parts)
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                done += 1
+                progress.tick(done)
+                continue
+            except OSError:
+                raise fail("INTEGRITY_FAILED", "retention journal entry could not be read",
+                           details={"reason_key": "retention_journal_entry_unreadable"}) from None
+            if not stat.S_ISREG(info.st_mode) or info.st_size != size \
+                    or _digest(path, keepalive) != digest:
+                raise fail("INTEGRITY_FAILED", "retention journal entry does not match its record",
+                           details={"reason_key": "retention_journal_entry_mismatch"})
+            verified.append(path)
+            done += 1
+            progress.tick(done)
+        return verified
+    finally:
+        _stage_end(stage, started, done, total)
 
 def _replay_journal(journal, files, trees, keepalive):
-    for path in files:
-        _renew(keepalive)
-        _unlink(path)
-    for path in trees:
-        if path is not None:
-            _remove_tree(path, keepalive)
-    _clear_journal(journal)
+    total = len(files) + sum(path is not None for path in trees)
+    stage = "replay_retention_journal"
+    started, done = _stage(stage, total), 0
+    progress = _Progress(stage, total)
+    try:
+        for path in files:
+            _renew(keepalive)
+            _unlink(path)
+            done += 1
+            progress.tick(done)
+        for path in trees:
+            if path is not None:
+                _remove_tree(path, keepalive)
+                done += 1
+                progress.tick(done)
+        _clear_journal(journal)
+    finally:
+        _stage_end(stage, started, done, total)
 
 def _recover_journal(ops_root, materialization_base, conn, store, keep, backup_keep=None, keepalive=None):
     root = Path(ops_root)
@@ -503,11 +613,11 @@ def _recover_journal(ops_root, materialization_base, conn, store, keep, backup_k
                             "current_keep": backup_keep})
     base = _validated_journal_base(materialization_base, trees)
     _check_journal_roots_live(base, trees, conn, store, keepalive)
+    verified_files = _verify_journal_files(root, files, keepalive)
+    verified_trees = [_verify_journal_tree(entry, keepalive) for entry in trees]
     tree_by_name = {entry["name"]: entry for entry in trees}
     candidates = _journal_root_candidates(base, tree_by_name)
     _check_journal_roots_not_retained(candidates, tree_by_name, keep)
-    verified_files = _verify_journal_files(root, files, keepalive)
-    verified_trees = [_verify_journal_tree(entry, keepalive) for entry in trees]
     _replay_journal(journal, verified_files, verified_trees, keepalive)
     return True
 
@@ -521,12 +631,12 @@ def _verify_fresh_deletion_journal(journal, ops_root, base, keep,
         raise _journal_invalid()
     base = _validated_journal_base(base, trees)
     _check_journal_roots_live(base, trees, conn, store, keepalive)
-    tree_by_name = {entry["name"]: entry for entry in trees}
-    candidates = _journal_root_candidates(base, tree_by_name)
-    _check_journal_roots_not_retained(candidates, tree_by_name, materialization_keep)
     _verify_journal_files(ops_root, files, keepalive)
     for entry in trees:
         _verify_journal_tree(entry, keepalive)
+    tree_by_name = {entry["name"]: entry for entry in trees}
+    candidates = _journal_root_candidates(base, tree_by_name)
+    _check_journal_roots_not_retained(candidates, tree_by_name, materialization_keep)
 
 def _database(path, expected, keepalive=None):
     try:
@@ -593,9 +703,16 @@ def _database(path, expected, keepalive=None):
                        details={"reason_key": "backup_database_integrity_failed"})
         try:
             current = os.lstat(path)
+            verified = os.fstat(fd)
         except OSError:
-            current = None
-        if current is None or (current.st_dev, current.st_ino) != (pinned.st_dev, pinned.st_ino):
+            current = verified = None
+        pinned_state = (pinned.st_dev, pinned.st_ino, pinned.st_size,
+                        pinned.st_mtime_ns, pinned.st_ctime_ns)
+        verified_state = None if verified is None else (
+            verified.st_dev, verified.st_ino, verified.st_size,
+            verified.st_mtime_ns, verified.st_ctime_ns)
+        if current is None or verified_state != pinned_state \
+                or (current.st_dev, current.st_ino) != (pinned.st_dev, pinned.st_ino):
             raise fail("INTEGRITY_FAILED", "backup database changed during verification",
                        details={"reason_key": "backup_database_changed"})
     finally:
@@ -1018,19 +1135,35 @@ def _verified_backup_plans(root, keep, keepalive, conn):
     return plans
 
 def _write_deletion_journal(ops_root, plans, roots, base, backup_keep=None, keepalive=None):
-    files = []
-    for scope, discarded, artifacts_dir, artifact_names in plans:
-        for record in discarded:
-            files.append(_journal_record(scope / (record["key"] + _DB), ops_root, keepalive))
-            files.append(_journal_record(scope / (record["key"] + _MANIFEST), ops_root, keepalive))
-        for name in sorted(artifact_names):
-            files.append(_journal_record(artifacts_dir / name, ops_root, keepalive))
-    trees = [_journal_tree_record(path, base, keepalive) for path in roots]
-    journal = ops_root / _JOURNAL_NAME
-    active = bool(files or trees)
-    if active:
-        _write_journal(journal, files, trees, backup_keep)
-    return journal, active
+    total = sum(2 * len(discarded) + len(artifact_names)
+                for _, discarded, _, artifact_names in plans) + len(roots)
+    stage = "build_retention_journal"
+    started, done = _stage(stage, total), 0
+    progress, files = _Progress(stage, total), []
+    try:
+        for scope, discarded, artifacts_dir, artifact_names in plans:
+            for record in discarded:
+                for suffix in (_DB, _MANIFEST):
+                    files.append(_journal_record(
+                        scope / (record["key"] + suffix), ops_root, keepalive))
+                    done += 1
+                    progress.tick(done)
+            for name in sorted(artifact_names):
+                files.append(_journal_record(artifacts_dir / name, ops_root, keepalive))
+                done += 1
+                progress.tick(done)
+        trees = []
+        for path in roots:
+            trees.append(_journal_tree_record(path, base, keepalive))
+            done += 1
+            progress.tick(done)
+        journal = ops_root / _JOURNAL_NAME
+        active = bool(files or trees)
+        if active:
+            _write_journal(journal, files, trees, backup_keep)
+        return journal, active
+    finally:
+        _stage_end(stage, started, done, total)
 
 def _delete_backup_plans(plans, keepalive):
     total = sum(len(discarded) + len(artifact_names)

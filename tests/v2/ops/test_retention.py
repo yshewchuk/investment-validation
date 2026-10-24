@@ -1627,3 +1627,152 @@ def test_stray_backup_scope_file_refuses_with_exact_reason(tmp_path, catalog):
 
     _refusal(ops, ops, catalog, "backup_scope_stray_file",
              keep=1, materialization_keep=1)
+
+
+def test_replay_refuses_recreated_root_with_same_name_and_contents(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    old = _materialization_dir(base, "root-old", 1)
+    entry = retention_module._journal_tree_record(old, base)
+    retention_module._write_journal(ops / ".retention-journal.json", [], [entry], 1)
+    old.rename(tmp_path / "preserved-old-root")
+    _materialization_dir(base, "root-old", 99)
+
+    _refusal(tmp_path, ops, catalog, "retention_journal_invalid",
+             keep=1, materialization_keep=1)
+
+
+def test_partial_journal_root_keeps_original_rank_for_same_identity(tmp_path):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    root = _materialization_dir(base, "root-old", 1)
+    entry = retention_module._journal_tree_record(root, base)
+    os.chmod(root, 0o755)
+    (root / "sentinel.bin").unlink()
+    os.chmod(root, 0o555)
+
+    assert retention_module._verify_journal_tree(entry) == root
+    assert entry["_partial"] is True
+    assert retention_module._journal_root_candidates(base, {root.name: entry}) == [root]
+
+
+def test_database_same_inode_rewrite_during_integrity_check_refuses(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    database = scope / "b1.sqlite"
+    real_integrity_errors = retention_module.integrity_errors
+
+    def rewrite_after_integrity(conn):
+        problems = real_integrity_errors(conn)
+        original = database.stat()
+        with database.open("r+b") as stream:
+            stream.seek(0)
+            stream.write(b"X")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.utime(database, ns=(original.st_atime_ns, original.st_mtime_ns))
+        return problems
+
+    monkeypatch.setattr(retention_module, "integrity_errors", rewrite_after_integrity)
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "backup_database_changed"
+    assert database.is_file()
+    assert (scope / "b1.manifest.json").is_file()
+    assert (scope / "artifacts" / "old.bin").is_file()
+    assert (scope / "b2.sqlite").is_file()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_pinned_file_info_refuses_nonregular_paths(tmp_path, kind):
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"payload")
+    path = tmp_path / "candidate.bin"
+    if kind == "symlink":
+        path.symlink_to(target)
+    else:
+        os.mkfifo(path)
+
+    with pytest.raises(fingerprints_module.NotRegularFile):
+        fingerprints_module.atomic_file_info(path)
+
+
+def test_stale_journal_pending_cleanup_failure_refuses_before_targets(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    pending = ops / ".retention-journal.json.pending"
+    pending.write_bytes(b"stale")
+    real_unlink = Path.unlink
+
+    def fail_pending(self, *args, **kwargs):
+        if self == pending:
+            raise OSError("injected")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_pending)
+    _refusal(ops, ops, catalog, "retention_journal_clear_failed",
+             code="BACKUP_FAILED", keep=1, materialization_keep=1)
+
+
+def test_journal_phases_emit_start_and_end_events(tmp_path, monkeypatch):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    root = _materialization_dir(base, "root-old", 1)
+    events = []
+    monkeypatch.setattr(retention_module, "_stderr",
+                        lambda event, **fields: events.append((event, fields)))
+
+    journal, active = retention_module._write_deletion_journal(
+        ops, [], [root], base, backup_keep=1)
+    assert active
+    files, trees, _ = retention_module._journal_files(journal)
+    retention_module._verify_journal_files(ops, files, None)
+    retention_module._verify_journal_tree(trees[0])
+    retention_module._journal_root_candidates(base, {trees[0]["name"]: trees[0]})
+    retention_module._replay_journal(journal, [], [root], None)
+
+    starts = {fields["stage"] for event, fields in events
+              if event == "RETENTION_STAGE_START"}
+    ends = {fields["stage"] for event, fields in events
+            if event == "RETENTION_STAGE_END"}
+    expected = {"build_retention_journal", "record_materialization_tree",
+                "verify_journal_files", "verify_journal_materialization_tree",
+                "rank_journal_materialization_roots", "replay_retention_journal"}
+    assert expected <= starts
+    assert expected <= ends
+
+
+def test_backup_artifacts_metadata_not_mapping_refuses_exact_reason(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00")
+    manifest = _manifest(scope, "b1")
+    manifest["artifacts"] = None
+    _save_manifest(scope, "b1", manifest)
+
+    _refusal(ops, ops, catalog, "backup_artifacts_not_mapping",
+             keep=1, materialization_keep=1)
+
+
+def test_symlink_backup_artifacts_directory_refuses_exact_reason(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00")
+    artifacts = scope / "artifacts"
+    artifacts.rmdir()
+    target = tmp_path / "outside"
+    target.mkdir()
+    artifacts.symlink_to(target, target_is_directory=True)
+
+    _refusal(ops, ops, catalog, "backup_artifacts_path_invalid",
+             keep=1, materialization_keep=1)
