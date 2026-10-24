@@ -4,13 +4,14 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import engine.v2.ops.retention as retention_module
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.retention import enforce_retention
 from engine.v2.ops.snapshot_roots import default_materialization_base
@@ -283,17 +284,48 @@ def test_newest_materializations_and_live_request_root_survive(tmp_path, catalog
     _materialization_dir(base, "root-d", 4)
     newest = _materialization_dir(base, "root-e", 5)
     _live_attempt(catalog, [(REQUEST_BINDING, "art_live")])
+    captured = []
+
+    def request_from_artifact(conn, store, artifact_id):
+        captured.append(artifact_id)
+        return SimpleNamespace(request_hash=LIVE_HASH)
+
+    monkeypatch.setattr(retention_module, "request_from_artifact", request_from_artifact)
+
+    enforce_retention(ops, conn=catalog, store=object(),
+                      keep=1, materialization_keep=2)
+
+    assert captured == ["art_live"]
+    assert live.is_dir() and (live / "sentinel.bin").is_file()
+    assert (base / "root-d").is_dir() and newest.is_dir()
+    assert not (base / "root-b").exists()
+    assert not (base / "root-c").exists()
+
+
+def test_live_crosscheck_bound_request_root_survives(tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    bound = _materialization_dir(base, LIVE_HASH.removeprefix("sha256:"), 1)
+    _materialization_dir(base, "root-old", 2)
+    newest = _materialization_dir(base, "root-new", 3)
+    spec = {"kind": "legacy_finality", "parameters": {}}
+    catalog.execute("INSERT INTO jobs VALUES (?, ?, ?)",
+                    ("job_check", "legacy_finality", json.dumps(spec)))
+    catalog.execute("INSERT INTO attempts VALUES (?, ?, ?)",
+                    ("att_check", "job_check", "running"))
+    catalog.execute("INSERT INTO attempt_input_bindings VALUES (?, ?, ?)",
+                    ("att_check", REQUEST_BINDING, "art_check"))
     monkeypatch.setattr(
         retention_module, "request_from_artifact",
         lambda conn, store, artifact_id: SimpleNamespace(request_hash=LIVE_HASH))
 
     enforce_retention(ops, conn=catalog, store=object(),
-                      keep=1, materialization_keep=2)
+                      keep=1, materialization_keep=1)
 
-    assert live.is_dir() and (live / "sentinel.bin").is_file()
-    assert (base / "root-d").is_dir() and newest.is_dir()
-    assert not (base / "root-b").exists()
-    assert not (base / "root-c").exists()
+    assert bound.is_dir() and (bound / "sentinel.bin").is_file()
+    assert newest.is_dir()
+    assert not (base / "root-old").exists()
 
 
 @pytest.mark.parametrize("bindings", [
@@ -311,6 +343,32 @@ def test_live_attempt_without_single_request_binding_refuses_and_deletes_nothing
 
     _refusal(tmp_path, ops, catalog, "live_request_binding_invalid",
              code="INPUT_CHANGED", keep=1, materialization_keep=1)
+
+
+def test_oversized_live_spec_refuses_in_preflight_and_deletes_nothing(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    spec = {"kind": "legacy_materialize",
+            "parameters": {"input_mode": "snapshot"},
+            "padding": "x" * (retention_module.MAX_LIVE_SPEC_BYTES + 1)}
+    catalog.execute("INSERT INTO jobs VALUES (?, ?, ?)",
+                    ("job_big", "legacy_materialize", json.dumps(spec)))
+    catalog.execute("INSERT INTO attempts VALUES (?, ?, ?)",
+                    ("att_big", "job_big", "running"))
+
+    error = _refusal(tmp_path, ops, catalog, "live_job_spec_too_large",
+                     keep=1, materialization_keep=1)
+
+    assert error.code == "INTEGRITY_FAILED"
+    assert error.problem.details["attempt_id"] == "att_big"
+    assert error.problem.details["spec_bytes"] > retention_module.MAX_LIVE_SPEC_BYTES
+    assert error.problem.details["byte_limit"] == retention_module.MAX_LIVE_SPEC_BYTES
 
 
 def test_unbound_current_publication_is_reported_and_only_older_roots_pruned(
@@ -361,12 +419,74 @@ def test_over_limit_backup_stream_refuses_and_deletes_nothing(
     assert error.code == "INTEGRITY_FAILED"
 
 
+def test_file_hash_stream_cap_reads_no_chunk_past_the_limit(tmp_path, monkeypatch):
+    path = tmp_path / "payload.bin"
+    path.write_bytes(b"x" * ((1 << 20) + 64))
+    limit = 10
+    reads = {"total": 0}
+    real_open = Path.open
+
+    class _CountedStream:
+        def __init__(self, stream):
+            self._stream = stream
+
+        def read(self, size=-1):
+            chunk = self._stream.read(size)
+            reads["total"] += len(chunk)
+            return chunk
+
+        def tell(self):
+            return self._stream.tell()
+
+        def __enter__(self):
+            self._stream.__enter__()
+            return self
+
+        def __exit__(self, *exc_info):
+            return self._stream.__exit__(*exc_info)
+
+    def counting_open(self, *args, **kwargs):
+        return _CountedStream(real_open(self, *args, **kwargs))
+
+    monkeypatch.setattr(Path, "open", counting_open)
+
+    with pytest.raises(OpsError) as caught:
+        file_hash(path, max_bytes=limit)
+
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "stream_too_large"
+    assert reads["total"] <= limit + 1
+
+
 def test_oversized_manifest_refuses_with_typed_error(tmp_path, catalog, monkeypatch):
     ops = tmp_path / "ops"
     scope = ops / "backups" / "shadow"
     _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"a.bin": b"artifact"})
     monkeypatch.setattr(retention_module, "_MAX_MANIFEST_BYTES", 10)
     error = _refusal(ops, ops, catalog, "backup_manifest_too_large",
+                     keep=1, materialization_keep=1)
+    assert error.code == "INTEGRITY_FAILED"
+
+
+def test_scope_listing_permission_error_is_typed(tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    real_iterdir = Path.iterdir
+
+    def deny_scope_listing(self, *args, **kwargs):
+        if self == scope:
+            raise PermissionError("denied")
+        return real_iterdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "iterdir", deny_scope_listing)
+
+    error = _refusal(tmp_path, ops, catalog, "retention_io_failed",
                      keep=1, materialization_keep=1)
     assert error.code == "INTEGRITY_FAILED"
 
@@ -405,16 +525,26 @@ def test_backup_deletion_failure_is_typed_without_root(tmp_path, catalog, monkey
     assert _files(ops) == before
 
 
-def test_read_only_materialization_root_is_removed(tmp_path, catalog):
+def test_read_only_materialization_root_is_removed(tmp_path, catalog, monkeypatch):
     ops = tmp_path / "ops"
     base = default_materialization_base(ops)
     base.mkdir(parents=True)
     root = _materialization_dir(base, "root-old", 1)
     os.chmod(root, 0o555)
     _materialization_dir(base, "root-new", 2)
+    real_unlink = os.unlink
+    writable_parents = []
+
+    def unlink(path, *args, **kwargs):
+        parent = Path(path).parent
+        writable_parents.append(bool(os.stat(parent).st_mode & stat.S_IWUSR))
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(retention_module.os, "unlink", unlink)
     enforce_retention(ops, conn=catalog, store=object(),
                       keep=1, materialization_keep=1)
     assert not root.exists()
+    assert writable_parents and all(writable_parents)
 
 
 def test_materialization_deletion_failure_is_typed_without_root(tmp_path, catalog, monkeypatch):
@@ -424,7 +554,7 @@ def test_materialization_deletion_failure_is_typed_without_root(tmp_path, catalo
     _materialization_dir(base, "root-new", 2)
     old = _materialization_dir(base, "root-old", 1)
     monkeypatch.setattr(
-        retention_module.shutil, "rmtree",
+        retention_module.os, "unlink",
         lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("denied")))
     with pytest.raises(OpsError) as caught:
         enforce_retention(ops, conn=catalog, store=object(),
@@ -432,6 +562,30 @@ def test_materialization_deletion_failure_is_typed_without_root(tmp_path, catalo
     assert caught.value.code == "INTEGRITY_FAILED"
     assert caught.value.problem.details["reason_key"] == "materialization_delete_failed"
     assert old.is_dir()
+
+
+def test_remove_tree_lease_lost_propagates_and_stops_further_removal(tmp_path):
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    (root / "one.txt").write_bytes(b"one")
+    (root / "sub" / "two.txt").write_bytes(b"two")
+    error = fail("LEASE_LOST", "the attempt lost its lease during materialization removal")
+    calls = {"count": 0}
+
+    def keepalive():
+        calls["count"] += 1
+        if calls["count"] >= 5:
+            raise error
+
+    with pytest.raises(OpsError) as caught:
+        retention_module._remove_tree(root, keepalive=keepalive)
+
+    assert caught.value is error
+    assert caught.value.code == "LEASE_LOST"
+    assert not (root / "sub" / "two.txt").exists()
+    assert (root / "one.txt").is_file()
+    assert (root / "sub").is_dir()
+    assert root.is_dir()
 
 
 def test_configured_materialization_base_is_used_for_retention(tmp_path, catalog):
@@ -452,3 +606,43 @@ def test_configured_materialization_base_is_used_for_retention(tmp_path, catalog
     assert not oldest.exists()
     assert newest.is_dir()
     assert default_root.is_dir()
+
+
+def test_integrity_progress_handler_lease_lost_propagates_and_deletes_nothing(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    before = _files(ops)
+    state = {"integrity": False, "calls": 0}
+    real_integrity_errors = retention_module.integrity_errors
+
+    def integrity_errors(conn):
+        state["integrity"] = True
+        try:
+            return real_integrity_errors(conn)
+        finally:
+            state["integrity"] = False
+
+    def keepalive():
+        if state["integrity"]:
+            state["calls"] += 1
+            raise fail("LEASE_LOST",
+                       "the attempt lost its lease during backup verification")
+
+    monkeypatch.setattr(retention_module, "integrity_errors", integrity_errors)
+    monkeypatch.setattr(retention_module, "_INTEGRITY_PROGRESS_INTERVAL", 1)
+
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1, keepalive=keepalive)
+
+    assert caught.value.code == "LEASE_LOST"
+    assert caught.value.problem.details.get("reason_key") != "backup_database_verify_failed"
+    assert state["calls"] > 0
+    assert _files(ops) == before

@@ -1050,6 +1050,7 @@ tests = [
     "tests/v2/ops/test_v2_ops_generation_effects.py",
     "tests/v2/ops/test_v2_ops_render_parity.py",
     "tests/v2/ops/test_v2_ops_same_session_replan.py",
+    "tests/v2/ops/test_retention.py",
     "tests/v2/serving/test_v2_serving_publication_binding.py",
 ]
 

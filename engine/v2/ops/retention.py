@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import resource
-import shutil
 import sqlite3
 import sys
 import time
@@ -11,9 +10,10 @@ from datetime import datetime
 from pathlib import Path
 
 from engine.v2.foundation import safe_relative_path
-from engine.v2.ops.catalog import integrity_errors
+from engine.v2.ops.catalog import decode_bounded_text, integrity_errors, sql_text_budget
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import file_hash
+from engine.v2.ops.reclaim import remove_tree
 from engine.v2.ops.snapshot_roots import default_materialization_base, materialization_root
 from engine.v2.ops.snapshot_stages import request_from_artifact
 
@@ -26,20 +26,22 @@ _LIVE_STATES = ("starting", "running", "cancelling", "recovery_pending")
 _REQUEST_BINDING = "materialization_request.json"
 _MAX_MANIFEST_BYTES = 10 * 1024 * 1024
 MAX_BACKUP_STREAM_BYTES = 4 * 1024 * 1024 * 1024
+MAX_LIVE_SPEC_BYTES = 1024 * 1024
+_INTEGRITY_PROGRESS_INTERVAL = 1000
 
 def _stderr(event, **fields):
     sys.stderr.write(json.dumps({"event": event, **fields}, sort_keys=True) + "\n")
 
-def _rss_mb():
+def _rss_peak_mb():
     return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 1)
 
 def _stage(name, total):
-    _stderr("RETENTION_STAGE_START", stage=name, total=total, rss_mb=_rss_mb())
+    _stderr("RETENTION_STAGE_START", stage=name, total=total, rss_peak_mb=_rss_peak_mb())
     return time.monotonic()
 
 def _stage_end(name, started, done, total):
     _stderr("RETENTION_STAGE_END", stage=name, done=done, total=total,
-            elapsed_s=round(time.monotonic() - started, 3), rss_mb=_rss_mb())
+            elapsed_s=round(time.monotonic() - started, 3), rss_peak_mb=_rss_peak_mb())
 
 class _Progress:
     def __init__(self, stage, total, interval=60.0):
@@ -56,7 +58,10 @@ class _Progress:
         self.last = now
         _stderr("RETENTION_PROGRESS", stage=self.stage, done=done, total=self.total,
                 rate_per_s=round(rate, 3),
-                eta_s=None if eta is None else round(eta, 1), rss_mb=_rss_mb())
+                eta_s=None if eta is None else round(eta, 1), rss_peak_mb=_rss_peak_mb())
+
+def _renew(keepalive):
+    keepalive() if keepalive is not None else None
 
 def _limit(keep, env, default, label):
     if keep is None:
@@ -97,15 +102,35 @@ def _database(path, expected, keepalive=None):
     if _digest(path, keepalive) != expected:
         raise fail("INTEGRITY_FAILED", "backup database hash does not match its manifest",
                    details={"reason_key": "backup_database_hash_mismatch"})
+    callback_error = None
+
+    def _progress():
+        nonlocal callback_error
+        try:
+            keepalive()
+        except Exception as error:
+            callback_error = error
+            return 1
+        return 0
+
     try:
         conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
         try:
+            if keepalive is not None:
+                conn.set_progress_handler(_progress, _INTEGRITY_PROGRESS_INTERVAL)
             problems = integrity_errors(conn)
         finally:
-            conn.close()
+            try:
+                conn.set_progress_handler(None, 0)
+            finally:
+                conn.close()
     except sqlite3.Error:
+        if callback_error is not None:
+            raise callback_error from None
         raise fail("INTEGRITY_FAILED", "backup database could not be verified",
                    details={"reason_key": "backup_database_verify_failed"}) from None
+    if callback_error is not None:
+        raise callback_error from None
     if problems:
         raise fail("INTEGRITY_FAILED", "backup database failed integrity or foreign-key checks",
                    details={"reason_key": "backup_database_integrity_failed"})
@@ -131,6 +156,7 @@ def _artifact(directory, name, info, keepalive=None):
                    details={"reason_key": "backup_artifact_hash_mismatch"})
 
 def _manifest(key, path, database, artifacts_dir, keepalive=None):
+    _renew(keepalive)
     try:
         with path.open("rb") as stream:
             raw = stream.read(_MAX_MANIFEST_BYTES + 1)
@@ -163,9 +189,14 @@ def _manifest(key, path, database, artifacts_dir, keepalive=None):
         _artifact(artifacts_dir, name, info, keepalive)
     return {"key": key, "when": when, "artifacts": set(artifacts)}
 
-def _scope_files(scope):
+def _scope_files(scope, keepalive=None):
     manifests, databases = {}, {}
-    for path in sorted(scope.iterdir(), key=lambda item: item.name):
+    entries = []
+    for path in scope.iterdir():
+        _renew(keepalive)
+        entries.append(path)
+    for path in sorted(entries, key=lambda item: item.name):
+        _renew(keepalive)
         if path.name == "artifacts":
             continue
         if path.is_symlink() or not path.is_file():
@@ -180,10 +211,11 @@ def _scope_files(scope):
                        details={"reason_key": "backup_scope_stray_file"})
     return manifests, databases
 
-def _present_artifacts(artifacts_dir):
+def _present_artifacts(artifacts_dir, keepalive=None):
     present = set()
     if artifacts_dir.exists():
         for path in artifacts_dir.iterdir():
+            _renew(keepalive)
             if path.is_symlink() or not path.is_file():
                 raise fail("INTEGRITY_FAILED", "stray backup artifact",
                            details={"reason_key": "backup_artifact_stray"})
@@ -206,10 +238,10 @@ def _scope_records(manifests, databases, artifacts_dir, keepalive=None):
 
 def _read_scope(scope, keepalive=None):
     artifacts_dir = _scope_artifacts_dir(scope)
-    manifests, databases = _scope_files(scope)
+    manifests, databases = _scope_files(scope, keepalive)
     records = _scope_records(manifests, databases, artifacts_dir, keepalive)
     referenced = set().union(*(record["artifacts"] for record in records)) if records else set()
-    present = _present_artifacts(artifacts_dir)
+    present = _present_artifacts(artifacts_dir, keepalive)
     if present != referenced:
         raise fail("INTEGRITY_FAILED", "backup artifacts are stray or incomplete",
                    details={"reason_key": "backup_artifacts_mismatch"})
@@ -222,26 +254,60 @@ def _plan(scope, keep, keepalive=None):
     kept = set().union(*(r["artifacts"] for r in retained)) if retained else set()
     return scope, ordered[keep:], artifacts_dir, present - kept
 
-def _live_roots(base, conn, store):
-    rows = conn.execute(
-        "SELECT a.attempt_id, j.kind, j.spec_json FROM attempts a "
-        "JOIN jobs j ON j.job_id = a.job_id WHERE a.state IN (?,?,?,?)",
-        _LIVE_STATES).fetchall()
-    total = len(rows)
+def _live_spec_too_large(attempt_id, spec_bytes):
+    return fail("INTEGRITY_FAILED", "live job spec exceeds its byte bound",
+                details={"reason_key": "live_job_spec_too_large",
+                         "attempt_id": attempt_id,
+                         "spec_bytes": spec_bytes,
+                         "byte_limit": MAX_LIVE_SPEC_BYTES})
+
+def _live_spec_malformed(attempt_id):
+    return fail("INTEGRITY_FAILED", "live job spec is malformed",
+                details={"reason_key": "live_job_spec_malformed",
+                         "attempt_id": attempt_id})
+
+def _live_spec(attempt_id, spec_bytes, spec_json, encoding, limit):
+    if spec_json is None:
+        if spec_bytes is not None and spec_bytes > limit:
+            raise _live_spec_too_large(attempt_id, spec_bytes)
+        raise _live_spec_malformed(attempt_id)
+    try:
+        text = decode_bounded_text(spec_json, encoding, MAX_LIVE_SPEC_BYTES)
+    except UnicodeError:
+        text = None
+    except ValueError:
+        raise _live_spec_too_large(attempt_id, spec_bytes) from None
+    try:
+        spec = json.loads(text) if text is not None else None
+    except (TypeError, ValueError):
+        spec = None
+    if not isinstance(spec, dict):
+        raise _live_spec_malformed(attempt_id)
+    return spec
+
+def _live_roots(base, conn, store, keepalive=None):
+    encoding, limit = sql_text_budget(conn, MAX_LIVE_SPEC_BYTES)
+    _renew(keepalive)
+    total = conn.execute(
+        "SELECT COUNT(*) FROM attempts a JOIN jobs j ON j.job_id = a.job_id "
+        "WHERE a.state IN (?,?,?,?)", _LIVE_STATES).fetchone()[0]
+    _renew(keepalive)
+    cursor = conn.execute(
+        "SELECT a.attempt_id, j.kind, length(CAST(j.spec_json AS BLOB)) AS spec_bytes, "
+        "CASE WHEN typeof(j.spec_json)='text' AND length(CAST(j.spec_json AS BLOB))<=? "
+        "THEN CAST(j.spec_json AS BLOB) END AS spec_json, "
+        "EXISTS(SELECT 1 FROM attempt_input_bindings b "
+        "WHERE b.attempt_id = a.attempt_id AND b.name = ?) AS bound "
+        "FROM attempts a JOIN jobs j ON j.job_id = a.job_id "
+        "WHERE a.state IN (?,?,?,?)", (limit, _REQUEST_BINDING, *_LIVE_STATES))
     started = _stage("resolve_live_roots", total)
     progress = _Progress("resolve_live_roots", total)
     done = 0
     try:
         active = []
-        for attempt_id, kind, spec_json in rows:
-            try:
-                spec = json.loads(spec_json)
-            except (TypeError, ValueError):
-                spec = None
-            if not isinstance(spec, dict):
-                raise fail("INTEGRITY_FAILED", "live job spec is malformed",
-                           details={"reason_key": "live_job_spec_malformed",
-                                    "attempt_id": attempt_id})
+        for attempt_id, kind, spec_bytes, spec_json, bound in cursor:
+            _renew(keepalive)
+            spec = _live_spec(attempt_id, spec_bytes, spec_json, encoding, limit)
             parameters = spec.get("parameters") or {}
             if not isinstance(parameters, dict):
                 raise fail("INTEGRITY_FAILED", "live job parameters are malformed",
@@ -249,7 +315,8 @@ def _live_roots(base, conn, store):
                                     "attempt_id": attempt_id})
             if kind != "legacy_materialize" \
                     and spec.get("kind") != "legacy_materialize" \
-                    and parameters.get("input_mode") != "snapshot":
+                    and parameters.get("input_mode") != "snapshot" \
+                    and not bound:
                 done += 1
                 progress.tick(done)
                 continue
@@ -260,6 +327,7 @@ def _live_roots(base, conn, store):
             return set()
         roots = set()
         for attempt_id in active:
+            _renew(keepalive)
             bound = conn.execute(
                 "SELECT artifact_id FROM attempt_input_bindings "
                 "WHERE attempt_id = ? AND name = ?",
@@ -270,12 +338,13 @@ def _live_roots(base, conn, store):
                            details={"reason_key": "live_request_binding_invalid",
                                     "attempt_id": attempt_id})
             request = request_from_artifact(conn, store, bound[0][0])
+            _renew(keepalive)
             roots.add(materialization_root(base, request.request_hash).name)
         return roots
     finally:
         _stage_end("resolve_live_roots", started, done, total)
 
-def _materialization_plan(ops_root, keep, conn, store, base=None):
+def _materialization_plan(ops_root, keep, conn, store, base=None, keepalive=None):
     base = base or default_materialization_base(ops_root)
     if base.is_symlink() or (base.exists() and not base.is_dir()):
         raise fail("INTEGRITY_FAILED", "materialization root is not a directory",
@@ -283,13 +352,17 @@ def _materialization_plan(ops_root, keep, conn, store, base=None):
     if not base.exists():
         return []
     _stderr("RETENTION_CURRENT_PUBLICATION_UNBOUND")
-    all_entries = list(base.iterdir())
+    all_entries = []
+    for item in base.iterdir():
+        _renew(keepalive)
+        all_entries.append(item)
     started = _stage("verify_materialization", len(all_entries))
     progress = _Progress("verify_materialization", len(all_entries))
     done = 0
     try:
         entries = []
         for item in all_entries:
+            _renew(keepalive)
             if item.name.startswith("."):
                 done += 1
                 progress.tick(done)
@@ -300,10 +373,15 @@ def _materialization_plan(ops_root, keep, conn, store, base=None):
             entries.append(item)
             done += 1
             progress.tick(done)
-        ordered = sorted(entries, key=lambda item: item.stat().st_mtime_ns, reverse=True)
+
+        def _mtime(item):
+            _renew(keepalive)
+            return item.stat().st_mtime_ns
+
+        ordered = sorted(entries, key=_mtime, reverse=True)
     finally:
         _stage_end("verify_materialization", started, done, len(all_entries))
-    live = _live_roots(base, conn, store)
+    live = _live_roots(base, conn, store, keepalive)
     retained = {item.name for item in ordered[:keep]} | live
     return [item for item in ordered if item.name not in retained]
 
@@ -314,17 +392,29 @@ def _unlink(path):
         raise fail("INTEGRITY_FAILED", "backup deletion failed",
                    details={"reason_key": "backup_delete_failed"}) from None
 
-def _remove_tree(path):
+def _remove_tree(path, keepalive=None):
+    """Remove one materialization tree with the shared reclaim walk.
+
+    Raw ``OSError`` maps to materialization_delete_failed; an ``OpsError``
+    raised by ``keepalive`` propagates unchanged."""
     try:
-        for directory, _, _ in os.walk(path):
-            os.chmod(directory, 0o755)
-        shutil.rmtree(path)
+        remove_tree(path, lambda: _renew(keepalive))
     except OSError:
         raise fail("INTEGRITY_FAILED", "materialization deletion failed",
                    details={"reason_key": "materialization_delete_failed"}) from None
 
 def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=None, keepalive=None, materialization_base=None):
-    """Keep the newest verified backups and materialization roots; return pruned keys."""
+    """Keep the newest verified backups and materialization roots; return deleted backup keys and omit removed root paths."""
+    try:
+        return _enforce_retention(ops_root, conn=conn, store=store, keep=keep,
+                                  materialization_keep=materialization_keep,
+                                  keepalive=keepalive,
+                                  materialization_base=materialization_base)
+    except OSError:
+        raise fail("INTEGRITY_FAILED", "retention filesystem verification failed",
+                   details={"reason_key": "retention_io_failed"}) from None
+
+def _enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=None, keepalive=None, materialization_base=None):
     keep = _limit(keep, KEEP_ENV, DEFAULT_KEEP, "backup")
     materialization_keep = _limit(materialization_keep, MATERIALIZATION_KEEP_ENV,
                                   DEFAULT_MATERIALIZATION_KEEP, "materialization")
@@ -333,7 +423,11 @@ def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=
         if root.is_symlink() or not root.is_dir():
             raise fail("INTEGRITY_FAILED", "backup root is not a directory",
                        details={"reason_key": "backup_root_invalid"})
-        scopes = sorted(root.iterdir(), key=lambda item: item.name)
+        scopes = []
+        for item in root.iterdir():
+            _renew(keepalive)
+            scopes.append(item)
+        scopes.sort(key=lambda item: item.name)
         if any(scope.is_symlink() or not scope.is_dir() for scope in scopes):
             raise fail("INTEGRITY_FAILED", "backup scope is not a directory",
                        details={"reason_key": "backup_scope_not_directory"})
@@ -344,7 +438,8 @@ def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=
                 progress.tick(done := done + 1)
         finally:
             _stage_end("verify_backups", started, done, len(scopes))
-    roots = _materialization_plan(ops_root, materialization_keep, conn, store, base=materialization_base)
+    roots = _materialization_plan(ops_root, materialization_keep, conn, store,
+                                  base=materialization_base, keepalive=keepalive)
     deleted = []
     backup_total = sum(len(discarded) + len(artifact_names)
                        for _, discarded, _, artifact_names in plans)
@@ -354,13 +449,15 @@ def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=
     started, progress, done = _stage("delete_backups", backup_total), _Progress("delete_backups", backup_total), 0
     try:
         for scope, discarded, artifacts_dir, artifact_names in plans:
-            keepalive() if keepalive is not None else None
             for record in discarded:
+                _renew(keepalive)
                 _unlink(scope / (record["key"] + _DB))
+                _renew(keepalive)
                 _unlink(scope / (record["key"] + _MANIFEST))
                 deleted.append(record["key"])
                 progress.tick(done := done + 1)
             for name in sorted(artifact_names):
+                _renew(keepalive)
                 _unlink(artifacts_dir / name)
                 progress.tick(done := done + 1)
     finally:
@@ -368,8 +465,8 @@ def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=
     started, progress, done = _stage("delete_materialization", len(roots)), _Progress("delete_materialization", len(roots)), 0
     try:
         for path in roots:
-            keepalive() if keepalive is not None else None
-            _remove_tree(path)
+            _renew(keepalive)
+            _remove_tree(path, keepalive)
             progress.tick(done := done + 1)
     finally:
         _stage_end("delete_materialization", started, done, len(roots))

@@ -18,15 +18,23 @@ from engine.v2.ops.errors import fail
 
 def file_hash(path, *, keepalive: Callable[[], None] | None = None,
               max_bytes: int | None = None):
-    """SHA-256 of ``path``; ``keepalive`` per 1MB chunk, ``max_bytes`` caps read bytes."""
+    """SHA-256 of ``path``; ``keepalive`` per 1MB chunk; ``max_bytes`` bounds
+    each read to the remaining ceiling plus one probe byte, failed typed
+    before that probe byte is hashed."""
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1 << 20), b""):
-            digest.update(chunk)
-            keepalive() if keepalive is not None else None
+        while True:
+            want = 1 << 20
+            if max_bytes is not None:
+                want = min(want, max_bytes - stream.tell() + 1)
+            chunk = stream.read(want)
+            if not chunk:
+                break
             if max_bytes is not None and stream.tell() > max_bytes:
                 raise fail("INTEGRITY_FAILED", "file exceeds the streaming byte ceiling",
                            details={"reason_key": "stream_too_large", "max_bytes": max_bytes})
+            digest.update(chunk)
+            keepalive() if keepalive is not None else None
     return "sha256:" + digest.hexdigest()
 
 
