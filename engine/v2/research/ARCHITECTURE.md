@@ -9,8 +9,7 @@ publishing exactly as before; this package adds parallel `tools/v2_*` CLIs
 that read a pinned v2 snapshot instead.
 
 `tools/log_diagnostics.py` is deliberately **not** moved here: it reads only
-a local transactions-log CSV, never the Tier-2 store, so it needs no
-snapshot-pinned counterpart.
+a local transactions-log CSV, never the Tier-2 store, so it needs no snapshot-pinned counterpart.
 
 ## Purpose
 
@@ -625,8 +624,7 @@ This bounds retained unmatched rows, not total process RSS.
   (`_pricing.trading_calendar_from_snapshot`, reading only the `date`
   column through `_scan.read_table`) — never from a local file or
   `INVESTING_PLAN_ROOT`. A snapshot with no `daily_market` table refuses
-  (`CONTRACT_MISMATCH`) rather than inventing a calendar; see Failure
-  semantics.
+  (`CONTRACT_MISMATCH`) rather than inventing a calendar; see Failure semantics.
 - `--since`, `--min-date`, `--years`, `--strategy` (repeatable, from
   `_pricing.STRUCTURES`): per-tool read/filter narrowing; never widen a read
   past the resolved snapshot.
