@@ -70,11 +70,14 @@ from checks.rearchitecture_phase6_restore_drill import (  # noqa: E402
     _build_published_fixture,
     _fenced_claim,
 )
-from engine.v2.foundation import ArtifactStore, Clock, SystemClock, format_timestamp  # noqa: E402
+from engine.v2.foundation import (  # noqa: E402
+    ArtifactError, ArtifactStore, Clock, SystemClock, format_timestamp,
+    safe_relative_path,
+)
+from engine.v2.foundation.artifacts import read_bounded_bytes  # noqa: E402
 from engine.v2.ops import publication  # noqa: E402
 from engine.v2.ops.backup import (  # noqa: E402
     MAX_MANIFEST_BYTES,
-    _single_filename,
     manifest_database_path,
     prepare_backup,
     restore_backup,
@@ -84,7 +87,6 @@ from engine.v2.ops.backup import (  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.outbox import fail_effect  # noqa: E402
-from engine.v2.ops.workflows.commands import read_bounded_bytes  # noqa: E402
 
 __all__ = ["OpsFailureDrillError", "run_drill", "main"]
 
@@ -150,7 +152,12 @@ def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
         if not isinstance(artifacts, dict):
             return False
         for name, info in artifacts.items():
-            _single_filename(name)
+            try:
+                parts = safe_relative_path(name)
+            except ArtifactError:
+                return False
+            if len(parts) != 1:
+                return False
             if (not isinstance(info, dict)
                     or type(info.get("byte_size")) is not int
                     or info["byte_size"] < 0):
