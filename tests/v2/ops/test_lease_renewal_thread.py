@@ -17,6 +17,7 @@ with a spy so the ordering is deterministic.
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -28,7 +29,9 @@ import pytest
 
 import engine.v2.ops.supervisor as supervisor_module
 from engine.v2.foundation import format_timestamp
+from engine.v2.ops import recovery
 from engine.v2.ops.bootstrap import open_catalog
+from engine.v2.ops.errors import make_problem
 from engine.v2.ops.recovery import begin_epoch, expire_leases
 from engine.v2.ops.scheduler import Supervisor
 from engine.v2.ops.supervisor import LEASE_SECONDS, LeaseRenewer, Service
@@ -49,6 +52,17 @@ def _stamp(clock, offset_seconds):
 def _lease(conn, attempt_id):
     return conn.execute("SELECT lease_expires_at, heartbeat_at FROM attempts "
                         "WHERE attempt_id = ?", (attempt_id,)).fetchone()
+
+
+def _log_payloads(stream):
+    payloads = []
+    for line in stream.text().splitlines():
+        if "{" in line:
+            try:
+                payloads.append(json.loads(line[line.index("{"):]))
+            except ValueError:
+                continue
+    return payloads
 
 
 class _CapturingStream:
@@ -154,9 +168,153 @@ def test_lease_loss_does_not_refund_attempt_count(tmp_path):
     assert job["state"] == "running"
 
 
+def test_renew_pass_query_failure_is_contained_and_retryable(tmp_path):
+    conn, clock, sup = catalog(tmp_path)
+    enqueue_claim(conn, clock, sup, key="queryfail")
+    stream = _CapturingStream()
+
+    class _FailingConnection:
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+    renewer = LeaseRenewer(tmp_path / DB_NAME, clock=clock, epoch_id=sup.epoch_id,
+                           lease_seconds=LEASE_SECONDS, stream=stream)
+    assert renewer.renew_pass(_FailingConnection()) == (0, 0)
+    assert renewer.passes == 1
+    assert renewer.errors == 1
+    logged = stream.text()
+    assert "lease query failed; retried next interval" in logged
+    payload = _log_payloads(stream)[-1]
+    assert payload["error"] == "OperationalError"
+
+    own = open_catalog(tmp_path / DB_NAME, clock=clock)
+    try:
+        renewed, total = renewer.renew_pass(own)
+    finally:
+        own.close()
+    assert (renewed, total) == (1, 1)
+    assert renewer.passes == 2
+    conn.close()
+
+
+def test_renew_pass_continues_after_one_heartbeat_failure(tmp_path, monkeypatch):
+    conn, clock, sup = catalog(tmp_path)
+    healthy = enqueue_claim(conn, clock, sup, key="healthy")
+    failing = enqueue_claim(conn, clock, sup, key="failing")
+    conn.execute("UPDATE attempts SET lease_expires_at = ? WHERE attempt_id IN (?, ?)",
+                 (_stamp(clock, 1), healthy.attempt_id, failing.attempt_id))
+    healthy_before = _lease(conn, healthy.attempt_id)
+    failing_before = _lease(conn, failing.attempt_id)
+
+    real_heartbeat = supervisor_module.heartbeat
+
+    def selective_heartbeat(conn, attempt_id, fence, *, clock, lease_seconds):
+        if attempt_id == failing.attempt_id:
+            raise sqlite3.OperationalError("locked for " + attempt_id)
+        return real_heartbeat(conn, attempt_id, fence, clock=clock, lease_seconds=lease_seconds)
+
+    monkeypatch.setattr(supervisor_module, "heartbeat", selective_heartbeat)
+    stream = _CapturingStream()
+
+    own = open_catalog(tmp_path / DB_NAME, clock=clock)
+    try:
+        renewer = LeaseRenewer(tmp_path / DB_NAME, clock=clock, epoch_id=sup.epoch_id,
+                               lease_seconds=LEASE_SECONDS, stream=stream)
+        renewed, total = renewer.renew_pass(own)
+    finally:
+        own.close()
+
+    healthy_after = _lease(conn, healthy.attempt_id)
+    failing_after = _lease(conn, failing.attempt_id)
+    assert (renewed, total) == (1, 2)
+    assert renewer.errors == 1
+    assert healthy_after["lease_expires_at"] > healthy_before["lease_expires_at"]
+    assert failing_after["lease_expires_at"] == failing_before["lease_expires_at"]
+
+    logged = stream.text()
+    assert "renewal errors this pass" in logged
+    summary = next(p for p in _log_payloads(stream) if "failed_attempts" in p)
+    assert summary["failed"] == 1
+    assert summary["failed_attempts"] == [
+        {"attempt_id": failing.attempt_id, "error": "OperationalError"}]
+    conn.close()
+
+
+def test_renew_pass_logs_bounded_progress_with_injected_clock(tmp_path, monkeypatch):
+    conn, clock, sup = catalog(tmp_path)
+    claim = enqueue_claim(conn, clock, sup, key="progress")
+    conn.execute("UPDATE attempts SET lease_expires_at = ? WHERE attempt_id = ?",
+                 (_stamp(clock, 100), claim.attempt_id))
+
+    real_heartbeat = supervisor_module.heartbeat
+
+    def advancing_heartbeat(conn, attempt_id, fence, *, clock, lease_seconds):
+        clock.advance(61)
+        return real_heartbeat(conn, attempt_id, fence, clock=clock, lease_seconds=lease_seconds)
+
+    monkeypatch.setattr(supervisor_module, "heartbeat", advancing_heartbeat)
+    stream = _CapturingStream()
+
+    own = open_catalog(tmp_path / DB_NAME, clock=clock)
+    try:
+        renewer = LeaseRenewer(tmp_path / DB_NAME, clock=clock, epoch_id=sup.epoch_id,
+                               lease_seconds=LEASE_SECONDS, stream=stream)
+        renewed, total = renewer.renew_pass(own)
+    finally:
+        own.close()
+
+    assert (renewed, total) == (1, 1)
+    assert renewer.passes == 1
+
+    logged = stream.text()
+    progress = [p for p in _log_payloads(stream) if "done" in p]
+    assert len(progress) == 1
+    payload = progress[0]
+    assert payload["pass_number"] == 1
+    assert payload["done"] == 1
+    assert payload["total"] == 1
+    assert "rate_per_second" in payload
+    assert "eta_seconds" in payload
+    assert payload["renewed"] == 1
+    assert "errors" in payload
+    assert "elapsed_seconds" in payload
+    assert "rss_kb" in payload
+    assert "pass complete" in logged
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # LeaseRenewer thread lifecycle: a real thread on its own connection
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("interval_seconds", [0, -1])
+def test_non_positive_interval_is_rejected(tmp_path, interval_seconds):
+    """A zero or negative test override would spin the wait loop with no pause."""
+    with pytest.raises(ValueError):
+        LeaseRenewer(tmp_path / DB_NAME, clock=FakeClock(), epoch_id="epoch",
+                     lease_seconds=LEASE_SECONDS, interval_seconds=interval_seconds)
+
+
+def test_stop_after_failed_thread_start_does_not_join(tmp_path, monkeypatch):
+    """A Thread whose start() raised has no ident; stop() must not join it."""
+    conn, clock, sup = catalog(tmp_path)
+    renewer = LeaseRenewer(tmp_path / DB_NAME, clock=clock, epoch_id=sup.epoch_id,
+                           lease_seconds=LEASE_SECONDS)
+    error = RuntimeError("thread start failed")
+
+    def failing_start(self):
+        raise error
+
+    monkeypatch.setattr(threading.Thread, "start", failing_start)
+    with pytest.raises(RuntimeError) as raised:
+        renewer.start()
+    conn.close()
+
+    assert raised.value is error
+    assert renewer._thread is not None
+    renewer.stop()
+    assert renewer._thread is None
 
 
 def test_thread_renews_then_stops_and_joins(tmp_path):
@@ -165,11 +323,11 @@ def test_thread_renews_then_stops_and_joins(tmp_path):
 
     A simulated tick (the serve loop's one thread) blocks on an Event inside one
     long effect -- it renews nothing. With a short ``interval_seconds`` the
-    LeaseRenewer runs on its OWN thread and connection; the fake clock jumps past
-    one renewal cadence (so the attempt's original lease is already expired) and
-    the renewer lands at least one MORE fenced renewal while the tick is still
-    stuck. The lease stays live under the stall, and ``stop()`` joins the thread
-    to completion before returning. Nothing sleeps a lease period, so the test
+    LeaseRenewer runs on its OWN thread and connection; the fake clock advances
+    to one second before the first renewal's deadline, and the renewer lands a
+    later fenced renewal while the tick is still stuck. The renewed lease then
+    survives the old deadline passing, and ``stop()`` joins the thread to
+    completion before returning. Nothing sleeps a lease period, so the test
     stays fast: the extra pass is one short real interval.
     """
     conn, clock, sup = catalog(tmp_path)
@@ -182,7 +340,6 @@ def test_thread_renews_then_stops_and_joins(tmp_path):
 
     tick_blocked = threading.Event()   # the simulated tick has entered its long effect
     release_tick = threading.Event()   # set only in finally to let the tick finish
-    cadence = renewer.interval         # lease_seconds / 4, the renewal contract
 
     def blocked_tick():
         tick_blocked.set()
@@ -197,12 +354,14 @@ def test_thread_renews_then_stops_and_joins(tmp_path):
         assert renewer.first_pass.wait(timeout=5.0), "renewal thread never ran a pass"
         after_first = _lease(conn, claim.attempt_id)
         assert after_first["heartbeat_at"] is not None
+        deadline_before = after_first["lease_expires_at"]
+        renewed_before = renewer.renewed
 
-        # The stall: fake time jumps past one cadence. The immediate first renewer
-        # pass has already extended the lease past its original (now + 1s), so the
-        # blocked tick now relies on a subsequent off-thread renewal after the
-        # advance to keep the lease live while the main tick stays stuck.
-        clock.advance(cadence + 1)
+        # The stall: advance to one second before the first renewal's deadline.
+        # The next committed renewal then has to be an off-thread pass at this
+        # new time, extending the lease from near expiry.
+        clock.advance(LEASE_SECONDS - 1)
+        assert deadline_before == _stamp(clock, 1)
 
         # Deterministic: the renewer's own thread must land another COMMITTED
         # renewal while the tick stays blocked -- ``renewed`` is counted after the
@@ -210,28 +369,40 @@ def test_thread_renews_then_stops_and_joins(tmp_path):
         # before the write) reads a durable lease. Poll a real deadline; the short
         # interval is <1s, so this finishes fast.
         deadline = time.monotonic() + 5.0
-        while renewer.renewed < 2 and time.monotonic() < deadline:
+        while ((renewer.renewed <= renewed_before
+                or _lease(conn, claim.attempt_id)["lease_expires_at"] <= deadline_before)
+               and time.monotonic() < deadline):
             time.sleep(0.005)
-        assert renewer.renewed >= 2, "renewal thread did not renew during the blocked tick"
+        assert renewer.renewed > renewed_before, \
+            "renewal thread did not renew during the blocked tick"
 
         during = _lease(conn, claim.attempt_id)
-        # The independent path advanced the heartbeat and kept the lease live past
-        # the advanced clock, so the tick's own expiry sweep would fence nothing.
         assert during["heartbeat_at"] > after_first["heartbeat_at"]
-        assert during["lease_expires_at"] > _stamp(clock, 0)
+        assert during["lease_expires_at"] > deadline_before
         assert tick.is_alive() and not release_tick.is_set()  # tick REMAINED blocked
+
+        # The old deadline has now passed; only the off-thread renewal keeps the
+        # lease live, so the tick's own expiry sweep must fence nothing.
+        clock.advance(2)
+        assert deadline_before <= _stamp(clock, 0)
+        assert during["lease_expires_at"] > _stamp(clock, 0)
         assert claim.attempt_id not in expire_leases(conn, clock=clock)
     finally:
         release_tick.set()
         tick.join(timeout=5.0)
+        thread = renewer._thread
         renewer.stop()
     conn.close()
 
     assert not tick.is_alive()        # simulated tick released and joined
+    assert thread is not None and not thread.is_alive()
     assert renewer._thread is None    # stop() joined to completion, never left running
     assert renewer.renewed >= 2       # this epoch's live attempt renewed each pass
     logged = stream.text()
     assert "lease_renewal" in logged and "thread starting" in logged and "thread stopped" in logged
+    pass_complete = next(payload for payload in _log_payloads(stream) if "skipped" in payload)
+    assert {"pass_number", "attempts", "renewed", "skipped", "errors",
+            "elapsed_seconds", "rss_kb"} <= set(pass_complete)
 
 
 def test_run_retries_catalog_open_then_renews(tmp_path):
@@ -272,9 +443,11 @@ def test_run_retries_catalog_open_then_renews(tmp_path):
             time.sleep(0.005)
         assert renewer.renewed >= 1                # the live attempt is renewed once connected
     finally:
+        thread = renewer._thread
         renewer.stop()
     conn.close()
 
+    assert thread is not None and not thread.is_alive()
     assert renewer._thread is None                 # stop() joined the retrying thread to completion
     assert renewer.passes >= 1
     assert all(seen is True for seen in must_exist_seen)  # never opened a catalog that could create one
@@ -305,9 +478,11 @@ def test_stop_while_awaiting_catalog_reconnect_exits_and_joins(tmp_path):
                            connect=always_fails, stream=stream)
     renewer.start()
     assert attempted.wait(timeout=5.0), "renewal thread never attempted the catalog open"
+    thread = renewer._thread
     renewer.stop()
     conn.close()
 
+    assert thread is not None and not thread.is_alive()
     assert renewer._thread is None                 # joined to completion, not left retrying
     assert renewer.passes == 0                     # a catalog was never opened, so no renewal ran
     assert not renewer.first_pass.is_set()         # first pass only fires once renewing
@@ -327,7 +502,7 @@ def test_start_spawns_renewer_after_identity_and_close_stops_it_before_lock(tmp_
     events = []
 
     def spy_renewer(db_path, *, clock, epoch_id, lease_seconds, **kw):
-        events.append(("renewer.spawn", epoch_id, service.identity is not None))
+        events.append(("renewer.spawn", epoch_id, service.identity is not None, lease_seconds))
         return _SpyRenewer(events, epoch_id)
 
     original_release = service.lock.release
@@ -346,6 +521,10 @@ def test_start_spawns_renewer_after_identity_and_close_stops_it_before_lock(tmp_
     spawn = events[0]
     assert spawn[1] == service.identity.epoch_id  # bound to THIS epoch
     assert spawn[2] is True                        # spawned only after identity init
+    assert spawn[3] == LEASE_SECONDS               # production cadence and lease are pinned
+    default_renewer = LeaseRenewer(tmp_path / DB_NAME, clock=clock,
+                                   epoch_id=spawn[1], lease_seconds=LEASE_SECONDS)
+    assert default_renewer.interval == LEASE_SECONDS / 4
 
 
 class _EmptyRegistry:
@@ -401,3 +580,64 @@ def test_clock_check_renews_live_workers_before_expiry_sweep_but_not_dead(tmp_pa
 
     assert dead.attempt_id in fenced       # a gone worker follows the fail-closed sweep
     assert live.attempt_id not in fenced   # a proven-live worker was renewed first
+
+
+# ---------------------------------------------------------------------------
+# Service._strand: exclusion prevents renewal, expiry holds reservations
+# ---------------------------------------------------------------------------
+
+
+def test_strand_excludes_attempt_from_renewal_and_holds_reservation_until_reconcile(tmp_path, monkeypatch):
+    """A fresh live claim passed through ``Service._strand`` must not be renewed;
+    expiry fences/bumps the job fence and holds the reservation, while only
+    reconcile proving process gone releases it."""
+    conn, clock, sup = catalog(tmp_path)
+    claim = enqueue_claim(conn, clock, sup, key="strand")
+
+    initial_lease = _lease(conn, claim.attempt_id)["lease_expires_at"]
+    initial_fence = conn.execute("SELECT fence FROM jobs WHERE job_id = ?",
+                                 (claim.job_id,)).fetchone()["fence"]
+
+    service = Service(conn, tmp_path, _EmptyRegistry(), TEST_POLICY, clock=clock,
+                      code_source=tmp_path, store_root=tmp_path)
+    renewer = LeaseRenewer(tmp_path / DB_NAME, clock=clock, epoch_id=sup.epoch_id,
+                           lease_seconds=LEASE_SECONDS)
+    service._renewer = renewer
+
+    service._strand(claim, make_problem("INPUT_CHANGED", "test strand"))
+
+    own = open_catalog(tmp_path / DB_NAME, clock=clock)
+    try:
+        renewer.renew_pass(own)
+    finally:
+        own.close()
+
+    assert _lease(conn, claim.attempt_id)["lease_expires_at"] == initial_lease
+
+    clock.advance(LEASE_SECONDS + 1)
+    fenced = expire_leases(conn, clock=clock)
+    assert claim.attempt_id in fenced
+
+    attempt = conn.execute("SELECT state FROM attempts WHERE attempt_id = ?",
+                           (claim.attempt_id,)).fetchone()
+    assert attempt["state"] == "recovery_pending"
+    job = conn.execute("SELECT fence FROM jobs WHERE job_id = ?",
+                       (claim.job_id,)).fetchone()
+    assert job["fence"] > initial_fence
+
+    reservation = conn.execute("SELECT released_at FROM resource_reservations "
+                               "WHERE attempt_id = ?", (claim.attempt_id,)).fetchone()
+    assert reservation is not None
+    assert reservation["released_at"] is None
+
+    monkeypatch.setattr(supervisor_module, "prove_ownership_gone",
+                        lambda *args, **kwargs: recovery.OwnershipProof(True, (), (), ()))
+    service.identity = sup
+    service.boot = "boot"
+    service.reconcile()
+
+    released = conn.execute("SELECT released_at FROM resource_reservations "
+                            "WHERE attempt_id = ?", (claim.attempt_id,)).fetchone()
+    assert released["released_at"] is not None
+
+    conn.close()

@@ -213,6 +213,9 @@ _LIVE_EPOCH_ATTEMPTS = (
 #: (AGENTS.md bounded row-loop cadence); the pass still counts and continues all rows.
 _RENEWAL_ERROR_DETAIL_LIMIT = 8
 
+#: Bounded progress cadence within a renewal pass.
+_RENEWAL_PROGRESS_SECONDS = 60
+
 
 def _rss_kb():
     """VmRSS in KiB from ``/proc/self/status``; ``None`` when unreadable."""
@@ -252,11 +255,15 @@ class LeaseRenewer:
         # ``interval_seconds`` overrides the cadence for tests only; production
         # always uses the ``lease_seconds / 4`` contract.
         self.interval = (lease_seconds / 4) if interval_seconds is None else interval_seconds
+        if self.interval <= 0:
+            raise ValueError("interval_seconds must be positive")
         self._connect = connect
         self._stream = sys.stderr if stream is None else stream
         self._stop = threading.Event()
         self.first_pass = threading.Event()
         self._thread = None
+        self._lock = threading.Lock()
+        self._excluded_attempts = set()
         #: diagnostics counters (never a control input).
         self.passes = 0
         self.renewed = 0
@@ -271,6 +278,15 @@ class LeaseRenewer:
                   file=self._stream, flush=True)
         except Exception:  # noqa: BLE001 - progress logging must not stop renewal
             pass
+
+    def exclude_attempt(self, attempt_id):
+        """Exclude ``attempt_id`` from renewal by this thread.
+
+        Takes the same lock as ``renew_pass`` so that once this returns no
+        heartbeat for that attempt can commit.
+        """
+        with self._lock:
+            self._excluded_attempts.add(attempt_id)
 
     def start(self):
         self._log("thread starting", rss_kb=_rss_kb())
@@ -319,28 +335,45 @@ class LeaseRenewer:
         """
         self.passes += 1
         pass_started = self.clock.monotonic()
+        last_progress = pass_started
         try:
             rows = conn.execute(_LIVE_EPOCH_ATTEMPTS, (self.epoch_id,)).fetchall()
         except Exception as exc:  # noqa: BLE001
             self.errors += 1
             self._log("lease query failed; retried next interval", error=type(exc).__name__)
             return (0, 0)
+        total = len(rows)
+        self._log("pass starting", pass_number=self.passes, total=total, rss_kb=_rss_kb())
         renewed = 0
         failed_this_pass = 0
         failed_attempts = []
+        done = 0
         for row in rows:
-            try:
-                if heartbeat(conn, row["attempt_id"], row["fence"], clock=self.clock,
-                             lease_seconds=self.lease_seconds):
-                    renewed += 1
-            except Exception as exc:  # noqa: BLE001 - one attempt's failure must not stop the pass
-                # Aggregate locally rather than log per row (AGENTS.md bounded
-                # row-loop cadence); count every failure and still continue the pass.
-                self.errors += 1
-                failed_this_pass += 1
-                if len(failed_attempts) < _RENEWAL_ERROR_DETAIL_LIMIT:
-                    failed_attempts.append({"attempt_id": row["attempt_id"],
-                                            "error": type(exc).__name__})
+            with self._lock:
+                if row["attempt_id"] not in self._excluded_attempts:
+                    try:
+                        if heartbeat(conn, row["attempt_id"], row["fence"], clock=self.clock,
+                                     lease_seconds=self.lease_seconds):
+                            renewed += 1
+                    except Exception as exc:  # noqa: BLE001 - one attempt's failure must not stop the pass
+                        # Aggregate locally rather than log per row (AGENTS.md bounded
+                        # row-loop cadence); count every failure and still continue the pass.
+                        self.errors += 1
+                        failed_this_pass += 1
+                        if len(failed_attempts) < _RENEWAL_ERROR_DETAIL_LIMIT:
+                            failed_attempts.append({"attempt_id": row["attempt_id"],
+                                                    "error": type(exc).__name__})
+            done += 1
+            now = self.clock.monotonic()
+            if now - last_progress >= _RENEWAL_PROGRESS_SECONDS:
+                elapsed = now - pass_started
+                rate = done / elapsed if elapsed > 0 else 0.0
+                eta = (total - done) / rate if rate > 0 else 0.0
+                self._log("pass progress", pass_number=self.passes, done=done, total=total,
+                          rate_per_second=round(rate, 2), eta_seconds=round(eta, 2),
+                          renewed=renewed, errors=self.errors, elapsed_seconds=round(elapsed, 2),
+                          rss_kb=_rss_kb())
+                last_progress = now
         self.renewed += renewed
         if failed_this_pass:
             self._log("renewal errors this pass", pass_number=self.passes,
@@ -364,7 +397,10 @@ class LeaseRenewer:
         """
         self._stop.set()
         if self._thread is not None:
-            self._thread.join()
+            # A Thread whose start() failed never got an ident; joining it would
+            # raise. Clear it without a join.
+            if self._thread.ident is not None:
+                self._thread.join()
             self._thread = None
 
 
@@ -1810,12 +1846,12 @@ class Service:
 
         Nothing is committed under a stale fence or without its required diagnostic.
         A still-live lease remains reserved until expiry. A job being cancelled
-        completes its cancellation (the worker has already exited). Anything
-        else is fenced off exactly as a lease expiry would do it
-        (``recovery.expire_leases``: attempt ``recovery_pending``, job fence
-        bumped, reservations held); ``reconcile`` then settles it on a later
-        tick, on supervisor restart, or through ``ops reconcile``. An attempt
-        already fenced by someone else is already ``recovery_pending``.
+        completes its cancellation (the worker has already exited). Otherwise,
+        expiry fences and bumps the job fence while holding reservations; only
+        proven ownership gone settles/releases, while unverified remains
+        ``recovery_pending``/held; ``reconcile`` then settles it on a later tick,
+        on supervisor restart, or through ``ops reconcile``. An attempt already
+        fenced by someone else is already ``recovery_pending``.
         """
         _report_stranded(claim, problem)
         job = self.conn.execute("SELECT state, active_attempt_id FROM jobs WHERE job_id = ?",
@@ -1826,6 +1862,9 @@ class Service:
                 and attempt["state"] == "cancelling"):
             complete_cancel(self.conn, claim.job_id, process_state="verified_dead", clock=self.clock)
             return
+        renewer = getattr(self, "_renewer", None)
+        if renewer is not None:
+            renewer.exclude_attempt(claim.attempt_id)
         expire_leases(self.conn, clock=self.clock)
 
     def _checkpoint_refs(self, claim, outputs, launch):

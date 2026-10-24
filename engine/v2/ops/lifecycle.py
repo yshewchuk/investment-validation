@@ -143,7 +143,15 @@ def record_launch(conn: sqlite3.Connection, attempt_id: str, fence: int,
 
 def heartbeat(conn: sqlite3.Connection, attempt_id: str, fence: int, *, clock: Clock,
               lease_seconds: int) -> bool:
-    """Extend the lease. False, and no write, when the fence is no longer held."""
+    """Extend the lease; the fenced renewal used by every live-attempt poll.
+
+    Callers are the supervisor's worker poll (``Service._poll``), an explicit
+    coordinator :class:`Keepalive`, and the supervisor's dedicated
+    ``LeaseRenewer`` thread (which also renews sibling attempts). The write is
+    fenced: a void fence, a cancelling job or an already-expired lease refuses
+    with ``False`` and no write, so renewal never revives an attempt that
+    recovery has fenced off or a lease whose time already ran out.
+    """
     now = clock.now()
     with transaction(conn):
         try:
@@ -203,15 +211,16 @@ class Keepalive:
 
 def renew_after_resume(conn: sqlite3.Connection, attempt_id: str, fence: int, *, clock: Clock,
                        lease_seconds: int) -> bool:
-    """Extend a lease across a wall-clock jump (B2), ignoring lease expiry.
+    """Extend a lease after a wall-clock jump or a monotonic pause.
 
-    The same liveness gate as :func:`verify_fence` — job running, this the
+    The same verified-live gate as :func:`verify_fence` — job running, this the
     active attempt, the fence and attempt state both still live — except the
-    lease-expiry check, since the jump itself may already read as "expired" in
-    wall-clock terms. The caller has already verified the recorded identity is
-    still alive; this only extends the lease so the very next
-    :func:`expire_leases` does not fence a healthy worker. False, with no
-    write, when the attempt no longer holds the job's fence.
+    lease-expiry check, since the jump or pause may already read as "expired" in
+    wall-clock terms. The caller has already verified the recorded worker
+    identity is alive (and still holds the exclusive process lock); this only
+    extends the lease so the very next :func:`expire_leases` does not fence a
+    healthy worker. It never restores a fence already voided by recovery:
+    False, with no write, when the attempt no longer holds the job's fence.
     """
     now = clock.now()
     with transaction(conn):
