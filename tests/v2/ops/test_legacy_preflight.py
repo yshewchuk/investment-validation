@@ -131,11 +131,57 @@ def test_preflight_preserves_features_stale_code_for_tier4_difference(case, tmp_
 def test_preflight_preserves_features_stale_code_for_corrupt_pinned_table(case, tmp_path):
     source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
     _accept(case, source, "preflight-corrupt-pinned")
-    (pinned / "data/features/panel.parquet").write_bytes(b"corrupt")
+    (pinned / "data/features/panel.parquet").write_bytes(
+        b"not-a-parquet-file-with-invalid-footer")
 
     with pytest.raises(OpsError) as err:
         run_preflight(case.conn, case.store, source_root=source,
                       materialization_root=pinned, receipt_id="preflight-corrupt-pinned")
+
+    assert err.value.code == "FEATURES_STALE"
+    assert err.value.problem.details["reason"] == "comparison_failed"
+
+
+def test_preflight_bounds_generation_read_set_hash(case, tmp_path, monkeypatch):
+    source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
+    _accept(case, source, "preflight-read-set-over-cap")
+    monkeypatch.setattr("engine.v2.ops.legacy_adapter.PREFLIGHT_MAX_HASH_BYTES", 4)
+
+    with pytest.raises(OpsError) as err:
+        run_preflight(case.conn, case.store, source_root=source,
+                      materialization_root=pinned,
+                      receipt_id="preflight-read-set-over-cap")
+
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.details["reason"] == "hash_file_over_cap"
+
+
+def test_preflight_bounds_feature_hash(case, tmp_path, monkeypatch):
+    source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
+    (source / "data/raw/source.csv").write_text("x")
+    _accept(case, source, "preflight-feature-over-cap")
+    monkeypatch.setattr("engine.v2.ops.legacy_adapter.PREFLIGHT_MAX_HASH_BYTES", 4)
+
+    with pytest.raises(OpsError) as err:
+        run_preflight(case.conn, case.store, source_root=source,
+                      materialization_root=pinned,
+                      receipt_id="preflight-feature-over-cap")
+
+    assert err.value.code == "FEATURES_STALE"
+    assert err.value.problem.details["reason"] == "comparison_failed"
+
+
+def test_preflight_refuses_byte_identical_corrupt_panel(case, tmp_path):
+    source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
+    _accept(case, source, "preflight-identical-corrupt-panel")
+    corrupt = b"not-a-parquet-file-with-invalid-footer"
+    (source / "data/features/panel.parquet").write_bytes(corrupt)
+    (pinned / "data/features/panel.parquet").write_bytes(corrupt)
+
+    with pytest.raises(OpsError) as err:
+        run_preflight(case.conn, case.store, source_root=source,
+                      materialization_root=pinned,
+                      receipt_id="preflight-identical-corrupt-panel")
 
     assert err.value.code == "FEATURES_STALE"
     assert err.value.problem.details["reason"] == "comparison_failed"

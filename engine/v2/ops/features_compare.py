@@ -132,9 +132,11 @@ def _table_cap_refusal(side, path):
 
 
 def compare_identical(name, path) -> dict:
-    """Result for a byte-identical pair of tables: nothing to diff, but provenance stamps
-    must still be well formed. Reads only the stamp columns (never the whole table)."""
+    """Result for a byte-identical pair: validate metadata and caps, then stamp columns."""
     cols, refusal = _footer_refusal(name, path)
+    if refusal:
+        return dict(IDENTICAL, verdict="mismatch", mismatches=[refusal])
+    refusal = _table_cap_refusal("pinned", path)
     if refusal:
         return dict(IDENTICAL, verdict="mismatch", mismatches=[refusal])
     out = []
