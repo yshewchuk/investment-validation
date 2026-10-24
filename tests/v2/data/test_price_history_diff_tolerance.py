@@ -12,7 +12,6 @@ import pytest
 
 from engine.v2.data import price_history
 from engine.v2.data.errors import DataError
-from engine.v2.data.price_history import CLOSE_ADJ_RTOL
 
 _STORED_COLUMNS = ["date", "close_adj", "close_raw", "high_raw", "retrieved_at", "deleted",
                    "source_kind", "source_hash", "capture_id"]
@@ -111,6 +110,26 @@ def test_nan_close_adj_matches_only_nan():
     assert list(out["retrieved_at"]) == [_T1, _T1]
 
 
+def test_infinite_close_adj_is_never_tolerated_against_a_different_value():
+    """The tolerance branch requires BOTH values finite: ``inf`` against a
+    finite value, or ``inf`` against ``-inf``, would otherwise satisfy
+    ``abs(a - b) <= RTOL * max(abs(a), abs(b))`` as ``inf <= inf`` and silently
+    swallow a corrupt/adjusted-close change. Removing the ``isfinite`` guard in
+    ``_values_equal`` fails the first and third assertions here."""
+    inf = float("inf")
+    neg_inf = float("-inf")
+    stored_finite = _stored(("2024-01-01", 100.0, 100.0, 105.0, _T0, False))
+    out = _diff(stored_finite, _retrieval(("2024-01-01", inf, 100.0, 105.0)))
+    assert list(out["date"]) == ["2024-01-01"]
+    assert out["close_adj"].tolist() == [inf]
+    assert list(out["retrieved_at"]) == [_T1]
+    stored_inf = _stored(("2024-01-01", inf, 100.0, 105.0, _T0, False))
+    assert _diff(stored_inf, _retrieval(("2024-01-01", inf, 100.0, 105.0))).empty
+    out = _diff(stored_inf, _retrieval(("2024-01-01", neg_inf, 100.0, 105.0)))
+    assert out["close_adj"].tolist() == [neg_inf]
+    assert list(out["retrieved_at"]) == [_T1]
+
+
 def test_accepted_drift_does_not_accumulate():
     v0 = 100.0
     stored = _stored(("2024-01-01", v0, v0, 105.0, _T0, False))
@@ -126,6 +145,26 @@ def test_accepted_drift_does_not_accumulate():
     assert list(out["close_raw"]) == [v0]
     assert list(out["high_raw"]) == [105.0]
     assert list(out["retrieved_at"]) == [_T1]
+
+
+def test_tolerance_compares_only_against_the_latest_stored_version():
+    # TWO stored versions of one date (v1 is the latest). The tolerance is
+    # judged against the latest version only: a retrieval within tolerance of
+    # v1 is no_change even though it differs from v0 by ~2.8e-5, well past
+    # CLOSE_ADJ_RTOL, and v0 itself now differs from v1 by 2e-5, so a
+    # re-report of the old value versions again.
+    v0 = 100.0
+    v1 = v0 * (1 + 2e-5)
+    stored = _stored(("2024-01-01", v0, v0, 105.0, _T0, False),
+                     ("2024-01-01", v1, v0, 105.0, _T1, False))
+    assert _diff(stored, _retrieval(("2024-01-01", v1 * (1 + 8e-6), v0, 105.0)),
+                 retrieved_at=_T2).empty
+    out = _diff(stored, _retrieval(("2024-01-01", v0, v0, 105.0)), retrieved_at=_T2)
+    assert list(out["date"]) == ["2024-01-01"]
+    assert out["close_adj"].tolist() == pytest.approx([v0])
+    assert list(out["close_raw"]) == [v0]
+    assert list(out["high_raw"]) == [105.0]
+    assert list(out["retrieved_at"]) == [_T2]
 
 
 @pytest.mark.parametrize("adj", [0.06, 10000.0])
@@ -147,10 +186,14 @@ def test_close_adj_tolerance_scales_relatively_not_absolutely(adj):
 
 
 def test_close_adj_boundary_relative_diff_just_under_and_over_rtol():
+    # Boundary cases spelled as literals (5e-6 relative is jitter, 2e-5
+    # versions) so the expectations cannot silently track a changed constant;
+    # the constant's own value is pinned here instead.
+    assert price_history.CLOSE_ADJ_RTOL == 1e-5
     stored = _stored(("2024-01-01", 100.0, 100.0, 105.0, _T0, False))
-    under = 100.0 * (1 + 0.9 * CLOSE_ADJ_RTOL)
+    under = 100.0 * (1 + 5e-6)
     assert _diff(stored, _retrieval(("2024-01-01", under, 100.0, 105.0))).empty
-    over = 100.0 * (1 + 1.1 * CLOSE_ADJ_RTOL)
+    over = 100.0 * (1 + 2e-5)
     out = _diff(stored, _retrieval(("2024-01-01", over, 100.0, 105.0)))
     assert list(out["date"]) == ["2024-01-01"]
     assert out["close_adj"].tolist() == pytest.approx([over])

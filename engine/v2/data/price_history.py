@@ -60,7 +60,10 @@ already forward-fills across retrievals at the row-version grain by
 construction -- see its own docstring -- but each row keeps ITS retrieval's
 scale, so a feature spanning a version boundary mixes two different rescale
 factors and no longer cancels): either leaks a later corporate action's
-information into an earlier decision date. ``close_raw``/``high_raw``
+information into an earlier decision date. Under :data:`CLOSE_ADJ_RTOL` a
+sub-tolerance ``close_adj`` difference between retrievals is accepted rather
+than versioned, so an as-of view can mix values from retrievals that differ
+by less than that tolerance. ``close_raw``/``high_raw``
 (split-adjusted only, never dividend-adjusted, since 2026-09-15) do not have
 this problem for splits handled the same way both sources apply them, but
 still restate around actual stock splits, so the same "ratio within one
@@ -133,11 +136,17 @@ def _values_equal(left, right) -> bool:
     ``close_raw`` and ``high_raw`` compare exactly (:func:`_float_equal`, NaN
     equal to NaN). ``close_adj`` is equal when exactly equal OR both finite
     and within :data:`CLOSE_ADJ_RTOL` relative tolerance (#1285 vendor float
-    jitter); one NaN against a finite value is NOT equal."""
+    jitter); one NaN against a finite value is NOT equal. A ``None`` (absent)
+    ``close_adj`` is equal only to another ``None`` -- the tolerance branch is
+    never reached with it, so no ``math.isfinite``/``None`` arithmetic can
+    raise."""
     adj_left, adj_right = getattr(left, "close_adj"), getattr(right, "close_adj")
-    adj_close_equal = _float_equal(adj_left, adj_right) or (
-        math.isfinite(adj_left) and math.isfinite(adj_right)
-        and abs(adj_left - adj_right) <= CLOSE_ADJ_RTOL * max(abs(adj_left), abs(adj_right)))
+    if adj_left is None or adj_right is None:
+        adj_close_equal = adj_left is None and adj_right is None
+    else:
+        adj_close_equal = _float_equal(adj_left, adj_right) or (
+            math.isfinite(adj_left) and math.isfinite(adj_right)
+            and abs(adj_left - adj_right) <= CLOSE_ADJ_RTOL * max(abs(adj_left), abs(adj_right)))
     return (adj_close_equal
             and _float_equal(getattr(left, "close_raw"), getattr(right, "close_raw"))
             and _float_equal(getattr(left, "high_raw"), getattr(right, "high_raw")))

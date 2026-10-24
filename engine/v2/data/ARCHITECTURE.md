@@ -859,7 +859,7 @@ Root doc §5 invariants this package is responsible for:
   tolerance; a genuine dividend or split adjustment (>= ~1e-3) exceeds it and
   versions every affected date. A changed, new or previously tombstoned date
   gets one new version row at the capture's `retrieved_at`. Same-knowledge-date
-  conflict: a capture whose `retrieved_at` is not later than every recorded
+  conflict: a capture whose `retrieved_at` is not later than the latest logged
   successful attempt for the ticker (`added`, `no_change` or `duplicate_source_hash`) is refused
   `INPUT_CHANGED` (`refused_backdate`), so an incoming row can never overwrite or
   sit beside a stored row at the same `retrieved_at`; no price-history version or
