@@ -213,7 +213,7 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
         profile = profile_named(DEFAULT_POLICY, name)
         assert profile.memory_bytes >= measured_peak_bytes
         assert profile.measured is False
-    assert POLICY_VERSION == DEFAULT_POLICY.version == "ops_resources.2026-10-10.v10"
+    assert POLICY_VERSION == DEFAULT_POLICY.version == "ops_resources.2026-10-24.v11"
 
 
 # --------------------------------------------------------------------------
@@ -247,7 +247,7 @@ def test_native_experiment_profile_preserves_production_reservations():
     assert admission.resources.scratch_limit_bytes == expected_scratch
     assert admission.resources.assigned_cpu_ids == (3,)
     assert admission.resources.thread_count == 1
-    assert admission.resources.resource_profile_version == "ops_resources.2026-10-10.v10"
+    assert admission.resources.resource_profile_version == "ops_resources.2026-10-24.v11"
 
 
 def test_scratch_admits_the_measured_read_set_for_every_staging_profile():
@@ -255,7 +255,9 @@ def test_scratch_admits_the_measured_read_set_for_every_staging_profile():
     legacy_score/legacy_decision_replay (``legacy_score``),
     legacy_model_evidence (``model_evidence``) and legacy_render
     (``projection``) all now admit the measured 1.67 GiB read set with
-    margin, and scratch is untouched from v4. ``legacy_score``'s
+    margin. Scratch is the v11 6 GiB read-set budget (raised from v4's
+    4 GiB for issue #1268; the bounded read set, issue #505, is the real
+    fix). ``legacy_score``'s
     ``memory_bytes`` moved twice after v4: v5 raised 5 GiB -> 6 GiB on real
     attempt-16 peaks, then v6 lowered it to 5.25 GiB (5*GIB + GIB//4) because
     6 GiB was never admittable on this host's live headroom -- see
@@ -278,7 +280,7 @@ def test_scratch_admits_the_measured_read_set_for_every_staging_profile():
                                    ("model_evidence", 5 * GIB), ("projection", 3 * GIB)):
         profile = profile_named(DEFAULT_POLICY, name)
         assert profile.scratch_bytes >= MEASURED_READ_SET_BYTES
-        assert profile.scratch_bytes == 4 * GIB
+        assert profile.scratch_bytes == 6 * GIB
         assert profile.memory_bytes == old_memory_bytes
 
 
@@ -482,6 +484,81 @@ def test_refuse_oversize_plan_blocks_submission_with_details(tmp_path):
         # A kind whose profile (legacy_rebuild, 20 GiB) already clears this
         # oversize manifest is never reported.
         assert "legacy_settlement" not in jobs
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------
+# 2026-10-24 (v11, issue #1268): the 2026-10-23 plan's real 4,372,938,136 B
+# read set (~4.4 GB) must pass the plan-time check under the raised 6 GiB
+# scratch, and a read set above 90% of a profile's budget must log one
+# fail-open stderr warning per profile -- never a problem, never a refusal.
+# --------------------------------------------------------------------------
+
+#: The 2026-10-23 read set, rounded to the 4.4e9 B the profile raise is sized
+#: against (issue #1268); 68% of the v11 6 GiB budget, so it must neither
+#: refuse nor warn.
+READ_SET_2026_10_23_BYTES = 4_400_000_000
+
+
+def _scratch_requests(tmp_path, byte_sizes):
+    """A real legacy-mode plan's requests bound to a synthetic manifest whose
+    file_refs sum to ``byte_sizes`` (same shape as the tests above)."""
+    (tmp_path / "catalog").mkdir()
+    store = ArtifactStore(tmp_path / "catalog")
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "catalog" / "ops.sqlite", clock=clock)
+    manifest_ref = _manifest_ref(store, conn, clock, byte_sizes)
+    plan = build_nightly_plan(str(REPO), "2026-10-23")
+    requests = build_legacy_job_requests(plan, tickers=("AAA", "BBB", "CCC", "DDD"),
+                                         year_start=2025, year_end=2026,
+                                         input_refs=(manifest_ref.artifact_id,))
+    return conn, store, requests
+
+
+def test_plan_scratch_admits_the_2026_10_23_read_set(tmp_path):
+    """Regression for #1268: the ~4.37 GB read set that the v10 4 GiB scratch
+    refused now passes for every staging kind, without a warning."""
+    from engine.v2.ops.nightly import plan_scratch_problems
+
+    conn, store, requests = _scratch_requests(tmp_path, [READ_SET_2026_10_23_BYTES])
+    try:
+        assert plan_scratch_problems(conn, store, requests) == []
+    finally:
+        conn.close()
+
+
+def test_plan_scratch_warns_above_ninety_percent_without_refusing(tmp_path, capsys):
+    """A read set at 95% of a profile's budget is admitted (no problem, no
+    raise) but logs exactly one stderr warning per staging profile, naming
+    the profile, needed, budget and kind."""
+    from engine.v2.ops.nightly import plan_scratch_problems
+
+    budget = profile_named(DEFAULT_POLICY, "validation").scratch_bytes
+    conn, store, requests = _scratch_requests(tmp_path, [int(0.95 * budget)])
+    try:
+        assert plan_scratch_problems(conn, store, requests) == []
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        for name in ("projection", "validation", "legacy_score", "model_evidence"):
+            assert err.count(f"profile {name} scratch budget") == 1
+        # A profile this read set is well under (legacy_rebuild, 20 GiB) is
+        # never named, and the line carries the needed/budget/kind numbers.
+        assert "legacy_rebuild" not in err
+        assert f"legacy read set {int(0.95 * budget)} B is 95%" in err
+    finally:
+        conn.close()
+
+
+def test_plan_scratch_stays_quiet_below_ninety_percent(tmp_path, capsys):
+    """A read set at half the budget is the normal case: admitted silently."""
+    from engine.v2.ops.nightly import plan_scratch_problems
+
+    budget = profile_named(DEFAULT_POLICY, "validation").scratch_bytes
+    conn, store, requests = _scratch_requests(tmp_path, [int(0.5 * budget)])
+    try:
+        assert plan_scratch_problems(conn, store, requests) == []
+        assert "WARNING" not in capsys.readouterr().err
     finally:
         conn.close()
 
