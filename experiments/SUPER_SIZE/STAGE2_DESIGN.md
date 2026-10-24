@@ -182,7 +182,9 @@ or `unavailable`. HMO stores positive implied_move or null; its appended
 has_implied_quote is 1 only for `present`. The comparator retains or_implied=0
 only for a source-preserved zero, never for a normalized null. Both arms use the same
 status/anchor and has_implied_quote rule; the comparator's existing masks and
-abstentions stay unchanged. HMO admits finite source-valid rvol30 and strictly
+abstentions stay unchanged. The source-derived indicator precedes comparator
+value masks; masking or_implied causes abstention, not indicator recomputation.
+HMO admits finite source-valid rvol30 and strictly
 positive source-valid implied_move without adding the comparator's [0,700] and
 [0,60] masks. Both inspected native and legacy normalizers enforce rvol30 in
 [0,500] and implied_move in [0,100]; each admitted snapshot binds its actual source
@@ -222,8 +224,9 @@ receipt under changed bindings. Shared history may be referenced only after
 exact existing context and eligibility compatibility checks; never rebuild it
 implicitly or reinterpret its membership to make a join succeed.
 
-After the pending source-free compiler lands, a separate wiring slice may admit
-the two exact dictionary versions by hash, with no latest/default substitution.
+The source-free compiler landed in [#1236](https://github.com/yshewchuk/investment-validation/pull/1236)
+with v1-only dictionary-hash support. A separate P3 wiring slice may admit the
+two exact dictionary versions by hash, with no latest/default substitution.
 Old request outputs must replay identically; the new hash/recipe yields new
 request/candidate IDs. Keep the request schema v2 and closed H/HM/HMO grids;
 dictionary version is explicit in the resolved recipe, not an extra search axis.
@@ -244,7 +247,7 @@ these versions through slices 3/4/5/6. Other core work and dependencies remain.
 | --- | --- | --- |
 | P1: add-only v2 dictionary/context contract | This reviewed design; explicit versions, closed lineage, no source reader | 180–300 / 250–400 / 35–60 |
 | P2: protected implied-history and absolute derivation | P1 and remaining causal materializer; reuse pinned/batched sources, no per-candidate builds | 250–380 / 300–500 / 40–70 |
-| P3: reader/compiler/recipe version wiring | P1/P2, complete stored reader and pending compiler; preserve old replay and v1 closures | 180–300 / 250–400 / 35–60 |
+| P3: reader/compiler/recipe version wiring | P1/P2, complete stored reader and landed v1-only compiler; preserve old replay and v1 closures | 180–300 / 250–400 / 35–60 |
 
 Split add/wire further at repository limits; these are estimates, not waivers.
 P1 tests pin all 14 mappings, exact 11/28/42 order and HMO quote position,
@@ -602,10 +605,10 @@ ID on amendment and authenticate all references against the anchor.
 
 ### Acceptance and implementation split
 
-First publish/review this checkpoint; then add the compiler, owning architecture
-contract and synthetic tests in a separate small runtime PR. Estimate: 180–280
-added code / 250–400 test / 30–60 documentation lines; no new dependency or framework.
-Tests cover exact grid/count arithmetic, all six ElasticNet pairs, smaller valid
+This checkpoint's compiler, owning architecture contract and synthetic tests
+landed in #1236. The original implementation estimate was 180–280 added code /
+250–400 test / 30–60 documentation lines; no new dependency or framework.
+Its tests cover exact grid/count arithmetic, all six ElasticNet pairs, smaller valid
 schedules, aliases, malformed nested documents and cap boundaries, dictionary
 and 30-day policy binding, deterministic non-mutating replay, identity changes,
 and poisoned repository/store/fit hooks. Verify v1 source closures stay unchanged.
