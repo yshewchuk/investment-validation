@@ -16,17 +16,31 @@ from engine.v2.foundation import ensure_directory, safe_relative_path
 from engine.v2.ops.errors import fail
 
 
-def file_hash(path, *, keepalive: Callable[[], None] | None = None):
-    """SHA-256 of ``path``. ``keepalive`` (issue #106 round 3): optional
-    zero-arg renewal callable invoked once per 1MB chunk -- the same seam as
-    ``legacy_adapter._digest`` -- so pinning ONE huge file renews during its
-    hash, not only between files. ``None`` keeps today's exact behavior."""
+def file_hash(path, *, keepalive: Callable[[], None] | None = None,
+              max_bytes: int | None = None,
+              on_progress: Callable[[int], None] | None = None):
+    """SHA-256 of ``path``; ``keepalive`` per 1MB chunk; ``max_bytes`` bounds
+    each read to the remaining ceiling plus one probe byte, failed typed
+    before that probe byte is hashed; ``on_progress`` (if given) receives the
+    cumulative bytes read after each hashed chunk."""
+    if max_bytes is not None and max_bytes < 0:
+        raise fail("INVALID_REQUEST", "max_bytes must not be negative",
+                   details={"max_bytes": max_bytes})
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1 << 20), b""):
+        while True:
+            want = 1 << 20
+            if max_bytes is not None:
+                want = min(want, max_bytes - stream.tell() + 1)
+            chunk = stream.read(want)
+            if not chunk:
+                break
+            if max_bytes is not None and stream.tell() > max_bytes:
+                raise fail("INTEGRITY_FAILED", "file exceeds the streaming byte ceiling",
+                           details={"reason_key": "stream_too_large", "max_bytes": max_bytes})
             digest.update(chunk)
-            if keepalive is not None:
-                keepalive()
+            keepalive() if keepalive is not None else None
+            on_progress(stream.tell()) if on_progress is not None else None
     return "sha256:" + digest.hexdigest()
 
 
