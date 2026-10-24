@@ -421,10 +421,13 @@ n_iter_no_change 15; its validation split stays within qualified training only.
 Preserve n_prior>=4, complete-input training admission, minimum 500 training rows
 and legacy training value masks (including abs_move in [0,200]). The target mask
 never filters evaluation targets or hides large misses. Preserve predictor masks
-or_implied [0,60] and or_rvol30 [0,700] at training and prediction. Under the
+or_implied [0,60] and or_rvol30 [0,700] at training and prediction. This preserves
+historical-evaluation predictor masking (prepare precedes walk_forward's split),
+not the live score path, which checks finiteness without these bounds. Under the
 lossy-source policy above, retain a zero sentinel only if the pinned stored source
 preserves it; normalized nulls stay null and cause baseline abstention. Preserve
-has_implied_quote=(or_implied>0), not HMO's null-zero encoding. Unavailable-input/insufficient-history
+has_implied_quote=(or_implied>0), computed from the source quote before masks,
+not HMO's null-zero encoding. Unavailable-input/insufficient-history
 predictions abstain explicitly. Do not apply the training target bound at prediction
 time. Preserve finite raw blend predictions (including negatives), as the native
 legacy estimator does; do not silently apply the challenger's zero projection. Reconstruct all fourteen
