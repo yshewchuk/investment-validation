@@ -31,13 +31,13 @@
 #   outcome, a needless restart only costs one re-run -- so even a docs-only push
 #   may restart a module. The namespace is computed BEFORE the cache is restored/
 #   saved and any fingerprint failure aborts the key step under set -e, so a broken
-#   digest can never restore or write a cache under a wrong key. A push's own run
-#   also cancels an older still-running push run on main (see concurrency below),
-#   so a rapid string of merges cannot queue behind itself.
+#   digest can never restore or write a cache under a wrong key. The concurrency
+#   block never cancels a running round; a newer push run only replaces an older
+#   run still pending in the same group (see concurrency below).
 # - weekly schedule, and workflow_dispatch by default: full, from scratch
 #   (no restore, --fresh clears the cache). Dispatch with fresh=false for an
-#   incremental run, and `modules` for a subset. Neither cancels a same-kind
-#   run in progress (see concurrency below).
+#   incremental run, and `modules` for a subset. Neither cancels a run in
+#   progress (see concurrency below).
 # - Scores never fail a job. A job fails ONLY when the tool does: a nonzero
 #   pytest/gremlins exit code, a missing/malformed current-run raw report, an
 #   ERROR gremlin result, or a merged module set that is not the one the plan
@@ -160,7 +160,7 @@ concurrency:
   #   repo) and head_repository.full_name is required precisely because
   #   head_branch alone is only a branch STRING with no owner/fork identity:
   #   without it, a same-named branch in an unrelated fork could land in the
-  #   same group and cancel the real PR's in-progress mutation run.
+  #   same group and replace the pending run of the real PR's mutation run.
   #   workflow_run.event is folded in too, so this group is never confused
   #   with the schedule/dispatch fallback group below (whose own workflow_run
   #   case never reaches here, since only workflow_run events use this arm).
@@ -168,7 +168,8 @@ concurrency:
   #   github.ref is identical to push's on main -- the three used to collide
   #   in one `refs/heads/main` group, so a merge's cancel-in-progress could
   #   kill a running Sunday full run or a dispatched run). cancel-in-progress:
-  #   true, so a rapid string of merges cannot queue up behind itself.
+  #   false: a running round finishes, a newer push run replaces only an older
+  #   PENDING one.
   # - schedule and workflow_dispatch: their own shared, ref-based group,
   #   byte-identical in shape to the group every trigger used before this
   #   change, and still non-cancelling (see cancel-in-progress below) -- a
@@ -179,10 +180,15 @@ concurrency:
   # else (schedule, workflow_dispatch) falls through to the plain
   # `mutation-gremlins-<ref>` group every trigger used before this change.
   group: mutation-gremlins-${{ github.event_name == 'push' && format('push-{0}', github.ref) || github.event_name == 'workflow_run' && format('{0}-{1}-{2}', github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch, github.event.workflow_run.event) || github.ref }}
-  # true for push and workflow_run (each now in its own group, so cancelling
-  # only ever hits a predecessor of the SAME kind); false for schedule/
-  # workflow_dispatch, unchanged from before this PR.
-  cancel-in-progress: ${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}
+  # false for every group: the concurrency block never cancels a running
+  # round (a half-finished round yields no result); GitHub keeps one running
+  # plus one pending run per group, and a new run replaces only the pending
+  # one. (cancel-stale-runs.yml can still cancel a run when its PR closes.)
+  # Coverage stays complete: a push plan runs every module, so a skipped
+  # pending push run's changes are tested by the next run; the gremlins cache
+  # is keyed by a whole-tree fingerprint, so a push that changes any tracked
+  # file re-runs in full.
+  cancel-in-progress: false
 
 env:
   # The phase-0 environment lock (requirements.txt header: "python 3.14.4").

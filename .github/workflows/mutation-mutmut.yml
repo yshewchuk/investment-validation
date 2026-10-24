@@ -29,14 +29,15 @@
 #   state (*.meta verdicts, mutmut-stats.json, the driver's test digest) and
 #   re-tests only functions whose source changed (plus survived/no-tests
 #   verdicts, when the module's tests changed). mutmut 3 keeps verdicts whose
-#   function hash is unchanged, so a cache hit skips finished mutants. A
-#   push's own run also cancels an older still-running push run on main (see
-#   concurrency below), so a rapid string of merges cannot queue behind itself.
+#   function hash is unchanged, so a cache hit skips finished mutants. The
+#   concurrency block never cancels a running round; a newer push run only
+#   replaces an older run still pending in the same group (see concurrency
+#   below).
 # - weekly schedule (staggered after the gremlins full run), and
 #   workflow_dispatch by default: full, from scratch (no restore: the runner
 #   starts without state, so every mutant is re-decided). Dispatch with
 #   fresh=false for an incremental run, and `modules` for a subset. Neither
-#   cancels a same-kind run in progress (see concurrency below).
+#   cancels a run in progress (see concurrency below).
 # - Scores never fail a job. A job fails ONLY when the tool does: a nonzero
 #   mutmut exit code (clean-run or worker failure), a step timeout, or an
 #   export that cannot read the module's state. Incremental exit 124 is an
@@ -106,14 +107,16 @@ concurrency:
   # repo), and head_repository.full_name is required because head_branch
   # alone carries no owner/fork identity -- the group is resolved before the
   # fork gate (the plan job's `if:`) ever runs. push to main gets its own
-  # cancelling group, never shared with schedule/dispatch (whose github.ref
+  # group, never shared with schedule/dispatch (whose github.ref
   # is identical to push's on main -- the three used to collide in one
   # `refs/heads/main` group, so a merge could cancel a running Sunday full
   # run or a dispatched run). schedule and workflow_dispatch keep their own
-  # shared, ref-based, non-cancelling group, byte-identical in shape to what
-  # every trigger used before this change.
+  # shared, ref-based group, byte-identical in shape to what
+  # every trigger used before this change. cancel-in-progress is false for
+  # every group: the concurrency block never cancels a running round; a new
+  # run only replaces an older PENDING one in its own group.
   group: mutation-mutmut-${{ github.event_name == 'push' && format('push-{0}', github.ref) || github.event_name == 'workflow_run' && format('{0}-{1}-{2}', github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch, github.event.workflow_run.event) || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}
+  cancel-in-progress: false
 
 env:
   # The phase-0 environment lock (requirements.txt header: "python 3.14.4").

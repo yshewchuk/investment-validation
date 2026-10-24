@@ -803,8 +803,7 @@ def test_workflow_triggers_and_concurrency():
     # test_push_schedule_and_dispatch_get_disjoint_concurrency_groups below
     # for the detailed assertions and rationale.
     assert WORKFLOW["concurrency"]["group"].startswith("mutation-gremlins-${{ ")
-    assert WORKFLOW["concurrency"]["cancel-in-progress"] == \
-        "${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}"
+    assert WORKFLOW["concurrency"]["cancel-in-progress"] is False
     assert WORKFLOW["permissions"] == {"contents": "read"}
     plan = JOBS["plan"]["steps"][-1]["run"]
     assert '"$EVENT" = "push"' in plan and '"$FRESH" = "false"' in plan and "mode=full" in plan
@@ -843,8 +842,7 @@ def test_push_schedule_and_dispatch_get_disjoint_concurrency_groups():
     # fall through to the bare, unqualified ref -- the exact group every
     # trigger shared before this fix.
     assert group.rstrip().endswith("|| github.ref }}")
-    assert WORKFLOW["concurrency"]["cancel-in-progress"] == \
-        "${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}"
+    assert WORKFLOW["concurrency"]["cancel-in-progress"] is False
 
 
 def test_gremlins_plan_checks_out_full_history_only_for_pull_request():
@@ -1152,8 +1150,7 @@ def test_mutmut_workflow_triggers_modes_and_a_separate_concurrency_group():
     # Three disjoint groups -- see test_mutmut_workflow_concurrency_group_keys_on_repo_and_pr_number
     # and test_mutmut_push_schedule_and_dispatch_get_disjoint_concurrency_groups below.
     assert MUTMUT["concurrency"]["group"].startswith("mutation-mutmut-${{ ")
-    assert MUTMUT["concurrency"]["cancel-in-progress"] == \
-        "${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}"
+    assert MUTMUT["concurrency"]["cancel-in-progress"] is False
     gremlin_on = WORKFLOW.get("on", WORKFLOW.get(True))
     assert MUTMUT["concurrency"]["group"] != WORKFLOW["concurrency"]["group"]
     assert MUTMUT["permissions"] == {"contents": "read"}
@@ -1182,8 +1179,7 @@ def test_mutmut_push_schedule_and_dispatch_get_disjoint_concurrency_groups():
     assert "github.event_name == 'push' &&" in group
     assert "format('push-{0}', github.ref)" in group
     assert group.rstrip().endswith("|| github.ref }}")
-    assert MUTMUT["concurrency"]["cancel-in-progress"] == \
-        "${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}"
+    assert MUTMUT["concurrency"]["cancel-in-progress"] is False
 
 
 def test_mutmut_plan_checks_out_full_history_only_for_pull_request():
