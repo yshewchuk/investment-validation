@@ -135,6 +135,20 @@ def test_invalid_minimum_last_date_is_refused(tmp_path):
     assert not path.exists()
 
 
+def test_timezone_aware_minimum_last_date_is_refused(tmp_path):
+    """Timezone-aware cutoffs return a refusal and leave the stored series unchanged."""
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, DATES)
+
+    result = refresh_gspc_daily(
+        StubFetcher(body=_body(DATES)), path,
+        minimum_last_date=pd.Timestamp("2026-08-27 12:00:00", tz="America/Toronto"),
+    )
+
+    assert result == {"ok": False, "reason": "invalid_cutoff"}
+    assert path.read_bytes() == before
+
+
 def test_identical_second_call_leaves_file_untouched(tmp_path):
     """Same bytes => no rewrite, so the panel's mtime-keyed cache stays warm."""
     path = tmp_path / "gspc_daily.csv"

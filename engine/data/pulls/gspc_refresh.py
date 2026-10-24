@@ -171,6 +171,8 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None,
     ``minimum_last_date`` is given, the fresh series must reach it; minimum
     coverage is checked after the parse and before the lock or any file read
     or write, so a source that ends too early leaves the target file untouched.
+    A timezone-aware cutoff returns ``invalid_cutoff``; naive date values
+    normalize and use the existing freshness comparison.
     """
     from engine.data.sources.base import CredentialRotated, FetchError
 
@@ -212,7 +214,7 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None,
             minimum = pd.Timestamp(minimum_last_date).normalize()
         except (TypeError, ValueError, OverflowError):
             return _finish({"ok": False, "reason": "invalid_cutoff"}, started)
-        if minimum is pd.NaT:
+        if minimum is pd.NaT or minimum.tz is not None:
             return _finish({"ok": False, "reason": "invalid_cutoff"}, started)
         if frame["date"].max().normalize() < minimum:
             return _finish({"ok": False, "reason": "stale_source"}, started)
