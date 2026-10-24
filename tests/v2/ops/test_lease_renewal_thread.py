@@ -356,6 +356,43 @@ def test_renew_stop_between_rows_cuts_the_pass_short(tmp_path, monkeypatch):
     assert "pass cut short by stop" in stream.text()
 
 
+def test_renew_pass_keeps_an_exclusion_recorded_while_the_query_runs(tmp_path, monkeypatch):
+    """Verified CodeRabbit race: an exclusion landing mid-``fetchall`` survives.
+
+    ``live_ids`` comes from a query snapshot that cannot know about an
+    ``exclude_attempt`` call recorded while the query executed, so the old
+    post-query ``intersection_update(live_ids)`` pruned that fresh exclusion
+    whenever the queried rows omitted its attempt -- the NEXT pass then handed
+    the just-excluded attempt to a heartbeat. The prune is now a difference
+    against the exclusions snapshotted under the lock BEFORE the query. A fake
+    connection's ``fetchall`` records the exclusion at exactly that moment and
+    returns a live row omitting ``"late"``; the pass must renew the live row
+    and keep ``"late"`` excluded."""
+    clock = FakeClock()
+    renewer = LeaseRenewer(tmp_path / DB_NAME, clock=clock, epoch_id="epoch",
+                           lease_seconds=LEASE_SECONDS, stream=_CapturingStream())
+
+    class _ExcludingDuringFetchConnection:
+        def execute(self, *args, **kwargs):
+            return self
+
+        def fetchall(self):
+            renewer.exclude_attempt("late")
+            return [{"attempt_id": "a1", "fence": 1}]
+
+    renewed_ids = []
+
+    def recording_heartbeat(conn, attempt_id, fence, *, clock, lease_seconds):
+        renewed_ids.append(attempt_id)
+        return True
+
+    monkeypatch.setattr(supervisor_module, "heartbeat", recording_heartbeat)
+
+    assert renewer.renew_pass(_ExcludingDuringFetchConnection()) == (1, 1)
+    assert renewed_ids == ["a1"]
+    assert "late" in renewer._excluded_attempts
+
+
 # ---------------------------------------------------------------------------
 # LeaseRenewer thread lifecycle: a real thread on its own connection
 # ---------------------------------------------------------------------------

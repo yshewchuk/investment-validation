@@ -281,6 +281,25 @@ class LeaseRenewer:
         with self._lock:
             self._excluded_attempts.add(attempt_id)
 
+    def _exclusion_snapshot(self):
+        """Copy of ``_excluded_attempts`` taken under ``_lock``."""
+        with self._lock:
+            # Query-start snapshot: the retire below may prune ONLY exclusions
+            # present here, so one recorded while execute/fetchall runs (not
+            # yet in this copy) survives even though no queried row knows it.
+            return set(self._excluded_attempts)
+
+    def _retire_stale_exclusions(self, snapshot, live_ids):
+        """Prune under ``_lock`` only snapshotted ids absent from ``live_ids``."""
+        with self._lock:
+            # Retire only a snapshotted exclusion whose attempt has since left
+            # this epoch's live set (fenced or settled at query start), so the
+            # set never grows past the attempts this thread can still hand to a
+            # heartbeat and never keeps a stale id off the set renewed.
+            # Post-snapshot exclusions are absent from the difference and are
+            # therefore never pruned, even when live_ids omits their attempt.
+            self._excluded_attempts.difference_update(snapshot - live_ids)
+
     def start(self):
         self._log("thread starting", rss_kb=_rss_kb())
         self._thread = threading.Thread(target=self._run, name="lease-renewal", daemon=True)
@@ -320,20 +339,14 @@ class LeaseRenewer:
     def renew_pass(self, conn):
         """Renew every live attempt of this epoch once; swallow per-row errors.
 
-        Returns ``(renewed, total)``. A refused heartbeat (void fence, a
-        cancelling job, an expired lease) counts against ``total`` but not
-        ``renewed`` and is left for the main loop's expiry/reconcile path; a
-        raised renewal (a locked catalog) is caught here, counted as an error,
-        and retried at the next interval. Stop is honored between rows, so a
-        pass already under way ends after the heartbeat in flight and the
-        remaining rows are left for the expiry sweep or the next pass. A
-        successful query also prunes ``_excluded_attempts`` to the live rows, so
-        an exclusion is retired once recovery has fenced or settled its attempt
-        and never keeps a stale id off the set of attempts this thread renews.
+        Returns ``(renewed, total)``: a refused heartbeat (void fence, cancelling job, expired
+        lease) counts in ``total`` only, a raised renewal is an error retried next interval, a
+        stop ends the pass after the in-flight row; prune uses only the query-start snapshot.
         """
         self.passes += 1
         pass_started = self.clock.monotonic()
         last_progress = pass_started
+        excluded_before_query = self._exclusion_snapshot()
         try:
             rows = conn.execute(_LIVE_EPOCH_ATTEMPTS, (self.epoch_id,)).fetchall()
         except Exception as exc:  # noqa: BLE001
@@ -342,11 +355,7 @@ class LeaseRenewer:
             return (0, 0)
         total = len(rows)
         live_ids = {row["attempt_id"] for row in rows}
-        with self._lock:
-            # An exclusion is retired only once its attempt leaves this epoch's live
-            # set (fenced or settled), so the set cannot grow past the attempts this
-            # thread can still hand to a heartbeat.
-            self._excluded_attempts.intersection_update(live_ids)
+        self._retire_stale_exclusions(excluded_before_query, live_ids)
         self._log("pass starting", pass_number=self.passes, total=total, rss_kb=_rss_kb())
         renewed = 0
         failed_this_pass = 0
