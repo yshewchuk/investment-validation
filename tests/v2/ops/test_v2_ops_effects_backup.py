@@ -82,6 +82,7 @@ def test_backup_publishes_verified_database_beside_unreferenced_stale_path(
     try:
         assert integrity_errors(rebuilt) == []
         assert _row_counts(rebuilt) == _row_counts(conn)
+        assert manifest["database_content_hash"] == backup_module._full_logical_digest(rebuilt)
     finally:
         rebuilt.close()
     assert manifest["database_rows"] == _row_counts(conn)
@@ -671,6 +672,69 @@ def test_manifest_database_path_uses_current_name_or_legacy_fallback(tmp_path):
         tmp_path, {"backup_key": "b1"}) == tmp_path / "b1.sqlite"
 
 
+def test_restore_accepts_legacy_manifest_without_size_fields(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "legacy", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    manifest = run_backup(
+        conn, key="legacy", owner="worker", target=backup, clock=clock, store=store)
+    (backup / manifest["database_file"]).rename(backup / "legacy.sqlite")
+    manifest.pop("database_file")
+    manifest.pop("database_size")
+    manifest.pop("database_rows")
+    manifest.pop("database_content_hash")
+    manifest["artifacts"]["evidence.bin"].pop("byte_size")
+    (backup / "legacy.manifest.json").write_text(json.dumps(manifest))
+
+    restored = restore_backup(backup, tmp_path / "legacy-restored")
+
+    assert (restored / "ops.sqlite").is_file()
+    assert (restored / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
+
+
+def test_durable_manifest_with_corrupt_database_is_not_reused(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "resume", {}, clock=clock)
+    backup = tmp_path / "backup"
+
+    def crash_after_manifest(name):
+        if name == "after_manifest_before_ack":
+            raise _InjectedCrash()
+
+    with pytest.raises(_InjectedCrash):
+        run_backup(conn, key="resume", owner="worker", target=backup,
+                   clock=clock, store=store, fault=crash_after_manifest)
+    manifest_path = backup / "resume.manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert backup_module._durable_manifest(manifest_path, "resume") == manifest
+    database = backup / manifest["database_file"]
+    database.write_bytes(database.read_bytes() + b"corruption")
+
+    assert backup_module._durable_manifest(manifest_path, "resume") is None
+
+
+def test_backup_destination_fsync_failure_is_retryable(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "disk-error", {}, clock=clock)
+    backup = tmp_path / "backup"
+    backup.mkdir()
+
+    def fail_fsync(_fd):
+        raise OSError("synthetic destination failure")
+
+    monkeypatch.setattr(backup_module.os, "fsync", fail_fsync)
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="disk-error", owner="worker", target=backup,
+                   clock=clock, store=store)
+
+    assert refused.value.code == "WORKER_FAILED"
+    assert refused.value.problem.retryable is True
+
+
 def test_single_filename_rejects_unsafe_names(tmp_path):
     assert backup_module._single_filename("plain.sqlite") == "plain.sqlite"
     for name in ("../escape", "/absolute", "a/b", "", ".", "a\\b"):
@@ -681,6 +745,13 @@ def test_single_filename_rejects_unsafe_names(tmp_path):
                 tmp_path, {"backup_key": "safe", "database_file": name})
         with pytest.raises(ValueError):
             backup_module.manifest_database_path(tmp_path, {"backup_key": name})
+
+
+def test_prepare_backup_rejects_unsafe_key(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    with pytest.raises(OpsError) as refused:
+        prepare_backup(conn, "../escape", {}, clock=clock)
+    assert refused.value.code == "INVALID_REQUEST"
 
 
 def test_full_logical_digest_changes_on_schema_change():

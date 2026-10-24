@@ -103,9 +103,12 @@ def _stream_copy(source, destination, *, expected_hash=None, expected_size=None,
     stream, size = _open_checked(source, stage=stage, expected_size=expected_size,
                                  oserror_code=oserror_code)
     try:
-        ensure_directory(destination.parent)
-        fd, temporary_name = tempfile.mkstemp(
-            dir=str(destination.parent), prefix=f".{destination.name}.", suffix=".pending")
+        try:
+            ensure_directory(destination.parent)
+            fd, temporary_name = tempfile.mkstemp(
+                dir=str(destination.parent), prefix=f".{destination.name}.", suffix=".pending")
+        except OSError:
+            raise fail("WORKER_FAILED", f"{stage} destination is unavailable") from None
         temporary = Path(temporary_name)
         try:
             digest = hashlib.sha256()
@@ -117,11 +120,17 @@ def _stream_copy(source, destination, *, expected_hash=None, expected_size=None,
                         break
                     if copied + len(chunk) > size:
                         raise fail("INTEGRITY_FAILED", f"{stage} grew while copying")
-                    out.write(chunk)
+                    try:
+                        out.write(chunk)
+                    except OSError:
+                        raise fail("WORKER_FAILED", f"{stage} destination write failed") from None
                     digest.update(chunk)
                     copied += len(chunk)
-                out.flush()
-                os.fsync(out.fileno())
+                try:
+                    out.flush()
+                    os.fsync(out.fileno())
+                except OSError:
+                    raise fail("WORKER_FAILED", f"{stage} destination flush failed") from None
             if copied != size:
                 raise fail("INTEGRITY_FAILED", f"{stage} shrank while copying")
             actual = "sha256:" + digest.hexdigest()
@@ -129,9 +138,12 @@ def _stream_copy(source, destination, *, expected_hash=None, expected_size=None,
                 raise fail("INTEGRITY_FAILED", f"{stage} hash mismatch")
             if fault is not None:
                 fault(destination.name)
-            os.replace(temporary, destination)
-            temporary = None
-            fsync_directory(destination.parent)
+            try:
+                os.replace(temporary, destination)
+                temporary = None
+                fsync_directory(destination.parent)
+            except OSError:
+                raise fail("WORKER_FAILED", f"{stage} destination publish failed") from None
             return copied, actual
         finally:
             if temporary is not None:
@@ -300,6 +312,62 @@ def _publish_manifest(manifest_path, manifest):
                 pass
 
 
+def _verified_file_hash(path, *, expected_size, stage):
+    stream, _ = _open_checked(path, stage=stage, expected_size=expected_size,
+                              oserror_code="INTEGRITY_FAILED")
+    try:
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(_CHUNK), b""):
+            digest.update(chunk)
+        return "sha256:" + digest.hexdigest()
+    finally:
+        stream.close()
+
+
+def _verified_database(target, manifest):
+    if (type(manifest.get("database_size")) is not int
+            or manifest["database_size"] < 0
+            or not isinstance(manifest.get("database_rows"), dict)
+            or not isinstance(manifest.get("database_content_hash"), str)):
+        return False
+    database = Path(target) / _single_filename(manifest["database_file"])
+    if _verified_file_hash(database, expected_size=manifest["database_size"],
+                           stage="durable backup database") != manifest.get("database"):
+        return False
+    probe = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
+    try:
+        return (not integrity_errors(probe)
+                and _table_row_counts(probe) == manifest["database_rows"]
+                and _full_logical_digest(probe) == manifest["database_content_hash"])
+    finally:
+        probe.close()
+
+
+def _verified_artifacts(target, artifacts):
+    if not isinstance(artifacts, dict):
+        return False
+    for name, info in artifacts.items():
+        _single_filename(name)
+        if (not isinstance(info, dict) or not isinstance(info.get("content_hash"), str)
+                or type(info.get("byte_size")) is not int or info["byte_size"] < 0):
+            return False
+        path = Path(target) / "artifacts" / name
+        if _verified_file_hash(path, expected_size=info["byte_size"],
+                               stage=f"durable backup artifact {name}") != info["content_hash"]:
+            return False
+    return True
+
+
+def _verify_durable_manifest(target, key, manifest):
+    try:
+        return (isinstance(manifest, dict) and manifest.get("backup_key") == key
+                and isinstance(manifest.get("database"), str)
+                and _verified_database(target, manifest)
+                and _verified_artifacts(target, manifest.get("artifacts")))
+    except Exception:
+        return False
+
+
 def _durable_manifest(manifest_path, key):
     """The manifest a crashed attempt already published for ``key``, or
     ``None``. It is the backup's own durable evidence -- trusted at exactly the
@@ -314,7 +382,8 @@ def _durable_manifest(manifest_path, key):
         manifest = json.loads(read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
     except (OSError, ValueError, RecursionError):
         return None
-    if isinstance(manifest, dict) and manifest.get("backup_key") == key:
+    if (isinstance(manifest, dict) and manifest.get("backup_key") == key
+            and _verify_durable_manifest(manifest_path.parent, key, manifest)):
         return manifest
     return None
 
@@ -377,6 +446,31 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
     return manifest
 
 
+def _restore_metadata(source, manifest):
+    database_path = manifest_database_path(source, manifest)
+    artifacts = _restore_artifacts(manifest.get("artifacts", {}))
+    database_size = manifest.get("database_size")
+    if database_size is not None and (type(database_size) is not int or database_size < 0):
+        raise ValueError("invalid database size")
+    database_hash = manifest["database"]
+    if not isinstance(database_hash, str):
+        raise ValueError("invalid database hash")
+    return database_path, database_hash, database_size, artifacts
+
+
+def _restore_artifacts(artifacts):
+    if not isinstance(artifacts, dict):
+        raise ValueError("invalid artifact metadata")
+    for name, info in artifacts.items():
+        _single_filename(name)
+        if not isinstance(info, dict) or not isinstance(info.get("content_hash"), str):
+            raise ValueError("invalid artifact metadata")
+        size = info.get("byte_size")
+        if size is not None and (type(size) is not int or size < 0):
+            raise ValueError("invalid artifact size")
+    return artifacts
+
+
 def restore_backup(source, destination):
     """Restore into a new isolated root and verify every database/artifact byte."""
     source, destination = Path(source), Path(destination)
@@ -392,21 +486,18 @@ def restore_backup(source, destination):
     except (OSError, ValueError, RecursionError) as exc:
         raise fail("INTEGRITY_FAILED", "backup manifest is unreadable") from exc
     try:
-        database_name = _single_filename(manifest["database_file"])
-        artifacts = manifest["artifacts"]
-        for name, info in artifacts.items():
-            _single_filename(name)
-            if not isinstance(info, dict) or not isinstance(info.get("content_hash"), str):
-                raise ValueError("invalid artifact metadata")
-    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        database_path, database_hash, database_size, artifacts = _restore_metadata(
+            source, manifest)
+        database_name = database_path.name
+    except (ArtifactError, AttributeError, KeyError, TypeError, ValueError) as exc:
         raise fail("INTEGRITY_FAILED", "backup manifest is invalid") from exc
     started = time.monotonic()
     _log(f"restore_backup: start database={database_name}")
     ensure_directory(destination)
     database = destination / "ops.sqlite"
-    _stream_copy(manifest_database_path(source, manifest), database,
-                 expected_hash=manifest["database"], expected_size=manifest["database_size"],
-                 stage="restore database", oserror_code="INTEGRITY_FAILED")
+    _stream_copy(database_path, database, expected_hash=database_hash,
+                 expected_size=database_size, stage="restore database",
+                 oserror_code="INTEGRITY_FAILED")
     probe = sqlite3.connect(database)
     try:
         if integrity_errors(probe):
