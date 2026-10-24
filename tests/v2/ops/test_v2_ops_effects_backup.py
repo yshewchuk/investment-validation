@@ -431,6 +431,23 @@ def test_run_backup_retry_after_the_effect_already_delivered_succeeds(tmp_path):
     assert (backup / "b4.manifest.json").read_bytes() == manifest_before_retry
 
 
+def test_delivered_retry_refuses_corrupted_artifact(tmp_path):
+    """A delivered receipt is not success when its durable files later change."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "b4", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key="b4", owner="worker", target=backup, clock=clock, store=store)
+
+    (backup / "artifacts" / "evidence.bin").write_bytes(b"corrupted")
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="b4", owner="worker", target=backup, clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+
+
 def test_backup_coordinator_retry_after_delivery_before_commit_attempt_succeeds(tmp_path,
                                                                                  monkeypatch):
     """#98 at the COORDINATOR level: the fault here is injected after

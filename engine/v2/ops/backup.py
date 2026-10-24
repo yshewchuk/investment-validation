@@ -36,6 +36,40 @@ def _log(message):
     print(f"[backup] {message}", file=sys.stderr, flush=True)
 
 
+class _Progress:
+    def __init__(self, stage, total=None, *, keepalive=None):
+        self.stage, self.total, self.keepalive = stage, total, keepalive
+        self.started = self.last_log = self.last_keepalive = time.monotonic()
+        self.done = 0
+        _log(f"{stage}: start total={total if total is not None else 'unknown'} "
+             f"rss_max_kib={_rss_max_kib()}")
+
+    def update(self, done):
+        self.done = done
+        now = time.monotonic()
+        if self.keepalive and now - self.last_keepalive >= 30:
+            self.keepalive()
+            self.last_keepalive = now
+        if now - self.last_log >= 60:
+            elapsed = now - self.started
+            rate = done / elapsed
+            eta = ((self.total - done) / rate if rate and self.total is not None
+                   else "unknown")
+            _log(f"{self.stage}: {done}/{self.total if self.total is not None else 'unknown'} "
+                 f"units rate={rate:.0f}/s eta={eta if eta == 'unknown' else f'{eta:.0f}s'} "
+                 f"rss_max_kib={_rss_max_kib()}")
+            self.last_log = now
+
+    def pulse(self):
+        self.update(self.done + 10000)
+        return 0
+
+    def finish(self, outcome="complete"):
+        elapsed = time.monotonic() - self.started
+        _log(f"{self.stage}: {outcome} done={self.done} elapsed={elapsed:.1f}s "
+             f"rss_max_kib={_rss_max_kib()}")
+
+
 def _rss_max_kib():
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
@@ -122,23 +156,44 @@ def _read_snapshot(conn):
         raise
 
 
-def _table_row_counts(conn):
+def _table_row_counts(conn, *, keepalive=None):
     tables = [row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
         "ORDER BY name")]
-    return {name: conn.execute(
-        'SELECT COUNT(1) FROM "' + name.replace('"', '""') + '"').fetchone()[0]
-        for name in tables}
+    progress = _Progress("database row counts", keepalive=keepalive)
+    conn.set_progress_handler(progress.pulse, 10000)
+    try:
+        counts = {name: conn.execute(
+            'SELECT COUNT(1) FROM "' + name.replace('"', '""') + '"').fetchone()[0]
+            for name in tables}
+    except BaseException:
+        progress.finish("failed")
+        raise
+    else:
+        progress.finish()
+        return counts
+    finally:
+        conn.set_progress_handler(None, 0)
 
 
-def _verify_staged(staged, source_rows):
+def _verify_staged(staged, source_rows, *, keepalive=None):
     if staged.stat().st_size > MAX_BACKUP_FILE_BYTES:
         raise fail("INTEGRITY_FAILED", "staged catalog exceeds the backup size limit")
     probe = sqlite3.connect(staged)
     try:
-        if integrity_errors(probe):
-            raise fail("INTEGRITY_FAILED", "staged catalog integrity check failed")
-        staged_rows = _table_row_counts(probe)
+        progress = _Progress("staged database integrity", keepalive=keepalive)
+        probe.set_progress_handler(progress.pulse, 10000)
+        try:
+            if integrity_errors(probe):
+                raise fail("INTEGRITY_FAILED", "staged catalog integrity check failed")
+        except BaseException:
+            progress.finish("failed")
+            raise
+        else:
+            progress.finish()
+        finally:
+            probe.set_progress_handler(None, 0)
+        staged_rows = _table_row_counts(probe, keepalive=keepalive)
         if staged_rows != source_rows:
             differing = [name for name in sorted(set(source_rows) | set(staged_rows))
                          if source_rows.get(name) != staged_rows.get(name)]
@@ -201,7 +256,7 @@ def _stage_copy(conn, target, key, *, keepalive=None):
 
 def _install_stage(staged, target, key, source_rows, *, keepalive=None):
     try:
-        _verify_staged(staged, source_rows)
+        _verify_staged(staged, source_rows, keepalive=keepalive)
         name = key + ".sqlite"
         size = staged.stat().st_size
         os.replace(staged, target / name)
@@ -307,10 +362,11 @@ def _publish_manifest(manifest_path, manifest):
             temporary.unlink(missing_ok=True)
 
 
-def verified_file_hash(path, *, expected_size, stage):
+def verified_file_hash(path, *, expected_size, stage, keepalive=None):
     """Hash a regular file without following links or reading beyond its cap."""
     stream, size = _open_checked(path, stage=stage, expected_size=expected_size,
                                  oserror_code="INTEGRITY_FAILED")
+    progress = _Progress(stage, size, keepalive=keepalive)
     try:
         digest = hashlib.sha256()
         copied = 0
@@ -319,9 +375,16 @@ def verified_file_hash(path, *, expected_size, stage):
                 raise fail("INTEGRITY_FAILED", f"{stage} grew while reading")
             digest.update(chunk)
             copied += len(chunk)
+            progress.update(copied)
         if copied != size:
             raise fail("INTEGRITY_FAILED", f"{stage} shrank while reading")
-        return "sha256:" + digest.hexdigest()
+        result = "sha256:" + digest.hexdigest()
+    except BaseException:
+        progress.finish("failed")
+        raise
+    else:
+        progress.finish()
+        return result
     finally:
         stream.close()
 
@@ -329,6 +392,7 @@ def verified_file_hash(path, *, expected_size, stage):
 def _copy_verified_file(source, destination, *, expected_size, expected_hash, stage):
     stream, size = _open_checked(source, stage=stage, expected_size=expected_size,
                                  oserror_code="INTEGRITY_FAILED")
+    progress = _Progress(stage, size)
     digest = hashlib.sha256()
     copied = 0
     try:
@@ -339,11 +403,17 @@ def _copy_verified_file(source, destination, *, expected_size, expected_hash, st
                     raise fail("INTEGRITY_FAILED", f"{stage} grew while reading")
                 digest.update(chunk)
                 out.write(chunk)
+                progress.update(copied)
             out.flush()
             os.fsync(out.fileno())
         actual = "sha256:" + digest.hexdigest()
         if copied != size or actual != expected_hash:
             raise fail("INTEGRITY_FAILED", f"{stage} size or hash mismatch")
+    except BaseException:
+        progress.finish("failed")
+        raise
+    else:
+        progress.finish()
     finally:
         stream.close()
 
@@ -355,11 +425,23 @@ def _verified_database(target, manifest, *, keepalive=None):
         return False
     database = manifest_database_path(target, manifest)
     if verified_file_hash(database, expected_size=manifest["database_size"],
-                           stage="durable backup database") != manifest.get("database"):
+                           stage="durable backup database", keepalive=keepalive) != manifest.get("database"):
         return False
     probe = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
     try:
-        return not integrity_errors(probe) and _table_row_counts(probe) == manifest["database_rows"]
+        progress = _Progress("durable database integrity", keepalive=keepalive)
+        probe.set_progress_handler(progress.pulse, 10000)
+        try:
+            errors = integrity_errors(probe)
+        except BaseException:
+            progress.finish("failed")
+            raise
+        else:
+            progress.finish()
+        finally:
+            probe.set_progress_handler(None, 0)
+        return not errors and _table_row_counts(
+            probe, keepalive=keepalive) == manifest["database_rows"]
     finally:
         probe.close()
 
@@ -380,7 +462,8 @@ def _verify_durable_manifest(target, key, manifest, *, keepalive=None):
                 return False
             path = Path(target) / "artifacts" / name
             if verified_file_hash(path, expected_size=info["byte_size"],
-                                  stage=f"durable backup artifact {name}") != info.get("content_hash"):
+                                  stage=f"durable backup artifact {name}",
+                                  keepalive=keepalive) != info.get("content_hash"):
                 return False
         return True
     except Exception:
@@ -414,18 +497,32 @@ def _durable_manifest(manifest_path, key, payload, refs, *, keepalive=None):
 
 def _delivered_or_stale(conn, key):
     row = conn.execute(
-        "SELECT receipt_json FROM outbox WHERE kind='backup' AND logical_key=? "
+        "SELECT receipt_json, payload_json FROM outbox WHERE kind='backup' AND logical_key=? "
         "AND state='delivered'", (key,)).fetchone()
     if row is None:
         raise fail("STALE_EXPECTATION", "backup effect is not pending")
-    return json.loads(row["receipt_json"])
+    return json.loads(row["receipt_json"]), json.loads(row["payload_json"])
+
+
+def _verified_delivered_backup_receipt(conn, key, target, *, keepalive=None):
+    receipt, payload = _delivered_or_stale(conn, key)
+    refs = _validated_artifact_names(payload)
+    target = Path(target)
+    if target.is_symlink():
+        raise fail("INVALID_REQUEST", "backup target is a symlink")
+    durable = _durable_manifest(target / (key + ".manifest.json"), key,
+                                payload, refs, keepalive=keepalive)
+    if durable is None or durable != receipt:
+        raise fail("INTEGRITY_FAILED", "delivered backup files failed verification")
+    return receipt
 
 
 def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=None):
     _validated_key(key)
     effect = claim(conn, "backup", owner=owner, clock=clock, logical_key=key)
     if effect is None:
-        return _delivered_or_stale(conn, key)
+        return _verified_delivered_backup_receipt(
+            conn, key, target, keepalive=keepalive)
     payload = json.loads(effect["payload_json"])
     refs = _validated_artifact_names(payload)
     target = Path(target)
@@ -457,7 +554,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
                 page_count = snapshot.execute("PRAGMA page_count").fetchone()[0]
                 if page_size * page_count > MAX_BACKUP_FILE_BYTES:
                     raise fail("INTEGRITY_FAILED", "source catalog exceeds the backup size limit")
-                source_rows = _table_row_counts(snapshot)
+                source_rows = _table_row_counts(snapshot, keepalive=keepalive)
                 staged = _stage_copy(snapshot, target, key, keepalive=keepalive)
         except BaseException:
             if staged is not None:

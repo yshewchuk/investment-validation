@@ -126,9 +126,11 @@ class _Deployment:
 
 
 def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
-    """The same byte-level checks ``run_backup`` itself makes: the manifest
-    names the key and schema, and every file it hashes (the database, and each
-    artifact copy) still hashes to the recorded digest."""
+    """Check manifest identity and whether the referenced file hashes match.
+
+    This drill check is a lightweight consistency check, not run_backup's
+    bounded no-follow validation.
+    """
     if manifest.get("schema_version") != "catalog_backup.v1.0":
         return False
     if manifest.get("backup_key") != key:
