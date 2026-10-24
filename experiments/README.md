@@ -271,3 +271,13 @@ all modes exclude ledger/outcome publication, final holdouts, releases and order
 Native inner recording normalizes each successful forecast submission once within
 the recording call, reusing that local value for its completion digest and publication.
 This adds no cross-call cache: fresh reads, validation order and receipt verification remain unchanged.
+
+## Static feature-subset preview
+
+`magnitude_feature_subsets.plan_subsets(request)` returns deterministic core,
+single-block-add/drop and full subsets with explicit candidate/fit counts. The
+[closed request contract](SUPER_SIZE/FEATURE_SEARCH.md) requires ordered column
+identity, disjoint blocks, model-configuration IDs, horizons, years and all caps.
+Only synthetic tests call it. It reads/writes nothing, adds no indicators, fits
+or selects nothing, and does not activate or expand the existing search compiler.
+Its `column_list_id` verifies names/order only, not full panel/source/recipe identity.

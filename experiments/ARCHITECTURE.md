@@ -957,3 +957,11 @@ Each invocation revalidates bindings/evidence; there is no cross-call admission 
 | CLI typed `OpsError`/`DataError`; unexpected builtin failure | Preserve the complete typed `Problem` in one refusal document, exit 2; unexpected builtin errors propagate. An opened connection closes in either case. |
 | Output exceeds the byte budget or output staging fails with an artifact, filesystem or SQLite error | Report bytes are discarded; only the refusal document reaches stdout, emitting `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Other staging errors are unexpected builtin failures and propagate. Prior journal commits remain. |
 | Stdout write or flush failure | The original stream error propagates with no retry and no second document; downstream may have received a prefix, and stdout remains caller-owned. |
+
+## Static feature-subset preview
+
+`magnitude_feature_subsets.plan_subsets` is a pure synthetic-test-only [planner](SUPER_SIZE/FEATURE_SEARCH.md).
+It uses foundation hashing, ops errors and Python sets/lists, with bounded
+partition/year/cap validation before expansion (`INVALID_EXPERIMENT_SPEC` on refusal).
+Detached identities verify names/order, not source/recipe admission; no I/O,
+indicators, fitting, selection or existing compiler/trial activation occurs.
