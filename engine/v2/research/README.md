@@ -18,7 +18,7 @@ than the legacy mutable store.
 Replaces (the store-reaching halves of): `tools/signal_screen.py`,
 `tools/fill_quality.py`, and the read path of
 `engine/data/pulls/polygon_fills.py`. `tools/log_diagnostics.py` is
-deliberately **not** moved: it reads only a CSV transactions log and needs no
+deliberately **not** moved: it reads only a local CSV transactions log (plus an optional sibling `metrics_*.json`) and needs no
 snapshot read, so it has no v2 counterpart. It also replaces the replay-over-a
 committed snapshot of `engine/replay.py` and `engine/build_trades.py`'s v2
 write path.

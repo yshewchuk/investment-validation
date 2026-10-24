@@ -100,7 +100,7 @@ from __future__ import annotations
 
 import json
 
-from engine.v2.ops.checkpoints import artifact
+from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import fail
 
 __all__ = ["accepted_generation_refs", "record_price_history_lineage", "refuse_generation_mismatch"]
@@ -126,6 +126,11 @@ SELECT base_receipt_id FROM data_receipt_lineage WHERE receipt_id = ?
 _MAX_LINEAGE_DEPTH = 64
 
 _PRICE_HISTORY_CAPTURE_LINEAGE = "price_history_capture"
+MAX_LEGACY_MANIFEST_BYTES = 16 * 1024 * 1024
+
+#: Distinguishes "``accepted`` not supplied" from a supplied ``None``
+#: (receipt not found) in :func:`refuse_generation_mismatch`.
+_NOT_SUPPLIED = object()
 
 
 def accepted_generation_refs(conn, store, *, receipt_id: str) -> dict[str, str] | None:
@@ -151,7 +156,13 @@ def accepted_generation_refs(conn, store, *, receipt_id: str) -> dict[str, str] 
             return None
         binding = conn.execute(_MANIFEST_BINDING, (receipt[0],)).fetchone()
         if binding is not None:
-            document = json.loads(store.read_verified(artifact(conn, store, binding[0])))
+            ref = registered_artifact(conn, binding[0])
+            if ref.byte_size > MAX_LEGACY_MANIFEST_BYTES:
+                raise fail("INPUT_CHANGED", "committed legacy manifest exceeds the preflight byte cap",
+                           details={"reason": "generation_manifest_over_cap",
+                                    "byte_size": ref.byte_size,
+                                    "max_bytes": MAX_LEGACY_MANIFEST_BYTES})
+            document = json.loads(store.read_verified(ref))
             return {ref["path"]: ref["content_hash"] for ref in document.get("file_refs", [])}
         lineage = conn.execute(_LINEAGE_BASE, (current,)).fetchone()
         if lineage is None:
@@ -173,16 +184,20 @@ def record_price_history_lineage(conn, *, receipt_id: str, base_receipt_id: str)
         (receipt_id, base_receipt_id, _PRICE_HISTORY_CAPTURE_LINEAGE))
 
 
-def refuse_generation_mismatch(conn, store, *, receipt_id: str, barrier_manifest: dict) -> None:
+def refuse_generation_mismatch(conn, store, *, receipt_id: str, barrier_manifest: dict,
+                               accepted: dict[str, str] | None | object = _NOT_SUPPLIED) -> None:
     """Refuse ``INPUT_CHANGED`` when ``barrier_manifest`` (the raw
     ``LegacyInputManifest`` document a barrier job just pinned) disagrees
     with the plan's pinned generation receipt (``generation_mismatch``), or
     when that exact receipt no longer resolves at all
     (``generation_receipt_missing``). An empty ``receipt_id`` is a
-    deliberate no-op for isolated callers — see the module docstring."""
+    deliberate no-op for isolated callers — see the module docstring. An
+    omitted ``accepted`` looks the receipt up; a supplied ``None`` is the
+    receipt-not-found answer itself."""
     if not receipt_id:
         return
-    accepted = accepted_generation_refs(conn, store, receipt_id=receipt_id)
+    if accepted is _NOT_SUPPLIED:
+        accepted = accepted_generation_refs(conn, store, receipt_id=receipt_id)
     if accepted is None:
         raise fail("INPUT_CHANGED",
                    "the plan's pinned generation receipt is missing, was never committed, or "

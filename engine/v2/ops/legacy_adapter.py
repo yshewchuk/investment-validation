@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import posixpath
+import stat
 import sys
 import time
 from collections.abc import Callable
@@ -21,7 +22,7 @@ from engine.v2.foundation.score_population import population_key as _population_
 from engine.v2.ops import finality as _finality
 from engine.v2.ops import worker_progress
 from engine.v2.ops.decision_replay import score_row_id as _score_row_id
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 
 _LEGACY_FINALITY_ORIGINALS = {
     "session_finality": _legacy_session_finality,
@@ -47,6 +48,15 @@ __all__ = ["configured_root", "copy_read_set", "invoke_evaluate", "invoke_nightl
            "manifest_files", "overlay_read_set", "projected_trading_sessions",
            "run_engineering_gate", "run_legacy_rebuild",
            "run_legacy_script", "run_security_scan", "verify_export_generation"]
+
+
+def add_preflight_subcommand(snapshot_sub):
+    """Register the inputs required by the post-import preflight command."""
+    preflight = snapshot_sub.add_parser(
+        "preflight", help="check imported legacy generation and feature tables before capture")
+    preflight.add_argument("--source-root", required=True, type=Path)
+    preflight.add_argument("--materialization-root", required=True, type=Path)
+    preflight.add_argument("--receipt-id", required=True)
 
 
 def configured_root() -> Path:
@@ -145,44 +155,104 @@ def covered_tickers(value, tickers):
     return _finality.covered_tickers(value, tickers, reads=_FINALITY_READS)
 
 
-def _digest(path: Path, *, keepalive: Callable[[], None] | None = None) -> str:
-    """SHA-256 of ``path``, optionally renewing per 1MB chunk.
+PREFLIGHT_MAX_HASH_BYTES = 2 * 1024 * 1024 * 1024
 
-    ``keepalive`` (issue #106, round 3): called once per chunk read so ONE
-    file large enough to exceed ``LEASE_SECONDS`` on its own still renews
-    during its hash, not only between files. The callable is already
-    internally throttled, so this is cheap.
-    """
+
+def _digest(path: Path, *, keepalive: Callable[[], None] | None = None,
+            max_bytes: int | None = None) -> str:
+    """SHA-256 of ``path``, optionally renewing per 1MB chunk and bounding bytes."""
     digest = hashlib.sha256()
+    total = 0
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1 << 20), b""):
+            total += len(chunk)
+            if max_bytes is not None and total > max_bytes:
+                raise fail("INPUT_CHANGED", "file exceeds the preflight hash byte cap",
+                           details={"reason": "hash_file_over_cap",
+                                    "max_bytes": max_bytes})
             digest.update(chunk)
             if keepalive is not None:
                 keepalive()
     return "sha256:" + digest.hexdigest()
 
 
+def _digest_open_file(path: Path, *, keepalive: Callable[[], None] | None = None,
+                      max_bytes: int | None = None,
+                      label: str | None = None) -> tuple[str, int]:
+    """Hash one opened regular file descriptor and report its observed size."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    shown = label or str(path)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise fail("INPUT_CHANGED", "legacy read-set member could not be opened",
+                   details={"path": shown,
+                            "reason": "generation_read_failed"}) from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise fail("INPUT_CHANGED", "legacy read-set member is not a regular file",
+                       details={"path": shown})
+        if max_bytes is not None and info.st_size > max_bytes:
+            raise fail("INPUT_CHANGED", "legacy read-set member exceeds the preflight hash byte cap",
+                       details={"path": shown, "reason": "hash_file_over_cap",
+                                "max_bytes": max_bytes})
+        digest = hashlib.sha256()
+        total = 0
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise fail("INPUT_CHANGED", "legacy read-set member exceeds the preflight hash byte cap",
+                               details={"path": shown, "reason": "hash_file_over_cap",
+                                        "max_bytes": max_bytes})
+                digest.update(chunk)
+                if keepalive is not None:
+                    keepalive()
+        if total != info.st_size:
+            raise fail("INPUT_CHANGED", "legacy read-set member changed while hashing",
+                       details={"path": shown})
+        return "sha256:" + digest.hexdigest(), info.st_size
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def manifest_files(root: Path | str, paths: tuple[str, ...] | list[str], *,
-                   keepalive: Callable[[], None] | None = None) -> dict:
-    """Return a complete, immutable read-set manifest and reject indirection.
+                   keepalive: Callable[[], None] | None = None,
+                   max_file_bytes: int | None = None,
+                   reject_indirect_ancestors: bool = False) -> dict:
+    """Return a complete read-set manifest, rejecting requested indirection.
 
     ``keepalive`` (issue #106): an optional zero-arg renewal callable invoked
     once per manifest iteration AND once per chunk of each file's hash, so a
     long hash pass -- even ONE huge file -- cannot starve other live
     attempts' leases. Omitting it is exactly the old behavior.
     """
-    base = Path(root).resolve()
+    root_path = Path(root)
+    if reject_indirect_ancestors and root_path.is_symlink():
+        raise fail("INPUT_CHANGED", "legacy read-set root is indirect")
+    base = root_path.resolve()
     result = {}
     for relative in paths:
         if keepalive is not None:
             keepalive()
         safe_relative_path(relative)
+        if reject_indirect_ancestors:
+            current = base
+            for component in Path(relative).parts[:-1]:
+                current = current / component
+                if current.is_symlink():
+                    raise fail("INPUT_CHANGED", "legacy read-set ancestor is indirect",
+                               details={"path": relative})
         source = base / relative
         if source.is_symlink() or not source.is_file():
             raise fail("INPUT_CHANGED", "legacy read-set member is missing or indirect",
                        details={"path": relative})
-        result[relative] = {"content_hash": _digest(source, keepalive=keepalive),
-                            "byte_size": source.stat().st_size}
+        content_hash, byte_size = _digest_open_file(
+            source, keepalive=keepalive, max_bytes=max_file_bytes, label=relative)
+        result[relative] = {"content_hash": content_hash, "byte_size": byte_size}
     return result
 
 
@@ -665,22 +735,62 @@ def _check_features_current(root, parameters=None):
                    details={"mismatches": mismatches})
 
 
-def _compare_to_pinned(materialization_root, hashes):
+def _feature_sha256(path, max_bytes=None):
+    """Hash a feature file, optionally using the preflight streaming cap."""
+    if max_bytes is None:
+        from engine.data import store
+        return store.file_sha256(path)
+    return _digest(path, max_bytes=max_bytes).split(":", 1)[1]
+
+
+def _feature_file_hashes(root, *, max_bytes=None):
+    """Current panel and Tier-4 hashes beneath an explicit legacy root."""
+    base = Path(root)
+    panel = base / "data/features/panel.parquet"
+    tier4 = base / "data/features/tier4_forecasts.parquet"
+    return {
+        "panel_sha256": _feature_sha256(panel, max_bytes)
+            if panel.is_file() else None,
+        "tier4_sha256": _feature_sha256(tier4, max_bytes)
+            if tier4.is_file() else None,
+    }
+
+
+def _compare_to_pinned(materialization_root, hashes, *, rebuilt_root=None,
+                       max_hash_bytes=None, compare_source=False):
     from engine import paths
-    from engine.data import store
     from engine.v2.ops import features_compare as fc
 
     root = Path(materialization_root)
+    if rebuilt_root is None:
+        sources = (("panel", paths.PANEL, paths.PANEL.relative_to(paths.ROOT)),
+                   ("tier4", paths.TIER4, paths.TIER4.relative_to(paths.ROOT)))
+    else:
+        rebuilt_root = Path(rebuilt_root)
+        sources = (
+            ("panel", rebuilt_root / "data/features/panel.parquet",
+             Path("data/features/panel.parquet")),
+            ("tier4", rebuilt_root / "data/features/tier4_forecasts.parquet",
+             Path("data/features/tier4_forecasts.parquet")),
+        )
     pinned = {}
     tables = {}
-    for name, rebuilt in (("panel", paths.PANEL), ("tier4", paths.TIER4)):
-        pinned_path = root / rebuilt.relative_to(paths.ROOT)
-        pinned[name] = store.file_sha256(pinned_path) if pinned_path.is_file() else None
-        # Byte-identical tables skip the diff; provenance stamps are still validated (stamp columns only).
-        if hashes[f"{name}_sha256"] is not None and hashes[f"{name}_sha256"] == pinned[name]:
+    for name, rebuilt, relative in sources:
+        pinned_path = root / relative
+        pinned[name] = (_feature_sha256(pinned_path, max_hash_bytes)
+                        if pinned_path.is_file() else None)
+        # Preflight must read the source path itself; an earlier hash cannot
+        # authorize a pinned-only shortcut after the source may have changed.
+        if (not compare_source and hashes[f"{name}_sha256"] is not None
+                and hashes[f"{name}_sha256"] == pinned[name]):
             tables[name] = fc.compare_identical(name, pinned_path)
         else:
             tables[name] = fc.compare_tables(name, rebuilt, pinned_path)
+        pinned_after = (_feature_sha256(pinned_path, max_hash_bytes)
+                        if pinned_path.is_file() else None)
+        if pinned_after != pinned[name]:
+            raise fail("FEATURES_STALE", "pinned feature table changed during comparison",
+                       details={"reason": "pinned_table_changed", "table": name})
     verdict = "match" if all(t["verdict"] == "match" for t in tables.values()) else "mismatch"
     return {"comparison": {"id": fc.COMPARISON_ID, "rtol": fc.FEATURES_RTOL,
                            "atol": fc.FEATURES_ATOL},
@@ -688,6 +798,74 @@ def _compare_to_pinned(materialization_root, hashes):
             "pinned_panel_sha256": pinned["panel"],
             "pinned_tier4_sha256": pinned["tier4"],
             "tables": tables}
+
+
+def run_snapshot_preflight(conn, store, *, source_root, materialization_root, receipt_id):
+    """Data-read-only import-generation and numeric feature check for the nightly CLI."""
+    from engine.v2.ops.generation_binding import (
+        accepted_generation_refs,
+        refuse_generation_mismatch,
+    )
+
+    if not str(receipt_id):
+        raise fail("INPUT_CHANGED",
+                   "generation receipt id is required",
+                   details={"reason": "generation_receipt_missing",
+                            "receipt_id": receipt_id})
+    worker_progress.step_start("snapshot_preflight_generation")
+    try:
+        accepted = accepted_generation_refs(conn, store, receipt_id=str(receipt_id))
+        try:
+            current_manifest = manifest_files(
+                source_root, tuple(accepted) if accepted is not None else (),
+                max_file_bytes=PREFLIGHT_MAX_HASH_BYTES,
+                reject_indirect_ancestors=True)
+        except OSError as exc:
+            raise fail("INPUT_CHANGED", "legacy read-set could not be read",
+                       details={"reason": "generation_read_failed"}) from exc
+        barrier_manifest = {"file_refs": [
+            {"path": path, "content_hash": entry["content_hash"]}
+            for path, entry in current_manifest.items()]}
+        refuse_generation_mismatch(conn, store, receipt_id=str(receipt_id),
+                                   barrier_manifest=barrier_manifest,
+                                   accepted=accepted)
+    finally:
+        worker_progress.step_end("snapshot_preflight_generation")
+
+    source = Path(source_root)
+    pinned = Path(materialization_root)
+    worker_progress.step_start("snapshot_preflight_features")
+    try:
+        source_hashes = _feature_file_hashes(
+            source, max_bytes=PREFLIGHT_MAX_HASH_BYTES)
+        comparison = _compare_to_pinned(
+            pinned, source_hashes, rebuilt_root=source,
+            max_hash_bytes=PREFLIGHT_MAX_HASH_BYTES, compare_source=True)
+        if _feature_file_hashes(
+                source, max_bytes=PREFLIGHT_MAX_HASH_BYTES) != source_hashes:
+            raise ValueError("source feature tables changed during comparison")
+    except Exception as exc:
+        code = exc.code if isinstance(exc, OpsError) else None
+        reason = (exc.problem.details.get("reason")
+                  if isinstance(exc, OpsError) else None)
+        if (code, reason) in {("INPUT_CHANGED", "hash_file_over_cap"),
+                              ("FEATURES_STALE", "pinned_table_changed")}:
+            raise
+        raise fail(
+            "FEATURES_STALE",
+            "the source feature tables could not be compared to the pinned materialization",
+            details={"reason": "comparison_failed",
+                     "exception_type": type(exc).__name__},
+        ) from exc
+    finally:
+        worker_progress.step_end("snapshot_preflight_features")
+    if comparison["verdict"] != "match":
+        raise fail(
+            "FEATURES_STALE",
+            "the source feature tables do not match the pinned materialization",
+            details={"reason": "mismatch", "comparison": comparison},
+        )
+    return {"generation": "match", "features": comparison}
 
 
 def _action_features(parameters, root, cross_check=None):

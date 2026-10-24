@@ -250,8 +250,13 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   `TableContract`; `price_history_query.py` also exposed as
   `Repository.get_price_series`/`.get_close`. A price-history read
   reconstructs row versions through the latest retrieval present in its
-  pinned snapshot; `retrieved_at` is provenance, not an observation ceiling.
-  The reader exposes only bars dated
+   pinned snapshot; `retrieved_at` is provenance, not an observation ceiling.
+   The read's scan limit is exactly the pinned per-ticker membership bound,
+   with no fixed row cap: a history of any size within that bound reads in
+   full, and a requested limit above the bound is refused with
+   `QUERY_NOT_BOUNDED` before any fragment opens, so the read cannot
+   exceed it (`RESULT_LIMIT_EXCEEDED` applies only to streamed rows past
+   an accepted limit). The reader exposes only bars dated
   on or before the decision session. This permits a session close fetched
   after midnight to be used for that session, while a later-dated bar remains
   unavailable. A vendor may revise historical values in a later retrieval,
@@ -850,6 +855,22 @@ Root doc §5 invariants this package is responsible for:
   the stored rows stay live, and the next refresh retries. Only live dates
   count: omitting a tombstoned date is not a refusal. `diff_retrieval` never
   emits a tombstone.
+- **A `price_history` refresh writes only new or changed dates.** A date is
+  unchanged when its latest stored (live) version equals the retrieval on
+  `close_raw` and `high_raw` exactly (NaN equals NaN) and on `close_adj` within a
+  relative tolerance of `1e-5` (`CLOSE_ADJ_RTOL`, above the provider's ~1e-6
+  download jitter). The comparison is always against
+  the latest stored version, never the first, so accepted drift stays below the
+  tolerance; a genuine dividend or split adjustment (>= ~1e-3) exceeds it and
+  versions every affected date. A changed, new or previously tombstoned date
+  gets one new version row at the capture's `retrieved_at`. Same-knowledge-date
+  conflict: a capture whose `retrieved_at` is not later than the latest logged
+  successful attempt for the ticker (`added`, `no_change` or `duplicate_source_hash`) is refused
+  `INPUT_CHANGED` (`refused_backdate`), so an incoming row can never overwrite or
+  sit beside a stored row at the same `retrieved_at`; no price-history version or
+  fragment is added (only the `refused_backdate` attempt is logged in
+  `data_price_captures`) and the stored rows stay live. A retrieval with no new or changed date is `no_change`
+  and adds no fragment version.
 - **Registered contract definitions are immutable.** `catalog.commit_snapshot`
   refuses (`IDENTITY_CONFLICT`) a changed definition under an existing
   `contract_id`; a table picks its next `contract_id`/`semantic_version` per

@@ -307,9 +307,14 @@ Order matters; each step gates the next.
 1. **Refresh**, cheapest and most load-bearing first: the forward calendar
    (unmetered, above), then one ORATS call each for market-wide summaries and
    cores, then batched ORATS confirmation for names that printed in the last 10
-   days. A dead credential stops the run; any other failure degrades to cached
-   data and raises `refresh_degraded` — staleness stays visible in `meta.json`
-   instead of going silent.
+   days. A dead credential stops the run; any other calendar refresh failure
+   degrades to cached data and raises `refresh_degraded` — staleness stays
+   visible in `meta.json` instead of going silent. The separate guarded `^GSPC`
+   refresh runs before the panel rebuild; a failed fetch or source lacking
+   the prior NYSE session refuses the nightly with
+   `GSPC_REFRESH_FAILED` or `GSPC_REFRESH_STALE`, preserving the old panel and
+   stored series. Correct the source or credential and retry on the next
+   nightly or a manual rerun.
 2. **Validate** the store it is about to score from. Red stops the pipeline:
    yesterday's snapshot stays published and a flag is written.
 2a. **Warm** the Tier-4 serving models the score will touch: any missing for
@@ -331,8 +336,9 @@ Order matters; each step gates the next.
 8. **Backup** (`--backup`): git push + private mirror. A failure flags but does
    not block the publish — the snapshot and the backup are independent.
 
-Re-running a night is safe: the fetch cache turns a same-day refresh into a
-hit, and the ledger refuses duplicate row ids.
+Re-running a night is safe: cached calendar fetches may be reused, while the
+guarded `^GSPC` refresh deliberately fetches fresh max history on each run;
+the ledger refuses duplicate row ids.
 
 ### Cron (WSL2)
 

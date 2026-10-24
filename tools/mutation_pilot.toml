@@ -467,6 +467,7 @@ skip = [
 ]
 tests = [
     "tests/v2/models/training/test_magnitude_elasticnet.py",
+    "tests/v2/models/training/test_magnitude_ridge_hgb.py",
     "tests/v2/models/training/test_magnitude_estimators.py",
     "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/test_v2_models_p5_2_acceptance.py",
@@ -500,6 +501,7 @@ skip = [
 ]
 tests = [
     "tests/v2/models/training/test_magnitude_elasticnet.py",
+    "tests/v2/models/test_magnitude_ridge_hgb_recipe.py",
     "tests/test_v2_models_admissible_table.py",
     "tests/test_v2_models_deployment.py",
     "tests/test_v2_models_inference.py",
@@ -619,6 +621,7 @@ mutate = [
     "engine/v2/scoring/financial.py",
     "engine/v2/scoring/frozen_batch.py",
     "engine/v2/scoring/frozen_inputs.py",
+    "engine/v2/scoring/gate_fold_selection.py",
     "engine/v2/scoring/nightly_source_bundle.py",
     "engine/v2/scoring/source_inputs.py",
 ]
@@ -649,6 +652,7 @@ tests = [
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
     "tests/test_v2_scoring_runup_frozen.py",
     "tests/test_v2_scoring_source_inputs.py",
+    "tests/v2/scoring/test_gate_fold_selection.py",
     "tests/v2/scoring/test_gate_forecast_source.py",
     "tests/test_v2_scoring_stage_ownership.py",
 ]

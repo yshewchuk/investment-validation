@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Refresh the legacy ``^GSPC`` daily CSV the regime features read.
 
-``engine.paths.GSPC_DAILY`` was fetched once from yfinance on 2026-08-27 and
-nothing refreshes it, so ``add_regime_features`` keeps anchoring every scored
-event on the same frozen series. This pull re-fetches the same
-``period="max"`` history through the Tier-1 fetcher and rewrites the file in
-the layout both readers already parse: three multi-header lines, then
-positional ``date,adj,close,high,low,open,volume`` rows. The series is cut to
-the stored file's start (``SERIES_START``): ``period="max"`` reaches back to
-1927 while ``GSPC_DAILY`` starts 2006-01-03, so a refresh only appends or
-corrects the tail and the legacy regime features computed from the existing
-rows can never change.
+The stored legacy series is read by panel regime features and this module is
+the shared guarded refresh used by legacy nightly and v2 price-refresh; legacy
+nightly may pass a coverage cutoff and refuses stale fetched coverage before
+reading or writing the target. This pull re-fetches the same ``period="max"``
+history through the Tier-1 fetcher and rewrites the file in the layout both
+readers already parse: three multi-header lines, then positional
+``date,adj,close,high,low,open,volume`` rows. The series is cut to the stored
+file's start (``SERIES_START``): ``period="max"`` reaches back to 1927 while
+``GSPC_DAILY`` starts 2006-01-03, so a refresh appends rows and may correct
+only the last ``TAIL_CORRECTABLE_ROWS`` rows; the Close of every older stored
+row is guarded (see Guards below), and regime features read only Close.
 
 Guards, because this file feeds a champion-model feature: a fetch or parse
 failure leaves the stored bytes untouched, and a fresh body may never shrink
@@ -157,16 +158,26 @@ def _finish(result: dict, started: float) -> dict:
     return result
 
 
-def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> dict:
+def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None,
+                       minimum_last_date=None) -> dict:
     """Fetch ^GSPC max history and refresh ``path`` in the legacy layout.
 
     Never raises for an ordinary per-source failure (the ``price_refresh.
     fetch_one`` lesson; ``CredentialRotated`` propagates because it is a
     whole-run condition). Returns ``{"ok": True, "last_date":
     "YYYY-MM-DD", "rows": N}`` or ``{"ok": False, "reason": ...}`` with the
-    reason in ``fetch_failed`` / ``unparseable`` / ``shrunk`` /
-    ``older_than_existing`` / ``history_changed`` / ``unreadable`` /
-    ``unwritable``.
+    reason in ``fetch_failed`` / ``unparseable`` / ``stale_source`` /
+    ``shrunk`` / ``older_than_existing`` / ``history_changed`` /
+    ``unreadable`` / ``unwritable`` / ``invalid_cutoff``. When
+    ``minimum_last_date`` is given, its type is validated before fetching and
+    the fresh series' coverage is checked after parse; when a cutoff is
+    supplied, the fetched coverage must contain the exact cutoff session and
+    extend at least through it. Both checks run before the lock or any file
+    read or write, so an invalid or stale cutoff leaves the target file
+    untouched. A timezone-aware cutoff, ``pd.NaT``, or a
+    numeric cutoff (including numpy numeric scalars and booleans) returns
+    ``invalid_cutoff``; naive date values normalize and use the existing
+    freshness comparison.
     """
     from engine.data.sources.base import CredentialRotated, FetchError
 
@@ -179,6 +190,18 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
         # A malformed path is refused before any quota is spent on the fetch.
         return _finish({"ok": False, "reason": "unreadable"}, started)
     _log(f"refresh {path} starting")
+
+    minimum = None
+    if minimum_last_date is not None:
+        if isinstance(minimum_last_date, (bool, int, float, complex, np.number,
+                                          np.bool_)):
+            return _finish({"ok": False, "reason": "invalid_cutoff"}, started)
+        try:
+            minimum = pd.Timestamp(minimum_last_date).normalize()
+        except (TypeError, ValueError, OverflowError):
+            return _finish({"ok": False, "reason": "invalid_cutoff"}, started)
+        if minimum is pd.NaT or minimum.tz is not None:
+            return _finish({"ok": False, "reason": "invalid_cutoff"}, started)
 
     try:
         rec = fetcher.fetch(
@@ -201,6 +224,12 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None) -> di
     frame = _parse_body(rec.body)
     if frame is None:
         return _finish({"ok": False, "reason": "unparseable"}, started)
+
+    if minimum is not None:
+        latest = frame["date"].max().normalize()
+        contains_cutoff = bool((frame["date"] == minimum).any())
+        if latest < minimum or not contains_cutoff:
+            return _finish({"ok": False, "reason": "stale_source"}, started)
 
     # The read-compare-replace section below is serialized against a
     # concurrent refresh of the same file through an exclusive flock on a

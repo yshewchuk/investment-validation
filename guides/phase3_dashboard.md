@@ -43,22 +43,28 @@ dashboard/earnings_app.py     # FastAPI, port 8711 (the semis scanner that used 
 ## 2. Nightly job (`nightly.py`, via cron)
 
 Order matters; each step gates the next:
-1. Refresh Tier 1/2 for calendar names (through the fetch wrapper; budget
+0. Refresh Tier 1/2 for calendar names (through the fetch wrapper; budget
    from the 3k/month reserve; ORATS quota guard active).
-2. Validation battery on the fresh data — red stops the pipeline (yesterday's
+1. Resolve the final board date from positive close-finality evidence.
+2. Refresh the guarded `^GSPC` series before rebuilding the panel, requiring
+   the fetched history to contain the previous NYSE session for that resolved
+   date. A failed fetch or missing cutoff session stops the nightly with
+   `GSPC_REFRESH_FAILED` or `GSPC_REFRESH_STALE`; the old panel is kept and
+   the source is retried on the next nightly or a manual rerun.
+3. Validation battery on the fresh data — red stops the pipeline (yesterday's
    snapshot stays published; a flag email/file is raised).
-2a. Warm the Tier-4 serving models the score will touch (subprocess; a
+3a. Warm the Tier-4 serving models the score will touch (subprocess; a
    failure stops the run with `WARM_SERVING_FAILED`).
-3. `score_calendar(as_of=today)`.
-4. Append predictions to the Phase 4 ledger (BEFORE rendering — the frozen
+4. `score_calendar(as_of=today)`.
+5. Append predictions to the Phase 4 ledger (BEFORE rendering — the frozen
    record is the point).
-5. Render bundle; run `selfcheck.py`: re-score 20 random board rows directly
+6. Render bundle; run `selfcheck.py`: re-score 20 random board rows directly
    via `engine.score` and diff — any mismatch stops publish.
-6. Publish atomically: upload to a staging prefix, then flip (or rely on
+7. Publish atomically: upload to a staging prefix, then flip (or rely on
    Pages' atomic deploys). Never leave a half-written remote bundle.
-7. Emit flags: new gate triggers, earnings-date changes, calibration drift
+8. Emit flags: new gate triggers, earnings-date changes, calibration drift
    past threshold, quota below reserve.
-8. Backup sync: push code to the public repo (hygiene hook enforced) and
+9. Backup sync: push code to the public repo (hygiene hook enforced) and
    mirror `ledger/`, reports, and `config/thesis/` to the private remote —
    the ledger is append-only and irreplaceable, so a dead laptop must lose
    at most one day of it. Sync failure raises a flag but does not block the
