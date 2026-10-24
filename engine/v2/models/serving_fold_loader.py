@@ -61,6 +61,17 @@ def _validate_descriptor(descriptor):
         raise ServingFoldError()
 
 
+def validate_serving_fold_descriptor(descriptor):
+    """Validate one serving-fold descriptor's intrinsic fields."""
+    try:
+        descriptor = from_document(ServingFoldDescriptor, to_document(descriptor))
+        _validate_descriptor(descriptor)
+    except ServingFoldError:
+        raise
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        raise ServingFoldError() from None
+
+
 def _view(descriptor, parent, catalog_hash, *, role="size"):
     policy = descriptor.policy
     if (not _hash_valid(catalog_hash) or not _manifest_hash_matches(parent)
@@ -92,13 +103,18 @@ def _pools(metadata, descriptor):
 
 
 def load_serving_fold(inference: FrozenInference, descriptor: ServingFoldDescriptor, *,
-                      verified_parent_manifest: StagedManifest, catalog_hash: str) -> ServingFoldRef:
-    """Caller verifies catalog hash/membership; this API verifies its declared object."""
+                      verified_parent_manifest: StagedManifest, catalog_hash: str,
+                      expected_bytes: int | None = None) -> ServingFoldRef:
+    """Caller verifies catalog hash/membership; this API verifies its declared object.
+
+    ``expected_bytes`` is the catalog-declared byte count for the fold object.
+    """
     try:
         descriptor = from_document(ServingFoldDescriptor, to_document(descriptor))
         _validate_descriptor(descriptor)
         release = _view(descriptor, verified_parent_manifest, catalog_hash)
-        artifact = inference.prepare_serving_fold(release.bindings[0], max_member_bytes=MAX_FOLD_BYTES)
+        artifact = inference.prepare_serving_fold(release.bindings[0], max_member_bytes=MAX_FOLD_BYTES,
+                                                  expected_bytes=expected_bytes)
         pred, res = _pools(artifact, descriptor)
         return ServingFoldRef(descriptor=descriptor, catalog_hash=catalog_hash,
                               pool_pred=pred, pool_res=res, inference=inference, release=release)
@@ -130,6 +146,11 @@ def _validate_catalog_object(obj, descriptor):
             or obj.get("name") != name or type(obj.get("bytes")) is not int
             or not 0 < obj["bytes"] <= MAX_FOLD_BYTES):
         raise ServingFoldError()
+
+
+def validate_serving_fold_object(obj, descriptor):
+    """Validate a catalog object against the serving-fold descriptor."""
+    _validate_catalog_object(obj, descriptor)
 
 
 def _chooser_catalog_hash(catalog, descriptor, parent):
