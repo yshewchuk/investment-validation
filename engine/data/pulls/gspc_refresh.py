@@ -9,9 +9,12 @@ history through the Tier-1 fetcher and rewrites the file in the layout both
 readers already parse: three multi-header lines, then positional
 ``date,adj,close,high,low,open,volume`` rows. The series is cut to the stored
 file's start (``SERIES_START``): ``period="max"`` reaches back to 1927 while
-``GSPC_DAILY`` starts 2006-01-03, so a refresh appends rows and may correct
-only the last ``TAIL_CORRECTABLE_ROWS`` rows; the Close of every older stored
-row is guarded (see Guards below), and regime features read only Close.
+``GSPC_DAILY`` starts 2006-01-03, so a refresh appends rows; only the Close
+of older stored rows (all but the last ``TAIL_CORRECTABLE_ROWS``) is guarded
+(see Guards below) -- their other fields (Adj Close, High, Low, Open,
+Volume) are NOT guarded, acceptable because the readers
+(``panel._gspc_series`` / ``add_regime_features`` and the trading calendar)
+use only dates and Close.
 
 Guards, because this file feeds a champion-model feature: a fetch or parse
 failure leaves the stored bytes untouched, and a fresh body may never shrink
