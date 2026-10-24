@@ -130,8 +130,8 @@ def test_preflight_refuses_pinned_change_during_feature_comparison(
 
     assert changed
     assert err.value.code == "FEATURES_STALE"
-    assert err.value.problem.details["reason"] == "comparison_failed"
-    assert err.value.problem.details["exception_type"] == "ValueError"
+    assert err.value.problem.details["reason"] == "pinned_table_changed"
+    assert err.value.problem.details["table"] in ("panel", "tier4")
 
 
 def test_preflight_preserves_generation_input_changed_code(case, tmp_path):
@@ -169,15 +169,15 @@ def test_preflight_maps_generation_read_error_to_input_changed(case, tmp_path, m
 
     source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
     _accept(case, source, "preflight-generation-read-error")
-    original_digest = legacy_adapter._digest_open_file
+    original_open = legacy_adapter.os.open
     source_file = source / "data/raw/source.csv"
 
-    def fail_source_read(path, **kwargs):
-        if path == source_file:
+    def open_wrapper(path, *args, **kwargs):
+        if path == source_file or str(path) == str(source_file):
             raise PermissionError("synthetic unreadable source")
-        return original_digest(path, **kwargs)
+        return original_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(legacy_adapter, "_digest_open_file", fail_source_read)
+    monkeypatch.setattr(legacy_adapter.os, "open", open_wrapper)
     with pytest.raises(OpsError) as err:
         run_preflight(case.conn, case.store, source_root=source,
                       materialization_root=pinned,
@@ -185,6 +185,22 @@ def test_preflight_maps_generation_read_error_to_input_changed(case, tmp_path, m
 
     assert err.value.code == "INPUT_CHANGED"
     assert err.value.problem.details["reason"] == "generation_read_failed"
+    assert err.value.problem.details["path"] == "data/raw/source.csv"
+
+
+def test_refuse_generation_mismatch_explicit_accepted_none_is_missing(case, tmp_path):
+    from engine.v2.ops.generation_binding import refuse_generation_mismatch
+
+    source, _ = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
+    _accept(case, source, "explicit-none-accepted")
+    with pytest.raises(OpsError) as err:
+        refuse_generation_mismatch(case.conn, case.store, receipt_id="explicit-none-accepted",
+                                   barrier_manifest={"file_refs": []},
+                                   accepted=None)
+
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.details["reason"] == "generation_receipt_missing"
+    assert err.value.problem.details["receipt_id"] == "explicit-none-accepted"
 
 
 def test_cli_registers_and_dispatches_snapshot_preflight(monkeypatch, tmp_path):

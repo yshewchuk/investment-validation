@@ -251,7 +251,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 
   | Condition | Outcome |
   | --- | --- |
-  | `^GSPC` refresh refuses (`GSPC_REFRESH_FAILED`) or source ends before the last NYSE session strictly before the resolved decision date (`GSPC_REFRESH_STALE`; with refresh and tiers on) | `NightlyStop` at `gspc_refresh`; exit 1 after calendar refresh and finality resolution, but before panel rebuild, warm or score; previous panel and published board remain; stale source is refused before the stored series is read or written |
+  | `^GSPC` refresh refuses (`GSPC_REFRESH_FAILED`) or source lacks the last NYSE session strictly before the resolved decision date (`GSPC_REFRESH_STALE`; with refresh and tiers on) | `NightlyStop` at `gspc_refresh`; exit 1 after calendar refresh and finality resolution, but before panel rebuild, warm or score; previous panel and published board remain; stale source is refused before the stored series is read or written |
   | Warm step (default scorer, or `--fetch-only`): subprocess exits non-zero, cannot start, times out (3 h), fails to plan/verify, leaves a fit missing or not ready, or the panel changed under it | `NightlyStop` `WARM_SERVING_FAILED`; exit 1; nothing scored; no in-process refit |
   | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`); no gap flag once repaired |
   | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no new SNAPSHOT (the previous one is kept), so the native import sees no new session for the night (`not_yet`, unless an earlier run that night already wrote one) |
