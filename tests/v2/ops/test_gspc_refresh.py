@@ -87,7 +87,8 @@ def test_success_writes_exact_legacy_layout(tmp_path):
     path = tmp_path / "gspc_daily.csv"
     fetcher = StubFetcher(body=_body(DATES))
 
-    result = refresh_gspc_daily(fetcher, path, refetch_token="run-1")
+    result = refresh_gspc_daily(fetcher, path, minimum_last_date=DATES[-1],
+                                refetch_token="run-1")
 
     assert result == {"ok": True, "last_date": "2026-08-27", "rows": 3}
     assert fetcher.calls == [("yfinance", "history",
@@ -107,6 +108,76 @@ def test_success_writes_exact_legacy_layout(tmp_path):
     assert list(raw[4]) == [c - 1 for c in closes]
     assert list(raw[5]) == closes
     assert [int(v) for v in raw[6]] == [1000 + i for i in range(len(DATES))]
+
+
+def test_stale_source_leaves_file_untouched(tmp_path):
+    """A source ending before the minimum is refused; bytes and mtime stay."""
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, DATES[:-1])
+    mtime = path.stat().st_mtime_ns
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path,
+                                minimum_last_date="2026-08-28")
+
+    assert result == {"ok": False, "reason": "stale_source"}
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == mtime
+
+
+def test_stale_source_skipping_cutoff_with_later_max_is_refused(tmp_path):
+    """A history missing the cutoff is refused even when its last date is later."""
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, DATES[:-1])
+    mtime = path.stat().st_mtime_ns
+    fetcher = StubFetcher(body=_body(["2026-08-25", "2026-08-26", "2026-08-28"]))
+
+    result = refresh_gspc_daily(fetcher, path, minimum_last_date="2026-08-27")
+
+    assert result == {"ok": False, "reason": "stale_source"}
+    assert len(fetcher.calls) == 1
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == mtime
+
+
+def test_invalid_minimum_last_date_is_refused(tmp_path):
+    """A minimum_last_date that is not a date is refused before writing."""
+    path = tmp_path / "gspc_daily.csv"
+    fetcher = StubFetcher(body=_body(DATES))
+
+    result = refresh_gspc_daily(fetcher, path, minimum_last_date="not-a-date")
+
+    assert result == {"ok": False, "reason": "invalid_cutoff"}
+    assert fetcher.calls == []
+    assert not path.exists()
+
+
+def test_timezone_aware_minimum_last_date_is_refused(tmp_path):
+    """Timezone-aware cutoffs return a refusal and leave the stored series unchanged."""
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, DATES)
+    fetcher = StubFetcher(body=_body(DATES))
+
+    result = refresh_gspc_daily(
+        fetcher, path,
+        minimum_last_date=pd.Timestamp("2026-08-27 12:00:00", tz="America/Toronto"),
+    )
+
+    assert result == {"ok": False, "reason": "invalid_cutoff"}
+    assert fetcher.calls == []
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("cutoff", [20261021, True])
+def test_numeric_minimum_last_date_is_refused(tmp_path, cutoff):
+    """Numeric cutoffs are refused before fetching or writing."""
+    path = tmp_path / "gspc_daily.csv"
+    fetcher = StubFetcher(body=_body(DATES))
+
+    result = refresh_gspc_daily(fetcher, path, minimum_last_date=cutoff)
+
+    assert result == {"ok": False, "reason": "invalid_cutoff"}
+    assert fetcher.calls == []
+    assert not path.exists()
 
 
 def test_identical_second_call_leaves_file_untouched(tmp_path):
