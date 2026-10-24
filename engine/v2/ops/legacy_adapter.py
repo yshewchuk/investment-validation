@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import posixpath
+import stat
 import sys
 import time
 from collections.abc import Callable
@@ -175,10 +176,51 @@ def _digest(path: Path, *, keepalive: Callable[[], None] | None = None,
     return "sha256:" + digest.hexdigest()
 
 
+def _digest_open_file(path: Path, *, keepalive: Callable[[], None] | None = None,
+                      max_bytes: int | None = None) -> tuple[str, int]:
+    """Hash one opened regular file descriptor and report its observed size."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise fail("INPUT_CHANGED", "legacy read-set member could not be opened",
+                   details={"path": str(path)}) from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise fail("INPUT_CHANGED", "legacy read-set member is not a regular file",
+                       details={"path": str(path)})
+        if max_bytes is not None and info.st_size > max_bytes:
+            raise fail("INPUT_CHANGED", "legacy read-set member exceeds the preflight hash byte cap",
+                       details={"path": str(path), "reason": "hash_file_over_cap",
+                                "max_bytes": max_bytes})
+        digest = hashlib.sha256()
+        total = 0
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise fail("INPUT_CHANGED", "legacy read-set member exceeds the preflight hash byte cap",
+                               details={"path": str(path), "reason": "hash_file_over_cap",
+                                        "max_bytes": max_bytes})
+                digest.update(chunk)
+                if keepalive is not None:
+                    keepalive()
+        if total != info.st_size:
+            raise fail("INPUT_CHANGED", "legacy read-set member changed while hashing",
+                       details={"path": str(path)})
+        return "sha256:" + digest.hexdigest(), info.st_size
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def manifest_files(root: Path | str, paths: tuple[str, ...] | list[str], *,
                    keepalive: Callable[[], None] | None = None,
-                   max_file_bytes: int | None = None) -> dict:
-    """Return a complete, immutable read-set manifest and reject indirection.
+                   max_file_bytes: int | None = None,
+                   reject_indirect_ancestors: bool = False) -> dict:
+    """Return a complete read-set manifest, rejecting requested indirection.
 
     ``keepalive`` (issue #106): an optional zero-arg renewal callable invoked
     once per manifest iteration AND once per chunk of each file's hash, so a
@@ -186,7 +228,7 @@ def manifest_files(root: Path | str, paths: tuple[str, ...] | list[str], *,
     attempts' leases. Omitting it is exactly the old behavior.
     """
     root_path = Path(root)
-    if root_path.is_symlink():
+    if reject_indirect_ancestors and root_path.is_symlink():
         raise fail("INPUT_CHANGED", "legacy read-set root is indirect")
     base = root_path.resolve()
     result = {}
@@ -194,26 +236,20 @@ def manifest_files(root: Path | str, paths: tuple[str, ...] | list[str], *,
         if keepalive is not None:
             keepalive()
         safe_relative_path(relative)
-        current = base
-        for component in Path(relative).parts[:-1]:
-            current = current / component
-            if current.is_symlink():
-                raise fail("INPUT_CHANGED", "legacy read-set ancestor is indirect",
-                           details={"path": relative})
+        if reject_indirect_ancestors:
+            current = base
+            for component in Path(relative).parts[:-1]:
+                current = current / component
+                if current.is_symlink():
+                    raise fail("INPUT_CHANGED", "legacy read-set ancestor is indirect",
+                               details={"path": relative})
         source = base / relative
         if source.is_symlink() or not source.is_file():
             raise fail("INPUT_CHANGED", "legacy read-set member is missing or indirect",
                        details={"path": relative})
-        byte_size = source.stat().st_size
-        if max_file_bytes is not None and byte_size > max_file_bytes:
-            raise fail("INPUT_CHANGED", "legacy read-set member exceeds the preflight hash byte cap",
-                       details={"path": relative, "reason": "hash_file_over_cap",
-                                "max_bytes": max_file_bytes})
-        result[relative] = {
-            "content_hash": _digest(source, keepalive=keepalive,
-                                    max_bytes=max_file_bytes),
-            "byte_size": byte_size,
-        }
+        content_hash, byte_size = _digest_open_file(
+            source, keepalive=keepalive, max_bytes=max_file_bytes)
+        result[relative] = {"content_hash": content_hash, "byte_size": byte_size}
     return result
 
 
@@ -778,7 +814,8 @@ def run_snapshot_preflight(conn, store, *, source_root, materialization_root, re
         try:
             current_manifest = manifest_files(
                 source_root, tuple(accepted) if accepted is not None else (),
-                max_file_bytes=PREFLIGHT_MAX_HASH_BYTES)
+                max_file_bytes=PREFLIGHT_MAX_HASH_BYTES,
+                reject_indirect_ancestors=True)
         except OSError as exc:
             raise fail("INPUT_CHANGED", "legacy read-set could not be read",
                        details={"reason": "generation_read_failed"}) from exc
@@ -786,7 +823,8 @@ def run_snapshot_preflight(conn, store, *, source_root, materialization_root, re
             {"path": path, "content_hash": entry["content_hash"]}
             for path, entry in current_manifest.items()]}
         refuse_generation_mismatch(conn, store, receipt_id=str(receipt_id),
-                                   barrier_manifest=barrier_manifest)
+                                   barrier_manifest=barrier_manifest,
+                                   accepted=accepted)
     finally:
         worker_progress.step_end("snapshot_preflight_generation")
 

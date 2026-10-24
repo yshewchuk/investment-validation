@@ -169,7 +169,7 @@ def test_preflight_maps_generation_read_error_to_input_changed(case, tmp_path, m
 
     source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
     _accept(case, source, "preflight-generation-read-error")
-    original_digest = legacy_adapter._digest
+    original_digest = legacy_adapter._digest_open_file
     source_file = source / "data/raw/source.csv"
 
     def fail_source_read(path, **kwargs):
@@ -177,7 +177,7 @@ def test_preflight_maps_generation_read_error_to_input_changed(case, tmp_path, m
             raise PermissionError("synthetic unreadable source")
         return original_digest(path, **kwargs)
 
-    monkeypatch.setattr(legacy_adapter, "_digest", fail_source_read)
+    monkeypatch.setattr(legacy_adapter, "_digest_open_file", fail_source_read)
     with pytest.raises(OpsError) as err:
         run_preflight(case.conn, case.store, source_root=source,
                       materialization_root=pinned,

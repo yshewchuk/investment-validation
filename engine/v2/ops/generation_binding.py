@@ -180,7 +180,8 @@ def record_price_history_lineage(conn, *, receipt_id: str, base_receipt_id: str)
         (receipt_id, base_receipt_id, _PRICE_HISTORY_CAPTURE_LINEAGE))
 
 
-def refuse_generation_mismatch(conn, store, *, receipt_id: str, barrier_manifest: dict) -> None:
+def refuse_generation_mismatch(conn, store, *, receipt_id: str, barrier_manifest: dict,
+                               accepted: dict[str, str] | None = None) -> None:
     """Refuse ``INPUT_CHANGED`` when ``barrier_manifest`` (the raw
     ``LegacyInputManifest`` document a barrier job just pinned) disagrees
     with the plan's pinned generation receipt (``generation_mismatch``), or
@@ -189,7 +190,8 @@ def refuse_generation_mismatch(conn, store, *, receipt_id: str, barrier_manifest
     deliberate no-op for isolated callers — see the module docstring."""
     if not receipt_id:
         return
-    accepted = accepted_generation_refs(conn, store, receipt_id=receipt_id)
+    if accepted is None:
+        accepted = accepted_generation_refs(conn, store, receipt_id=receipt_id)
     if accepted is None:
         raise fail("INPUT_CHANGED",
                    "the plan's pinned generation receipt is missing, was never committed, or "
