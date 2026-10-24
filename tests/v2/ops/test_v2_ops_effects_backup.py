@@ -92,7 +92,7 @@ def test_restore_rejects_symlinked_artifact_and_removes_partial_destination(tmp_
                clock=clock, store=store)
     artifact = backup / "artifacts" / "evidence.bin"
     artifact.unlink()
-    artifact.symlink_to(tmp_path / "objects" / "missing")
+    artifact.symlink_to(store.verify(ref))
     destination = tmp_path / "symlink-restored"
 
     with pytest.raises(OpsError) as refused:
@@ -276,7 +276,7 @@ def test_backup_rejects_symlinked_artifact_source(tmp_path, monkeypatch):
     ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
     prepare_backup(conn, "symlink-artifact", {"evidence.bin": ref}, clock=clock)
     source = tmp_path / "changed-source"
-    source.symlink_to(tmp_path / "objects" / "missing")
+    source.symlink_to(store.verify(ref))
     monkeypatch.setattr(store, "verify", lambda _ref: source)
     backup = tmp_path / "backup"
 
@@ -317,6 +317,8 @@ def test_per_key_lock_serializes_two_threads(tmp_path):
     target = tmp_path / "backup"
     target.mkdir()
     first_entered = threading.Event()
+    second_attempting = threading.Event()
+    second_entered = threading.Event()
     release = threading.Event()
     order = []
 
@@ -329,20 +331,23 @@ def test_per_key_lock_serializes_two_threads(tmp_path):
 
     def second():
         first_entered.wait(5)
+        second_attempting.set()
         with backup_module._backup_lock(target, "same-key"):
             order.append("second-enter")
+            second_entered.set()
 
     first_thread = threading.Thread(target=first)
     second_thread = threading.Thread(target=second)
     first_thread.start()
     assert first_entered.wait(5)
     second_thread.start()
-    assert second_thread.is_alive()
-    assert "second-enter" not in order
+    assert second_attempting.wait(5)
+    assert not second_entered.wait(0.1)
     release.set()
     first_thread.join(5)
     second_thread.join(5)
 
+    assert second_entered.is_set()
     assert order == ["first-enter", "first-exit", "second-enter"]
 
 
@@ -374,6 +379,9 @@ def test_catalog_backup_to_reports_page_progress(tmp_path):
     _status, remaining, total = seen[-1]
     assert remaining == 0
     assert total > 0
+    assert all(0 <= pending <= count for _, pending, count in seen)
+    assert all(count == total for _, _, count in seen)
+    assert all(left[1] >= right[1] for left, right in zip(seen, seen[1:]))
 
 
 def test_backup_rejects_symlink_target_before_writing(tmp_path):
@@ -391,6 +399,27 @@ def test_backup_rejects_symlink_target_before_writing(tmp_path):
     assert refused.value.problem.retryable is False
     assert not list(outside.glob("b4.*.sqlite"))
     assert not (outside / "b4.sqlite").exists()
+
+
+def test_backup_rejects_symlinked_artifact_directory_before_staging(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "symlink-artifacts", {"evidence.bin": ref}, clock=clock)
+    target = tmp_path / "backup"
+    target.mkdir()
+    outside = tmp_path / "outside-artifacts"
+    outside.mkdir()
+    (target / "artifacts").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="symlink-artifacts", owner="worker", target=target,
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INVALID_REQUEST"
+    assert refused.value.problem.retryable is False
+    assert not (target / "symlink-artifacts.sqlite").exists()
+    assert not (outside / "evidence.bin").exists()
 
 
 @pytest.mark.parametrize("key", ["../escape", "/absolute", "a/b", "", ".", "a\\b"])
@@ -566,6 +595,37 @@ def test_restore_accepts_legacy_manifest_without_size_fields(tmp_path):
     assert (restored / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
 
 
+def test_ack_loss_reuses_verified_backup_without_recopy(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"ack-loss evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "ack-loss", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+
+    def crash_after_manifest(point):
+        if point == "after_manifest_before_ack":
+            raise _InjectedCrash()
+
+    with pytest.raises(_InjectedCrash):
+        run_backup(conn, key="ack-loss", owner="worker", target=backup,
+                   clock=clock, store=store, fault=crash_after_manifest)
+    manifest_path = backup / "ack-loss.manifest.json"
+    manifest_before = manifest_path.read_bytes()
+    clock.advance(3600)
+
+    def unexpected_rebuild(*_args, **_kwargs):
+        pytest.fail("verified backup was rebuilt")
+
+    monkeypatch.setattr(backup_module, "_stage_copy", unexpected_rebuild)
+    receipt = run_backup(conn, key="ack-loss", owner="worker", target=backup,
+                         clock=clock, store=store)
+
+    assert receipt == json.loads(manifest_before)
+    assert manifest_path.read_bytes() == manifest_before
+    assert conn.execute(
+        "SELECT state FROM outbox WHERE logical_key='ack-loss'").fetchone()[0] == "delivered"
+
+
 def test_durable_manifest_with_corrupt_database_is_not_reused(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
@@ -712,11 +772,38 @@ def test_verified_file_hash_refuses_growth_after_open(tmp_path, monkeypatch):
     monkeypatch.setattr(backup_module, "_open_checked",
                         lambda _path, **_kwargs: (GrowingStream(), 1))
 
-    with pytest.raises(OpsError) as refused:
+    with pytest.raises(OpsError, match="grew while reading") as refused:
         backup_module.verified_file_hash(tmp_path / "growing", expected_size=None,
                                          stage="growing file")
 
     assert refused.value.code == "INTEGRITY_FAILED"
+
+
+@pytest.mark.parametrize("tamper", ["database", "artifact"], ids=["database-hash", "artifact-hash"])
+def test_restore_refuses_corrupt_database_or_artifact(tmp_path, tamper):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "restore-corrupt", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    manifest = run_backup(
+        conn, key="restore-corrupt", owner="worker", target=backup, clock=clock, store=store)
+
+    if tamper == "database":
+        path = backup / manifest["database_file"]
+        content = bytearray(path.read_bytes())
+        content[0] ^= 1
+        path.write_bytes(content)
+    else:
+        (backup / "artifacts" / "evidence.bin").write_bytes(b"tamper!!")
+
+    destination = tmp_path / "restore-corrupt-output"
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, destination)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+    assert not destination.exists()
 
 
 def test_source_catalog_over_byte_cap_is_refused_before_table_scan(tmp_path, monkeypatch):

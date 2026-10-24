@@ -61,7 +61,8 @@ class _Progress:
             self.last_log = now
 
     def pulse(self):
-        self.update(self.done + 10000)
+        """Count one SQLite callback; SQLite calls every 10,000 VM instructions."""
+        self.update(self.done + 1)
         return 0
 
     def finish(self, outcome="complete"):
@@ -510,6 +511,8 @@ def _verified_delivered_backup_receipt(conn, key, target, *, keepalive=None):
     target = Path(target)
     if target.is_symlink():
         raise fail("INVALID_REQUEST", "backup target is a symlink")
+    if refs and (target / "artifacts").is_symlink():
+        raise fail("INTEGRITY_FAILED", "delivered backup artifacts directory is a symlink")
     durable = _durable_manifest(target / (key + ".manifest.json"), key,
                                 payload, refs, keepalive=keepalive)
     if durable is None or durable != receipt:
@@ -529,6 +532,9 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
     if target.is_symlink():
         raise fail("INVALID_REQUEST", "backup target is a symlink")
     ensure_directory(target)
+    artifact_root = target / "artifacts"
+    if refs and artifact_root.is_symlink():
+        raise fail("INVALID_REQUEST", "backup artifacts directory is a symlink")
     manifest_path = target / (key + ".manifest.json")
     started = time.monotonic()
     _log(f"run_backup {key}: start")
@@ -623,10 +629,20 @@ def _restore_contents(source, destination, database_source, database_hash,
                             expected_hash=database_hash, stage="backup database")
         try:
             probe = sqlite3.connect(database)
+            progress = _Progress("restored database integrity")
+            probe.set_progress_handler(progress.pulse, 10000)
             try:
-                if integrity_errors(probe):
+                try:
+                    errors = integrity_errors(probe)
+                except BaseException:
+                    progress.finish("failed")
+                    raise
+                else:
+                    progress.finish()
+                if errors:
                     raise fail("INTEGRITY_FAILED", "restored catalog failed integrity check")
             finally:
+                probe.set_progress_handler(None, 0)
                 probe.close()
         except sqlite3.DatabaseError:
             raise fail("INTEGRITY_FAILED", "restored catalog failed integrity check") from None

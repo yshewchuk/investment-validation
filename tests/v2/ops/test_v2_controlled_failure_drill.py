@@ -1,29 +1,29 @@
-"""Synthetic regression for restore's existing-destination refusal."""
+"""Synthetic regressions for the controlled backup failure drill."""
 from __future__ import annotations
 
-import pytest
+import hashlib
 
-from engine.v2.foundation import ArtifactStore
-from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
-from engine.v2.ops.errors import OpsError
-from tests.ops_support import catalog
+from tools.v2_controlled_failure_drill import _manifest_is_consistent
 
 
-def test_restore_refuses_existing_destination_without_overwriting_database(tmp_path):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    prepare_backup(conn, "restore-refusal", {}, clock=clock)
-    backup = tmp_path / "backup"
-    run_backup(conn, key="restore-refusal", owner="worker", target=backup,
-               clock=clock, store=store)
+def test_manifest_check_honors_selected_file_and_refuses_symlink(tmp_path):
+    content = b"synthetic backup database"
+    database = tmp_path / "selected.sqlite"
+    database.write_bytes(content)
+    manifest = {
+        "schema_version": "catalog_backup.v1.0",
+        "backup_key": "drill",
+        "database_file": "selected.sqlite",
+        "database_size": len(content),
+        "database": "sha256:" + hashlib.sha256(content).hexdigest(),
+        "artifacts": {},
+    }
 
-    restored = restore_backup(backup, tmp_path / "restored")
-    database = restored / "ops.sqlite"
-    before = database.read_bytes()
+    assert _manifest_is_consistent(manifest, tmp_path, "drill")
 
-    with pytest.raises(OpsError) as refused:
-        restore_backup(backup, tmp_path / "restored")
+    outside = tmp_path / "outside.sqlite"
+    outside.write_bytes(content)
+    database.unlink()
+    database.symlink_to(outside)
 
-    assert refused.value.code == "INVALID_REQUEST"
-    assert refused.value.problem.retryable is False
-    assert database.read_bytes() == before
+    assert not _manifest_is_consistent(manifest, tmp_path, "drill")

@@ -72,11 +72,19 @@ from checks.rearchitecture_phase6_restore_drill import (  # noqa: E402
 )
 from engine.v2.foundation import ArtifactStore, Clock, SystemClock, format_timestamp  # noqa: E402
 from engine.v2.ops import publication  # noqa: E402
-from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup  # noqa: E402
+from engine.v2.ops.backup import (  # noqa: E402
+    MAX_MANIFEST_BYTES,
+    _single_filename,
+    manifest_database_path,
+    prepare_backup,
+    restore_backup,
+    run_backup,
+    verified_file_hash,
+)
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
-from engine.v2.ops.fingerprints import file_hash  # noqa: E402
 from engine.v2.ops.outbox import fail_effect  # noqa: E402
+from engine.v2.ops.workflows.commands import read_bounded_bytes  # noqa: E402
 
 __all__ = ["OpsFailureDrillError", "run_drill", "main"]
 
@@ -126,23 +134,35 @@ class _Deployment:
 
 
 def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
-    """Check manifest identity and whether the referenced file hashes match.
-
-    This drill check is a lightweight consistency check, not run_backup's
-    bounded no-follow validation.
-    """
-    if manifest.get("schema_version") != "catalog_backup.v1.0":
-        return False
-    if manifest.get("backup_key") != key:
-        return False
-    database = root / (key + ".sqlite")
-    if not database.is_file() or file_hash(database) != manifest.get("database"):
-        return False
-    for name, info in manifest.get("artifacts", {}).items():
-        path = root / "artifacts" / name
-        if not path.is_file() or file_hash(path) != info.get("content_hash"):
+    """Check identity and hashes with the production bounded file reader."""
+    try:
+        if (manifest.get("schema_version") != "catalog_backup.v1.0"
+                or manifest.get("backup_key") != key):
             return False
-    return True
+        database = manifest_database_path(root, manifest)
+        database_size = manifest.get("database_size")
+        if (type(database_size) is not int or database_size < 0
+                or verified_file_hash(
+                    database, expected_size=database_size,
+                    stage="drill backup database") != manifest.get("database")):
+            return False
+        artifacts = manifest.get("artifacts", {})
+        if not isinstance(artifacts, dict):
+            return False
+        for name, info in artifacts.items():
+            _single_filename(name)
+            if (not isinstance(info, dict)
+                    or type(info.get("byte_size")) is not int
+                    or info["byte_size"] < 0):
+                return False
+            path = root / "artifacts" / name
+            if verified_file_hash(
+                    path, expected_size=info["byte_size"],
+                    stage=f"drill backup artifact {name}") != info.get("content_hash"):
+                return False
+        return True
+    except (OpsError, OSError, TypeError, ValueError, AttributeError, KeyError):
+        return False
 
 
 def _run_after_good_release(deployment: _Deployment) -> dict:
@@ -242,9 +262,14 @@ def _run_before_any_release(deployment: _Deployment) -> dict:
 
         manifest_path = deployment.backup_root / (key + ".manifest.json")
         manifest_present = manifest_path.is_file()
-        manifest = json.loads(manifest_path.read_text()) if manifest_present else None
-        manifest_verified = manifest_present and _manifest_is_consistent(
-            manifest, deployment.backup_root, key)
+        try:
+            manifest = (json.loads(read_bounded_bytes(
+                manifest_path, MAX_MANIFEST_BYTES)) if manifest_present else None)
+            manifest_verified = manifest_present and _manifest_is_consistent(
+                manifest, deployment.backup_root, key)
+        except (OpsError, OSError, ValueError, TypeError, RecursionError):
+            manifest = None
+            manifest_verified = False
         row = conn.execute(
             "SELECT effect_id, claim_token, claimed_by, state FROM outbox "
             "WHERE kind='backup' AND logical_key=?", (key,)).fetchone()
