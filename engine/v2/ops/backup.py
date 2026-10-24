@@ -14,6 +14,7 @@ from engine.v2.foundation import (
     format_timestamp,
     from_document,
     fsync_directory,
+    parse_timestamp,
     safe_relative_path,
 )
 from engine.v2.foundation.artifacts import ArtifactError
@@ -400,6 +401,15 @@ def _validate_backup_artifacts(artifacts):
             raise ValueError("artifact metadata is invalid")
 
 
+def _valid_backup_cutoff(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        return format_timestamp(parse_timestamp(value)) == value
+    except (TypeError, ValueError):
+        return False
+
+
 def _validate_backup_manifest(manifest):
     if not isinstance(manifest, dict):
         raise ValueError("manifest is not an object")
@@ -408,7 +418,7 @@ def _validate_backup_manifest(manifest):
     database_rows = manifest.get("database_rows")
     artifacts = manifest.get("artifacts")
     if (manifest.get("schema_version") != "catalog_backup.v1.0"
-            or not isinstance(manifest.get("cutoff"), str)
+            or not _valid_backup_cutoff(manifest.get("cutoff"))
             or not isinstance(backup_key, str)
             or len(safe_relative_path(backup_key)) != 1
             or not _valid_backup_hash(database_hash)):

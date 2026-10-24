@@ -86,8 +86,9 @@ def test_backup_rejects_unsafe_artifact_name_before_ack(tmp_path, artifact_name)
 
 @pytest.mark.parametrize("case", [
     "missing_database", "missing_artifacts", "artifact_list", "bad_artifact",
-    "bad_database_rows", "nonmapping_database_rows", "bad_database_hash", "bad_schema",
-    "bad_cutoff", "unsafe_backup_key", "unsafe_artifact_name",
+    "missing_database_rows", "bad_database_rows", "nonmapping_database_rows",
+    "bad_database_hash", "bad_schema",
+    "bad_cutoff", "bad_cutoff_string", "unsafe_backup_key", "unsafe_artifact_name",
 ])
 def test_restore_rejects_malformed_manifest_before_creating_destination(tmp_path, case):
     source = tmp_path / "backup"
@@ -104,6 +105,8 @@ def test_restore_rejects_malformed_manifest_before_creating_destination(tmp_path
         manifest["artifacts"] = []
     elif case == "bad_artifact":
         manifest["artifacts"] = {"evidence.bin": {"byte_size": "8", "content_hash": digest}}
+    elif case == "missing_database_rows":
+        manifest.pop("database_rows")
     elif case == "bad_database_rows":
         manifest["database_rows"] = {"items": -1}
     elif case == "nonmapping_database_rows":
@@ -114,6 +117,8 @@ def test_restore_rejects_malformed_manifest_before_creating_destination(tmp_path
         manifest["schema_version"] = "unknown"
     elif case == "bad_cutoff":
         manifest["cutoff"] = None
+    elif case == "bad_cutoff_string":
+        manifest["cutoff"] = "not-a-timestamp"
     elif case == "unsafe_backup_key":
         manifest["backup_key"] = "../outside"
     else:
