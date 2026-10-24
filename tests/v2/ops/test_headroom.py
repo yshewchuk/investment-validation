@@ -229,6 +229,11 @@ def test_tampered_plan_artifact_refuses_integrity_failed(catalog):
 def test_oversize_json_artifact_refuses_resource_limit(catalog, monkeypatch):
     conn, store, clock = catalog
     monkeypatch.setattr(headroom, "_MAX_JSON_BYTES", 1)
+
+    def _no_byte_access(*args, **kwargs):
+        raise AssertionError("oversize refusal must not hash or read artifact bytes")
+    monkeypatch.setattr(store, "verify", _no_byte_access)
+    monkeypatch.setattr(store, "read_verified", _no_byte_access)
     plan_id = publish(conn, store, clock, nightly_plan_document())
     with pytest.raises(OpsError) as excinfo:
         headroom.headroom_command(_headroom_args(conn, store, clock, plan_id),

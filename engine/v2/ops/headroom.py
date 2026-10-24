@@ -28,7 +28,7 @@ import time
 
 from engine.v2.foundation import ArtifactError, ArtifactStore
 from engine.v2.ops import nightly
-from engine.v2.ops.checkpoints import artifact
+from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from engine.v2.ops.stages import registry
@@ -103,21 +103,21 @@ def _json_object(conn, store, artifact_id, label):
     ``INVALID_REQUEST`` refusal rather than a traceback. But a registered
     artifact whose bytes fail content-address verification
     (``ArtifactError`` from ``read_verified``) is corruption, not input error,
-    so it becomes ``INTEGRITY_FAILED``.
+    so it becomes ``INTEGRITY_FAILED``. The size check runs on catalog
+    metadata (``registered_artifact``) before any bytes are hashed.
     """
     try:
-        ref = artifact(conn, store, artifact_id)
-        if ref.byte_size > _MAX_JSON_BYTES:
-            raise fail("RESOURCE_LIMIT_EXCEEDED",
-                       f"the {label} artifact exceeds {_MAX_JSON_BYTES} bytes")
+        ref = registered_artifact(conn, artifact_id)
+    except OpsError:
+        raise fail("INVALID_REQUEST", f"the {label} artifact is not readable") from None
+    if ref.byte_size > _MAX_JSON_BYTES:
+        raise fail("RESOURCE_LIMIT_EXCEEDED",
+                   f"the {label} artifact exceeds {_MAX_JSON_BYTES} bytes")
+    try:
         raw = store.read_verified(ref)
     except ArtifactError:
         raise fail("INTEGRITY_FAILED",
                    f"the {label} artifact bytes fail verification") from None
-    except OpsError as exc:
-        if exc.code == "RESOURCE_LIMIT_EXCEEDED":
-            raise
-        raise fail("INVALID_REQUEST", f"the {label} artifact is not readable") from None
     try:
         document = json.loads(raw)
     except ValueError:
