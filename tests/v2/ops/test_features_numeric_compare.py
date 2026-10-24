@@ -570,6 +570,29 @@ def test_footer_cap_boundary_refuses_before_parsing_the_footer(tmp_path, monkeyp
     assert fc.compare_identical("panel", path)["verdict"] == "match"      # panel metadata is validated
 
 
+def test_identical_table_row_cap_refuses_before_full_decode(tmp_path, monkeypatch):
+    import engine.v2.ops.features_compare as fc
+
+    path = tmp_path / "table.parquet"
+    _write(path, _frame())
+    monkeypatch.setattr(fc, "TABLE_MAX_ROWS", 6)
+    assert fc.compare_identical("panel", path)["verdict"] == "match"
+
+    monkeypatch.setattr(fc, "TABLE_MAX_ROWS", 5)
+    result = fc.compare_identical("panel", path)
+    assert result["verdict"] == "mismatch"
+    assert result["mismatches"] == [
+        {"reason": "table_rows_over_cap", "side": "pinned", "n_rows": 6},
+    ]
+
+    monkeypatch.setattr(fc, "TABLE_MAX_ROWS", 0)
+    monkeypatch.setattr(fc.pd, "read_parquet",
+                        lambda *args, **kwargs: pytest.fail("table decode was reached"))
+    assert fc.compare_identical("panel", path)["mismatches"] == [
+        {"reason": "table_rows_over_cap", "side": "pinned", "n_rows": 6},
+    ]
+
+
 def test_differing_table_row_cap_refuses_before_full_decode(tmp_path, monkeypatch):
     import pandas as pd
 

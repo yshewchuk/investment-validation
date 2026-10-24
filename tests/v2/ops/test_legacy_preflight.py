@@ -104,6 +104,36 @@ def test_preflight_refuses_source_change_during_feature_comparison(
     assert err.value.problem.details["exception_type"] == "ValueError"
 
 
+def test_preflight_refuses_pinned_change_during_feature_comparison(
+        case, tmp_path, monkeypatch):
+    from engine.v2.ops import features_compare
+
+    source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
+    _accept(case, source, "preflight-pinned-race")
+    original_compare = features_compare.compare_tables
+    changed = False
+
+    def compare_then_change(name, rebuilt, pinned_path):
+        nonlocal changed
+        result = original_compare(name, rebuilt, pinned_path)
+        if name == "panel" and not changed:
+            changed = True
+            panel = pd.read_parquet(pinned_path)
+            panel.loc[0, "value"] = 0.75
+            panel.to_parquet(pinned_path, index=False)
+        return result
+
+    monkeypatch.setattr(features_compare, "compare_tables", compare_then_change)
+    with pytest.raises(OpsError) as err:
+        run_preflight(case.conn, case.store, source_root=source,
+                      materialization_root=pinned, receipt_id="preflight-pinned-race")
+
+    assert changed
+    assert err.value.code == "FEATURES_STALE"
+    assert err.value.problem.details["reason"] == "comparison_failed"
+    assert err.value.problem.details["exception_type"] == "ValueError"
+
+
 def test_preflight_preserves_generation_input_changed_code(case, tmp_path):
     source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
     _accept(case, source, "preflight-generation-stale")
@@ -263,6 +293,23 @@ def test_digest_enforces_streaming_hash_byte_cap(tmp_path):
     assert err.value.problem.details["reason"] == "hash_file_over_cap"
 
 
+def test_preflight_bounds_committed_generation_manifest(case, tmp_path, monkeypatch):
+    source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
+    _accept(case, source, "preflight-manifest-over-cap")
+    monkeypatch.setattr(
+        "engine.v2.ops.generation_binding.MAX_LEGACY_MANIFEST_BYTES", 0)
+
+    with pytest.raises(OpsError) as err:
+        run_preflight(case.conn, case.store, source_root=source,
+                      materialization_root=pinned,
+                      receipt_id="preflight-manifest-over-cap")
+
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.details["reason"] == "generation_manifest_over_cap"
+    assert err.value.problem.details["byte_size"] > 0
+    assert err.value.problem.details["max_bytes"] == 0
+
+
 def test_preflight_bounds_generation_read_set_hash(case, tmp_path, monkeypatch):
     source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
     _accept(case, source, "preflight-read-set-over-cap")
@@ -288,8 +335,9 @@ def test_preflight_bounds_feature_hash(case, tmp_path, monkeypatch):
                       materialization_root=pinned,
                       receipt_id="preflight-feature-over-cap")
 
-    assert err.value.code == "FEATURES_STALE"
-    assert err.value.problem.details["reason"] == "comparison_failed"
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.details == {"reason": "hash_file_over_cap",
+                                         "max_bytes": 4}
 
 
 def test_preflight_refuses_byte_identical_corrupt_panel(case, tmp_path):

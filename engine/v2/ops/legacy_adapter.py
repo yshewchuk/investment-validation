@@ -21,7 +21,7 @@ from engine.v2.foundation.score_population import population_key as _population_
 from engine.v2.ops import finality as _finality
 from engine.v2.ops import worker_progress
 from engine.v2.ops.decision_replay import score_row_id as _score_row_id
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 
 _LEGACY_FINALITY_ORIGINALS = {
     "session_finality": _legacy_session_finality,
@@ -747,6 +747,10 @@ def _compare_to_pinned(materialization_root, hashes, *, rebuilt_root=None,
             tables[name] = fc.compare_identical(name, pinned_path)
         else:
             tables[name] = fc.compare_tables(name, rebuilt, pinned_path)
+        pinned_after = (_feature_sha256(pinned_path, max_hash_bytes)
+                        if pinned_path.is_file() else None)
+        if pinned_after != pinned[name]:
+            raise ValueError("pinned feature table changed during comparison")
     verdict = "match" if all(t["verdict"] == "match" for t in tables.values()) else "mismatch"
     return {"comparison": {"id": fc.COMPARISON_ID, "rtol": fc.FEATURES_RTOL,
                            "atol": fc.FEATURES_ATOL},
@@ -757,7 +761,7 @@ def _compare_to_pinned(materialization_root, hashes, *, rebuilt_root=None,
 
 
 def run_snapshot_preflight(conn, store, *, source_root, materialization_root, receipt_id):
-    """Read-only import-generation and numeric feature check for the nightly CLI."""
+    """Data-read-only import-generation and numeric feature check for the nightly CLI."""
     from engine.v2.ops.generation_binding import (
         accepted_generation_refs,
         refuse_generation_mismatch,
@@ -799,6 +803,9 @@ def run_snapshot_preflight(conn, store, *, source_root, materialization_root, re
                 source, max_bytes=PREFLIGHT_MAX_HASH_BYTES) != source_hashes:
             raise ValueError("source feature tables changed during comparison")
     except Exception as exc:
+        if (isinstance(exc, OpsError) and exc.code == "INPUT_CHANGED"
+                and exc.problem.details.get("reason") == "hash_file_over_cap"):
+            raise
         raise fail(
             "FEATURES_STALE",
             "the source feature tables could not be compared to the pinned materialization",
