@@ -16,10 +16,10 @@ from engine.v2.models import (
     ArtifactInventoryMember, ArtifactMember, ModelArtifactInventory, ModelBinding,
     ModelRelease, ModelReleaseInventory, ReleaseBinding, ReleaseRequirement, deployment,
 )
+from engine.v2.models import serving_fold_preflight as folds
 from engine.v2.models.serving_folds import ServingFoldDescriptor, SizeFoldPolicy
 from tests.fixtures.size_serving_header import HEADER
 from tools import phase5_prepare_release as prep
-from tools import phase5_serving_folds as folds
 
 
 class NoPrediction:

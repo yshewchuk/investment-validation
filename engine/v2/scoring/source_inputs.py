@@ -19,6 +19,7 @@ from engine.v2.models.residual_artifact import (
     DriverResidualPoolArtifact,
     PairedResidualPoolArtifact,
 )
+from engine.v2.models.trailing_cutoff_artifact import TrailingCutoffArtifact
 from engine.v2.scoring.frozen_executor import (
     _RUNUP_FINAL_NAMES,
     _RUNUP_RAW_NAMES,
@@ -318,6 +319,7 @@ class SourceBundle:
     # causal-key check -- never from request rows or a context-scoped rebuild.
     paired_residual_recipe: Mapping[str, Any] = field(default_factory=dict)
     paired_residual_artifact: "PairedResidualPoolArtifact | None" = None
+    trailing_cutoff_artifact: "TrailingCutoffArtifact | None" = None
     # The planned-exit simulation's COMPATIBILITY path (R4-10): the paired
     # pool as source rows (event_date, pred_abs_move, err_move, err_crush,
     # optional ticker) -- prior events' residuals, e.g. a Phase 4 capture's
@@ -779,7 +781,52 @@ def fold_pool(name: str, values: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _entry_rule_gate_block(bundle: SourceBundle) -> dict[str, Any]:
+    from engine.v2.scoring.native_entry_rule import (
+        ENTRY_RULE_STRATEGIES,
+        entry_rule_block,
+    )
+
+    _gate_forecast_members(bundle, {})
+    if set(bundle.gate_recipe) != {"mode", "mcap_usd"}:
+        raise ValueError(
+            "gate_recipe entry_rule takes only mode and mcap_usd")
+    mcap_usd = bundle.gate_recipe["mcap_usd"]
+    if mcap_usd is not None:
+        if isinstance(mcap_usd, (bool, str, bytes)):
+            raise ValueError(
+                "gate_recipe.mcap_usd must be a finite number or None")
+        try:
+            mcap_usd = float(mcap_usd)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "gate_recipe.mcap_usd must be a finite number or None"
+            ) from exc
+        if not isfinite(mcap_usd):
+            raise ValueError(
+                "gate_recipe.mcap_usd must be a finite number or None")
+    if bundle.strategy not in ENTRY_RULE_STRATEGIES:
+        raise ValueError(
+            f"entry_rule gate is not defined for {bundle.strategy}")
+    artifact = bundle.trailing_cutoff_artifact
+    if artifact is not None and not isinstance(
+            artifact, TrailingCutoffArtifact):
+        raise ValueError(
+            "trailing_cutoff_artifact must be a TrailingCutoffArtifact")
+    month = bundle.context.get("event_date")
+    if artifact is None and month is None:
+        raise ValueError("entry_rule gate needs context.event_date")
+    return entry_rule_block(
+        bundle.strategy, mcap_usd=mcap_usd, cutoff=artifact, month=month,
+    )
+
+
 def _gate_block(bundle: SourceBundle) -> dict[str, Any]:
+    if bundle.gate_recipe.get("mode") == "entry_rule":
+        return _entry_rule_gate_block(bundle)
+    if bundle.trailing_cutoff_artifact is not None:
+        raise ValueError(
+            "trailing_cutoff_artifact requires an entry_rule gate_recipe")
     gate = _bounded_recipe("gate_recipe", bundle.gate_recipe, _GATE_RECIPE_FIELDS)
     gate.update(_gate_forecast_members(bundle, gate))
     if _is_frozen_recipe(gate):

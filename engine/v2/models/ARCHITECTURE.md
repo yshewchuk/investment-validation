@@ -55,6 +55,27 @@ Invalid shapes/nonfinite labels or predictions raise `ValueError`; the experimen
 caller translates fitting failures to `EXPERIMENT_VARIANT_FAILED`. The shared
 no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
 
+`magnitude_elasticnet_recipe.elasticnet_recipe` builds closed JSON-only research
+metadata without importing training or sklearn. Ordered selected columns and a
+caller-supplied dictionary hash bind preprocessing, fixed estimator parameters,
+seed and projection; a recipe hash is not a source/fold/candidate seal or proof
+of dictionary membership. `training.magnitude_elasticnet.fit_elasticnet_predictions`
+consumes this recipe and matching named numeric matrices. It learns imputation,
+missing indicators and scaling from training rows only, returning finite nonnegative
+forecasts, the full standardized coefficient vector (values and missing indicators),
+selected source columns in recipe order, iterations and dual gap.
+No runtime caller activates this adapter. Causal membership, source identities,
+inner-only subset/parameter choice, resource/attempt caps and failure recording
+are caller responsibilities, not guarantees derived from these arrays.
+
+| ElasticNet condition | Outcome |
+|---|---|
+| Either no-fit guard is active | Its `RuntimeFitForbidden` precedes recipe or array inspection |
+| Invalid closed recipe, column order, matrix dimensions, infinities or label domain | `ValueError`; no fit or partial result |
+| Nonconvergence or nonfinite fit evidence/predictions | `ValueError`; no partial result, retry or iteration increase |
+| Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
+| Cache, transaction or partial-write concerns | No cache, I/O, persistence or publication; v1 recipes and results are unchanged |
+
 An automated nightly append cycle for the pool/residual/cutoff artifacts:
 release assembly is §2.1, staging §2.2, and the three-phase tick sidecar is §2.2.1; see #192.
 
@@ -405,7 +426,7 @@ exact month, full panel SHA-256, estimator member, embedded pool fields/count an
 explicit interval policy. The enclosing catalog hash binds catalog identity
 without a self-reference inside the descriptor.
 `tools.phase5_prepare_release` obtains the registered producer's `SizeFoldPolicy`;
-`tools.phase5_serving_folds` validates cache bytes before catalog publication, without fitting/inference.
+`serving_fold_preflight` (this package) validates cache bytes before catalog publication, without fitting/inference.
 Serving-fold writers (`tier4.serving_model`, Phase-4 build/backfill) use binary handles and explicit `compress=0`; filename suffixes cannot enable compression.
 Release preparation (`--tier4-dir` and raw-byte APIs) requires trusted uncompressed inputs from supported writers; it does not refuse arbitrary compressed inputs before decoding.
 Hashes verify bytes, not provenance. The serialized byte cap is not a decoded-memory bound.
@@ -600,8 +621,8 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   `release_bindings.py`'s reads of `deployment.current_pointer`,
   `deployment._read_manifest`, `deployment._manifest_hash_matches`,
   `deployment.production_release_root`, and `deployment.MissingReleaseRoot`.
-- `engine.v2.models.training` — the same artifact types, to build one from
-  causal source rows; never imported *by* this package (one-way).
+- `engine.v2.models.training` — the same artifact types and no-fit guards, plus
+  closed ElasticNet recipe validation; never imported *by* this package (one-way).
 - `engine.v2.ops` — `engine/v2/ops/cli.py` (the no-fit guard for `ops
   rescore`) and `engine/v2/ops/training.py` (`deployment.promote` from the
   `models_promote` job worker, and `deployment.
@@ -619,18 +640,19 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   serve `/models/release.json`; never promotes.
 - `tools/phase5_state_stage_job.py` — publishes the staging-success record
   (`mark_staging_succeeded`) for a nightly pool candidate (§2.2).
-- `tools/phase5_prepare_release.py`, `tools/phase5_inventory.py` and
-  `tools/phase5_serving_folds.py` — release preparation, inventory and fold metadata;
-  `tools/phase5_serving_fold_checks.py` (its policy/header checks) imports
-  `FOLD_PANEL_SHA256_PATTERN` from `serving_folds`.
+- `tools/phase5_prepare_release.py` and `tools/phase5_inventory.py` — release preparation and
+  inventory; the former imports `serving_fold_preflight`, `serving_fold_checks` (fold metadata and
+  its policy/header checks) and `pinned_panel` (the pinned panel check), which live in this package.
 - `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_execution.py`
   — `no_fit.forbid_fitting` before native trial claims and fixed-child fitting.
 
 ## 6. External systems and libraries
 
-A local filesystem tree only (the release store root —§7.4's env-configured
-key names it for production). No network, no database, no third-party
-service. `hashlib.sha256` for every content hash; `os.fsync`/`os.replace`
+A local filesystem tree (the release store root —§7.4's env-configured
+key names it for production). `pinned_panel.verify_panel_copy` also opens the
+pinned snapshot's SQLite catalog read-only through `engine.v2.data`, and the
+serving-fold preflight decodes joblib bytes (`joblib`, `numpy`). No network, no
+third-party service. `hashlib.sha256` for every content hash; `os.fsync`/`os.replace`
 for the pointer's crash-proof write.
 
 ## 7. Failure semantics

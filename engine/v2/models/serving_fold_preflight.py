@@ -1,7 +1,7 @@
 """Offline role-specific fold declarations from bounded bytes and registered policy.
 
 The descriptor is preparation metadata, not a runtime loader or inference view.
-Legacy cache decoding stays outside the native model package. Inputs must be
+The legacy joblib cache is decoded only inside the same-package checks (``serving_fold_checks``). Inputs must be
 trusted uncompressed output from the serving-fold writers; byte caps and hashes
 do not establish provenance or bound decoded memory.
 """
@@ -13,18 +13,18 @@ from dataclasses import dataclass
 from engine.v2.foundation import from_document, to_document
 from engine.v2.models import ArtifactMember, ModelRelease
 from engine.v2.models.deployment import StagedManifest, semantic_release_hash
+from engine.v2.models.serving_fold_checks import (
+    check_size_policy,
+    fold_month,
+    held_out_pools,
+    load_stored_fold,
+)
 from engine.v2.models.serving_folds import (
     ChooserFoldPolicy,
     ChooserServingFoldDescriptor,
     ServingFoldDescriptor,
     SizeFoldPolicy,
     chooser_fold_outputs,
-)
-from tools.phase5_serving_fold_checks import (
-    check_size_policy,
-    fold_month,
-    held_out_pools,
-    load_stored_fold,
 )
 
 MAX_FOLD_BYTES = 32 * 1024 * 1024
