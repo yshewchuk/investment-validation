@@ -101,10 +101,11 @@ def _live_attempt(conn, bindings=()):
                      [("att_live", name, artifact_id) for name, artifact_id in bindings])
 
 
-def _refusal(snapshot_root, ops_root, conn, reason, **kwargs):
+def _refusal(snapshot_root, ops_root, conn, reason, *, code="INTEGRITY_FAILED", **kwargs):
     before = _files(snapshot_root)
     with pytest.raises(OpsError) as caught:
         enforce_retention(ops_root, conn=conn, store=object(), **kwargs)
+    assert caught.value.code == code
     assert caught.value.problem.details["reason_key"] == reason
     assert _files(snapshot_root) == before
     return caught.value
@@ -237,7 +238,7 @@ def test_invalid_environment_limits_refuse_without_deleting(
     _materialization_dir(base, "root-new", 2)
     monkeypatch.setenv(env, value)
 
-    _refusal(tmp_path, ops, catalog, reason)
+    _refusal(tmp_path, ops, catalog, reason, code="INVALID_REQUEST")
 
 
 def test_materialization_keep_defaults_to_eleven(tmp_path, catalog, monkeypatch):
@@ -252,6 +253,24 @@ def test_materialization_keep_defaults_to_eleven(tmp_path, catalog, monkeypatch)
 
     assert not roots[0].exists()
     assert all(root.is_dir() for root in roots[1:])
+
+
+def test_backup_keep_defaults_to_seven(tmp_path, catalog, monkeypatch):
+    monkeypatch.delenv(retention_module.KEEP_ENV, raising=False)
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    for index in range(8):
+        _write_backup(scope, f"b{index}", f"2026-01-{index + 1:02d}T00:00:00+00:00",
+                      {f"a{index}.bin": b"artifact"})
+
+    enforce_retention(ops, conn=catalog, store=object())
+
+    assert sorted(path.name for path in scope.iterdir() if path.is_file()) == [
+        "b1.manifest.json", "b1.sqlite", "b2.manifest.json", "b2.sqlite",
+        "b3.manifest.json", "b3.sqlite", "b4.manifest.json", "b4.sqlite",
+        "b5.manifest.json", "b5.sqlite", "b6.manifest.json", "b6.sqlite",
+        "b7.manifest.json", "b7.sqlite"]
+    assert not (scope / "artifacts" / "a0.bin").exists()
 
 
 def test_newest_materializations_and_live_request_root_survive(tmp_path, catalog, monkeypatch):
@@ -291,7 +310,7 @@ def test_live_attempt_without_single_request_binding_refuses_and_deletes_nothing
     _live_attempt(catalog, bindings)
 
     _refusal(tmp_path, ops, catalog, "live_request_binding_invalid",
-             keep=1, materialization_keep=1)
+             code="INPUT_CHANGED", keep=1, materialization_keep=1)
 
 
 def test_unbound_current_publication_is_reported_and_only_older_roots_pruned(
@@ -312,6 +331,34 @@ def test_unbound_current_publication_is_reported_and_only_older_roots_pruned(
     assert "RETENTION_CURRENT_PUBLICATION_UNBOUND" in events
     assert not oldest.exists() and not older.exists()
     assert newer.is_dir() and newest.is_dir()
+
+
+@pytest.mark.parametrize("kind", ["database", "artifact"])
+def test_over_limit_backup_stream_refuses_and_deletes_nothing(
+        tmp_path, catalog, monkeypatch, kind):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    monkeypatch.setattr(retention_module, "MAX_BACKUP_STREAM_BYTES", 10)
+    if kind == "database":
+        database = scope / "b1.sqlite"
+        with database.open("wb") as stream:
+            stream.truncate(11)
+        manifest = _manifest(scope, "b1")
+        manifest["database"] = "sha256:" + "0" * 64
+        _save_manifest(scope, "b1", manifest)
+    else:
+        artifact = scope / "artifacts" / "old.bin"
+        with artifact.open("wb") as stream:
+            stream.truncate(11)
+        manifest = _manifest(scope, "b1")
+        manifest["artifacts"]["old.bin"] = {
+            "content_hash": "sha256:" + "0" * 64, "byte_size": 11}
+        _save_manifest(scope, "b1", manifest)
+    error = _refusal(ops, ops, catalog, "stream_too_large",
+                     keep=1, materialization_keep=1)
+    assert error.code == "INTEGRITY_FAILED"
 
 
 def test_oversized_manifest_refuses_with_typed_error(tmp_path, catalog, monkeypatch):
@@ -341,6 +388,23 @@ def test_injected_deletion_oserror_is_typed(tmp_path, catalog, monkeypatch):
     assert _files(ops) == before
 
 
+def test_backup_deletion_failure_is_typed_without_root(tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"a.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"b.bin": b"new"})
+    before = _files(ops)
+    monkeypatch.setattr(
+        Path, "unlink",
+        lambda self: (_ for _ in ()).throw(PermissionError("denied")))
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "backup_delete_failed"
+    assert _files(ops) == before
+
+
 def test_read_only_materialization_root_is_removed(tmp_path, catalog):
     ops = tmp_path / "ops"
     base = default_materialization_base(ops)
@@ -351,6 +415,23 @@ def test_read_only_materialization_root_is_removed(tmp_path, catalog):
     enforce_retention(ops, conn=catalog, store=object(),
                       keep=1, materialization_keep=1)
     assert not root.exists()
+
+
+def test_materialization_deletion_failure_is_typed_without_root(tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-new", 2)
+    old = _materialization_dir(base, "root-old", 1)
+    monkeypatch.setattr(
+        retention_module.shutil, "rmtree",
+        lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("denied")))
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "materialization_delete_failed"
+    assert old.is_dir()
 
 
 def test_configured_materialization_base_is_used_for_retention(tmp_path, catalog):

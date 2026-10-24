@@ -707,22 +707,31 @@ so the diagram above does not show it as a submitted production stage.
 is shadow-only end to end,
 and nothing on this diagram writes to the legacy board.
 
-### Backup retention (#1156)
+### Backup and materialization retention (#1156)
 
-The standard nightly ops `backup_effect` invokes retention only after a successful backup; a failed or absent backup means retention is not invoked and deletes nothing. The first run may delete only after this code is wired on the standard nightly path and synthetic tests have passed. `OPS_BACKUP_RETENTION_KEEP` (default 7) bounds complete backups and `OPS_MATERIALIZATION_RETENTION_KEEP` (default 11) bounds materialization roots. Both counts must parse as positive integers; zero, negative, non-integer or otherwise malformed configuration is a keyed refusal that deletes nothing.
+#### Contract
 
-A backup counts only when strictly verified complete: exact manifest schema and key set, a non-empty database, a recomputed database digest matching the manifest, clean SQLite `integrity_check`/`foreign_key_check`, and an on-disk artifact set exactly matching the manifest with per-artifact size and hash. The newest complete backup is always retained. Materialization-root candidates are the newest K plus any root whose live use is provable from persisted ops attempts or the current publication.
+The standard nightly ops `backup_effect` invokes retention only after a successful backup; a failed or absent backup means retention is not invoked and deletes nothing. `OPS_BACKUP_RETENTION_KEEP` (default 7) bounds complete backups and `OPS_MATERIALIZATION_RETENTION_KEEP` (default 11) bounds materialization roots. Both counts must parse as positive integers; zero, negative, non-integer or otherwise malformed configuration is a keyed refusal that deletes nothing.
 
-Any unverifiable backup or live-attempt use evidence (unreadable manifest, schema/digest/artifact mismatch, non-clean pragma, unresolvable live attempt) is a stable keyed refusal and the whole invocation deletes nothing; uncertainty is never read as "not in use". The known missing current-publication-to-root binding follows the supervisor decision and the follow-up tracked in #1206: retention conservatively keeps the newest K roots, emits a keyed diagnostic, and files the follow-up GitHub issue, without adding a release-manifest field.
+A backup counts only when strictly verified complete: exact manifest schema and key set, a non-empty database, a recomputed database digest matching the manifest, clean SQLite `integrity_check`/`foreign_key_check`, and an on-disk artifact set exactly matching the manifest with per-artifact size and hash. The newest complete backup is always retained. Materialization-root candidates are the newest 11 plus any root whose live use is provable from persisted ops attempts.
+
+Any unverifiable backup or live-attempt use evidence (unreadable manifest, schema/digest/artifact mismatch, non-clean pragma, unresolvable live attempt) is a stable keyed refusal and the whole invocation deletes nothing; uncertainty is never read as "not in use". The known missing current-publication-to-root binding is tracked externally as #1206: retention conservatively keeps the newest 11 roots for unbound publication and emits a keyed diagnostic, without adding a release-manifest field.
 
 Retention uses stdlib `json`, `sqlite3` and filesystem traversal/unlink because no standard tool implements this policy; it does not hand-roll a format parser. Rerunning against unchanged state is a no-op. Deletion follows a preflight; deletions proceed one entry at a time without rollback, so a later unlink failure leaves earlier deletions durable. Reports a typed failure without local paths. Journal recovery and broader preflight are tracked in #1251 and must preserve no-deletion-on-unverified-state.
 
 | Condition | Outcome |
 | --- | --- |
 | Oversized or unverifiable backup manifest | Keyed refusal; the whole invocation deletes nothing. |
+| Backup DB/artifact exceeds the streaming byte ceiling | Keyed refusal; the whole invocation deletes nothing. |
+| Invalid retention count limit (zero, negative, non-integer or malformed) | Keyed refusal; the whole invocation deletes nothing. |
+| Keepalive renewal failure during retention | Keyed refusal; before first mutation none; during deletion prior deletions may persist. |
 | Backup or live-use preflight refusal | Keyed refusal; no deletions occur. |
 | Backup unlink `OSError` | Typed error; prior deletions may persist; a later run refuses the incomplete scope without deleting. |
 | Materialization `rmtree` `OSError` | Typed error; the next run re-plans. |
+
+#### History
+
+The first run may delete only after this code is wired on the standard nightly path and synthetic tests have passed.
 
 ## 5. Invariants
 

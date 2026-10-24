@@ -16,17 +16,17 @@ from engine.v2.foundation import ensure_directory, safe_relative_path
 from engine.v2.ops.errors import fail
 
 
-def file_hash(path, *, keepalive: Callable[[], None] | None = None):
-    """SHA-256 of ``path``. ``keepalive`` (issue #106 round 3): optional
-    zero-arg renewal callable invoked once per 1MB chunk -- the same seam as
-    ``legacy_adapter._digest`` -- so pinning ONE huge file renews during its
-    hash, not only between files. ``None`` keeps today's exact behavior."""
+def file_hash(path, *, keepalive: Callable[[], None] | None = None,
+              max_bytes: int | None = None):
+    """SHA-256 of ``path``; ``keepalive`` per 1MB chunk, ``max_bytes`` caps read bytes."""
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
         for chunk in iter(lambda: stream.read(1 << 20), b""):
             digest.update(chunk)
-            if keepalive is not None:
-                keepalive()
+            keepalive() if keepalive is not None else None
+            if max_bytes is not None and stream.tell() > max_bytes:
+                raise fail("INTEGRITY_FAILED", "file exceeds the streaming byte ceiling",
+                           details={"reason_key": "stream_too_large", "max_bytes": max_bytes})
     return "sha256:" + digest.hexdigest()
 
 

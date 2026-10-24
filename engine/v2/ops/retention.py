@@ -25,6 +25,7 @@ _ARTIFACT_KEYS = frozenset({"content_hash", "byte_size"})
 _LIVE_STATES = ("starting", "running", "cancelling", "recovery_pending")
 _REQUEST_BINDING = "materialization_request.json"
 _MAX_MANIFEST_BYTES = 10 * 1024 * 1024
+MAX_BACKUP_STREAM_BYTES = 4 * 1024 * 1024 * 1024
 
 def _stderr(event, **fields):
     sys.stderr.write(json.dumps({"event": event, **fields}, sort_keys=True) + "\n")
@@ -84,7 +85,7 @@ def _safe_name(name, *, artifact=False):
 
 def _digest(path, keepalive=None):
     try:
-        return file_hash(path, keepalive=keepalive)
+        return file_hash(path, keepalive=keepalive, max_bytes=MAX_BACKUP_STREAM_BYTES)
     except OSError:
         raise fail("INTEGRITY_FAILED", "backup file could not be read",
                    details={"reason_key": "backup_file_unreadable"}) from None
@@ -323,15 +324,11 @@ def _remove_tree(path):
                    details={"reason_key": "materialization_delete_failed"}) from None
 
 def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=None, keepalive=None, materialization_base=None):
-    """Keep the newest verified backups and materialization roots; return pruned keys.
-    ``conn`` and ``store`` are the coordinator's already-open operations catalog
-    and artifact store; live root resolution never guesses or re-opens them.
-    """
+    """Keep the newest verified backups and materialization roots; return pruned keys."""
     keep = _limit(keep, KEEP_ENV, DEFAULT_KEEP, "backup")
     materialization_keep = _limit(materialization_keep, MATERIALIZATION_KEEP_ENV,
                                   DEFAULT_MATERIALIZATION_KEEP, "materialization")
-    root = Path(ops_root) / "backups"
-    plans = []
+    root, plans = Path(ops_root) / "backups", []
     if root.exists():
         if root.is_symlink() or not root.is_dir():
             raise fail("INTEGRITY_FAILED", "backup root is not a directory",
@@ -340,49 +337,40 @@ def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=
         if any(scope.is_symlink() or not scope.is_dir() for scope in scopes):
             raise fail("INTEGRITY_FAILED", "backup scope is not a directory",
                        details={"reason_key": "backup_scope_not_directory"})
-        started = _stage("verify_backups", len(scopes))
-        progress = _Progress("verify_backups", len(scopes))
-        done = 0
+        started, progress, done = _stage("verify_backups", len(scopes)), _Progress("verify_backups", len(scopes)), 0
         try:
             for scope in scopes:
                 plans.append(_plan(scope, keep, keepalive))
-                done += 1
-                progress.tick(done)
+                progress.tick(done := done + 1)
         finally:
             _stage_end("verify_backups", started, done, len(scopes))
     roots = _materialization_plan(ops_root, materialization_keep, conn, store, base=materialization_base)
     deleted = []
     backup_total = sum(len(discarded) + len(artifact_names)
                        for _, discarded, _, artifact_names in plans)
-    started = _stage("delete_backups", backup_total)
-    progress = _Progress("delete_backups", backup_total)
-    done = 0
+    _stderr("RETENTION_DELETE_PLAN", backup_total=backup_total,
+            materialization_total=len(roots), keep=keep,
+            materialization_keep=materialization_keep, scopes=len(plans))
+    started, progress, done = _stage("delete_backups", backup_total), _Progress("delete_backups", backup_total), 0
     try:
         for scope, discarded, artifacts_dir, artifact_names in plans:
-            if keepalive is not None:
-                keepalive()
+            keepalive() if keepalive is not None else None
             for record in discarded:
                 _unlink(scope / (record["key"] + _DB))
                 _unlink(scope / (record["key"] + _MANIFEST))
                 deleted.append(record["key"])
-                done += 1
-                progress.tick(done)
+                progress.tick(done := done + 1)
             for name in sorted(artifact_names):
                 _unlink(artifacts_dir / name)
-                done += 1
-                progress.tick(done)
+                progress.tick(done := done + 1)
     finally:
         _stage_end("delete_backups", started, done, backup_total)
-    started = _stage("delete_materialization", len(roots))
-    progress = _Progress("delete_materialization", len(roots))
-    done = 0
+    started, progress, done = _stage("delete_materialization", len(roots)), _Progress("delete_materialization", len(roots)), 0
     try:
         for path in roots:
-            if keepalive is not None:
-                keepalive()
+            keepalive() if keepalive is not None else None
             _remove_tree(path)
-            done += 1
-            progress.tick(done)
+            progress.tick(done := done + 1)
     finally:
         _stage_end("delete_materialization", started, done, len(roots))
     return deleted
