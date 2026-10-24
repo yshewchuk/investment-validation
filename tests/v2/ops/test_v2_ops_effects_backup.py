@@ -61,7 +61,11 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
     assert (tmp_path / "restored" / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
 
 
-@pytest.mark.parametrize("case", ["missing_database", "missing_artifacts", "artifact_list", "bad_artifact"])
+@pytest.mark.parametrize("case", [
+    "missing_database", "missing_artifacts", "artifact_list", "bad_artifact",
+    "bad_database_rows", "nonmapping_database_rows", "bad_database_hash", "bad_schema",
+    "bad_cutoff", "unsafe_backup_key", "unsafe_artifact_name",
+])
 def test_restore_rejects_malformed_manifest_before_creating_destination(tmp_path, case):
     source = tmp_path / "backup"
     source.mkdir()
@@ -75,8 +79,22 @@ def test_restore_rejects_malformed_manifest_before_creating_destination(tmp_path
         manifest.pop("artifacts")
     elif case == "artifact_list":
         manifest["artifacts"] = []
-    else:
+    elif case == "bad_artifact":
         manifest["artifacts"] = {"evidence.bin": {"byte_size": "8", "content_hash": digest}}
+    elif case == "bad_database_rows":
+        manifest["database_rows"] = {"items": -1}
+    elif case == "nonmapping_database_rows":
+        manifest["database_rows"] = []
+    elif case == "bad_database_hash":
+        manifest["database"] = "invalid"
+    elif case == "bad_schema":
+        manifest["schema_version"] = "unknown"
+    elif case == "bad_cutoff":
+        manifest["cutoff"] = None
+    elif case == "unsafe_backup_key":
+        manifest["backup_key"] = "../outside"
+    else:
+        manifest["artifacts"] = {"../outside": {"byte_size": 8, "content_hash": digest}}
     (source / "backup.manifest.json").write_text(json.dumps(manifest))
     destination = tmp_path / "restored"
 
@@ -85,6 +103,42 @@ def test_restore_rejects_malformed_manifest_before_creating_destination(tmp_path
 
     assert refused.value.code == "INTEGRITY_FAILED"
     assert not destination.exists()
+
+
+def test_restore_rejects_database_row_count_mismatch(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "row-mismatch", {}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key="row-mismatch", owner="worker", target=backup,
+               clock=clock, store=store)
+    manifest_path = backup / "row-mismatch.manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["database_rows"]["outbox"] += 1
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, tmp_path / "restored")
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+
+
+def test_restore_maps_invalid_sqlite_bytes_to_integrity_failed(tmp_path):
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    database = backup / "bad.sqlite"
+    database.write_bytes(b"not sqlite bytes")
+    manifest = {"schema_version": "catalog_backup.v1.0", "backup_key": "bad",
+                "cutoff": "2026-01-01T00:00:00Z",
+                "database": backup_module._checked_file_hash(
+                    database, stage="synthetic database"),
+                "database_rows": {}, "artifacts": {}}
+    (backup / "bad.manifest.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, tmp_path / "restored")
+
+    assert refused.value.code == "INTEGRITY_FAILED"
 
 
 def test_backup_published_hash_rejects_symlink_replacement(tmp_path, monkeypatch):
@@ -181,7 +235,7 @@ def test_backup_refuses_row_count_mismatch(tmp_path):
     assert refused.value.problem.details["tables"] == ["evidence"]
 
 
-def test_bounded_reader_rejects_oversize_and_nonregular_inputs(tmp_path):
+def test_bounded_reader_rejects_oversize_and_nonregular_inputs(tmp_path, monkeypatch):
     oversized = tmp_path / "oversized.json"
     oversized.write_bytes(b"x" * (backup_module.MAX_MANIFEST_BYTES + 1))
     with pytest.raises(ValueError, match="bounded regular file"):
@@ -196,6 +250,20 @@ def test_bounded_reader_rejects_oversize_and_nonregular_inputs(tmp_path):
     os.mkfifo(fifo)
     with pytest.raises(ValueError, match="bounded regular file"):
         backup_module._read_bounded_bytes(fifo, backup_module.MAX_MANIFEST_BYTES)
+
+    growing = tmp_path / "growing.json"
+    growing.write_bytes(b"x")
+    monkeypatch.setattr(backup_module.os, "read",
+                        lambda _fd, _size: b"x" * (backup_module.MAX_MANIFEST_BYTES + 1))
+    with pytest.raises(ValueError, match="grew beyond its byte limit"):
+        backup_module._read_bounded_bytes(growing, backup_module.MAX_MANIFEST_BYTES)
+
+    oversized_database = tmp_path / "oversized.sqlite"
+    oversized_database.write_bytes(b"123")
+    monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", 2)
+    with pytest.raises(OpsError) as refused:
+        backup_module._checked_file_hash(oversized_database, stage="synthetic database")
+    assert refused.value.code == "INTEGRITY_FAILED"
 
 
 @pytest.mark.parametrize("stale_bytes", [b"", b"SQLite format 3\x00"],
@@ -234,7 +302,8 @@ def test_restore_rejects_tampered_backup_components(tmp_path, component):
     run_backup(conn, key="tampered", owner="worker", target=backup, clock=clock, store=store)
     path = (backup / "tampered.sqlite" if component == "database"
             else backup / "artifacts" / "evidence.bin")
-    path.write_bytes(path.read_bytes() + b"tampered")
+    path.write_bytes(b"tampered" if component == "artifact"
+                     else path.read_bytes() + b"tampered")
     destination = tmp_path / "restored"
 
     with pytest.raises(OpsError) as refused:
@@ -438,6 +507,33 @@ def test_run_backup_retry_after_the_effect_already_delivered_succeeds(tmp_path):
     assert conn.execute("SELECT state FROM outbox WHERE logical_key='b4'").fetchone()[0] == "delivered"
     # No second backup was performed: the manifest file on disk is unchanged.
     assert (backup / "b4.manifest.json").read_bytes() == manifest_before_retry
+
+
+@pytest.mark.parametrize("damage", ["missing_manifest", "database", "artifact"])
+def test_delivered_retry_refuses_missing_or_tampered_backup_files(tmp_path, damage):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "delivered-check", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key="delivered-check", owner="worker", target=backup,
+               clock=clock, store=store)
+    if damage == "missing_manifest":
+        (backup / "delivered-check.manifest.json").unlink()
+    elif damage == "database":
+        database = backup / "delivered-check.sqlite"
+        database.write_bytes(database.read_bytes() + b"changed")
+    else:
+        (backup / "artifacts" / "evidence.bin").write_bytes(b"tampered")
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="delivered-check", owner="retry", target=backup,
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert conn.execute(
+        "SELECT state FROM outbox WHERE logical_key='delivered-check'").fetchone()[0] == \
+        "delivered"
 
 
 def test_backup_coordinator_retry_after_delivery_before_commit_attempt_succeeds(tmp_path,

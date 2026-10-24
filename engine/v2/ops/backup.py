@@ -16,6 +16,7 @@ from engine.v2.foundation import (
     fsync_directory,
     safe_relative_path,
 )
+from engine.v2.foundation.artifacts import ArtifactError
 from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.outbox import claim, complete, enqueue
@@ -339,7 +340,7 @@ def _publish_manifest(manifest_path, manifest, prior):
 def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=_no_keepalive):
     effect = claim(conn, "backup", owner=owner, clock=clock, logical_key=key)
     if effect is None:
-        return _delivered_or_stale(conn, "backup", key)
+        return _verify_delivered_backup(conn, key, target)
     payload = json.loads(effect["payload_json"])
     target = Path(target)
     if target.exists() and target.is_symlink():
@@ -406,7 +407,35 @@ def _validate_backup_manifest(manifest):
         raise ValueError("manifest fields are invalid")
     _validate_backup_row_counts(database_rows)
     _validate_backup_artifacts(artifacts)
-    return backup_key, database_hash, artifacts
+    return backup_key, database_hash, database_rows, artifacts
+
+
+def _verify_delivered_backup(conn, key, target):
+    """Return a delivered receipt only while its manifest and files still verify."""
+    receipt = _delivered_or_stale(conn, "backup", key)
+    target = Path(target)
+    if target.is_symlink():
+        raise fail("INTEGRITY_FAILED", "delivered backup target is unsafe")
+    try:
+        manifest_path = target / (key + ".manifest.json")
+        manifest = json.loads(_read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
+        backup_key, database_hash, database_rows, artifacts = _validate_backup_manifest(
+            manifest)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, KeyError,
+            TypeError, AttributeError, OpsError, ArtifactError) as exc:
+        raise fail("INTEGRITY_FAILED", "delivered backup manifest is missing or invalid") from exc
+    if backup_key != key or manifest != receipt:
+        raise fail("INTEGRITY_FAILED", "delivered backup manifest differs from its receipt")
+    database = target / (key + ".sqlite")
+    if not _prior_database_matches(database, database_hash, database_rows):
+        raise fail("INTEGRITY_FAILED", "delivered backup database is missing or invalid")
+    for name, info in artifacts.items():
+        actual_hash = _checked_file_hash(
+            target / "artifacts" / name, stage="delivered backup artifact",
+            expected_size=info["byte_size"])
+        if actual_hash != info["content_hash"]:
+            raise fail("INTEGRITY_FAILED", "delivered backup artifact hash differs")
+    return receipt
 
 
 def restore_backup(source, destination):
@@ -419,9 +448,9 @@ def restore_backup(source, destination):
         raise fail("INTEGRITY_FAILED", "backup manifest is missing or ambiguous")
     try:
         manifest = json.loads(_read_bounded_bytes(manifests[0], MAX_MANIFEST_BYTES))
-        backup_key, database_hash, artifacts = _validate_backup_manifest(manifest)
+        backup_key, database_hash, database_rows, artifacts = _validate_backup_manifest(manifest)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, KeyError,
-            TypeError, AttributeError, OpsError) as exc:
+            TypeError, AttributeError, OpsError, ArtifactError) as exc:
         raise fail("INTEGRITY_FAILED", "backup manifest is invalid") from exc
 
     destination.mkdir(parents=True)
@@ -429,12 +458,8 @@ def restore_backup(source, destination):
     _copy_verified_file(source / (backup_key + ".sqlite"), database,
                         expected_size=None, expected_hash=database_hash,
                         stage="restore database")
-    probe = sqlite3.connect(database)
-    try:
-        if integrity_errors(probe):
-            raise fail("INTEGRITY_FAILED", "restored catalog failed integrity check")
-    finally:
-        probe.close()
+    if not _prior_database_matches(database, database_hash, database_rows):
+        raise fail("INTEGRITY_FAILED", "restored catalog failed verification")
     for name, info in artifacts.items():
         path = destination / "artifacts" / name
         path.parent.mkdir(parents=True, exist_ok=True)
