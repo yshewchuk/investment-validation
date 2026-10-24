@@ -467,6 +467,7 @@ skip = [
 ]
 tests = [
     "tests/v2/models/training/test_magnitude_elasticnet.py",
+    "tests/v2/models/training/test_magnitude_ridge_hgb.py",
     "tests/v2/models/training/test_magnitude_estimators.py",
     "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/test_v2_models_p5_2_acceptance.py",
@@ -500,6 +501,7 @@ skip = [
 ]
 tests = [
     "tests/v2/models/training/test_magnitude_elasticnet.py",
+    "tests/v2/models/test_magnitude_ridge_hgb_recipe.py",
     "tests/test_v2_models_admissible_table.py",
     "tests/test_v2_models_deployment.py",
     "tests/test_v2_models_inference.py",
