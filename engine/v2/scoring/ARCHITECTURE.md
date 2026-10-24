@@ -131,7 +131,7 @@ load-bearing entrypoints:
   `ModelNotReady` naming the member; a wrong artifact type is
   `ModelNotReady`). They only expose verified objects: choosing the one for a
   row's (models, cutoff) or event month, and declaring it, is the nightly
-  bundle's job (#1157 step 2); until then nothing consumes these fields.
+  bundle's job (`ops.native_entry_rule_inputs`).
   Picking the object matching a request's own `(strategy, alpha, cutoff)`
   and mapping a binding to specific forecast-output names is the per-night
   assembler's job, not this module's.
@@ -674,11 +674,32 @@ resolved driver identity, the row is refused with `MODEL_NOT_READY`. If no
 release resolves, `NoCurrentRelease` remains; a resolved binding missing
 required model roles keeps the native batch's existing per-row refusals.
 
-#### Proposed paired residual contract (issue #498; loading implemented by #1157 step 1, declaration not)
+#### Paired residual and entry-rule declarations (issue #498)
 
-The release binding already loads and exposes the typed `paired_residual_pool`
-members (`paired_residual_artifacts`, above); the recipe derivation and
-bundle declaration described below are not implemented yet.
+The release binding loads and exposes the typed `paired_residual_pool` and
+`trailing_pnl_cutoff` members (above). `ops.native_entry_rule_inputs.
+entry_rule_declarations` selects from them, for one gate-less sized-put row,
+the unique paired pool whose key equals `(size model_id, iv_crush model_id,
+row cutoff)` and the unique trailing cutoff for the event month, and returns
+`paired_residual_artifact`, a `paired_residual_recipe` carrying only that key
+and the artifact's content hash, `trailing_cutoff_artifact`, and a
+`gate_recipe` `{"mode": "entry_rule", "mcap_usd": <declared fact or None>}`.
+`source_inputs` turns that gate recipe into `native_entry_rule.entry_rule_block`
+over `SourceBundle.trailing_cutoff_artifact` (a missing artifact is carried as
+`None` so the stage refuses `MODEL_NOT_READY`; a rule for a strategy outside
+`ENTRY_RULE_STRATEGIES` or extra recipe members is `ValueError`). A missing or
+ambiguous pool or cutoff, an unusable `mcap_usd`, or a non-finite value raises
+`NightlySourceBundleRefusal("MODEL_NOT_READY")` for that row only; the
+declaration is pure (no I/O, cache, retry, transaction or partial write) and
+equal inputs give equal output. The gate branch also validates any declared
+`gate_forecast_source`/`gate_forecast_pool` exactly as the model-gate branch does.
+
+| Condition | Outcome |
+|---|---|
+| Strategy outside `ENTRY_RULE_STRATEGIES`, no unique paired pool for `(size, iv_crush, cutoff)`, no unique trailing cutoff for the event month, unparsable event date, or `mcap_usd` that is a bool, string or non-finite | `NightlySourceBundleRefusal("MODEL_NOT_READY")`, fixed detail, that row only |
+| `mcap_usd` is `None` | Declared; the rule's verdict is undetermined (`MISSING_FEATURES` flag) |
+| Gate recipe with members other than `mode`/`mcap_usd`, a non-entry-rule strategy, a wrongly typed or orphan `trailing_cutoff_artifact`, no artifact and no `context.event_date`, or an invalid declared gate source | `ValueError` from the source-input builder |
+| No release family staged | The binding tuple is empty and the row refuses as above |
 
 Legacy `Scorer._residual_pool` (`engine/score.py:3687`) joins Tier-4
 forecasts, panel outcomes and realized crush on `(ticker,event_date)`.
@@ -693,11 +714,12 @@ artifact; `tools/phase5_prepare_release.py:215` stages its typed document.
 Use standard promotion. It records schema, model IDs, exclusive cutoff,
 lineage and hash; no request fallback, rebuild or invented residuals.
 
-The proposed `resolve_release_binding` path in `engine/v2/scoring/release_bindings.py`
-loads the typed member into `ScoringReleaseBinding` with its artifact and derived
-recipe. Derive the recipe only from the verified artifact key/hash; requests
-cannot override it or reintroduce per-row pools. Missing or malformed paired
-state raises `ModelNotReady` (`MODEL_NOT_READY`) atomically for the release;
+`resolve_release_binding` in `engine/v2/scoring/release_bindings.py`
+loads the typed member into `ScoringReleaseBinding`; the recipe is derived only
+from the verified artifact key/hash, and requests
+cannot override it or reintroduce per-row pools. A malformed or unloadable paired
+member raises `ModelNotReady` (`MODEL_NOT_READY`) atomically for the release; an
+absent family is an empty tuple and only the rows that need it refuse;
 model-role gaps retain their existing per-row refusals. A valid zero-row artifact is not a
 refusal and preserves the legacy thin-pool/undetermined outcome. Changed
 releases use the standard rebuild and promotion path; old releases have no fallback.
@@ -707,7 +729,7 @@ structure before returning the binding and before bundle assembly or scoring.
 `SourceBundle.paired_residual_artifact` and `.paired_residual_recipe` already exist (`engine/v2/scoring/source_inputs.py:301`);
 `paired_arrays_from_artifact` (`engine/v2/scoring/native_residuals.py:73`) can
 return `MODEL_NOT_READY` when `residuals` is also declared or its artifact is
-missing or mismatches the expected key/hash. The proposed release loader
+missing or mismatches the expected key/hash. The release loader
 validates before constructing `NativeScoreInputs` and owns the atomic release-wide
 refusal before row scoring; direct blocks that bypass it can still reach this
 helper's defensive refusal.

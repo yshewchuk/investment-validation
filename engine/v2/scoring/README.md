@@ -127,7 +127,9 @@ failure rather than a stale sentence.
 `fit_runup_payoff_surface`) to build a payoff-calibration artifact from
 causal source rows -- the one place besides this package's own
 compatibility path that fitting math runs, and it is layer 6 importing
-layer 5 (strictly lower), never the reverse. `engine.v2.ops.cli` imports
+layer 5 (strictly lower), never the reverse. `engine.v2.ops.native_entry_rule_inputs`
+imports `native_entry_rule.ENTRY_RULE_STRATEGIES`, `NightlySourceBundleRefusal`,
+`ModelIdentity` and `ScoringReleaseBinding`. `engine.v2.ops.cli` imports
 `score_one`, `NativeScoreInputs` and `StageReceipt` for the read-only
 `ops rescore` command, which re-scores one already-captured event inside a
 `no_fit_guard()` block. `engine.v2.serving.native_render` (layer 7) imports
@@ -165,8 +167,8 @@ features (event history, market/regime block) come from `feature_vector`, which
 still wins for any derived column it declares; `dte_entry` is scorer-computed
 (from the priced legs and quote date) and no longer projected.
 
-The current builder is deliberately bounded to STR-THRU and its declared
-recipes. To add another strategy or recipe, extend `source_inputs.py` and add
+The current builder is deliberately bounded to its supported strategies
+(`SUPPORTED_STRATEGIES`) and their declared recipes. To add another strategy or recipe, extend `source_inputs.py` and add
 tests proving both execution from source inputs and rejection of injected
 answers. Do not bypass the boundary by hand-constructing `NativeScoreInputs`
 from legacy-selected contracts, forecasts, prices, simulation results, gate
