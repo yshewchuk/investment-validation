@@ -74,6 +74,36 @@ def test_preflight_preserves_features_stale_code(case, tmp_path):
     assert err.value.problem.details["reason"] == "mismatch"
 
 
+def test_preflight_refuses_source_change_during_feature_comparison(
+        case, tmp_path, monkeypatch):
+    from engine.v2.ops import features_compare
+
+    source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
+    _accept(case, source, "preflight-source-race")
+    original_compare = features_compare.compare_tables
+    changed = False
+
+    def compare_then_change(name, rebuilt, pinned_path):
+        nonlocal changed
+        result = original_compare(name, rebuilt, pinned_path)
+        if name == "panel" and not changed:
+            changed = True
+            panel = pd.read_parquet(rebuilt)
+            panel.loc[0, "value"] = 0.75
+            panel.to_parquet(rebuilt, index=False)
+        return result
+
+    monkeypatch.setattr(features_compare, "compare_tables", compare_then_change)
+    with pytest.raises(OpsError) as err:
+        run_preflight(case.conn, case.store, source_root=source,
+                      materialization_root=pinned, receipt_id="preflight-source-race")
+
+    assert changed
+    assert err.value.code == "FEATURES_STALE"
+    assert err.value.problem.details["reason"] == "comparison_failed"
+    assert err.value.problem.details["exception_type"] == "ValueError"
+
+
 def test_preflight_preserves_generation_input_changed_code(case, tmp_path):
     source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
     _accept(case, source, "preflight-generation-stale")

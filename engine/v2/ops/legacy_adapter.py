@@ -154,7 +154,7 @@ def covered_tickers(value, tickers):
     return _finality.covered_tickers(value, tickers, reads=_FINALITY_READS)
 
 
-PREFLIGHT_MAX_HASH_BYTES = 512 * 1024 * 1024
+PREFLIGHT_MAX_HASH_BYTES = 2 * 1024 * 1024 * 1024
 
 
 def _digest(path: Path, *, keepalive: Callable[[], None] | None = None,
@@ -718,7 +718,7 @@ def _feature_file_hashes(root, *, max_bytes=None):
 
 
 def _compare_to_pinned(materialization_root, hashes, *, rebuilt_root=None,
-                       max_hash_bytes=None):
+                       max_hash_bytes=None, compare_source=False):
     from engine import paths
     from engine.v2.ops import features_compare as fc
 
@@ -740,8 +740,10 @@ def _compare_to_pinned(materialization_root, hashes, *, rebuilt_root=None,
         pinned_path = root / relative
         pinned[name] = (_feature_sha256(pinned_path, max_hash_bytes)
                         if pinned_path.is_file() else None)
-        # Byte-identical tables skip the diff; provenance stamps are still validated (stamp columns only).
-        if hashes[f"{name}_sha256"] is not None and hashes[f"{name}_sha256"] == pinned[name]:
+        # Preflight must read the source path itself; an earlier hash cannot
+        # authorize a pinned-only shortcut after the source may have changed.
+        if (not compare_source and hashes[f"{name}_sha256"] is not None
+                and hashes[f"{name}_sha256"] == pinned[name]):
             tables[name] = fc.compare_identical(name, pinned_path)
         else:
             tables[name] = fc.compare_tables(name, rebuilt, pinned_path)
@@ -792,7 +794,10 @@ def run_snapshot_preflight(conn, store, *, source_root, materialization_root, re
             source, max_bytes=PREFLIGHT_MAX_HASH_BYTES)
         comparison = _compare_to_pinned(
             pinned, source_hashes, rebuilt_root=source,
-            max_hash_bytes=PREFLIGHT_MAX_HASH_BYTES)
+            max_hash_bytes=PREFLIGHT_MAX_HASH_BYTES, compare_source=True)
+        if _feature_file_hashes(
+                source, max_bytes=PREFLIGHT_MAX_HASH_BYTES) != source_hashes:
+            raise ValueError("source feature tables changed during comparison")
     except Exception as exc:
         raise fail(
             "FEATURES_STALE",
