@@ -72,18 +72,10 @@ from checks.rearchitecture_phase6_restore_drill import (  # noqa: E402
 )
 from engine.v2.foundation import ArtifactStore, Clock, SystemClock, format_timestamp  # noqa: E402
 from engine.v2.ops import publication  # noqa: E402
-from engine.v2.ops.backup import (  # noqa: E402
-    MAX_MANIFEST_BYTES,
-    _hash_file,
-    _open_checked,
-    _validated_manifest_shape,
-    prepare_backup,
-    restore_backup,
-    run_backup,
-)
-from engine.v2.ops.workflows.commands import read_bounded_bytes  # noqa: E402
+from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
+from engine.v2.ops.fingerprints import file_hash  # noqa: E402
 from engine.v2.ops.outbox import fail_effect  # noqa: E402
 
 __all__ = ["OpsFailureDrillError", "run_drill", "main"]
@@ -133,64 +125,25 @@ class _Deployment:
     backup_root: Path
 
 
-def _file_matches(path: Path, *, digest, expected_size, stage: str) -> bool:
-    """One manifest-selected file: a regular, non-symlink file within the byte
-    cap, matching the size the manifest records (when it records one) and
-    hashing to the digest it records. Every malformed path or I/O or hash
-    refusal is a FAIL, never a raise."""
-    try:
-        stream, _ = _open_checked(path, stage=stage, expected_size=expected_size)
-        stream.close()
-    except (OSError, OpsError, ValueError):
-        return False
-    try:
-        return _hash_file(path, stage=stage, announce=False) == digest
-    except (OSError, OpsError, ValueError):
-        return False
-
-
 def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
-    """This drill's own byte-level consistency check: the manifest names the
-    key and schema, has a valid legacy shape with safe single-filename paths,
-    and the database file it selects (falling back to legacy ``<key>.sqlite``)
-    and each artifact copy are regular non-symlink files within the byte cap
-    that match their recorded size (where the manifest records one) and hash to
-    their recorded digest. Malformed shape/path and any I/O or hash failure is
-    never verified."""
-    if not isinstance(manifest, dict):
-        return False
+    """The same byte-level checks ``run_backup`` itself makes: the manifest
+    names the key and schema, and every file it hashes (the database, and each
+    artifact copy) still hashes to the recorded digest."""
     if manifest.get("schema_version") != "catalog_backup.v1.0":
         return False
     if manifest.get("backup_key") != key:
         return False
-    try:
-        database_name, artifacts, database_size = _validated_manifest_shape(
-            manifest, current=False)
-    except (AttributeError, TypeError, ValueError):
+    database_name = manifest.get("database_file", key + ".sqlite")
+    if not isinstance(database_name, str) or Path(database_name).name != database_name:
         return False
-    if not _file_matches(root / database_name, digest=manifest.get("database"),
-                         expected_size=database_size, stage="drill database"):
+    database = root / database_name
+    if not database.is_file() or file_hash(database) != manifest.get("database"):
         return False
-    for name, info in artifacts.items():
-        if not _file_matches(root / "artifacts" / name,
-                             digest=info.get("content_hash"),
-                             expected_size=info.get("byte_size"),
-                             stage="drill artifact"):
+    for name, info in manifest.get("artifacts", {}).items():
+        path = root / "artifacts" / name
+        if not path.is_file() or file_hash(path) != info.get("content_hash"):
             return False
     return True
-
-
-def _read_verified_backup_manifest(path: Path, root: Path, key: str) -> tuple:
-    """The bounded manifest load as one decision: read at most
-    ``MAX_MANIFEST_BYTES`` through ``read_bounded_bytes``, then consistency-
-    check the bytes only if they parse as JSON. A missing, oversize,
-    malformed, symlinked or non-regular manifest is ``(None, False)`` --
-    never verified."""
-    try:
-        manifest = json.loads(read_bounded_bytes(path, MAX_MANIFEST_BYTES))
-    except (OSError, ValueError, RecursionError):
-        return None, False
-    return manifest, _manifest_is_consistent(manifest, root, key)
 
 
 def _run_after_good_release(deployment: _Deployment) -> dict:
@@ -290,8 +243,9 @@ def _run_before_any_release(deployment: _Deployment) -> dict:
 
         manifest_path = deployment.backup_root / (key + ".manifest.json")
         manifest_present = manifest_path.is_file()
-        manifest, manifest_verified = _read_verified_backup_manifest(
-            manifest_path, deployment.backup_root, key)
+        manifest = json.loads(manifest_path.read_text()) if manifest_present else None
+        manifest_verified = manifest_present and _manifest_is_consistent(
+            manifest, deployment.backup_root, key)
         row = conn.execute(
             "SELECT effect_id, claim_token, claimed_by, state FROM outbox "
             "WHERE kind='backup' AND logical_key=?", (key,)).fetchone()
