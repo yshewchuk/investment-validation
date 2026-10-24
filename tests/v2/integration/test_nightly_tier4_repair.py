@@ -1312,7 +1312,7 @@ def test_run_nightly_refuses_stale_gspc_coverage_and_rotation(
             "ok": False, "reason": "credential_rotated"}
     else:
         assert caught.value.detail == (
-            "GSPC_REFRESH_STALE: expected through 2012-10-26, got source ending before cutoff")
+            "GSPC_REFRESH_STALE: expected through 2012-10-26, got source missing or ending before cutoff")
         assert captured["report"].steps["gspc_refresh"] == {
             "ok": False, "reason": "stale_source"}
     assert len(calendar_refreshes) == 1, "the calendar refresh runs exactly once"

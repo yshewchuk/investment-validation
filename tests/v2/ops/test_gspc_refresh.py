@@ -124,6 +124,21 @@ def test_stale_source_leaves_file_untouched(tmp_path):
     assert path.stat().st_mtime_ns == mtime
 
 
+def test_stale_source_skipping_cutoff_with_later_max_is_refused(tmp_path):
+    """A history missing the cutoff is refused even when its last date is later."""
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, DATES[:-1])
+    mtime = path.stat().st_mtime_ns
+    fetcher = StubFetcher(body=_body(["2026-08-25", "2026-08-26", "2026-08-28"]))
+
+    result = refresh_gspc_daily(fetcher, path, minimum_last_date="2026-08-27")
+
+    assert result == {"ok": False, "reason": "stale_source"}
+    assert len(fetcher.calls) == 1
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == mtime
+
+
 def test_invalid_minimum_last_date_is_refused(tmp_path):
     """A minimum_last_date that is not a date is refused before writing."""
     path = tmp_path / "gspc_daily.csv"

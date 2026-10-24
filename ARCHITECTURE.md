@@ -476,7 +476,7 @@ Only a tracked path absent from the worktree reads as empty.
 - **Legacy nightly — `engine.dashboard.nightly`.** The board in production
   today. When refresh and tiers are enabled, after resolving the final board
   date and before its panel rebuild it refreshes the legacy `^GSPC` daily
-  series and verifies it reaches the previous trading session for that
+  series and verifies it contains the previous trading session for that
   resolved date, then
   follows the load-bearing order: refresh →
   validate → warm Tier-4 serving models → score → ledger → render → selfcheck → publish → flags → backup,

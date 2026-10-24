@@ -1583,7 +1583,7 @@ def run_nightly(
                     raise _refuse(
                         report, "gspc_refresh",
                         f"GSPC_REFRESH_STALE: expected through {pd.Timestamp(expected).date()}, "
-                        "got source ending before cutoff",
+                        "got source missing or ending before cutoff",
                     )
                 raise _refuse(report, "gspc_refresh", "GSPC_REFRESH_FAILED: " + str(result.get("reason", "unknown")))
         except CredentialRotated as exc:

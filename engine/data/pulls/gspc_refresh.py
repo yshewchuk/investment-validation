@@ -170,9 +170,11 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None,
     ``shrunk`` / ``older_than_existing`` / ``history_changed`` /
     ``unreadable`` / ``unwritable`` / ``invalid_cutoff``. When
     ``minimum_last_date`` is given, its type is validated before fetching and
-    the fresh series' coverage is checked after parse; both checks run before
-    the lock or any file read or write, so an invalid or stale cutoff leaves
-    the target file untouched. A timezone-aware cutoff, ``pd.NaT``, or a
+    the fresh series' coverage is checked after parse; when a cutoff is
+    supplied, the fetched coverage must contain the exact cutoff session and
+    extend at least through it. Both checks run before the lock or any file
+    read or write, so an invalid or stale cutoff leaves the target file
+    untouched. A timezone-aware cutoff, ``pd.NaT``, or a
     numeric cutoff (including numpy numeric scalars and booleans) returns
     ``invalid_cutoff``; naive date values normalize and use the existing
     freshness comparison.
@@ -223,8 +225,11 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None,
     if frame is None:
         return _finish({"ok": False, "reason": "unparseable"}, started)
 
-    if minimum is not None and frame["date"].max().normalize() < minimum:
-        return _finish({"ok": False, "reason": "stale_source"}, started)
+    if minimum is not None:
+        latest = frame["date"].max().normalize()
+        contains_cutoff = bool((frame["date"] == minimum).any())
+        if latest < minimum or not contains_cutoff:
+            return _finish({"ok": False, "reason": "stale_source"}, started)
 
     # The read-compare-replace section below is serialized against a
     # concurrent refresh of the same file through an exclusive flock on a

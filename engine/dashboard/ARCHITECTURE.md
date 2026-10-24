@@ -25,8 +25,10 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   calendar refresh resolves the final board date, but before any Tier-3 panel
   rebuild, when both `refresh` and `tiers` are enabled (including fetch-only
   runs). The coverage cutoff is the last NYSE session strictly before the
-  resolved decision date, not the requested date. A failed refresh, or a
-  successful refresh whose source ends before that cutoff, stops with typed
+  resolved decision date, not the requested date. A fetched series must
+  contain that exact session date; a later maximum date does not cover a
+  missing cutoff session. A failed refresh, or a source missing the cutoff,
+  stops with typed
   `NightlyStop` step `gspc_refresh`. This cutoff uses `projected_trading_days`
   with the calendar's scheduled holidays and `UNSCHEDULED_CLOSURES`, so
   checking it does not read the stored GSPC file. The helper checks minimum coverage before
@@ -211,9 +213,9 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   are enabled, ordinary helper refusal stops full and fetch-only runs with
   `GSPC_REFRESH_FAILED: <reason>`; credential rotation uses the fixed detail
   `GSPC_REFRESH_FAILED: credential_rotated`. A source response that does not
-  cover the last NYSE session strictly before the decision date stops with
-  `GSPC_REFRESH_STALE: expected through <date>, got source ending before
-  cutoff`. Both are `NightlyStop` at `gspc_refresh`, after calendar refresh
+  contain the last NYSE session strictly before the resolved decision date
+  stops with `GSPC_REFRESH_STALE: expected through <date>, got source missing
+  or ending before cutoff`. Both are `NightlyStop` at `gspc_refresh`, after calendar refresh
   and finality resolution but before panel rebuild, validation or scoring. The
   source coverage cutoff is computed from the rule-based NYSE calendar and the
   resolved board date without reading `GSPC_DAILY`; the guarded
