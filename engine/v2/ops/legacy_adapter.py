@@ -177,22 +177,25 @@ def _digest(path: Path, *, keepalive: Callable[[], None] | None = None,
 
 
 def _digest_open_file(path: Path, *, keepalive: Callable[[], None] | None = None,
-                      max_bytes: int | None = None) -> tuple[str, int]:
+                      max_bytes: int | None = None,
+                      label: str | None = None) -> tuple[str, int]:
     """Hash one opened regular file descriptor and report its observed size."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    shown = label or str(path)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
         raise fail("INPUT_CHANGED", "legacy read-set member could not be opened",
-                   details={"path": str(path)}) from exc
+                   details={"path": shown,
+                            "reason": "generation_read_failed"}) from exc
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             raise fail("INPUT_CHANGED", "legacy read-set member is not a regular file",
-                       details={"path": str(path)})
+                       details={"path": shown})
         if max_bytes is not None and info.st_size > max_bytes:
             raise fail("INPUT_CHANGED", "legacy read-set member exceeds the preflight hash byte cap",
-                       details={"path": str(path), "reason": "hash_file_over_cap",
+                       details={"path": shown, "reason": "hash_file_over_cap",
                                 "max_bytes": max_bytes})
         digest = hashlib.sha256()
         total = 0
@@ -202,14 +205,14 @@ def _digest_open_file(path: Path, *, keepalive: Callable[[], None] | None = None
                 total += len(chunk)
                 if max_bytes is not None and total > max_bytes:
                     raise fail("INPUT_CHANGED", "legacy read-set member exceeds the preflight hash byte cap",
-                               details={"path": str(path), "reason": "hash_file_over_cap",
+                               details={"path": shown, "reason": "hash_file_over_cap",
                                         "max_bytes": max_bytes})
                 digest.update(chunk)
                 if keepalive is not None:
                     keepalive()
         if total != info.st_size:
             raise fail("INPUT_CHANGED", "legacy read-set member changed while hashing",
-                       details={"path": str(path)})
+                       details={"path": shown})
         return "sha256:" + digest.hexdigest(), info.st_size
     finally:
         if descriptor >= 0:
@@ -248,7 +251,7 @@ def manifest_files(root: Path | str, paths: tuple[str, ...] | list[str], *,
             raise fail("INPUT_CHANGED", "legacy read-set member is missing or indirect",
                        details={"path": relative})
         content_hash, byte_size = _digest_open_file(
-            source, keepalive=keepalive, max_bytes=max_file_bytes)
+            source, keepalive=keepalive, max_bytes=max_file_bytes, label=relative)
         result[relative] = {"content_hash": content_hash, "byte_size": byte_size}
     return result
 
@@ -786,7 +789,8 @@ def _compare_to_pinned(materialization_root, hashes, *, rebuilt_root=None,
         pinned_after = (_feature_sha256(pinned_path, max_hash_bytes)
                         if pinned_path.is_file() else None)
         if pinned_after != pinned[name]:
-            raise ValueError("pinned feature table changed during comparison")
+            raise fail("FEATURES_STALE", "pinned feature table changed during comparison",
+                       details={"reason": "pinned_table_changed", "table": name})
     verdict = "match" if all(t["verdict"] == "match" for t in tables.values()) else "mismatch"
     return {"comparison": {"id": fc.COMPARISON_ID, "rtol": fc.FEATURES_RTOL,
                            "atol": fc.FEATURES_ATOL},
@@ -841,8 +845,11 @@ def run_snapshot_preflight(conn, store, *, source_root, materialization_root, re
                 source, max_bytes=PREFLIGHT_MAX_HASH_BYTES) != source_hashes:
             raise ValueError("source feature tables changed during comparison")
     except Exception as exc:
-        if (isinstance(exc, OpsError) and exc.code == "INPUT_CHANGED"
-                and exc.problem.details.get("reason") == "hash_file_over_cap"):
+        code = exc.code if isinstance(exc, OpsError) else None
+        reason = (exc.problem.details.get("reason")
+                  if isinstance(exc, OpsError) else None)
+        if (code, reason) in {("INPUT_CHANGED", "hash_file_over_cap"),
+                              ("FEATURES_STALE", "pinned_table_changed")}:
             raise
         raise fail(
             "FEATURES_STALE",

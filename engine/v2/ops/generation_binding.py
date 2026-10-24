@@ -128,6 +128,10 @@ _MAX_LINEAGE_DEPTH = 64
 _PRICE_HISTORY_CAPTURE_LINEAGE = "price_history_capture"
 MAX_LEGACY_MANIFEST_BYTES = 16 * 1024 * 1024
 
+#: Distinguishes "``accepted`` not supplied" from a supplied ``None``
+#: (receipt not found) in :func:`refuse_generation_mismatch`.
+_NOT_SUPPLIED = object()
+
 
 def accepted_generation_refs(conn, store, *, receipt_id: str) -> dict[str, str] | None:
     """``{path: content_hash}`` of ONE SPECIFIC committed import receipt's own
@@ -181,16 +185,18 @@ def record_price_history_lineage(conn, *, receipt_id: str, base_receipt_id: str)
 
 
 def refuse_generation_mismatch(conn, store, *, receipt_id: str, barrier_manifest: dict,
-                               accepted: dict[str, str] | None = None) -> None:
+                               accepted: dict[str, str] | None | object = _NOT_SUPPLIED) -> None:
     """Refuse ``INPUT_CHANGED`` when ``barrier_manifest`` (the raw
     ``LegacyInputManifest`` document a barrier job just pinned) disagrees
     with the plan's pinned generation receipt (``generation_mismatch``), or
     when that exact receipt no longer resolves at all
     (``generation_receipt_missing``). An empty ``receipt_id`` is a
-    deliberate no-op for isolated callers — see the module docstring."""
+    deliberate no-op for isolated callers — see the module docstring. An
+    omitted ``accepted`` looks the receipt up; a supplied ``None`` is the
+    receipt-not-found answer itself."""
     if not receipt_id:
         return
-    if accepted is None:
+    if accepted is _NOT_SUPPLIED:
         accepted = accepted_generation_refs(conn, store, receipt_id=receipt_id)
     if accepted is None:
         raise fail("INPUT_CHANGED",
