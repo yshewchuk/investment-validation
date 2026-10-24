@@ -71,8 +71,10 @@ from checks.rearchitecture_phase6_restore_drill import (  # noqa: E402
     _fenced_claim,
 )
 from engine.v2.foundation import (  # noqa: E402
-    ArtifactError, ArtifactStore, Clock, SystemClock, format_timestamp,
-    safe_relative_path,
+    ArtifactStore,
+    Clock,
+    SystemClock,
+    format_timestamp,
 )
 from engine.v2.foundation.artifacts import read_bounded_bytes  # noqa: E402
 from engine.v2.ops import publication  # noqa: E402
@@ -82,6 +84,7 @@ from engine.v2.ops.backup import (  # noqa: E402
     prepare_backup,
     restore_backup,
     run_backup,
+    validate_backup_artifact_manifest,
     verified_file_hash,
 )
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
@@ -148,20 +151,9 @@ def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
                     database, expected_size=database_size,
                     stage="drill backup database") != manifest.get("database")):
             return False
-        artifacts = manifest.get("artifacts", {})
-        if not isinstance(artifacts, dict):
-            return False
+        artifacts = manifest.get("artifacts")
+        validate_backup_artifact_manifest(root, artifacts, require_sizes=True)
         for name, info in artifacts.items():
-            try:
-                parts = safe_relative_path(name)
-            except ArtifactError:
-                return False
-            if len(parts) != 1:
-                return False
-            if (not isinstance(info, dict)
-                    or type(info.get("byte_size")) is not int
-                    or info["byte_size"] < 0):
-                return False
             path = root / "artifacts" / name
             if verified_file_hash(
                     path, expected_size=info["byte_size"],

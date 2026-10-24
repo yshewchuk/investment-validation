@@ -25,7 +25,7 @@ from engine.v2.foundation import (
 )
 from engine.v2.foundation.artifacts import read_bounded_bytes
 from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.outbox import claim, complete, enqueue
 
 MAX_MANIFEST_BYTES = 1024 * 1024
@@ -243,7 +243,7 @@ def _stage_copy(conn, target, key, *, keepalive=None):
             last_log = now
 
     try:
-        backup_to(conn, staged, progress=progress)
+        backup_to(conn, staged, progress=progress, keepalive=keepalive)
         elapsed = time.monotonic() - started
         _log(f"database-copy: complete bytes={total_bytes} elapsed={elapsed:.1f}s "
              f"rss_max_kib={_rss_max_kib()}")
@@ -273,7 +273,8 @@ def _install_stage(staged, target, key, source_rows, *, keepalive=None):
         except OSError:
             raise fail("WORKER_FAILED", "backup database publish failed") from None
         digest = verified_file_hash(target / name, expected_size=size,
-                                    stage="installed backup database")
+                                    stage="installed backup database",
+                                    keepalive=keepalive)
         return name, digest
     finally:
         staged.unlink(missing_ok=True)
@@ -282,7 +283,12 @@ def _install_stage(staged, target, key, source_rows, *, keepalive=None):
 def _copy_artifacts(refs, store, target, fault, *, keepalive=None):
     copied = {}
     for name, ref in refs.items():
-        source = store.verify(ref)
+        if ref.byte_size > MAX_BACKUP_FILE_BYTES:
+            raise fail("INTEGRITY_FAILED", f"artifact {name} exceeds the backup file size limit")
+        try:
+            source = store.verify(ref, max_bytes=ref.byte_size)
+        except ArtifactError:
+            raise fail("INTEGRITY_FAILED", f"artifact {name} verification failed") from None
         destination = target / "artifacts" / name
         ensure_directory(destination.parent)
         source_stream, _ = _open_checked(
@@ -474,6 +480,10 @@ def _verify_durable_manifest(target, key, manifest, *, keepalive=None):
                                   keepalive=keepalive) != info.get("content_hash"):
                 return False
         return True
+    except OpsError as exc:
+        if exc.code in {"LEASE_LOST", "CANCELLED"}:
+            raise
+        return False
     except Exception:
         return False
 
@@ -517,6 +527,7 @@ def _verified_delivered_backup_receipt(conn, key, target, *, keepalive=None):
     target = Path(target)
     if target.is_symlink():
         raise fail("INVALID_REQUEST", "backup target is a symlink")
+    target = target.resolve()
     if refs and (target / "artifacts").is_symlink():
         raise fail("INTEGRITY_FAILED", "delivered backup artifacts directory is a symlink")
     durable = _durable_manifest(target / (key + ".manifest.json"), key,
@@ -526,7 +537,7 @@ def _verified_delivered_backup_receipt(conn, key, target, *, keepalive=None):
     return receipt
 
 
-def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=None):
+def _run_backup_impl(conn, *, key, owner, target, clock, store, fault=None, keepalive=None):
     _validated_key(key)
     effect = claim(conn, "backup", owner=owner, clock=clock, logical_key=key)
     if effect is None:
@@ -594,14 +605,26 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
     return manifest
 
 
-def _validate_restore_artifacts(source, artifacts):
+def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=None):
+    try:
+        return _run_backup_impl(conn, key=key, owner=owner, target=target,
+                                clock=clock, store=store, fault=fault,
+                                keepalive=keepalive)
+    except OSError:
+        raise fail("WORKER_FAILED", "backup storage operation failed") from None
+
+
+def validate_backup_artifact_manifest(source, artifacts, *, require_sizes=False):
+    """Validate artifact names, metadata and directory for every backup reader."""
+    if not isinstance(artifacts, dict):
+        raise ValueError("invalid artifacts mapping")
     for name, info in artifacts.items():
         _single_filename(name)
         if (not isinstance(info, dict) or not isinstance(info.get("content_hash"), str)
-                or ("byte_size" in info
-                    and (type(info["byte_size"]) is not int or info["byte_size"] < 0))):
+                or (require_sizes or "byte_size" in info)
+                and (type(info.get("byte_size")) is not int or info["byte_size"] < 0)):
             raise ValueError("invalid artifact metadata")
-    artifact_root = source / "artifacts"
+    artifact_root = Path(source) / "artifacts"
     if artifacts and (artifact_root.is_symlink() or not artifact_root.is_dir()):
         raise ValueError("invalid artifact directory")
 
@@ -614,13 +637,13 @@ def _read_restore_manifest(source, manifest_path):
         database_source = manifest_database_path(source, manifest)
         database_hash = manifest.get("database")
         database_size = manifest.get("database_size")
-        artifacts = manifest.get("artifacts", {})
+        artifacts = manifest.get("artifacts")
         if (not isinstance(database_hash, str)
                 or (database_size is not None
                     and (type(database_size) is not int or database_size < 0))
                 or not isinstance(artifacts, dict)):
             raise ValueError("invalid manifest fields")
-        _validate_restore_artifacts(source, artifacts)
+        validate_backup_artifact_manifest(source, artifacts)
         return database_source, database_hash, database_size, artifacts
     except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
         raise fail("INTEGRITY_FAILED", "backup manifest is malformed or unsafe") from None

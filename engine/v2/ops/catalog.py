@@ -89,7 +89,8 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 
 
 def backup_to(conn: sqlite3.Connection, dest: Path | str, *,
-              progress: Callable[[int, int, int], None] | None = None) -> None:
+              progress: Callable[[int, int, int], None] | None = None,
+              keepalive: Callable[[], None] | None = None) -> None:
     """A consistent copy through the online backup API, integrity-checked."""
     dest = Path(dest)
     if dest.exists():
@@ -97,7 +98,17 @@ def backup_to(conn: sqlite3.Connection, dest: Path | str, *,
     target = sqlite3.connect(str(dest))
     try:
         conn.backup(target, pages=_BACKUP_PAGE_BATCH, progress=progress)
-        problems = integrity_errors(target)
+        if keepalive is None:
+            problems = integrity_errors(target)
+        else:
+            def pulse() -> int:
+                keepalive()
+                return 0
+            target.set_progress_handler(pulse, 10000)
+            try:
+                problems = integrity_errors(target)
+            finally:
+                target.set_progress_handler(None, 0)
     finally:
         target.close()
     if problems:
