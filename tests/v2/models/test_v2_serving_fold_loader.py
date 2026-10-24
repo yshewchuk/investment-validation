@@ -94,6 +94,16 @@ def test_one_decode_existing_executor_matches_legacy(setup, monkeypatch):
     assert setup[2].release.bindings[0].adapter == "json-linear.v1"
 
 
+def test_declared_object_bytes_are_enforced(setup):
+    _, _, _, path, _ = setup
+    size = path.stat().st_size
+    ref = _load(setup, expected_bytes=size)
+    assert ref.pool_pred == (0.1, 0.2)
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$") as caught:
+        _load(setup, expected_bytes=size + 1)
+    assert caught.value.code == MODEL_NOT_READY
+
+
 def test_warm_legacy_entry_reused_and_limit_never_relaxes(setup, monkeypatch):
     inference, descriptor, parent, path, _ = setup
     binding = replace(parent.release.bindings[0], adapter="tier4-serving-fold.v1",

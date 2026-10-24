@@ -280,6 +280,16 @@ does not establish full-universe fit. The real fix is the bounded/chunked
 read design tracked by issue #505; 3 GiB only buys headroom until that
 lands. Profile capacity is unchanged by this routing: ``native_score_batch``
 shares the existing 3 GiB reservation, no bytes change.
+
+v11 (2026-10-24) raises ``scratch_bytes`` from 4 GiB to 6 GiB for exactly the
+four profiles a kind that stages the legacy read set can carry --
+``projection``, ``validation``, ``legacy_score``, ``model_evidence`` (all of
+them go through the same ``_pin_read_set``/``_populate_legacy_staging``
+barrier). Basis: the 2026-10-23 plan's read set measured 4,372,938,136 bytes
+-- already over the old 4 GiB reservation -- growing at roughly 100 MB/day;
+6 GiB buys about two weeks at that rate (issue #1268). This is headroom, not
+a fix: the bounded read set tracked by issue #505 is the real fix. Every other
+profile's scratch is unchanged.
 """
 from __future__ import annotations
 
@@ -291,9 +301,11 @@ __all__ = ["DEFAULT_POLICY", "GIB", "MIB", "POLICY_VERSION", "policy_problems", 
 GIB = 1 << 30
 MIB = 1 << 20
 
-# v10 adds a single-thread native smoke profile with the existing experiment
+# v10 added a single-thread native smoke profile with the existing experiment
 # memory/scratch reservation; it does not claim a measured full-universe fit.
-POLICY_VERSION = "ops_resources.2026-10-10.v10"
+# v11 raises the four legacy read-set-staging profiles' scratch from 4 GiB to
+# 6 GiB (issue #1268; the bounded read set, issue #505, is the real fix).
+POLICY_VERSION = "ops_resources.2026-10-24.v11"
 
 DEFAULT_POLICY = ResourcePolicy(
     version=POLICY_VERSION,
@@ -315,9 +327,11 @@ DEFAULT_POLICY = ResourcePolicy(
         # scratch bumped to the v4 basis (1.67 GiB measured + headroom).
         # INTERIM (v9): 3 GiB is sized from the observed 100-ticker render
         # only; it is NOT evidence of full-universe fit. The bounded/chunked
-        # read design tracked by issue #505 is the real fix.
+        # read design tracked by issue #505 is the real fix. Scratch raised
+        # 2026-10-24 (v11) from 4 GiB to 6 GiB with the other three
+        # read-set-staging profiles (issue #1268).
         ResourceProfile(name="projection", memory_bytes=3 * GIB, cpu_count=2,
-                        scratch_bytes=4 * GIB, heavy=False),
+                        scratch_bytes=6 * GIB, heavy=False),
         # The serialized selfcheck builds a bounded scorer of its own.
         # Lowered 2026-09-14 from 11/2 GiB to 5 GiB (right-sizing pass, ops
         # memory reservation review): the adapted legacy scoring path
@@ -333,8 +347,9 @@ DEFAULT_POLICY = ResourcePolicy(
         # whose barrier-path read set measured 1.67 GiB on a real 4-ticker
         # snapshot nightly (see module docstring) -- 4 GiB is that plus
         # headroom, never a value chosen to make one run pass on paper.
+        # Scratch raised 2026-10-24 (v11) from 4 GiB to 6 GiB (issue #1268).
         ResourceProfile(name="validation", memory_bytes=5 * GIB, cpu_count=4,
-                        scratch_bytes=4 * GIB, heavy=True),
+                        scratch_bytes=6 * GIB, heavy=True),
         # Lowered 2026-09-14 from 11/2 GiB to 5 GiB for the same reason as
         # validation above: measured peak is 4.15 GiB tree RSS (2026-09-13
         # 38-request canary), so 5 GiB keeps 0.85 GiB of margin while fitting
@@ -356,8 +371,9 @@ DEFAULT_POLICY = ResourcePolicy(
         # capacity samples, why the margins are this thin, and the
         # unresolved risk for legacy_decision_replay specifically (no
         # completed watchdog peak exists for it).
+        # Scratch raised 2026-10-24 (v11) from 4 GiB to 6 GiB (issue #1268).
         ResourceProfile(name="legacy_score", memory_bytes=5 * GIB + GIB // 4, cpu_count=5,
-                        scratch_bytes=4 * GIB, heavy=True),
+                        scratch_bytes=6 * GIB, heavy=True),
         # legacy_model_evidence (store_domains read) stages the legacy read
         # set through the same barrier -- scratch bumped 2026-09-14 (v4) from
         # 1 GiB to the 1.67 GiB + headroom basis above. memory_bytes raised
@@ -368,9 +384,10 @@ DEFAULT_POLICY = ResourcePolicy(
         # the real worst-case peak down to 4866.2 MiB -- see the module
         # docstring's v8 entry for the full basis (three post-fix forced
         # rebuilds, 1-1.2s PSS sampling, and the headroom_bytes sample this
-        # reservation is checked against).
+        # reservation is checked against). Scratch raised 2026-10-24 (v11)
+        # from 4 GiB to 6 GiB (issue #1268).
         ResourceProfile(name="model_evidence", memory_bytes=5 * GIB,
-                        cpu_count=4, scratch_bytes=4 * GIB, heavy=True),
+                        cpu_count=4, scratch_bytes=6 * GIB, heavy=True),
         ResourceProfile(name="legacy_rebuild", memory_bytes=11 * GIB // 2, cpu_count=5,
                         scratch_bytes=20 * GIB, heavy=True, disk_heavy=True),
         # Covers the legacy_materialize worker (engine/v2/data/legacy_materialization.py

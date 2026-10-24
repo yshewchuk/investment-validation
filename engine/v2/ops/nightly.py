@@ -7,6 +7,7 @@ worker.  A shadow run accepts stage callables and records explicit degradation.
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping
@@ -1528,6 +1529,19 @@ def run_shadow_nightly(source_root: Path | str, private_root: Path | str,
 # --------------------------------------------------------------------------
 
 
+def _warn_scratch_level(profile, needed, kind):
+    """The #1268 above-90% diagnostic, fail-open: stderr only, and a broken
+    stderr (closed/broken pipe, OSError/ValueError on write) never turns the
+    warning into a plan failure."""
+    try:
+        pct = 100.0 * needed / profile.scratch_bytes
+        print(f"[plan] WARNING legacy read set {needed} B is {pct:.0f}% of profile "
+              f"{profile.name} scratch budget {profile.scratch_bytes} B (kind {kind})",
+              file=sys.stderr)
+    except (OSError, ValueError):
+        pass
+
+
 def plan_scratch_problems(conn, store, requests, *, policy=DEFAULT_POLICY, kind_registry=None):
     """Per-job scratch admission problems for an already-built request graph.
 
@@ -1552,7 +1566,10 @@ def plan_scratch_problems(conn, store, requests, *, policy=DEFAULT_POLICY, kind_
       ``legacy_manifest.json`` binding every stage in a legacy-mode plan does.
 
     Returns a list of problem dicts (empty means every job fits); never
-    raises on its own.
+    raises on its own. A read set that fits but is above 90% of its
+    profile's budget logs one fail-open stderr warning per profile (issue
+    #1268's early signal ahead of #505); it is never a problem and never
+    changes the returned list.
     """
     from engine.v2.ops.stages import registry as default_registry
     from engine.v2.ops.store_barrier import domains_of
@@ -1560,6 +1577,7 @@ def plan_scratch_problems(conn, store, requests, *, policy=DEFAULT_POLICY, kind_
     reg = kind_registry or default_registry()
     manifest_totals: dict[str, int] = {}
     problems = []
+    warned_profiles: set[str] = set()
     for request in requests:
         kind = request.job.kind
         parameters = request.job.parameters or {}
@@ -1581,6 +1599,10 @@ def plan_scratch_problems(conn, store, requests, *, policy=DEFAULT_POLICY, kind_
         if needed > profile.scratch_bytes:
             problems.append({"kind": kind, "profile": profile.name,
                              "needed_bytes": needed, "scratch_bytes": profile.scratch_bytes})
+        elif (needed > 0.9 * profile.scratch_bytes
+              and profile.name not in warned_profiles):
+            warned_profiles.add(profile.name)
+            _warn_scratch_level(profile, needed, kind)
     return problems
 
 

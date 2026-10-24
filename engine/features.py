@@ -56,6 +56,7 @@ __all__ = [
     "PANEL_FEATURE_COLUMNS",
     "OUTCOME_COLUMNS",
     "load_panel",
+    "clear_panel_caches",
     "panel_for_ticker",
     "build_features",
     "panel_features",
@@ -306,6 +307,13 @@ def _panel_with_forecasts(panel_key: tuple, forecast_key: tuple) -> pd.DataFrame
         how="left",
     ).drop(columns=["event_date"])
     return joined.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+
+def clear_panel_caches() -> None:
+    """Free the cached Tier-3 panel and forecast frames; the next load_panel() re-reads."""
+    _panel_cached.cache_clear()
+    _forecasts_cached.cache_clear()
+    _panel_with_forecasts.cache_clear()
 
 
 def load_panel(path=None, *, with_forecasts: bool = False) -> pd.DataFrame:

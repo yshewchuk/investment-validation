@@ -415,8 +415,8 @@ Split list (code, in order; estimates in #822): 1 catalog `retrain_cutoff`, stag
 ## 3. Inputs
 
 **Forward serving-fold contract.** Offline descriptor authoring is described
-below; verified loading is defined below, while selection and scoring
-integration remain design only.
+below; verified loading is defined below. Size-fold selection is implemented in
+`engine/v2/scoring/gate_fold_selection.py`; batch wiring remains design only.
 Monthly folds
 are separate from the full-refit champion bindings. A `ServingFoldRef`
 identifies one release-owned `tier4_folds:size` estimator object, its model,
@@ -433,7 +433,10 @@ Selection uses the exact earlier of the event month and decision month,
 the registered size model and feature order, and the pinned panel byte hash.
 It never chooses the newest available fold or substitutes a full-refit model.
 The panel hash comes from the already-pinned snapshot's single original
-`feature_panel` object; an unsupported multi-fragment layout is refused.
+`feature_panel` object; an unsupported multi-fragment layout is refused. The
+scoring selector (`gate_fold_selection.py`) applies the month rule and the
+release-staged descriptor checks only; comparing the descriptor's panel hash
+with the pinned snapshot is the batch wiring's duty, not yet built.
 Snapshot ID, dataset version and panel byte hash remain distinct identities.
 Selection returns a separate content-addressed, single-binding inference view
 linked to its parent release and descriptor; it does not mutate or promote the
@@ -442,8 +445,8 @@ that binding through `FrozenInference`; no second prediction engine is added.
 
 | Forward fold condition | Outcome |
 |---|---|
-| Exact model/month/panel match, verified metadata and pool | Return immutable selected fold and provenance |
-| Missing, duplicate, future, wrong-panel or incompatible fold | `MODEL_NOT_READY`; no older-model or training fallback |
+| Exact model/month match (and, once batch wiring compares the pinned panel hash, panel match), verified metadata and pool | Return immutable selected fold and provenance |
+| Missing, duplicate, future or incompatible fold (and, once batch wiring compares the pinned panel hash, wrong-panel fold) | `MODEL_NOT_READY`; no older-model or training fallback |
 | Corrupt, oversized, escaped-path or header/descriptor mismatch | `MODEL_NOT_READY` before inference; redact filesystem details |
 | Old cache lacks held-out pool or declared interval policy | Refuse; never rebuild the pool during scoring |
 
@@ -536,8 +539,9 @@ Training frame-value, membership and label receipts do not supply that proof.
 descriptor against a verified parent manifest and catalog identity, returning
 a `ServingFoldRef` with immutable metadata/pools, its shared `FrozenInference`
 owner and an ephemeral single-binding inference view. The view identity binds
-parent, catalog and descriptor; it is never staged or promoted. Selection,
-catalog discovery and source-bundle wiring remain separate work. Loaders are read-only:
+parent, catalog and descriptor; it is never staged or promoted. Size-fold catalog
+indexing and causal selection live in `engine/v2/scoring/gate_fold_selection.py`
+(see the scoring ARCHITECTURE). Loaders are read-only:
 no writes/transactions/retries. Refused calls return no reference but may retain a
 hash-verified decoded artifact in the shared cache; each call still validates its
 metadata and descriptor. Identical verified inputs produce identical references.
@@ -643,7 +647,9 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
 `from engine.v2.models import deployment`, checked against `README.md`'s
 `<!-- consumers: ... -->` directive):
 
-- `engine.v2.scoring` — the verified frozen inference contract/loader for
+- `engine.v2.scoring` — `gate_fold_selection.py` calls `load_serving_fold`,
+  `validate_serving_fold_object` and `validate_serving_fold_descriptor` from
+  `serving_fold_loader`; the verified frozen inference contract/loader for
   the model stage, the payoff-calibration artifact type, and
   `release_bindings.py`'s reads of `deployment.current_pointer`,
   `deployment._read_manifest`, `deployment._manifest_hash_matches`,
