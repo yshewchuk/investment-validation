@@ -19,6 +19,7 @@ from engine.v2.models.serving_fold_loader import (
     load_serving_fold,
     validate_serving_fold_descriptor,
 )
+from engine.v2.models.serving_fold_preflight import describe_size_fold
 from engine.v2.models.serving_folds import SizeFoldPolicy
 from engine.v2.scoring.gate_fold_selection import (
     SizeFoldCatalog,
@@ -28,7 +29,6 @@ from engine.v2.scoring.gate_fold_selection import (
 from engine.v2.scoring.release_bindings import ModelNotReady, resolve_release_binding
 from tests.fixtures.size_serving_header import HEADER
 from tests.v2.models.serving_fold_support import fold_bytes, fold_name, release_inputs
-from tools.phase5_serving_folds import describe_size_fold
 
 MEMBER = "tier4_folds:size"
 CATALOG_MEMBER = "phase5_release.json"
