@@ -725,6 +725,7 @@ Backup retention is applied per backup scope and runs only after a successful ba
 | Live attempt with a missing or duplicate request binding | `INPUT_CHANGED`; no new deletion. |
 | Lease renewal failure during retention | `LEASE_LOST`; work stops. |
 | Journal write or backup unlink `OSError` | `BACKUP_FAILED`; earlier unlinks may persist with a valid journal for retry. |
+| Stale journal temporary-file cleanup `OSError` | `BACKUP_FAILED`; no retention target is deleted. |
 | Journal clear `OSError` after unlinks | `BACKUP_FAILED`; target deletion is complete and the journal may be absent; the next run is a no-op. |
 | Current backup keep limit rises above the journaled limit | `INTEGRITY_FAILED`; no journal targets are removed. |
 | Known incomplete backup candidate from a pending/failed outbox row | Residue is retained untouched; verified backups may be planned after all preflight succeeds. |

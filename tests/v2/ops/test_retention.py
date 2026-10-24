@@ -13,6 +13,7 @@ import pytest
 
 import engine.v2.ops.fingerprints as fingerprints_module
 import engine.v2.ops.retention as retention_module
+import engine.v2.ops.snapshot_stages as snapshot_stages_module
 from engine.v2.foundation import ArtifactError
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import file_hash
@@ -1606,3 +1607,23 @@ def test_journal_clear_failure_refuses_after_backup_deletion(
     assert (scope / "b2.manifest.json").is_file()
     assert (scope / "artifacts" / "new.bin").is_file()
     assert not (ops / ".retention-journal.json").exists()
+
+
+@pytest.mark.parametrize("max_bytes", [float("inf"), float("-inf"), float("nan"),
+                                        True, -1, 1.5])
+def test_request_artifact_rejects_invalid_byte_limit_before_reads(max_bytes):
+    with pytest.raises(OpsError) as caught:
+        snapshot_stages_module.request_from_artifact(
+            None, None, "request", max_bytes=max_bytes)
+    assert caught.value.code == "INVALID_REQUEST"
+    assert caught.value.problem.details["reason_key"] == "artifact_byte_limit_invalid"
+
+
+def test_stray_backup_scope_file_refuses_with_exact_reason(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00")
+    (scope / "unexpected.tmp").write_bytes(b"unexpected")
+
+    _refusal(ops, ops, catalog, "backup_scope_stray_file",
+             keep=1, materialization_keep=1)

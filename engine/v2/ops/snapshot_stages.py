@@ -138,6 +138,10 @@ def _catalog_path(conn) -> str:
 
 
 def _read_json(conn, store, artifact_id, *, max_bytes=None):
+    if max_bytes is not None and (isinstance(max_bytes, bool)
+                                  or not isinstance(max_bytes, int) or max_bytes < 0):
+        raise fail("INVALID_REQUEST", "artifact byte limit must be a non-negative integer",
+                   details={"reason_key": "artifact_byte_limit_invalid"})
     ref = registered_artifact(conn, artifact_id, max_metadata_bytes=max_bytes)
     if max_bytes is not None and ref.byte_size > max_bytes:
         raise fail("INTEGRITY_FAILED",
