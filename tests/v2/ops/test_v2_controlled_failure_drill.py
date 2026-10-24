@@ -23,6 +23,15 @@ def test_manifest_check_honors_selected_file_and_refuses_symlink(tmp_path):
     }
 
     assert _manifest_is_consistent(manifest, tmp_path, "drill")
+    database.write_bytes(content + b"corrupt")
+    assert not _manifest_is_consistent(manifest, tmp_path, "drill")
+    database.write_bytes(content)
+    (tmp_path / "drill.sqlite").write_bytes(content)
+    missing_database_file = dict(manifest)
+    missing_database_file.pop("database_file")
+    assert not _manifest_is_consistent(missing_database_file, tmp_path, "drill")
+    null_database_file = dict(manifest, database_file=None)
+    assert not _manifest_is_consistent(null_database_file, tmp_path, "drill")
     missing_artifacts = dict(manifest)
     missing_artifacts.pop("artifacts")
     assert not _manifest_is_consistent(missing_artifacts, tmp_path, "drill")

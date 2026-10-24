@@ -142,7 +142,8 @@ def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
     """Check identity and hashes with the production bounded file reader."""
     try:
         if (manifest.get("schema_version") != "catalog_backup.v1.0"
-                or manifest.get("backup_key") != key):
+                or manifest.get("backup_key") != key
+                or not isinstance(manifest.get("database_file"), str)):
             return False
         database = manifest_database_path(root, manifest)
         database_size = manifest.get("database_size")

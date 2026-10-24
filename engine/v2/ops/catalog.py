@@ -101,14 +101,28 @@ def backup_to(conn: sqlite3.Connection, dest: Path | str, *,
         if keepalive is None:
             problems = integrity_errors(target)
         else:
+            keepalive_error = []
+
             def pulse() -> int:
-                keepalive()
+                try:
+                    keepalive()
+                except BaseException as exc:
+                    keepalive_error.append(exc)
+                    return 1
                 return 0
+
             target.set_progress_handler(pulse, 10000)
             try:
-                problems = integrity_errors(target)
+                try:
+                    problems = integrity_errors(target)
+                except sqlite3.Error:
+                    if keepalive_error:
+                        raise keepalive_error[0] from None
+                    raise
             finally:
                 target.set_progress_handler(None, 0)
+            if keepalive_error:
+                raise keepalive_error[0] from None
     finally:
         target.close()
     if problems:

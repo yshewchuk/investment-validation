@@ -104,8 +104,11 @@ def _validated_key(key):
 
 
 def manifest_database_path(root, manifest):
-    name = manifest.get("database_file")
-    if name is None:
+    if "database_file" in manifest:
+        name = manifest["database_file"]
+        if not isinstance(name, str):
+            raise ValueError("invalid database file")
+    else:
         name = _single_filename(manifest.get("backup_key")) + ".sqlite"
     return Path(root) / _single_filename(name)
 
@@ -440,7 +443,8 @@ def _copy_verified_file(source, destination, *, expected_size, expected_hash, st
 
 
 def _verified_database(target, manifest, *, keepalive=None):
-    if (type(manifest.get("database_size")) is not int
+    if (not isinstance(manifest.get("database_file"), str)
+            or type(manifest.get("database_size")) is not int
             or manifest["database_size"] < 0
             or not isinstance(manifest.get("database_rows"), dict)):
         return False
@@ -655,7 +659,8 @@ def _restore_manifest_rows(manifest, manifest_path):
 
 
 def _restore_manifest_sizes(manifest):
-    current = "database_file" in manifest
+    current = any(field in manifest for field in (
+        "database_file", "database_size", "database_rows"))
     database_file = manifest.get("database_file")
     database_size = manifest.get("database_size")
     if current and not isinstance(database_file, str):

@@ -82,6 +82,7 @@ def test_restore_requires_artifacts_mapping(tmp_path):
     ("database_rows", {}, False),
     ("database_size", None, True),
     ("database_file", None, False),
+    ("database_file", None, True),
 ])
 def test_restore_rejects_manifest_identity_or_row_count_mismatch(
         tmp_path, field, value, remove):
@@ -157,9 +158,16 @@ def test_backup_integrity_scan_renews_keepalive(tmp_path, monkeypatch):
     monkeypatch.setattr(catalog_module, "integrity_errors", long_integrity_scan)
     backup_module.backup_to(
         source, tmp_path / "copy.sqlite", keepalive=lambda: renewed.append(True))
-    source.close()
-
     assert renewed
+
+    def lose_lease():
+        raise fail("LEASE_LOST", "synthetic backup keepalive loss")
+
+    with pytest.raises(OpsError) as lost:
+        backup_module.backup_to(
+            source, tmp_path / "lost.sqlite", keepalive=lose_lease)
+    assert lost.value.code == "LEASE_LOST"
+    source.close()
 
 
 def test_sqlite_progress_callback_preserves_lease_loss():
@@ -727,6 +735,9 @@ def test_manifest_database_path_uses_current_name_or_legacy_fallback(tmp_path):
         tmp_path / "b1.abc.sqlite"
     assert backup_module.manifest_database_path(
         tmp_path, {"backup_key": "b1"}) == tmp_path / "b1.sqlite"
+    with pytest.raises(ValueError):
+        backup_module.manifest_database_path(
+            tmp_path, {"backup_key": "b1", "database_file": None})
 
 
 def test_restore_accepts_legacy_manifest_without_size_fields(tmp_path):
@@ -766,6 +777,10 @@ def test_ack_loss_reuses_verified_backup_without_recopy(tmp_path, monkeypatch):
                    clock=clock, store=store, fault=crash_after_manifest)
     manifest_path = backup / "ack-loss.manifest.json"
     manifest_before = manifest_path.read_bytes()
+    payload = json.loads(conn.execute(
+        "SELECT payload_json FROM outbox WHERE logical_key='ack-loss'"
+    ).fetchone()[0])
+    assert json.loads(manifest_before)["cutoff"] == payload["cutoff"]
     clock.advance(3600)
 
     def unexpected_rebuild(*_args, **_kwargs):
@@ -812,6 +827,7 @@ def test_relative_backup_root_retry_after_manifest_crash_succeeds(tmp_path, monk
 def test_durable_manifest_propagates_lease_loss(tmp_path, monkeypatch):
     manifest = {
         "backup_key": "lease",
+        "database_file": "lease.sqlite",
         "database": "sha256:" + "0" * 64,
         "database_size": 0,
         "database_rows": {},
@@ -846,6 +862,11 @@ def test_durable_manifest_with_corrupt_database_is_not_reused(tmp_path):
     manifest_path = backup / "resume.manifest.json"
     manifest = json.loads(manifest_path.read_text())
     assert backup_module._durable_manifest(manifest_path, "resume", payload, refs) == manifest
+    assert not backup_module._verified_database(
+        backup, {**manifest, "database_file": None})
+    missing_file = dict(manifest)
+    missing_file.pop("database_file")
+    assert not backup_module._verified_database(backup, missing_file)
 
     manifest["artifacts"] = {}
     manifest_path.write_text(json.dumps(manifest))
