@@ -23,6 +23,7 @@ from engine.v2.foundation import (
     fsync_directory,
     safe_relative_path,
 )
+from engine.v2.foundation.artifacts import read_bounded_bytes
 from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
 from engine.v2.ops.errors import fail
 from engine.v2.ops.outbox import claim, complete, enqueue
@@ -89,11 +90,9 @@ def _single_filename(value):
 
 def _validated_key(key):
     try:
-        parts = safe_relative_path(key)
-    except ArtifactError:
+        _single_filename(key)
+    except ValueError:
         raise fail("INVALID_REQUEST", "unsafe backup key") from None
-    if len(parts) != 1:
-        raise fail("INVALID_REQUEST", "unsafe backup key")
     return key
 
 
@@ -258,6 +257,14 @@ def _stage_copy(conn, target, key, *, keepalive=None):
 def _install_stage(staged, target, key, source_rows, *, keepalive=None):
     try:
         _verify_staged(staged, source_rows, keepalive=keepalive)
+        try:
+            fd = os.open(staged, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            raise fail("WORKER_FAILED", "backup database stage sync failed") from None
         name = key + ".sqlite"
         size = staged.stat().st_size
         os.replace(staged, target / name)
@@ -475,7 +482,6 @@ def _durable_manifest(manifest_path, key, payload, refs, *, keepalive=None):
     """Return a verified prior only when it also matches this effect payload."""
     if not manifest_path.is_file():
         return None
-    from engine.v2.ops.workflows.commands import read_bounded_bytes
 
     try:
         manifest = json.loads(read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
@@ -600,8 +606,6 @@ def _validate_restore_artifacts(source, artifacts):
 
 
 def _read_restore_manifest(source, manifest_path):
-    from engine.v2.ops.workflows.commands import read_bounded_bytes
-
     try:
         manifest = json.loads(read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
         if not isinstance(manifest, dict):

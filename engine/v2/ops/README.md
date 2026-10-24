@@ -210,8 +210,9 @@ The top-level operator tool `tools/v2_restore_drill.py` consumes
 `backup.restore_backup` and `cli.rescore_command` to restore a local backup and
 replay a score offline; like other `tools/` callers it is outside the engine
 import graph and adds no engine dependency. The top-level operator tool
-`tools/v2_controlled_failure_drill.py` also consumes `backup.restore_backup`
-for controlled failure drills.
+`tools/v2_controlled_failure_drill.py` also consumes `backup.restore_backup`,
+`backup.manifest_database_path` and `backup.verified_file_hash` to validate
+selected backup files during controlled failure drills.
 
 The top-level `experiments/native_registration.py` library consumes the narrow
 registration surface above, including `native_registration.native_evidence_json` for bounded reservation serialization. Like other `experiments/` callers, it is outside
