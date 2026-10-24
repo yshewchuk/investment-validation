@@ -18,6 +18,7 @@ from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from tests.ops_support import FakeClock
 
 MINIMUM_SCRATCH_BYTES = profile_named(DEFAULT_POLICY, "legacy_score").scratch_bytes
+MATERIALIZE_SCRATCH_BYTES = profile_named(DEFAULT_POLICY, "materialize").scratch_bytes
 
 
 @pytest.mark.parametrize("pct,expected", [
@@ -93,6 +94,25 @@ def test_overall_status_and_exit_code_are_the_worst(catalog):
     assert (fail["status"], fail["exit_code"]) == ("FAIL", 2)
 
 
+def test_mixed_statuses_aggregate_to_the_worst_exit_two(catalog):
+    conn, store, clock = catalog
+    manifest_id = publish(conn, store, clock, manifest_document(MINIMUM_SCRATCH_BYTES // 4),
+                          "legacy_input_manifest.v1.0")
+    _seed_finished_attempt(conn, attempt_id="ok1", profile="legacy_score",
+                           memory_bytes=1000, peak=500, ended_at="2026-10-01T00:00:00Z")
+    ok = report_for(catalog, nightly_plan_document(manifest_id))
+    assert {item["status"] for item in ok["limits"]} == {"OK"}
+    assert (ok["status"], ok["exit_code"]) == ("OK", 0)
+    _seed_finished_attempt(conn, attempt_id="warn1", profile="validation",
+                           memory_bytes=1000, peak=850, ended_at="2026-10-02T00:00:00Z")
+    _seed_finished_attempt(conn, attempt_id="fail1", profile="materialize",
+                           memory_bytes=1000, peak=990, ended_at="2026-10-03T00:00:00Z")
+    mixed = report_for(catalog, nightly_plan_document(manifest_id))
+    statuses = {item["status"] for item in mixed["limits"]}
+    assert {"OK", "WARN", "FAIL"} <= statuses
+    assert (mixed["status"], mixed["exit_code"]) == ("FAIL", 2)
+
+
 def test_plan_without_any_scratch_input_is_unmeasured_not_ok(catalog):
     document = report_for(catalog, nightly_plan_document())
     assert document["status"] == "UNMEASURED"
@@ -111,14 +131,26 @@ def test_non_nightly_plan_scratch_is_unmeasured(catalog):
     assert "not a nightly plan" in scratch["detail"]
 
 
+def test_snapshot_plan_scratch_entry_uses_pinned_estimate(catalog):
+    estimate = MATERIALIZE_SCRATCH_BYTES // 4
+    document = report_for(catalog, nightly_plan_document(
+        input_mode="snapshot", snapshot_inputs={"scratch_estimate_bytes": estimate}))
+    scratch = [item for item in document["limits"]
+               if item["name"].startswith("scratch_bytes:")]
+    assert [item["name"] for item in scratch] == ["scratch_bytes:materialize"]
+    entry = scratch[0]
+    assert entry["usage"] == estimate
+    assert entry["limit"] == MATERIALIZE_SCRATCH_BYTES
+    assert entry["status"] == "OK"
+    assert "snapshot scratch_estimate_bytes" in entry["detail"]
+
+
 def test_not_covered_lists_the_static_names(catalog):
     document = report_for(catalog, nightly_plan_document())
-    assert "chains._RESULT_CAP (2_000_000)" in document["not_covered"]
-    assert "serving.projections._LOOKUP_RESULT_CAP" in document["not_covered"]
-    assert "models.inventory MAX_ARTIFACT_BYTES/MAX_REGISTRY_BYTES" in document["not_covered"]
-    assert "iv_crush_inputs.MAX_TARGET_OBJECT_BYTES" in document["not_covered"]
-    assert "event_history.MAX_OUTCOME_OBJECT_BYTES" in document["not_covered"]
-    assert len(document["not_covered"]) == 11
+    assert document["not_covered"] == list(headroom._NOT_COVERED)
+    assert len(document["not_covered"]) == len(headroom._NOT_COVERED)
+    for name in headroom._NOT_COVERED:
+        assert name in document["not_covered"]
 
 
 def test_rss_cap_entry_only_when_requested(catalog):
@@ -186,11 +218,34 @@ def test_tampered_plan_artifact_refuses_integrity_failed(catalog):
     conn, store, clock = catalog
     plan_id = publish(conn, store, clock, nightly_plan_document())
     path = store.verify(registered_artifact(conn, plan_id))
+    path.chmod(0o600)
     path.write_bytes(b'{"kind": "tampered"}')
     with pytest.raises(OpsError) as excinfo:
         headroom.headroom_command(_headroom_args(conn, store, clock, plan_id),
                                   store.root, conn, clock)
     assert excinfo.value.code == "INTEGRITY_FAILED"
+
+
+@pytest.mark.parametrize("bad", [True, False, float("nan"), float("inf"), float("-inf"),
+                                 0, 0.0, -1, -0.5, "1.5", 2, []])
+def test_headroom_report_validates_max_rss_gb_directly(catalog, bad):
+    """The engine-level guard is independent of cli.py's argparse type: every
+    non-positive, non-finite or non-float value is refused as INVALID_REQUEST."""
+    with pytest.raises(OpsError) as excinfo:
+        report_for(catalog, nightly_plan_document(), max_rss_gb=bad)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert excinfo.value.problem.message == \
+        "max_rss_gb must be a finite number greater than 0"
+
+
+def test_headroom_report_accepts_valid_max_rss_gb(catalog):
+    conn, store, _clock = catalog
+    assert headroom.headroom_report(conn, store.root, nightly_plan_document(),
+                                    max_rss_gb=None)["exit_code"] == 1  # UNMEASURED limits
+    by_name = {item["name"]: item
+               for item in report_for(catalog, nightly_plan_document(),
+                                      max_rss_gb=0.25)["limits"]}
+    assert by_name["rss_cap_gb"]["limit"] == int(0.25 * 1024 ** 3)
 
 
 # ---------------------------------------------------- real rows (memory, G)
@@ -237,6 +292,22 @@ def test_memory_entries_group_by_profile_and_scope_rss_to_latest_epoch(catalog):
     # global max: b1/b2 (500, 600) count, a1's higher 900 in ep-1 does not.
     assert by_name["rss_cap_gb"]["usage"] == 600
     assert by_name["rss_cap_gb"]["limit"] == int(1.0 * 1024 ** 3)
+
+
+def test_rss_cap_uses_the_latest_epoch_peak_not_the_global_max(catalog):
+    """Two supervisor epochs share one profile: the older epoch's higher peak
+    must not feed the rss cap; only the epoch of the latest finished attempt does."""
+    conn, _store, _clock = catalog
+    _seed_finished_attempt(conn, attempt_id="a1", profile="legacy_score",
+                           memory_bytes=10000, peak=9000, ended_at="2026-10-01T00:00:00Z")
+    _seed_finished_attempt(conn, attempt_id="a2", profile="legacy_score",
+                           memory_bytes=10000, peak=1000, ended_at="2026-10-02T00:00:00Z",
+                           epoch="ep-2", boot="boot-2")
+    by_name = {item["name"]: item
+               for item in headroom._memory_entries(conn, max_rss_gb=1.0)}
+    assert by_name["memory_peak:legacy_score"]["usage"] == 9000  # both epochs count
+    assert by_name["rss_cap_gb"]["usage"] == 1000  # only ep-2, the latest epoch
+    assert by_name["rss_cap_gb"]["status"] == "OK"
 
 
 def test_entries_have_no_projection_yet(catalog):

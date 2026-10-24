@@ -21,6 +21,7 @@ every entry keeps a ``projected_days_to_limit`` of ``None`` to hold the
 from __future__ import annotations
 
 import json
+import math
 import sys
 import time
 
@@ -219,6 +220,14 @@ def _memory_entries(conn, max_rss_gb):
 
 
 def headroom_report(conn, root, plan, *, max_rss_gb=None):
+    # Validate the cap here, not only through cli.py's argparse type: library
+    # callers bypass the parser, and bool/NaN/inf/0/negatives would otherwise
+    # reach the rss arithmetic (True silently meaning "1 GiB").
+    if max_rss_gb is not None and (
+            not isinstance(max_rss_gb, float)
+            or not math.isfinite(max_rss_gb) or max_rss_gb <= 0.0):
+        raise fail("INVALID_REQUEST",
+                   "max_rss_gb must be a finite number greater than 0")
     started = time.monotonic()
     print("[headroom] start", file=sys.stderr)
     store = ArtifactStore(root)
