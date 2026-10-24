@@ -111,6 +111,8 @@ def test_shared_declaration_exception_propagates_unchanged(monkeypatch):
 def test_no_caller_policy_injection(argument):
     with pytest.raises(TypeError, match="takes 0 positional arguments"):
         owner.policy_definitions(argument)
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        owner.policy_definitions(policy=argument)
 
 
 def test_policy_hashes_are_canonical_content_not_source_attestation():
@@ -142,7 +144,24 @@ def test_declared_existing_math_outputs_are_real_synthetic_outputs():
     runup = runup_math.add_runup_features(events, {"SYN": prices}, "date")
     market = prices.rename(columns={"close_adj": "close"})
     regime_values = regime.add_regime_features(events, market)
+    # Independent linear-price ratios, closed-form EMA and sample-volatility fixtures.
+    expected = {
+        "signed_streak": (0.0, 1.0), "dist_high": (0.0, 0.0),
+        "dist_ema": (39.156330872322506, 39.06402614162066),
+        "ret5": (1.243781094527363, 1.2406947890818865),
+        "ret10": (2.5188916876574208, 2.5125628140703515),
+        "ret20": (5.167958656330751, 5.154639175257736),
+        "spy_ret21": (5.440414507772018, 5.4263565891472965),
+        "spy_ret63": (18.313953488372103, 18.260869565217398),
+        "spy_ret252": (162.58064516129033, 161.53846153846155), "spy_dd252": (0.0, 0.0),
+        "spy_vol5": (0.01537865853928494, 0.015302806408497203),
+        "spy_vol20": (0.05976531498495605, 0.059464848697108046),
+        "spy_vol60": (0.19649281677968067, 0.19544833483601656),
+        "spy_vol252": (1.7320068898775558, 1.7175113885160873),
+        "spy_vol20_rel252": (-0.9654936043648296, -0.9653773191288793),
+    }
     declared = owner.policy_definitions()["derivation_policies"]
     for output, frame in [(name, runup) for name in _RUNUP] + [(name, regime_values) for name in _REGIME]:
         assert declared[output]["output"] == output
-        assert np.isfinite(frame[output].to_numpy()).all()
+        assert len(frame) == 2
+        assert frame[output].tolist() == pytest.approx(expected[output], rel=1e-10, abs=1e-10)

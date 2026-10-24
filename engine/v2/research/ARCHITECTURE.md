@@ -48,13 +48,13 @@ materializer, CLI, model or registration integration.
 
 Panel boundaries require plain JSON (nested history before normalization); detached refusals use `CONTRACT_MISMATCH`, native refusals propagate.
 
-`magnitude_panel_v2_policies.policy_definitions()` is P1a-1: detached `source_policies`,
+`magnitude_panel_v2_policies.policy_definitions()` returns detached `source_policies`,
 `derivation_policies`, `quote_indicator` and `missing_indicators` metadata from the
 [parity design](https://github.com/yshewchuk/investment-validation/blob/26b5958d868afc5189611aa77ec1774a9e246d71/experiments/SUPER_SIZE/STAGE2_DESIGN.md#incumbent-parity-amendment-october-24-design-only).
 It uses standard JSON copying and public `eligibility_policy` declarations, not a registry/parser.
-The separate P1a-2 dictionary/recipe factory binds these policies to source roles, subsets and ordered columns;
-P1a-1 declares requirements, not computations, qualified sources or snapshots. Only synthetic tests call it.
-No v2 dictionary/table/context, reader, model, compiler change or runtime activation exists in this slice.
+These closed policies declare logical inputs and arithmetic requirements; they do not bind a selected subset,
+compute features or qualify source snapshots. Only synthetic tests call this metadata factory.
+No v2 dictionary/table/context, reader, model, compiler change or runtime activation exists in this module.
 
 | Condition | Outcome |
 | --- | --- |
@@ -127,7 +127,7 @@ These CLI files sit outside `checks/import_layers.py`'s hook (it only parses
 `engine*` importers), so no `engine` package is recorded as importing this
 one; the library entrypoints below are this package's real public interface:
 
-`eligibility_policy.eligibility_policy`, `eligibility_policy.plan_eligibility`,
+`magnitude_panel_v2_policies.policy_definitions`, `eligibility_policy.eligibility_policy`, `eligibility_policy.plan_eligibility`,
 `experiment_population.canonical_events`, `experiment_trades.classify_events`,
 `snapshot_inputs.snapshot_reference`, `snapshot_inputs.admit_snapshot`,
 `signal_screen.run`, `fill_quality.run`, `polygon_fills.run`, `replay.replay`,

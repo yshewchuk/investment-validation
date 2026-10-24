@@ -207,9 +207,9 @@ context binds producer-declared label bounds without verifying them; neither the
 result nor the parent metadata-only context grants training, observed-PIT, holdout
 or stored-panel admission. There is no writer, CLI, fit or automatic execution.
 
-P1a-1 `magnitude_panel_v2_policies.policy_definitions()` returns detached, closed
+`magnitude_panel_v2_policies.policy_definitions()` returns detached, closed
 source/derivation/quote policy metadata and the family-owned missing-flag policy.
-Public grouped eligibility is declared, not applied. P1a-2 separately binds roles/subsets/projection.
+Grouped eligibility is declared, not applied; this module does not bind roles to selected subsets.
 Only synthetic tests consume it; no v2 dictionary, table, context, reader, source
 qualification, fit or search activation is provided. Resolved source snapshots
 must be bound separately by later native admission.
