@@ -644,7 +644,7 @@ def _restore_manifest_rows(manifest, manifest_path):
             or not isinstance(backup_key, str)
             or _single_filename(backup_key) != expected_key):
         raise ValueError("invalid backup identity")
-    if database_rows is None and manifest.get("database_file") is None:
+    if database_rows is None and "database_file" not in manifest:
         return None
     if (not isinstance(database_rows, dict)
             or any(not isinstance(name, str) or not name
@@ -654,22 +654,32 @@ def _restore_manifest_rows(manifest, manifest_path):
     return database_rows
 
 
+def _restore_manifest_sizes(manifest):
+    current = "database_file" in manifest
+    database_file = manifest.get("database_file")
+    database_size = manifest.get("database_size")
+    if current and not isinstance(database_file, str):
+        raise ValueError("invalid database file")
+    if current and (type(database_size) is not int or database_size < 0):
+        raise ValueError("invalid database size")
+    if database_size is not None and (type(database_size) is not int or database_size < 0):
+        raise ValueError("invalid database size")
+    return database_size, current
+
+
 def _read_restore_manifest(source, manifest_path):
     try:
         manifest = json.loads(read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
         if not isinstance(manifest, dict):
             raise ValueError("manifest must be an object")
         database_rows = _restore_manifest_rows(manifest, manifest_path)
+        database_size, current = _restore_manifest_sizes(manifest)
         database_source = manifest_database_path(source, manifest)
         database_hash = manifest.get("database")
-        database_size = manifest.get("database_size")
         artifacts = manifest.get("artifacts")
-        if (not isinstance(database_hash, str)
-                or (database_size is not None
-                    and (type(database_size) is not int or database_size < 0))
-                or not isinstance(artifacts, dict)):
+        if not isinstance(database_hash, str) or not isinstance(artifacts, dict):
             raise ValueError("invalid manifest fields")
-        validate_backup_artifact_manifest(source, artifacts)
+        validate_backup_artifact_manifest(source, artifacts, require_sizes=current)
         return database_source, database_hash, database_size, database_rows, artifacts
     except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
         raise fail("INTEGRITY_FAILED", "backup manifest is malformed or unsafe") from None

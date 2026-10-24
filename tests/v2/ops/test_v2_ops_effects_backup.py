@@ -43,14 +43,16 @@ def _row_counts(conn):
 def test_artifact_store_verify_respects_explicit_byte_cap(tmp_path):
     store = ArtifactStore(tmp_path / "objects")
     ref = store.publish_bytes(b"larger than cap", schema_ref="evidence.v1.0")
-    with pytest.raises(ArtifactError):
+    with pytest.raises(ArtifactError) as cap_refused:
         store.verify(ref, max_bytes=4)
+    assert cap_refused.value.code == "SIZE_LIMIT"
 
     source = store.root / ref.storage_key
     source.chmod(0o644)
     source.write_bytes(b"grown beyond the registered size")
-    with pytest.raises(ArtifactError):
+    with pytest.raises(ArtifactError) as grown_refused:
         store.verify(ref, max_bytes=ref.byte_size)
+    assert grown_refused.value.code == "SIZE_LIMIT"
 
 
 def test_restore_requires_artifacts_mapping(tmp_path):
@@ -78,6 +80,8 @@ def test_restore_requires_artifacts_mapping(tmp_path):
     ("schema_version", "catalog_backup.v9.0", False),
     ("backup_key", "different-key", False),
     ("database_rows", {}, False),
+    ("database_size", None, True),
+    ("database_file", None, False),
 ])
 def test_restore_rejects_manifest_identity_or_row_count_mismatch(
         tmp_path, field, value, remove):
@@ -93,6 +97,26 @@ def test_restore_rejects_manifest_identity_or_row_count_mismatch(
         manifest.pop(field)
     else:
         manifest[field] = value
+    manifest_path.write_text(json.dumps(manifest))
+
+    destination = tmp_path / "restored"
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, destination)
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert not destination.exists()
+
+
+def test_restore_requires_current_manifest_artifact_sizes(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"required size", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "missing-artifact-size", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key="missing-artifact-size", owner="worker", target=backup,
+               clock=clock, store=store)
+    manifest_path = backup / "missing-artifact-size.manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifacts"]["evidence.bin"].pop("byte_size")
     manifest_path.write_text(json.dumps(manifest))
 
     destination = tmp_path / "restored"
@@ -161,7 +185,8 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
     restored = restore_backup(backup, tmp_path / "restored")
     artifact = restored / "artifacts" / "evidence.bin"
     assert artifact.read_bytes() == b"evidence"
-    original = artifact.read_bytes()
+    original = b"preexisting destination sentinel"
+    artifact.write_bytes(original)
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "delivered"
     with pytest.raises(OpsError) as refused:
         restore_backup(backup, tmp_path / "restored")
