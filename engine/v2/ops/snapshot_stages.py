@@ -138,7 +138,7 @@ def _catalog_path(conn) -> str:
 
 
 def _read_json(conn, store, artifact_id, *, max_bytes=None):
-    ref = registered_artifact(conn, artifact_id)
+    ref = registered_artifact(conn, artifact_id, max_metadata_bytes=max_bytes)
     if max_bytes is not None and ref.byte_size > max_bytes:
         raise fail("INTEGRITY_FAILED",
                    "live materialization request artifact exceeds the byte limit",

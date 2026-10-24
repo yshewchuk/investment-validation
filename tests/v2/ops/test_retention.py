@@ -13,6 +13,7 @@ import pytest
 
 import engine.v2.ops.fingerprints as fingerprints_module
 import engine.v2.ops.retention as retention_module
+from engine.v2.foundation import ArtifactError
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.retention import enforce_retention
@@ -666,6 +667,20 @@ def test_file_hash_negative_max_bytes_refuses_empty_file(tmp_path):
     assert caught.value.problem.details["max_bytes"] == -1
 
 
+@pytest.mark.parametrize("bad", [True, False, -1, 1.5, "10"])
+@pytest.mark.parametrize("reader", [file_hash, fingerprints_module.atomic_file_info],
+                         ids=["file_hash", "atomic_file_info"])
+def test_invalid_max_bytes_refuses_with_typed_error(tmp_path, reader, bad):
+    path = tmp_path / "payload.bin"
+    path.write_bytes(b"payload")
+
+    with pytest.raises(OpsError) as caught:
+        reader(path, max_bytes=bad)
+
+    assert caught.value.code == "INVALID_REQUEST"
+    assert caught.value.problem.details == {"max_bytes": bad}
+
+
 def test_file_hash_reports_cumulative_bytes_to_on_progress(tmp_path):
     path = tmp_path / "payload.bin"
     payload = b"x" * 2304000
@@ -1042,6 +1057,30 @@ def test_corrupt_live_request_artifact_refuses_as_integrity_failed(
                                      "attempt_id": "att_live"}
 
 
+def test_artifact_error_from_live_request_artifact_refuses_as_integrity_failed(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, LIVE_HASH.removeprefix("sha256:"), 1)
+    _materialization_dir(base, "root-old", 2)
+    _live_attempt(catalog, [(REQUEST_BINDING, "art_live")])
+
+    def missing(conn, store, artifact_id, *, max_bytes=None):
+        raise ArtifactError("MISSING", artifact_id)
+
+    monkeypatch.setattr(retention_module, "request_from_artifact", missing)
+
+    before = _files(tmp_path)
+    error = _refusal(tmp_path, ops, catalog, "live_request_artifact_invalid",
+                     keep=1, materialization_keep=1)
+
+    assert error.code == "INTEGRITY_FAILED"
+    assert error.problem.details == {"reason_key": "live_request_artifact_invalid",
+                                     "attempt_id": "att_live"}
+    assert _files(tmp_path) == before
+
+
 def test_oversized_live_request_artifact_refuses_before_store_read(
         tmp_path, catalog, monkeypatch):
     ops = tmp_path / "ops"
@@ -1061,7 +1100,10 @@ def test_oversized_live_request_artifact_refuses_before_store_read(
 
     store = StoreSpy()
 
-    def registered_artifact(conn, artifact_id):
+    captured_max = []
+
+    def registered_artifact(conn, artifact_id, *, max_metadata_bytes=None):
+        captured_max.append(max_metadata_bytes)
         return SimpleNamespace(byte_size=retention_module.MAX_LIVE_SPEC_BYTES + 1,
                                content_hash="sha256:" + "0" * 64,
                                artifact_id=artifact_id)
@@ -1076,6 +1118,7 @@ def test_oversized_live_request_artifact_refuses_before_store_read(
 
     assert caught.value.code == "INTEGRITY_FAILED"
     assert caught.value.problem.details["reason_key"] == "live_request_too_large"
+    assert captured_max == [retention_module.MAX_LIVE_SPEC_BYTES]
     assert _files(tmp_path) == before
     assert store.read_verified_calls == []
 

@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from engine.v2.foundation import fsync_directory, safe_relative_path
+from engine.v2.foundation import ArtifactError, fsync_directory, safe_relative_path
 from engine.v2.ops.catalog import decode_bounded_text, integrity_errors, sql_text_budget
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import NotRegularFile, atomic_file_info, file_hash
@@ -162,8 +162,9 @@ def _journal_backup_parts(relative):
     parts = relative.split("/")
     if len(parts) not in (3, 4) or parts[0] != "backups":
         return None
-    if any(part in ("", ".", "..") or "\\" in part or "\x00" in part
-           for part in parts):
+    try:
+        safe_relative_path(relative)
+    except ArtifactError:
         return None
     _safe_name(parts[1])
     if len(parts) == 3:
@@ -193,7 +194,7 @@ def _journal_tree_directories(value):
     return value
 
 def _journal_relative_path_safe(parts, relative):
-    if not parts or "\\" in relative or "\x00" in relative:
+    if "\\" in relative or "\x00" in relative:
         return False
     return all(part not in ("", ".", "..") for part in parts)
 
@@ -798,6 +799,12 @@ def _live_spec_malformed(attempt_id):
                 details={"reason_key": "live_job_spec_malformed",
                          "attempt_id": attempt_id})
 
+def _live_request_artifact_invalid(attempt_id):
+    return fail("INTEGRITY_FAILED",
+                "live materialization request artifact is invalid",
+                details={"reason_key": "live_request_artifact_invalid",
+                         "attempt_id": attempt_id})
+
 def _live_spec(attempt_id, spec_bytes, spec_json, encoding, limit):
     if spec_json is None:
         if spec_bytes is not None and spec_bytes > limit:
@@ -875,10 +882,9 @@ def _live_roots(base, conn, store, keepalive=None):
             except OpsError as error:
                 if error.code != "INPUT_CHANGED":
                     raise
-                raise fail("INTEGRITY_FAILED",
-                           "live materialization request artifact is invalid",
-                           details={"reason_key": "live_request_artifact_invalid",
-                                    "attempt_id": attempt_id}) from None
+                raise _live_request_artifact_invalid(attempt_id) from None
+            except ArtifactError:
+                raise _live_request_artifact_invalid(attempt_id) from None
             _renew(keepalive)
             roots.add(materialization_root(base, request.request_hash).name)
         return roots
