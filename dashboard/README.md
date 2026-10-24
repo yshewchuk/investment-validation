@@ -310,8 +310,8 @@ Order matters; each step gates the next.
    days. A dead credential stops the run; any other calendar refresh failure
    degrades to cached data and raises `refresh_degraded` — staleness stays
    visible in `meta.json` instead of going silent. The separate guarded `^GSPC`
-   refresh runs before the panel rebuild; a failed fetch or source ending
-   before the prior NYSE session refuses the nightly with
+   refresh runs before the panel rebuild; a failed fetch or source lacking
+   the prior NYSE session refuses the nightly with
    `GSPC_REFRESH_FAILED` or `GSPC_REFRESH_STALE`, preserving the old panel and
    stored series. Correct the source or credential and retry on the next
    nightly or a manual rerun.
