@@ -374,8 +374,12 @@ def test_invalid_explicit_keep_values_refuse_without_deleting(
     _materialization_dir(base, "root-new", 2)
     kwargs = {"keep": value} if label == "backup" else {"materialization_keep": value}
 
-    _refusal(tmp_path, ops, catalog, f"{label}_keep_invalid",
-             code="INVALID_REQUEST", **kwargs)
+    error = _refusal(tmp_path, ops, catalog, f"{label}_keep_invalid",
+                     code="INVALID_REQUEST", **kwargs)
+
+    assert error.code == "INVALID_REQUEST"
+    assert error.problem.details["reason_key"] == f"{label}_keep_invalid"
+    assert error.problem.message == f"{label} keep must be a positive integer"
 
 
 def test_interrupted_remove_tree_root_mode_refuses_before_any_deletion(
@@ -1245,7 +1249,7 @@ def test_database_verification_logs_bounded_stage_and_progress(
     assert progress
     assert len(progress) >= 2
     for e in progress:
-        assert "rate_per_s" in e
+        assert e["rate_per_s"] > 0
         assert "eta_s" in e
         assert e["total"] is None and e["eta_s"] is None
         assert e["done"] >= 1 and "elapsed_s" in e and "rss_peak_mb" in e

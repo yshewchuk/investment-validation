@@ -19,6 +19,12 @@ from engine.v2.foundation import ensure_directory, safe_relative_path
 from engine.v2.ops.errors import fail
 
 
+def _check_max_bytes(max_bytes):
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+        raise fail("INVALID_REQUEST", "max_bytes must be a nonnegative integer",
+                   details={"max_bytes": max_bytes})
+
+
 def file_hash(path, *, keepalive: Callable[[], None] | None = None,
               max_bytes: int | None = None,
               on_progress: Callable[[int], None] | None = None):
@@ -26,9 +32,7 @@ def file_hash(path, *, keepalive: Callable[[], None] | None = None,
     each read to the remaining ceiling plus one probe byte, failed typed
     before that probe byte is hashed; ``on_progress`` (if given) receives the
     cumulative bytes read after each hashed chunk."""
-    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
-        raise fail("INVALID_REQUEST", "max_bytes must be a nonnegative integer",
-                   details={"max_bytes": max_bytes})
+    _check_max_bytes(max_bytes)
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
         while True:
@@ -127,9 +131,7 @@ def atomic_file_info(path, *, keepalive: Callable[[], None] | None = None,
     nonblocking flags; the pinned descriptor is checked before and after the
     read, as is the path's identity, so a replaced or modified file refuses.
     """
-    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
-        raise fail("INVALID_REQUEST", "max_bytes must be a nonnegative integer",
-                   details={"max_bytes": max_bytes})
+    _check_max_bytes(max_bytes)
     fd, pinned = _open_pinned_regular(path)
     try:
         digest, total = _read_pinned_digest(

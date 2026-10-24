@@ -231,7 +231,7 @@ def test_remove_tree_reports_progress_after_each_removal(tmp_path):
                                on_progress=lambda done, total: progress.append((done, total)))
 
     assert progress == [(1, 6), (2, 6), (3, 6), (4, 6), (5, 6), (6, 6)]
-    assert len(renewals) >= 12
+    assert len(renewals) == 3 + 3 * 2 + 2 * 2 + 2
     assert not root.exists()
 
 
