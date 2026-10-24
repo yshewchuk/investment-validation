@@ -441,6 +441,9 @@ def _materialization_plan(ops_root, keep, conn, store, base=None, keepalive=None
             if item.is_symlink() or not item.is_dir():
                 raise fail("INTEGRITY_FAILED", "materialization entry is not a directory",
                            details={"reason_key": "materialization_entry_invalid"})
+            if stat.S_IMODE(os.lstat(item).st_mode) != 0o555:
+                raise fail("INTEGRITY_FAILED", "materialization root is not mode 0555",
+                           details={"reason_key": "materialization_root_incomplete"})
             entries.append(item)
             done += 1
             progress.tick(done)

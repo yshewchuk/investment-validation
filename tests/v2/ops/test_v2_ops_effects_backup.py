@@ -8,7 +8,8 @@ from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
 from engine.v2.ops.effects_graph import backup_effect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
-from tests.ops_support import catalog
+from engine.v2.ops.supervisor import Service
+from tests.ops_support import REGISTRY, TEST_POLICY, catalog
 from tests.v2.ops.test_v2_ops_effects_graph import (
     SESSION, _commit, _open, _params, _row, _seed_decisions, _submit_and_claim,
 )
@@ -258,5 +259,38 @@ def test_backup_effect_propagates_retention_sentinel_after_successful_backup(tmp
         backup_wm = conn.execute("SELECT occurrence FROM watermarks WHERE pipeline='nightly' "
                                  "AND scope=? AND stage='backup'", (scope,)).fetchone()
         assert backup_wm["occurrence"] == SESSION
+    finally:
+        conn.close()
+
+
+def test_coordinator_effect_dispatches_configured_materialization_base(tmp_path, monkeypatch):
+    """Synthetic: the ``backup`` branch of ``supervisor.Service._coordinator_effect``
+    must dispatch to ``backup_effect`` with the service's configured
+    ``materialization_base`` passed through unchanged; the effect itself is
+    stubbed at the ``supervisor`` module binding and captures its kwargs. The
+    claim is made under the frozen ``scheduler.Supervisor`` identity (the
+    object ``_open`` returns), while ``_coordinator_effect`` is the real
+    ``supervisor.Service`` method, constructed here with the configured
+    materialization base."""
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        _seed_decisions(conn, clock, scope, SESSION, predictions=[_row("evt-1", "pred")])
+        claim = _submit_and_claim(conn, clock, supervisor, kind="backup", key="backup-1",
+                                  parameters=_params("backup", SESSION, scope))
+        configured_base = tmp_path / "custom-materialization-base"
+        service = Service(conn, root, REGISTRY, TEST_POLICY, clock=clock,
+                          code_source=root, materialization_base=configured_base)
+        captured = []
+
+        def spy(*args, **kwargs):
+            captured.append(kwargs)
+            return (None, ())
+
+        monkeypatch.setattr("engine.v2.ops.supervisor.backup_effect", spy)
+        result = service._coordinator_effect(claim, (), keepalive=lambda: None)
+        assert result == (None, ())
+        assert len(captured) == 1
+        assert captured[0]["materialization_base"] == configured_base
     finally:
         conn.close()

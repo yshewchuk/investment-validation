@@ -117,8 +117,11 @@ def _refusal(snapshot_root, ops_root, conn, reason, *, code="INTEGRITY_FAILED", 
 def _materialization_dir(base, name, mtime_ns):
     path = base / name
     path.mkdir()
-    (path / "sentinel.bin").write_bytes(b"kept")
+    sentinel = path / "sentinel.bin"
+    sentinel.write_bytes(b"kept")
+    os.chmod(sentinel, 0o444)
     os.utime(path, ns=(mtime_ns, mtime_ns))
+    os.chmod(path, 0o555)
     return path
 
 
@@ -214,7 +217,7 @@ def test_corrupt_backup_refusal_names_the_failing_backup_key(tmp_path, catalog):
     assert set(error.problem.details) == {"reason_key", "backup_key"}
 
 
-def test_database_pathname_replaced_after_pinned_hash_refuses_with_changed_reason(
+def test_database_pathname_replaced_during_pinned_verification_refuses_with_typed_failure(
         tmp_path, catalog, monkeypatch):
     ops = tmp_path / "ops"
     scope = ops / "backups" / "shadow"
@@ -235,7 +238,7 @@ def test_database_pathname_replaced_after_pinned_hash_refuses_with_changed_reaso
 
     monkeypatch.setattr(retention_module, "file_hash", file_hash)
 
-    _refusal(ops, ops, catalog, "backup_database_changed",
+    _refusal(ops, ops, catalog, "backup_database_verify_failed",
              keep=1, materialization_keep=1)
     assert state["replaced"]
 
@@ -285,6 +288,47 @@ def test_invalid_environment_limits_refuse_without_deleting(
     monkeypatch.setenv(env, value)
 
     _refusal(tmp_path, ops, catalog, reason, code="INVALID_REQUEST")
+
+
+@pytest.mark.parametrize(("label", "value"), [
+    ("backup", 0),
+    ("backup", -1),
+    ("backup", True),
+    ("backup", 1.5),
+    ("materialization", 0),
+    ("materialization", -1),
+    ("materialization", True),
+    ("materialization", 1.5),
+])
+def test_invalid_explicit_keep_values_refuse_without_deleting(
+        tmp_path, catalog, monkeypatch, label, value):
+    monkeypatch.delenv(retention_module.KEEP_ENV, raising=False)
+    monkeypatch.delenv(retention_module.MATERIALIZATION_KEEP_ENV, raising=False)
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"a.bin": b"artifact"})
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    kwargs = {"keep": value} if label == "backup" else {"materialization_keep": value}
+
+    _refusal(tmp_path, ops, catalog, f"{label}_keep_invalid",
+             code="INVALID_REQUEST", **kwargs)
+
+
+def test_interrupted_remove_tree_root_mode_refuses_before_any_deletion(
+        tmp_path, catalog):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    old = _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    os.chmod(old, 0o700)
+
+    _refusal(tmp_path, ops, catalog, "materialization_root_incomplete",
+             keep=1, materialization_keep=1)
+    assert old.is_dir()
 
 
 def test_materialization_keep_defaults_to_eleven(tmp_path, catalog, monkeypatch):
@@ -956,9 +1000,13 @@ def test_database_verification_logs_bounded_stage_and_progress(
     assert ends[0]["done"] >= 1
     assert "elapsed_s" in ends[0] and "rss_peak_mb" in ends[0]
     assert progress
+    assert len(progress) >= 2
     assert all(e["total"] is None and e["eta_s"] is None for e in progress)
     assert all(e["done"] >= 1 and "elapsed_s" in e and "rss_peak_mb" in e
                for e in progress)
+    done_counts = [e["done"] for e in progress]
+    assert all(previous < current
+               for previous, current in zip(done_counts, done_counts[1:]))
 
 
 def test_remove_tree_emits_bounded_progress_after_each_removal(
