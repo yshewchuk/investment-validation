@@ -13,13 +13,14 @@ in the pinned snapshot; ``retrieved_at`` remains provenance.
 ``get_price_series`` then keeps only bars dated on or before
 ``query.session_date``. No
 ``QUERY_NOT_BOUNDED``/``RESULT_LIMIT_EXCEEDED`` escape hatch beyond what
-``Repository.scan`` itself already enforces: the scan's result limit is this
-caller's explicit ``_RESULT_CAP`` lowered to the selected pinned membership
-bound ``Repository.scan_population_bound`` reports for the SAME ticker predicate --
-``scan`` refuses any limit above that bound before opening a fragment -- and
-``_BATCH_CAP`` follows that limit down, staying positive when the bound is
-zero (the query contract requires a positive batch limit; a zero bound is a
-zero-row membership, not an unbounded query).
+``Repository.scan`` itself already enforces: the scan's result limit is
+exactly the selected pinned membership bound ``Repository.scan_population_bound``
+reports for the SAME ticker predicate (no fixed cap; a ticker's history grows
+as new, revised or revived bars are appended) -- ``scan`` refuses any limit
+above that bound before opening a fragment -- and ``_BATCH_CAP`` follows that
+limit down, staying positive when the bound is zero (the query contract
+requires a positive batch limit; a zero bound is a zero-row membership, not
+an unbounded query).
 """
 from __future__ import annotations
 
@@ -38,7 +39,6 @@ __all__ = ["get_close", "get_price_series", "has_price_history", "tickers_with_p
 _COLUMNS = ("date", "close_adj", "close_raw", "high_raw", "retrieved_at", "deleted", "source_kind",
            "source_hash")
 _BATCH_CAP = 50_000
-_RESULT_CAP = 200_000
 
 #: task brief 2026-09-15 send-back: :func:`tickers_with_price_history`'s
 #: in-process existence cache, keyed by ``dataset_version_id`` alone -- the
@@ -185,7 +185,7 @@ def _fetch_rows(repository, snapshot_ref: SnapshotRef, ticker: str) -> pd.DataFr
     population_bound = repository.scan_population_bound(
         snapshot_ref.snapshot_id, table_name=PRICE_HISTORY_TABLE_NAME,
         table_contract_ref=dvr.table_contract_ref, key_filter=key_filter)
-    max_result_rows = min(_RESULT_CAP, population_bound)
+    max_result_rows = population_bound
     max_batch_rows = min(_BATCH_CAP, max_result_rows) if max_result_rows > 0 else _BATCH_CAP
     query = DataQuery(
         snapshot_id=snapshot_ref.snapshot_id, table_contract_ref=dvr.table_contract_ref,

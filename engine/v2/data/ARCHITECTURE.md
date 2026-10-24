@@ -250,8 +250,13 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
   `TableContract`; `price_history_query.py` also exposed as
   `Repository.get_price_series`/`.get_close`. A price-history read
   reconstructs row versions through the latest retrieval present in its
-  pinned snapshot; `retrieved_at` is provenance, not an observation ceiling.
-  The reader exposes only bars dated
+   pinned snapshot; `retrieved_at` is provenance, not an observation ceiling.
+   The read's scan limit is exactly the pinned per-ticker membership bound,
+   with no fixed row cap: a history of any size within that bound reads in
+   full, and a requested limit above the bound is refused with
+   `QUERY_NOT_BOUNDED` before any fragment opens, so the read cannot
+   exceed it (`RESULT_LIMIT_EXCEEDED` applies only to streamed rows past
+   an accepted limit). The reader exposes only bars dated
   on or before the decision session. This permits a session close fetched
   after midnight to be used for that session, while a later-dated bar remains
   unavailable. A vendor may revise historical values in a later retrieval,
