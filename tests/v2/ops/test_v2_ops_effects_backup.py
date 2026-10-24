@@ -626,6 +626,31 @@ def test_ack_loss_reuses_verified_backup_without_recopy(tmp_path, monkeypatch):
         "SELECT state FROM outbox WHERE logical_key='ack-loss'").fetchone()[0] == "delivered"
 
 
+def test_relative_backup_root_retry_after_manifest_crash_succeeds(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"relative retry", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "relative", {"evidence.bin": ref}, clock=clock)
+    monkeypatch.chdir(tmp_path)
+
+    def crash_after_manifest(point):
+        if point == "after_manifest_before_ack":
+            raise _InjectedCrash()
+
+    with pytest.raises(_InjectedCrash):
+        run_backup(conn, key="relative", owner="worker", target="backup",
+                   clock=clock, store=store, fault=crash_after_manifest)
+    clock.advance(3600)
+
+    receipt = run_backup(conn, key="relative", owner="worker", target="backup",
+                         clock=clock, store=store)
+
+    assert receipt["database_rows"]
+    assert (tmp_path / "backup" / "relative.manifest.json").is_file()
+    assert conn.execute(
+        "SELECT state FROM outbox WHERE logical_key='relative'").fetchone()[0] == "delivered"
+
+
 def test_durable_manifest_with_corrupt_database_is_not_reused(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
