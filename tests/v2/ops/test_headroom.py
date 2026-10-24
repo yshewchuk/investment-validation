@@ -226,6 +226,25 @@ def test_tampered_plan_artifact_refuses_integrity_failed(catalog):
     assert excinfo.value.code == "INTEGRITY_FAILED"
 
 
+def test_oversize_json_artifact_refuses_resource_limit(catalog, monkeypatch):
+    conn, store, clock = catalog
+    monkeypatch.setattr(headroom, "_MAX_JSON_BYTES", 1)
+    plan_id = publish(conn, store, clock, nightly_plan_document())
+    with pytest.raises(OpsError) as excinfo:
+        headroom.headroom_command(_headroom_args(conn, store, clock, plan_id),
+                                  store.root, conn, clock)
+    assert excinfo.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert excinfo.value.problem.message == "the plan artifact exceeds 1 bytes"
+
+
+@pytest.mark.parametrize("plan", [[1, 2, 3], None])
+def test_headroom_report_refuses_non_object_plan(catalog, plan):
+    with pytest.raises(OpsError) as excinfo:
+        report_for(catalog, plan)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert excinfo.value.problem.message == "plan must be a JSON object"
+
+
 @pytest.mark.parametrize("bad", [True, False, float("nan"), float("inf"), float("-inf"),
                                  0, 0.0, -1, -0.5, "1.5", 2, []])
 def test_headroom_report_validates_max_rss_gb_directly(catalog, bad):

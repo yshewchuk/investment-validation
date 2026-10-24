@@ -1,4 +1,5 @@
-"""Read-only nightly limit headroom check: usage against fixed repo limits.
+"""Nightly limit headroom check that writes no data or artifacts (it opens
+the ops catalog like every ops command): usage against fixed repo limits.
 
 One ``headroom_report`` pass answers "how close is tonight's plan to a hard
 limit" from catalog metadata only -- no object payloads beyond the plan and
@@ -44,6 +45,9 @@ _RANK = {"OK": 0, "UNMEASURED": 1, "WARN": 2, "FAIL": 3}
 #: How many of the most recent finished attempts the memory limits scan.
 _RECENT_ATTEMPTS = 500
 _GIB = 1024 ** 3
+#: Bounded-read cap for JSON artifact loads (repo convention, cf.
+#: d14_inputs.MAX_CALENDAR_BYTES): refuse before verified read of an oversize blob.
+_MAX_JSON_BYTES = 16 * 1024 * 1024
 
 _NOT_COVERED = (
     "max-registration-bytes (run-script flag, not in repo)",
@@ -95,7 +99,7 @@ def _json_object(conn, store, artifact_id, label):
     """Load a registered artifact as a JSON object, or refuse.
 
     A bad ``--plan`` id (unregistered) or a payload that is not a JSON object
-    is an operator input error on this read-only command, so it becomes an
+    is an operator input error on this write-free command, so it becomes an
     ``INVALID_REQUEST`` refusal rather than a traceback. But a registered
     artifact whose bytes fail content-address verification
     (``ArtifactError`` from ``read_verified``) is corruption, not input error,
@@ -103,11 +107,16 @@ def _json_object(conn, store, artifact_id, label):
     """
     try:
         ref = artifact(conn, store, artifact_id)
+        if ref.byte_size > _MAX_JSON_BYTES:
+            raise fail("RESOURCE_LIMIT_EXCEEDED",
+                       f"the {label} artifact exceeds {_MAX_JSON_BYTES} bytes")
         raw = store.read_verified(ref)
     except ArtifactError:
         raise fail("INTEGRITY_FAILED",
                    f"the {label} artifact bytes fail verification") from None
-    except OpsError:
+    except OpsError as exc:
+        if exc.code == "RESOURCE_LIMIT_EXCEEDED":
+            raise
         raise fail("INVALID_REQUEST", f"the {label} artifact is not readable") from None
     try:
         document = json.loads(raw)
@@ -228,6 +237,8 @@ def headroom_report(conn, root, plan, *, max_rss_gb=None):
             or not math.isfinite(max_rss_gb) or max_rss_gb <= 0.0):
         raise fail("INVALID_REQUEST",
                    "max_rss_gb must be a finite number greater than 0")
+    if not isinstance(plan, dict):
+        raise fail("INVALID_REQUEST", "plan must be a JSON object")
     started = time.monotonic()
     print("[headroom] start", file=sys.stderr)
     store = ArtifactStore(root)
