@@ -81,9 +81,10 @@ The separate `magnitude_ridge_hgb_recipe` API constructs/validates source-free
 It binds explicit ordered unique columns, a canonical dictionary hash, fixed
 preprocessing/estimator policy and derived width; no dictionary or source is read.
 The `history_ridge`/`history_hgb` family names reuse the training-layer private
-estimator constructor (`training/_magnitude_estimators.build_estimator`, imported by the training fitter) unchanged; each numeric adapter owns its guards and fitting,
-not the constructor. This is not the fixed eleven-column v1 execution envelope. Dictionary membership and
-truthful matrix order remain caller-owned; a hash alone grants no admission.
+estimator constructor (`training/_magnitude_estimators.build_estimator`,
+imported by the training fitters) unchanged; each numeric adapter owns its
+guards and fitting, not the constructor. This is not the fixed eleven-column
+v1 execution envelope. Dictionary membership and truthful matrix order remain caller-owned; a hash alone grants no admission.
 `training.magnitude_ridge_hgb.fit_ridge_hgb_predictions(..., columns=...)`
 checks both no-fit guards before inspecting metadata or numeric inputs, validates
 the closed recipe and exact declared column order, then copies numeric matrices.

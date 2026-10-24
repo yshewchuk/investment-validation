@@ -82,9 +82,8 @@ MAX_FRESH_BYTES = 64 * 1024 * 1024
 
 #: The stored series starts 2006-01-03 but yfinance ``period="max"`` reaches
 #: back to 1927, so fetched rows before this date are cut in ``_parse_body``:
-#: a refresh only ever appends or corrects the tail and legacy regime
-#: features computed from existing rows never change. A body left with no
-#: rows after the cut is unparseable.
+#: a refresh appends rows; only older Close values are guarded (see the
+#: module docstring). A body left with no rows after the cut is unparseable.
 SERIES_START = pd.Timestamp("2006-01-01")
 
 #: The number of trailing stored rows a refresh may CORRECT: their Close values
@@ -113,8 +112,8 @@ def _parse_body(body) -> pd.DataFrame | None:
     NaN before rendering (so ``astype("int64")`` on volume can never raise;
     NaN/inf volume lands as ``0``), duplicate dates keep the last
     occurrence, and rows before ``SERIES_START`` — the 1927-deep part of the
-    ``period="max"`` history — are cut so the rewrite only appends or
-    corrects the tail. Nothing left after the drops is ``None``.
+    ``period="max"`` history — are cut to match the stored file's start.
+    Nothing left after the drops is ``None``.
     """
     try:
         frame = pd.read_csv(io.BytesIO(body if isinstance(body, bytes) else str(body).encode()))
