@@ -31,8 +31,9 @@ also drops intermediate anchors. See [legacy convention](../../engine/features.p
 [anchor math](../../engine/data/features/panel.py), and
 [native panel design](../../guides/native_panel_tier4_design.md).
 Reuse audited existing feature math, but reconstruct each block at the experiment's
-source-session ceiling from already stored, pinned sources. No provider calls,
-new data source, production panel migration, or production Tier4 rebuild is needed.
+source-session ceiling from qualified, pinned stored sources. Provider calls, new
+source acquisition, production panel migration and production Tier4 rebuilds are
+outside this design's scope; required stored-source availability must be established.
 
 Proposed table: `research_magnitude_panel`, immutable versioned schema, primary key
 `(event_id, context_id, horizon_sessions)`. Join to the exact history snapshot on
@@ -52,12 +53,13 @@ Optional missing values stay null; changed recipes/sources get new immutable ide
 ### Feature dictionary and subsets
 
 Freeze ordered column lists, units, aliases, missing rules and source dependencies
-before registration. The proposed first dictionary uses only these existing blocks:
+before registration. The proposed dictionary reuses these blocks' math, with the
+new regime-source binding below:
 
 | Set | Inputs | Eligibility |
 | --- | --- | --- |
 | H | Eleven current stored-history columns | Existing history contract unchanged |
-| HM | H + signed_streak, ema12r_abs, dist_high, dist_ema, abs_dist_ema, ret5, ret10, ret20; SPY ret21/63/252, dd252, vol5/20/60/252, vol20_rel252 | Audited runup/regime math at each horizon |
+| HM | H + signed_streak, ema12r_abs, dist_high, dist_ema, abs_dist_ema, ret5, ret10, ret20; ^GSPC-close ret21/63/252, dd252, vol5/20/60/252, vol20_rel252 (existing spy_* aliases) | Audited runup/regime math at each horizon; versioned source binding below |
 | HMO | HM + implied_move, iv10, iv30, exern_iv10, exern_iv30, iee, skew, contango, fwd90_30, fexern90_30, rvol30, spot, mcap_log; mean_prior_or_implied | Daily-market mapping plus the protected implied-history prefix below |
 
 The thirteen daily-market names denote research aliases from `DAILY_STATE_FIELDS`,
@@ -99,25 +101,40 @@ The following mapping is exhaustive; it adds no learned feature or search axis.
 | signed_streak | HM/HMO; existing signed-run recursion over qualified prior outcomes |
 | dist_high | HM/HMO; existing adjusted-price distance from trailing high |
 | dist_ema | HM/HMO; existing adjusted-price distance from trailing EMA |
-| spy_vol20 | HM/HMO; regime volatility; benchmark source differs from legacy |
-| spy_dd252 | HM/HMO; regime drawdown; benchmark source differs from legacy |
+| spy_vol20 | HM/HMO; regime volatility; v2 selects ^GSPC close, current v1 differs |
+| spy_dd252 | HM/HMO; regime drawdown; v2 selects ^GSPC close, current v1 differs |
 | mean_prior_or_implied | HMO only; protected historical ORATS quote mean below |
 | or_implied | HMO alias implied_move; comparator mask [0,60], HMO source-validity policy below |
 | or_rvol30 | HMO alias rvol30; comparator mask [0,700], HMO source-validity policy below |
 | mcap_log | HMO; missing/known-late capture remains null |
 
-**Regime-source caveat ([#1276](https://github.com/yshewchuk/investment-validation/issues/1276)).**
+**Regime-source choice and current caveat ([#1276](https://github.com/yshewchuk/investment-validation/issues/1276)).**
 Matching `spy_*` names and arithmetic does not establish source parity. The
 [legacy panel](../../engine/data/features/panel.py#L367-L403) uses the ^GSPC
 `gspc_daily.csv` close; [native inputs](../../engine/v2/features/panel_row_inputs.py#L349-L370)
 and [research blocks](../../engine/v2/research/magnitude_panel_daily.py#L198-L207)
 instead feed SPY `daily_market.spot` into the regime calculation's `close` column.
 The provider maps `stockPrice` to `spot`; that mapping alone proves neither
-official-close nor intraday-snapshot semantics. Before claiming exact benchmark
-source parity, resolve and pin the instrument, price definition, source and causal
-availability/provenance policy in the recipe identity. This amendment switches
-no source or v1 behavior and asserts no measured impact. This verified mismatch
-concerns regime inputs, not native runup, which uses `price_history.close_adj`.
+official-close nor intraday-snapshot semantics. This verified mismatch concerns
+regime inputs, not native runup, which uses `price_history.close_adj`.
+
+Owner decision (October 24): use ^GSPC closing prices for the experiment's
+market-context features, including HM/HMO and the causal legacy comparator.
+The owner reports a prior comparison found no material difference and prefers
+^GSPC to avoid ETF-specific fund drag; that comparison is not independently
+reproduced here or asserted as measured equivalence. Retain existing `spy_*`
+aliases/order, but bind the selected instrument, close definition and source policy
+in the new v2 dictionary, with the stored snapshot and causal availability/provenance
+in new recipe/context identities. Existing v1 SPY inputs and identities stay unchanged.
+
+Implementation depends on a qualified stored ^GSPC-close source and a research
+reader enforcing each 5/3/1 source ceiling and frozen admission/holdout policy.
+Neither that source's availability nor its research reader is established here;
+the legacy CSV path is code evidence, not permission to read it. Missing required
+provenance refuses before values; missing qualified inputs follow the frozen
+null/abstention policy. The source choice resolves the benchmark decision, not
+storage/provenance qualification or exact source parity. No source switch or data
+run is implemented or authorized by this design.
 
 `ema12r_abs` is an EMA-with-mean fallback, not the ratio described in stale
 feature-note prose. `abs_dist_high` is not an active incumbent input: it was
@@ -213,8 +230,8 @@ inside each training fold, never stored globally or used to preselect features.
 **Immutable migration, not in-place widening.** Add research_magnitude_panel.v2
 (semantic version 2.0.0) and magnitude_panel_context.v2; preserve the existing
 v1 dictionary, helpers, row admission and identities. V2 dictionary entries bind
-ordered names, units, missing policy, source dependencies and the two derivation
-policies above; dictionary_hash remains content_hash of that ordered dictionary.
+ordered names, units, missing policy, source dependencies, the regime-source policy
+and the two derivation policies above; dictionary_hash remains content_hash of that ordered dictionary.
 H's eleven values/order remain unchanged; an unchanged H dictionary hash alone
 does not make the new versioned recipe/context identical. HM/HMO hashes change.
 New producers bind v2 schema/policies, full HMO dictionary hash, source/history
@@ -258,7 +275,9 @@ last-prior inclusion, protected/embargo holes without renumbering, skipped
 realized outcomes with valid quotes, future/known-late poison and each 5/3/1 clock.
 Include normalized-null versus preserved-zero fixtures and arm-specific mask boundaries.
 It proves no protected payload read and bounded source scans/batch invariance.
-P3 proves old request replay, new identities, unchanged 33/603 fixture counts,
+P3 requires the qualified ^GSPC-close reader and pins its source-policy/snapshot
+identities, testing causal ceilings and refusal of mismatched source bindings.
+It proves old request replay, new identities, unchanged 33/603 fixture counts,
 no partial-row admission and no global preprocessing or outer-outcome selection.
 No real source coverage, holdout opening, provider job, fit or registration is
 authorized or established here. The parallel numeric adapters remain
@@ -300,7 +319,7 @@ Slice 1 metadata admission alone still grants no raw-payload access.
 ### Bounded construction, not another per-event history build
 
 Use one metadata/holdout plan and pinned source resolution per build; batch by
-bounded ticker/year groups, sort each source once, and share bounded SPY/calendar
+bounded ticker/year groups, sort each source once, and share bounded ^GSPC/calendar
 state. Advance causal prefixes/search indices across horizons and events. Reuse the
 existing immutable history artifact; do not call its producer inside the panel loop
 or repeat feature production per candidate/fold. Preserve prefix state across batch
@@ -437,7 +456,7 @@ protected/availability-qualified prefix, not the production reader's aggregate.
 No old weights/panel forecasts/latest Tier4 release are reused. If causal inputs are unavailable,
 report abstention; never relabel a different recipe or substitute history mean. This is a protocol-
 matched reconstruction, not a claim to reproduce the reported 498-event result.
-Matched event IDs do not repair the regime-source difference above. The legacy
+Matched event IDs do not repair the current v1 regime-source difference above. The legacy
 arm must retain its causally qualified benchmark semantics; if those inputs are
 unavailable, report the legacy comparison unavailable rather than substitute SPY
 spot silently. A separately approved source-changed research comparator requires
