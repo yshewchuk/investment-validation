@@ -579,6 +579,31 @@ def _verify_journal_files(root, files, keepalive):
     finally:
         _stage_end(stage, started, done, total)
 
+def _journal_backup_directory(path, reason):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise fail("INTEGRITY_FAILED", "retention journal backup path could not be read",
+                   details={"reason_key": "retention_journal_entry_unreadable"}) from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise fail("INTEGRITY_FAILED", "retention journal backup path is not a directory",
+                   details={"reason_key": reason})
+
+def _verify_journal_backup_paths(root, files):
+    scopes = {}
+    for parts, _, _ in files:
+        scopes.setdefault(parts[1], set())
+        if len(parts) == 4:
+            scopes[parts[1]].add(parts[2])
+    _journal_backup_directory(root / "backups", "backup_root_invalid")
+    for scope in sorted(scopes):
+        _journal_backup_directory(root / "backups" / scope, "backup_scope_not_directory")
+        for artifacts in sorted(scopes[scope]):
+            _journal_backup_directory(root / "backups" / scope / artifacts,
+                                      "backup_artifacts_path_invalid")
+
 def _replay_journal(journal, files, trees, keepalive):
     total = len(files) + sum(path is not None for path in trees)
     stage = "replay_retention_journal"
@@ -613,6 +638,7 @@ def _recover_journal(ops_root, materialization_base, conn, store, keep, backup_k
                             "current_keep": backup_keep})
     base = _validated_journal_base(materialization_base, trees)
     _check_journal_roots_live(base, trees, conn, store, keepalive)
+    _verify_journal_backup_paths(root, files)
     verified_files = _verify_journal_files(root, files, keepalive)
     verified_trees = [_verify_journal_tree(entry, keepalive) for entry in trees]
     tree_by_name = {entry["name"]: entry for entry in trees}

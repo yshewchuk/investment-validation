@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import stat
 from pathlib import Path
@@ -1325,6 +1326,46 @@ def test_interrupted_backup_deletion_refuses_on_increased_keep(
     assert caught.value.code == "INTEGRITY_FAILED"
     assert caught.value.problem.details["reason_key"] == "retention_journal_policy_changed"
     assert _files(ops) == before
+
+
+def test_replay_refuses_symlinked_scope_before_deletion(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    real_unlink = Path.unlink
+
+    def fail_manifest(self, *args, **kwargs):
+        if self.name == "b1.manifest.json":
+            raise OSError(5, "injected")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_manifest)
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+    assert caught.value.code == "BACKUP_FAILED"
+    assert caught.value.problem.details["reason_key"] == "backup_delete_failed"
+    assert not (scope / "b1.sqlite").exists()
+    assert (scope / "b1.manifest.json").is_file()
+    assert (ops / ".retention-journal.json").is_file()
+
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    decoy = tmp_path / "decoy"
+    shutil.copytree(scope, decoy)
+    original = tmp_path / "original-scope"
+    scope.rename(original)
+    scope.symlink_to(decoy, target_is_directory=True)
+    decoy_before = _files(decoy)
+
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "backup_scope_not_directory"
+    assert _files(decoy) == decoy_before
+    assert (ops / ".retention-journal.json").is_file()
 
 
 def _create_outbox_table(conn):
