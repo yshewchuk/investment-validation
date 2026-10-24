@@ -9,9 +9,12 @@ history through the Tier-1 fetcher and rewrites the file in the layout both
 readers already parse: three multi-header lines, then positional
 ``date,adj,close,high,low,open,volume`` rows. The series is cut to the stored
 file's start (``SERIES_START``): ``period="max"`` reaches back to 1927 while
-``GSPC_DAILY`` starts 2006-01-03, so a refresh appends rows and may correct
-only the last ``TAIL_CORRECTABLE_ROWS`` rows; the Close of every older stored
-row is guarded (see Guards below), and regime features read only Close.
+``GSPC_DAILY`` starts 2006-01-03, so a refresh appends rows; only the Close
+of older stored rows (all but the last ``TAIL_CORRECTABLE_ROWS``) is guarded
+(see Guards below) -- their other fields (Adj Close, High, Low, Open,
+Volume) are NOT guarded, acceptable because the readers
+(``panel._gspc_series`` / ``add_regime_features`` and the trading calendar)
+use only dates and Close.
 
 Guards, because this file feeds a champion-model feature: a fetch or parse
 failure leaves the stored bytes untouched, and a fresh body may never shrink
@@ -77,11 +80,10 @@ MAX_EXISTING_BYTES = 64 * 1024 * 1024
 #: Ceiling on the fetched fresh body, refused as unparseable before decoding.
 MAX_FRESH_BYTES = 64 * 1024 * 1024
 
-#: The stored series starts 2006-01-03 but yfinance ``period="max"`` reaches
-#: back to 1927, so fetched rows before this date are cut in ``_parse_body``:
-#: a refresh only ever appends or corrects the tail and legacy regime
-#: features computed from existing rows never change. A body left with no
-#: rows after the cut is unparseable.
+#: The stored series' first row is 2006-01-03 but yfinance ``period="max"`` reaches
+#: back to 1927, so fetched rows before this lower bound (2006-01-01, not the first stored date) are cut in ``_parse_body``:
+#: a refresh appends rows; only older Close values are guarded (see the
+#: module docstring). A body left with no rows after the cut is unparseable.
 SERIES_START = pd.Timestamp("2006-01-01")
 
 #: The number of trailing stored rows a refresh may CORRECT: their Close values
@@ -110,8 +112,8 @@ def _parse_body(body) -> pd.DataFrame | None:
     NaN before rendering (so ``astype("int64")`` on volume can never raise;
     NaN/inf volume lands as ``0``), duplicate dates keep the last
     occurrence, and rows before ``SERIES_START`` — the 1927-deep part of the
-    ``period="max"`` history — are cut so the rewrite only appends or
-    corrects the tail. Nothing left after the drops is ``None``.
+    ``period="max"`` history — are cut to match the stored file's start.
+    Nothing left after the drops is ``None``.
     """
     try:
         frame = pd.read_csv(io.BytesIO(body if isinstance(body, bytes) else str(body).encode()))
