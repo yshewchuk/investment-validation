@@ -28,37 +28,37 @@ their historical wrappers are not a supported experiment execution boundary.
 
 ## Stage-2 magnitude panel foundation
 
-`magnitude_panel_table` uses native `TableContract`/`ColumnContract`, standard JSON
-and canonical hashing. Its immutable v1 event/context/horizon key has an ordered
-H/HM/HMO raw dictionary, excluding learned Tier4 outputs and current-event outcomes.
-Rows require exact cohort coverage, finite typed values, missing/quote status,
-and per-observation date, knowledge mode, row/fragment identity and content digest.
-The context is reconstructed-only; historical inputs cannot be relabeled observed.
-Each source declares a canonical SHA-256 `content_hash` for its contributing observation.
-Pure validation checks digest syntax/binding, not source membership or value equality.
+`magnitude_panel_table` uses native `TableContract`/`ColumnContract`, JSON and canonical hashing.
+Its immutable v1 event/context/horizon key has ordered H/HM/HMO dictionaries, excluding learned Tier4 outputs/current-event outcomes.
+Rows require exact cohort coverage, finite typed values, missing/quote status and per-observation date,
+knowledge mode, row/fragment identity and canonical SHA-256 `content_hash`.
+Contexts are reconstructed-only, never relabeled observed; pure validation checks digest syntax/binding, not source membership or value equality.
 
 `magnitude_panel_plan` (no production caller; grants no raw-payload read authority) reconstructs protected population/calendar
 metadata and checks exact history receipts and isolated history/prior-outcome fragments without payloads.
-Its context binds snapshots, history identity, dictionary, producer/environment,
-and the complete observed forecast calendar with its separately bound source metadata.
-Detached validation checks JSON types, closed event/request/recipe/producer schemas,
-native-derived folds, fragment lists and calendar-source consistency; repository
-preflight still authenticates membership and source truth.
-Horizon cutoffs require native calendar reconstruction, not hashes alone.
+Its context binds snapshots, history, dictionary, producer/environment and complete observed calendar/source metadata.
+Detached validation checks JSON types, closed event/request/recipe/producer schemas, native folds, fragments and calendar-source consistency;
+repository preflight authenticates membership/source truth. Horizon cutoffs require native calendar reconstruction, not hashes alone.
 Public history interfaces `validate_context_identity`, `validate_event_forecasts`,
 `preflight_source` and `validate_features` share existing validation without new authority.
-`magnitude_features.calendar_input` exposes session metadata;
-`magnitude_inputs.target_object_identity` detaches admitted event/fragment IDs.
-`magnitude_panel_table.canonical_day` accepts only canonical date strings, otherwise
-refusing with `CONTRACT_MISMATCH`. No raw payload permission is issued;
+`magnitude_features.calendar_input` exposes session metadata; `magnitude_inputs.target_object_identity` detaches admitted event/fragment IDs.
+`magnitude_panel_table.canonical_day` requires canonical date strings or refuses `CONTRACT_MISMATCH`. No raw payload permission is issued;
 raw-source protected-event policy is not implemented by this plan. There is no writer,
 materializer, CLI, model or registration integration.
 
-Panel boundaries require plain JSON, including nested history before normalization.
-Detached validation uses `CONTRACT_MISMATCH`; repository reconstruction retains native refusals.
+Panel boundaries require plain JSON (nested history before normalization); detached refusals use `CONTRACT_MISMATCH`, native refusals propagate.
+
+`magnitude_panel_v2_policies.policy_definitions()` is P1a-1: detached `source_policies`,
+`derivation_policies`, `quote_indicator` and `missing_indicators` metadata from the
+[parity design](https://github.com/yshewchuk/investment-validation/blob/26b5958d868afc5189611aa77ec1774a9e246d71/experiments/SUPER_SIZE/STAGE2_DESIGN.md#incumbent-parity-amendment-october-24-design-only).
+It uses standard JSON copying and public `eligibility_policy` declarations, not a registry/parser.
+The separate P1a-2 dictionary/recipe factory binds these policies to source roles, subsets and ordered columns;
+P1a-1 declares requirements, not computations, qualified sources or snapshots. Only synthetic tests call it.
+No v2 dictionary/table/context, reader, model, compiler change or runtime activation exists in this slice.
 
 | Condition | Outcome |
 | --- | --- |
+| `policy_definitions()` | No arguments; detached metadata only, no I/O/fits/verification or retry/cache. Shared declaration exceptions propagate unchanged. |
 | Invalid detached panel identity/schema, nested digest/folds, snapshot, calendar, cutoff or row | `CONTRACT_MISMATCH` |
 | Malformed or forged direct calendar snapshot | `SNAPSHOT_UNRESOLVED` |
 | Empty native observed session calendar | `CALENDAR_UNAVAILABLE` |
