@@ -1467,6 +1467,38 @@ def test_fresh_journal_mismatch_refuses_after_mutation(tmp_path, catalog, monkey
     assert _files(ops) == snapshot
 
 
+def test_fresh_journal_symlinked_scope_refuses_before_deletion(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    original = retention_module._write_deletion_journal
+    decoy = tmp_path / "decoy"
+    targets_before = None
+
+    def symlinking_journal(*args, **kwargs):
+        nonlocal targets_before
+        result = original(*args, **kwargs)
+        shutil.copytree(scope, decoy)
+        original_scope = tmp_path / "original-scope"
+        scope.rename(original_scope)
+        scope.symlink_to(decoy, target_is_directory=True)
+        targets_before = _files(decoy)
+        return result
+
+    monkeypatch.setattr(retention_module, "_write_deletion_journal", symlinking_journal)
+
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "backup_scope_not_directory"
+    assert _files(decoy) == targets_before
+    assert (ops / ".retention-journal.json").is_file()
+
+
 def test_replay_refuses_deleting_newly_live_journaled_root(tmp_path, catalog, monkeypatch):
     ops = tmp_path / "ops"
     base = default_materialization_base(ops)

@@ -657,6 +657,7 @@ def _verify_fresh_deletion_journal(journal, ops_root, base, keep,
         raise _journal_invalid()
     base = _validated_journal_base(base, trees)
     _check_journal_roots_live(base, trees, conn, store, keepalive)
+    _verify_journal_backup_paths(ops_root, files)
     _verify_journal_files(ops_root, files, keepalive)
     for entry in trees:
         _verify_journal_tree(entry, keepalive)
