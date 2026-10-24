@@ -52,6 +52,11 @@ from engine.v2.foundation import CONTENT_HASH_PREFIX, to_document  # noqa: E402
 from engine.v2.models import deployment  # noqa: E402
 from engine.v2.models.contracts import ArtifactMember, ModelBinding, ModelRelease  # noqa: E402
 from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state  # noqa: E402
+from engine.v2.models.pinned_panel import (  # noqa: E402
+    COPY_PREFIX,
+    PinnedPanelContext,
+    verify_panel_copy,
+)
 from engine.v2.models.release_layout import (  # noqa: E402
     MANIFEST_NAME,
     MISSING,
@@ -71,21 +76,16 @@ from engine.v2.models.release_layout import (  # noqa: E402
     write_object,
 )
 from engine.v2.models.releases import ModelReleaseInventory  # noqa: E402
-from engine.v2.models.serving_folds import (  # noqa: E402
-    ChooserFoldPolicy,
-    SizeFoldPolicy,
-    chooser_fold_outputs,
-)
-from tools.phase5_pinned_panel import (  # noqa: E402
-    COPY_PREFIX,
-    PinnedPanelContext,
-    verify_panel_copy,
-)
-from tools.phase5_serving_folds import (  # noqa: E402
+from engine.v2.models.serving_fold_preflight import (  # noqa: E402
     MAX_FOLD_BYTES,
     descriptor_from_preflight,
     preflight_chooser_fold,
     preflight_size_fold,
+)
+from engine.v2.models.serving_folds import (  # noqa: E402
+    ChooserFoldPolicy,
+    SizeFoldPolicy,
+    chooser_fold_outputs,
 )
 
 JOBLIB_ADAPTER = "joblib-estimator.v1"

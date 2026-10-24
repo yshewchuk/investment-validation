@@ -17,11 +17,11 @@ from engine.v2.models import (
     deployment,
 )
 from engine.v2.models import serving_fold_loader as loader
+from engine.v2.models.serving_fold_preflight import describe_size_fold
 from engine.v2.models.serving_folds import SizeFoldPolicy
 from engine.v2.scoring.frozen_executor import FrozenStageExecutor
 from tests.fixtures.size_serving_header import HEADER
 from tests.v2.models.serving_fold_support import fold_bytes, fold_name, release_inputs
-from tools.phase5_serving_folds import describe_size_fold
 
 
 class Predictor:
