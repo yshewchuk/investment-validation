@@ -449,7 +449,7 @@ def test_newest_materializations_and_live_request_root_survive(tmp_path, catalog
     enforce_retention(ops, conn=catalog, store=object(),
                       keep=1, materialization_keep=2)
 
-    assert captured == ["art_live"]
+    assert captured == ["art_live", "art_live"]
     assert live.is_dir() and (live / "sentinel.bin").is_file()
     assert (base / "root-d").is_dir() and newest.is_dir()
     assert not (base / "root-b").exists()
@@ -1383,3 +1383,140 @@ def test_atomic_file_info_exact_max_bytes_boundary(tmp_path):
 
     assert size == limit
     assert digest == file_hash(path)
+
+
+def test_fresh_journal_mismatch_refuses_after_mutation(tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+
+    original = retention_module._write_deletion_journal
+    snapshot = None
+
+    def mutating_journal(*args, **kwargs):
+        nonlocal snapshot
+        result = original(*args, **kwargs)
+        database = scope / "b1.sqlite"
+        database.write_bytes(database.read_bytes() + b"\0")
+        snapshot = _files(ops)
+        return result
+
+    monkeypatch.setattr(retention_module, "_write_deletion_journal", mutating_journal)
+
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "retention_journal_entry_mismatch"
+    assert _files(ops) == snapshot
+
+
+def test_replay_refuses_deleting_newly_live_journaled_root(tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    root = _materialization_dir(base, LIVE_HASH.removeprefix("sha256:"), 1)
+    entry = retention_module._journal_tree_record(root, base)
+    retention_module._write_journal(ops / ".retention-journal.json", [], [entry], 1)
+    _live_attempt(catalog, [(REQUEST_BINDING, "art_live")])
+    monkeypatch.setattr(retention_module, "request_from_artifact",
+                        lambda conn, store, artifact_id, *, max_bytes=None:
+                        SimpleNamespace(request_hash=LIVE_HASH))
+
+    _refusal(tmp_path, ops, catalog, "materialization_root_in_use",
+             keep=1, materialization_keep=1)
+
+
+def test_replay_refuses_deleting_newly_retained_journaled_root(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    old = _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    entry = retention_module._journal_tree_record(old, base)
+    retention_module._write_journal(ops / ".retention-journal.json", [], [entry], 1)
+
+    _refusal(tmp_path, ops, catalog, "materialization_root_retained",
+             keep=1, materialization_keep=2)
+
+
+def test_fresh_materialization_journal_mismatch_refuses_after_mutation(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    old = _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+
+    original = retention_module._write_deletion_journal
+    snapshot = None
+
+    def mutating_journal(*args, **kwargs):
+        nonlocal snapshot
+        result = original(*args, **kwargs)
+        os.chmod(old, 0o755)
+        sentinel = old / "sentinel.bin"
+        os.chmod(sentinel, 0o644)
+        sentinel.write_bytes(b"changed")
+        os.chmod(sentinel, 0o444)
+        os.chmod(old, 0o555)
+        snapshot = _files(ops)
+        return result
+
+    monkeypatch.setattr(retention_module, "_write_deletion_journal", mutating_journal)
+
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "retention_journal_invalid"
+    assert _files(ops) == snapshot
+
+
+def test_invalid_retention_journal_refuses_without_deletion(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    (ops / ".retention-journal.json").write_text("{}", encoding="utf-8")
+
+    _refusal(tmp_path, ops, catalog, "retention_journal_invalid",
+             keep=1, materialization_keep=1)
+
+
+def test_unreadable_retention_journal_refuses_without_deletion(tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    journal = ops / ".retention-journal.json"
+    journal.write_text("{}", encoding="utf-8")
+
+    before = _files(ops)
+    real_open = Path.open
+
+    def unreadable_open(self, *args, **kwargs):
+        if self == journal:
+            raise PermissionError("journal is unreadable")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", unreadable_open)
+
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "retention_journal_unreadable"
+
+    monkeypatch.setattr(Path, "open", real_open)
+    assert _files(ops) == before
+
+
+def test_unsafe_backup_name_refuses_with_typed_integrity_error(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    scope.mkdir(parents=True)
+    (scope / "..\\escape.manifest.json").write_text("{}", encoding="utf-8")
+
+    _refusal(tmp_path, ops, catalog, "backup_name_unsafe",
+             keep=1, materialization_keep=1)

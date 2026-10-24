@@ -89,7 +89,10 @@ def _safe_name(name, *, artifact=False):
     if artifact:
         bad = bad or "/" in name or "\\" in name
     elif not bad:
-        bad = len(safe_relative_path(name)) != 1
+        try:
+            bad = len(safe_relative_path(name)) != 1
+        except ArtifactError:
+            bad = True
     if bad:
         reason = "backup_artifact_name_unsafe" if artifact else "backup_name_unsafe"
         raise fail("INTEGRITY_FAILED", "backup name is unsafe",
@@ -508,6 +511,22 @@ def _recover_journal(ops_root, materialization_base, conn, store, keep, backup_k
     _replay_journal(journal, verified_files, verified_trees, keepalive)
     return True
 
+def _verify_fresh_deletion_journal(journal, ops_root, base, keep,
+                                   materialization_keep, conn, store, keepalive=None):
+    entries = _journal_files(journal)
+    if entries is None:
+        raise _journal_invalid()
+    files, trees, recorded_backup_keep = entries
+    if recorded_backup_keep != keep:
+        raise _journal_invalid()
+    base = _validated_journal_base(base, trees)
+    _check_journal_roots_live(base, trees, conn, store, keepalive)
+    tree_by_name = {entry["name"]: entry for entry in trees}
+    candidates = _journal_root_candidates(base, tree_by_name)
+    _check_journal_roots_not_retained(candidates, tree_by_name, materialization_keep)
+    _verify_journal_files(ops_root, files, keepalive)
+    for entry in trees:
+        _verify_journal_tree(entry, keepalive)
 
 def _database(path, expected, keepalive=None):
     try:
@@ -1066,6 +1085,9 @@ def _enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep
             materialization_keep=materialization_keep, scopes=len(plans))
     journal, journal_active = _write_deletion_journal(
         ops_root, plans, roots, base, keep, keepalive)
+    if journal_active:
+        _verify_fresh_deletion_journal(journal, ops_root, base, keep,
+                                       materialization_keep, conn, store, keepalive)
     deleted = _delete_backup_plans(plans, keepalive)
     _delete_materialization_plans(roots, keepalive)
     if journal_active:
