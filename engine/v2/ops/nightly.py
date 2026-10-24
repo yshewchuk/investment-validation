@@ -1529,6 +1529,19 @@ def run_shadow_nightly(source_root: Path | str, private_root: Path | str,
 # --------------------------------------------------------------------------
 
 
+def _warn_scratch_level(profile, needed, kind):
+    """The #1268 above-90% diagnostic, fail-open: stderr only, and a broken
+    stderr (closed/broken pipe, OSError/ValueError on write) never turns the
+    warning into a plan failure."""
+    try:
+        pct = 100.0 * needed / profile.scratch_bytes
+        print(f"[plan] WARNING legacy read set {needed} B is {pct:.0f}% of profile "
+              f"{profile.name} scratch budget {profile.scratch_bytes} B (kind {kind})",
+              file=sys.stderr)
+    except (OSError, ValueError):
+        pass
+
+
 def plan_scratch_problems(conn, store, requests, *, policy=DEFAULT_POLICY, kind_registry=None):
     """Per-job scratch admission problems for an already-built request graph.
 
@@ -1589,10 +1602,7 @@ def plan_scratch_problems(conn, store, requests, *, policy=DEFAULT_POLICY, kind_
         elif (needed > 0.9 * profile.scratch_bytes
               and profile.name not in warned_profiles):
             warned_profiles.add(profile.name)
-            pct = 100.0 * needed / profile.scratch_bytes
-            print(f"[plan] WARNING legacy read set {needed} B is {pct:.0f}% of profile "
-                  f"{profile.name} scratch budget {profile.scratch_bytes} B (kind {kind})",
-                  file=sys.stderr)
+            _warn_scratch_level(profile, needed, kind)
     return problems
 
 

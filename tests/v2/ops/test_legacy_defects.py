@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -548,6 +549,26 @@ def test_plan_scratch_warns_above_ninety_percent_without_refusing(tmp_path, caps
         assert "legacy_rebuild" not in err
         assert f"legacy read set {int(0.95 * budget)} B is 95%" in err
         assert f"scratch budget {budget} B (kind" in err
+    finally:
+        conn.close()
+
+
+def test_plan_scratch_warning_never_breaks_the_plan_on_a_broken_stderr(tmp_path, monkeypatch):
+    """#1268 fail-open follow-up: the above-90% warning is diagnostic only.
+    With a read set at 95% of the validation budget and a stderr whose write
+    raises OSError, plan_scratch_problems must still return [] and not raise."""
+    from engine.v2.ops.nightly import plan_scratch_problems
+
+    budget = profile_named(DEFAULT_POLICY, "validation").scratch_bytes
+    conn, store, requests = _scratch_requests(tmp_path, [int(0.95 * budget)])
+
+    class _BrokenStderr:
+        def write(self, *args):
+            raise OSError("stderr is gone")
+
+    monkeypatch.setattr(sys, "stderr", _BrokenStderr())
+    try:
+        assert plan_scratch_problems(conn, store, requests) == []
     finally:
         conn.close()
 
