@@ -25,7 +25,6 @@ from engine.v2.foundation import (
 )
 from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
 from engine.v2.ops.errors import fail
-from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.outbox import claim, complete, enqueue
 
 MAX_MANIFEST_BYTES = 1024 * 1024
@@ -223,16 +222,25 @@ def _copy_artifacts(refs, store, target, fault, *, keepalive=None):
         source = store.verify(ref)
         destination = target / "artifacts" / name
         ensure_directory(destination.parent)
-        fd, pending = tempfile.mkstemp(dir=str(destination.parent),
-                                      prefix=f".{name}.", suffix=".pending")
+        source_stream, _ = _open_checked(
+            source, stage=f"artifact {name}", expected_size=ref.byte_size,
+            oserror_code="INTEGRITY_FAILED")
+        try:
+            fd, pending = tempfile.mkstemp(dir=str(destination.parent),
+                                          prefix=f".{name}.", suffix=".pending")
+        except BaseException:
+            source_stream.close()
+            raise
         temporary = Path(pending)
         started = last_log = last_keepalive = time.monotonic()
         digest = hashlib.sha256()
         total = 0
         _log(f"artifact {name}: start bytes={ref.byte_size} rss_max_kib={_rss_max_kib()}")
         try:
-            with os.fdopen(fd, "wb") as out, source.open("rb") as src:
+            with os.fdopen(fd, "wb") as out, source_stream as src:
                 while chunk := src.read(_CHUNK):
+                    if total + len(chunk) > ref.byte_size:
+                        raise fail("INTEGRITY_FAILED", f"artifact {name} grew while reading")
                     out.write(chunk)
                     digest.update(chunk)
                     total += len(chunk)
@@ -262,6 +270,7 @@ def _copy_artifacts(refs, store, target, fault, *, keepalive=None):
                  f"rss_max_kib={_rss_max_kib()}")
             copied[name] = {"content_hash": actual, "byte_size": total}
         finally:
+            source_stream.close()
             temporary.unlink(missing_ok=True)
     return copied
 
@@ -317,12 +326,34 @@ def verified_file_hash(path, *, expected_size, stage):
         stream.close()
 
 
+def _copy_verified_file(source, destination, *, expected_size, expected_hash, stage):
+    stream, size = _open_checked(source, stage=stage, expected_size=expected_size,
+                                 oserror_code="INTEGRITY_FAILED")
+    digest = hashlib.sha256()
+    copied = 0
+    try:
+        with stream, Path(destination).open("wb") as out:
+            for chunk in iter(lambda: stream.read(_CHUNK), b""):
+                copied += len(chunk)
+                if copied > size:
+                    raise fail("INTEGRITY_FAILED", f"{stage} grew while reading")
+                digest.update(chunk)
+                out.write(chunk)
+            out.flush()
+            os.fsync(out.fileno())
+        actual = "sha256:" + digest.hexdigest()
+        if copied != size or actual != expected_hash:
+            raise fail("INTEGRITY_FAILED", f"{stage} size or hash mismatch")
+    finally:
+        stream.close()
+
+
 def _verified_database(target, manifest, *, keepalive=None):
     if (type(manifest.get("database_size")) is not int
             or manifest["database_size"] < 0
             or not isinstance(manifest.get("database_rows"), dict)):
         return False
-    database = Path(target) / (_single_filename(manifest["backup_key"]) + ".sqlite")
+    database = manifest_database_path(target, manifest)
     if verified_file_hash(database, expected_size=manifest["database_size"],
                            stage="durable backup database") != manifest.get("database"):
         return False
@@ -335,9 +366,23 @@ def _verified_database(target, manifest, *, keepalive=None):
 
 def _verify_durable_manifest(target, key, manifest, *, keepalive=None):
     try:
-        return (isinstance(manifest, dict) and manifest.get("backup_key") == key
-                and isinstance(manifest.get("database"), str)
-                and _verified_database(target, manifest, keepalive=keepalive))
+        if (not isinstance(manifest, dict) or manifest.get("backup_key") != key
+                or not isinstance(manifest.get("database"), str)
+                or not _verified_database(target, manifest, keepalive=keepalive)):
+            return False
+        artifacts = manifest.get("artifacts")
+        if not isinstance(artifacts, dict):
+            return False
+        for name, info in artifacts.items():
+            _single_filename(name)
+            if (not isinstance(info, dict) or type(info.get("byte_size")) is not int
+                    or info["byte_size"] < 0):
+                return False
+            path = Path(target) / "artifacts" / name
+            if verified_file_hash(path, expected_size=info["byte_size"],
+                                  stage=f"durable backup artifact {name}") != info.get("content_hash"):
+                return False
+        return True
     except Exception:
         return False
 
@@ -439,29 +484,82 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
     return manifest
 
 
+def _validate_restore_artifacts(source, artifacts):
+    for name, info in artifacts.items():
+        _single_filename(name)
+        if (not isinstance(info, dict) or not isinstance(info.get("content_hash"), str)
+                or ("byte_size" in info
+                    and (type(info["byte_size"]) is not int or info["byte_size"] < 0))):
+            raise ValueError("invalid artifact metadata")
+    artifact_root = source / "artifacts"
+    if artifacts and (artifact_root.is_symlink() or not artifact_root.is_dir()):
+        raise ValueError("invalid artifact directory")
+
+
+def _read_restore_manifest(source, manifest_path):
+    from engine.v2.ops.workflows.commands import read_bounded_bytes
+
+    try:
+        manifest = json.loads(read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
+        if not isinstance(manifest, dict):
+            raise ValueError("manifest must be an object")
+        database_source = manifest_database_path(source, manifest)
+        database_hash = manifest.get("database")
+        database_size = manifest.get("database_size")
+        artifacts = manifest.get("artifacts", {})
+        if (not isinstance(database_hash, str)
+                or (database_size is not None
+                    and (type(database_size) is not int or database_size < 0))
+                or not isinstance(artifacts, dict)):
+            raise ValueError("invalid manifest fields")
+        _validate_restore_artifacts(source, artifacts)
+        return database_source, database_hash, database_size, artifacts
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
+        raise fail("INTEGRITY_FAILED", "backup manifest is malformed or unsafe") from None
+
+
+def _restore_contents(source, destination, database_source, database_hash,
+                      database_size, artifacts):
+    try:
+        database = destination / "ops.sqlite"
+        _copy_verified_file(database_source, database, expected_size=database_size,
+                            expected_hash=database_hash, stage="backup database")
+        try:
+            probe = sqlite3.connect(database)
+            try:
+                if integrity_errors(probe):
+                    raise fail("INTEGRITY_FAILED", "restored catalog failed integrity check")
+            finally:
+                probe.close()
+        except sqlite3.DatabaseError:
+            raise fail("INTEGRITY_FAILED", "restored catalog failed integrity check") from None
+        for name, info in artifacts.items():
+            path = destination / "artifacts" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _copy_verified_file(source / "artifacts" / name, path,
+                                expected_size=info.get("byte_size"),
+                                expected_hash=info["content_hash"],
+                                stage=f"backup artifact {name}")
+    except BaseException:
+        import shutil
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+
+
 def restore_backup(source, destination):
     """Restore into a new isolated root; refuse an existing destination."""
     source, destination = Path(source), Path(destination)
-    if destination.exists():
+    if destination.exists() or destination.is_symlink():
         raise fail("INVALID_REQUEST", "restore destination already exists")
     manifests = list(source.glob("*.manifest.json"))
     if len(manifests) != 1:
         raise fail("INTEGRITY_FAILED", "backup manifest is missing or ambiguous")
-    manifest = json.loads(manifests[0].read_text())
-    destination.mkdir(parents=True)
-    database = destination / "ops.sqlite"
-    database_source = manifest_database_path(source, manifest)
-    database.write_bytes(database_source.read_bytes())
-    probe = sqlite3.connect(database)
+    database_source, database_hash, database_size, artifacts = _read_restore_manifest(
+        source, manifests[0])
     try:
-        if integrity_errors(probe) or file_hash(database) != manifest["database"]:
-            raise fail("INTEGRITY_FAILED", "restored catalog failed verification")
-    finally:
-        probe.close()
-    for name, info in manifest["artifacts"].items():
-        path = destination / "artifacts" / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes((source / "artifacts" / name).read_bytes())
-        if file_hash(path) != info["content_hash"]:
-            raise fail("INTEGRITY_FAILED", "restored artifact failed verification")
+        destination.mkdir(parents=True)
+    except FileExistsError:
+        raise fail("INVALID_REQUEST", "restore destination already exists") from None
+    _restore_contents(source, destination, database_source, database_hash,
+                      database_size, artifacts)
     return destination
