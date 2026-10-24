@@ -89,7 +89,7 @@ Do not mistake the obsolete ten-column `LEGACY_FEATURES` or registry prose for
 the active [fourteen-input list](../../engine/models/training/size_model.py#L72-L87).
 The following mapping is exhaustive; it adds no learned feature or search axis.
 
-| Active incumbent input | Challenger subset / exact meaning |
+| Active incumbent input | Challenger subset / mapping (source caveat below) |
 | --- | --- |
 | has_implied_quote | HMO only; 1 for a positive current quote, otherwise 0 |
 | mean_prior_abs_move | H; existing protected history value |
@@ -99,12 +99,25 @@ The following mapping is exhaustive; it adds no learned feature or search axis.
 | signed_streak | HM/HMO; existing signed-run recursion over qualified prior outcomes |
 | dist_high | HM/HMO; existing adjusted-price distance from trailing high |
 | dist_ema | HM/HMO; existing adjusted-price distance from trailing EMA |
-| spy_vol20 | HM/HMO; existing SPY volatility calculation |
-| spy_dd252 | HM/HMO; existing SPY drawdown calculation |
+| spy_vol20 | HM/HMO; regime volatility; benchmark source differs from legacy |
+| spy_dd252 | HM/HMO; regime drawdown; benchmark source differs from legacy |
 | mean_prior_or_implied | HMO only; protected historical ORATS quote mean below |
 | or_implied | HMO alias implied_move; comparator mask [0,60], HMO source-validity policy below |
 | or_rvol30 | HMO alias rvol30; comparator mask [0,700], HMO source-validity policy below |
 | mcap_log | HMO; missing/known-late capture remains null |
+
+**Regime-source caveat ([#1276](https://github.com/yshewchuk/investment-validation/issues/1276)).**
+Matching `spy_*` names and arithmetic does not establish source parity. The
+[legacy panel](../../engine/data/features/panel.py#L367-L403) uses the ^GSPC
+`gspc_daily.csv` close; [native inputs](../../engine/v2/features/panel_row_inputs.py#L349-L370)
+and [research blocks](../../engine/v2/research/magnitude_panel_daily.py#L198-L207)
+instead feed SPY `daily_market.spot` into the regime calculation's `close` column.
+The provider maps `stockPrice` to `spot`; that mapping alone proves neither
+official-close nor intraday-snapshot semantics. Before claiming exact benchmark
+source parity, resolve and pin the instrument, price definition, source and causal
+availability/provenance policy in the recipe identity. This amendment switches
+no source or v1 behavior and asserts no measured impact. This verified mismatch
+concerns regime inputs, not native runup, which uses `price_history.close_adj`.
 
 `ema12r_abs` is an EMA-with-mean fallback, not the ratio described in stale
 feature-note prose. `abs_dist_high` is not an active incumbent input: it was
@@ -417,7 +430,13 @@ quote-presence and absolute aliases. Its historical-implied aggregate needs its 
 protected/availability-qualified prefix, not the production reader's aggregate.
 No old weights/panel forecasts/latest Tier4 release are reused. If causal inputs are unavailable,
 report abstention; never relabel a different recipe or substitute history mean. This is a protocol-
-matched reproduction, not a claim to reproduce the reported 498-event result.
+matched reconstruction, not a claim to reproduce the reported 498-event result.
+Matched event IDs do not repair the regime-source difference above. The legacy
+arm must retain its causally qualified benchmark semantics; if those inputs are
+unavailable, report the legacy comparison unavailable rather than substitute SPY
+spot silently. A separately approved source-changed research comparator requires
+a distinct pinned recipe and an explicit changed-input label; it cannot replace
+the legacy arm or establish exact source parity on the matched set.
 
 Freeze a common eligible event manifest before labels. Store forecasts before
 opening evaluation outcomes through existing admission. For the main paired report,
