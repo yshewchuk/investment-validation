@@ -705,6 +705,18 @@ def test_oversized_manifest_refuses_with_typed_error(tmp_path, catalog, monkeypa
     assert error.code == "INTEGRITY_FAILED"
 
 
+def test_oversized_deletion_journal_refuses_and_deletes_nothing(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    monkeypatch.setattr(retention_module, "_MAX_JOURNAL_BYTES", 1)
+    error = _refusal(ops, ops, catalog, "retention_journal_too_large",
+                     keep=1, materialization_keep=1)
+    assert error.code == "INTEGRITY_FAILED"
+
+
 def test_scope_listing_permission_error_is_typed(tmp_path, catalog, monkeypatch):
     ops = tmp_path / "ops"
     scope = ops / "backups" / "shadow"
@@ -1520,3 +1532,77 @@ def test_unsafe_backup_name_refuses_with_typed_integrity_error(tmp_path, catalog
 
     _refusal(tmp_path, ops, catalog, "backup_name_unsafe",
              keep=1, materialization_keep=1)
+
+
+def test_synthetic_journal_accepts_size_over_four_mib(tmp_path):
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    journal = ops / ".retention-journal.json"
+
+    files = [
+        {"path": f"backups/shadow/b{index}.sqlite",
+         "content_hash": "sha256:" + "0" * 64, "byte_size": 0}
+        for index in range(32_000)
+    ]
+
+    retention_module._write_journal(journal, files, [], 1)
+    assert journal.stat().st_size > 4 * 1024 * 1024
+
+    result = retention_module._journal_files(journal)
+    assert result is not None
+    parsed_files, parsed_roots, backup_keep = result
+    assert len(parsed_files) == 32_000
+    assert backup_keep == 1
+
+
+def test_journal_write_failure_refuses_and_leaves_files_unchanged(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    before = _files(ops)
+    real_open = Path.open
+
+    def fail_pending(self, *args, **kwargs):
+        if self.name == ".retention-journal.json.pending":
+            raise OSError("injected")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_pending)
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+    assert caught.value.code == "BACKUP_FAILED"
+    assert caught.value.problem.details["reason_key"] == "retention_journal_write_failed"
+    assert _files(ops) == before
+
+
+def test_journal_clear_failure_refuses_after_backup_deletion(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    real_fsync = retention_module.fsync_directory
+    calls = {"count": 0}
+
+    def fail_second_fsync(path):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise OSError("injected")
+        return real_fsync(path)
+
+    monkeypatch.setattr(retention_module, "fsync_directory", fail_second_fsync)
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+    assert caught.value.code == "BACKUP_FAILED"
+    assert caught.value.problem.details["reason_key"] == "retention_journal_clear_failed"
+    assert not (scope / "b1.sqlite").exists()
+    assert not (scope / "b1.manifest.json").exists()
+    assert not (scope / "artifacts" / "old.bin").exists()
+    assert (scope / "b2.sqlite").is_file()
+    assert (scope / "b2.manifest.json").is_file()
+    assert (scope / "artifacts" / "new.bin").is_file()
+    assert not (ops / ".retention-journal.json").exists()

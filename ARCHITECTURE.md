@@ -715,7 +715,7 @@ and nothing on this diagram writes to the legacy board.
 
 #### Contract
 
-Backup retention is applied per backup scope (one scope at a time) and runs only after a successful backup; a failed or absent backup invokes nothing and deletes nothing. Selection retains newest N complete verified backups per scope and newest K roots plus persisted live-attempt references; all backup scopes and live refs are preflighted before any fresh deletion; each fresh target matches the durable journal snapshot before first unlink; replay verifies remaining targets and refuses changed/live/retained roots. N defaults to `OPS_BACKUP_RETENTION_KEEP=7` and K defaults to `OPS_MATERIALIZATION_RETENTION_KEEP=11`. A complete backup has the exact manifest schema, a non-empty hash-matched database with clean SQLite integrity/foreign-key checks, and the exact on-disk artifact set with matching sizes and hashes. Current publication has no root binding, so retention keeps the newest 11 roots conservatively and emits `RETENTION_CURRENT_PUBLICATION_UNBOUND`. Refusal outcomes are `INVALID_REQUEST`, `INPUT_CHANGED`, `INTEGRITY_FAILED`, `LEASE_LOST` and `BACKUP_FAILED`. Rerunning against unchanged state is a no-op.
+Backup retention is applied per backup scope and runs only after a successful backup; a failed or absent backup invokes nothing and deletes nothing. Selection retains newest N complete verified backups per scope and newest K roots plus persisted live-attempt references; all backup scopes and live refs are preflighted before any fresh deletion; each fresh target matches the durable journal snapshot before first unlink; replay verifies remaining targets and refuses changed/live/retained roots. N defaults to `OPS_BACKUP_RETENTION_KEEP=7` and K defaults to `OPS_MATERIALIZATION_RETENTION_KEEP=11`. A complete backup has the exact manifest schema, a non-empty hash-matched database with clean SQLite integrity/foreign-key checks, and the exact on-disk artifact set with matching sizes and hashes. Current publication has no root binding, so retention keeps the newest 11 roots conservatively and emits `RETENTION_CURRENT_PUBLICATION_UNBOUND`. Refusal outcomes are `INVALID_REQUEST`, `INPUT_CHANGED`, `INTEGRITY_FAILED`, `LEASE_LOST` and `BACKUP_FAILED`. Rerunning against unchanged state is a no-op.
 
 | Condition | Outcome |
 | --- | --- |
@@ -731,6 +731,7 @@ Backup retention is applied per backup scope (one scope at a time) and runs only
 | Unknown, active, or inconsistent backup residue | `INTEGRITY_FAILED`; no new deletion. |
 | Interrupted prune with a valid journal | Every remaining file and tree entry is verified before any are removed; absent entries count as completed. |
 | Journal unreadable, invalid, or any target mismatches its record | `INTEGRITY_FAILED`; no journal targets are removed. |
+| Deletion journal exceeding its supported bound | `INTEGRITY_FAILED`; no deletion. |
 | Journaled root is now live or among the newest K roots | `INTEGRITY_FAILED`; no journal targets are removed. |
 | Materialization tree removal `OSError` | `BACKUP_FAILED`; earlier deletes may persist and the next invocation verifies and completes the journaled remainder. |
 | Visible materialization candidate that is not a real readonly 0555 directory | `INTEGRITY_FAILED`; no new deletion. |
