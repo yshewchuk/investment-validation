@@ -130,8 +130,8 @@ def test_preflight_refuses_pinned_change_during_feature_comparison(
 
     assert changed
     assert err.value.code == "FEATURES_STALE"
-    assert err.value.problem.details["reason"] == "comparison_failed"
-    assert err.value.problem.details["exception_type"] == "OpsError"
+    assert err.value.problem.details["reason"] == "pinned_table_changed"
+    assert err.value.problem.details["table"] in ("panel", "tier4")
 
 
 def test_preflight_preserves_generation_input_changed_code(case, tmp_path):

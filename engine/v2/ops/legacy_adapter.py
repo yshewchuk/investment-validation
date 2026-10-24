@@ -845,8 +845,11 @@ def run_snapshot_preflight(conn, store, *, source_root, materialization_root, re
                 source, max_bytes=PREFLIGHT_MAX_HASH_BYTES) != source_hashes:
             raise ValueError("source feature tables changed during comparison")
     except Exception as exc:
-        if (isinstance(exc, OpsError) and exc.code == "INPUT_CHANGED"
-                and exc.problem.details.get("reason") == "hash_file_over_cap"):
+        code = exc.code if isinstance(exc, OpsError) else None
+        reason = (exc.problem.details.get("reason")
+                  if isinstance(exc, OpsError) else None)
+        if (code, reason) in {("INPUT_CHANGED", "hash_file_over_cap"),
+                              ("FEATURES_STALE", "pinned_table_changed")}:
             raise
         raise fail(
             "FEATURES_STALE",

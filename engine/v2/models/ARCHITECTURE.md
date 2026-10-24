@@ -403,7 +403,8 @@ the chooser producer artifacts below; this alone admits neither training sources
 nor a nightly chooser declaration.
 
 Selection uses the exact earlier of the event month and decision month,
-the registered size model and feature order, and the pinned panel byte hash.
+and the registered size model and feature order. The panel byte hash is the
+pinned snapshot's, compared by the batch caller, not the selector.
 It never chooses the newest available fold or substitutes a full-refit model.
 The panel hash comes from the already-pinned snapshot's single original
 `feature_panel` object; an unsupported multi-fragment layout is refused. The
