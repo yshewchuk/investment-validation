@@ -1,0 +1,272 @@
+"""Read-only nightly limit headroom check: usage against fixed repo limits.
+
+One ``headroom_report`` pass answers "how close is tonight's plan to a hard
+limit" from catalog metadata only -- no object payloads beyond the plan and
+its bound legacy manifest, no data-row reads, so it fits the nightly window.
+Statuses: ``OK`` at or below 80%, ``WARN`` above 80%, ``FAIL`` above 95%;
+the document's overall status is the worst limit's and the CLI exits with
+0/1/2 to match. Every limit the check could not measure carries an
+explanatory ``detail`` note or appears in ``not_covered``.
+
+The scratch check mirrors ``nightly.plan_scratch_problems`` exactly -- the
+same ``store_barrier.domains_of`` read-domain test, the same
+``_legacy_resource`` profile routing and the same manifest ``file_refs``
+byte total -- but reports the measured usage per profile instead of only
+refusing an oversize plan.
+"""
+from __future__ import annotations
+
+import json
+import sys
+import time
+
+from engine.v2.data.price_history_query import _RESULT_CAP
+from engine.v2.data.repository import Repository
+from engine.v2.foundation import ArtifactStore, parse_timestamp
+from engine.v2.ops import nightly
+from engine.v2.ops.checkpoints import artifact
+from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
+from engine.v2.ops.stages import registry
+from engine.v2.ops.store_barrier import domains_of
+
+#: The three-tier cut points; 80.0 is OK, 95.0 is WARN (strictly above fails).
+_WARN_PCT = 80.0
+_FAIL_PCT = 95.0
+_EXIT = {"OK": 0, "WARN": 1, "FAIL": 2}
+
+#: How many of the most recent finished attempts the memory limits scan.
+_RECENT_ATTEMPTS = 500
+_GIB = 1024 ** 3
+
+_NOT_COVERED = (
+    "max-registration-bytes (run-script flag, not in repo)",
+    "chains._RESULT_CAP (2_000_000)",
+    "legacy_bundle.MAX_ARTIFACT_BYTES",
+    "release_layout.MAX_CATALOG_BYTES",
+    "deployment.MAX_MANIFEST_BYTES",
+    "serving_fold MAX_FOLD_BYTES",
+    "d14_inputs.MAX_CALENDAR_BYTES",
+    "serving.projections._LOOKUP_RESULT_CAP",
+)
+
+
+def status_for(pct: float) -> str:
+    if pct > _FAIL_PCT:
+        return "FAIL"
+    if pct > _WARN_PCT:
+        return "WARN"
+    return "OK"
+
+
+def project_days(points, limit: int):
+    """Least-squares linear days-to-limit over ``(day, usage)`` points.
+
+    ``None`` unless at least two points share no duplicate day value and the
+    slope is strictly positive; the projection measures from the latest
+    point's usage toward ``limit``.
+    """
+    if len(points) < 2:
+        return None
+    days = [point[0] for point in points]
+    if len(set(days)) < 2:
+        return None
+    mean_x = sum(days) / len(points)
+    mean_y = sum(point[1] for point in points) / len(points)
+    variance_x = sum((day - mean_x) ** 2 for day in days)
+    if variance_x <= 0:
+        return None
+    slope = sum((day - mean_x) * (usage - mean_y) for day, usage in points) / variance_x
+    if slope <= 0:
+        return None
+    current = max(points, key=lambda point: point[0])[1]
+    return (limit - current) / slope
+
+
+def _entry(name, usage, limit, unit, detail, projected_days=None):
+    pct = round(100.0 * usage / limit, 1) if limit > 0 else 0.0
+    return {"name": name, "usage": int(usage), "limit": int(limit), "unit": unit,
+            "pct": pct, "status": status_for(pct),
+            "projected_days_to_limit": projected_days, "detail": detail}
+
+
+def _scratch_entry(profile, needed, detail):
+    return _entry(f"scratch_bytes:{profile.name}", needed, profile.scratch_bytes,
+                  "bytes", detail)
+
+
+def _manifest_total(conn, store, manifest_id, totals):
+    if manifest_id not in totals:
+        manifest = json.loads(store.read_verified(artifact(conn, store, manifest_id)))
+        totals[manifest_id] = sum(int(item["byte_size"])
+                                  for item in manifest.get("file_refs", []))
+    return totals[manifest_id]
+
+
+def _scratch_entries(conn, store, plan):
+    """One ``scratch_bytes:<profile>`` entry per profile the plan stages against.
+
+    Mirrors ``nightly.plan_scratch_problems``: ``legacy_materialize`` is
+    checked against its pinned ``scratch_estimate_bytes``; every kind with a
+    declared legacy-store read domain is checked against its bound
+    ``legacy_manifest.json`` (the plan's ``input_manifest_ref``) byte total;
+    snapshot-mode stages that read the materialized root declare no read
+    domain and are skipped, exactly as ``domains_of`` decides at claim time.
+    """
+    if plan.get("kind") != "nightly":
+        return [_entry("scratch_bytes", 0, 0, "bytes",
+                       "not a nightly plan; no scratch budget to measure")]
+    snapshot = (plan.get("snapshot_inputs") or {}
+                if plan.get("input_mode") == "snapshot" else None)
+    refresh_mode = plan.get("refresh_mode", "legacy")
+    reg = registry()
+    manifest_id = plan.get("input_manifest_ref")
+    totals: dict[str, int] = {}
+    seen: set[str] = set()
+    entries = []
+    for stage in nightly._stage_sequence(plan, False, snapshot, refresh_mode):
+        kind = nightly._action_for(stage, refresh_mode=refresh_mode)
+        if kind == "legacy_materialize":
+            needed = int((snapshot or {}).get("scratch_estimate_bytes", 0))
+            detail = "pinned snapshot scratch_estimate_bytes (legacy_materialize)"
+        elif snapshot is not None and stage in nightly.SNAPSHOT_STAGES:
+            continue
+        elif manifest_id and any(mode == "read" for _, mode in domains_of(reg, kind)):
+            needed = _manifest_total(conn, store, manifest_id, totals)
+            detail = f"legacy read-set manifest total (stage {stage})"
+        else:
+            continue
+        profile = profile_named(DEFAULT_POLICY, nightly._legacy_resource(kind))
+        if profile.name in seen:
+            continue
+        seen.add(profile.name)
+        entries.append(_scratch_entry(profile, needed, detail))
+    if not entries:
+        entries = [_entry("scratch_bytes", 0, 0, "bytes",
+                          "plan carries neither a legacy input manifest nor a "
+                          "snapshot scratch estimate; nothing to measure")]
+    return entries
+
+
+def _max_partition_rows(records):
+    totals: dict[str, int] = {}
+    for record in records:
+        totals[record.partition_key] = totals.get(record.partition_key, 0) + record.row_count
+    if not totals:
+        return 0, None
+    ticker = max(totals, key=lambda key: totals[key])
+    return totals[ticker], ticker
+
+
+def _chain_registered(conn, snapshot_id, history):
+    chain = []
+    current = snapshot_id
+    seen: set[str] = set()
+    while current and current not in seen and len(chain) < max(int(history), 1):
+        seen.add(current)
+        row = conn.execute(
+            "SELECT parent_snapshot_id, registered_at FROM data_snapshots "
+            "WHERE snapshot_id = ?", (current,)).fetchone()
+        if row is None:
+            break
+        chain.append((current, row["registered_at"]))
+        current = row["parent_snapshot_id"]
+    return chain
+
+
+def _history_points(conn, repository, snapshot_id, history):
+    stamps = []
+    for chain_id, registered_at in _chain_registered(conn, snapshot_id, history):
+        ref = repository.resolve(chain_id)
+        if "price_history" not in ref.table_versions:
+            continue
+        usage, _ = _max_partition_rows(repository.fragment_records(ref, "price_history"))
+        stamps.append((parse_timestamp(registered_at), usage))
+    if not stamps:
+        return []
+    base = min(stamp for stamp, _ in stamps)
+    return [((stamp - base).total_seconds() / 86400.0, usage) for stamp, usage in stamps]
+
+
+def _price_history_entry(conn, store, plan, history):
+    snapshot_id = (plan.get("snapshot_inputs") or {}).get("snapshot_id")
+    if not snapshot_id:
+        return [_entry("price_history_result_rows", 0, _RESULT_CAP, "rows",
+                       "plan pins no snapshot_inputs; result-cap check skipped")]
+    repository = Repository(conn, store, pin_snapshots=True)
+    snapshot_ref = repository.resolve(snapshot_id)
+    if "price_history" not in snapshot_ref.table_versions:
+        return [_entry("price_history_result_rows", 0, _RESULT_CAP, "rows",
+                       "pinned snapshot carries no price_history table; check skipped")]
+    usage, ticker = _max_partition_rows(
+        repository.fragment_records(snapshot_ref, "price_history"))
+    points = _history_points(conn, repository, snapshot_id, history)
+    projected = project_days(points, _RESULT_CAP) if len(points) >= 2 else None
+    detail = f"largest partition_key {ticker}" if ticker else "no price_history fragments"
+    return [_entry("price_history_result_rows", usage, _RESULT_CAP, "rows", detail, projected)]
+
+
+def _memory_entries(conn, max_rss_gb):
+    """``memory_peak:<profile>`` entries from the most recent finished attempts.
+
+    The enforced memory limit and the profile name live on the attempt's
+    ``resource_reservations`` row (``scheduler._create_attempt`` writes both
+    beside ``resources_json``); rows with a NULL peak are skipped, as are
+    attempts outside the recent window.
+    """
+    entries = []
+    rows = conn.execute(
+        "SELECT rr.profile AS profile, rr.memory_bytes AS memory_bytes, "
+        "MAX(a.memory_peak_bytes) AS peak FROM attempts a "
+        "JOIN resource_reservations rr ON rr.attempt_id = a.attempt_id "
+        "WHERE a.attempt_id IN (SELECT attempt_id FROM attempts "
+        "WHERE ended_at IS NOT NULL AND memory_peak_bytes IS NOT NULL "
+        "ORDER BY COALESCE(ended_at, created_at) DESC LIMIT ?) "
+        "GROUP BY rr.profile, rr.memory_bytes ORDER BY peak DESC",
+        (_RECENT_ATTEMPTS,)).fetchall()
+    for row in rows:
+        entries.append(_entry(f"memory_peak:{row['profile']}", row["peak"],
+                              row["memory_bytes"], "bytes",
+                              "max memory_peak_bytes of recent finished attempts "
+                              "in this reservation profile"))
+    if max_rss_gb is not None:
+        # "most recent session" is the latest supervisor epoch: attempts carry
+        # their submitting supervisor's epoch_id, so this bounds the scan to
+        # one daemon lifetime.
+        peak = conn.execute(
+            "SELECT MAX(memory_peak_bytes) AS peak FROM attempts "
+            "WHERE memory_peak_bytes IS NOT NULL AND supervisor_epoch = "
+            "(SELECT supervisor_epoch FROM attempts "
+            "WHERE ended_at IS NOT NULL AND memory_peak_bytes IS NOT NULL "
+            "ORDER BY COALESCE(ended_at, created_at) DESC LIMIT 1)").fetchone()["peak"]
+        entries.append(_entry("rss_cap_gb", int(peak or 0), int(max_rss_gb * _GIB), "bytes",
+                              "largest attempt memory peak of the most recent "
+                              "supervisor epoch vs --max-rss-gb"))
+    return entries
+
+
+def headroom_report(conn, root, plan, *, max_rss_gb=None, history=5):
+    started = time.monotonic()
+    print("[headroom] start", file=sys.stderr)
+    store = ArtifactStore(root)
+    limits = [*_scratch_entries(conn, store, plan),
+              *_price_history_entry(conn, store, plan, history),
+              *_memory_entries(conn, max_rss_gb)]
+    status = max((item["status"] for item in limits), key=_EXIT.__getitem__, default="OK")
+    document = {"schema": "headroom.v1", "status": status, "exit_code": _EXIT[status],
+                "limits": limits, "not_covered": list(_NOT_COVERED)}
+    for item in limits:
+        line = (f"[headroom] {item['status']} {item['name']}: {item['usage']}/"
+                f"{item['limit']} {item['unit']} ({item['pct']}%)")
+        if item["projected_days_to_limit"] is not None:
+            line += f" [days-to-limit {item['projected_days_to_limit']:.1f}]"
+        print(line, file=sys.stderr)
+    print(f"[headroom] done in {time.monotonic() - started:.1f}s: {status}", file=sys.stderr)
+    return document
+
+
+def headroom_command(args, root, conn, clock):
+    """``ops headroom --plan <plan_ref>``: load the plan artifact, report."""
+    store = ArtifactStore(root)
+    ref = artifact(conn, store, args.plan)
+    plan = json.loads(store.read_verified(ref))
+    return headroom_report(conn, root, plan, max_rss_gb=args.max_rss_gb, history=args.history)

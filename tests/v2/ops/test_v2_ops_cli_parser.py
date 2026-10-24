@@ -33,7 +33,8 @@ def test_command_tree_is_exactly_the_expected_set():
     assert _subparser_choices(p) == sorted({
         "init", "doctor", "health", "serve", "plan", "submit", "rescore",
         "capture-inputs", "reconcile", "reclaim", "provider-account", "snapshot", "ledger",
-        "decisions", "price-refresh", "price-history", "computed-moves", "get", "logs",
+        "decisions", "price-refresh", "price-history", "computed-moves", "headroom",
+        "get", "logs",
         "cancel", "resume", "explain"})
     for action in p._actions:
         if isinstance(action, argparse._SubParsersAction):
@@ -97,6 +98,12 @@ _CASES = [
     ("submit", ["submit", "--plan", "p", "--idempotency-key", "k"],
      {"command": "submit", "idempotency_key": "k", "plan": "p",
       "root": "data/operations"}),
+    ("headroom_defaults", ["headroom", "--plan", "p"],
+     {"command": "headroom", "history": 5, "max_rss_gb": None, "plan": "p",
+      "root": "data/operations"}),
+    ("headroom_explicit", ["--root", "R1", "headroom", "--plan", "p",
+                           "--max-rss-gb", "1.5", "--history", "3"],
+     {"command": "headroom", "history": 3, "max_rss_gb": 1.5, "plan": "p", "root": "R1"}),
     ("rescore", ["rescore", "--request", "r.json", "--native-inputs", "n.json"],
      {"command": "rescore", "native_inputs": Path("n.json"), "request": Path("r.json"),
       "root": "data/operations"}),
