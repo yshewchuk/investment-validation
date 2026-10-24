@@ -166,6 +166,33 @@ def _snapshot_estimate(snapshot):
     return estimate
 
 
+def _checked_plan_fields(plan):
+    """The validated plan fields, mirroring ``nightly._snapshot_inputs`` and
+    the ``plans.py``/submit-side field checks: returns
+    ``(input_mode, snapshot, manifest_id)``.
+
+    Absent ``input_mode``/``refresh_mode`` mean ``"legacy"``, exactly as
+    ``_submit_nightly`` reads them; a present-but-wrong value is an operator
+    input error on this write-free command and refuses ``INVALID_REQUEST``
+    rather than being coerced. ``snapshot_inputs`` is required to be a JSON
+    object in snapshot mode; its ``scratch_estimate_bytes`` stays validated
+    per plan-stage by ``_snapshot_estimate``.
+    """
+    input_mode = plan.get("input_mode", "legacy")
+    if input_mode not in ("legacy", "snapshot"):
+        raise fail("INVALID_REQUEST", "input_mode must be legacy or snapshot")
+    snapshot = plan.get("snapshot_inputs") if input_mode == "snapshot" else None
+    if input_mode == "snapshot" and not isinstance(snapshot, dict):
+        raise fail("INVALID_REQUEST",
+                   "snapshot input mode needs snapshot_inputs to be a JSON object")
+    manifest_id = plan.get("input_manifest_ref")
+    if "input_manifest_ref" in plan and not (isinstance(manifest_id, str) and manifest_id):
+        raise fail("INVALID_REQUEST", "input_manifest_ref must be a non-empty string")
+    if not isinstance(plan.get("refresh_mode", "legacy"), str):
+        raise fail("INVALID_REQUEST", "refresh_mode must be a string")
+    return input_mode, snapshot, manifest_id
+
+
 def _scratch_entries(conn, store, plan):
     """One ``scratch_bytes:<profile>`` entry per profile the plan stages against.
 
@@ -175,15 +202,15 @@ def _scratch_entries(conn, store, plan):
     ``legacy_manifest.json`` (the plan's ``input_manifest_ref``) byte total;
     snapshot-mode stages that read the materialized root declare no read
     domain and are skipped, exactly as ``domains_of`` decides at claim time.
+    Plan fields are validated by ``_checked_plan_fields`` before any limit is
+    measured, the way ``_submit_nightly`` refuses a bad plan.
     """
     if plan.get("kind") != "nightly":
         return [_unmeasured("scratch_bytes", 0, "bytes",
                             "not a nightly plan; no scratch budget to measure")]
-    snapshot = (plan.get("snapshot_inputs") or {}
-                if plan.get("input_mode") == "snapshot" else None)
+    _input_mode, snapshot, manifest_id = _checked_plan_fields(plan)
     refresh_mode = plan.get("refresh_mode", "legacy")
     reg = registry()
-    manifest_id = plan.get("input_manifest_ref")
     totals: dict[str, int] = {}
     seen: set[str] = set()
     entries = []

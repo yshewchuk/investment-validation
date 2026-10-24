@@ -186,22 +186,71 @@ def test_empty_manifest_file_refs_is_zero_usage_ok(catalog):
 
 
 @pytest.mark.parametrize("snapshot_inputs", [
-    None, {},                                      # estimate missing (must not default to 0)
+    {},                                      # estimate missing (must not default to 0)
     {"scratch_estimate_bytes": None},
     {"scratch_estimate_bytes": True},
     {"scratch_estimate_bytes": -1},
     {"scratch_estimate_bytes": "1024"},
     {"scratch_estimate_bytes": 1.5},
-], ids=["absent", "empty", "null", "bool", "negative", "str", "float"])
+], ids=["empty", "null", "bool", "negative", "str", "float"])
 def test_bad_snapshot_scratch_estimate_refuses_invalid_request(catalog, snapshot_inputs):
     plan = nightly_plan_document(input_mode="snapshot")
-    if snapshot_inputs is not None:
-        plan["snapshot_inputs"] = snapshot_inputs
+    plan["snapshot_inputs"] = snapshot_inputs
     with pytest.raises(OpsError) as excinfo:
         report_for(catalog, plan)
     assert excinfo.value.code == "INVALID_REQUEST"
     assert excinfo.value.problem.message == \
         "snapshot scratch_estimate_bytes must be a non-negative integer"
+
+
+# A plan can be built and saved by a caller other than ``plan nightly``, so
+# headroom validates the plan fields the way nightly submission does
+# (nightly._snapshot_inputs / _submit_nightly / plans._pin_refresh_mode).
+@pytest.mark.parametrize("extra,message", [
+    ({"input_mode": "snapshot "}, "input_mode must be legacy or snapshot"),
+    ({"input_mode": "native"}, "input_mode must be legacy or snapshot"),
+    ({"input_mode": None}, "input_mode must be legacy or snapshot"),
+    ({"input_mode": 5}, "input_mode must be legacy or snapshot"),
+    ({"input_mode": "snapshot"},
+     "snapshot input mode needs snapshot_inputs to be a JSON object"),
+    ({"input_mode": "snapshot", "snapshot_inputs": None},
+     "snapshot input mode needs snapshot_inputs to be a JSON object"),
+    ({"input_mode": "snapshot", "snapshot_inputs": [{"scratch_estimate_bytes": 1}]},
+     "snapshot input mode needs snapshot_inputs to be a JSON object"),
+    ({"input_mode": "snapshot", "snapshot_inputs": "1024"},
+     "snapshot input mode needs snapshot_inputs to be a JSON object"),
+    ({"input_manifest_ref": ""}, "input_manifest_ref must be a non-empty string"),
+    ({"input_manifest_ref": None}, "input_manifest_ref must be a non-empty string"),
+    ({"input_manifest_ref": 5}, "input_manifest_ref must be a non-empty string"),
+    ({"input_manifest_ref": ["artifact-id"]},
+     "input_manifest_ref must be a non-empty string"),
+    ({"refresh_mode": None}, "refresh_mode must be a string"),
+    ({"refresh_mode": 5}, "refresh_mode must be a string"),
+    ({"refresh_mode": ["native"]}, "refresh_mode must be a string"),
+], ids=["mode-trailing-space", "mode-native", "mode-null", "mode-int",
+        "snapshot-inputs-absent", "snapshot-inputs-null", "snapshot-inputs-list",
+        "snapshot-inputs-str", "manifest-empty", "manifest-null", "manifest-int",
+        "manifest-list", "refresh-null", "refresh-int", "refresh-list"])
+def test_unvalidated_plan_fields_refuse_like_nightly_submission(catalog, extra, message):
+    with pytest.raises(OpsError) as excinfo:
+        report_for(catalog, nightly_plan_document(**extra))
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert excinfo.value.problem.message == message
+
+
+def test_default_and_native_plan_fields_still_pass(catalog):
+    """Absent input_mode means legacy and absent refresh_mode means legacy; a
+    non-member but string refresh_mode keeps the legacy DAG, exactly as
+    ``_submit_nightly`` reads them -- none of these refuse."""
+    conn, store, clock = catalog
+    manifest_id = publish(conn, store, clock, manifest_document(1000),
+                          "legacy_input_manifest.v1.0")
+    document = report_for(catalog, nightly_plan_document(manifest_id))
+    assert any(item["name"].startswith("scratch_bytes:") for item in document["limits"])
+    for extra in ({"input_mode": "legacy", "refresh_mode": "legacy"},
+                  {"refresh_mode": "native"}, {"refresh_mode": "anything-else"}):
+        document = report_for(catalog, nightly_plan_document(manifest_id, **extra))
+        assert any(item["name"].startswith("scratch_bytes:") for item in document["limits"])
 
 
 def test_not_covered_lists_the_static_names(catalog):
