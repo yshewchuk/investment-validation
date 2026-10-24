@@ -1213,9 +1213,14 @@ def test_run_nightly_refuses_stale_panel_input_when_gspc_refresh_fails(
         attempted.append((fetcher, path, refetch_token, minimum_last_date))
         return {"ok": False, "reason": "fetch_failed"}
 
+    calendar_refreshes = []
+
+    def record_calendar_refresh(*args, **kwargs):
+        calendar_refreshes.append((args, kwargs))
+        return {"ok": True}
+
     monkeypatch.setattr(gspc_refresh, "refresh_gspc_daily", fail_gspc)
-    monkeypatch.setattr(nightly, "refresh_calendar_data",
-                        lambda *a, **k: pytest.fail("calendar refresh ran after GSPC refusal"))
+    monkeypatch.setattr(nightly, "refresh_calendar_data", record_calendar_refresh)
     sentinel = _ScorerSentinel()
 
     with pytest.raises(NightlyStop) as caught:
@@ -1234,6 +1239,7 @@ def test_run_nightly_refuses_stale_panel_input_when_gspc_refresh_fails(
     assert set(captured["report"].as_dict()) == {
         "as_of", "requested_as_of", "resolved_as_of", "finality", "steps",
         "timeline", "flags", "stopped", "elapsed_s"}
+    assert len(calendar_refreshes) == 1, "the calendar refresh runs exactly once"
     assert not sentinel.touched
     assert marker_writes == []
     assert calls == []
@@ -1280,9 +1286,14 @@ def test_run_nightly_refuses_stale_gspc_coverage_and_rotation(
             raise CredentialRotated("test credential rotation")
         return {"ok": False, "reason": "stale_source"}
 
+    calendar_refreshes = []
+
+    def record_calendar_refresh(*args, **kwargs):
+        calendar_refreshes.append((args, kwargs))
+        return {"ok": True}
+
     monkeypatch.setattr(gspc_refresh, "refresh_gspc_daily", fail_gspc)
-    monkeypatch.setattr(nightly, "refresh_calendar_data",
-                        lambda *a, **k: pytest.fail("calendar refresh ran after GSPC refusal"))
+    monkeypatch.setattr(nightly, "refresh_calendar_data", record_calendar_refresh)
     sentinel = _ScorerSentinel()
 
     with pytest.raises(NightlyStop) as caught:
@@ -1304,6 +1315,7 @@ def test_run_nightly_refuses_stale_gspc_coverage_and_rotation(
             "GSPC_REFRESH_STALE: expected through 2012-10-26, got source ending before cutoff")
         assert captured["report"].steps["gspc_refresh"] == {
             "ok": False, "reason": "stale_source"}
+    assert len(calendar_refreshes) == 1, "the calendar refresh runs exactly once"
     assert calls == []
     assert marker_writes == []
     assert not sentinel.touched

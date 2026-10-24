@@ -1481,42 +1481,6 @@ def run_nightly(
                                        "(the calendar may need a refresh)"})
 
     report.mark("universe", started=started)
-    if refresh and tiers:
-        from engine.calendar import UNSCHEDULED_CLOSURES, projected_trading_days
-        from engine.data.fetch import Fetcher, CredentialRotated
-        from engine.data.pulls.gspc_refresh import refresh_gspc_daily
-        if fetcher is None:
-            fetcher = Fetcher()
-        _log_rss("gspc refresh start")
-        try:
-            previous_sessions = projected_trading_days(
-                as_of - pd.Timedelta(days=14), as_of - pd.Timedelta(days=1)
-            )
-            previous_sessions = previous_sessions[
-                ~previous_sessions.strftime("%Y-%m-%d").isin(UNSCHEDULED_CLOSURES)
-            ]
-            expected = previous_sessions[-1]
-            refetch_token = f"legacy-nightly-{time.time_ns()}"
-            result = refresh_gspc_daily(
-                fetcher, paths.GSPC_DAILY, refetch_token=refetch_token,
-                minimum_last_date=expected,
-            )
-            _log_rss("gspc refresh end")
-            report.mark("gspc_refresh", started=started)
-            report.steps["gspc_refresh"] = result
-            if not result.get("ok"):
-                if result.get("reason") == "stale_source":
-                    raise _refuse(
-                        report, "gspc_refresh",
-                        f"GSPC_REFRESH_STALE: expected through {pd.Timestamp(expected).date()}, "
-                        "got source ending before cutoff",
-                    )
-                raise _refuse(report, "gspc_refresh", "GSPC_REFRESH_FAILED: " + str(result.get("reason", "unknown")))
-        except CredentialRotated as exc:
-            _log_rss("gspc refresh end")
-            report.mark("gspc_refresh", started=started)
-            report.steps["gspc_refresh"] = {"ok": False, "reason": "credential_rotated"}
-            raise _refuse(report, "gspc_refresh", "GSPC_REFRESH_FAILED: credential_rotated") from exc
     # -- 1. refresh -----------------------------------------------------------
     if refresh and calendar_tickers:
         from engine.data.fetch import CredentialRotated, FetchError
@@ -1590,6 +1554,43 @@ def run_nightly(
                 raise NightlyStop("finality", detail)
     else:
         report.resolved_as_of = str(as_of.date())
+
+    if refresh and tiers:
+        from engine.calendar import UNSCHEDULED_CLOSURES, projected_trading_days
+        from engine.data.fetch import Fetcher, CredentialRotated
+        from engine.data.pulls.gspc_refresh import refresh_gspc_daily
+        if fetcher is None:
+            fetcher = Fetcher()
+        _log_rss("gspc refresh start")
+        try:
+            previous_sessions = projected_trading_days(
+                as_of - pd.Timedelta(days=14), as_of - pd.Timedelta(days=1)
+            )
+            previous_sessions = previous_sessions[
+                ~previous_sessions.strftime("%Y-%m-%d").isin(UNSCHEDULED_CLOSURES)
+            ]
+            expected = previous_sessions[-1]
+            refetch_token = f"legacy-nightly-{time.time_ns()}"
+            result = refresh_gspc_daily(
+                fetcher, paths.GSPC_DAILY, refetch_token=refetch_token,
+                minimum_last_date=expected,
+            )
+            _log_rss("gspc refresh end")
+            report.mark("gspc_refresh", started=started)
+            report.steps["gspc_refresh"] = result
+            if not result.get("ok"):
+                if result.get("reason") == "stale_source":
+                    raise _refuse(
+                        report, "gspc_refresh",
+                        f"GSPC_REFRESH_STALE: expected through {pd.Timestamp(expected).date()}, "
+                        "got source ending before cutoff",
+                    )
+                raise _refuse(report, "gspc_refresh", "GSPC_REFRESH_FAILED: " + str(result.get("reason", "unknown")))
+        except CredentialRotated as exc:
+            _log_rss("gspc refresh end")
+            report.mark("gspc_refresh", started=started)
+            report.steps["gspc_refresh"] = {"ok": False, "reason": "credential_rotated"}
+            raise _refuse(report, "gspc_refresh", "GSPC_REFRESH_FAILED: credential_rotated") from exc
 
     # -- 2. validation battery — red stops the pipeline ----------------------
     # Validate what will actually be scored (falling back to the frontier set

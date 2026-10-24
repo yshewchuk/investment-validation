@@ -21,14 +21,15 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 
 ## Primary contracts and public interfaces
 
-- `nightly.py` refreshes the guarded legacy `^GSPC` daily series before the
-  calendar refresh and any Tier-3 panel rebuild when both `refresh` and
-  `tiers` are enabled (including fetch-only runs). A failed refresh, or a
-  successful refresh whose source ends before the last NYSE session strictly
-  before the decision date, stops with typed `NightlyStop` step
-  `gspc_refresh`. This cutoff uses `projected_trading_days` with the calendar's
-  scheduled holidays and `UNSCHEDULED_CLOSURES`, so checking it does not read
-  the stored GSPC file. The helper checks minimum coverage before
+- `nightly.py` refreshes the guarded legacy `^GSPC` daily series after the
+  calendar refresh resolves the final board date, but before any Tier-3 panel
+  rebuild, when both `refresh` and `tiers` are enabled (including fetch-only
+  runs). The coverage cutoff is the last NYSE session strictly before the
+  resolved decision date, not the requested date. A failed refresh, or a
+  successful refresh whose source ends before that cutoff, stops with typed
+  `NightlyStop` step `gspc_refresh`. This cutoff uses `projected_trading_days`
+  with the calendar's scheduled holidays and `UNSCHEDULED_CLOSURES`, so
+  checking it does not read the stored GSPC file. The helper checks minimum coverage before
   reading or replacing the stored file; a stale source leaves it untouched.
   With refresh disabled, both refresh and panel rebuild are skipped. The v2
   `price-refresh` stage omits the new optional cutoff and keeps its existing
@@ -212,9 +213,10 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   `GSPC_REFRESH_FAILED: credential_rotated`. A source response that does not
   cover the last NYSE session strictly before the decision date stops with
   `GSPC_REFRESH_STALE: expected through <date>, got source ending before
-  cutoff`. Both are `NightlyStop` at `gspc_refresh`, before calendar refresh,
-  validation, panel rebuild or scoring. The source coverage cutoff is computed
-  from the rule-based NYSE calendar without reading `GSPC_DAILY`; the guarded
+  cutoff`. Both are `NightlyStop` at `gspc_refresh`, after calendar refresh
+  and finality resolution but before panel rebuild, validation or scoring. The
+  source coverage cutoff is computed from the rule-based NYSE calendar and the
+  resolved board date without reading `GSPC_DAILY`; the guarded
   helper enforces it before touching that file. A refused source therefore
   leaves the stored file unchanged. `refresh=False` skips this refresh and
   the panel rebuild. Existing report JSON top-level fields are unchanged. The
@@ -244,7 +246,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 
   | Condition | Outcome |
   | --- | --- |
-  | `^GSPC` refresh refuses (`GSPC_REFRESH_FAILED`) or source ends before the last NYSE session strictly before the decision date (`GSPC_REFRESH_STALE`; with refresh and tiers on) | `NightlyStop` at `gspc_refresh`; exit 1 before calendar refresh, panel rebuild, warm or score; previous panel and published board remain; stale source is refused before the stored series is read or written |
+  | `^GSPC` refresh refuses (`GSPC_REFRESH_FAILED`) or source ends before the last NYSE session strictly before the resolved decision date (`GSPC_REFRESH_STALE`; with refresh and tiers on) | `NightlyStop` at `gspc_refresh`; exit 1 after calendar refresh and finality resolution, but before panel rebuild, warm or score; previous panel and published board remain; stale source is refused before the stored series is read or written |
   | Warm step (default scorer, or `--fetch-only`): subprocess exits non-zero, cannot start, times out (3 h), fails to plan/verify, leaves a fit missing or not ready, or the panel changed under it | `NightlyStop` `WARM_SERVING_FAILED`; exit 1; nothing scored; no in-process refit |
   | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`); no gap flag once repaired |
   | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no new SNAPSHOT (the previous one is kept), so the native import sees no new session for the night (`not_yet`, unless an earlier run that night already wrote one) |
