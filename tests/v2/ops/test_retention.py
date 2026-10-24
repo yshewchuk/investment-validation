@@ -107,6 +107,7 @@ def _refusal(snapshot_root, ops_root, conn, reason, **kwargs):
         enforce_retention(ops_root, conn=conn, store=object(), **kwargs)
     assert caught.value.problem.details["reason_key"] == reason
     assert _files(snapshot_root) == before
+    return caught.value
 
 
 def _materialization_dir(base, name, mtime_ns):
@@ -277,3 +278,62 @@ def test_unbound_current_publication_is_reported_and_only_older_roots_pruned(
     assert "RETENTION_CURRENT_PUBLICATION_UNBOUND" in events
     assert not oldest.exists() and not older.exists()
     assert newer.is_dir() and newest.is_dir()
+
+
+def test_oversized_manifest_refuses_with_typed_error(tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"a.bin": b"artifact"})
+    monkeypatch.setattr(retention_module, "_MAX_MANIFEST_BYTES", 10)
+    error = _refusal(ops, ops, catalog, "backup_manifest_too_large",
+                     keep=1, materialization_keep=1)
+    assert error.code == "INTEGRITY_FAILED"
+
+
+def test_injected_deletion_oserror_is_typed(tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"a.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"b.bin": b"new"})
+    before = _files(ops)
+    monkeypatch.setattr(Path, "unlink",
+                        lambda self: (_ for _ in ()).throw(OSError("denied")))
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "backup_delete_failed"
+    assert "denied" not in str(caught.value.problem)
+    assert _files(ops) == before
+
+
+def test_read_only_materialization_root_is_removed(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    root = _materialization_dir(base, "root-old", 1)
+    os.chmod(root, 0o555)
+    _materialization_dir(base, "root-new", 2)
+    enforce_retention(ops, conn=catalog, store=object(),
+                      keep=1, materialization_keep=1)
+    assert not root.exists()
+
+
+def test_configured_materialization_base_is_used_for_retention(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    default_base = default_materialization_base(ops)
+    default_base.mkdir(parents=True)
+    default_root = _materialization_dir(default_base, "default-root", 1)
+
+    configured_base = tmp_path / "configured-base"
+    configured_base.mkdir()
+    oldest = _materialization_dir(configured_base, "root-old", 1)
+    newest = _materialization_dir(configured_base, "root-new", 2)
+
+    enforce_retention(ops, conn=catalog, store=object(),
+                      keep=1, materialization_keep=1,
+                      materialization_base=configured_base)
+
+    assert not oldest.exists()
+    assert newest.is_dir()
+    assert default_root.is_dir()

@@ -1,10 +1,3 @@
-"""Prune verified catalog backups and unreferenced materialization roots.
-
-A scope under ``ops_root/backups`` holds ``<key>.sqlite``, ``<key>.manifest.json``
-and a shared ``artifacts/`` directory. Everything is verified before deletion;
-any malformed, stray or incomplete file refuses the whole call. Roots beside
-``ops_root`` are kept by mtime, plus every root a live attempt still binds.
-"""
 from __future__ import annotations
 
 import json
@@ -31,32 +24,27 @@ _MANIFEST_KEYS = frozenset({"schema_version", "backup_key", "cutoff", "database"
 _ARTIFACT_KEYS = frozenset({"content_hash", "byte_size"})
 _LIVE_STATES = ("starting", "running", "cancelling", "recovery_pending")
 _REQUEST_BINDING = "materialization_request.json"
-
+_MAX_MANIFEST_BYTES = 10 * 1024 * 1024
 
 def _stderr(event, **fields):
     sys.stderr.write(json.dumps({"event": event, **fields}, sort_keys=True) + "\n")
 
-
 def _rss_mb():
     return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 1)
-
 
 def _stage(name, total):
     _stderr("RETENTION_STAGE_START", stage=name, total=total, rss_mb=_rss_mb())
     return time.monotonic()
 
-
 def _stage_end(name, started, done, total):
     _stderr("RETENTION_STAGE_END", stage=name, done=done, total=total,
             elapsed_s=round(time.monotonic() - started, 3), rss_mb=_rss_mb())
-
 
 class _Progress:
     def __init__(self, stage, total, interval=60.0):
         self.stage, self.total = stage, total
         self.interval = interval
         self.started = self.last = time.monotonic()
-
     def tick(self, done):
         now = time.monotonic()
         if now - self.last < self.interval:
@@ -68,7 +56,6 @@ class _Progress:
         _stderr("RETENTION_PROGRESS", stage=self.stage, done=done, total=self.total,
                 rate_per_s=round(rate, 3),
                 eta_s=None if eta is None else round(eta, 1), rss_mb=_rss_mb())
-
 
 def _limit(keep, env, default, label):
     if keep is None:
@@ -83,7 +70,6 @@ def _limit(keep, env, default, label):
                    details={"reason_key": f"{label}_keep_invalid"})
     return keep
 
-
 def _safe_name(name, *, artifact=False):
     bad = not isinstance(name, str) or not name or name in (".", "..")
     if artifact:
@@ -96,20 +82,18 @@ def _safe_name(name, *, artifact=False):
                    details={"reason_key": reason})
     return name
 
-
-def _digest(path):
+def _digest(path, keepalive=None):
     try:
-        return file_hash(path)
+        return file_hash(path, keepalive=keepalive)
     except OSError:
         raise fail("INTEGRITY_FAILED", "backup file could not be read",
                    details={"reason_key": "backup_file_unreadable"}) from None
 
-
-def _database(path, expected):
+def _database(path, expected, keepalive=None):
     if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
         raise fail("INTEGRITY_FAILED", "backup database is missing, empty or not a regular file",
                    details={"reason_key": "backup_database_invalid"})
-    if _digest(path) != expected:
+    if _digest(path, keepalive) != expected:
         raise fail("INTEGRITY_FAILED", "backup database hash does not match its manifest",
                    details={"reason_key": "backup_database_hash_mismatch"})
     try:
@@ -125,8 +109,7 @@ def _database(path, expected):
         raise fail("INTEGRITY_FAILED", "backup database failed integrity or foreign-key checks",
                    details={"reason_key": "backup_database_integrity_failed"})
 
-
-def _artifact(directory, name, info):
+def _artifact(directory, name, info, keepalive=None):
     _safe_name(name, artifact=True)
     if not isinstance(info, dict) or set(info) != _ARTIFACT_KEYS:
         raise fail("INTEGRITY_FAILED", "backup artifact metadata has unexpected keys",
@@ -142,14 +125,18 @@ def _artifact(directory, name, info):
     if path.stat().st_size != size:
         raise fail("INTEGRITY_FAILED", "backup artifact size does not match its manifest",
                    details={"reason_key": "backup_artifact_size_mismatch"})
-    if _digest(path) != digest:
+    if _digest(path, keepalive) != digest:
         raise fail("INTEGRITY_FAILED", "backup artifact hash does not match its manifest",
                    details={"reason_key": "backup_artifact_hash_mismatch"})
 
-
-def _manifest(key, path, database, artifacts_dir):
+def _manifest(key, path, database, artifacts_dir, keepalive=None):
     try:
-        document = json.loads(path.read_text())
+        with path.open("rb") as stream:
+            raw = stream.read(_MAX_MANIFEST_BYTES + 1)
+        if len(raw) > _MAX_MANIFEST_BYTES:
+            raise fail("INTEGRITY_FAILED", "backup manifest is too large",
+                       details={"reason_key": "backup_manifest_too_large"})
+        document = json.loads(raw)
     except (OSError, ValueError):
         raise fail("INTEGRITY_FAILED", "backup manifest could not be read",
                    details={"reason_key": "backup_manifest_unreadable"}) from None
@@ -166,15 +153,14 @@ def _manifest(key, path, database, artifacts_dir):
     if when is None or when.tzinfo is None or when.utcoffset() is None:
         raise fail("INTEGRITY_FAILED", "backup cutoff is not a timezone-aware ISO timestamp",
                    details={"reason_key": "backup_cutoff_invalid"})
-    _database(database, document["database"])
+    _database(database, document["database"], keepalive)
     artifacts = document["artifacts"]
     if not isinstance(artifacts, dict):
         raise fail("INTEGRITY_FAILED", "backup artifact metadata is not a mapping",
                    details={"reason_key": "backup_artifacts_not_mapping"})
     for name, info in artifacts.items():
-        _artifact(artifacts_dir, name, info)
+        _artifact(artifacts_dir, name, info, keepalive)
     return {"key": key, "when": when, "artifacts": set(artifacts)}
-
 
 def _scope_files(scope):
     manifests, databases = {}, {}
@@ -193,7 +179,6 @@ def _scope_files(scope):
                        details={"reason_key": "backup_scope_stray_file"})
     return manifests, databases
 
-
 def _present_artifacts(artifacts_dir):
     present = set()
     if artifacts_dir.exists():
@@ -204,7 +189,6 @@ def _present_artifacts(artifacts_dir):
             present.add(path.name)
     return present
 
-
 def _scope_artifacts_dir(scope):
     artifacts_dir = scope / "artifacts"
     if artifacts_dir.is_symlink() or (artifacts_dir.exists() and not artifacts_dir.is_dir()):
@@ -212,19 +196,17 @@ def _scope_artifacts_dir(scope):
                    details={"reason_key": "backup_artifacts_path_invalid"})
     return artifacts_dir
 
-
-def _scope_records(manifests, databases, artifacts_dir):
+def _scope_records(manifests, databases, artifacts_dir, keepalive=None):
     if set(manifests) != set(databases):
         raise fail("INTEGRITY_FAILED", "incomplete backup",
                    details={"reason_key": "backup_incomplete"})
-    return [_manifest(key, manifests[key], databases[key], artifacts_dir)
+    return [_manifest(key, manifests[key], databases[key], artifacts_dir, keepalive)
             for key in sorted(manifests)]
 
-
-def _read_scope(scope):
+def _read_scope(scope, keepalive=None):
     artifacts_dir = _scope_artifacts_dir(scope)
     manifests, databases = _scope_files(scope)
-    records = _scope_records(manifests, databases, artifacts_dir)
+    records = _scope_records(manifests, databases, artifacts_dir, keepalive)
     referenced = set().union(*(record["artifacts"] for record in records)) if records else set()
     present = _present_artifacts(artifacts_dir)
     if present != referenced:
@@ -232,14 +214,12 @@ def _read_scope(scope):
                    details={"reason_key": "backup_artifacts_mismatch"})
     return records, artifacts_dir, present
 
-
-def _plan(scope, keep):
-    records, artifacts_dir, present = _read_scope(scope)
+def _plan(scope, keep, keepalive=None):
+    records, artifacts_dir, present = _read_scope(scope, keepalive)
     ordered = sorted(records, key=lambda r: (r["when"], r["key"]), reverse=True)
     retained = ordered[:keep]
     kept = set().union(*(r["artifacts"] for r in retained)) if retained else set()
     return scope, ordered[keep:], artifacts_dir, present - kept
-
 
 def _live_roots(base, conn, store):
     rows = conn.execute(
@@ -294,9 +274,8 @@ def _live_roots(base, conn, store):
     finally:
         _stage_end("resolve_live_roots", started, done, total)
 
-
-def _materialization_plan(ops_root, keep, conn, store):
-    base = default_materialization_base(ops_root)
+def _materialization_plan(ops_root, keep, conn, store, base=None):
+    base = base or default_materialization_base(ops_root)
     if base.is_symlink() or (base.exists() and not base.is_dir()):
         raise fail("INTEGRITY_FAILED", "materialization root is not a directory",
                    details={"reason_key": "materialization_root_invalid"})
@@ -327,16 +306,24 @@ def _materialization_plan(ops_root, keep, conn, store):
     retained = {item.name for item in ordered[:keep]} | live
     return [item for item in ordered if item.name not in retained]
 
+def _unlink(path):
+    try:
+        path.unlink()
+    except OSError:
+        raise fail("INTEGRITY_FAILED", "backup deletion failed",
+                   details={"reason_key": "backup_delete_failed"}) from None
 
 def _remove_tree(path):
-    for directory, _, _ in os.walk(path):
-        os.chmod(directory, 0o755)
-    shutil.rmtree(path)
+    try:
+        for directory, _, _ in os.walk(path):
+            os.chmod(directory, 0o755)
+        shutil.rmtree(path)
+    except OSError:
+        raise fail("INTEGRITY_FAILED", "materialization deletion failed",
+                   details={"reason_key": "materialization_delete_failed"}) from None
 
-
-def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=None):
+def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=None, keepalive=None, materialization_base=None):
     """Keep the newest verified backups and materialization roots; return pruned keys.
-
     ``conn`` and ``store`` are the coordinator's already-open operations catalog
     and artifact store; live root resolution never guesses or re-opens them.
     """
@@ -358,12 +345,12 @@ def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=
         done = 0
         try:
             for scope in scopes:
-                plans.append(_plan(scope, keep))
+                plans.append(_plan(scope, keep, keepalive))
                 done += 1
                 progress.tick(done)
         finally:
             _stage_end("verify_backups", started, done, len(scopes))
-    roots = _materialization_plan(ops_root, materialization_keep, conn, store)
+    roots = _materialization_plan(ops_root, materialization_keep, conn, store, base=materialization_base)
     deleted = []
     backup_total = sum(len(discarded) + len(artifact_names)
                        for _, discarded, _, artifact_names in plans)
@@ -372,14 +359,16 @@ def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=
     done = 0
     try:
         for scope, discarded, artifacts_dir, artifact_names in plans:
+            if keepalive is not None:
+                keepalive()
             for record in discarded:
-                (scope / (record["key"] + _DB)).unlink()
-                (scope / (record["key"] + _MANIFEST)).unlink()
+                _unlink(scope / (record["key"] + _DB))
+                _unlink(scope / (record["key"] + _MANIFEST))
                 deleted.append(record["key"])
                 done += 1
                 progress.tick(done)
             for name in sorted(artifact_names):
-                (artifacts_dir / name).unlink()
+                _unlink(artifacts_dir / name)
                 done += 1
                 progress.tick(done)
     finally:
@@ -389,12 +378,11 @@ def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=
     done = 0
     try:
         for path in roots:
+            if keepalive is not None:
+                keepalive()
             _remove_tree(path)
             done += 1
             progress.tick(done)
     finally:
         _stage_end("delete_materialization", started, done, len(roots))
     return deleted
-
-
-prune_backups = retain_backups = apply_retention = enforce_retention

@@ -715,7 +715,14 @@ A backup counts only when strictly verified complete: exact manifest schema and 
 
 Any unverifiable backup or live-attempt use evidence (unreadable manifest, schema/digest/artifact mismatch, non-clean pragma, unresolvable live attempt) is a stable keyed refusal and the whole invocation deletes nothing; uncertainty is never read as "not in use". The known missing current-publication-to-root binding follows the supervisor decision and the follow-up tracked in #1206: retention conservatively keeps the newest K roots, emits a keyed diagnostic, and files the follow-up GitHub issue, without adding a release-manifest field.
 
-Retention uses stdlib `json`, `sqlite3` and filesystem traversal/unlink because no standard tool implements this policy; it does not hand-roll a format parser. Rerunning against unchanged state is a no-op. Deletion follows a preflight that refuses without deleting when any backup or live-attempt evidence is missing or ambiguous; deletions proceed one entry at a time without rollback, so a later unlink failure leaves earlier deletions durable, reports a typed failure without local paths, and the next nightly invocation retries the remainder.
+Retention uses stdlib `json`, `sqlite3` and filesystem traversal/unlink because no standard tool implements this policy; it does not hand-roll a format parser. Rerunning against unchanged state is a no-op. Deletion follows a preflight; deletions proceed one entry at a time without rollback, so a later unlink failure leaves earlier deletions durable. Reports a typed failure without local paths. Journal recovery and broader preflight are tracked in #1251 and must preserve no-deletion-on-unverified-state.
+
+| Condition | Outcome |
+| --- | --- |
+| Oversized or unverifiable backup manifest | Keyed refusal; the whole invocation deletes nothing. |
+| Backup or live-use preflight refusal | Keyed refusal; no deletions occur. |
+| Backup unlink `OSError` | Typed error; prior deletions may persist; a later run refuses the incomplete scope without deleting. |
+| Materialization `rmtree` `OSError` | Typed error; the next run re-plans. |
 
 ## 5. Invariants
 

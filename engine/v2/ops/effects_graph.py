@@ -811,7 +811,7 @@ def publication_effect(conn, store, claim, ops_root, repo_root, *, clock, store_
 # --------------------------------------------------------------------------
 
 
-def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=_no_keepalive):
+def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=_no_keepalive, materialization_base=None):
     """Prepare then run one backup; a failure releases its outbox effect back
     to pending (rather than waiting out its lease) so an immediate retry can
     claim it — the job's own retry policy is what makes this "retryable"."""
@@ -856,9 +856,11 @@ def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=
                  generation=generation)
     # Retention runs only after the backup and its watermark are durable; a
     # refusal propagates as a typed OpsError so the next nightly retries it.
-    # Both steps are idempotent, so a retry after a partial prune re-verifies
-    # the same scopes and deletes only what is still unreferenced.
-    enforce_retention(ops_root, conn=conn, store=store)
+    # Both steps are idempotent. After a deletion I/O error, earlier deletions
+    # may remain durable; the next run refuses an incomplete/stray scope and
+    # deletes nothing. See #1251 for journal recovery and broader preflight,
+    # which must preserve no-deletion-on-unverified-state.
+    enforce_retention(ops_root, conn=conn, store=store, keepalive=keepalive, materialization_base=materialization_base)
     return None, ()
 
 
