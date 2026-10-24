@@ -14,7 +14,9 @@ The scratch check reuses the same helpers as ``nightly.plan_scratch_problems``
 -- the ``store_barrier.domains_of`` read-domain test, the ``_legacy_resource``
 profile routing and the manifest ``file_refs`` byte total -- but reports the
 measured usage per profile instead of only refusing an oversize plan, so it is
-not a mirror of the refusal logic.
+not a mirror of the refusal logic. No covered limit has growth history yet, so
+every entry keeps a ``projected_days_to_limit`` of ``None`` to hold the
+``headroom.v1`` shape stable.
 """
 from __future__ import annotations
 
@@ -22,9 +24,7 @@ import json
 import sys
 import time
 
-from engine.v2.data.price_history_query import _RESULT_CAP
-from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactError, ArtifactStore, parse_timestamp
+from engine.v2.foundation import ArtifactError, ArtifactStore
 from engine.v2.ops import nightly
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.errors import OpsError, fail
@@ -67,35 +67,11 @@ def status_for(pct: float) -> str:
     return "OK"
 
 
-def project_days(points, limit: int):
-    """Least-squares linear days-to-limit over ``(day, usage)`` points.
-
-    ``None`` unless at least two points share no duplicate day value and the
-    slope is strictly positive; the projection measures from the latest
-    point's usage toward ``limit``.
-    """
-    if len(points) < 2:
-        return None
-    days = [point[0] for point in points]
-    if len(set(days)) < 2:
-        return None
-    mean_x = sum(days) / len(points)
-    mean_y = sum(point[1] for point in points) / len(points)
-    variance_x = sum((day - mean_x) ** 2 for day in days)
-    if variance_x <= 0:
-        return None
-    slope = sum((day - mean_x) * (usage - mean_y) for day, usage in points) / variance_x
-    if slope <= 0:
-        return None
-    current = max(points, key=lambda point: point[0])[1]
-    return max(0.0, (limit - current) / slope)
-
-
-def _entry(name, usage, limit, unit, detail, projected_days=None):
+def _entry(name, usage, limit, unit, detail):
     pct = round(100.0 * usage / limit, 1) if limit > 0 else 0.0
     return {"name": name, "usage": int(usage), "limit": int(limit), "unit": unit,
             "pct": pct, "status": status_for(pct),
-            "projected_days_to_limit": projected_days, "detail": detail}
+            "projected_days_to_limit": None, "detail": detail}
 
 
 def _unmeasured(name, limit, unit, detail):
@@ -194,64 +170,6 @@ def _scratch_entries(conn, store, plan):
     return entries
 
 
-def _max_partition_rows(records):
-    totals: dict[str, int] = {}
-    for record in records:
-        totals[record.partition_key] = totals.get(record.partition_key, 0) + record.row_count
-    if not totals:
-        return 0, None
-    ticker = max(totals, key=lambda key: totals[key])
-    return totals[ticker], ticker
-
-
-def _chain_registered(conn, snapshot_id, history):
-    chain = []
-    current = snapshot_id
-    seen: set[str] = set()
-    while current and current not in seen and len(chain) < max(int(history), 1):
-        seen.add(current)
-        row = conn.execute(
-            "SELECT parent_snapshot_id, registered_at FROM data_snapshots "
-            "WHERE snapshot_id = ?", (current,)).fetchone()
-        if row is None:
-            break
-        chain.append((current, row["registered_at"]))
-        current = row["parent_snapshot_id"]
-    return chain
-
-
-def _history_points(conn, repository, snapshot_id, history):
-    stamps = []
-    for chain_id, registered_at in _chain_registered(conn, snapshot_id, history):
-        ref = repository.resolve(chain_id)
-        if "price_history" not in ref.table_versions:
-            continue
-        usage, _ = _max_partition_rows(repository.fragment_records(ref, "price_history"))
-        stamps.append((parse_timestamp(registered_at), usage))
-    if not stamps:
-        return []
-    base = min(stamp for stamp, _ in stamps)
-    return [((stamp - base).total_seconds() / 86400.0, usage) for stamp, usage in stamps]
-
-
-def _price_history_entry(conn, store, plan, history):
-    snapshot_id = (plan.get("snapshot_inputs") or {}).get("snapshot_id")
-    if not snapshot_id:
-        return [_unmeasured("price_history_result_rows", _RESULT_CAP, "rows",
-                            "plan pins no snapshot_inputs; result-cap check skipped")]
-    repository = Repository(conn, store, pin_snapshots=True)
-    snapshot_ref = repository.resolve(snapshot_id)
-    if "price_history" not in snapshot_ref.table_versions:
-        return [_unmeasured("price_history_result_rows", _RESULT_CAP, "rows",
-                            "pinned snapshot carries no price_history table; check skipped")]
-    usage, ticker = _max_partition_rows(
-        repository.fragment_records(snapshot_ref, "price_history"))
-    points = _history_points(conn, repository, snapshot_id, history)
-    projected = project_days(points, _RESULT_CAP) if len(points) >= 2 else None
-    detail = f"largest partition_key {ticker}" if ticker else "no price_history fragments"
-    return [_entry("price_history_result_rows", usage, _RESULT_CAP, "rows", detail, projected)]
-
-
 def _memory_entries(conn, max_rss_gb):
     """``memory_peak:<profile>`` entries from the most recent finished attempts.
 
@@ -300,23 +218,19 @@ def _memory_entries(conn, max_rss_gb):
     return entries
 
 
-def headroom_report(conn, root, plan, *, max_rss_gb=None, history=5):
+def headroom_report(conn, root, plan, *, max_rss_gb=None):
     started = time.monotonic()
     print("[headroom] start", file=sys.stderr)
     store = ArtifactStore(root)
     limits = [*_scratch_entries(conn, store, plan),
-              *_price_history_entry(conn, store, plan, history),
               *_memory_entries(conn, max_rss_gb)]
     status = max((item["status"] for item in limits), key=_RANK.__getitem__, default="OK")
     document = {"schema": "headroom.v1", "status": status, "exit_code": _EXIT[status],
                 "limits": limits, "not_covered": list(_NOT_COVERED)}
     for item in limits:
         pct = "unmeasured" if item["pct"] is None else f"{item['pct']}%"
-        line = (f"[headroom] {item['status']} {item['name']}: {item['usage']}/"
-                f"{item['limit']} {item['unit']} ({pct})")
-        if item["projected_days_to_limit"] is not None:
-            line += f" [days-to-limit {item['projected_days_to_limit']:.1f}]"
-        print(line, file=sys.stderr)
+        print(f"[headroom] {item['status']} {item['name']}: {item['usage']}/"
+              f"{item['limit']} {item['unit']} ({pct})", file=sys.stderr)
     print(f"[headroom] done in {time.monotonic() - started:.1f}s: {status}", file=sys.stderr)
     return document
 
@@ -325,4 +239,4 @@ def headroom_command(args, root, conn, clock):
     """``ops headroom --plan <plan_ref>``: load the plan artifact, report."""
     store = ArtifactStore(root)
     plan = _json_object(conn, store, args.plan, "plan")
-    return headroom_report(conn, root, plan, max_rss_gb=args.max_rss_gb, history=args.history)
+    return headroom_report(conn, root, plan, max_rss_gb=args.max_rss_gb)

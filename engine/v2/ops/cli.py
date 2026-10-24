@@ -151,9 +151,6 @@ def _add_headroom_command(commands):
     headroom.add_argument("--max-rss-gb", type=_positive_gb, default=None,
                          help="also check the largest recent attempt memory peak "
                               "against this GiB cap")
-    headroom.add_argument("--history", type=int, default=5,
-                          help="snapshots to walk for the price-history days-to-limit "
-                               "projection (default 5)")
 
 
 def _add_snapshot_commands(commands):

@@ -1,16 +1,14 @@
-"""Headroom check: status tiers, projection, scratch limits, CLI exit codes.
+"""Headroom check: status tiers, scratch limits, CLI exit codes.
 
 Synthetic manifest through a tmp ops catalog, plus hand-inserted
 attempts/resource_reservations rows for the memory limits; no market data and
-no snapshots -- the price-history entry covers its projection through a stub
-repository.
+no snapshots.
 """
 import json
 import types
 
 import pytest
 
-from engine.v2.data.price_history_query import _RESULT_CAP
 from engine.v2.foundation import ArtifactStore
 from engine.v2.ops import cli, headroom
 from engine.v2.ops.bootstrap import open_catalog
@@ -27,20 +25,6 @@ MINIMUM_SCRATCH_BYTES = profile_named(DEFAULT_POLICY, "legacy_score").scratch_by
 ])
 def test_status_boundaries(pct, expected):
     assert headroom.status_for(pct) == expected
-
-
-def test_project_days_growing():
-    assert headroom.project_days([(0.0, 10), (1.0, 20)], 30) == pytest.approx(1.0)
-
-
-def test_project_days_flat_or_declining_is_none():
-    assert headroom.project_days([(0.0, 10), (1.0, 10)], 30) is None
-    assert headroom.project_days([(0.0, 20), (1.0, 10)], 30) is None
-
-
-def test_project_days_needs_two_distinct_dates():
-    assert headroom.project_days([(0.0, 10)], 30) is None
-    assert headroom.project_days([(0.0, 10), (0.0, 20)], 30) is None
 
 
 @pytest.fixture
@@ -127,18 +111,6 @@ def test_non_nightly_plan_scratch_is_unmeasured(catalog):
     assert "not a nightly plan" in scratch["detail"]
 
 
-def test_price_history_skipped_without_snapshot_inputs(catalog):
-    document = report_for(catalog, nightly_plan_document())
-    entry = next(item for item in document["limits"]
-                 if item["name"] == "price_history_result_rows")
-    assert entry["limit"] == _RESULT_CAP
-    assert entry["unit"] == "rows"
-    assert entry["status"] == "UNMEASURED"
-    assert entry["pct"] is None
-    assert entry["projected_days_to_limit"] is None
-    assert "skipped" in entry["detail"]
-
-
 def test_not_covered_lists_the_static_names(catalog):
     document = report_for(catalog, nightly_plan_document())
     assert "chains._RESULT_CAP (2_000_000)" in document["not_covered"]
@@ -187,7 +159,7 @@ def test_cli_headroom_returns_document_exit_code(tmp_path, catalog, capsys):
 
 
 def _headroom_args(conn, store, clock, plan_id, **extra):
-    args = types.SimpleNamespace(plan=plan_id, max_rss_gb=None, history=5)
+    args = types.SimpleNamespace(plan=plan_id, max_rss_gb=None)
     for key, value in extra.items():
         setattr(args, key, value)
     return args
@@ -267,39 +239,15 @@ def test_memory_entries_group_by_profile_and_scope_rss_to_latest_epoch(catalog):
     assert by_name["rss_cap_gb"]["limit"] == int(1.0 * 1024 ** 3)
 
 
-# ------------------------------------------------- price history (projection)
-
-
-class _StubRef:
-    table_versions = {"price_history": 1}
-
-
-class _StubRecord:
-    def __init__(self, partition_key, row_count):
-        self.partition_key = partition_key
-        self.row_count = row_count
-
-
-class _StubRepository:
-    def __init__(self, conn, store, pin_snapshots=True):
-        pass
-
-    def resolve(self, snapshot_id):
-        return _StubRef()
-
-    def fragment_records(self, ref, table):
-        return [_StubRecord("AAPL", 1000), _StubRecord("MSFT", 400)]
-
-
-def test_price_history_projection_from_history_points(catalog, monkeypatch):
-    monkeypatch.setattr(headroom, "Repository", _StubRepository)
-    monkeypatch.setattr(headroom, "_history_points",
-                        lambda conn, repository, snapshot_id, history: [(0.0, 100), (10.0, 1000)])
-    document = report_for(catalog, nightly_plan_document(snapshot_inputs={"snapshot_id": "snap"}))
-    entry = next(item for item in document["limits"]
-                 if item["name"] == "price_history_result_rows")
-    assert entry["status"] == "OK"
-    assert entry["usage"] == 1000  # largest partition (AAPL)
-    # known slope from the two points: 90 rows/day, so (_RESULT_CAP - 1000)/90
-    assert entry["projected_days_to_limit"] == pytest.approx((_RESULT_CAP - 1000) / 90.0)
+def test_entries_have_no_projection_yet(catalog):
+    """No covered limit has growth history: the key is present and always None."""
+    conn, store, clock = catalog
+    manifest_id = publish(conn, store, clock, manifest_document(1000),
+                          "legacy_input_manifest.v1.0")
+    _seed_finished_attempt(conn, attempt_id="a1", profile="legacy_score",
+                           memory_bytes=1000, peak=900, ended_at="2026-10-01T00:00:00Z")
+    document = report_for(catalog, nightly_plan_document(manifest_id))
+    assert document["limits"]
+    for item in document["limits"]:
+        assert item["projected_days_to_limit"] is None
 
