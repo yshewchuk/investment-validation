@@ -136,7 +136,7 @@ def _add_snapshot_commands(commands):
     snapshot = commands.add_parser("snapshot")
     snapshot.add_argument("--root", default=argparse.SUPPRESS)
     snapshot_sub = snapshot.add_subparsers(dest="snapshot_command", required=True)
-    from engine.v2.ops.legacy_preflight import add_preflight_subcommand
+    from engine.v2.ops.legacy_adapter import add_preflight_subcommand
     add_preflight_subcommand(snapshot_sub)
     plan_import_p = snapshot_sub.add_parser("plan-import")
     plan_import_p.add_argument("--source-root", required=True, type=Path)

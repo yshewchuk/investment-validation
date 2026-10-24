@@ -49,6 +49,15 @@ __all__ = ["configured_root", "copy_read_set", "invoke_evaluate", "invoke_nightl
            "run_legacy_script", "run_security_scan", "verify_export_generation"]
 
 
+def add_preflight_subcommand(snapshot_sub):
+    """Register the inputs required by the post-import preflight command."""
+    preflight = snapshot_sub.add_parser(
+        "preflight", help="check imported legacy generation and feature tables before capture")
+    preflight.add_argument("--source-root", required=True, type=Path)
+    preflight.add_argument("--materialization-root", required=True, type=Path)
+    preflight.add_argument("--receipt-id", required=True)
+
+
 def configured_root() -> Path:
     """Shared root selected at engine startup, including its environment override."""
     from engine import paths
@@ -721,24 +730,45 @@ def run_snapshot_preflight(conn, store, *, source_root, materialization_root, re
         refuse_generation_mismatch,
     )
 
-    accepted = accepted_generation_refs(conn, store, receipt_id=str(receipt_id))
-    current_manifest = manifest_files(
-        source_root, tuple(accepted) if accepted is not None else ())
-    barrier_manifest = {"file_refs": [
-        {"path": path, "content_hash": entry["content_hash"]}
-        for path, entry in current_manifest.items()]}
-    refuse_generation_mismatch(conn, store, receipt_id=str(receipt_id),
-                               barrier_manifest=barrier_manifest)
+    if not str(receipt_id):
+        raise fail("INPUT_CHANGED",
+                   "generation receipt id is required",
+                   details={"reason": "generation_receipt_missing",
+                            "receipt_id": receipt_id})
+    worker_progress.step_start("snapshot_preflight_generation")
+    try:
+        accepted = accepted_generation_refs(conn, store, receipt_id=str(receipt_id))
+        current_manifest = manifest_files(
+            source_root, tuple(accepted) if accepted is not None else ())
+        barrier_manifest = {"file_refs": [
+            {"path": path, "content_hash": entry["content_hash"]}
+            for path, entry in current_manifest.items()]}
+        refuse_generation_mismatch(conn, store, receipt_id=str(receipt_id),
+                                   barrier_manifest=barrier_manifest)
+    finally:
+        worker_progress.step_end("snapshot_preflight_generation")
 
     source = Path(source_root)
     pinned = Path(materialization_root)
-    source_hashes = _feature_file_hashes(source)
-    comparison = _compare_to_pinned(pinned, source_hashes, rebuilt_root=source)
-    pinned_hashes = {
-        "panel_sha256": comparison["pinned_panel_sha256"],
-        "tier4_sha256": comparison["pinned_tier4_sha256"],
-    }
-    _check_snapshot_features(comparison, pinned_hashes)
+    worker_progress.step_start("snapshot_preflight_features")
+    try:
+        source_hashes = _feature_file_hashes(source)
+        comparison = _compare_to_pinned(pinned, source_hashes, rebuilt_root=source)
+    except Exception as exc:
+        raise fail(
+            "FEATURES_STALE",
+            "the source feature tables could not be compared to the pinned materialization",
+            details={"reason": "comparison_failed",
+                     "exception_type": type(exc).__name__},
+        ) from exc
+    finally:
+        worker_progress.step_end("snapshot_preflight_features")
+    if comparison["verdict"] != "match":
+        raise fail(
+            "FEATURES_STALE",
+            "the source feature tables do not match the pinned materialization",
+            details={"reason": "mismatch", "comparison": comparison},
+        )
     return {"generation": "match", "features": comparison}
 
 

@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from engine.data import store as data_store
+from engine.v2.ops import cli
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.legacy_adapter import run_snapshot_preflight as run_preflight
 from tests.v2.ops.test_v2_ops_snapshot_stages import case as _case  # noqa: F401
@@ -80,3 +81,61 @@ def test_preflight_preserves_generation_input_changed_code(case, tmp_path):
                       materialization_root=pinned, receipt_id="preflight-generation-stale")
     assert err.value.code == "INPUT_CHANGED"
     assert err.value.problem.details["reason"] == "generation_mismatch"
+
+
+def test_cli_registers_and_dispatches_snapshot_preflight(monkeypatch, tmp_path):
+    source = tmp_path / "source"
+    pinned = tmp_path / "pinned"
+    seen = {}
+
+    def run(conn, store, **kwargs):
+        seen.update(kwargs)
+        return {"sentinel": "preflight-dispatched"}
+
+    monkeypatch.setattr("engine.v2.ops.legacy_adapter.run_snapshot_preflight", run)
+    args = cli.parser().parse_args([
+        "snapshot", "preflight", "--source-root", str(source),
+        "--materialization-root", str(pinned), "--receipt-id", "cli-receipt",
+    ])
+    result = cli.dispatch(args, tmp_path, None, None)
+
+    assert result == {"sentinel": "preflight-dispatched"}
+    assert seen == {"source_root": source, "materialization_root": pinned,
+                    "receipt_id": "cli-receipt"}
+
+
+def test_preflight_rejects_empty_receipt_id(case, tmp_path):
+    source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
+    with pytest.raises(OpsError) as err:
+        run_preflight(case.conn, case.store, source_root=source,
+                      materialization_root=pinned, receipt_id="")
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.details["reason"] == "generation_receipt_missing"
+
+
+def test_preflight_preserves_features_stale_code_for_tier4_difference(case, tmp_path):
+    source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
+    _accept(case, source, "preflight-tier4-stale")
+    tier4_path = source / "data/features/tier4_forecasts.parquet"
+    tier4 = pd.read_parquet(tier4_path)
+    tier4.loc[0, "forecast"] = 0.75
+    tier4.to_parquet(tier4_path, index=False)
+    with pytest.raises(OpsError) as err:
+        run_preflight(case.conn, case.store, source_root=source,
+                      materialization_root=pinned, receipt_id="preflight-tier4-stale")
+    assert err.value.code == "FEATURES_STALE"
+    assert err.value.problem.details["reason"] == "mismatch"
+    assert err.value.problem.details["comparison"]["tables"]["tier4"]["verdict"] == "mismatch"
+
+
+def test_preflight_preserves_features_stale_code_for_corrupt_pinned_table(case, tmp_path):
+    source, pinned = _roots(tmp_path, source_value=0.5, pinned_value=0.5)
+    _accept(case, source, "preflight-corrupt-pinned")
+    (pinned / "data/features/panel.parquet").write_bytes(b"corrupt")
+
+    with pytest.raises(OpsError) as err:
+        run_preflight(case.conn, case.store, source_root=source,
+                      materialization_root=pinned, receipt_id="preflight-corrupt-pinned")
+
+    assert err.value.code == "FEATURES_STALE"
+    assert err.value.problem.details["reason"] == "comparison_failed"
