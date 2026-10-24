@@ -500,6 +500,49 @@ def test_capture_same_value_at_a_later_retrieved_at_gives_no_change(tmp_path):
     assert len(stored) == 1  # still just the original 09-10 row
 
 
+def test_capture_close_adj_jitter_gives_no_change_and_no_new_rows(tmp_path):
+    """#1285 at the store level: a later Tier-1 retrieval whose ``close_adj``
+    jitters within ``CLOSE_ADJ_RTOL`` of the stored latest version (and whose
+    Close/High match it exactly) is ``no_change`` with zero rows added -- the
+    vendor float jitter no longer rewrites a ticker's whole history every day.
+    A shift above the tolerance (a third retrieval) is the genuine-restatement
+    case it must not swallow: ``added``, and the date keeps both versions."""
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0})
+    os.utime(px_path, (_epoch("2024-09-10T00:00:00+00:00"),) * 2)
+    first = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert first["by_outcome"] == {"added": 1}
+
+    # Only the adjusted close jitters: _write_tier1 maps Close -> close_raw and
+    # High -> high_raw from ``rows`` (both 100.0 here, matching px exactly) and
+    # Adj Close -> close_adj from ``adj_close``.
+    _write_tier1(source_root, "AAPL", {"2024-01-01": 100.0}, key="jitter",
+                 fetched_at="2024-09-11T00:00:00+00:00",
+                 adj_close={"2024-01-01": 100.0 * (1 + 2e-6)})
+    second = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert second["by_outcome"] == {"no_change": 1, "duplicate_source_hash": 1}
+    assert second["rows_added"] == 0
+
+    stored = _scan_price_history(conn, store, second["result_snapshot_id"])
+    assert len(stored) == 1  # still just the original 09-10 px row
+    assert stored["close_adj"].tolist() == [100.0]
+
+    # 1e-3 relative is a dividend/split restatement, not jitter: it versions.
+    _write_tier1(source_root, "AAPL", {"2024-01-01": 100.0}, key="restate",
+                 fetched_at="2024-09-12T00:00:00+00:00",
+                 adj_close={"2024-01-01": 100.0 * (1 + 1e-3)})
+    third = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert third["by_outcome"] == {"added": 1, "duplicate_source_hash": 2}
+    assert third["rows_added"] == 1
+
+    stored = _scan_price_history(conn, store, third["result_snapshot_id"])
+    assert len(stored) == 2  # both versions of the same date are kept
+    assert sorted(stored["date"]) == ["2024-01-01", "2024-01-01"]
+    assert [r[:10] for r in stored["retrieved_at"]] == ["2024-09-10", "2024-09-12"]
+    assert stored["close_adj"].tolist() == pytest.approx([100.0, 100.1])
+
+
 def test_capture_refuses_a_ticker_whose_retrieval_omits_stored_dates_and_keeps_capturing(tmp_path):
     """Issue #719: a retrieval that omits dates live in the ticker's stored
     history refuses that ticker only -- ``refused_partial``, nothing written
