@@ -64,7 +64,8 @@ consumes this recipe and matching named numeric matrices. It learns imputation,
 missing indicators and scaling from training rows only, returning finite nonnegative
 forecasts, the full standardized coefficient vector (values and missing indicators),
 selected source columns in recipe order, iterations and dual gap.
-No runtime caller activates this adapter. Causal membership, source identities,
+The experiment dispatcher calls this adapter; production entrypoints remain unwired.
+Causal membership, source identities,
 inner-only subset/parameter choice, resource/attempt caps and failure recording
 are caller responsibilities, not guarantees derived from these arrays.
 
@@ -91,7 +92,7 @@ A fresh one-thread fit learns only training rows: Ridge keeps every selected col
 through median imputation, full missing flags and scaling; HGB freezes training-all-null columns to
 zero at training/prediction while routing partial nulls natively. It returns
 `magnitude_ridge_hgb_fit.v1` with the validated recipe hash and detached finite
-nonnegative predictions. This is an unwired numeric boundary: no source/holdout/fold
+nonnegative predictions. This is a production-unwired numeric boundary: no source/holdout/fold
 admission, CLI, selection or registration; existing eleven-column recipes, fitters
 and source closures remain unchanged.
 

@@ -35,8 +35,9 @@ selected-column matrices. It returns predictions, recipe ID, the full coefficien
 vector, selected source columns and convergence evidence after one guarded training-only fit. `columns` must match
 the recipe order. The caller owns causal membership, source identity, fit caps and
 inner-only choice of subset/alpha/l1_ratio; this API cannot certify those from arrays.
-No runtime caller, grid activation, validation-target selection, cache or persistence
-is added. Nonconvergence raises `ValueError` with no retry or partial result.
+The experiment dispatcher is a numeric caller, not a grid or production activation.
+No validation-target selection, cache or persistence is added.
+Nonconvergence raises `ValueError` with no retry or partial result.
 
 `magnitude_ridge_hgb.fit_ridge_hgb_predictions` separately accepts a closed
 variable-width recipe, caller-admitted numeric matrices and exact ordered
