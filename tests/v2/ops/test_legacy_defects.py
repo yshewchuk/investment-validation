@@ -516,7 +516,7 @@ def _scratch_requests(tmp_path, byte_sizes):
     return conn, store, requests
 
 
-def test_plan_scratch_admits_the_2026_10_23_read_set(tmp_path):
+def test_plan_scratch_admits_the_2026_10_23_read_set(tmp_path, capsys):
     """Regression for #1268: the ~4.37 GB read set that the v10 4 GiB scratch
     refused now passes for every staging kind, without a warning."""
     from engine.v2.ops.nightly import plan_scratch_problems
@@ -524,6 +524,7 @@ def test_plan_scratch_admits_the_2026_10_23_read_set(tmp_path):
     conn, store, requests = _scratch_requests(tmp_path, [READ_SET_2026_10_23_BYTES])
     try:
         assert plan_scratch_problems(conn, store, requests) == []
+        assert capsys.readouterr().err == ""
     finally:
         conn.close()
 
@@ -546,8 +547,32 @@ def test_plan_scratch_warns_above_ninety_percent_without_refusing(tmp_path, caps
         # never named, and the line carries the needed/budget/kind numbers.
         assert "legacy_rebuild" not in err
         assert f"legacy read set {int(0.95 * budget)} B is 95%" in err
+        assert f"scratch budget {budget} B (kind" in err
     finally:
         conn.close()
+
+
+def test_plan_scratch_warns_only_strictly_above_ninety_percent(tmp_path, capsys):
+    """Boundary of the #1268 warning: a read set of exactly int(0.9*budget)
+    (still <= the float threshold) is silent; one byte more is strictly above
+    0.9*budget and emits exactly one validation warning, never a refusal."""
+    from engine.v2.ops.nightly import plan_scratch_problems
+
+    budget = profile_named(DEFAULT_POLICY, "validation").scratch_bytes
+    threshold = int(0.9 * budget)  # 0.9*6 GiB is not integral, so +1 is > float 0.9*budget
+    for needed, expect_warning in ((threshold, False), (threshold + 1, True)):
+        sub = tmp_path / f"needed-{needed}"
+        sub.mkdir()
+        conn, store, requests = _scratch_requests(sub, [needed])
+        try:
+            assert plan_scratch_problems(conn, store, requests) == []
+            err = capsys.readouterr().err
+            count = err.count("profile validation scratch budget")
+            assert count == (1 if expect_warning else 0)
+            if not expect_warning:
+                assert "WARNING" not in err
+        finally:
+            conn.close()
 
 
 def test_plan_scratch_stays_quiet_below_ninety_percent(tmp_path, capsys):
@@ -558,7 +583,7 @@ def test_plan_scratch_stays_quiet_below_ninety_percent(tmp_path, capsys):
     conn, store, requests = _scratch_requests(tmp_path, [int(0.5 * budget)])
     try:
         assert plan_scratch_problems(conn, store, requests) == []
-        assert "WARNING" not in capsys.readouterr().err
+        assert capsys.readouterr().err == ""
     finally:
         conn.close()
 
