@@ -43,16 +43,15 @@ underscore convention, and an import of a name absent from this list fails
 | `tag_nonfinite`, `untag_nonfinite` | The `canonical_json`/`content_hash` non-finite normalization (contracts §2.1), exposed so a writer can put a legacy NaN/Infinity on disk as valid strict JSON and a reader can decode it back to a real float at its own read boundary — see `engine/v2/ops/legacy_adapter.py::_write_action`/`_action_render` and `engine/v2/ops/render_inputs.py::stage_model_evidence`. |
 | `from_document`, `to_document`, `parse_schema_version`, `DocumentError` | Strict dataclass ⇄ JSON decoding driven by annotations. Errors carry `code`, `path` and fixed `message`, never the offending value; constructor-relative paths acquire the nested/caller prefix, with the original error chained. |
 | `Clock`, `SystemClock`, `format_timestamp`, `parse_timestamp` | Injected wall/monotonic clocks, and the one timestamp wire form. |
-| `ArtifactStore`, `ArtifactError` | Attempt staging directories; copy-hash-fsync-link publication; re-verification before reuse. `verify(ref, max_bytes=N)` optionally refuses references larger than `N` and stops hashing a grown object as soon as it exceeds `N`; the default `verify(ref)` behavior is unchanged. |
+| `ArtifactStore`, `ArtifactError` | Attempt staging directories; copy-hash-fsync-link publication; re-verification before reuse. |
 | `artifact_reference` | The identity `ArtifactStore.publish_bytes` would give some bytes, computed without touching storage — so a worker or coordinator that already holds the exact bytes of a published artifact can recompute its `ArtifactRef` and agree with the store by construction. |
 | `safe_relative_path`, `ensure_directory`, `fsync_directory` | The path and durability primitives the store is built from. |
-| `artifacts.read_bounded_bytes(path, max_bytes)` | Bounded read of a regular file opened without following links or blocking on a FIFO; refuses non-regular and oversized files. |
 | `score_population.population_key`, `score_population.population_difference` | Shared legacy score population identity and planned-versus-observed rule for ops and serving. |
 | `market_horizon.trading_days_before_print`, `market_horizon.CalendarCoverageError` | Pure pre-print session distance and its distinct insufficient-coverage refusal; no calendar fetch or gap filling. |
 | `experiment_holdouts.ExperimentHoldouts`, `experiment_holdouts.calendar_date` | Canonical day validation and shared deterministic, versioned random/rolling membership; no final-read authority. |
 | `experiment_exits.valid_exit_recipe`, `experiment_exits.valid_threshold_units` | Pure, closed exit declaration/unit admission shared by planning, walking and the RUNUP request. |
 
-<!-- public-interface: experiment_exits, experiment_exits.valid_exit_recipe, experiment_exits.valid_threshold_units, final_holdout, final_holdout.declaration_from_document, final_holdout.request_from_document, final_holdout.request_from_registration, canonical_json, iter_canonical_json, content_hash, CONTENT_HASH_PREFIX, tag_nonfinite, untag_nonfinite, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, ArtifactStore, ArtifactError, artifacts.read_bounded_bytes, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed, market_calendar, market_horizon, score_population, experiment_holdouts, experiment_holdouts.ExperimentHoldouts, experiment_holdouts.calendar_date -->
+<!-- public-interface: experiment_exits, experiment_exits.valid_exit_recipe, experiment_exits.valid_threshold_units, final_holdout, final_holdout.declaration_from_document, final_holdout.request_from_document, final_holdout.request_from_registration, canonical_json, iter_canonical_json, content_hash, CONTENT_HASH_PREFIX, tag_nonfinite, untag_nonfinite, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, ArtifactStore, ArtifactError, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed, market_calendar, market_horizon, score_population, experiment_holdouts, experiment_holdouts.ExperimentHoldouts, experiment_holdouts.calendar_date -->
 
 ## Consumers
 
@@ -66,7 +65,7 @@ failure rather than a stale sentence.
   corpus, receipts and baseline hash through the one implementation.
 
 - engine/v2/data — `DocumentError`, `from_document`, `parse_timestamp` for the strict document checks `engine.v2.foundation.typed` cannot express from annotations alone.
-- engine/v2/ops — content identity, safe artifact storage and bounded reads, typed decoding, clocks and `experiment_exits.valid_exit_recipe` plan admission.
+- engine/v2/ops — content identity, safe artifact storage, typed decoding, clocks and `experiment_exits.valid_exit_recipe` plan admission.
 - engine/v2/ledger — canonical append-only payloads and durable export paths.
 - engine/v2/serving — safe immutable release paths and health timestamps.
 - engine/v2/models — `canonical_json`/`content_hash` (P5-4) to identify and
