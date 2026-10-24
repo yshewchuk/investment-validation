@@ -59,6 +59,50 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
     assert artifact.read_bytes() == original
 
 
+def test_restore_rejects_unsafe_manifest_artifact_before_creating_destination(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"safe", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "unsafe-restore", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key="unsafe-restore", owner="worker", target=backup,
+               clock=clock, store=store)
+    manifest_path = backup / "unsafe-restore.manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifacts"]["../escape"] = manifest["artifacts"].pop("evidence.bin")
+    manifest_path.write_text(json.dumps(manifest))
+    destination = tmp_path / "unsafe-restored"
+
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, destination)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+    assert not destination.exists()
+    assert not (tmp_path / "escape").exists()
+
+
+def test_restore_rejects_symlinked_artifact_and_removes_partial_destination(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"safe", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "symlink-restore", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key="symlink-restore", owner="worker", target=backup,
+               clock=clock, store=store)
+    artifact = backup / "artifacts" / "evidence.bin"
+    artifact.unlink()
+    artifact.symlink_to(tmp_path / "objects" / "missing")
+    destination = tmp_path / "symlink-restored"
+
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, destination)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+    assert not destination.exists()
+
+
 @pytest.mark.parametrize("stale_bytes", [b"", b"SQLite format 3\x00"],
                          ids=["zero-byte", "truncated-header"])
 def test_backup_atomically_replaces_unverified_key_database(tmp_path, stale_bytes):
@@ -224,6 +268,25 @@ def test_unsafe_artifact_name_is_refused_before_database_install(tmp_path):
     assert refused.value.code == "INVALID_REQUEST"
     assert refused.value.problem.retryable is False
     assert not list(backup.glob("*.sqlite"))
+
+
+def test_backup_rejects_symlinked_artifact_source(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "symlink-artifact", {"evidence.bin": ref}, clock=clock)
+    source = tmp_path / "changed-source"
+    source.symlink_to(tmp_path / "objects" / "missing")
+    monkeypatch.setattr(store, "verify", lambda _ref: source)
+    backup = tmp_path / "backup"
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="symlink-artifact", owner="worker", target=backup,
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+    assert not list(backup.glob("*.manifest.json"))
 
 
 @pytest.mark.parametrize("mutation", [
@@ -516,6 +579,15 @@ def test_durable_manifest_with_corrupt_database_is_not_reused(tmp_path):
     manifest["artifacts"] = {"evidence.bin": {
         "content_hash": ref.content_hash, "byte_size": ref.byte_size}}
     manifest_path.write_text(json.dumps(manifest))
+    artifact = backup / "artifacts" / "evidence.bin"
+    artifact.write_bytes(b"corrupted retry artifact")
+    assert backup_module._durable_manifest(manifest_path, "resume", payload, refs) is None
+    clock.advance(3600)
+    repaired = run_backup(conn, key="resume", owner="worker", target=backup,
+                          clock=clock, store=store)
+    assert repaired["artifacts"] == manifest["artifacts"]
+    assert backup_module._durable_manifest(manifest_path, "resume", payload, refs) == repaired
+    assert artifact.read_bytes() == b"retry evidence"
     database = backup / manifest["database_file"]
     database.write_bytes(database.read_bytes() + b"corruption")
     assert backup_module._durable_manifest(manifest_path, "resume", payload, refs) is None
