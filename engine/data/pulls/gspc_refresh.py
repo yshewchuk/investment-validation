@@ -168,8 +168,8 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None,
     reason in ``fetch_failed`` / ``unparseable`` / ``stale_source`` /
     ``shrunk`` / ``older_than_existing`` / ``history_changed`` /
     ``unreadable`` / ``unwritable`` / ``invalid_cutoff``. When
-    ``minimum_last_date`` is given, the fresh series must reach it; minimum
-    coverage is checked after the parse and before the lock or any file read
+    ``minimum_last_date`` is given, the fresh series must reach the cutoff date;
+    coverage is checked after parse and before the lock or any file read
     or write, so a source that ends too early leaves the target file untouched.
     A timezone-aware cutoff returns ``invalid_cutoff``; naive date values
     normalize and use the existing freshness comparison.
