@@ -38,12 +38,20 @@ def _row_counts(conn):
 
 def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
     conn, clock, _ = catalog(tmp_path)
+    conn.execute("CREATE TABLE snapshot_probe (value TEXT)")
+    conn.execute("INSERT INTO snapshot_probe VALUES ('captured')")
+    conn.commit()
     store = ArtifactStore(tmp_path / "objects")
     ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
     prepare_backup(conn, "b1", {"evidence.bin": ref}, clock=clock)
     backup = tmp_path / "backup"
     manifest = run_backup(conn, key="b1", owner="worker", target=backup, clock=clock, store=store)
     assert manifest["artifacts"]["evidence.bin"]["content_hash"] == ref.content_hash
+    snapshot = sqlite3.connect(backup / "b1.sqlite")
+    try:
+        assert snapshot.execute("SELECT value FROM snapshot_probe").fetchone()[0] == "captured"
+    finally:
+        snapshot.close()
     restored = restore_backup(backup, tmp_path / "restored")
     assert (restored / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "delivered"
@@ -51,6 +59,56 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
         restore_backup(backup, tmp_path / "restored")
     assert refused.value.code == "INVALID_REQUEST"
     assert (tmp_path / "restored" / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
+
+
+@pytest.mark.parametrize("case", ["missing_database", "missing_artifacts", "artifact_list", "bad_artifact"])
+def test_restore_rejects_malformed_manifest_before_creating_destination(tmp_path, case):
+    source = tmp_path / "backup"
+    source.mkdir()
+    digest = "sha256:" + "0" * 64
+    manifest = {"schema_version": "catalog_backup.v1.0", "backup_key": "backup",
+                "cutoff": "2026-01-01T00:00:00Z", "database": digest,
+                "database_rows": {}, "artifacts": {}}
+    if case == "missing_database":
+        manifest.pop("database")
+    elif case == "missing_artifacts":
+        manifest.pop("artifacts")
+    elif case == "artifact_list":
+        manifest["artifacts"] = []
+    else:
+        manifest["artifacts"] = {"evidence.bin": {"byte_size": "8", "content_hash": digest}}
+    (source / "backup.manifest.json").write_text(json.dumps(manifest))
+    destination = tmp_path / "restored"
+
+    with pytest.raises(OpsError) as refused:
+        restore_backup(source, destination)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert not destination.exists()
+
+
+def test_backup_published_hash_rejects_symlink_replacement(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "hash-race", {}, clock=clock)
+    target = tmp_path / "backup"
+    external = tmp_path / "external.sqlite"
+    external.write_bytes(b"outside")
+
+    def replace_database(_payload, _store, _target, _fault, _keepalive):
+        database = target / "hash-race.sqlite"
+        database.unlink()
+        database.symlink_to(external)
+        return {}
+
+    monkeypatch.setattr(backup_module, "_copy_artifacts", replace_database)
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="hash-race", owner="worker", target=target,
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert external.read_bytes() == b"outside"
+    assert not (target / "hash-race.manifest.json").exists()
 
 
 def test_sqlite_backup_copy_error_is_retryable(tmp_path, monkeypatch):
@@ -132,7 +190,7 @@ def test_bounded_reader_rejects_oversize_and_nonregular_inputs(tmp_path):
         backup_module._read_bounded_bytes(tmp_path, backup_module.MAX_MANIFEST_BYTES)
     symlink = tmp_path / "manifest-link.json"
     symlink.symlink_to(oversized)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="file cannot be read safely"):
         backup_module._read_bounded_bytes(symlink, backup_module.MAX_MANIFEST_BYTES)
     fifo = tmp_path / "manifest-fifo.json"
     os.mkfifo(fifo)
@@ -164,6 +222,26 @@ def test_backup_replaces_stale_final_database_only_with_verified_copy(tmp_path, 
     assert manifest["database_rows"] == _row_counts(conn)
     assert conn.execute(
         "SELECT state FROM outbox WHERE logical_key='b7'").fetchone()[0] == "delivered"
+
+
+@pytest.mark.parametrize("component", ["database", "artifact"])
+def test_restore_rejects_tampered_backup_components(tmp_path, component):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "tampered", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key="tampered", owner="worker", target=backup, clock=clock, store=store)
+    path = (backup / "tampered.sqlite" if component == "database"
+            else backup / "artifacts" / "evidence.bin")
+    path.write_bytes(path.read_bytes() + b"tampered")
+    destination = tmp_path / "restored"
+
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, destination)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert destination.exists()
 
 
 def test_backup_copy_failure_remains_retryable(tmp_path):
@@ -215,6 +293,7 @@ def test_retry_rebuilds_unsafe_prior_database(tmp_path, monkeypatch, unsafe_prio
         run_backup(conn, key="unsafe-prior", owner="worker", target=backup,
                    clock=clock, store=store, fault=crash_after_publish)
     database = backup / "unsafe-prior.sqlite"
+    prior_inode = database.lstat().st_ino
     external = tmp_path / "external.sqlite"
     external_bytes = None
     if unsafe_prior == "symlink":
@@ -223,7 +302,10 @@ def test_retry_rebuilds_unsafe_prior_database(tmp_path, monkeypatch, unsafe_prio
         database.unlink()
         database.symlink_to(external)
     else:
-        monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", 8)
+        cap = database.stat().st_size
+        with database.open("ab") as stream:
+            stream.write(b"oversized prior")
+        monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", cap)
         assert database.stat().st_size > backup_module.MAX_BACKUP_FILE_BYTES
     clock.advance(301)
 
@@ -232,6 +314,7 @@ def test_retry_rebuilds_unsafe_prior_database(tmp_path, monkeypatch, unsafe_prio
 
     assert result["database_rows"] == _row_counts(conn)
     assert not database.is_symlink()
+    assert database.lstat().st_ino != prior_inode
     if external_bytes is not None:
         assert external.read_bytes() == external_bytes
 

@@ -18,7 +18,6 @@ from engine.v2.foundation import (
 )
 from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
 from engine.v2.ops.errors import OpsError, fail
-from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.outbox import claim, complete, enqueue
 
 MAX_MANIFEST_BYTES = 1024 * 1024
@@ -354,7 +353,8 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
         _stage_database(conn, target, key, database, source_rows)
     copied = _copy_artifacts(payload, store, target, fault, keepalive)
     manifest = {"schema_version": payload["schema_version"], "backup_key": key,
-                "cutoff": payload["cutoff"], "database": file_hash(database),
+                "cutoff": payload["cutoff"],
+                "database": _checked_file_hash(database, stage="backup database"),
                 "database_rows": source_rows, "artifacts": copied}
     _publish_manifest(manifest_path, manifest, prior)
     if fault:
@@ -362,6 +362,51 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
     complete(conn, effect["effect_id"], manifest, owner=owner,
              claim_token=effect["claim_token"], clock=clock)
     return manifest
+
+
+def _valid_backup_hash(value):
+    return (isinstance(value, str) and len(value) == 71
+            and value.startswith("sha256:")
+            and all(char in "0123456789abcdef" for char in value[7:]))
+
+
+def _validate_backup_row_counts(database_rows):
+    if not isinstance(database_rows, dict):
+        raise ValueError("database row counts are invalid")
+    if any(not isinstance(name, str) or type(count) is not int or count < 0
+           for name, count in database_rows.items()):
+        raise ValueError("database row counts are invalid")
+
+
+def _validate_backup_artifacts(artifacts):
+    if not isinstance(artifacts, dict):
+        raise ValueError("backup artifacts are invalid")
+    for name, info in artifacts.items():
+        if (not isinstance(name, str) or len(safe_relative_path(name)) != 1
+                or not isinstance(info, dict)):
+            raise ValueError("artifact entry is invalid")
+        size = info.get("byte_size")
+        if (type(size) is not int or size < 0 or size > MAX_BACKUP_FILE_BYTES
+                or not _valid_backup_hash(info.get("content_hash"))):
+            raise ValueError("artifact metadata is invalid")
+
+
+def _validate_backup_manifest(manifest):
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest is not an object")
+    backup_key = manifest.get("backup_key")
+    database_hash = manifest.get("database")
+    database_rows = manifest.get("database_rows")
+    artifacts = manifest.get("artifacts")
+    if (manifest.get("schema_version") != "catalog_backup.v1.0"
+            or not isinstance(manifest.get("cutoff"), str)
+            or not isinstance(backup_key, str)
+            or len(safe_relative_path(backup_key)) != 1
+            or not _valid_backup_hash(database_hash)):
+        raise ValueError("manifest fields are invalid")
+    _validate_backup_row_counts(database_rows)
+    _validate_backup_artifacts(artifacts)
+    return backup_key, database_hash, artifacts
 
 
 def restore_backup(source, destination):
@@ -374,15 +419,15 @@ def restore_backup(source, destination):
         raise fail("INTEGRITY_FAILED", "backup manifest is missing or ambiguous")
     try:
         manifest = json.loads(_read_bounded_bytes(manifests[0], MAX_MANIFEST_BYTES))
-        backup_key = manifest["backup_key"]
-        if not isinstance(backup_key, str) or len(safe_relative_path(backup_key)) != 1:
-            raise ValueError("unsafe backup key")
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, KeyError) as exc:
+        backup_key, database_hash, artifacts = _validate_backup_manifest(manifest)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, KeyError,
+            TypeError, AttributeError, OpsError) as exc:
         raise fail("INTEGRITY_FAILED", "backup manifest is invalid") from exc
+
     destination.mkdir(parents=True)
     database = destination / "ops.sqlite"
     _copy_verified_file(source / (backup_key + ".sqlite"), database,
-                        expected_size=None, expected_hash=manifest["database"],
+                        expected_size=None, expected_hash=database_hash,
                         stage="restore database")
     probe = sqlite3.connect(database)
     try:
@@ -390,12 +435,10 @@ def restore_backup(source, destination):
             raise fail("INTEGRITY_FAILED", "restored catalog failed integrity check")
     finally:
         probe.close()
-    for name, info in manifest["artifacts"].items():
-        if not isinstance(name, str) or len(safe_relative_path(name)) != 1:
-            raise fail("INTEGRITY_FAILED", "backup artifact name is unsafe")
+    for name, info in artifacts.items():
         path = destination / "artifacts" / name
         path.parent.mkdir(parents=True, exist_ok=True)
         _copy_verified_file(source / "artifacts" / name, path,
-                            expected_size=info.get("byte_size"),
+                            expected_size=info["byte_size"],
                             expected_hash=info["content_hash"], stage="restore artifact")
     return destination
