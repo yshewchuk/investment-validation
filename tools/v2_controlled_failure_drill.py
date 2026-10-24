@@ -72,7 +72,12 @@ from checks.rearchitecture_phase6_restore_drill import (  # noqa: E402
 )
 from engine.v2.foundation import ArtifactStore, Clock, SystemClock, format_timestamp  # noqa: E402
 from engine.v2.ops import publication  # noqa: E402
-from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup  # noqa: E402
+from engine.v2.ops.backup import (  # noqa: E402
+    _verified_file_hash,
+    prepare_backup,
+    restore_backup,
+    run_backup,
+)
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.fingerprints import file_hash  # noqa: E402
@@ -126,9 +131,8 @@ class _Deployment:
 
 
 def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
-    """The same byte-level checks ``run_backup`` itself makes: the manifest
-    names the key and schema, and every file it hashes (the database, and each
-    artifact copy) still hashes to the recorded digest."""
+    """The manifest's selected database is opened without following links and
+    hashed within the same size bound as production backup verification."""
     if manifest.get("schema_version") != "catalog_backup.v1.0":
         return False
     if manifest.get("backup_key") != key:
@@ -137,7 +141,11 @@ def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
     if not isinstance(database_name, str) or Path(database_name).name != database_name:
         return False
     database = root / database_name
-    if not database.is_file() or file_hash(database) != manifest.get("database"):
+    try:
+        if _verified_file_hash(database, expected_size=manifest.get("database_size"),
+                               stage="drill backup database") != manifest.get("database"):
+            return False
+    except Exception:
         return False
     for name, info in manifest.get("artifacts", {}).items():
         path = root / "artifacts" / name
