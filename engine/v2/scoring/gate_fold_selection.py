@@ -26,26 +26,31 @@ _INVALID = "size fold catalog is not valid"
 _PHASE5_RELEASE_SCHEMA = "phase5_staged_release.v1.0"
 
 
-def _proof(catalog_hash: str, descriptors: Mapping[str, ServingFoldDescriptor]) -> str:
+def _proof(catalog_hash: str, descriptors: Mapping[str, ServingFoldDescriptor],
+           object_bytes: Mapping[str, int]) -> str:
     return content_hash({
         "catalog": catalog_hash,
         "descriptors": {k: to_document(v) for k, v in sorted(descriptors.items())},
+        "object_bytes": {k: v for k, v in sorted(object_bytes.items())},
     })
 
 
 @dataclass(frozen=True, kw_only=True)
 class SizeFoldCatalog:
-    """The staged size folds of one verified release, descriptors only."""
+    """The staged size folds of one verified release, descriptors and object bytes."""
 
     parent: StagedManifest
     catalog_hash: str
     descriptors: Mapping[str, ServingFoldDescriptor]
+    object_bytes: Mapping[str, int]
     _issued: str | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self._issued != _proof(self.catalog_hash, dict(self.descriptors)):
-            raise TypeError("SizeFoldCatalog proof does not match its descriptors")
+        if self._issued != _proof(self.catalog_hash, dict(self.descriptors),
+                                  dict(self.object_bytes)):
+            raise TypeError("SizeFoldCatalog proof does not match its contents")
         object.__setattr__(self, "descriptors", MappingProxyType(dict(self.descriptors)))
+        object.__setattr__(self, "object_bytes", MappingProxyType(dict(self.object_bytes)))
 
 
 def index_size_folds(catalog: Mapping, parent: StagedManifest) -> SizeFoldCatalog:
@@ -68,20 +73,15 @@ def index_size_folds(catalog: Mapping, parent: StagedManifest) -> SizeFoldCatalo
     try:
         if len(rows) != 1 or rows[0].get("status") != "STAGED":
             return SizeFoldCatalog(
-                parent=parent, catalog_hash=digest, descriptors={},
-                _issued=_proof(digest, {}))
+                parent=parent, catalog_hash=digest, descriptors={}, object_bytes={},
+                _issued=_proof(digest, {}, {}))
         objects = rows[0].get("objects")
         if not isinstance(objects, list):
             raise ValueError("objects")
-        descriptors: dict[str, ServingFoldDescriptor] = {}
-        for obj in objects:
-            descriptor = _descriptor_of(obj)
-            if descriptor.fold_start in descriptors:
-                raise ValueError("duplicate")
-            descriptors[descriptor.fold_start] = descriptor
+        descriptors, object_bytes = _fold_entries(objects)
         return SizeFoldCatalog(
             parent=parent, catalog_hash=digest, descriptors=descriptors,
-            _issued=_proof(digest, descriptors))
+            object_bytes=object_bytes, _issued=_proof(digest, descriptors, object_bytes))
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
         raise ModelNotReady(_MEMBER_ID, _INVALID) from None
 
@@ -123,6 +123,21 @@ def _descriptor_of(obj: Any) -> ServingFoldDescriptor:
     return descriptor
 
 
+def _fold_entries(objects: list) -> tuple[dict[str, ServingFoldDescriptor], dict[str, int]]:
+    descriptors: dict[str, ServingFoldDescriptor] = {}
+    object_bytes: dict[str, int] = {}
+    for obj in objects:
+        descriptor = _descriptor_of(obj)
+        size = obj.get("bytes")
+        if type(size) is not int:
+            raise ValueError("bytes")
+        if descriptor.fold_start in descriptors:
+            raise ValueError("duplicate")
+        descriptors[descriptor.fold_start] = descriptor
+        object_bytes[descriptor.fold_start] = size
+    return descriptors, object_bytes
+
+
 def select_gate_forecast_source(binding, event_date, as_of) -> GateForecastSource:
     """Load the fold for the earlier of the event's and decision's month."""
     from engine.v2.scoring.release_bindings import ModelNotReady
@@ -137,7 +152,8 @@ def select_gate_forecast_source(binding, event_date, as_of) -> GateForecastSourc
     try:
         ref = load_serving_fold(
             binding.frozen_inference, descriptor,
-            verified_parent_manifest=catalog.parent, catalog_hash=catalog.catalog_hash)
+            verified_parent_manifest=catalog.parent, catalog_hash=catalog.catalog_hash,
+            expected_bytes=catalog.object_bytes[fold_start])
     except ServingFoldError:
         raise ModelNotReady(
             _MEMBER_ID, "size fold could not be verified or loaded") from None

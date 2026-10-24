@@ -74,9 +74,11 @@ def _object(descriptor, *, name=None, size=1):
             "serving_fold": to_document(descriptor)}
 
 
-def _row(descriptors, status="STAGED"):
+def _row(descriptors, status="STAGED", sizes=None):
+    sizes = [1] * len(descriptors) if sizes is None else sizes
     return {"member_id": MEMBER, "status": status,
-            "objects": [_object(descriptor) for descriptor in descriptors]}
+            "objects": [_object(descriptor, size=size)
+                        for descriptor, size in zip(descriptors, sizes)]}
 
 
 _SCHEMA = "phase5_staged_release.v1.0"
@@ -119,8 +121,9 @@ def _fold(tmp_path, fold_start):
     descriptor = _descriptor(cache, parent)
     path = tmp_path / descriptor.estimator.path
     path.parent.mkdir(exist_ok=True)
-    path.write_bytes(fold_bytes(cache))
-    catalog_dict = _catalog(parent, _row([descriptor]))
+    raw = fold_bytes(cache)
+    path.write_bytes(raw)
+    catalog_dict = _catalog(parent, _row([descriptor], sizes=[len(raw)]))
     catalog = index_size_folds(catalog_dict, parent)
     catalog_hash = catalog.catalog_hash
     binding = SimpleNamespace(frozen_inference=FrozenInference(tmp_path), size_folds=catalog)
@@ -235,7 +238,8 @@ def test_size_fold_catalog_descriptors_are_read_only(tmp_path):
 def test_size_fold_catalog_rejects_wrong_proof(tmp_path):
     parent = _staged(tmp_path, _cache())
     with pytest.raises(TypeError):
-        SizeFoldCatalog(parent=parent, catalog_hash="x", descriptors={}, _issued="wrong")
+        SizeFoldCatalog(parent=parent, catalog_hash="x", descriptors={},
+                        object_bytes={}, _issued="wrong")
 
 
 def test_size_fold_catalog_rejects_wrong_catalog_hash(tmp_path):
@@ -264,6 +268,15 @@ def test_size_fold_catalog_rejects_wrong_key(tmp_path):
     catalog = index_size_folds(_catalog(parent, _row([descriptor])), parent)
     with pytest.raises(TypeError):
         replace(catalog, descriptors={"2026-11-01": descriptor})
+
+
+def test_size_fold_catalog_rejects_changed_object_bytes(tmp_path):
+    cache = _cache()
+    parent = _staged(tmp_path, cache)
+    descriptor = _descriptor(cache, parent)
+    catalog = index_size_folds(_catalog(parent, _row([descriptor])), parent)
+    with pytest.raises(TypeError):
+        replace(catalog, object_bytes={"2026-10-01": 2})
 
 
 @pytest.mark.parametrize("mutate", [
@@ -312,6 +325,17 @@ def test_selection_corrupt_object_refuses(fold):
     _assert_model_not_ready(caught, "size fold could not be verified or loaded")
 
 
+def test_selection_rejects_declared_bytes_mismatch(fold):
+    actual = fold.path.stat().st_size
+    row = {"member_id": MEMBER, "status": "STAGED",
+           "objects": [_object(fold.descriptor, size=actual + 1)]}
+    catalog = index_size_folds(_catalog(fold.parent, row), fold.parent)
+    binding = SimpleNamespace(frozen_inference=fold.binding.frozen_inference, size_folds=catalog)
+    with pytest.raises(ModelNotReady) as caught:
+        select_gate_forecast_source(binding, "2026-10-05", "2026-10-06")
+    _assert_model_not_ready(caught, "size fold could not be verified or loaded")
+
+
 def test_selection_accepts_iso_datetime_strings(fold):
     source = select_gate_forecast_source(
         fold.binding, "2026-10-15T09:30:00", "2026-10-16T10:00:00")
@@ -357,11 +381,12 @@ def test_selection_uses_fold_policy_interval_floor(tmp_path):
                             feature_order=tuple(cache["features"]),
                             panel_sha256=cache["tier3_snapshot"],
                             interval_floor=0.037)
-    descriptor = describe_size_fold(fold_bytes(cache), fold_name(cache), policy, parent)
+    raw = fold_bytes(cache)
+    descriptor = describe_size_fold(raw, fold_name(cache), policy, parent)
     path = tmp_path / descriptor.estimator.path
     path.parent.mkdir(exist_ok=True)
-    path.write_bytes(fold_bytes(cache))
-    catalog = index_size_folds(_catalog(parent, _row([descriptor])), parent)
+    path.write_bytes(raw)
+    catalog = index_size_folds(_catalog(parent, _row([descriptor], sizes=[len(raw)])), parent)
     binding = SimpleNamespace(frozen_inference=FrozenInference(tmp_path), size_folds=catalog)
     source = select_gate_forecast_source(binding, "2026-10-05", "2026-10-06")
     assert source.interval_floor == 0.037
@@ -500,6 +525,7 @@ def _three_folds(tmp_path):
     parent = _staged(tmp_path, _cache("2026-08-01"))
     descriptors = {}
     pools = {}
+    sizes = []
     for index, month in enumerate(("2026-08-01", "2026-09-01", "2026-10-01")):
         cache = _cache(month)
         cache.update(pool_pred=np.array([0.1 + index, 0.2 + index]),
@@ -507,10 +533,12 @@ def _three_folds(tmp_path):
         descriptor = _descriptor(cache, parent)
         path = tmp_path / descriptor.estimator.path
         path.parent.mkdir(exist_ok=True)
-        path.write_bytes(fold_bytes(cache))
+        raw = fold_bytes(cache)
+        path.write_bytes(raw)
         descriptors[month] = descriptor
+        sizes.append(len(raw))
         pools[month] = (tuple(cache["pool_pred"]), tuple(cache["pool_res"]))
-    catalog = _catalog(parent, _row(list(descriptors.values())))
+    catalog = _catalog(parent, _row(list(descriptors.values()), sizes=sizes))
     indexed = index_size_folds(catalog, parent)
     binding = SimpleNamespace(frozen_inference=FrozenInference(tmp_path), size_folds=indexed)
     return SimpleNamespace(binding=binding, parent=parent, descriptors=descriptors,
