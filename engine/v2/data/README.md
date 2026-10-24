@@ -112,7 +112,7 @@ for the session-only daily-state input adapter.
 
 `engine.v2.models.training` reads pinned D14 dataset inputs and typed refusals.
 
-<!-- consumers: engine.v2.ops, engine.v2.serving, engine.v2.research, engine.v2.features, engine.v2.models.training -->
+<!-- consumers: engine.v2.ops, engine.v2.serving, engine.v2.research, engine.v2.features, engine.v2.models, engine.v2.models.training -->
 
 ## Usage
 
