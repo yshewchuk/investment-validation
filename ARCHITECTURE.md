@@ -711,7 +711,7 @@ and nothing on this diagram writes to the legacy board.
 
 #### Contract
 
-Retention runs only after a successful backup; a failed or absent backup invokes nothing and deletes nothing. It retains the newest configured N complete verified backups (N default 7) and the newest configured K roots (K default 11), plus roots existing persisted live-attempt state proves in use. A complete backup has the exact manifest schema, a non-empty hash-matched database with clean SQLite integrity/foreign-key checks, and the exact on-disk artifact set with matching sizes and hashes. Current publication has no root binding, so retention keeps the newest 11 roots conservatively and emits `RETENTION_CURRENT_PUBLICATION_UNBOUND`. Invalid limits refuse `INVALID_REQUEST`; a live attempt with a missing or duplicate request binding refuses `INPUT_CHANGED`, matching `retention._live_roots`; any other verification or filesystem refusal is keyed `INTEGRITY_FAILED`; a lease failure propagates `LEASE_LOST` and stops work. All preflight refusals delete nothing. The first run may delete only after this code is wired on the standard nightly path and synthetic tests have passed. Journal recovery and broader preflight must preserve no-deletion-on-unverified-state. Deletions start only after preflight and proceed per entry without rollback.
+Retention runs only after a successful backup; a failed or absent backup invokes nothing and deletes nothing. It retains the newest configured N complete verified backups (`OPS_BACKUP_RETENTION_KEEP=7` by default) and the newest configured K roots (`OPS_MATERIALIZATION_RETENTION_KEEP=11` by default), plus roots existing persisted live-attempt state proves in use. A complete backup has the exact manifest schema, a non-empty hash-matched database with clean SQLite integrity/foreign-key checks, and the exact on-disk artifact set with matching sizes and hashes. Current publication has no root binding, so retention keeps the newest 11 roots conservatively and emits `RETENTION_CURRENT_PUBLICATION_UNBOUND`. Invalid limits refuse `INVALID_REQUEST`; a live attempt with a missing or duplicate request binding refuses `INPUT_CHANGED`, matching `retention._live_roots`; any other verification or filesystem refusal is keyed `INTEGRITY_FAILED`; a lease failure propagates `LEASE_LOST` and stops work. All preflight refusals delete nothing. Journal recovery and broader preflight must preserve no-deletion-on-unverified-state. Deletions start only after preflight and proceed per entry without rollback.
 
 | Condition | Outcome |
 | --- | --- |
@@ -725,7 +725,7 @@ Retention runs only after a successful backup; a failed or absent backup invokes
 
 #### History
 
-The known missing current-publication-to-root binding is tracked externally as #1206; the conservative newest-11-roots keep and keyed diagnostic for unbound publication were chosen without adding a release-manifest field. Journal recovery and broader preflight are tracked in #1251.
+The first run may delete only after this code is wired on the standard nightly path and synthetic tests have passed. The known missing current-publication-to-root binding is tracked externally as #1206; the conservative newest-11-roots keep and keyed diagnostic for unbound publication were chosen without adding a release-manifest field. Journal recovery and broader preflight are tracked in #1251.
 
 ## 5. Invariants
 

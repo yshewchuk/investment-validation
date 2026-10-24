@@ -4,14 +4,16 @@ import json
 import os
 import resource
 import sqlite3
+import stat
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 from engine.v2.foundation import safe_relative_path
 from engine.v2.ops.catalog import decode_bounded_text, integrity_errors, sql_text_budget
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.reclaim import remove_tree
 from engine.v2.ops.snapshot_roots import default_materialization_base, materialization_root
@@ -115,44 +117,62 @@ def _digest(path, keepalive=None):
                    details={"reason_key": "backup_file_unreadable"}) from None
 
 def _database(path, expected, keepalive=None):
-    if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
-        raise fail("INTEGRITY_FAILED", "backup database is missing, empty or not a regular file",
-                   details={"reason_key": "backup_database_invalid"})
-    if _digest(path, keepalive) != expected:
-        raise fail("INTEGRITY_FAILED", "backup database hash does not match its manifest",
-                   details={"reason_key": "backup_database_hash_mismatch"})
-    callback_error = None
-
-    def _progress():
-        nonlocal callback_error
-        try:
-            keepalive()
-        except Exception as error:
-            callback_error = error
-            return 1
-        return 0
-
     try:
-        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
-        try:
-            if keepalive is not None:
-                conn.set_progress_handler(_progress, _INTEGRITY_PROGRESS_INTERVAL)
-            problems = integrity_errors(conn)
-        finally:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                     | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        raise fail("INTEGRITY_FAILED", "backup database is missing, empty or not a regular file",
+                   details={"reason_key": "backup_database_invalid"}) from None
+    try:
+        pinned = os.fstat(fd)
+        if not stat.S_ISREG(pinned.st_mode) or pinned.st_size <= 0:
+            raise fail("INTEGRITY_FAILED", "backup database is missing, empty or not a regular file",
+                       details={"reason_key": "backup_database_invalid"})
+        proc_fd = Path(f"/proc/self/fd/{fd}")
+        if _digest(proc_fd, keepalive) != expected:
+            raise fail("INTEGRITY_FAILED", "backup database hash does not match its manifest",
+                       details={"reason_key": "backup_database_hash_mismatch"})
+        callback_error = None
+
+        def _progress():
+            nonlocal callback_error
             try:
-                conn.set_progress_handler(None, 0)
+                keepalive()
+            except Exception as error:
+                callback_error = error
+                return 1
+            return 0
+
+        try:
+            conn = sqlite3.connect(proc_fd.as_uri() + "?mode=ro&immutable=1", uri=True)
+            try:
+                if keepalive is not None:
+                    conn.set_progress_handler(_progress, _INTEGRITY_PROGRESS_INTERVAL)
+                problems = integrity_errors(conn)
             finally:
-                conn.close()
-    except sqlite3.Error:
+                try:
+                    conn.set_progress_handler(None, 0)
+                finally:
+                    conn.close()
+        except sqlite3.Error:
+            if callback_error is not None:
+                raise callback_error from None
+            raise fail("INTEGRITY_FAILED", "backup database could not be verified",
+                       details={"reason_key": "backup_database_verify_failed"}) from None
         if callback_error is not None:
             raise callback_error from None
-        raise fail("INTEGRITY_FAILED", "backup database could not be verified",
-                   details={"reason_key": "backup_database_verify_failed"}) from None
-    if callback_error is not None:
-        raise callback_error from None
-    if problems:
-        raise fail("INTEGRITY_FAILED", "backup database failed integrity or foreign-key checks",
-                   details={"reason_key": "backup_database_integrity_failed"})
+        if problems:
+            raise fail("INTEGRITY_FAILED", "backup database failed integrity or foreign-key checks",
+                       details={"reason_key": "backup_database_integrity_failed"})
+        try:
+            current = os.lstat(path)
+        except OSError:
+            current = None
+        if current is None or (current.st_dev, current.st_ino) != (pinned.st_dev, pinned.st_ino):
+            raise fail("INTEGRITY_FAILED", "backup database changed during verification",
+                       details={"reason_key": "backup_database_changed"})
+    finally:
+        os.close(fd)
 
 def _artifact(directory, name, info, keepalive=None):
     _safe_name(name, artifact=True)
@@ -252,8 +272,16 @@ def _scope_records(manifests, databases, artifacts_dir, keepalive=None):
     if set(manifests) != set(databases):
         raise fail("INTEGRITY_FAILED", "incomplete backup",
                    details={"reason_key": "backup_incomplete"})
-    return [_manifest(key, manifests[key], databases[key], artifacts_dir, keepalive)
-            for key in sorted(manifests)]
+    records = []
+    for key in sorted(manifests):
+        try:
+            records.append(
+                _manifest(key, manifests[key], databases[key], artifacts_dir, keepalive))
+        except OpsError as error:
+            problem = error.problem
+            raise OpsError(replace(problem, details={**problem.details,
+                                                     "backup_key": key})) from None
+    return records
 
 def _read_scope(scope, keepalive=None):
     artifacts_dir = _scope_artifacts_dir(scope)
@@ -327,7 +355,7 @@ def _live_roots(base, conn, store, keepalive=None):
         for attempt_id, kind, spec_bytes, spec_json, bound in cursor:
             _renew(keepalive)
             spec = _live_spec(attempt_id, spec_bytes, spec_json, encoding, limit)
-            parameters = spec.get("parameters") or {}
+            parameters = spec["parameters"] if "parameters" in spec else {}
             if not isinstance(parameters, dict):
                 raise fail("INTEGRITY_FAILED", "live job parameters are malformed",
                            details={"reason_key": "live_job_parameters_malformed",

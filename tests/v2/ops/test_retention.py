@@ -195,6 +195,49 @@ def test_invalid_backup_databases_refuse_and_leave_every_file(
     _refusal(ops, ops, catalog, reason, keep=1, materialization_keep=1)
 
 
+def test_corrupt_backup_refusal_names_the_failing_backup_key(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    manifest = _manifest(scope, "b2")
+    manifest["database"] = ZERO_HASH
+    _save_manifest(scope, "b2", manifest)
+
+    error = _refusal(ops, ops, catalog, "backup_database_hash_mismatch",
+                     keep=1, materialization_keep=1)
+
+    assert error.problem.details["backup_key"] == "b2"
+    assert error.problem.details["reason_key"] == "backup_database_hash_mismatch"
+    assert set(error.problem.details) == {"reason_key", "backup_key"}
+
+
+def test_database_pathname_replaced_after_pinned_hash_refuses_with_changed_reason(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    older = scope / "b1.sqlite"
+    swap = tmp_path / "swap.sqlite"
+    swap.write_bytes(older.read_bytes())
+    real_file_hash = retention_module.file_hash
+    state = {"replaced": False}
+
+    def file_hash(path, **kwargs):
+        digest = real_file_hash(path, **kwargs)
+        if not state["replaced"] and str(path).startswith("/proc/self/fd/"):
+            state["replaced"] = True
+            os.replace(swap, older)
+        return digest
+
+    monkeypatch.setattr(retention_module, "file_hash", file_hash)
+
+    _refusal(ops, ops, catalog, "backup_database_changed",
+             keep=1, materialization_keep=1)
+    assert state["replaced"]
+
+
 @pytest.mark.parametrize(("damage", "reason"), [
     ("size", "backup_artifact_size_mismatch"),
     ("hash", "backup_artifact_hash_mismatch"),
@@ -345,6 +388,31 @@ def test_live_attempt_without_single_request_binding_refuses_and_deletes_nothing
              code="INPUT_CHANGED", keep=1, materialization_keep=1)
 
 
+def test_live_attempt_without_materialization_intent_is_skipped(tmp_path, catalog,
+                                                                 monkeypatch):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-old", 1)
+    newest = _materialization_dir(base, "root-new", 2)
+    spec = {"kind": "legacy_finality", "parameters": {}}
+    catalog.execute("INSERT INTO jobs VALUES (?, ?, ?)",
+                    ("job_skip", "legacy_finality", json.dumps(spec)))
+    catalog.execute("INSERT INTO attempts VALUES (?, ?, ?)",
+                    ("att_skip", "job_skip", "running"))
+    captured = []
+    monkeypatch.setattr(
+        retention_module, "request_from_artifact",
+        lambda conn, store, artifact_id: captured.append(artifact_id))
+
+    enforce_retention(ops, conn=catalog, store=object(),
+                      keep=1, materialization_keep=1)
+
+    assert captured == []
+    assert newest.is_dir() and (newest / "sentinel.bin").is_file()
+    assert not (base / "root-old").exists()
+
+
 def test_oversized_live_spec_refuses_in_preflight_and_deletes_nothing(tmp_path, catalog):
     ops = tmp_path / "ops"
     scope = ops / "backups" / "shadow"
@@ -369,6 +437,29 @@ def test_oversized_live_spec_refuses_in_preflight_and_deletes_nothing(tmp_path, 
     assert error.problem.details["attempt_id"] == "att_big"
     assert error.problem.details["spec_bytes"] > retention_module.MAX_LIVE_SPEC_BYTES
     assert error.problem.details["byte_limit"] == retention_module.MAX_LIVE_SPEC_BYTES
+
+
+def test_false_non_dict_live_parameters_refuse_with_attempt_id(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    spec = {"kind": "legacy_materialize", "parameters": []}
+    catalog.execute("INSERT INTO jobs VALUES (?, ?, ?)",
+                    ("job_bad", "legacy_materialize", json.dumps(spec)))
+    catalog.execute("INSERT INTO attempts VALUES (?, ?, ?)",
+                    ("att_bad", "job_bad", "running"))
+
+    error = _refusal(tmp_path, ops, catalog, "live_job_parameters_malformed",
+                     keep=1, materialization_keep=1)
+
+    assert error.code == "INTEGRITY_FAILED"
+    assert error.problem.details["reason_key"] == "live_job_parameters_malformed"
+    assert error.problem.details["attempt_id"] == "att_bad"
 
 
 def test_unbound_current_publication_is_reported_and_only_older_roots_pruned(
