@@ -575,6 +575,24 @@ def test_run_backup_retry_after_the_effect_already_delivered_succeeds(tmp_path):
     assert (backup / "b4.manifest.json").read_bytes() == manifest_before_retry
 
 
+def test_delivered_backup_retry_refuses_tampered_artifact(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "tampered-delivery", {"evidence.bin": ref}, clock=clock)
+    backup_root = tmp_path / "backup"
+    run_backup(conn, key="tampered-delivery", owner="worker", target=backup_root,
+               clock=clock, store=store)
+    (backup_root / "artifacts" / "evidence.bin").write_bytes(b"partial")
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="tampered-delivery", owner="retry", target=backup_root,
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+
+
 def test_backup_coordinator_retry_after_delivery_before_commit_attempt_succeeds(tmp_path,
                                                                                  monkeypatch):
     """#98 at the COORDINATOR level: the fault here is injected after
@@ -829,6 +847,32 @@ def test_restore_refuses_a_published_database_hash_mismatch(tmp_path):
     assert not (tmp_path / "restored" / "ops.sqlite").exists()
 
 
+def test_backup_keepalive_runs_outside_snapshot_transaction(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "heartbeat", {}, clock=clock)
+    observed_transactions = []
+    renewals = []
+    original_digest = backup_module._full_logical_digest
+
+    def digest_with_heartbeat(snapshot, *, stage="database-digest", keepalive=None):
+        observed_transactions.append(conn.in_transaction)
+        if keepalive is not None:
+            keepalive()
+        return original_digest(snapshot, stage=stage)
+
+    def keepalive():
+        assert not conn.in_transaction
+        renewals.append(True)
+
+    monkeypatch.setattr(backup_module, "_full_logical_digest", digest_with_heartbeat)
+    run_backup(conn, key="heartbeat", owner="worker", target=tmp_path / "backup",
+               clock=clock, store=store, keepalive=keepalive)
+
+    assert observed_transactions and not any(observed_transactions)
+    assert renewals
+
+
 def test_sparse_file_over_the_byte_cap_is_refused_without_a_destination(
         tmp_path, monkeypatch):
     monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", 1024)
@@ -843,6 +887,30 @@ def test_sparse_file_over_the_byte_cap_is_refused_without_a_destination(
     assert refused.value.problem.retryable is False
 
     assert not destination.exists()
+
+
+def test_verified_file_hash_refuses_growth_after_open(tmp_path, monkeypatch):
+    class GrowingStream:
+        def __init__(self):
+            self.read_once = False
+
+        def read(self, _size):
+            if self.read_once:
+                return b""
+            self.read_once = True
+            return b"xx"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(backup_module, "_open_checked",
+                        lambda _path, **_kwargs: (GrowingStream(), 1))
+
+    with pytest.raises(OpsError) as refused:
+        backup_module.verified_file_hash(tmp_path / "growing", expected_size=None,
+                                         stage="growing file")
+
+    assert refused.value.code == "INTEGRITY_FAILED"
 
 
 def test_source_catalog_over_byte_cap_is_refused_before_table_scan(tmp_path, monkeypatch):

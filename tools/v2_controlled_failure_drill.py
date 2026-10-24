@@ -70,13 +70,20 @@ from checks.rearchitecture_phase6_restore_drill import (  # noqa: E402
     _build_published_fixture,
     _fenced_claim,
 )
-from engine.v2.foundation import ArtifactStore, Clock, SystemClock, format_timestamp  # noqa: E402
+from engine.v2.foundation import (  # noqa: E402
+    ArtifactStore,
+    Clock,
+    SystemClock,
+    format_timestamp,
+    safe_relative_path,
+)
 from engine.v2.ops import publication  # noqa: E402
 from engine.v2.ops.backup import (  # noqa: E402
-    _verified_file_hash,
+    manifest_database_path,
     prepare_backup,
     restore_backup,
     run_backup,
+    verified_file_hash,
 )
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
@@ -131,25 +138,40 @@ class _Deployment:
 
 
 def _manifest_is_consistent(manifest: dict, root: Path, key: str) -> bool:
-    """The manifest's selected database is opened without following links and
-    hashed within the same size bound as production backup verification."""
+    """Verify manifest-selected files with the production no-follow byte cap."""
     if manifest.get("schema_version") != "catalog_backup.v1.0":
         return False
     if manifest.get("backup_key") != key:
         return False
-    database_name = manifest.get("database_file", key + ".sqlite")
-    if not isinstance(database_name, str) or Path(database_name).name != database_name:
-        return False
-    database = root / database_name
     try:
-        if _verified_file_hash(database, expected_size=manifest.get("database_size"),
-                               stage="drill backup database") != manifest.get("database"):
+        database = manifest_database_path(root, manifest)
+        if verified_file_hash(database,
+                              expected_size=manifest.get("database_size"),
+                              stage="drill backup database") != manifest.get("database"):
             return False
     except Exception:
         return False
-    for name, info in manifest.get("artifacts", {}).items():
-        path = root / "artifacts" / name
-        if not path.is_file() or file_hash(path) != info.get("content_hash"):
+    artifacts = manifest.get("artifacts", {})
+    if not isinstance(artifacts, dict):
+        return False
+    artifact_root = root / "artifacts"
+    if artifact_root.is_symlink():
+        return False
+    for name, info in artifacts.items():
+        try:
+            parts = safe_relative_path(name)
+            if len(parts) != 1 or not isinstance(info, dict):
+                return False
+            expected_size = info.get("byte_size")
+            if expected_size is not None and type(expected_size) is not int:
+                return False
+            if not isinstance(info.get("content_hash"), str):
+                return False
+            if verified_file_hash(
+                    artifact_root / parts[0], expected_size=expected_size,
+                    stage=f"drill backup artifact {parts[0]}") != info["content_hash"]:
+                return False
+        except Exception:
             return False
     return True
 

@@ -79,7 +79,10 @@ def _full_logical_digest(conn, *, stage="database-digest", keepalive=None):
     started = time.monotonic()
     last_log = last_keepalive = started
     processed = 0
-    _log(f"{stage}: start rss_max_kib={_rss_max_kib()}")
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    total_estimate = page_size * conn.execute("PRAGMA page_count").fetchone()[0]
+    _log(f"{stage}: start estimated_total={total_estimate}B "
+         f"rss_max_kib={_rss_max_kib()}")
     for line in conn.iterdump():
         encoded = line.encode("utf-8")
         digest.update(encoded)
@@ -91,8 +94,12 @@ def _full_logical_digest(conn, *, stage="database-digest", keepalive=None):
         if now - last_log >= 60:
             elapsed = now - started
             rate = processed / elapsed
-            _log(f"{stage}: done={processed} bytes total=unknown rate={rate:.0f}B/s "
-                 f"eta=unknown elapsed={elapsed:.1f}s rss_max_kib={_rss_max_kib()}")
+            remaining_estimate = max(0, total_estimate - processed)
+            eta_estimate = remaining_estimate / rate if rate else None
+            eta_text = f"{eta_estimate:.0f}s" if eta_estimate is not None else "unknown"
+            _log(f"{stage}: done={processed} estimated_total={total_estimate}B "
+                 f"rate={rate:.0f}B/s eta_est={eta_text} elapsed={elapsed:.1f}s "
+                 f"rss_max_kib={_rss_max_kib()}")
             last_log = now
     elapsed = time.monotonic() - started
     _log(f"{stage}: complete bytes={processed} elapsed={elapsed:.1f}s "
@@ -395,13 +402,20 @@ def _publish_manifest(manifest_path, manifest):
                 pass
 
 
-def _verified_file_hash(path, *, expected_size, stage):
-    stream, _ = _open_checked(path, stage=stage, expected_size=expected_size,
-                              oserror_code="INTEGRITY_FAILED")
+def verified_file_hash(path, *, expected_size, stage):
+    """Hash a regular file without following links or reading beyond its cap."""
+    stream, size = _open_checked(path, stage=stage, expected_size=expected_size,
+                                 oserror_code="INTEGRITY_FAILED")
     try:
         digest = hashlib.sha256()
+        copied = 0
         for chunk in iter(lambda: stream.read(_CHUNK), b""):
+            if copied + len(chunk) > size:
+                raise fail("INTEGRITY_FAILED", f"{stage} grew while reading")
             digest.update(chunk)
+            copied += len(chunk)
+        if copied != size:
+            raise fail("INTEGRITY_FAILED", f"{stage} shrank while reading")
         return "sha256:" + digest.hexdigest()
     finally:
         stream.close()
@@ -414,7 +428,7 @@ def _verified_database(target, manifest, *, keepalive=None):
             or not isinstance(manifest.get("database_content_hash"), str)):
         return False
     database = Path(target) / _single_filename(manifest["database_file"])
-    if _verified_file_hash(database, expected_size=manifest["database_size"],
+    if verified_file_hash(database, expected_size=manifest["database_size"],
                            stage="durable backup database") != manifest.get("database"):
         return False
     probe = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
@@ -437,7 +451,7 @@ def _verified_artifacts(target, artifacts):
                 or type(info.get("byte_size")) is not int or info["byte_size"] < 0):
             return False
         path = Path(target) / "artifacts" / name
-        if _verified_file_hash(path, expected_size=info["byte_size"],
+        if verified_file_hash(path, expected_size=info["byte_size"],
                                stage=f"durable backup artifact {name}") != info["content_hash"]:
             return False
     return True
@@ -478,16 +492,30 @@ def _durable_manifest(manifest_path, key, payload, refs, *, keepalive=None):
     return manifest
 
 
+def _delivered_backup(conn, key, target, keepalive):
+    row = conn.execute(
+        "SELECT payload_json FROM outbox WHERE kind='backup' AND logical_key=? "
+        "AND state='delivered'", (key,)).fetchone()
+    if row is None:
+        raise fail("STALE_EXPECTATION", "backup effect is not pending")
+    payload = json.loads(row["payload_json"])
+    refs = _validated_artifact_names(payload)
+    target = Path(target)
+    if target.is_symlink():
+        raise fail("INVALID_REQUEST", "backup target is a symlink")
+    durable = _durable_manifest(target / (key + ".manifest.json"),
+                                key, payload, refs, keepalive=keepalive)
+    if durable is None:
+        raise fail("INTEGRITY_FAILED", "delivered backup files are missing or invalid")
+    _log(f"run_backup {key}: delivered retry verified durable result")
+    return durable
+
+
 def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=None):
     _validated_key(key)
     effect = claim(conn, "backup", owner=owner, clock=clock, logical_key=key)
     if effect is None:
-        row = conn.execute(
-            "SELECT receipt_json FROM outbox WHERE kind='backup' AND logical_key=? "
-            "AND state='delivered'", (key,)).fetchone()
-        if row is None:
-            raise fail("STALE_EXPECTATION", "backup effect is not pending")
-        return json.loads(row["receipt_json"])
+        return _delivered_backup(conn, key, target, keepalive)
     payload = json.loads(effect["payload_json"])
     refs = _validated_artifact_names(payload)
     target = Path(target)
@@ -507,9 +535,15 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
             complete(conn, effect["effect_id"], durable, owner=owner,
                      claim_token=effect["claim_token"], clock=clock)
             return durable
+        _log(f"run_backup {key}: no verified reusable result; rebuilding")
+        database_path = conn.execute("PRAGMA database_list").fetchone()[2]
+        if not database_path:
+            raise fail("WORKER_FAILED", "backup snapshot requires a file-backed catalog")
+        snapshot_conn = sqlite3.connect(Path(database_path).resolve().as_uri() + "?mode=ro",
+                                         uri=True)
         staged = None
         try:
-            with _read_snapshot(conn) as snapshot:
+            with _read_snapshot(snapshot_conn) as snapshot:
                 page_size = snapshot.execute("PRAGMA page_size").fetchone()[0]
                 page_count = snapshot.execute("PRAGMA page_count").fetchone()[0]
                 if page_size * page_count > MAX_BACKUP_FILE_BYTES:
@@ -521,6 +555,8 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
             if staged is not None:
                 staged.unlink(missing_ok=True)
             raise
+        finally:
+            snapshot_conn.close()
         database_file, database_hash = _install_stage(
             staged, target, key, source_rows, source_digest, keepalive=keepalive)
         copied = _copy_artifacts(refs, store, target, fault, keepalive=keepalive)
