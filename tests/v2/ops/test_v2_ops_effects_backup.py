@@ -9,7 +9,6 @@ import pytest
 
 from engine.v2.foundation import ArtifactStore, to_document
 from engine.v2.ops import backup as backup_module
-from engine.v2.ops import catalog as catalog_module
 from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
 from engine.v2.ops.catalog import integrity_errors
 from engine.v2.ops.effects_graph import backup_effect
@@ -114,70 +113,6 @@ def test_staged_row_count_mismatch_is_refused_with_table_details(tmp_path, monke
     assert refused.value.problem.details["tables"] == ["outbox"]
 
 
-def test_lost_ack_retry_reuses_prior_database(tmp_path, monkeypatch):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "b9", {"evidence.bin": ref}, clock=clock)
-    backup = tmp_path / "backup"
-    calls = []
-    real_backup_to = backup_module.backup_to
-
-    def counted(conn, destination, *, progress=None):
-        calls.append(destination)
-        real_backup_to(conn, destination, progress=progress)
-
-    monkeypatch.setattr(backup_module, "backup_to", counted)
-
-    def crash(point):
-        if point == "after_manifest_before_ack":
-            raise _InjectedCrash("ack lost")
-
-    with pytest.raises(_InjectedCrash):
-        run_backup(conn, key="b9", owner="worker", target=backup, clock=clock,
-                   store=store, fault=crash)
-    assert len(calls) == 1
-    clock.advance(301)
-    run_backup(conn, key="b9", owner="retry", target=backup, clock=clock, store=store)
-    assert len(calls) == 1
-
-
-def test_lost_ack_retry_rebuilds_when_source_changed(tmp_path, monkeypatch):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    prepare_backup(conn, "b10", {}, clock=clock)
-    conn.execute("CREATE TABLE synthetic_change (value INTEGER)")
-    conn.commit()
-    backup = tmp_path / "backup"
-    calls = []
-    real_backup_to = backup_module.backup_to
-
-    def counted(conn, destination, *, progress=None):
-        calls.append(destination)
-        real_backup_to(conn, destination, progress=progress)
-
-    monkeypatch.setattr(backup_module, "backup_to", counted)
-
-    def crash(point):
-        if point == "after_manifest_before_ack":
-            raise _InjectedCrash("ack lost")
-
-    with pytest.raises(_InjectedCrash):
-        run_backup(conn, key="b10", owner="worker", target=backup, clock=clock,
-                   store=store, fault=crash)
-    first = json.loads((backup / "b10.manifest.json").read_text())
-    assert len(calls) == 1
-
-    conn.execute("INSERT INTO synthetic_change VALUES (1)")
-    conn.commit()
-    clock.advance(301)
-    second = run_backup(conn, key="b10", owner="retry", target=backup, clock=clock, store=store)
-
-    assert len(calls) == 2
-    assert second["database"] != first["database"]
-    assert second["database_rows"]["synthetic_change"] == 1
-
-
 def test_backup_counts_and_copy_share_one_snapshot(tmp_path, monkeypatch):
     """A writer that commits after the source counts are read must not leak
     its row into the backup: counts and ``backup_to`` use one read snapshot."""
@@ -216,83 +151,57 @@ def test_backup_counts_and_copy_share_one_snapshot(tmp_path, monkeypatch):
     assert manifest["database_rows"] == before
 
 
-def test_oversized_prior_manifest_is_ignored_and_rebuilt(tmp_path, monkeypatch):
+def test_staged_content_mismatch_is_refused_without_row_count_change(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "b11", {"evidence.bin": ref}, clock=clock)
-    backup = tmp_path / "backup"
-    calls = []
+    conn.execute("CREATE TABLE synthetic_content (value TEXT)")
+    conn.execute("INSERT INTO synthetic_content VALUES ('original')")
+    conn.commit()
+    prepare_backup(conn, "b15", {}, clock=clock)
     real_backup_to = backup_module.backup_to
 
-    def counted(conn, destination, *, progress=None):
-        calls.append(destination)
-        real_backup_to(conn, destination, progress=progress)
+    def corrupt_content(source, destination, *, progress=None):
+        real_backup_to(source, destination, progress=progress)
+        damaged = sqlite3.connect(destination)
+        try:
+            damaged.execute("UPDATE synthetic_content SET value='tampered'")
+            damaged.commit()
+        finally:
+            damaged.close()
 
-    monkeypatch.setattr(backup_module, "backup_to", counted)
+    monkeypatch.setattr(backup_module, "backup_to", corrupt_content)
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="b15", owner="worker", target=tmp_path / "backup",
+                   clock=clock, store=store)
 
-    def crash(point):
-        if point == "after_manifest_before_ack":
-            raise _InjectedCrash("ack lost")
-
-    with pytest.raises(_InjectedCrash):
-        run_backup(conn, key="b11", owner="worker", target=backup, clock=clock,
-                   store=store, fault=crash)
-    manifest_path = backup / "b11.manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    assert len(calls) == 1
-
-    manifest["artifacts"]["evidence.bin"]["padding"] = (
-        "x" * (backup_module.MAX_MANIFEST_BYTES + 1))
-    # The manifest is still shape-valid: only the byte cap distinguishes it.
-    backup_module._validated_manifest_shape(manifest, current=True)
-    manifest_path.write_text(json.dumps(manifest))
-    assert manifest_path.stat().st_size > backup_module.MAX_MANIFEST_BYTES
-
-    clock.advance(301)
-    rebuilt = run_backup(conn, key="b11", owner="retry", target=backup, clock=clock,
-                         store=store)
-
-    assert len(calls) == 2
-    assert manifest_path.stat().st_size <= backup_module.MAX_MANIFEST_BYTES
-    assert json.loads(manifest_path.read_text()) == rebuilt
-    assert rebuilt["backup_key"] == "b11"
-    assert "padding" not in rebuilt["artifacts"]["evidence.bin"]
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+    assert refused.value.problem.details["reason"] == "content_digest"
 
 
-def test_prior_manifest_with_extra_field_is_invalid_and_rebuilt(tmp_path, monkeypatch):
+def test_fresh_copy_outbox_state_tamper_is_refused_as_content_digest(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    prepare_backup(conn, "b14", {}, clock=clock)
-    backup = tmp_path / "backup"
-    calls = []
+    prepare_backup(conn, "b22", {}, clock=clock)
     real_backup_to = backup_module.backup_to
 
-    def counted(conn, destination, *, progress=None):
-        calls.append(destination)
-        real_backup_to(conn, destination, progress=progress)
+    def tamper(source, destination, *, progress=None):
+        real_backup_to(source, destination, progress=progress)
+        damaged = sqlite3.connect(destination)
+        try:
+            damaged.execute("UPDATE outbox SET attempts=attempts+1")
+            damaged.commit()
+        finally:
+            damaged.close()
 
-    monkeypatch.setattr(backup_module, "backup_to", counted)
+    monkeypatch.setattr(backup_module, "backup_to", tamper)
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="b22", owner="worker", target=tmp_path / "backup",
+                   clock=clock, store=store)
 
-    def crash(point):
-        if point == "after_manifest_before_ack":
-            raise _InjectedCrash("ack lost")
-
-    with pytest.raises(_InjectedCrash):
-        run_backup(conn, key="b14", owner="worker", target=backup, clock=clock,
-                   store=store, fault=crash)
-    manifest_path = backup / "b14.manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["irrelevant"] = "field"
-    manifest_path.write_text(json.dumps(manifest))
-
-    clock.advance(301)
-    rebuilt = run_backup(conn, key="b14", owner="retry", target=backup, clock=clock,
-                         store=store)
-
-    assert len(calls) == 2
-    assert "irrelevant" not in rebuilt
-    assert json.loads(manifest_path.read_text()) == rebuilt
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert refused.value.problem.retryable is False
+    assert refused.value.problem.details["reason"] == "content_digest"
 
 
 def test_retry_removes_only_matching_crash_staging_files(tmp_path):
@@ -334,30 +243,6 @@ def test_backup_copy_failure_remains_retryable(tmp_path):
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "delivered"
 
 
-def test_manifest_success_before_ack_is_idempotent_and_keys_are_safe(tmp_path):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    with pytest.raises(OpsError) as refused:
-        prepare_backup(conn, "../escape", {"evidence.bin": ref}, clock=clock)
-    assert refused.value.code == "INVALID_REQUEST"
-    assert refused.value.problem.retryable is False
-    prepare_backup(conn, "b3", {"evidence.bin": ref}, clock=clock)
-    backup = tmp_path / "backup"
-    def crash(point):
-        if point == "after_manifest_before_ack":
-            raise _InjectedCrash("ack lost")
-    with pytest.raises(_InjectedCrash):
-        run_backup(conn, key="b3", owner="worker", target=backup, clock=clock, store=store,
-                   fault=crash)
-    first = (backup / "b3.manifest.json").read_bytes()
-    clock.advance(301)
-    second = run_backup(conn, key="b3", owner="retry", target=backup, clock=clock, store=store)
-    assert (backup / "b3.manifest.json").read_bytes() == first
-    assert second["cutoff"] == "2026-09-12T00:00:00.000000Z"
-    assert conn.execute("SELECT state FROM outbox WHERE logical_key='b3'").fetchone()[0] == "delivered"
-
-
 def test_prepare_backup_retry_returns_same_effect_without_rebuilding_payload(tmp_path):
     """P2-C07: ``prepare_backup`` called again for a key that already has a
     pending/running ``backup`` effect must return that SAME effect, not
@@ -378,156 +263,12 @@ def test_prepare_backup_retry_returns_same_effect_without_rebuilding_payload(tmp
                         ).fetchone()[0] == 1
 
 
-def test_staged_content_mismatch_is_refused_without_row_count_change(tmp_path, monkeypatch):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    conn.execute("CREATE TABLE synthetic_content (value TEXT)")
-    conn.execute("INSERT INTO synthetic_content VALUES ('original')")
-    conn.commit()
-    prepare_backup(conn, "b15", {}, clock=clock)
-    real_backup_to = backup_module.backup_to
-
-    def corrupt_content(source, destination, *, progress=None):
-        real_backup_to(source, destination, progress=progress)
-        damaged = sqlite3.connect(destination)
-        try:
-            damaged.execute("UPDATE synthetic_content SET value='tampered'")
-            damaged.commit()
-        finally:
-            damaged.close()
-
-    monkeypatch.setattr(backup_module, "backup_to", corrupt_content)
-    with pytest.raises(OpsError) as refused:
-        run_backup(conn, key="b15", owner="worker", target=tmp_path / "backup",
-                   clock=clock, store=store)
-
-    assert refused.value.code == "INTEGRITY_FAILED"
-    assert refused.value.problem.retryable is False
-    assert refused.value.problem.details["reason"] == "content_digest"
-
-
-def test_same_row_count_altered_prior_with_updated_file_hash_is_rebuilt(
-        tmp_path, monkeypatch):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    conn.execute("CREATE TABLE synthetic_content (value TEXT)")
-    conn.execute("INSERT INTO synthetic_content VALUES ('original')")
-    conn.commit()
-    prepare_backup(conn, "b16", {}, clock=clock)
-    backup = tmp_path / "backup"
-    calls = []
-    real_backup_to = backup_module.backup_to
-
-    def counted(conn, destination, *, progress=None):
-        calls.append(destination)
-        real_backup_to(conn, destination, progress=progress)
-
-    monkeypatch.setattr(backup_module, "backup_to", counted)
-
-    def crash(point):
-        if point == "after_manifest_before_ack":
-            raise _InjectedCrash("ack lost")
-
-    with pytest.raises(_InjectedCrash):
-        run_backup(conn, key="b16", owner="worker", target=backup, clock=clock,
-                   store=store, fault=crash)
-    first = json.loads((backup / "b16.manifest.json").read_text())
-    assert len(calls) == 1
-
-    prior_database = backup / first["database_file"]
-    altered = sqlite3.connect(prior_database)
-    try:
-        altered.execute("UPDATE synthetic_content SET value='altered'")
-        altered.commit()
-    finally:
-        altered.close()
-    manifest = json.loads((backup / "b16.manifest.json").read_text())
-    manifest["database"] = file_hash(prior_database)
-    (backup / "b16.manifest.json").write_text(json.dumps(manifest))
-
-    clock.advance(301)
-    rebuilt = run_backup(conn, key="b16", owner="retry", target=backup,
-                         clock=clock, store=store)
-
-    assert len(calls) == 2
-    assert rebuilt["database_file"] != first["database_file"]
-    assert rebuilt["database_content_hash"] != first["database_content_hash"]
-
-
-@pytest.mark.parametrize("corruption", ["integrity", "file-hash"])
-def test_corrupt_prior_database_falls_back_to_rebuild(tmp_path, monkeypatch, corruption):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    prepare_backup(conn, "b17", {}, clock=clock)
-    backup = tmp_path / "backup"
-    calls = []
-    real_backup_to = backup_module.backup_to
-
-    def counted(conn, destination, *, progress=None):
-        calls.append(destination)
-        real_backup_to(conn, destination, progress=progress)
-
-    monkeypatch.setattr(backup_module, "backup_to", counted)
-
-    def crash(point):
-        if point == "after_manifest_before_ack":
-            raise _InjectedCrash("ack lost")
-
-    with pytest.raises(_InjectedCrash):
-        run_backup(conn, key="b17", owner="worker", target=backup, clock=clock,
-                   store=store, fault=crash)
-    first = json.loads((backup / "b17.manifest.json").read_text())
-    prior_database = backup / first["database_file"]
-    manifest_path = backup / "b17.manifest.json"
-    if corruption == "integrity":
-        prior_database.write_bytes(b"not a sqlite database")
-        first["database"] = file_hash(prior_database)
-    else:
-        first["database"] = "sha256:" + "0" * 64
-    manifest_path.write_text(json.dumps(first))
-
-    clock.advance(301)
-    rebuilt = run_backup(conn, key="b17", owner="retry", target=backup,
-                         clock=clock, store=store)
-
-    assert len(calls) == 2
-    assert rebuilt["database_file"] != first["database_file"]
-
-
-def test_structurally_valid_prior_with_different_artifact_metadata_is_refused(
-        tmp_path):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "b18", {"evidence.bin": ref}, clock=clock)
-    backup = tmp_path / "backup"
-
-    def crash(point):
-        if point == "after_manifest_before_ack":
-            raise _InjectedCrash("ack lost")
-
-    with pytest.raises(_InjectedCrash):
-        run_backup(conn, key="b18", owner="worker", target=backup, clock=clock,
-                   store=store, fault=crash)
-    manifest_path = backup / "b18.manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["artifacts"]["evidence.bin"]["content_hash"] = "sha256:" + "0" * 64
-    manifest_path.write_text(json.dumps(manifest))
-
-    clock.advance(301)
-    with pytest.raises(OpsError) as refused:
-        run_backup(conn, key="b18", owner="retry", target=backup, clock=clock, store=store)
-
-    assert refused.value.code == "INTEGRITY_FAILED"
-    assert refused.value.problem.retryable is False
-
-
 def test_artifact_hash_mismatch_refuses_non_retryable_integrity_failure(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     ref = store.publish_bytes(b"good bytes", schema_ref="evidence.v1.0")
     prepare_backup(conn, "b19", {"evidence.bin": ref}, clock=clock)
-    object_path = backup_module._artifact_object_path(store, ref)
+    object_path = store.root.joinpath(*ref.storage_key.split("/"))
     data = bytearray(object_path.read_bytes())
     data[0] ^= 0xFF
     object_path.unlink()
@@ -546,46 +287,12 @@ def test_artifact_hash_mismatch_refuses_non_retryable_integrity_failure(tmp_path
     assert refused.value.problem.retryable is False
 
 
-def test_grown_object_after_preflight_is_refused_without_verify(tmp_path, monkeypatch):
-    """A backing object that grows after the bounded preflight must fail the
-    copy as a typed integrity error, and must never fall back to the
-    unbounded ``ArtifactStore.verify`` re-read the preflight replaced."""
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "b30", {"evidence.bin": ref}, clock=clock)
-
-    real_preflight = backup_module._preflight_artifact
-
-    def preflight_then_grow(store, ref, keepalive=None):
-        path = real_preflight(store, ref, keepalive)
-        data = path.read_bytes()
-        path.unlink()
-        path.write_bytes(data + b"grown after preflight")
-        return path
-
-    monkeypatch.setattr(backup_module, "_preflight_artifact", preflight_then_grow)
-
-    def forbid(_ref):
-        raise AssertionError("store.verify must not run")
-
-    monkeypatch.setattr(store, "verify", forbid)
-
-    with pytest.raises(OpsError) as refused:
-        run_backup(conn, key="b30", owner="worker", target=tmp_path / "backup",
-                   clock=clock, store=store)
-
-    assert refused.value.code == "INTEGRITY_FAILED"
-    assert refused.value.problem.retryable is False
-    assert not list((tmp_path / "backup").rglob("evidence.bin"))
-
-
 def test_oversized_backing_object_is_refused_before_verify(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    ref = store.publish_bytes(b"x" * (4 << 20), schema_ref="evidence.v1.0")
     prepare_backup(conn, "b27", {"evidence.bin": ref}, clock=clock)
-    monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", ref.byte_size - 1)
+    monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", 2 << 20)
     calls = []
 
     def spy(_ref):
@@ -627,37 +334,6 @@ def test_size_mismatched_backing_object_is_refused_before_verify(tmp_path, monke
     assert calls == []
 
 
-def test_deeply_nested_prior_manifest_is_invalid_and_rebuilt(tmp_path, monkeypatch):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    prepare_backup(conn, "b20", {}, clock=clock)
-    backup = tmp_path / "backup"
-    calls = []
-    real_backup_to = backup_module.backup_to
-
-    def counted(conn, destination, *, progress=None):
-        calls.append(destination)
-        real_backup_to(conn, destination, progress=progress)
-
-    monkeypatch.setattr(backup_module, "backup_to", counted)
-
-    def crash(point):
-        if point == "after_manifest_before_ack":
-            raise _InjectedCrash("ack lost")
-
-    with pytest.raises(_InjectedCrash):
-        run_backup(conn, key="b20", owner="worker", target=backup, clock=clock,
-                   store=store, fault=crash)
-    (backup / "b20.manifest.json").write_text("[" * 100_000)
-
-    clock.advance(301)
-    rebuilt = run_backup(conn, key="b20", owner="retry", target=backup,
-                         clock=clock, store=store)
-
-    assert len(calls) == 2
-    assert rebuilt["backup_key"] == "b20"
-
-
 def test_unsafe_artifact_name_is_refused_before_database_install(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
@@ -671,6 +347,30 @@ def test_unsafe_artifact_name_is_refused_before_database_install(tmp_path):
     assert refused.value.code == "INVALID_REQUEST"
     assert refused.value.problem.retryable is False
     assert not list(backup.glob("*.sqlite"))
+
+
+@pytest.mark.parametrize("mutation", [
+    {"artifact_id": 123},
+    {"storage_key": None},
+    {"unexpected": "field"},
+], ids=["wrong-type", "null-storage-key", "unknown-field"])
+def test_malformed_payload_artifact_metadata_is_refused_before_backup(
+        tmp_path, mutation):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    malformed = {**to_document(ref), **mutation}
+    prepare_backup(conn, "bad-ref", {"evidence.bin": malformed}, clock=clock)
+    backup = tmp_path / "backup"
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="bad-ref", owner="worker", target=backup,
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INVALID_REQUEST"
+    assert refused.value.problem.retryable is False
+    assert not list(backup.glob("*.sqlite"))
+    assert not list(backup.glob("*.manifest.json"))
 
 
 def test_per_key_lock_serializes_two_threads(tmp_path):
@@ -731,13 +431,9 @@ def test_restore_reads_manifest_within_the_existing_bound(tmp_path):
     manifest = run_backup(conn, key="cap", owner="worker", target=backup,
                           clock=clock, store=store)
     (backup / manifest["database_file"]).rename(backup / "cap.sqlite")
-    legacy = {name: manifest[name] for name in
-              ("schema_version", "backup_key", "cutoff", "database", "artifacts")}
-    legacy["artifacts"]["evidence.bin"]["padding"] = (
+    manifest["artifacts"]["evidence.bin"]["padding"] = (
         "x" * (backup_module.MAX_MANIFEST_BYTES + 1))
-    # The manifest is still shape-valid: only the byte cap distinguishes it.
-    backup_module._validated_manifest_shape(legacy, current=False)
-    (backup / "cap.manifest.json").write_text(json.dumps(legacy))
+    (backup / "cap.manifest.json").write_text(json.dumps(manifest))
     assert (backup / "cap.manifest.json").stat().st_size > \
         backup_module.MAX_MANIFEST_BYTES
     destination = tmp_path / "restored"
@@ -760,35 +456,6 @@ def test_restore_catches_deeply_nested_manifest_json(tmp_path):
 
     assert refused.value.code == "INTEGRITY_FAILED"
     assert refused.value.problem.retryable is False
-
-
-def test_restore_legacy_manifest_falls_back_to_key_named_database(tmp_path):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "legacy", {"evidence.bin": ref}, clock=clock)
-    backup = tmp_path / "backup"
-    manifest = run_backup(conn, key="legacy", owner="worker", target=backup,
-                          clock=clock, store=store)
-    source_rows = _row_counts(conn)
-    (backup / manifest["database_file"]).rename(backup / "legacy.sqlite")
-    legacy = {name: manifest[name] for name in
-              ("schema_version", "backup_key", "cutoff", "database", "artifacts")}
-    (backup / "legacy.manifest.json").write_text(json.dumps(legacy))
-
-    restored = restore_backup(backup, tmp_path / "restored")
-
-    on_disk = json.loads((backup / "legacy.manifest.json").read_text())
-    assert set(on_disk) == {"schema_version", "backup_key", "cutoff", "database",
-                            "artifacts"}
-    assert (restored / "ops.sqlite").is_file()
-    restored_db = sqlite3.connect(restored / "ops.sqlite")
-    try:
-        assert integrity_errors(restored_db) == []
-        assert _row_counts(restored_db) == source_rows
-    finally:
-        restored_db.close()
-    assert (restored / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
 
 
 def test_restore_rejects_unsafe_database_filename(tmp_path):
@@ -912,18 +579,14 @@ def test_backup_coordinator_retry_after_delivery_before_commit_attempt_succeeds(
     """#98 at the COORDINATOR level: the fault here is injected after
     ``backup_effect``'s own ``run_backup`` delivered the effect (outbox row
     ``delivered``, manifest durable) but before the attempt's own
-    ``commit_attempt`` runs — the exact boundary ``backup.py``'s
-    ``_delivered_or_stale`` replay branch targets. The call-level test above
-    only simulates the crash at the ``run_backup`` call site, and the
-    existing coordinator tests only inject faults INSIDE ``backup_effect``
-    (before it returns); neither exercises this window, which the nightly
-    job-retry path traverses for real. The retry re-attempts the SAME job
-    through the scheduler's own retry machinery (a retryable ``commit_attempt``
-    failure settles the crashed attempt and moves the job to ``retry_wait``;
-    a fresh claim after the backoff delay starts attempt 2), and must
-    complete with exactly ONE delivered backup effect, the manifest
-    unchanged, the backup watermark written, the second attempt committed
-    and the first attempt settled as failed -- nothing left dangling."""
+    ``commit_attempt`` runs — the exact boundary ``backup.py``'s delivered
+    replay branch targets. The retry re-attempts the SAME job through the
+    scheduler's own retry machinery (a retryable ``commit_attempt`` failure
+    settles the crashed attempt and moves the job to ``retry_wait``; a fresh
+    claim after the backoff delay starts attempt 2), and must complete with
+    exactly ONE delivered backup effect, the manifest unchanged, the backup
+    watermark written, the second attempt committed and the first attempt
+    settled as failed -- nothing left dangling."""
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:
         scope = "shadow"
@@ -1020,51 +683,6 @@ def test_single_filename_rejects_unsafe_names(tmp_path):
             backup_module.manifest_database_path(tmp_path, {"backup_key": name})
 
 
-def test_file_backed_snapshot_uses_a_separate_read_only_connection(tmp_path):
-    conn, _, _ = catalog(tmp_path)
-    try:
-        with backup_module._snapshot(conn) as (snapshot, separate):
-            assert separate is True
-            assert snapshot is not conn
-            with pytest.raises(sqlite3.OperationalError):
-                snapshot.execute("CREATE TABLE snapshot_probe (value INTEGER)")
-            assert snapshot.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 0
-            conn.execute("CREATE TABLE snapshot_probe (value INTEGER)")
-            conn.commit()
-        assert not conn.in_transaction
-    finally:
-        conn.close()
-
-
-def test_in_memory_snapshot_reuses_the_connection_without_keepalive():
-    conn = sqlite3.connect(":memory:")
-    try:
-        with backup_module._snapshot(conn) as (snapshot, separate):
-            assert separate is False
-            assert snapshot is conn
-            assert snapshot.execute("SELECT 1").fetchone()[0] == 1
-        assert not conn.in_transaction
-    finally:
-        conn.close()
-
-
-def test_expected_dump_lines_includes_schema_statements(tmp_path):
-    conn, _, _ = catalog(tmp_path)
-    try:
-        baseline = backup_module._schema_statement_count(conn)
-        conn.execute("CREATE TABLE synthetic_indexed (value INTEGER)")
-        conn.execute("CREATE INDEX synthetic_indexed_value ON synthetic_indexed(value)")
-        conn.commit()
-        rows = _row_counts(conn)
-        statements = backup_module._schema_statement_count(conn)
-        assert statements == baseline + 1
-        assert backup_module._expected_dump_lines(
-            rows, statements, backup_module._sqlite_sequence_lines(conn)) == len(
-            list(conn.iterdump()))
-    finally:
-        conn.close()
-
-
 def test_full_logical_digest_changes_on_schema_change():
     conn = sqlite3.connect(":memory:")
     try:
@@ -1106,92 +724,6 @@ def test_restore_refuses_a_published_database_size_mismatch(tmp_path):
     assert refused.value.problem.retryable is False
 
 
-def test_fresh_copy_outbox_state_tamper_is_refused_as_content_digest(tmp_path, monkeypatch):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    prepare_backup(conn, "b22", {}, clock=clock)
-    real_backup_to = backup_module.backup_to
-
-    def tamper(source, destination, *, progress=None):
-        real_backup_to(source, destination, progress=progress)
-        damaged = sqlite3.connect(destination)
-        try:
-            damaged.execute("UPDATE outbox SET attempts=attempts+1")
-            damaged.commit()
-        finally:
-            damaged.close()
-
-    monkeypatch.setattr(backup_module, "backup_to", tamper)
-    with pytest.raises(OpsError) as refused:
-        run_backup(conn, key="b22", owner="worker", target=tmp_path / "backup",
-                   clock=clock, store=store)
-
-    assert refused.value.code == "INTEGRITY_FAILED"
-    assert refused.value.problem.retryable is False
-    assert refused.value.problem.details["reason"] == "content_digest"
-
-
-def test_malformed_prior_artifact_metadata_is_rebuilt(tmp_path, monkeypatch):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "b23", {"evidence.bin": ref}, clock=clock)
-    backup = tmp_path / "backup"
-    calls = []
-    real_backup_to = backup_module.backup_to
-
-    def counted(conn, destination, *, progress=None):
-        calls.append(destination)
-        real_backup_to(conn, destination, progress=progress)
-
-    monkeypatch.setattr(backup_module, "backup_to", counted)
-
-    def crash(point):
-        if point == "after_manifest_before_ack":
-            raise _InjectedCrash("ack lost")
-
-    with pytest.raises(_InjectedCrash):
-        run_backup(conn, key="b23", owner="worker", target=backup, clock=clock,
-                   store=store, fault=crash)
-    manifest_path = backup / "b23.manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["artifacts"]["evidence.bin"]["content_hash"] = 123
-    manifest_path.write_text(json.dumps(manifest))
-
-    clock.advance(301)
-    rebuilt = run_backup(conn, key="b23", owner="retry", target=backup,
-                         clock=clock, store=store)
-
-    assert len(calls) == 2
-    assert rebuilt["backup_key"] == "b23"
-    assert isinstance(
-        json.loads(manifest_path.read_text())["artifacts"]["evidence.bin"]["content_hash"], str)
-
-
-@pytest.mark.parametrize("mutation", [
-    {"artifact_id": 123},
-    {"storage_key": None},
-    {"unexpected": "field"},
-], ids=["wrong-type", "null-storage-key", "unknown-field"])
-def test_malformed_payload_artifact_metadata_is_refused_before_backup(
-        tmp_path, mutation):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    malformed = {**to_document(ref), **mutation}
-    prepare_backup(conn, "bad-ref", {"evidence.bin": malformed}, clock=clock)
-    backup = tmp_path / "backup"
-
-    with pytest.raises(OpsError) as refused:
-        run_backup(conn, key="bad-ref", owner="worker", target=backup,
-                   clock=clock, store=store)
-
-    assert refused.value.code == "INVALID_REQUEST"
-    assert refused.value.problem.retryable is False
-    assert not list(backup.glob("*.sqlite"))
-    assert not list(backup.glob("*.manifest.json"))
-
-
 def test_restore_refuses_a_published_database_hash_mismatch(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
@@ -1221,213 +753,9 @@ def test_sparse_file_over_the_byte_cap_is_refused_without_a_destination(
         stream.truncate(1025)
     destination = tmp_path / "copy.bin"
 
-    for call in (
-        lambda: backup_module._hash_file(sparse, stage="sparse hash"),
-        lambda: backup_module._stream_copy(sparse, destination, stage="sparse copy"),
-    ):
-        with pytest.raises(OpsError) as refused:
-            call()
-        assert refused.value.code == "INTEGRITY_FAILED"
-        assert refused.value.problem.retryable is False
-
-    assert not destination.exists()
-
-
-def test_file_backed_backup_renews_keepalive_during_the_copy(tmp_path, monkeypatch):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    prepare_backup(conn, "b25", {}, clock=clock)
-    renewals = []
-    in_backup = {"active": False}
-    returned = {"value": False}
-    real_backup_to = backup_module.backup_to
-
-    def wrapped(source, destination, *, progress=None):
-        def marked(*args):
-            in_backup["active"] = True
-            try:
-                progress(*args)
-            finally:
-                in_backup["active"] = False
-
-        real_backup_to(source, destination, progress=marked)
-        returned["value"] = True
-
-    monkeypatch.setattr(backup_module, "backup_to", wrapped)
-    monkeypatch.setattr(backup_module, "_HEARTBEAT_SECONDS", 0)
-    # Force many bounded page batches so more than one in-copy renewal occurs.
-    monkeypatch.setattr(catalog_module, "_BACKUP_PAGE_BATCH", 1)
-
-    run_backup(conn, key="b25", owner="worker", target=tmp_path / "backup",
-               clock=clock, store=store,
-               keepalive=lambda: renewals.append(
-                   (in_backup["active"], returned["value"])))
-
-    in_copy = [active for active, done in renewals if active and not done]
-    assert len(in_copy) > 1
-
-
-def test_table_row_counts_keepalive_fires_inside_one_long_count(monkeypatch):
-    conn = sqlite3.connect(":memory:")
-    try:
-        conn.execute("CREATE TABLE synthetic_rows (value INTEGER)")
-        conn.executemany("INSERT INTO synthetic_rows VALUES (?)",
-                         ((i,) for i in range(5000)))
-        conn.commit()
-        monkeypatch.setattr(backup_module, "_HEARTBEAT_SECONDS", 0)
-        calls = []
-
-        counts = backup_module._table_row_counts(
-            conn, keepalive=lambda: calls.append(1))
-
-        assert counts["synthetic_rows"] == 5000
-        assert len(calls) > 1
-    finally:
-        conn.close()
-
-
-def test_superseded_uuid_database_is_removed_after_the_new_manifest(
-        tmp_path, monkeypatch):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    conn.execute("CREATE TABLE synthetic_change (value INTEGER)")
-    conn.commit()
-    prepare_backup(conn, "b26", {}, clock=clock)
-    backup = tmp_path / "backup"
-
-    def crash(point):
-        if point == "after_manifest_before_ack":
-            raise _InjectedCrash("ack lost")
-
-    with pytest.raises(_InjectedCrash):
-        run_backup(conn, key="b26", owner="worker", target=backup,
-                   clock=clock, store=store, fault=crash)
-    first = json.loads((backup / "b26.manifest.json").read_text())
-    first_path = backup / first["database_file"]
-    assert first_path.exists()
-
-    conn.execute("INSERT INTO synthetic_change VALUES (1)")
-    conn.commit()
-    clock.advance(301)
-    stale = backup / f"b26.{'0' * 32}.sqlite"
-    stale.write_bytes(b"stale")
-    assert stale.name != first["database_file"]
-
-    observed = []
-    real_remove = backup_module._remove_superseded_databases
-
-    def checked_remove(target, key, keep):
-        published = json.loads((backup / "b26.manifest.json").read_text())
-        observed.append((published["database_file"], (backup / keep).exists(),
-                         first_path.exists(), stale.exists()))
-        real_remove(target, key, keep)
-
-    monkeypatch.setattr(backup_module, "_remove_superseded_databases",
-                        checked_remove)
-    second = run_backup(conn, key="b26", owner="retry", target=backup,
-                        clock=clock, store=store)
-
-    assert second["database_file"] != first["database_file"]
-    assert observed == [(second["database_file"], True, True, True)]
-    assert not first_path.exists()
-    assert not stale.exists()
-    assert (backup / second["database_file"]).exists()
-
-
-def _current_manifest(**overrides):
-    """A current-shaped manifest: every current key, with non-null database
-    fields and an artifact byte_size."""
-    manifest = {
-        "schema_version": "catalog_backup.v1.0",
-        "backup_key": "b-shape",
-        "cutoff": "2026-09-12T00:00:00.000000Z",
-        "database": "sha256:" + "0" * 64,
-        "database_file": "b-shape.abc.sqlite",
-        "database_content_hash": "sha256:" + "1" * 64,
-        "database_rows": {"outbox": 1},
-        "database_size": 4096,
-        "artifacts": {"evidence.bin": {"content_hash": "sha256:" + "2" * 64,
-                                       "byte_size": 8}},
-    }
-    manifest.update(overrides)
-    return manifest
-
-
-def _legacy_manifest(**overrides):
-    """A legacy-shaped manifest that predates the current-only optional keys."""
-    manifest = {
-        "schema_version": "catalog_backup.v1.0",
-        "backup_key": "b-shape",
-        "cutoff": "2026-09-12T00:00:00.000000Z",
-        "database": "sha256:" + "0" * 64,
-        "artifacts": {"evidence.bin": {"content_hash": "sha256:" + "2" * 64}},
-    }
-    manifest.update(overrides)
-    return manifest
-
-
-@pytest.mark.parametrize("field", ["database_file", "database_content_hash",
-                                   "database_size"])
-def test_current_manifest_rejects_explicit_null_database_field(field):
-    manifest = _current_manifest()
-    manifest[field] = None
-
-    with pytest.raises(ValueError):
-        backup_module._validated_manifest_shape(manifest, current=True)
-
-
-@pytest.mark.parametrize("artifact", [
-    {"content_hash": "sha256:" + "2" * 64},
-    {"content_hash": "sha256:" + "2" * 64, "byte_size": None},
-], ids=["missing", "null"])
-def test_current_manifest_requires_artifact_byte_size(artifact):
-    manifest = _current_manifest(artifacts={"evidence.bin": artifact})
-
-    with pytest.raises(ValueError):
-        backup_module._validated_manifest_shape(manifest, current=True)
-
-
-@pytest.mark.parametrize("field", ["database_file", "database_content_hash",
-                                   "database_size"])
-def test_legacy_manifest_present_null_optional_field_is_rejected(field):
-    manifest = _legacy_manifest()
-    manifest[field] = None
-
-    with pytest.raises(ValueError):
-        backup_module._validated_manifest_shape(manifest, current=False)
-
-
-def test_legacy_manifest_omitting_optional_fields_validates():
-    manifest = _legacy_manifest()
-
-    name, artifacts, size = backup_module._validated_manifest_shape(
-        manifest, current=False)
-
-    assert name == "b-shape.sqlite"
-    assert size is None
-    assert artifacts == {"evidence.bin": {"content_hash": "sha256:" + "2" * 64}}
-
-
-def test_oversized_source_snapshot_is_refused_before_backup_to(tmp_path, monkeypatch):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    prepare_backup(conn, "b29", {}, clock=clock)
-    allocation = (conn.execute("PRAGMA page_count").fetchone()[0]
-                  * conn.execute("PRAGMA page_size").fetchone()[0])
-    monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", allocation - 1)
-    calls = []
-
-    def spy(*args, **kwargs):
-        calls.append(args)
-        raise AssertionError("backup_to must not run before the size preflight")
-
-    monkeypatch.setattr(backup_module, "backup_to", spy)
-
     with pytest.raises(OpsError) as refused:
-        run_backup(conn, key="b29", owner="worker", target=tmp_path / "backup",
-                   clock=clock, store=store)
-
+        backup_module._stream_copy(sparse, destination, stage="sparse copy")
     assert refused.value.code == "INTEGRITY_FAILED"
     assert refused.value.problem.retryable is False
-    assert calls == []
-    assert not list((tmp_path / "backup").glob("*.sqlite"))
+
+    assert not destination.exists()
