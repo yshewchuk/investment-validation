@@ -418,8 +418,8 @@ that binding through `FrozenInference`; no second prediction engine is added.
 
 | Forward fold condition | Outcome |
 |---|---|
-| Exact model/month/panel match, verified metadata and pool | Return immutable selected fold and provenance |
-| Missing, duplicate, future, wrong-panel or incompatible fold | `MODEL_NOT_READY`; no older-model or training fallback |
+| Exact model/month match (and, once batch wiring compares the pinned panel hash, panel match), verified metadata and pool | Return immutable selected fold and provenance |
+| Missing, duplicate, future or incompatible fold (and, once batch wiring compares the pinned panel hash, wrong-panel fold) | `MODEL_NOT_READY`; no older-model or training fallback |
 | Corrupt, oversized, escaped-path or header/descriptor mismatch | `MODEL_NOT_READY` before inference; redact filesystem details |
 | Old cache lacks held-out pool or declared interval policy | Refuse; never rebuild the pool during scoring |
 
