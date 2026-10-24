@@ -253,8 +253,10 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
    pinned snapshot; `retrieved_at` is provenance, not an observation ceiling.
    The read's scan limit is exactly the pinned per-ticker membership bound,
    with no fixed row cap: a history of any size within that bound reads in
-   full, and `RESULT_LIMIT_EXCEEDED` is only possible above the bound, which
-   `scan` refuses before any fragment opens. The reader exposes only bars dated
+   full, and a requested limit above the bound is refused with
+   `QUERY_NOT_BOUNDED` before any fragment opens, so the read cannot
+   exceed it (`RESULT_LIMIT_EXCEEDED` applies only to streamed rows past
+   an accepted limit). The reader exposes only bars dated
   on or before the decision session. This permits a session close fetched
   after midnight to be used for that session, while a later-dated bar remains
   unavailable. A vendor may revise historical values in a later retrieval,
