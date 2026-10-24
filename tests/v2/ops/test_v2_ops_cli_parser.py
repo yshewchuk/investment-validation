@@ -104,6 +104,9 @@ _CASES = [
     ("headroom_explicit", ["--root", "R1", "headroom", "--plan", "p",
                            "--max-rss-gb", "1.5", "--history", "3"],
      {"command": "headroom", "history": 3, "max_rss_gb": 1.5, "plan": "p", "root": "R1"}),
+    ("headroom_max_rss_gb_fraction", ["headroom", "--plan", "p", "--max-rss-gb", "0.25"],
+     {"command": "headroom", "history": 5, "max_rss_gb": 0.25, "plan": "p",
+      "root": "data/operations"}),
     ("rescore", ["rescore", "--request", "r.json", "--native-inputs", "n.json"],
      {"command": "rescore", "native_inputs": Path("n.json"), "request": Path("r.json"),
       "root": "data/operations"}),
@@ -301,6 +304,10 @@ _ERROR_CASES = [
     ("snapshot_promote_missing_expected_generation",
      ["snapshot", "promote", "--candidate-scope", "c", "--target-scope", "t",
       "--comparison-receipt", "r"]),
+    ("headroom_max_rss_gb_zero", ["headroom", "--plan", "p", "--max-rss-gb", "0"]),
+    ("headroom_max_rss_gb_negative", ["headroom", "--plan", "p", "--max-rss-gb", "-1"]),
+    ("headroom_max_rss_gb_nan", ["headroom", "--plan", "p", "--max-rss-gb", "nan"]),
+    ("headroom_max_rss_gb_inf", ["headroom", "--plan", "p", "--max-rss-gb", "inf"]),
 ]
 
 

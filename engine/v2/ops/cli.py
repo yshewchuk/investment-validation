@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import time
 from pathlib import Path
@@ -131,12 +132,23 @@ def _add_computed_moves_commands(commands):
                          help="report target/cache coverage without writing")
 
 
+def _positive_gb(value):
+    """argparse type: a finite ``--max-rss-gb`` greater than zero."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from None
+    if not math.isfinite(number) or number <= 0.0:
+        raise argparse.ArgumentTypeError("--max-rss-gb must be a finite value greater than 0")
+    return number
+
+
 def _add_headroom_command(commands):
     """The read-only ``ops headroom`` subparser (see ``engine.v2.ops.headroom``):
     nightly limit usage against fixed repo limits, exit code 0/1/2 = OK/WARN/FAIL."""
     headroom = commands.add_parser("headroom")
     headroom.add_argument("--plan", required=True, help="the plan_ref artifact id")
-    headroom.add_argument("--max-rss-gb", type=float, default=None,
+    headroom.add_argument("--max-rss-gb", type=_positive_gb, default=None,
                          help="also check the largest recent attempt memory peak "
                               "against this GiB cap")
     headroom.add_argument("--history", type=int, default=5,

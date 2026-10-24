@@ -3,16 +3,18 @@
 One ``headroom_report`` pass answers "how close is tonight's plan to a hard
 limit" from catalog metadata only -- no object payloads beyond the plan and
 its bound legacy manifest, no data-row reads, so it fits the nightly window.
-Statuses: ``OK`` at or below 80%, ``WARN`` above 80%, ``FAIL`` above 95%;
-the document's overall status is the worst limit's and the CLI exits with
-0/1/2 to match. Every limit the check could not measure carries an
-explanatory ``detail`` note or appears in ``not_covered``.
+Statuses: ``OK`` at or below 80%, ``WARN`` above 80%, ``FAIL`` above 95%; a
+limit the check could not measure is ``UNMEASURED`` rather than ``OK`` and
+drives exit 1 so a skipped check is never mistaken for a clean one. The
+document's overall status is the worst limit's and the CLI exits 0/1/2 to
+match (``UNMEASURED`` ranks with ``WARN``). Anything else the check does not
+measure appears in ``not_covered``.
 
-The scratch check mirrors ``nightly.plan_scratch_problems`` exactly -- the
-same ``store_barrier.domains_of`` read-domain test, the same
-``_legacy_resource`` profile routing and the same manifest ``file_refs``
-byte total -- but reports the measured usage per profile instead of only
-refusing an oversize plan.
+The scratch check reuses the same helpers as ``nightly.plan_scratch_problems``
+-- the ``store_barrier.domains_of`` read-domain test, the ``_legacy_resource``
+profile routing and the manifest ``file_refs`` byte total -- but reports the
+measured usage per profile instead of only refusing an oversize plan, so it is
+not a mirror of the refusal logic.
 """
 from __future__ import annotations
 
@@ -22,9 +24,10 @@ import time
 
 from engine.v2.data.price_history_query import _RESULT_CAP
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactStore, parse_timestamp
+from engine.v2.foundation import ArtifactError, ArtifactStore, parse_timestamp
 from engine.v2.ops import nightly
 from engine.v2.ops.checkpoints import artifact
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from engine.v2.ops.stages import registry
 from engine.v2.ops.store_barrier import domains_of
@@ -32,7 +35,10 @@ from engine.v2.ops.store_barrier import domains_of
 #: The three-tier cut points; 80.0 is OK, 95.0 is WARN (strictly above fails).
 _WARN_PCT = 80.0
 _FAIL_PCT = 95.0
-_EXIT = {"OK": 0, "WARN": 1, "FAIL": 2}
+_EXIT = {"OK": 0, "UNMEASURED": 1, "WARN": 1, "FAIL": 2}
+#: The worst-status order for the document; UNMEASURED counts as exit 1
+#: (like WARN) but ranks below a measured WARN so a real signal shows.
+_RANK = {"OK": 0, "UNMEASURED": 1, "WARN": 2, "FAIL": 3}
 
 #: How many of the most recent finished attempts the memory limits scan.
 _RECENT_ATTEMPTS = 500
@@ -47,6 +53,9 @@ _NOT_COVERED = (
     "serving_fold MAX_FOLD_BYTES",
     "d14_inputs.MAX_CALENDAR_BYTES",
     "serving.projections._LOOKUP_RESULT_CAP",
+    "models.inventory MAX_ARTIFACT_BYTES/MAX_REGISTRY_BYTES",
+    "iv_crush_inputs.MAX_TARGET_OBJECT_BYTES",
+    "event_history.MAX_OUTCOME_OBJECT_BYTES",
 )
 
 
@@ -79,7 +88,7 @@ def project_days(points, limit: int):
     if slope <= 0:
         return None
     current = max(points, key=lambda point: point[0])[1]
-    return (limit - current) / slope
+    return max(0.0, (limit - current) / slope)
 
 
 def _entry(name, usage, limit, unit, detail, projected_days=None):
@@ -89,14 +98,46 @@ def _entry(name, usage, limit, unit, detail, projected_days=None):
             "projected_days_to_limit": projected_days, "detail": detail}
 
 
+def _unmeasured(name, limit, unit, detail):
+    """A limit the pass could not measure: no usage, no pct, never OK.
+
+    It ranks with ``WARN`` (exit 1) so a skipped check is not read as clean;
+    the ``detail`` names why nothing was measured.
+    """
+    return {"name": name, "usage": 0, "limit": int(limit), "unit": unit,
+            "pct": None, "status": "UNMEASURED",
+            "projected_days_to_limit": None, "detail": detail}
+
+
 def _scratch_entry(profile, needed, detail):
     return _entry(f"scratch_bytes:{profile.name}", needed, profile.scratch_bytes,
                   "bytes", detail)
 
 
+def _json_object(conn, store, artifact_id, label):
+    """Load a registered artifact as a JSON object, or refuse ``INVALID_REQUEST``.
+
+    A bad ``--plan`` id (unregistered), an unreadable/missing object
+    (``ArtifactError``) or a payload that is not a JSON object is an operator
+    input error on this read-only command, not an integrity failure, so every
+    path becomes one ``INVALID_REQUEST`` refusal rather than a traceback.
+    """
+    try:
+        raw = store.read_verified(artifact(conn, store, artifact_id))
+    except (ArtifactError, OpsError):
+        raise fail("INVALID_REQUEST", f"the {label} artifact is not readable") from None
+    try:
+        document = json.loads(raw)
+    except ValueError:
+        raise fail("INVALID_REQUEST", f"the {label} artifact is not valid JSON") from None
+    if not isinstance(document, dict):
+        raise fail("INVALID_REQUEST", f"the {label} must be a JSON object")
+    return document
+
+
 def _manifest_total(conn, store, manifest_id, totals):
     if manifest_id not in totals:
-        manifest = json.loads(store.read_verified(artifact(conn, store, manifest_id)))
+        manifest = _json_object(conn, store, manifest_id, "manifest")
         totals[manifest_id] = sum(int(item["byte_size"])
                                   for item in manifest.get("file_refs", []))
     return totals[manifest_id]
@@ -113,8 +154,8 @@ def _scratch_entries(conn, store, plan):
     domain and are skipped, exactly as ``domains_of`` decides at claim time.
     """
     if plan.get("kind") != "nightly":
-        return [_entry("scratch_bytes", 0, 0, "bytes",
-                       "not a nightly plan; no scratch budget to measure")]
+        return [_unmeasured("scratch_bytes", 0, "bytes",
+                            "not a nightly plan; no scratch budget to measure")]
     snapshot = (plan.get("snapshot_inputs") or {}
                 if plan.get("input_mode") == "snapshot" else None)
     refresh_mode = plan.get("refresh_mode", "legacy")
@@ -141,9 +182,9 @@ def _scratch_entries(conn, store, plan):
         seen.add(profile.name)
         entries.append(_scratch_entry(profile, needed, detail))
     if not entries:
-        entries = [_entry("scratch_bytes", 0, 0, "bytes",
-                          "plan carries neither a legacy input manifest nor a "
-                          "snapshot scratch estimate; nothing to measure")]
+        entries = [_unmeasured("scratch_bytes", 0, "bytes",
+                               "plan carries neither a legacy input manifest nor a "
+                               "snapshot scratch estimate; nothing to measure")]
     return entries
 
 
@@ -190,13 +231,13 @@ def _history_points(conn, repository, snapshot_id, history):
 def _price_history_entry(conn, store, plan, history):
     snapshot_id = (plan.get("snapshot_inputs") or {}).get("snapshot_id")
     if not snapshot_id:
-        return [_entry("price_history_result_rows", 0, _RESULT_CAP, "rows",
-                       "plan pins no snapshot_inputs; result-cap check skipped")]
+        return [_unmeasured("price_history_result_rows", _RESULT_CAP, "rows",
+                            "plan pins no snapshot_inputs; result-cap check skipped")]
     repository = Repository(conn, store, pin_snapshots=True)
     snapshot_ref = repository.resolve(snapshot_id)
     if "price_history" not in snapshot_ref.table_versions:
-        return [_entry("price_history_result_rows", 0, _RESULT_CAP, "rows",
-                       "pinned snapshot carries no price_history table; check skipped")]
+        return [_unmeasured("price_history_result_rows", _RESULT_CAP, "rows",
+                            "pinned snapshot carries no price_history table; check skipped")]
     usage, ticker = _max_partition_rows(
         repository.fragment_records(snapshot_ref, "price_history"))
     points = _history_points(conn, repository, snapshot_id, history)
@@ -251,12 +292,13 @@ def headroom_report(conn, root, plan, *, max_rss_gb=None, history=5):
     limits = [*_scratch_entries(conn, store, plan),
               *_price_history_entry(conn, store, plan, history),
               *_memory_entries(conn, max_rss_gb)]
-    status = max((item["status"] for item in limits), key=_EXIT.__getitem__, default="OK")
+    status = max((item["status"] for item in limits), key=_RANK.__getitem__, default="OK")
     document = {"schema": "headroom.v1", "status": status, "exit_code": _EXIT[status],
                 "limits": limits, "not_covered": list(_NOT_COVERED)}
     for item in limits:
+        pct = "unmeasured" if item["pct"] is None else f"{item['pct']}%"
         line = (f"[headroom] {item['status']} {item['name']}: {item['usage']}/"
-                f"{item['limit']} {item['unit']} ({item['pct']}%)")
+                f"{item['limit']} {item['unit']} ({pct})")
         if item["projected_days_to_limit"] is not None:
             line += f" [days-to-limit {item['projected_days_to_limit']:.1f}]"
         print(line, file=sys.stderr)
@@ -267,6 +309,5 @@ def headroom_report(conn, root, plan, *, max_rss_gb=None, history=5):
 def headroom_command(args, root, conn, clock):
     """``ops headroom --plan <plan_ref>``: load the plan artifact, report."""
     store = ArtifactStore(root)
-    ref = artifact(conn, store, args.plan)
-    plan = json.loads(store.read_verified(ref))
+    plan = _json_object(conn, store, args.plan, "plan")
     return headroom_report(conn, root, plan, max_rss_gb=args.max_rss_gb, history=args.history)

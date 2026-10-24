@@ -696,6 +696,7 @@ mutate = [
     "engine/v2/ops/__main__.py",
     "engine/v2/ops/diagnostics.py",
     "engine/v2/ops/health.py",
+    "engine/v2/ops/headroom.py",
     "engine/v2/ops/experiments.py",
 ]
 tests = [
