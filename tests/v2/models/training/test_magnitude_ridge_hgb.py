@@ -15,7 +15,7 @@ from engine.v2.models import no_fit
 from engine.v2.models.magnitude_ridge_hgb_recipe import ridge_hgb_recipe
 from engine.v2.models.training.magnitude import fit_magnitude_predictions
 from engine.v2.models.training.magnitude_ridge_hgb import fit_ridge_hgb_predictions
-from engine.v2.ops.native_registration import _fitted_magnitude_recipe
+from engine.v2.ops.native_registration import magnitude_fitted_execution_document
 
 KINDS = ("history_ridge", "history_hgb")
 
@@ -65,7 +65,7 @@ def test_order_and_policy_refusal_precedes_numeric_conversion(kind):
     with pytest.raises(ValueError, match="recipe"):
         _fit(recipe, Poison(), Poison(), Poison())
     with pytest.raises(ValueError, match="recipe"):
-        fit_ridge_hgb_predictions(_fitted_magnitude_recipe(kind), Poison(), Poison(), Poison(), columns=[])
+        fit_ridge_hgb_predictions(magnitude_fitted_execution_document("2026-01-01", kind)["fit_recipe"], Poison(), Poison(), Poison(), columns=[])
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -79,6 +79,28 @@ def test_arbitrary_width_original_units_and_recipe_bound_output(kind, width):
     expected = [2, 5, 8, 152] if kind == "history_ridge" else [5] * 4
     assert result["predictions"] == pytest.approx(expected, abs=1e-10)
     assert all(type(value) is float for value in result["predictions"])
+
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("width", [3, 28, 42, 43])
+def test_first_and_last_selected_columns_both_drive_predictions(kind, width):
+    # Four balanced corners: two independent signals, including a column beyond H.
+    corners = np.array([[0, 0], [1, 0], [0, 1], [1, 1]])
+    prediction = np.full((4, width), 7.0)
+    prediction[:, [0, -1]] = corners
+    train = np.repeat(prediction, 20, axis=0)
+    means = np.array([2., 4., 8., 10.])
+    result = _fit(_recipe(kind, width), train, np.repeat(means, 20), prediction)
+    # Independent Ridge shrinkage and four HGB leaves' residual contraction.
+    shrinkage = 80 / 81 if kind == "history_ridge" else 1 - 0.9**100
+    assert result["predictions"] == pytest.approx(6 + (means - 6) * shrinkage, abs=1e-6)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_genuine_zero_labels_remain_valid(kind):
+    result = _fit(_recipe(kind, 28), np.zeros((3, 28)), [0, 0, 0], np.ones((2, 28)))
+    assert result["predictions"] == [0., 0.]
 
 
 @pytest.mark.parametrize("alpha", [0.1, 1, 10])
@@ -97,7 +119,7 @@ def test_hgb_fixed_iteration_two_leaf_oracle(leaves):
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_eleven_column_numeric_parity_with_unchanged_v1(kind):
-    old = _fitted_magnitude_recipe(kind)
+    old = magnitude_fitted_execution_document("2026-01-01", kind)["fit_recipe"]
     recipe = ridge_hgb_recipe(model=kind, columns=old["features"],
         feature_dictionary_hash="sha256:" + "a" * 64,
         **({"alpha": 1} if kind == "history_ridge" else {"max_leaf_nodes": 7}))

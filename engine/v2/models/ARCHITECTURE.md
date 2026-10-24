@@ -80,21 +80,28 @@ The separate `magnitude_ridge_hgb_recipe` API constructs/validates source-free
 `magnitude_ridge_hgb_recipe.v1` metadata for the bounded stage-2 Ridge/HGB grid.
 It binds explicit ordered unique columns, a canonical dictionary hash, fixed
 preprocessing/estimator policy and derived width; no dictionary or source is read.
-The `history_ridge`/`history_hgb` family names reuse the private estimator builder,
-not the fixed eleven-column v1 execution envelope. Dictionary membership and
+The `history_ridge`/`history_hgb` family names reuse the same-package private
+estimator constructor unchanged; each numeric adapter owns its guards and fitting,
+not the constructor. This is not the fixed eleven-column v1 execution envelope. Dictionary membership and
 truthful matrix order remain caller-owned; a hash alone grants no admission.
 `training.magnitude_ridge_hgb.fit_ridge_hgb_predictions(..., columns=...)`
 checks both no-fit guards before inspecting metadata or numeric inputs, validates
 the closed recipe and exact declared column order, then copies numeric matrices.
-A fresh one-thread fit learns only training rows: Ridge uses retained median-imputed
-columns, full missing flags and scaling; HGB freezes training-all-null columns to
+A fresh one-thread fit learns only training rows: Ridge keeps every selected column
+through median imputation, full missing flags and scaling; HGB freezes training-all-null columns to
 zero at training/prediction while routing partial nulls natively. It returns
 `magnitude_ridge_hgb_fit.v1` with the validated recipe hash and detached finite
-nonnegative predictions. Invalid policy/order/shape, infinite features,
-nonfinite/negative labels or nonfinite predictions refuse with `ValueError`.
-There is no cache, retry, partial result, write or transaction. This is an unwired
-numeric boundary: no source/holdout/fold admission, CLI, selection or registration;
-existing eleven-column recipes, fitters and source closures remain unchanged.
+nonnegative predictions. This is an unwired numeric boundary: no source/holdout/fold
+admission, CLI, selection or registration; existing eleven-column recipes, fitters
+and source closures remain unchanged.
+
+| Ridge/HGB condition | Outcome |
+|---|---|
+| Either no-fit guard active | Its `RuntimeFitForbidden` precedes recipe, column or array inspection |
+| Invalid closed policy/order, matrix shape, infinite features or nonfinite/negative labels | `ValueError` before fit; no partial result |
+| Wrong prediction shape or nonfinite predictions | `ValueError` after fit, before projection; no partial result |
+| Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
+| Cache, retry, transaction or partial-write concerns | No cache, retry, persistence or publication |
 
 An automated nightly append cycle for the pool/residual/cutoff artifacts:
 release assembly is §2.1, staging §2.2, and the three-phase tick sidecar is §2.2.1; see #192.

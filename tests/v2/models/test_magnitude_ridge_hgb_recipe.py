@@ -88,7 +88,9 @@ def test_bad_dictionary_hash_refuses(digest):
     ("history_hgb", {"max_leaf_nodes": 8}),
 ])
 def test_bad_or_wrong_family_parameters_refuse(model, knobs):
-    with pytest.raises(ValueError):
+    message = ("Ridge requires" if model == "history_ridge" else
+               "HGB requires" if model == "history_hgb" else "unknown variable-width magnitude model")
+    with pytest.raises(ValueError, match=message):
         ridge_hgb_recipe(model=model, columns=["a"], feature_dictionary_hash=HASH, **knobs)
 
 
@@ -122,6 +124,36 @@ def test_any_fixed_policy_change_or_unknown_field_refuses(model, knobs):
 @pytest.mark.parametrize("recipe", [None, [], "recipe", 1, {"estimator": {"params": []}}])
 def test_malformed_envelopes_refuse(recipe):
     with pytest.raises(ValueError, match="closed"):
+        validate_ridge_hgb_recipe(recipe)
+
+
+
+def test_non_json_object_cannot_masquerade_as_valid_canonical_policy():
+    class LooksLikeNone:
+        def __str__(self):
+            return "none"
+
+    recipe = ridge_hgb_recipe(model="history_ridge", columns=["a"], feature_dictionary_hash=HASH, alpha=1)
+    recipe["target_transform"] = LooksLikeNone()
+    with pytest.raises(ValueError, match="invalid closed variable-width magnitude recipe"):
+        validate_ridge_hgb_recipe(recipe)
+
+
+@pytest.mark.parametrize("params", [[], None, "parameters", 1])
+def test_malformed_parameters_inside_otherwise_complete_envelope_refuse(params):
+    recipe = ridge_hgb_recipe(model="history_ridge", columns=["a"], feature_dictionary_hash=HASH, alpha=1)
+    recipe["estimator"]["params"] = params
+    with pytest.raises(ValueError, match="invalid closed variable-width magnitude recipe"):
+        validate_ridge_hgb_recipe(recipe)
+
+
+def test_excessive_recipe_nesting_is_a_closed_refusal():
+    nested = []
+    for _ in range(2000):
+        nested = [nested]
+    recipe = ridge_hgb_recipe(model="history_ridge", columns=["a"], feature_dictionary_hash=HASH, alpha=1)
+    recipe["extra"] = nested
+    with pytest.raises(ValueError, match="invalid closed variable-width magnitude recipe"):
         validate_ridge_hgb_recipe(recipe)
 
 
