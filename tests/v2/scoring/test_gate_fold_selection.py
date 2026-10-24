@@ -602,6 +602,32 @@ def test_resolve_release_binding_indexes_size_folds(tmp_path):
         assert descriptor.estimator.name == "estimator"
 
 
+def test_resolve_release_binding_then_select_gate_forecast_source(tmp_path):
+    cache = _cache()
+    parent = _stage_and_promote(tmp_path, cache)
+    descriptor = _descriptor(cache, parent)
+    raw = fold_bytes(cache)
+    path = tmp_path / "deployment" / descriptor.estimator.path
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(raw)
+    catalog = _catalog(parent, _row([descriptor], sizes=[len(raw)]))
+    (tmp_path / "phase5_release.json").write_text(json.dumps(catalog, sort_keys=True))
+    binding = resolve_release_binding(tmp_path)
+    source = select_gate_forecast_source(binding, "2026-10-05", "2026-10-06")
+    ref = load_serving_fold(binding.frozen_inference,
+                            binding.size_folds.descriptors["2026-10-01"],
+                            verified_parent_manifest=binding.size_folds.parent,
+                            catalog_hash=binding.size_folds.catalog_hash)
+    assert source.pool_pred == (0.1, 0.2)
+    assert source.pool_res == (-0.01, 0.02)
+    assert source.interval_floor == 0.0
+    assert source.inference is binding.frozen_inference
+    assert source.binding_id == ref.release.bindings[0].binding_id
+    with pytest.raises(ModelNotReady) as caught:
+        select_gate_forecast_source(binding, "2026-12-05", "2026-12-06")
+    _assert_model_not_ready(caught, "no staged size fold for 2026-12-01")
+
+
 def test_resolve_release_binding_refuses_bad_catalog_hash(tmp_path):
     cache = _cache()
     parent = _stage_and_promote(tmp_path, cache)
