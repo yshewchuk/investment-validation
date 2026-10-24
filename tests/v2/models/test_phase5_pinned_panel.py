@@ -20,12 +20,12 @@ import pytest
 from engine.v2.models import release_layout as layout
 from engine.v2.foundation import CONTENT_HASH_PREFIX, from_document, to_document
 from engine.v2.models import deployment
+from engine.v2.models.pinned_panel import COPY_PREFIX, PANEL_TABLE, PinnedPanelContext, verify_panel_copy
 from engine.v2.models.serving_folds import ServingFoldDescriptor
 from tests.data_scan_support import (catalog_and_store, commit_tables, contract_for,
                                      contract_ref_for, fake_hash, hand_built_record, to_bytes)
 from tests.v2.models.test_phase5_serving_folds import cache, _bytes, _inputs, _name, _policy  # noqa: F401
 from tools import phase5_prepare_release as prep
-from tools.phase5_pinned_panel import COPY_PREFIX, PANEL_TABLE, PinnedPanelContext, verify_panel_copy
 
 IDENTITY_KEYS = {"panel_copy_mode", "panel_copy_snapshot_id", "panel_copy_dataset_version_id",
                  "panel_copy_object_id", "panel_copy_sha256"}

@@ -29,6 +29,15 @@ The native experiment reporter validates the recipe before calling this API;
 registration does not import training. Old training recipes are unchanged.
 The fitter restores HGB's integral JSON `max_features` fraction to float for sklearn.
 
+`magnitude_elasticnet.fit_elasticnet_predictions(recipe, train_features, train_labels,
+prediction_features, *, columns)` is an add-only research adapter for explicit
+selected-column matrices. It returns predictions, recipe ID, the full coefficient
+vector, selected source columns and convergence evidence after one guarded training-only fit. `columns` must match
+the recipe order. The caller owns causal membership, source identity, fit caps and
+inner-only choice of subset/alpha/l1_ratio; this API cannot certify those from arrays.
+No runtime caller, grid activation, validation-target selection, cache or persistence
+is added. Nonconvergence raises `ValueError` with no retry or partial result.
+
 The names other packages may import. Everything else is internal regardless of
 underscore convention, and an import of a name absent from this list fails
 `checks/package_readmes.py`.
@@ -63,7 +72,7 @@ P5-3 (current dataset/training recipes):
 - `fold_receipts` / `receipt_issues` — the per-fold training-membership and
   label-availability receipts and the check that refuses future members,
   future labels and upstream in-sample leakage.
-- `run_training_job` — the only entry that fits a recipe; resumable per fold,
+- `run_training_job` — fits the current release recipes; resumable per fold,
   guarded by the shared no-fit switch.
 
 `build_d14_dataset` builds the two monthly D14 datasets from explicit catalog,
@@ -105,7 +114,7 @@ are not saved, so they cannot be re-bucketed). The real-data dataset
 builders for these and for the calibration recipes live in
 `tools/phase5_datasets.py` (legacy readers stay outside `engine/v2`).
 
-<!-- public-interface: build_d14_dataset, calculate_frame, input_rows, input_frame, decision_rows, daily_features, validate_role, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool -->
+<!-- public-interface: fit_elasticnet_predictions, build_d14_dataset, calculate_frame, input_rows, input_frame, decision_rows, daily_features, validate_role, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool -->
 
 ## Consumers
 

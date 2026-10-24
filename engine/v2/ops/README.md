@@ -122,9 +122,16 @@ candidate row.
 `nightly_calendar_inputs.scan_decision_calendar`,
 `nightly_calendar_inputs.scan_candidate_expiries`, and
 `nightly_calendar_inputs.scan_calendar_row_inputs` (both of the latter accept
-an optional `chain_rows`) are internal staging APIs
+an optional `chain_rows`; calendar-row scanning also accepts `spot_reader`) are internal staging APIs
 for pinned raw-row calendar inputs. They compose decision-calendar sessions,
-strategy-eligible expiries and calendar-row inputs; `nightly_raw_row_producer` calls `scan_decision_calendar` and `scan_calendar_row_inputs` (which calls `scan_candidate_expiries`). See the component architecture contract.
+strategy-eligible expiries and calendar-row inputs; `nightly_raw_row_producer` calls `scan_decision_calendar`, `make_spot_reader`, and `scan_calendar_row_inputs` (which calls `scan_candidate_expiries`). See the component architecture contract.
+
+`nightly_calendar_inputs.make_spot_reader(repository, snapshot)` creates a frozen
+`SpotReader` bound to those exact objects; at most 128 `(ticker, session)` spot rows or
+missing values are retained. Full histories and exceptions are never cached.
+Direct calls validate a nonempty string ticker and naive midnight session before cache access.
+After existing key/date/chain validation, the calendar helper refuses a wrong reader
+type or repository/snapshot binding, and wrong row type/session, as `INVALID_REQUEST`.
 
 `nightly_raw_row_producer.build_native_score_batch_events` is an internal
 producer that composes native raw-row event and refusal documents from pinned
@@ -160,6 +167,8 @@ either required table. Their current consumer is
 <!-- public-interface: Migration, migrate, magnitude_fitted_execution_document, validate_magnitude_fitted_execution, registered_artifact, register_artifact, verify_eod_availability, transaction, sql_text_budget, decode_bounded_text, OpsError, fail, ExperimentSpec, resolve_experiment_plan, register_hypothesis_in_transaction, verified_registration_bytes, magnitude_execution_document, validate_magnitude_execution, magnitude_history_request, magnitude_history_execution_document, validate_magnitude_history_execution, environment_identity, source_closure, worker_source_manifest, TrainFoldRule, fit_walk_forward_fold, connect, experiment_spec_from_document, READ_ONCE, reclaim, remove_tree, enforce_retention, THREAD_VARIABLES, NativeGateParameters, NATIVE_GATE_WORKER, NATIVE_GATE_ENTRYPOINT, NATIVE_GATE_RUNNERS, main, submit_graph, validate_receipt_read_policy, NamespacePolicy, registry, require_current, OWNER, MIGRATIONS, MAX_JOB_FAILURE_BYTES, get_job, MAX_NATIVE_EVIDENCE_BYTES, read_native_evidence, native_evidence_json -->
 
 ## Consumers
+
+`experiments/magnitude_search_request.py` consumes `errors.fail` for typed source-free declaration refusals.
 
 `experiments/runup_exit_report.py` consumes `fingerprints.source_closure` /
 `environment_identity` and `errors.OpsError` / `fail` for exploratory identity

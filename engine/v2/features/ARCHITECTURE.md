@@ -331,8 +331,8 @@ uses no implicit clock, and owns no cache.
 - `regime` uses `panel_math._anchor_index` plus NumPy/pandas; it has no
   filesystem/network access or legacy imports. `panel_row_inputs.scan_panel_row`
   calls `regime.add_regime_features`, and `nightly_raw_row_producer` calls
-  `scan_panel_row` in production; every other caller is a test. Neither input
-  frame is mutated.
+  `scan_panel_row` in production. The opt-in research daily-block builder also
+  calls the pure regime function; other callers are tests. Neither input frame is mutated.
 - `panel_math` supplies anchoring to `regime`; both have focused parity tests.
   Both are reached in production through `scan_panel_row`.
 

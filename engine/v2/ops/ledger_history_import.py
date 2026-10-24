@@ -60,6 +60,8 @@ _FAMILIES = (
 
 
 def _row_date(date_field, payload):
+    if not isinstance(payload, dict):
+        raise fail("VALIDATION_FAILED", "legacy ledger line is not a JSON object")
     value = payload.get(date_field)
     if not value:
         raise fail("VALIDATION_FAILED", "legacy row is missing its date field",
@@ -108,32 +110,47 @@ def _read_lines(path, *, expected_sha256=None, source_root=None):
     return [line.strip() for line in text.splitlines() if line.strip()], source_hash
 
 
+def _decode_row(raw):
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raise fail("VALIDATION_FAILED", "legacy ledger line is not valid JSON") from None
+
+
 def _included_prefix(lines, date_field, through):
     """The longest leading run of ``lines`` whose own date field is on or
-    before ``through``. Ledger files are append-only and written in
-    chronological order (``engine/ledger.py`` ``write_predictions``/
-    ``_write_outcomes``), so a prefix is exact; stopping at the first
-    later-dated row is the conservative failure mode if that ever stops
-    holding -- it can only exclude more than a strict per-row filter would,
-    never less, which keeps the "never imports rows the nightly under test
-    is about to commit itself" guarantee. Keeping a true prefix (rather than
-    filtering rows out of the middle) also keeps each surviving line's
-    1-based position equal to its real line number in the file, which is
-    what ``decision_imports``' ``(source_hash, line_number)`` idempotency
-    key depends on across repeated/differently-bounded runs.
+    before ``through``, plus the count of those rows dated exactly ``through``.
+    With ``through`` set, each row is decoded and validated before its date is
+    compared; the first later-dated row is decoded and date-validated before
+    scanning stops, but it and the subsequent tail are excluded, and only the
+    subsequent tail is never inspected. With ``through`` omitted every line is returned, then
+    decoded and validated by :func:`_date_span`.
+    Ledger files are append-only and written in chronological order
+    (``engine/ledger.py`` ``write_predictions``/``_write_outcomes``), so a
+    prefix is exact; stopping at the first later-dated row is the conservative
+    failure mode if that ever stops holding -- it can only exclude more than a
+    strict per-row filter would, never less, which keeps the "never imports
+    rows the nightly under test is about to commit itself" guarantee. Keeping
+    a true prefix (rather than filtering rows out of the middle) also keeps
+    each surviving line's 1-based position equal to its real line number in
+    the file, which is what ``decision_imports``' ``(source_hash,
+    line_number)`` idempotency key depends on across repeated/differently-
+    bounded runs. Exact-date coverage counts only included rows, so it never
+    claims a later-dated row that the prefix deliberately excludes.
     """
     if through is None:
-        return list(lines)
+        return list(lines), 0
     included = []
+    exact_rows = 0
     for raw in lines:
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            raise fail("VALIDATION_FAILED", "legacy ledger line is not valid JSON") from None
-        if _row_date(date_field, payload) > through:
+        payload = _decode_row(raw)
+        row_date = _row_date(date_field, payload)
+        if row_date > through:
             break
+        if row_date == through:
+            exact_rows += 1
         included.append(raw)
-    return included
+    return included, exact_rows
 
 
 def _file_transaction(conn, *, dry_run):
@@ -195,8 +212,10 @@ def import_history(conn, root, source_root, *, through=None, dry_run=False, cloc
 
 def _date_span(included, date_field):
     """The (min, max) row date across an already-filtered line list, or
-    ``(None, None)`` for an empty one."""
-    dates = [_row_date(date_field, json.loads(raw)) for raw in included]
+    ``(None, None)`` for an empty one. Every line is decoded through the same
+    guarded helper as the prefix scan, so malformed JSON syntax is a typed
+    ``VALIDATION_FAILED`` rather than a raw ``JSONDecodeError``."""
+    dates = [_row_date(date_field, _decode_row(raw)) for raw in included]
     return (min(dates), max(dates)) if dates else (None, None)
 
 
@@ -241,9 +260,10 @@ def _import_one_file(conn, path, family, kind, date_field, *, through, dry_run, 
     """Import one legacy ledger file's leading in-scope prefix, mutating
     ``totals`` (this family's running counters, already installed in
     ``summary``) and ``divergent_ids`` (this family's distinct diverged
-    row_ids, a set) in place. Returns ``(committed_owner, low, high)`` -- the
-    (possibly advanced) committed decision-authority owner and this file's
-    own date span (``(None, None)`` when nothing was in scope).
+    row_ids, a set) in place. Returns ``(committed_owner, low, high,
+    exact_rows)`` -- the (possibly advanced) committed decision-authority
+    owner, this file's own date span (``(None, None)`` when nothing was in
+    scope) and its count of in-scope rows dated exactly on ``through``.
 
     The user's standing 2026-09-14 decision applies here too: a row_id that
     repeats within the legacy ledger with a DIFFERING payload never blocks
@@ -259,11 +279,11 @@ def _import_one_file(conn, path, family, kind, date_field, *, through, dry_run, 
     totals["files"] += 1
     lines, source_hash = _read_lines(
         path, expected_sha256=expected_sha256, source_root=source_root)
-    included = _included_prefix(lines, date_field, through)
+    included, exact_rows = _included_prefix(lines, date_field, through)
     totals["lines"] += len(included)
     low, high = _date_span(included, date_field)
     if not included:
-        return committed_owner, low, high
+        return committed_owner, low, high, exact_rows
     stamp = format_timestamp(clock.now())
     existing_before = {row[0] for row in conn.execute(
         "SELECT line_number FROM decision_imports WHERE source_hash=?",
@@ -293,7 +313,7 @@ def _import_one_file(conn, path, family, kind, date_field, *, through, dry_run, 
     totals["divergent_row_ids"] = len(divergent_ids)
     totals["imported"] += new_line_count - len(new_divergences)
     totals["already_present"] += len(included) - new_line_count
-    return committed_owner, low, high
+    return committed_owner, low, high, exact_rows
 
 
 def discover_history_files(source_root):
@@ -360,12 +380,13 @@ def _history_files_by_family(source_root, pinned_files):
 
 
 def _run(conn, source_root, *, through, dry_run, clock, pinned_files=None):
-    summary = {"schema_version": "ledger_history_import.v1.0", "dry_run": dry_run,
+    summary = {"schema_version": "ledger_history_import.v1.1", "dry_run": dry_run,
                "through": through.isoformat() if through else None, "families": {}}
     committed_owner_row = conn.execute(
         "SELECT owner FROM decision_authority WHERE singleton=1").fetchone()
     committed_owner = committed_owner_row[0] if committed_owner_row else None
     seen_min, seen_max = None, None
+    coverage_families = {}
     by_family = _history_files_by_family(source_root, pinned_files)
     for family, subdir, kind, date_field in _FAMILIES:
         files = by_family[family]
@@ -373,16 +394,23 @@ def _run(conn, source_root, *, through, dry_run, clock, pinned_files=None):
                   "divergences": 0, "divergent_row_ids": 0}
         summary["families"][family] = totals
         divergent_ids = set()
+        exact_rows = 0
         for path, expected_sha256 in files:
-            committed_owner, low, high = _import_one_file(
+            committed_owner, low, high, file_exact_rows = _import_one_file(
                 conn, path, family, kind, date_field, through=through, dry_run=dry_run,
                 clock=clock, committed_owner=committed_owner, totals=totals,
                 divergent_ids=divergent_ids, summary=summary, source_root=source_root,
                 expected_sha256=expected_sha256)
+            exact_rows += file_exact_rows
             seen_min = _merge_bound(seen_min, low, keep_lower=True)
             seen_max = _merge_bound(seen_max, high, keep_lower=False)
+        coverage_families[family] = {
+            "rows": exact_rows, "status": "present" if exact_rows else "no_rows"}
     if pinned_files is not None:
         _validate_pinned_history_files(source_root, pinned_files)
     summary["date_range"] = {"min": seen_min.isoformat() if seen_min else None,
                              "max": seen_max.isoformat() if seen_max else None}
+    summary["coverage"] = (
+        {"through": through.isoformat(), "families": coverage_families}
+        if through is not None else None)
     return summary

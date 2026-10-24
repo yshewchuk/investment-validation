@@ -127,7 +127,8 @@ always_run = [
 timeout_constant = 2.0
 timeout_multiplier = 5.0
 # Parallel mutant workers. Match bounded_run's --cores. CI overrides it with
-# --max-children $(nproc) (4 on a standard GitHub runner).
+# --max-children $(nproc) (4 on a standard GitHub runner), except that
+# mutation_pilot caps data_incremental at one child regardless of the request.
 max_children = 2
 # Passed to every pytest invocation both drivers make (mutmut's per-mutant
 # pytest calls and gremlin_pilot's gremlins run). NEVER disable pytest-xdist
@@ -403,6 +404,7 @@ mutate = [
     "engine/v2/data/massive_refresh.py",
 ]
 tests = [
+    "tests/v2/integration/test_mutation_worker_memory.py",
     "tests/v2/ops/test_massive_accounting_hooks.py",
     "tests/v2/ops/test_massive_acquisition.py",
     "tests/v2/data/test_computed_moves.py",
@@ -464,6 +466,7 @@ skip = [
     "*/training/trailing_cutoff.py",
 ]
 tests = [
+    "tests/v2/models/training/test_magnitude_elasticnet.py",
     "tests/v2/models/training/test_magnitude_estimators.py",
     "tests/v2/research/test_magnitude_fitted_model.py",
     "tests/test_v2_models_p5_2_acceptance.py",
@@ -496,6 +499,7 @@ skip = [
     "*/trailing_cutoff_artifact.py",
 ]
 tests = [
+    "tests/v2/models/training/test_magnitude_elasticnet.py",
     "tests/test_v2_models_admissible_table.py",
     "tests/test_v2_models_deployment.py",
     "tests/test_v2_models_inference.py",
@@ -1205,6 +1209,7 @@ mutate = [
     "engine/v2/research/*.py",
 ]
 tests = [
+    "tests/v2/research/test_magnitude_search_request.py",
     "tests/v2/research/test_eligibility_policy.py",
     "tests/v2/research/test_magnitude_search_plan.py",
     "tests/v2/research/test_magnitude_search_trials.py",
@@ -1234,6 +1239,7 @@ tests = [
     "tests/v2/research/test_magnitude_features.py",
     "tests/v2/research/test_magnitude_history_store.py",
     "tests/v2/research/test_magnitude_history_projection.py",
+    "tests/v2/research/test_magnitude_panel_contract.py",
     "tests/v2/research/test_magnitude_search_payload.py",
     "tests/v2/research/test_magnitude_folds.py",
     "tests/v2/research/test_magnitude_registration.py",
