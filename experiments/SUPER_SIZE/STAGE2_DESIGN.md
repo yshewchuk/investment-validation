@@ -141,15 +141,17 @@ remain explicitly reconstructed, never observed-PIT; known-late values are null.
 No realized value, skipped flag or label-completion status chooses quote inclusion.
 Thus a missing realized move does not by itself exclude an available prior quote.
 
-Compute the arithmetic mean over finite admitted quotes, including preserved
-source-zero sentinels; skip nulls, count actual contributions, and return null when count
+Compute the arithmetic mean over finite admitted quotes, including zero
+sentinels only when the pinned stored source preserves them; skip nulls, count actual contributions, and return null when count
 is zero. Do not apply the incumbent's current-quote [0,60] mask to historical
-quotes or their mean. Source-contract violations refuse, not silently winsorize.
+quotes or their mean. Observable stored source-contract violations refuse, not
+silently winsorize; an ingest-masked null does not expose its original violation.
 Reuse `strict_prior_mean(..., population="admitted")` on the complete ordinal sequence, masking every
 noncontributor's quote to null without reading it. Append the target with a null
 quote and take that target's returned mean/count, so the final eligible prior
-event is included. Source zeros are not changed to null before this aggregate.
-The resulting zero mean is valid even though a zero *current* quote is unavailable
+event is included. The aggregate does not further mask source-preserved zeros;
+normalized nulls remain null. A resulting
+zero mean from preserved zeros is valid even though a zero *current* quote is unavailable
 to HMO. Do not copy `computed_moves.mean_prior_or_implied`, resume its aggregate,
 or substitute realized-move history: filtering its latest row cannot remove
 protected contributions. Never open a mixed protected outcome fragment merely
@@ -164,13 +166,13 @@ population restriction, not byte-identical reproduction of old production inputs
 
 **Current quote and ordering.** Preserve source status `present`, `zero`, `absent`
 or `unavailable`. HMO stores positive implied_move or null; its appended
-has_implied_quote is 1 only for `present`. The comparator preserves source zero
-as or_implied=0, but never replaces absence with zero. Both arms use the same
+has_implied_quote is 1 only for `present`. The comparator retains or_implied=0
+only for a source-preserved zero, never for a normalized null. Both arms use the same
 status/anchor and has_implied_quote rule; the comparator's existing masks and
 abstentions stay unchanged. HMO admits finite source-valid rvol30 and strictly
 positive source-valid implied_move without adding the comparator's [0,700] and
-[0,60] masks. The inspected native/legacy normalizers enforce source ranges
-[0,500] and [0,100] respectively; each admitted snapshot binds its actual source
+[0,60] masks. Both inspected native and legacy normalizers enforce rvol30 in
+[0,500] and implied_move in [0,100]; each admitted snapshot binds its actual source
 contract/producer, not an assumed range. This preserves the designed arm-specific
 preprocessing, not identical value admission; report mask-related abstentions.
 
@@ -403,9 +405,10 @@ n_iter_no_change 15; its validation split stays within qualified training only.
 Preserve n_prior>=4, complete-input training admission, minimum 500 training rows
 and legacy training value masks (including abs_move in [0,200]). The target mask
 never filters evaluation targets or hides large misses. Preserve predictor masks
-or_implied [0,60] and or_rvol30 [0,700] at training and prediction. Keep source
-zero-quote versus absent-quote status so the baseline retains its zero sentinel
-and has_implied_quote=(or_implied>0), rather than inheriting HMO's null-zero encoding. Unavailable-input/insufficient-history
+or_implied [0,60] and or_rvol30 [0,700] at training and prediction. Under the
+lossy-source policy above, retain a zero sentinel only if the pinned stored source
+preserves it; normalized nulls stay null and cause baseline abstention. Preserve
+has_implied_quote=(or_implied>0), not HMO's null-zero encoding. Unavailable-input/insufficient-history
 predictions abstain explicitly. Do not apply the training target bound at prediction
 time. Preserve finite raw blend predictions (including negatives), as the native
 legacy estimator does; do not silently apply the challenger's zero projection. Reconstruct all fourteen
