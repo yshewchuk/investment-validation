@@ -29,9 +29,10 @@
 #   state (*.meta verdicts, mutmut-stats.json, the driver's test digest) and
 #   re-tests only functions whose source changed (plus survived/no-tests
 #   verdicts, when the module's tests changed). mutmut 3 keeps verdicts whose
-#   function hash is unchanged, so a cache hit skips finished mutants. A
-#   running round is never cancelled; a newer push run only replaces an older
-#   run still pending in the same group (see concurrency below).
+#   function hash is unchanged, so a cache hit skips finished mutants. The
+#   concurrency block never cancels a running round; a newer push run only
+#   replaces an older run still pending in the same group (see concurrency
+#   below).
 # - weekly schedule (staggered after the gremlins full run), and
 #   workflow_dispatch by default: full, from scratch (no restore: the runner
 #   starts without state, so every mutant is re-decided). Dispatch with
@@ -112,8 +113,8 @@ concurrency:
   # run or a dispatched run). schedule and workflow_dispatch keep their own
   # shared, ref-based group, byte-identical in shape to what
   # every trigger used before this change. cancel-in-progress is false for
-  # every group: no group ever cancels a running round; a new run only
-  # replaces an older PENDING one in its own group.
+  # every group: the concurrency block never cancels a running round; a new
+  # run only replaces an older PENDING one in its own group.
   group: mutation-mutmut-${{ github.event_name == 'push' && format('push-{0}', github.ref) || github.event_name == 'workflow_run' && format('{0}-{1}-{2}', github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch, github.event.workflow_run.event) || github.ref }}
   cancel-in-progress: false
 

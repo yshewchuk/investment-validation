@@ -31,9 +31,9 @@
 #   outcome, a needless restart only costs one re-run -- so even a docs-only push
 #   may restart a module. The namespace is computed BEFORE the cache is restored/
 #   saved and any fingerprint failure aborts the key step under set -e, so a broken
-#   digest can never restore or write a cache under a wrong key. A running round
-#   is never cancelled; a newer push run only replaces an older run still pending
-#   in the same group (see concurrency below).
+#   digest can never restore or write a cache under a wrong key. The concurrency
+#   block never cancels a running round; a newer push run only replaces an older
+#   run still pending in the same group (see concurrency below).
 # - weekly schedule, and workflow_dispatch by default: full, from scratch
 #   (no restore, --fresh clears the cache). Dispatch with fresh=false for an
 #   incremental run, and `modules` for a subset. Neither cancels a run in
@@ -180,10 +180,14 @@ concurrency:
   # else (schedule, workflow_dispatch) falls through to the plain
   # `mutation-gremlins-<ref>` group every trigger used before this change.
   group: mutation-gremlins-${{ github.event_name == 'push' && format('push-{0}', github.ref) || github.event_name == 'workflow_run' && format('{0}-{1}-{2}', github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch, github.event.workflow_run.event) || github.ref }}
-  # false for every group: a running round is never cancelled (a half-finished
-  # round yields no result). GitHub then keeps one running plus one pending run
-  # per group, and a new run cancels only the pending one. Coverage stays
-  # complete because push runs are incremental from the cached state.
+  # false for every group: the concurrency block never cancels a running
+  # round (a half-finished round yields no result); GitHub keeps one running
+  # plus one pending run per group, and a new run replaces only the pending
+  # one. (cancel-stale-runs.yml can still cancel a run when its PR closes.)
+  # Coverage stays complete: a push plan runs every module, so a skipped
+  # pending push run's changes are tested by the next run; the gremlins cache
+  # is keyed by a whole-tree fingerprint, so a push that changes any tracked
+  # file re-runs in full.
   cancel-in-progress: false
 
 env:

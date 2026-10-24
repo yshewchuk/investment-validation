@@ -362,8 +362,9 @@ retires them). Neither mutation workflow queues behind, cancels, caches over
 or merges into the other -- every shared resource is namespaced per backend;
 each backend has three disjoint concurrency groups, one per trigger family
 (a PR's `workflow_run`, a push to main, and schedule/dispatch together), so
-none of the three can ever cancel a run from a different family, and each of
-the first two cancels an older still-running run of its own family:
+none of the three can ever cancel a run from a different family, and with
+`cancel-in-progress: false` none of the groups cancels a running round --
+a newer run of the same family replaces only an older PENDING run:
 
 | workflow | backend | concurrency groups | cache namespace | module artifacts | aggregate artifact |
 |---|---|---|---|---|---|
