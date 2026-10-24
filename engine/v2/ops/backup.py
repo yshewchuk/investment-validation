@@ -40,6 +40,7 @@ def _log(message):
 class _Progress:
     def __init__(self, stage, total=None, *, keepalive=None):
         self.stage, self.total, self.keepalive = stage, total, keepalive
+        self.keepalive_error = None
         self.started = self.last_log = self.last_keepalive = time.monotonic()
         self.done = 0
         _log(f"{stage}: start total={total if total is not None else 'unknown'} "
@@ -63,13 +64,19 @@ class _Progress:
 
     def pulse(self):
         """Count one SQLite callback; SQLite calls every 10,000 VM instructions."""
-        self.update(self.done + 1)
+        try:
+            self.update(self.done + 1)
+        except BaseException as exc:
+            self.keepalive_error = exc
+            return 1
         return 0
 
     def finish(self, outcome="complete"):
         elapsed = time.monotonic() - self.started
         _log(f"{self.stage}: {outcome} done={self.done} elapsed={elapsed:.1f}s "
              f"rss_max_kib={_rss_max_kib()}")
+        if self.keepalive_error is not None:
+            raise self.keepalive_error
 
 
 def _rss_max_kib():
@@ -629,11 +636,27 @@ def validate_backup_artifact_manifest(source, artifacts, *, require_sizes=False)
         raise ValueError("invalid artifact directory")
 
 
+def _restore_manifest_rows(manifest, manifest_path):
+    backup_key = manifest.get("backup_key")
+    database_rows = manifest.get("database_rows")
+    expected_key = manifest_path.name.removesuffix(".manifest.json")
+    if (manifest.get("schema_version") != "catalog_backup.v1.0"
+            or not isinstance(backup_key, str)
+            or _single_filename(backup_key) != expected_key
+            or not isinstance(database_rows, dict)
+            or any(not isinstance(name, str) or not name
+                   or type(count) is not int or count < 0
+                   for name, count in database_rows.items())):
+        raise ValueError("invalid backup identity or row counts")
+    return database_rows
+
+
 def _read_restore_manifest(source, manifest_path):
     try:
         manifest = json.loads(read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
         if not isinstance(manifest, dict):
             raise ValueError("manifest must be an object")
+        database_rows = _restore_manifest_rows(manifest, manifest_path)
         database_source = manifest_database_path(source, manifest)
         database_hash = manifest.get("database")
         database_size = manifest.get("database_size")
@@ -644,13 +667,13 @@ def _read_restore_manifest(source, manifest_path):
                 or not isinstance(artifacts, dict)):
             raise ValueError("invalid manifest fields")
         validate_backup_artifact_manifest(source, artifacts)
-        return database_source, database_hash, database_size, artifacts
+        return database_source, database_hash, database_size, database_rows, artifacts
     except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
         raise fail("INTEGRITY_FAILED", "backup manifest is malformed or unsafe") from None
 
 
 def _restore_contents(source, destination, database_source, database_hash,
-                      database_size, artifacts):
+                      database_size, database_rows, artifacts):
     try:
         database = destination / "ops.sqlite"
         _copy_verified_file(database_source, database, expected_size=database_size,
@@ -667,8 +690,8 @@ def _restore_contents(source, destination, database_source, database_hash,
                     raise
                 else:
                     progress.finish()
-                if errors:
-                    raise fail("INTEGRITY_FAILED", "restored catalog failed integrity check")
+                if errors or _table_row_counts(probe) != database_rows:
+                    raise fail("INTEGRITY_FAILED", "restored catalog integrity or row counts mismatch")
             finally:
                 probe.set_progress_handler(None, 0)
                 probe.close()
@@ -695,12 +718,12 @@ def restore_backup(source, destination):
     manifests = list(source.glob("*.manifest.json"))
     if len(manifests) != 1:
         raise fail("INTEGRITY_FAILED", "backup manifest is missing or ambiguous")
-    database_source, database_hash, database_size, artifacts = _read_restore_manifest(
-        source, manifests[0])
+    database_source, database_hash, database_size, database_rows, artifacts = (
+        _read_restore_manifest(source, manifests[0]))
     try:
         destination.mkdir(parents=True)
     except FileExistsError:
         raise fail("INVALID_REQUEST", "restore destination already exists") from None
     _restore_contents(source, destination, database_source, database_hash,
-                      database_size, artifacts)
+                      database_size, database_rows, artifacts)
     return destination

@@ -73,6 +73,35 @@ def test_restore_requires_artifacts_mapping(tmp_path):
     assert not destination.exists()
 
 
+@pytest.mark.parametrize(("field", "value", "remove"), [
+    ("schema_version", None, True),
+    ("schema_version", "catalog_backup.v9.0", False),
+    ("backup_key", "different-key", False),
+    ("database_rows", {}, False),
+])
+def test_restore_rejects_manifest_identity_or_row_count_mismatch(
+        tmp_path, field, value, remove):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "restore-manifest-check", {}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key="restore-manifest-check", owner="worker", target=backup,
+               clock=clock, store=store)
+    manifest_path = backup / "restore-manifest-check.manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if remove:
+        manifest.pop(field)
+    else:
+        manifest[field] = value
+    manifest_path.write_text(json.dumps(manifest))
+
+    destination = tmp_path / "restored"
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, destination)
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert not destination.exists()
+
+
 def test_backup_manifest_publication_oserror_is_retryable(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
@@ -107,6 +136,18 @@ def test_backup_integrity_scan_renews_keepalive(tmp_path, monkeypatch):
     source.close()
 
     assert renewed
+
+
+def test_sqlite_progress_callback_preserves_lease_loss():
+    progress = backup_module._Progress(
+        "synthetic progress", keepalive=lambda: (_ for _ in ()).throw(
+            fail("LEASE_LOST", "synthetic lease loss")))
+    progress.last_keepalive = 0
+
+    assert progress.pulse() == 1
+    with pytest.raises(OpsError) as lost:
+        progress.finish()
+    assert lost.value.code == "LEASE_LOST"
 
 
 def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
@@ -674,7 +715,6 @@ def test_restore_accepts_legacy_manifest_without_size_fields(tmp_path):
     (backup / manifest["database_file"]).rename(backup / "legacy.sqlite")
     manifest.pop("database_file")
     manifest.pop("database_size")
-    manifest.pop("database_rows")
     manifest["artifacts"]["evidence.bin"].pop("byte_size")
     (backup / "legacy.manifest.json").write_text(json.dumps(manifest))
 
