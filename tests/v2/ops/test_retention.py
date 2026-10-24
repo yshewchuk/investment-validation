@@ -226,19 +226,19 @@ def test_database_pathname_replaced_during_pinned_verification_refuses_with_type
     older = scope / "b1.sqlite"
     swap = tmp_path / "swap.sqlite"
     swap.write_bytes(older.read_bytes())
-    real_file_hash = retention_module.file_hash
+    real_integrity_errors = retention_module.integrity_errors
     state = {"replaced": False}
 
-    def file_hash(path, **kwargs):
-        digest = real_file_hash(path, **kwargs)
-        if not state["replaced"] and str(path).startswith("/proc/self/fd/"):
+    def integrity_errors(conn):
+        problems = real_integrity_errors(conn)
+        if not state["replaced"]:
             state["replaced"] = True
             os.replace(swap, older)
-        return digest
+        return problems
 
-    monkeypatch.setattr(retention_module, "file_hash", file_hash)
+    monkeypatch.setattr(retention_module, "integrity_errors", integrity_errors)
 
-    _refusal(ops, ops, catalog, "backup_database_verify_failed",
+    _refusal(ops, ops, catalog, "backup_database_changed",
              keep=1, materialization_keep=1)
     assert state["replaced"]
 
@@ -608,9 +608,11 @@ def test_file_hash_negative_max_bytes_refuses_empty_file(tmp_path):
 
 def test_file_hash_reports_cumulative_bytes_to_on_progress(tmp_path):
     path = tmp_path / "payload.bin"
-    path.write_bytes(b"x" * 2304000)
+    payload = b"x" * 2304000
+    path.write_bytes(payload)
     seen = []
-    file_hash(path, on_progress=seen.append)
+    digest = file_hash(path, on_progress=seen.append)
+    assert digest == "sha256:" + hashlib.sha256(payload).hexdigest()
     assert seen == [1 << 20, 2 << 20, 2304000]
 
 

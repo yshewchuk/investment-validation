@@ -942,4 +942,6 @@ def _enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep
     _delete_materialization_plans(roots, keepalive)
     if journal_active:
         _clear_journal(journal)
+    _stderr("RETENTION_DELETE_COMPLETE", backup_count=len(deleted),
+            materialization_count=len(roots))
     return deleted

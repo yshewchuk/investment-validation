@@ -218,6 +218,32 @@ def test_backup_coordinator_retry_after_delivery_before_commit_attempt_succeeds(
         conn.close()
 
 
+def test_backup_effect_skips_retention_when_backup_fails(tmp_path, monkeypatch):
+    """Synthetic: a failed backup must not invoke retention."""
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        _seed_decisions(conn, clock, scope, SESSION, predictions=[_row("evt-1", "pred")])
+        claim = _submit_and_claim(conn, clock, supervisor, kind="backup", key="backup-fails",
+                                  parameters=_params("backup", SESSION, scope))
+        calls = []
+
+        def fail_backup(*args, **kwargs):
+            raise RuntimeError("synthetic backup failure")
+
+        def record_retention(*args, **kwargs):
+            calls.append((args, kwargs))
+
+        monkeypatch.setattr("engine.v2.ops.effects_graph.run_backup", fail_backup)
+        monkeypatch.setattr("engine.v2.ops.effects_graph.enforce_retention", record_retention)
+        with pytest.raises(RuntimeError, match="synthetic backup failure"):
+            backup_effect(conn, store, claim, root, clock=clock)
+
+        assert calls == []
+    finally:
+        conn.close()
+
+
 def test_backup_effect_propagates_retention_sentinel_after_successful_backup(tmp_path, monkeypatch):
     """Synthetic: ``enforce_retention`` refuses with a typed ``OpsError`` after the
     backup and its watermark are already durable. The refusal must leave
