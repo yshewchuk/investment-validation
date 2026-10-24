@@ -658,10 +658,12 @@ def test_injected_deletion_oserror_is_typed(tmp_path, catalog, monkeypatch):
     with pytest.raises(OpsError) as caught:
         enforce_retention(ops, conn=catalog, store=object(),
                           keep=1, materialization_keep=1)
-    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.code == "BACKUP_FAILED"
     assert caught.value.problem.details["reason_key"] == "backup_delete_failed"
     assert "denied" not in str(caught.value.problem)
-    assert _files(ops) == before
+    after = _files(ops)
+    assert {name: after[name] for name in before} == before
+    assert ".retention-journal.json" in after
 
 
 def test_backup_deletion_failure_is_typed_without_root(tmp_path, catalog, monkeypatch):
@@ -676,9 +678,104 @@ def test_backup_deletion_failure_is_typed_without_root(tmp_path, catalog, monkey
     with pytest.raises(OpsError) as caught:
         enforce_retention(ops, conn=catalog, store=object(),
                           keep=1, materialization_keep=1)
-    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.code == "BACKUP_FAILED"
     assert caught.value.problem.details["reason_key"] == "backup_delete_failed"
+    after = _files(ops)
+    assert {name: after[name] for name in before} == before
+    assert ".retention-journal.json" in after
+
+
+def test_partial_backup_deletion_resumes_from_verified_journal(tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    real_unlink = Path.unlink
+
+    def fail_manifest(self, *args, **kwargs):
+        if self.name == "b1.manifest.json":
+            raise OSError(5, "injected")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_manifest)
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+    assert caught.value.code == "BACKUP_FAILED"
+    assert caught.value.problem.details["reason_key"] == "backup_delete_failed"
+    assert not (scope / "b1.sqlite").exists()
+    assert (scope / "b1.manifest.json").is_file()
+    journal = ops / ".retention-journal.json"
+    assert journal.is_file()
+
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    assert enforce_retention(ops, conn=catalog, store=object(),
+                             keep=1, materialization_keep=1) == []
+    assert not journal.exists()
+    assert not (scope / "b1.manifest.json").exists()
+    assert not (scope / "artifacts" / "old.bin").exists()
+    assert (scope / "b2.manifest.json").is_file()
+    assert (scope / "artifacts" / "new.bin").is_file()
+
+
+def test_journal_mismatch_refuses_before_deleting_remaining_entries(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    real_unlink = Path.unlink
+
+    def fail_manifest(self, *args, **kwargs):
+        if self.name == "b1.manifest.json":
+            raise OSError(5, "injected")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_manifest)
+    with pytest.raises(OpsError):
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    (scope / "b1.manifest.json").write_bytes(b"changed")
+    before = _files(ops)
+
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "retention_journal_entry_mismatch"
     assert _files(ops) == before
+
+
+def test_partial_materialization_deletion_resumes_from_verified_journal(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    old = _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    real_remove = retention_module.remove_tree
+
+    def fail_after_partial_remove(path, keepalive, on_progress=None):
+        os.chmod(path, 0o700)
+        (path / "sentinel.bin").unlink()
+        raise OSError(5, "injected")
+
+    monkeypatch.setattr(retention_module, "remove_tree", fail_after_partial_remove)
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+    assert caught.value.code == "BACKUP_FAILED"
+    assert caught.value.problem.details["reason_key"] == "materialization_delete_failed"
+    assert old.is_dir() and not (old / "sentinel.bin").exists()
+    assert (ops / ".retention-journal.json").is_file()
+
+    monkeypatch.setattr(retention_module, "remove_tree", real_remove)
+    assert enforce_retention(ops, conn=catalog, store=object(),
+                             keep=1, materialization_keep=1) == []
+    assert not old.exists()
+    assert (base / "root-new").is_dir()
+    assert not (ops / ".retention-journal.json").exists()
 
 
 def test_read_only_materialization_root_is_removed(tmp_path, catalog, monkeypatch):
@@ -715,8 +812,9 @@ def test_materialization_deletion_failure_is_typed_without_root(tmp_path, catalo
     with pytest.raises(OpsError) as caught:
         enforce_retention(ops, conn=catalog, store=object(),
                           keep=1, materialization_keep=1)
-    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.code == "BACKUP_FAILED"
     assert caught.value.problem.details["reason_key"] == "materialization_delete_failed"
+    assert (ops / ".retention-journal.json").is_file()
     assert old.is_dir()
 
 

@@ -711,18 +711,24 @@ and nothing on this diagram writes to the legacy board.
 
 #### Contract
 
-Retention runs only after a successful backup; a failed or absent backup invokes nothing and deletes nothing. It retains the newest configured N complete verified backups (`OPS_BACKUP_RETENTION_KEEP=7` by default) and the newest configured K roots (`OPS_MATERIALIZATION_RETENTION_KEEP=11` by default), plus roots existing persisted live-attempt state proves in use. A complete backup has the exact manifest schema, a non-empty hash-matched database with clean SQLite integrity/foreign-key checks, and the exact on-disk artifact set with matching sizes and hashes. Current publication has no root binding, so retention keeps the newest 11 roots conservatively and emits `RETENTION_CURRENT_PUBLICATION_UNBOUND`. Invalid limits refuse `INVALID_REQUEST`; a live attempt with a missing or duplicate request binding refuses `INPUT_CHANGED`; any other verification or filesystem refusal is keyed `INTEGRITY_FAILED`; a lease failure propagates `LEASE_LOST` and stops work. All preflight refusals delete nothing. Deletions start only after preflight and proceed per entry without rollback.
+Retention runs only after a successful backup; a failed or absent backup invokes nothing and deletes nothing. It retains the newest configured N complete verified backups (`OPS_BACKUP_RETENTION_KEEP=7` by default) and the newest configured K roots (`OPS_MATERIALIZATION_RETENTION_KEEP=11` by default), plus roots existing persisted live-attempt state proves in use. A complete backup has the exact manifest schema, a non-empty hash-matched database with clean SQLite integrity/foreign-key checks, and the exact on-disk artifact set with matching sizes and hashes. Current publication has no root binding, so retention keeps the newest 11 roots conservatively and emits `RETENTION_CURRENT_PUBLICATION_UNBOUND`.
+
+Invalid limits refuse `INVALID_REQUEST`; a live attempt with a missing or duplicate request binding refuses `INPUT_CHANGED`; other verification or filesystem refusals are keyed `INTEGRITY_FAILED`; lease failure propagates `LEASE_LOST` and stops work. Before a new deletion plan, retention completes the backup and live-root preflight. It durably journals every planned backup file's safe relative path, size and digest and each materialization candidate's base, name, original mtime, directories, and file hashes before unlink begins. On retry, all still-present journaled files and tree entries are verified before any are removed; already-absent entries count as completed. A journaled root is rechecked against live attempts and the current newest K. A malformed, unreadable or mismatched journal refuses without deleting any journal target. If an unlink fails, the journal remains for retry. The newest complete backup is never planned for deletion.
+
+Retention uses stdlib `json`, `sqlite3` and filesystem traversal/unlink because no standard tool implements this policy; it does not hand-roll a format parser. Rerunning against unchanged state is a no-op.
 
 | Condition | Outcome |
 | --- | --- |
-| Invalid retention count limit (zero, negative, non-integer or malformed) | `INVALID_REQUEST`; the whole invocation deletes nothing. |
-| Oversized or unverifiable backup manifest, digest/artifact mismatch, non-clean pragma, or malformed live attempt spec or parameters | `INTEGRITY_FAILED`; the whole invocation deletes nothing. |
-| Live attempt with a missing or duplicate request binding | `INPUT_CHANGED`; the whole invocation deletes nothing. |
+| Invalid retention count limit (zero, negative, non-integer or malformed) | `INVALID_REQUEST`; no deletion. |
+| Oversized or unverifiable backup, malformed live-attempt evidence, or unresolved live use | `INTEGRITY_FAILED`; no new deletion. |
+| Live attempt with a missing or duplicate request binding | `INPUT_CHANGED`; no new deletion. |
 | Lease renewal failure during retention | `LEASE_LOST`; work stops. |
-| Backup unlink `OSError` | `INTEGRITY_FAILED`; earlier deletes may persist; a later run refuses the incomplete scope without deleting. |
-| Materialization tree removal `OSError` | `INTEGRITY_FAILED`; earlier deletes may persist and a subsequent pass refuses a writable/incomplete residual root without deleting. |
-| Visible candidate materialization root that is not a real readonly 0555 directory | `INTEGRITY_FAILED`; the whole invocation deletes nothing. |
-| Other backup or live-use preflight refusal (not a missing or duplicate live request binding) | `INTEGRITY_FAILED`; no deletions occur. |
+| Journal write or backup unlink `OSError` | `BACKUP_FAILED`; earlier unlinks may persist and a valid journal remains for retry. |
+| Interrupted prune with a valid journal | Every remaining file and tree entry is verified before any are removed; absent entries count as completed. |
+| Journal unreadable, invalid, or any target mismatches its record | `INTEGRITY_FAILED`; no journal targets are removed. |
+| Journaled root is now live or among the newest K roots | `INTEGRITY_FAILED`; no journal targets are removed. |
+| Materialization tree removal `OSError` | `BACKUP_FAILED`; earlier deletes may persist and the next invocation verifies and completes the journaled remainder. |
+| Visible materialization candidate that is not a real readonly 0555 directory | `INTEGRITY_FAILED`; no new deletion. |
 | Any retention refusal | The current nightly backup attempt fails, even though backup/watermark may already be durable. |
 
 ## 5. Invariants
