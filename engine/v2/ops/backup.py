@@ -538,6 +538,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
     if target.is_symlink():
         raise fail("INVALID_REQUEST", "backup target is a symlink")
     ensure_directory(target)
+    target = target.resolve()
     artifact_root = target / "artifacts"
     if refs and artifact_root.is_symlink():
         raise fail("INVALID_REQUEST", "backup artifacts directory is a symlink")
