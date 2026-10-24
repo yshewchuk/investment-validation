@@ -1709,6 +1709,7 @@ def test_replay_refuses_recreated_root_with_same_name_and_contents(tmp_path, cat
     old = _materialization_dir(base, "root-old", 1)
     entry = retention_module._journal_tree_record(old, base)
     retention_module._write_journal(ops / ".retention-journal.json", [], [entry], 1)
+    os.chmod(base, 0o755)
     old.rename(tmp_path / "preserved-old-root")
     _materialization_dir(base, "root-old", 99)
 
