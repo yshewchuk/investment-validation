@@ -57,14 +57,15 @@ before registration. The proposed first dictionary uses only these existing bloc
 | Set | Inputs | Eligibility |
 | --- | --- | --- |
 | H | Eleven current stored-history columns | Existing history contract unchanged |
-| HM | H + signed_streak, ema12r_abs, dist_high, dist_ema, ret5, ret10, ret20; SPY ret21/63/252, dd252, vol5/20/60/252, vol20_rel252 | Audited runup/regime math at each horizon |
-| HMO | HM + implied_move, iv10, iv30, exern_iv10, exern_iv30, iee, skew, contango, fwd90_30, fexern90_30, rvol30, spot, mcap_log | Existing daily_market fields via explicit native mapping |
+| HM | H + signed_streak, ema12r_abs, dist_high, dist_ema, abs_dist_ema, ret5, ret10, ret20; SPY ret21/63/252, dd252, vol5/20/60/252, vol20_rel252 | Audited runup/regime math at each horizon |
+| HMO | HM + implied_move, iv10, iv30, exern_iv10, exern_iv30, iee, skew, contango, fwd90_30, fexern90_30, rvol30, spot, mcap_log; mean_prior_or_implied | Daily-market mapping plus the protected implied-history prefix below |
 
-Names in the last row denote research aliases from `DAILY_STATE_FIELDS`, not a
-permission to read a same-named realized-event field. Add quote-present indicators
+The thirteen daily-market names denote research aliases from `DAILY_STATE_FIELDS`,
+not permission to read a same-named realized-event field. Historical implied mean
+has its separate prefix policy below. Add quote-present indicators
 only to HMO, and missing indicators only for each recipe's selected columns; H
-remains history-only. These are not extra search axes. A zero implied
-quote means unavailable, while a genuine zero target remains valid. Missing market
+remains history-only. These are not extra search axes. A zero current implied
+quote means unavailable to HMO, while a genuine zero target remains valid. Missing market
 cap or late capture stays missing; do not use the earliest later retrieval as causal.
 
 Defer daily-state lags, ratios/interactions and sector context pending exact source/availability maps.
@@ -75,8 +76,177 @@ new option-chain surfaces, interpolation and liquidity engineering are not.
 Exclude `or_exern_z252` (quarantined), current-event move/abs_move, post-event IV,
 label-derived quality/completion flags, and stored learned Tier4 predictions.
 Tier4 stacking requires fold-local/OOF regeneration and verified training cutoffs,
-not merely an early forecast timestamp; defer it. The separate legacy benchmark
-below may add its audited input aliases without exposing them as search predictors.
+not merely an early forecast timestamp; defer it. The incumbent-parity amendment
+below exposes its two previously omitted inputs to challenger selection as well.
+
+### Incumbent-parity amendment (October 24; design only)
+
+The owner approved this design-first lane before dictionary implementation. The
+table above now proposes 11/28/42 numeric columns for H/HM/HMO; the checked-in
+`research_magnitude_panel.v1` dictionary still has 11/27/40. No existing runtime
+contract, snapshot or compiler declaration is changed by this document.
+Do not mistake the obsolete ten-column `LEGACY_FEATURES` or registry prose for
+the active [fourteen-input list](../../engine/models/training/size_model.py#L72-L87).
+The following mapping is exhaustive; it adds no learned feature or search axis.
+
+| Active incumbent input | Challenger subset / exact meaning |
+| --- | --- |
+| has_implied_quote | HMO only; 1 for a positive current quote, otherwise 0 |
+| mean_prior_abs_move | H; existing protected history value |
+| abs_dist_ema | HM/HMO; abs(dist_ema), null iff its causal source is null |
+| ema12r_abs | HM/HMO; ema12_prior_abs_move if n_prior >= 12, else mean_prior_abs_move |
+| mean_prior_move | H; existing protected history value |
+| signed_streak | HM/HMO; existing signed-run recursion over qualified prior outcomes |
+| dist_high | HM/HMO; existing adjusted-price distance from trailing high |
+| dist_ema | HM/HMO; existing adjusted-price distance from trailing EMA |
+| spy_vol20 | HM/HMO; existing SPY volatility calculation |
+| spy_dd252 | HM/HMO; existing SPY drawdown calculation |
+| mean_prior_or_implied | HMO only; protected historical ORATS quote mean below |
+| or_implied | HMO alias implied_move; comparator mask [0,60], HMO source-validity policy below |
+| or_rvol30 | HMO alias rvol30; comparator mask [0,700], HMO source-validity policy below |
+| mcap_log | HMO; missing/known-late capture remains null |
+
+`ema12r_abs` is an EMA-with-mean fallback, not the ratio described in stale
+feature-note prose. `abs_dist_high` is not an active incumbent input: it was
+removed as a duplicate of -dist_high. No other explicit interaction belongs to
+the active list. General ratios/lags/sector/stacking remain deferred. Source
+math already exists in `runup_math`, `panel_math` and `event_history`; reuse it
+where its admission contract matches, not production readers or stored predictions.
+
+**Absolute distance.** Derive from the same horizon-admitted `dist_ema` used by
+both arms; retain its adjusted-price anchors and missing reason. No extra read,
+backfill, full-panel copy, rounding or independent availability claim is allowed.
+
+**Historical implied mean.** Freeze one shared reconstruction for HMO and the
+causal incumbent. For each target/horizon, establish the full pinned canonical
+confirmed-event metadata prefix from its first known event, strictly before both
+the target event date and source-session ceiling. This includes metadata before
+history_start; that start bounds numeric contributions, not ordinal calculation.
+Keep the ordered metadata sequence and its zero-based ordinal; warm-up is four events, as the native
+[computed-move contract](../../engine/v2/data/computed_moves_table.py#L90-L102)
+and `event_sequence(..., warmup=4)` define it. Protected or embargo-excluded events may count as metadata ordinals,
+but never contribute quote values. Do not restart warm-up at history_start,
+renumber after exclusions, infer an ordinal from H.n_prior, or reuse a production
+`admitted`/completion flag. Prove the sequence/start against pinned metadata;
+an incomplete prefix or conflicting event identity refuses before values.
+
+A contributor must have ordinal >= 4, be on/after history_start, and be a
+nonprotected development event admitted by the same frozen grouped-eligibility
+policy. Resolve its quote from
+already stored daily_market: the last src_iv row strictly before that historical
+event date, never a newer row or an older nonmissing fallback. Its numerical
+source prefix and any known availability must not exceed that historical
+pre-print ceiling or the target forecast ceiling. Missing publication stamps
+remain explicitly reconstructed, never observed-PIT; known-late values are null.
+No realized value, skipped flag or label-completion status chooses quote inclusion.
+Thus a missing realized move does not by itself exclude an available prior quote.
+
+Compute the arithmetic mean over finite admitted quotes, including zero
+sentinels only when the pinned stored source preserves them; skip nulls, count actual contributions, and return null when count
+is zero. Do not apply the incumbent's current-quote [0,60] mask to historical
+quotes or their mean. Observable stored source-contract violations refuse, not
+silently winsorize; an ingest-masked null does not expose its original violation.
+Reuse `strict_prior_mean(..., population="admitted")` on the complete ordinal sequence, masking every
+noncontributor's quote to null without reading it. Append the target with a null
+quote and take that target's returned mean/count, so the final eligible prior
+event is included. The aggregate does not further mask source-preserved zeros;
+normalized nulls remain null. A resulting
+zero mean from preserved zeros is valid even though a zero *current* quote is unavailable
+to HMO. Do not copy `computed_moves.mean_prior_or_implied`, resume its aggregate,
+or substitute realized-move history: filtering its latest row cannot remove
+protected contributions. Never open a mixed protected outcome fragment merely
+to obtain an implied quote; reconstruction uses event metadata and daily sources.
+
+Retain the complete prefix membership/exclusions, source and availability anchors,
+consumed row/fragment identities, contribution count and missing reason in v2
+lineage/context identity. These are provenance, not added predictors. A known
+empty qualified prefix stays null; missing required provenance refuses rather
+than manufacturing a trustworthy missing value. This is the declared research
+population restriction, not byte-identical reproduction of old production inputs.
+
+**Current quote and ordering.** Preserve source status `present`, `zero`, `absent`
+or `unavailable`. HMO stores positive implied_move or null; its appended
+has_implied_quote is 1 only for `present`. The comparator retains or_implied=0
+only for a source-preserved zero, never for a normalized null. Both arms use the same
+status/anchor and has_implied_quote rule; the comparator's existing masks and
+abstentions stay unchanged. HMO admits finite source-valid rvol30 and strictly
+positive source-valid implied_move without adding the comparator's [0,700] and
+[0,60] masks. Both inspected native and legacy normalizers enforce rvol30 in
+[0,500] and implied_move in [0,100]; each admitted snapshot binds its actual source
+contract/producer, not an assumed range. This preserves the designed arm-specific
+preprocessing, not identical value admission; report mask-related abstentions.
+
+**Lossy source encoding.** Both the [native normalizer](../../engine/v2/ops/providers/orats_daily_market.py#L346-L354)
+and [legacy normalizer](../../engine/data/normalize/n_daily.py#L286-L304) already
+replace nonpositive current quotes with null. Such stored nulls do not prove
+whether the original value was zero or absent. Keep them null, record that loss
+of original status, skip them in both arms' reconstructed historical mean, and
+retain comparator abstention for missing current quotes. Set status `zero` and
+retain zero in the baseline/mean only when the pinned stored source actually
+preserves it; never reconstruct zero from null or fetch provider/raw data to
+recover it in this scope. Synthetic preserved-zero cases test policy, not source
+coverage. This prevents a claim that every historical production sentinel can
+be reproduced from today's normalized store.
+
+Add abs_dist_ema immediately after dist_ema in the
+runup block; append an `implied_history` block containing mean_prior_or_implied
+after daily_market. All other numeric order is unchanged. HMO's raw model matrix
+is these 42 columns followed by has_implied_quote; H/HM have no quote column.
+Recipe-specific missing flags are generated only from that recipe's columns
+inside each training fold, never stored globally or used to preselect features.
+
+**Immutable migration, not in-place widening.** Add research_magnitude_panel.v2
+(semantic version 2.0.0) and magnitude_panel_context.v2; preserve the existing
+v1 dictionary, helpers, row admission and identities. V2 dictionary entries bind
+ordered names, units, missing policy, source dependencies and the two derivation
+policies above; dictionary_hash remains content_hash of that ordered dictionary.
+H's eleven values/order remain unchanged; an unchanged H dictionary hash alone
+does not make the new versioned recipe/context identical. HM/HMO hashes change.
+New producers bind v2 schema/policies, full HMO dictionary hash, source/history
+snapshots, eligibility, prefix lineage and environment. Never relabel v1 or
+partial daily blocks as v2 rows, overwrite old snapshots, or reuse a success
+receipt under changed bindings. Shared history may be referenced only after
+exact existing context and eligibility compatibility checks; never rebuild it
+implicitly or reinterpret its membership to make a join succeed.
+
+After the pending source-free compiler lands, a separate wiring slice may admit
+the two exact dictionary versions by hash, with no latest/default substitution.
+Old request outputs must replay identically; the new hash/recipe yields new
+request/candidate IDs. Keep the request schema v2 and closed H/HM/HMO grids;
+dictionary version is explicit in the resolved recipe, not an extra search axis.
+Any actual amended run needs a new experiment/arm registration and sealed
+source/fold identities. Compiler declarations remain nonexecuting.
+
+There are still 33 candidates and 603 search fits for the proposed six-inner /
+three-outer fixture, plus 9 legacy logical / 18 component fits. Another schedule
+has different counts. Wider matrices and prefix work can change cost; none of
+these counts is a resource promise, real-data budget or performance claim.
+
+**Acceptance and bounded sequence.** This design precedes dictionary code.
+P1–P3 refine the original section-5 roadmap rather than replace it: P1 extends
+core slice 1; P2 completes the parity-dependent part of slices 2/6; P3 wires
+these versions through slices 3/4/5/6. Other core work and dependencies remain.
+
+| Slice | Dependency / acceptance | Estimated added code / tests / docs |
+| --- | --- | --- |
+| P1: add-only v2 dictionary/context contract | This reviewed design; explicit versions, closed lineage, no source reader | 180–300 / 250–400 / 35–60 |
+| P2: protected implied-history and absolute derivation | P1 and remaining causal materializer; reuse pinned/batched sources, no per-candidate builds | 250–380 / 300–500 / 40–70 |
+| P3: reader/compiler/recipe version wiring | P1/P2, complete stored reader and pending compiler; preserve old replay and v1 closures | 180–300 / 250–400 / 35–60 |
+
+Split add/wire further at repository limits; these are estimates, not waivers.
+P1 tests pin all 14 mappings, exact 11/28/42 order and HMO quote position,
+derivation-policy identity changes, unchanged v1 outputs and cross-version refusal.
+P2 uses independent numeric oracles for abs/nulls and prior means, zero/null quote
+counts, full-prefix four-event warm-up without restart at history_start,
+last-prior inclusion, protected/embargo holes without renumbering, skipped
+realized outcomes with valid quotes, future/known-late poison and each 5/3/1 clock.
+Include normalized-null versus preserved-zero fixtures and arm-specific mask boundaries.
+It proves no protected payload read and bounded source scans/batch invariance.
+P3 proves old request replay, new identities, unchanged 33/603 fixture counts,
+no partial-row admission and no global preprocessing or outer-outcome selection.
+No real source coverage, holdout opening, provider job, fit or registration is
+authorized or established here. The parallel numeric adapters remain
+column/hash-driven, with no panel dependency or hard-coded width.
 
 ### Admission before data and values
 
@@ -235,9 +405,10 @@ n_iter_no_change 15; its validation split stays within qualified training only.
 Preserve n_prior>=4, complete-input training admission, minimum 500 training rows
 and legacy training value masks (including abs_move in [0,200]). The target mask
 never filters evaluation targets or hides large misses. Preserve predictor masks
-or_implied [0,60] and or_rvol30 [0,700] at training and prediction. Keep source
-zero-quote versus absent-quote status so the baseline retains its zero sentinel
-and has_implied_quote=(or_implied>0), rather than inheriting HMO's null-zero encoding. Unavailable-input/insufficient-history
+or_implied [0,60] and or_rvol30 [0,700] at training and prediction. Under the
+lossy-source policy above, retain a zero sentinel only if the pinned stored source
+preserves it; normalized nulls stay null and cause baseline abstention. Preserve
+has_implied_quote=(or_implied>0), not HMO's null-zero encoding. Unavailable-input/insufficient-history
 predictions abstain explicitly. Do not apply the training target bound at prediction
 time. Preserve finite raw blend predictions (including negatives), as the native
 legacy estimator does; do not silently apply the challenger's zero projection. Reconstruct all fourteen
@@ -274,6 +445,9 @@ gain/promotion rule is a separate future decision; this run reports evidence onl
 
 ## 5. Small PR sequence and acceptance
 
+This is the original core roadmap. The section-1 parity P1–P3 substeps refine
+its named slices; row 0's estimate describes the original checkpoint, not the
+size of this later amendment or the separate request-compiler checkpoint.
 Each runtime PR targets <=400 added non-test code lines/<=120 doc lines; split add/wire further as needed with contract tests.
 Estimates exclude full-universe jobs/review queues. Ranges count added code/tests/docs, not deletions.
 Re-estimate before each PR and split at repository limits; these estimates grant no waiver.
