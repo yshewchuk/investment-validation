@@ -7,6 +7,7 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,7 +21,7 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.ops import executor
-from engine.v2.ops.catalog import transaction
+from engine.v2.ops.catalog import connect, transaction
 from engine.v2.ops.checkpoints import (
     artifact,
     cache_identity,
@@ -193,6 +194,180 @@ def _bounded_problem_details(details):
     return bounded
 
 
+#: Live attempts of THIS supervisor epoch whose lease the renewal thread
+#: extends each interval: a ``starting``/``running`` attempt that is still its
+#: job's active attempt under the job's current fence. A void fence or a
+#: cancelling job is excluded here, but an already-expired lease IS selected
+#: (expiry is not a row state), and ``lifecycle.heartbeat`` refuses it inside
+#: its fenced transaction, so this query never revives an attempt recovery has
+#: fenced off or a lease whose time already ran out.
+_LIVE_EPOCH_ATTEMPTS = (
+    "SELECT a.attempt_id, a.fence FROM attempts a "
+    "JOIN jobs j ON j.job_id = a.job_id "
+    "WHERE a.supervisor_epoch = ? "
+    "AND a.state IN ('starting', 'running') "
+    "AND j.state = 'running' AND j.active_attempt_id = a.attempt_id "
+    "AND j.fence = a.fence")
+
+#: At most this many failed attempts are named in a pass's single summary log line
+#: (AGENTS.md bounded row-loop cadence); the pass still counts and continues all rows.
+_RENEWAL_ERROR_DETAIL_LIMIT = 8
+
+
+def _rss_kb():
+    """VmRSS in KiB from ``/proc/self/status``; ``None`` when unreadable."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+class LeaseRenewer:
+    """A dedicated thread that renews this epoch's live leases off the main loop.
+
+    ``serve()``'s polling, reconciliation and coordinator effects run on one
+    thread, so a single long effect (a big read-set hash/copy, a subprocess)
+    used to starve every other live attempt of its heartbeat and the next
+    ``expire_leases`` fenced a healthy sibling (issue #1239). This thread is the
+    independent path the ``supervisor.py`` lease contract requires: it opens its
+    OWN catalog connection (the service connection is never shared across
+    threads), and once per ``lease_seconds / 4`` renews every live
+    ``starting``/``running`` attempt of this epoch through the fenced
+    :func:`heartbeat`, which refuses a void fence, a cancellation or an
+    already-expired lease without reviving it. Each renewal is one short
+    fenced transaction; a catalog error is swallowed and retried at the next
+    interval, never mutating attempt or job state. The thread runs only while
+    the supervisor holds its exclusive process lock: the caller starts it after
+    identity initialization and stops-and-joins it before releasing the lock.
+    """
+
+    def __init__(self, db_path, *, clock, epoch_id, lease_seconds, interval_seconds=None,
+                 connect=connect, stream=None):
+        self.db_path, self.clock, self.epoch_id = db_path, clock, epoch_id
+        self.lease_seconds = lease_seconds
+        # ``interval_seconds`` overrides the cadence for tests only; production
+        # always uses the ``lease_seconds / 4`` contract.
+        self.interval = (lease_seconds / 4) if interval_seconds is None else interval_seconds
+        self._connect = connect
+        self._stream = sys.stderr if stream is None else stream
+        self._stop = threading.Event()
+        self.first_pass = threading.Event()
+        self._thread = None
+        #: diagnostics counters (never a control input).
+        self.passes = 0
+        self.renewed = 0
+        self.errors = 0
+
+    def _log(self, message, **fields):
+        """One bounded stderr line (AGENTS.md progress logging); never raises."""
+        try:
+            payload = {"event": "lease_renewal", "epoch_id": self.epoch_id,
+                       "interval_seconds": self.interval, **fields}
+            print(f"[lease-renewal] {message} {json.dumps(payload, sort_keys=True)}",
+                  file=self._stream, flush=True)
+        except Exception:  # noqa: BLE001 - progress logging must not stop renewal
+            pass
+
+    def start(self):
+        self._log("thread starting", rss_kb=_rss_kb())
+        self._thread = threading.Thread(target=self._run, name="lease-renewal", daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        started = self.clock.monotonic()
+        conn = None
+        try:
+            # The connect is a catalog operation like any other, so a failure is
+            # retried at the same bounded interval rather than exiting the thread
+            # forever (a one-shot open would strand this epoch's leases to the
+            # expiry sweep on a transient lock). ``must_exist=True`` opens the
+            # existing catalog read-write and never creates a missing one.
+            while conn is None:
+                try:
+                    conn = self._connect(self.db_path, must_exist=True)
+                except Exception as exc:  # noqa: BLE001 - catalog errors retry at next interval
+                    self.errors += 1
+                    self._log("could not open catalog connection; retried next interval",
+                              error=type(exc).__name__)
+                    if self._stop.wait(self.interval):
+                        return
+            self._log("thread running", rss_kb=_rss_kb())
+            while True:
+                self.renew_pass(conn)
+                self.first_pass.set()
+                if self._stop.wait(self.interval):
+                    break
+        finally:
+            if conn is not None:
+                conn.close()
+            self._log("thread stopped", passes=self.passes, renewed=self.renewed,
+                      errors=self.errors, elapsed_seconds=self.clock.monotonic() - started,
+                      rss_kb=_rss_kb())
+
+    def renew_pass(self, conn):
+        """Renew every live attempt of this epoch once; swallow per-row errors.
+
+        Returns ``(renewed, total)``. A refused heartbeat (void fence, a
+        cancelling job, an expired lease) counts against ``total`` but not
+        ``renewed`` and is left for the main loop's expiry/reconcile path; a
+        raised renewal (a locked catalog) is caught here, counted as an error,
+        and retried at the next interval.
+        """
+        self.passes += 1
+        pass_started = self.clock.monotonic()
+        try:
+            rows = conn.execute(_LIVE_EPOCH_ATTEMPTS, (self.epoch_id,)).fetchall()
+        except Exception as exc:  # noqa: BLE001
+            self.errors += 1
+            self._log("lease query failed; retried next interval", error=type(exc).__name__)
+            return (0, 0)
+        renewed = 0
+        failed_this_pass = 0
+        failed_attempts = []
+        for row in rows:
+            try:
+                if heartbeat(conn, row["attempt_id"], row["fence"], clock=self.clock,
+                             lease_seconds=self.lease_seconds):
+                    renewed += 1
+            except Exception as exc:  # noqa: BLE001 - one attempt's failure must not stop the pass
+                # Aggregate locally rather than log per row (AGENTS.md bounded
+                # row-loop cadence); count every failure and still continue the pass.
+                self.errors += 1
+                failed_this_pass += 1
+                if len(failed_attempts) < _RENEWAL_ERROR_DETAIL_LIMIT:
+                    failed_attempts.append({"attempt_id": row["attempt_id"],
+                                            "error": type(exc).__name__})
+        self.renewed += renewed
+        if failed_this_pass:
+            self._log("renewal errors this pass", pass_number=self.passes,
+                      failed=failed_this_pass, failed_attempts=failed_attempts,
+                      truncated=failed_this_pass > len(failed_attempts))
+        self._log("pass complete", pass_number=self.passes, attempts=len(rows),
+                  renewed=renewed, skipped=len(rows) - renewed, errors=self.errors,
+                  elapsed_seconds=self.clock.monotonic() - pass_started, rss_kb=_rss_kb())
+        return (renewed, len(rows))
+
+    def stop(self):
+        """Signal the thread and join it to completion: after this returns the
+        renewal thread has exited, so ``_thread`` is cleared only once no further
+        renewal write can run. The join waits for the thread to finish on its
+        own; it is not a timed join. The thread's own catalog connection carries
+        a SQLite ``busy_timeout``, which bounds each individual DB attempt (a
+        renewal stuck behind a lock raises after that budget, is swallowed, and
+        the loop exits) rather than the total join. The spec requires this thread
+        stopped before the supervisor releases its lock, so a timed join that
+        could return while the thread is still live is unsafe.
+        """
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+
+
 class Service:
     def __init__(self, conn, root, registry, policy, *, clock, code_source, store_root=None,
                  materialization_base=None):
@@ -214,18 +389,7 @@ class Service:
         #: attempt_id -> _StepState; every running attempt's step-file offset,
         #: open step and interval memory peak.
         self._progress_state = {}
-        self.boot = read_boot_id()
-        self.lock = SupervisorLock(self.root / "supervisor.lock")
-        self.identity = None
-        self.last_wall = clock.now()
-        self.last_mono = clock.monotonic()
-        #: (code, message) of the last publication-status-reconciliation
-        #: problem actually printed, so a persisting problem prints once
-        #: rather than on every ~1s tick (2026-09-14 second review fix).
-        self._last_publication_status_problem = None
-        #: same dedup, for _reconcile_computed_moves_refresh (S4C Part 4,
-        #: revised after Opus BLOCK(3)).
-        self._last_computed_moves_problem = None
+        self._init_run_state()
         #: {"identity": _computed_moves_identity() tuple, "attempts": int,
         #: "not_before": monotonic float} or None -- the backoff memo for
         #: the SAME method (Opus re-gate finding: an unthrottled rebuild
@@ -275,6 +439,32 @@ class Service:
         self._native_parity_schema_mismatch_job_id = None
         self._last_native_parity_problem = None
 
+    def _init_run_state(self):
+        """Set up this epoch's process identity, lock and per-tick bookkeeping.
+
+        Split out of ``__init__`` to keep it under the 80-line function budget;
+        called at the same point, so assignment order is unchanged. ``self.clock``
+        and ``self.root`` are already set by ``__init__`` before this runs.
+        """
+        self.boot = read_boot_id()
+        self.lock = SupervisorLock(self.root / "supervisor.lock")
+        self.identity = None
+        #: independent lease-renewal thread (issue #1239); None until start().
+        self._renewer = None
+        self.last_wall = self.clock.now()
+        self.last_mono = self.clock.monotonic()
+        #: (code, message) of the last publication-status-reconciliation
+        #: problem actually printed, so a persisting problem prints once
+        #: rather than on every ~1s tick (2026-09-14 second review fix).
+        self._last_publication_status_problem = None
+        #: same dedup, for _reconcile_computed_moves_refresh (S4C Part 4,
+        #: revised after Opus BLOCK(3)).
+        self._last_computed_moves_problem = None
+
+    def _catalog_path(self):
+        return next(row[2] for row in self.conn.execute("PRAGMA database_list")
+                    if row[1] == "main")
+
     def start(self):
         if not self.lock.acquire():
             raise OpsError(make_problem("RESOURCE_UNAVAILABLE", "another supervisor holds this catalog"))
@@ -283,7 +473,16 @@ class Service:
             self.identity = Supervisor(epoch, self.boot)
             fence_foreign_epochs(self.conn, epoch_id=epoch, clock=self.clock)
             self.reconcile()
+            # issue #1239: start the independent renewal thread only AFTER this
+            # epoch's identity exists, so it renews this epoch's attempts on its
+            # own catalog connection; stop-and-join it before the lock releases.
+            self._renewer = LeaseRenewer(self._catalog_path(), clock=self.clock,
+                                         epoch_id=epoch, lease_seconds=LEASE_SECONDS)
+            self._renewer.start()
         except BaseException:
+            if self._renewer is not None:
+                self._renewer.stop()
+                self._renewer = None
             self.lock.release()
             raise
 
@@ -1038,20 +1237,34 @@ class Service:
 
     def _clock_check(self):
         wall, mono = self.clock.now(), self.clock.monotonic()
-        jump = abs((wall - self.last_wall).total_seconds() - (mono - self.last_mono))
-        if jump > 60:
+        mono_gap = mono - self.last_mono
+        jump = abs((wall - self.last_wall).total_seconds() - mono_gap)
+        # A wall-clock jump (a host suspend: wall races ahead of monotonic) or a
+        # monotonic tick pause that outlasted a lease (issue #1239: this
+        # single-threaded loop stalled on one long effect, so neither ``_poll``
+        # nor the renewal thread renewed these leases while wall and monotonic
+        # advanced together) both renew the live tracked attempts here, BEFORE
+        # this tick's ``expire_leases`` sweep fences a healthy worker.
+        if jump > 60 or mono_gap > LEASE_SECONDS:
             self._resume_after_jump()
         self.last_wall, self.last_mono = wall, mono
 
     def _resume_after_jump(self):
-        """A wall-clock jump (e.g. host suspend) must not fence a live worker (B2).
+        """A pause that outlasted a lease must not fence a live worker (B2, #1239).
 
-        Only this supervisor's own tracked attempts are ever touched here: an
-        attempt whose recorded identity is still verifiably alive gets its
-        lease renewed, ignoring wall-clock expiry, before ``expire_leases``
-        runs later this tick. One whose identity is gone is left alone and
-        goes through the normal expiry/reconcile path. No other attempt is
-        fenced by a jump.
+        Reached from ``_clock_check`` (before ``expire_leases`` runs later this
+        tick) on either a wall-clock jump or a long monotonic tick pause. Only
+        THIS supervisor's own tracked attempts are ever touched, and only while
+        it still holds the exclusive process lock (``start()`` took it,
+        ``close()`` releases it, and ``tick()`` runs only between them): an
+        attempt whose recorded worker identity is verifiably still alive has its
+        lease renewed, ignoring wall-clock expiry, so the sweep does not fence
+        it. One whose identity is gone is left alone and goes through the normal
+        expiry/reconcile path. ``renew_after_resume`` re-checks the current
+        job/attempt/fence pair in its own transaction, so this never restores a
+        fence recovery has already voided -- it only extends a lease this same
+        supervisor still holds under its live fence. No other attempt is fenced
+        or revived by a pause.
         """
         for attempt_id, running in self.running.items():
             identity = running.identities[0] if running.identities else None
@@ -1798,6 +2011,12 @@ class Service:
         return _commit, ()
 
     def close(self):
+        # issue #1239: stop-and-join the renewal thread BEFORE releasing the
+        # process lock, so no renewal write races a successor supervisor that
+        # takes the lock (and re-opens its own epoch) while this one is closing.
+        if self._renewer is not None:
+            self._renewer.stop()
+            self._renewer = None
         for running in self.running.values():
             signal_owned(running.identities, self.boot, hard=True)
             running.process.wait(timeout=5)
