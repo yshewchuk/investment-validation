@@ -58,6 +58,8 @@ def test_preflight_uses_real_generation_and_numeric_comparison(case, tmp_path):
                            materialization_root=pinned, receipt_id="preflight-match")
     assert result["generation"] == "match"
     assert result["features"]["verdict"] == "match"
+    assert result["features"]["tables"]["panel"]["verdict"] == "match"
+    assert result["features"]["tables"]["tier4"]["verdict"] == "match"
     assert case.conn.total_changes == before_changes
     assert {path: path.read_bytes() for path in feature_files} == before_files
 
@@ -132,6 +134,8 @@ def test_cli_registers_and_dispatches_snapshot_preflight(monkeypatch, tmp_path):
 
     def run(conn, store, **kwargs):
         seen.update(kwargs)
+        seen["conn"] = conn
+        seen["store_type"] = type(store).__name__
         return {"sentinel": "preflight-dispatched"}
 
     monkeypatch.setattr("engine.v2.ops.legacy_adapter.run_snapshot_preflight", run)
@@ -139,11 +143,14 @@ def test_cli_registers_and_dispatches_snapshot_preflight(monkeypatch, tmp_path):
         "snapshot", "preflight", "--source-root", str(source),
         "--materialization-root", str(pinned), "--receipt-id", "cli-receipt",
     ])
-    result = cli.dispatch(args, tmp_path, None, None)
+    conn = object()
+    clock = object()
+    result = cli.dispatch(args, tmp_path, conn, clock)
 
     assert result == {"sentinel": "preflight-dispatched"}
     assert seen == {"source_root": source, "materialization_root": pinned,
-                    "receipt_id": "cli-receipt"}
+                    "receipt_id": "cli-receipt", "conn": conn,
+                    "store_type": "ArtifactStore"}
 
 
 def test_preflight_rejects_empty_receipt_id(case, tmp_path):

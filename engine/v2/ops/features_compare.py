@@ -21,10 +21,11 @@ STAMP_MAX_ROWS = 5_000_000
 STAMP_MAX_BYTES = STAMP_MAX_ROWS * 96
 # Parquet footer (metadata) cap, read from the 8-byte file tail before the footer is parsed.
 STAMP_MAX_FOOTER_BYTES = 64 * 1024 * 1024
-# Whole-table cap on decoded input: row count and total uncompressed bytes from the footer;
-# a differing table over either cap is refused rather than decoded.
+# Whole-table cap on decoded input: row count and total uncompressed bytes from the footer.
+# All tables over either cap are refused before decode, identical or differing.
 TABLE_MAX_ROWS = 5_000_000
 TABLE_MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+TABLE_MAX_FOOTER_BYTES = 64 * 1024 * 1024
 TABLE_KEYS = {"panel": ("ticker", "date"), "tier4": ("ticker", "event_date")}
 IDENTICAL = {"verdict": "match", "max_abs_diff": 0.0, "max_rel_diff": 0.0,
              "n_columns_differing": 0, "mismatches": []}
@@ -117,7 +118,7 @@ def _cap_refusals(name, paths):
 def _table_cap_refusal(side, path):
     """The mismatch entry for one whole table over its row, byte or footer cap; else None."""
     footer = _footer_length(path)
-    if footer is not None and footer > TABLE_MAX_UNCOMPRESSED_BYTES:
+    if footer is not None and footer > TABLE_MAX_FOOTER_BYTES:
         return {"reason": "table_footer_over_cap", "side": side, "n_bytes": footer}
     import pyarrow.parquet as pq
 

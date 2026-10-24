@@ -629,7 +629,7 @@ def test_differing_table_byte_cap_refuses_before_full_decode(tmp_path, monkeypat
          "n_bytes": uncompressed},
     ]
 
-    monkeypatch.setattr(fc, "TABLE_MAX_UNCOMPRESSED_BYTES", footer - 1)
+    monkeypatch.setattr(fc, "TABLE_MAX_FOOTER_BYTES", footer - 1)
     monkeypatch.setattr(pq, "ParquetFile",
                         lambda *args, **kwargs: pytest.fail("footer cap must precede parsing"))
     footer_result = fc.compare_tables("panel", rebuilt, pinned)
