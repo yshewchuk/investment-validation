@@ -115,16 +115,22 @@ def _scratch_entry(profile, needed, detail):
 
 
 def _json_object(conn, store, artifact_id, label):
-    """Load a registered artifact as a JSON object, or refuse ``INVALID_REQUEST``.
+    """Load a registered artifact as a JSON object, or refuse.
 
-    A bad ``--plan`` id (unregistered), an unreadable/missing object
-    (``ArtifactError``) or a payload that is not a JSON object is an operator
-    input error on this read-only command, not an integrity failure, so every
-    path becomes one ``INVALID_REQUEST`` refusal rather than a traceback.
+    A bad ``--plan`` id (unregistered) or a payload that is not a JSON object
+    is an operator input error on this read-only command, so it becomes an
+    ``INVALID_REQUEST`` refusal rather than a traceback. But a registered
+    artifact whose bytes fail content-address verification
+    (``ArtifactError`` from ``read_verified``) is corruption, not input error,
+    so it becomes ``INTEGRITY_FAILED``.
     """
     try:
-        raw = store.read_verified(artifact(conn, store, artifact_id))
-    except (ArtifactError, OpsError):
+        ref = artifact(conn, store, artifact_id)
+        raw = store.read_verified(ref)
+    except ArtifactError:
+        raise fail("INTEGRITY_FAILED",
+                   f"the {label} artifact bytes fail verification") from None
+    except OpsError:
         raise fail("INVALID_REQUEST", f"the {label} artifact is not readable") from None
     try:
         document = json.loads(raw)
@@ -252,7 +258,9 @@ def _memory_entries(conn, max_rss_gb):
     The enforced memory limit and the profile name live on the attempt's
     ``resource_reservations`` row (``scheduler._create_attempt`` writes both
     beside ``resources_json``); rows with a NULL peak are skipped, as are
-    attempts outside the recent window.
+    attempts outside the recent window. With no recorded peak at all the
+    limits are ``UNMEASURED``, never an OK zero: a catalog that has never
+    run an attempt is not a catalog with idle memory.
     """
     entries = []
     rows = conn.execute(
@@ -264,6 +272,9 @@ def _memory_entries(conn, max_rss_gb):
         "ORDER BY COALESCE(ended_at, created_at) DESC LIMIT ?) "
         "GROUP BY rr.profile, rr.memory_bytes ORDER BY peak DESC",
         (_RECENT_ATTEMPTS,)).fetchall()
+    if not rows:
+        entries.append(_unmeasured("memory_peak", 0, "bytes",
+                                   "no finished attempt has a recorded memory peak"))
     for row in rows:
         entries.append(_entry(f"memory_peak:{row['profile']}", row["peak"],
                               row["memory_bytes"], "bytes",
@@ -279,9 +290,13 @@ def _memory_entries(conn, max_rss_gb):
             "(SELECT supervisor_epoch FROM attempts "
             "WHERE ended_at IS NOT NULL AND memory_peak_bytes IS NOT NULL "
             "ORDER BY COALESCE(ended_at, created_at) DESC LIMIT 1)").fetchone()["peak"]
-        entries.append(_entry("rss_cap_gb", int(peak or 0), int(max_rss_gb * _GIB), "bytes",
-                              "largest attempt memory peak of the most recent "
-                              "supervisor epoch vs --max-rss-gb"))
+        if peak is None:
+            entries.append(_unmeasured("rss_cap_gb", int(max_rss_gb * _GIB), "bytes",
+                                       "no finished attempt has a recorded memory peak"))
+        else:
+            entries.append(_entry("rss_cap_gb", int(peak), int(max_rss_gb * _GIB), "bytes",
+                                  "largest attempt memory peak of the most recent "
+                                  "supervisor epoch vs --max-rss-gb"))
     return entries
 
 

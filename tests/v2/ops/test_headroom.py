@@ -14,7 +14,7 @@ from engine.v2.data.price_history_query import _RESULT_CAP
 from engine.v2.foundation import ArtifactStore
 from engine.v2.ops import cli, headroom
 from engine.v2.ops.bootstrap import open_catalog
-from engine.v2.ops.checkpoints import register_artifact
+from engine.v2.ops.checkpoints import register_artifact, registered_artifact
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from tests.ops_support import FakeClock
@@ -152,11 +152,17 @@ def test_not_covered_lists_the_static_names(catalog):
 def test_rss_cap_entry_only_when_requested(catalog):
     document = report_for(catalog, nightly_plan_document())
     assert not [item for item in document["limits"] if item["name"] == "rss_cap_gb"]
+    peak = next(item for item in document["limits"] if item["name"] == "memory_peak")
+    assert peak["status"] == "UNMEASURED"
+    assert "no finished attempt has a recorded memory peak" in peak["detail"]
     document = report_for(catalog, nightly_plan_document(), max_rss_gb=1.5)
     entry = next(item for item in document["limits"] if item["name"] == "rss_cap_gb")
     assert entry["limit"] == int(1.5 * 1024 ** 3)
-    assert entry["usage"] == 0
-    assert entry["status"] == "OK"
+    assert entry["status"] == "UNMEASURED"
+    assert entry["pct"] is None
+    assert "no finished attempt has a recorded memory peak" in entry["detail"]
+    assert document["status"] == "UNMEASURED"
+    assert document["exit_code"] == 1
 
 
 def test_cli_headroom_returns_document_exit_code(tmp_path, catalog, capsys):
@@ -202,6 +208,17 @@ def test_non_object_plan_json_refuses_invalid_request(catalog):
         headroom.headroom_command(_headroom_args(conn, store, clock, plan_id),
                                   store.root, conn, clock)
     assert excinfo.value.code == "INVALID_REQUEST"
+
+
+def test_tampered_plan_artifact_refuses_integrity_failed(catalog):
+    conn, store, clock = catalog
+    plan_id = publish(conn, store, clock, nightly_plan_document())
+    path = store.verify(registered_artifact(conn, plan_id))
+    path.write_bytes(b'{"kind": "tampered"}')
+    with pytest.raises(OpsError) as excinfo:
+        headroom.headroom_command(_headroom_args(conn, store, clock, plan_id),
+                                  store.root, conn, clock)
+    assert excinfo.value.code == "INTEGRITY_FAILED"
 
 
 # ---------------------------------------------------- real rows (memory, G)
@@ -283,5 +300,6 @@ def test_price_history_projection_from_history_points(catalog, monkeypatch):
                  if item["name"] == "price_history_result_rows")
     assert entry["status"] == "OK"
     assert entry["usage"] == 1000  # largest partition (AAPL)
-    assert entry["projected_days_to_limit"] is not None
+    # known slope from the two points: 90 rows/day, so (_RESULT_CAP - 1000)/90
+    assert entry["projected_days_to_limit"] == pytest.approx((_RESULT_CAP - 1000) / 90.0)
 
