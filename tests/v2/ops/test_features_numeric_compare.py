@@ -407,9 +407,9 @@ def test_compare_identical_checks_only_stamps_and_counts_once_per_side(tmp_path)
                                             ([_H1, "bad", _H1, _H1, _H1, _H1], "mismatch")])
 def test_byte_identical_tier4_goes_through_the_stamp_check_in_the_features_action(
         tmp_path, monkeypatch, stamps, verdict):
+    import engine.v2.ops.features_compare as fc
     from engine import paths as paths_module
     from engine.data import rebuild
-    import engine.v2.ops.features_compare as fc
 
     def no_full_compare(*args, **kwargs):
         raise AssertionError("byte-identical tables must not take the full compare path")
@@ -504,6 +504,7 @@ def test_compare_identical_refuses_oversized_stamp_bytes_without_decoding(tmp_pa
 
 def test_compare_identical_byte_cap_boundary_and_exact_size(tmp_path, monkeypatch):
     import pyarrow.parquet as pq
+
     import engine.v2.ops.features_compare as fc
 
     path = tmp_path / "t.parquet"
@@ -546,6 +547,7 @@ def test_compare_tables_refuses_an_over_cap_stamp_column_on_either_side(tmp_path
 
 def test_footer_cap_boundary_refuses_before_parsing_the_footer(tmp_path, monkeypatch):
     import pyarrow.parquet as pq
+
     import engine.v2.ops.features_compare as fc
 
     path = tmp_path / "t.parquet"
@@ -556,10 +558,105 @@ def test_footer_cap_boundary_refuses_before_parsing_the_footer(tmp_path, monkeyp
     assert fc.compare_identical("tier4", path)["verdict"] == "match"      # exactly at the cap
     monkeypatch.setattr(fc, "STAMP_MAX_FOOTER_BYTES", footer - 1)
 
+    parquet_file = pq.ParquetFile
+
     def no_parse(*args, **kwargs):
         raise AssertionError("footer must not be parsed")
 
     monkeypatch.setattr(pq, "ParquetFile", no_parse)
     out = fc.compare_identical("tier4", path)
     assert out["mismatches"] == [{"reason": "stamp_footer_over_cap", "n_bytes": footer}]
-    assert fc.compare_identical("panel", path)["verdict"] == "match"      # no stamp columns: footer never read
+    monkeypatch.setattr(pq, "ParquetFile", parquet_file)
+    assert fc.compare_identical("panel", path)["verdict"] == "match"      # panel metadata is validated
+
+
+def test_identical_table_row_cap_refuses_before_full_decode(tmp_path, monkeypatch):
+    import engine.v2.ops.features_compare as fc
+
+    path = tmp_path / "table.parquet"
+    _write(path, _frame())
+    monkeypatch.setattr(fc, "TABLE_MAX_ROWS", 6)
+    assert fc.compare_identical("panel", path)["verdict"] == "match"
+
+    monkeypatch.setattr(fc, "TABLE_MAX_ROWS", 5)
+    result = fc.compare_identical("panel", path)
+    assert result["verdict"] == "mismatch"
+    assert result["mismatches"] == [
+        {"reason": "table_rows_over_cap", "side": "pinned", "n_rows": 6},
+    ]
+
+    monkeypatch.setattr(fc, "TABLE_MAX_ROWS", 0)
+    monkeypatch.setattr(fc.pd, "read_parquet",
+                        lambda *args, **kwargs: pytest.fail("table decode was reached"))
+    assert fc.compare_identical("panel", path)["mismatches"] == [
+        {"reason": "table_rows_over_cap", "side": "pinned", "n_rows": 6},
+    ]
+
+
+def test_differing_table_row_cap_refuses_before_full_decode(tmp_path, monkeypatch):
+    import pandas as pd
+
+    from engine.v2.ops import features_compare as fc
+
+    table = pd.DataFrame({"ticker": ["AAA"], "date": ["2026-01-02"], "value": [1.0]})
+    rebuilt = tmp_path / "rebuilt.parquet"
+    pinned = tmp_path / "pinned.parquet"
+    table.to_parquet(rebuilt, index=False)
+    table.to_parquet(pinned, index=False)
+    monkeypatch.setattr(fc, "TABLE_MAX_ROWS", 0)
+    monkeypatch.setattr(fc.pd, "read_parquet",
+                        lambda *args, **kwargs: pytest.fail("full table decode was reached"))
+
+    result = fc.compare_tables("panel", rebuilt, pinned)
+
+    assert result["verdict"] == "mismatch"
+    assert result["mismatches"] == [
+        {"reason": "table_rows_over_cap", "side": "rebuilt", "n_rows": 1},
+        {"reason": "table_rows_over_cap", "side": "pinned", "n_rows": 1},
+    ]
+
+
+def test_differing_table_byte_cap_refuses_before_full_decode(tmp_path, monkeypatch):
+    import pyarrow.parquet as pq
+
+    import engine.v2.ops.features_compare as fc
+
+    table = pd.DataFrame({
+        "ticker": [f"AAA{i:05d}" for i in range(4096)],
+        "date": ["2026-01-02"] * 4096,
+        "value": [float(i) for i in range(4096)],
+    })
+    rebuilt = tmp_path / "rebuilt.parquet"
+    pinned = tmp_path / "pinned.parquet"
+    table.to_parquet(rebuilt, index=False)
+    table.to_parquet(pinned, index=False)
+    footer = fc._footer_length(rebuilt)
+    metadata = pq.ParquetFile(rebuilt).metadata
+    uncompressed = sum(
+        metadata.row_group(i).column(j).total_uncompressed_size
+        for i in range(metadata.num_row_groups)
+        for j in range(metadata.num_columns)
+    )
+    assert uncompressed > footer + 1
+    monkeypatch.setattr(fc, "TABLE_MAX_UNCOMPRESSED_BYTES", footer + 1)
+    monkeypatch.setattr(fc.pd, "read_parquet",
+                        lambda *args, **kwargs: pytest.fail("full table decode was reached"))
+
+    result = fc.compare_tables("panel", rebuilt, pinned)
+
+    assert result["verdict"] == "mismatch"
+    assert result["mismatches"] == [
+        {"reason": "table_bytes_over_cap", "side": "rebuilt",
+         "n_bytes": uncompressed},
+        {"reason": "table_bytes_over_cap", "side": "pinned",
+         "n_bytes": uncompressed},
+    ]
+
+    monkeypatch.setattr(fc, "TABLE_MAX_FOOTER_BYTES", footer - 1)
+    monkeypatch.setattr(pq, "ParquetFile",
+                        lambda *args, **kwargs: pytest.fail("footer cap must precede parsing"))
+    footer_result = fc.compare_tables("panel", rebuilt, pinned)
+    assert footer_result["mismatches"] == [
+        {"reason": "table_footer_over_cap", "side": "rebuilt", "n_bytes": footer},
+        {"reason": "table_footer_over_cap", "side": "pinned", "n_bytes": footer},
+    ]

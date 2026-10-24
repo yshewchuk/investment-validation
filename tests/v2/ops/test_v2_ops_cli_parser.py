@@ -38,7 +38,7 @@ def test_command_tree_is_exactly_the_expected_set():
     for action in p._actions:
         if isinstance(action, argparse._SubParsersAction):
             assert _subparser_choices(action.choices["snapshot"]) == sorted(
-                {"plan-import", "submit", "promote", "rollback"})
+                {"plan-import", "submit", "promote", "rollback", "preflight"})
             assert _subparser_choices(action.choices["ledger"]) == sorted(
                 {"import-history", "status", "calibrate", "book"})
             assert _subparser_choices(action.choices["decisions"]) == ["supersede"]
