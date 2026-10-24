@@ -236,7 +236,7 @@ def test_retry_rebuilds_unsafe_prior_database(tmp_path, monkeypatch, unsafe_prio
         assert external.read_bytes() == external_bytes
 
 
-def test_retry_refuses_changed_source_without_replacing_manifest(tmp_path):
+def test_retry_rebuilds_when_source_rows_change(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "changed-source", {}, clock=clock)
@@ -250,21 +250,22 @@ def test_retry_refuses_changed_source_without_replacing_manifest(tmp_path):
         run_backup(conn, key="changed-source", owner="worker", target=backup,
                    clock=clock, store=store, fault=crash_after_publish)
     manifest = backup / "changed-source.manifest.json"
-    original = manifest.read_bytes()
-    manifest_doc = json.loads(backup_module._read_bounded_bytes(
+    prior = json.loads(backup_module._read_bounded_bytes(
         manifest, backup_module.MAX_MANIFEST_BYTES))
-    assert drill_module._manifest_is_consistent(manifest_doc, backup, "changed-source", conn)
+    assert drill_module._manifest_is_consistent(prior, backup, "changed-source", conn)
     conn.execute("CREATE TABLE synthetic_change (value TEXT)")
     conn.commit()
     clock.advance(301)
 
-    with pytest.raises(OpsError) as refused:
-        run_backup(conn, key="changed-source", owner="retry", target=backup,
-                   clock=clock, store=store)
+    result = run_backup(conn, key="changed-source", owner="retry", target=backup,
+                        clock=clock, store=store)
+    updated = json.loads(backup_module._read_bounded_bytes(
+        manifest, backup_module.MAX_MANIFEST_BYTES))
 
-    assert refused.value.code == "INTEGRITY_FAILED"
-    assert refused.value.problem.retryable is False
-    assert manifest.read_bytes() == original
+    assert result["database_rows"] == _row_counts(conn)
+    assert updated["database_rows"] != prior["database_rows"]
+    assert updated["database"] != prior["database"]
+    assert drill_module._manifest_is_consistent(updated, backup, "changed-source", conn)
 
 
 def test_manifest_difference_is_refused(tmp_path):

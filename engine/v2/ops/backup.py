@@ -218,7 +218,7 @@ def _verified_prior_backup(manifest_path, database, source_rows, key, payload):
         return None
     prior_rows = manifest.get("database_rows")
     if prior_rows is not None and prior_rows != source_rows:
-        raise fail("INTEGRITY_FAILED", "backup source rows changed after manifest publication")
+        return None
     if prior_rows is None:
         return None
     expected_hash = manifest.get("database")
