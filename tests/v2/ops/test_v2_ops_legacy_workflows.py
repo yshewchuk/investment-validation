@@ -62,6 +62,48 @@ def test_private_copy_rejects_indirection_and_is_read_only(tmp_path):
         manifest_files(source, ("link",))
 
 
+def test_manifest_files_ancestor_symlink_rejection_is_opt_in(tmp_path):
+    root = tmp_path / "source"
+    outside = tmp_path / "outside"
+    (root / "nested").mkdir(parents=True)
+    outside.mkdir()
+    (outside / "input.bin").write_bytes(b"pinned")
+    (root / "nested" / "link").symlink_to(outside, target_is_directory=True)
+
+    assert manifest_files(root, ("nested/link/input.bin",))["nested/link/input.bin"][
+        "byte_size"] == 6
+    with pytest.raises(OpsError, match="ancestor is indirect"):
+        manifest_files(root, ("nested/link/input.bin",), reject_indirect_ancestors=True)
+
+
+def test_manifest_files_refuses_member_replaced_by_symlink_before_open(tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+
+    root = tmp_path / "source"
+    root.mkdir()
+    member = root / "input.bin"
+    member.write_bytes(b"pinned")
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(b"attacker")
+    if not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("platform has no O_NOFOLLOW flag")
+    real_open = os.open
+    swapped = False
+
+    def swap_then_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == member and not swapped:
+            swapped = True
+            member.unlink()
+            member.symlink_to(replacement)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr("engine.v2.ops.legacy_adapter.os.open", swap_then_open)
+    with pytest.raises(OpsError, match="could not be opened"):
+        manifest_files(root, ("input.bin",))
+
+
 def test_overlay_read_set_symlinks_every_file_without_touching_the_source(tmp_path):
     """Attempt-19 fix: ``legacy_render``'s writable overlay must reach the
     SAME bytes a verified materialization root pins, never copy them, and

@@ -21,6 +21,11 @@ STAMP_MAX_ROWS = 5_000_000
 STAMP_MAX_BYTES = STAMP_MAX_ROWS * 96
 # Parquet footer (metadata) cap, read from the 8-byte file tail before the footer is parsed.
 STAMP_MAX_FOOTER_BYTES = 64 * 1024 * 1024
+# Whole-table cap on decoded input: row count and total uncompressed bytes from the footer.
+# All tables over either cap are refused before decode, identical or differing.
+TABLE_MAX_ROWS = 5_000_000
+TABLE_MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+TABLE_MAX_FOOTER_BYTES = 64 * 1024 * 1024
 TABLE_KEYS = {"panel": ("ticker", "date"), "tier4": ("ticker", "event_date")}
 IDENTICAL = {"verdict": "match", "max_abs_diff": 0.0, "max_rel_diff": 0.0,
              "n_columns_differing": 0, "mismatches": []}
@@ -110,10 +115,29 @@ def _cap_refusals(name, paths):
     return found
 
 
+def _table_cap_refusal(side, path):
+    """The mismatch entry for one whole table over its row, byte or footer cap; else None."""
+    footer = _footer_length(path)
+    if footer is not None and footer > TABLE_MAX_FOOTER_BYTES:
+        return {"reason": "table_footer_over_cap", "side": side, "n_bytes": footer}
+    import pyarrow.parquet as pq
+
+    md = pq.ParquetFile(path).metadata
+    if md.num_rows > TABLE_MAX_ROWS:
+        return {"reason": "table_rows_over_cap", "side": side, "n_rows": md.num_rows}
+    size = sum(md.row_group(i).column(j).total_uncompressed_size
+               for i in range(md.num_row_groups) for j in range(md.num_columns))
+    if size > TABLE_MAX_UNCOMPRESSED_BYTES:
+        return {"reason": "table_bytes_over_cap", "side": side, "n_bytes": size}
+    return None
+
+
 def compare_identical(name, path) -> dict:
-    """Result for a byte-identical pair of tables: nothing to diff, but provenance stamps
-    must still be well formed. Reads only the stamp columns (never the whole table)."""
+    """Result for a byte-identical pair: validate metadata and caps, then stamp columns."""
     cols, refusal = _footer_refusal(name, path)
+    if refusal:
+        return dict(IDENTICAL, verdict="mismatch", mismatches=[refusal])
+    refusal = _table_cap_refusal("pinned", path)
     if refusal:
         return dict(IDENTICAL, verdict="mismatch", mismatches=[refusal])
     out = []
@@ -137,10 +161,17 @@ def _stamp_mismatches(name, rebuilt, pinned):
 
 
 def _precheck(name, rebuilt_path, pinned_path):
-    """Structural result when a table is missing or a stamp column is over its cap; else None."""
+    """Structural result when a table is missing or over a table/stamp cap; else None."""
     if not rebuilt_path.exists() or not pinned_path.exists():
         return _structural([{"reason": "table_missing", "rebuilt": rebuilt_path.exists(),
                              "pinned": pinned_path.exists()}])
+    table_capped = []
+    for side, path in (("rebuilt", rebuilt_path), ("pinned", pinned_path)):
+        refusal = _table_cap_refusal(side, path)
+        if refusal:
+            table_capped.append(refusal)
+    if table_capped:
+        return _structural(table_capped)
     capped = _cap_refusals(name, (("rebuilt", rebuilt_path), ("pinned", pinned_path)))
     return _structural(capped) if capped else None
 

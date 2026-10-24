@@ -64,8 +64,8 @@ can turn green. Do not substitute historical receipt ids or hand-written logs.
   rendered through the actual `engine.dashboard.render.render_bundle`**
   (`tests/test_v2_serving_legacy_bundle.py`); not yet run against the full
   board of a real accepted Phase 2 release.
-- `python3 -m engine.v2.ops` (`plan`, `submit`, `snapshot plan-import|submit|
-  promote|rollback`, `get`, `logs`, `cancel`, `resume`, `explain`, `serve`,
+- `python3 -m engine.v2.ops` (`plan`, `submit`, `snapshot plan-import|preflight|
+  submit|promote|rollback`, `get`, `logs`, `cancel`, `resume`, `explain`, `serve`,
   `init`, `doctor`, `health`, `reconcile`) — the general nightly/operations
   CLI. **Exists** (Phase 1/2 work); this guide does not touch `engine/v2/ops`.
 - **Publishing a v2 serving release through the fenced ops workflow EXISTS
