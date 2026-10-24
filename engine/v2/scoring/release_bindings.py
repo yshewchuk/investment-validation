@@ -51,6 +51,7 @@ from engine.v2.models.residual_artifact import (
     residual_artifact_from_document,
 )
 from engine.v2.models.trailing_cutoff_artifact import TrailingCutoffArtifact
+from engine.v2.scoring.gate_fold_selection import SizeFoldCatalog, index_size_folds
 
 __all__ = [
     "ModelIdentity",
@@ -164,6 +165,9 @@ class ScoringReleaseBinding:
     chooser_admissible_artifacts: tuple[AdmissibleDepthTable, ...] = ()
     paired_residual_artifacts: tuple[PairedResidualPoolArtifact, ...] = ()
     trailing_cutoff_artifacts: tuple[TrailingCutoffArtifact, ...] = ()
+    #: Indexed descriptors of the release's ``tier4_folds:size`` member; absent
+    #: or not STAGED -> empty. See ARCHITECTURE.md ("Forward forecast assembly").
+    size_folds: "SizeFoldCatalog | None" = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_identity", MappingProxyType(dict(self.model_identity)))
@@ -217,6 +221,7 @@ def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
 
     model_identity, model_artifact_refs = _resolve_model_bindings(dep_root, release)
     catalog = _read_state_catalog(root, pointer.release_id)
+    size_folds = index_size_folds(catalog, manifest)
     payoff = _resolve_state_group(
         dep_root, catalog, lambda member_id: member_id.startswith(_PAYOFF_PREFIXES), _load_payoff)
     recalibration = _resolve_state_group(
@@ -245,7 +250,7 @@ def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
         chooser_analog_artifacts=chooser_analog,
         chooser_admissible_artifacts=chooser_admissible,
         paired_residual_artifacts=paired_residual,
-        trailing_cutoff_artifacts=trailing_cutoff,
+        trailing_cutoff_artifacts=trailing_cutoff, size_folds=size_folds,
     )
 
 

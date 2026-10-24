@@ -48,6 +48,9 @@ load-bearing entrypoints:
 - `source_inputs.py` — `SourceBundle` (answer-free source dataclass, frozen,
   `kw_only=True`) and `build_native_score_inputs(bundle) -> NativeScoreInputs`,
   the boundary every acceptance/parity caller starts from.
+- `gate_fold_selection.py` — `SizeFoldCatalog`, `index_size_folds` and
+  `select_gate_forecast_source`: the release's staged size-fold descriptors
+  (`ScoringReleaseBinding.size_folds`) and the causal choice of one fold.
 - `gate_forecast_source.py` — `GateForecastSource`, the optional
   `SourceBundle.gate_forecast_source` carrying the selected size fold's
   binding, release, inference and held-out pool for the gate's forecast.
@@ -79,14 +82,15 @@ load-bearing entrypoints:
   runs in production).
 - `release_bindings.py` — `resolve_release_binding(release_root) ->
   ScoringReleaseBinding`, the production reader of a live deployment's model
-  identity, model artifact refs, and analog/payoff/recalibration/residual/chooser
-  artifacts;
+  identity, model artifact refs, analog/payoff/recalibration/residual/chooser
+  artifacts, and the staged size-fold descriptor index (`size_folds`);
   `resolve_production_release_binding()` is the same resolution against the
   one configured production release root
   (`engine.v2.models.deployment.production_release_root()`, config key
   `MODEL_RELEASE_ROOT` — see `engine/v2/models/ARCHITECTURE.md` §7.4).
   `ScoringReleaseBinding` (frozen dataclass, every mapping field a read-only
-  `MappingProxyType`) fields: `release_id: str`; `model_identity: Mapping[str,
+  `MappingProxyType`) fields (plus `size_folds: SizeFoldCatalog | None`, the
+  indexed `tier4_folds:size` descriptors, see "Forward forecast assembly"): `release_id: str`; `model_identity: Mapping[str,
   ModelIdentity]` **keyed `"{role}:{strategy_id}"`** (never by `role` alone —
   a release can bind `role="gate"` once per strategy, so two bindings
   resolving to the same key is a release defect, refused as `ModelNotReady`
@@ -238,6 +242,29 @@ Failure semantics: building the source members does no I/O, caching, retry or
 fallback; a refusal returns no bundle. Choosing which fold to supply is the
 caller's duty and this input does not select or fall back.
 
+`resolve_release_binding` indexes the release's staged size folds (catalog
+member `tier4_folds:size`) into `ScoringReleaseBinding.size_folds`
+(`SizeFoldCatalog`: the verified parent manifest, the catalog hash and each
+object's `ServingFoldDescriptor` by `fold_start`). Indexing reads descriptors
+only; no estimator is loaded. `select_gate_forecast_source(binding, event_date,
+as_of) -> GateForecastSource` picks the fold by the legacy rule
+`tier4.serving_fold` (the earlier of the event's month and the decision month),
+loads that one fold through `load_serving_fold` and the binding's shared
+`FrozenInference`, and returns the source.
+
+| Condition | Outcome |
+| --- | --- |
+| Release stages no `tier4_folds:size` member, or it is not `STAGED` | Empty catalog; selection raises `ModelNotReady` |
+| Catalog `schema_version`, `release_id` (against the parent manifest) or self `manifest_hash` not verifying (`index_size_folds` re-checks them; it never trusts a caller-built catalog) | `ModelNotReady` |
+| `members` not a list, a member row that is not a mapping, more than one `tier4_folds:size` row, `objects` not a list, an object that is not a mapping or lacks string `path`/`content_hash`, no `serving_fold` descriptor, undecodable descriptor, descriptor failing the loader's descriptor check (first-of-month `fold_start`, policy, pool count, estimator), descriptor `estimator` path or hash differing from the catalog object, catalog object `name` or `bytes` failing the serving-fold object check (name derived from the descriptor, `0 < bytes <= MAX_FOLD_BYTES`), duplicate `fold_start` | `ModelNotReady` at `resolve_release_binding` |
+| `binding.size_folds` is `None` (hand-built binding) | `ModelNotReady` at selection |
+| `SizeFoldCatalog` whose issuance proof (a hash over its `catalog_hash`, descriptors and catalog-declared object bytes) is absent or does not match, including a `dataclasses.replace` that swaps descriptors or bytes; the declared bytes are enforced when the fold is loaded | `TypeError`; selection also refuses any object that is not a `SizeFoldCatalog` |
+| No staged fold for the selected month, or the catalog entry's descriptor `fold_start` differs from its key (caller-built catalog) | `ModelNotReady("tier4_folds:size", ...)`; never an older fold |
+| Fold fails verification or loading (`ServingFoldError`) | `ModelNotReady`; no fallback to another fold |
+| `event_date` or `as_of` not an ISO date | `ValueError` |
+
+Selection does no writes and keeps no state beyond the shared inference cache.
+
 Raw feature names exclude stage-owned forecast/analog/pricing answers; the
 gate's declared feature order still includes them for stage-time derivation.
 6c must provide the required raw inputs and observation anchor for the driver,
@@ -334,6 +361,16 @@ One declared legacy adapter (`checks/legacy_adapters.json`, package
 `engine.v2.scoring`, module `compatibility.py`): `engine.score.Scorer`,
 `engine.score.ScoreRequest`, `engine.fills.FillModel`, confined to
 `score_legacy_request`, removal targeted at "phase-5 scoring extraction."
+
+`release_bindings.py` and `gate_fold_selection.py` import each other
+(`resolve_release_binding` calls `index_size_folds`; the selector raises
+`ModelNotReady`). `release_bindings.py` imports it at top level (the worker
+source-manifest closure follows top-level imports); the reverse import is
+function-local, so there is no import-time cycle.
+`gate_fold_selection.py` also imports `engine.v2.foundation`,
+`engine.v2.models.deployment`, `engine.v2.models.serving_fold_loader`,
+`engine.v2.models.serving_folds` and `gate_forecast_source.py`;
+`release_bindings.py` imports it at top level.
 
 `nightly_source_bundle.py` adds one new intra-package import edge
 (`.source_inputs`, for its own leakage check). It does not import
@@ -512,6 +549,7 @@ rather than its own. `native_score_batch` goes through `score_one`, never
   | `resolve_production_release_binding()` only: no/blank `MODEL_RELEASE_ROOT` | `ModelNotReady("release_root", "no production release root is configured")` |
   | once resolved, any member (model binding, payoff/recalibration/analog artifact) missing, wrong status, hash mismatch, or fails its typed load | `ModelNotReady(member_id, ...)`, naming the exact member (e.g. `"model:gate:STR-THRU"`) |
   | Release-local `phase5_release.json`: unreadable, bad self-hash, wrong schema or release ID | `ModelNotReady("phase5_release.json", ...)` before any state-family row is read; a valid root copy never overrides this refusal |
+  | `tier4_folds:size` row malformed (more than one row, non-mapping objects, bad descriptor, name/bytes mismatch, duplicate `fold_start`) | `ModelNotReady("tier4_folds:size", ...)` at resolve; a non-list `members`, a non-mapping members row or a non-string `member_id` is `ModelNotReady("phase5_release.json", ...)`; an absent or non-`STAGED` row indexes empty (see "Forward forecast assembly") |
   | Release-local catalog absent | Read the legacy root catalog only if its schema, self-hash and release ID match; otherwise `ModelNotReady` |
 
   Catalogs beside each staged model manifest survive promotion and rollback.
