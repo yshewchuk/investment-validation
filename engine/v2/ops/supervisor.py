@@ -201,17 +201,31 @@ def _bounded_problem_details(details):
 #: (expiry is not a row state), and ``lifecycle.heartbeat`` refuses it inside
 #: its fenced transaction, so this query never revives an attempt recovery has
 #: fenced off or a lease whose time already ran out.
-_LIVE_EPOCH_ATTEMPTS = (
-    "SELECT a.attempt_id, a.fence FROM attempts a "
-    "JOIN jobs j ON j.job_id = a.job_id "
-    "WHERE a.supervisor_epoch = ? "
+_LIVE_EPOCH_ATTEMPT_FILTER = (
+    "a.supervisor_epoch = ? "
     "AND a.state IN ('starting', 'running') "
     "AND j.state = 'running' AND j.active_attempt_id = a.attempt_id "
     "AND j.fence = a.fence")
 
+_LIVE_EPOCH_ATTEMPT_COUNT = (
+    "SELECT COUNT(*) FROM attempts a JOIN jobs j ON j.job_id = a.job_id "
+    "WHERE " + _LIVE_EPOCH_ATTEMPT_FILTER)
+
+#: Keyset page over the same predicate: rows strictly after the previous page's
+#: last ``attempt_id``, ordered by it, capped by the bound in ``LIMIT ?``.
+_LIVE_EPOCH_ATTEMPT_PAGE = (
+    "SELECT a.attempt_id, a.fence FROM attempts a "
+    "JOIN jobs j ON j.job_id = a.job_id "
+    "WHERE " + _LIVE_EPOCH_ATTEMPT_FILTER + " AND a.attempt_id > ? "
+    "ORDER BY a.attempt_id LIMIT ?")
+
 #: At most this many failed attempts are named in a pass's single summary log line
 #: (AGENTS.md bounded row-loop cadence); the pass still counts and continues all rows.
 _RENEWAL_ERROR_DETAIL_LIMIT = 8
+
+#: Rows fetched per keyset page of the live-attempt query (bounded fetchall;
+#: the pass never materializes the whole live set at once).
+_RENEWAL_PAGE_ROWS = 128
 
 #: Bounded progress cadence within a renewal pass.
 _RENEWAL_PROGRESS_SECONDS = 60
@@ -289,16 +303,53 @@ class LeaseRenewer:
             # yet in this copy) survives even though no queried row knows it.
             return set(self._excluded_attempts)
 
-    def _retire_stale_exclusions(self, snapshot, live_ids):
-        """Prune under ``_lock`` only snapshotted ids absent from ``live_ids``."""
+    def _retire_stale_exclusions(self, snapshot, exclusions_seen):
+        """Prune under ``_lock`` only snapshotted ids absent from the live rows."""
         with self._lock:
             # Retire only a snapshotted exclusion whose attempt has since left
             # this epoch's live set (fenced or settled at query start), so the
             # set never grows past the attempts this thread can still hand to a
             # heartbeat and never keeps a stale id off the set renewed.
-            # Post-snapshot exclusions are absent from the difference and are
-            # therefore never pruned, even when live_ids omits their attempt.
-            self._excluded_attempts.difference_update(snapshot - live_ids)
+            # ``exclusions_seen`` is the subset of the snapshot found among the
+            # streamed rows; post-snapshot exclusions are absent from the
+            # difference and are therefore never pruned, even when the rows
+            # omit their attempt.
+            self._excluded_attempts.difference_update(snapshot - exclusions_seen)
+
+    def _live_attempt_pages(self, conn):
+        """Yield this epoch's live attempts as keyset pages of ``_RENEWAL_PAGE_ROWS``.
+
+        Each page is one bounded ``fetchall`` of the paged query; the next page
+        starts strictly after the previous page's last ``attempt_id``, so the
+        pass never materializes the whole live set. The generator ends after a
+        short or empty page; a raising page query propagates to ``renew_pass``.
+        """
+        last_id = ""
+        while True:
+            page = conn.execute(_LIVE_EPOCH_ATTEMPT_PAGE,
+                                (self.epoch_id, last_id, _RENEWAL_PAGE_ROWS)).fetchall()
+            if not page:
+                return
+            yield page
+            if len(page) < _RENEWAL_PAGE_ROWS:
+                return
+            last_id = page[-1]["attempt_id"]
+
+    def _log_pass_progress(self, now, pass_started, last_progress, done, total, renewed):
+        """Emit the bounded row-loop progress line if due; return the new marker.
+
+        AGENTS.md progress logging cadence: at most one line per
+        ``_RENEWAL_PROGRESS_SECONDS`` of fake or real time within a pass.
+        """
+        if now - last_progress < _RENEWAL_PROGRESS_SECONDS:
+            return last_progress
+        elapsed = now - pass_started
+        rate = done / elapsed if elapsed > 0 else 0.0
+        eta = (total - done) / rate if rate > 0 else 0.0
+        self._log("pass progress", pass_number=self.passes, done=done, total=total,
+                  rate_per_second=round(rate, 2), eta_seconds=round(eta, 2), renewed=renewed,
+                  errors=self.errors, elapsed_seconds=round(elapsed, 2), rss_kb=_rss_kb())
+        return now
 
     def start(self):
         self._log("thread starting", rss_kb=_rss_kb())
@@ -342,67 +393,77 @@ class LeaseRenewer:
         Returns ``(renewed, total)``: a refused heartbeat (void fence, cancelling job, expired
         lease) counts in ``total`` only, a raised renewal is an error retried next interval, a
         stop ends the pass after the in-flight row; prune uses only the query-start snapshot.
+        Rows stream through bounded keyset pages; the snapshot prune runs ONLY once the
+        pages exhaust, never when a stop cut the pass short or a page query raised.
         """
         self.passes += 1
         pass_started = self.clock.monotonic()
         last_progress = pass_started
-        excluded_before_query = self._exclusion_snapshot()
         try:
-            rows = conn.execute(_LIVE_EPOCH_ATTEMPTS, (self.epoch_id,)).fetchall()
+            total = conn.execute(_LIVE_EPOCH_ATTEMPT_COUNT, (self.epoch_id,)).fetchone()[0]
         except Exception as exc:  # noqa: BLE001
             self.errors += 1
             self._log("lease query failed; retried next interval", error=type(exc).__name__)
             return (0, 0)
-        total = len(rows)
-        live_ids = {row["attempt_id"] for row in rows}
-        self._retire_stale_exclusions(excluded_before_query, live_ids)
+        excluded_before_query = self._exclusion_snapshot()
         self._log("pass starting", pass_number=self.passes, total=total, rss_kb=_rss_kb())
         renewed = 0
         failed_this_pass = 0
         failed_attempts = []
         done = 0
-        for row in rows:
-            # Check between rows, never mid-heartbeat: a stop requested during a
-            # pass lets the in-flight renewal finish and cuts the pass short at
-            # the next row instead of working through every remaining attempt.
-            if self._stop.is_set():
-                self._log("pass cut short by stop", pass_number=self.passes, done=done,
-                          total=total, renewed=renewed, rss_kb=_rss_kb())
-                break
-            with self._lock:
-                if row["attempt_id"] not in self._excluded_attempts:
-                    try:
-                        if heartbeat(conn, row["attempt_id"], row["fence"], clock=self.clock,
-                                     lease_seconds=self.lease_seconds):
-                            renewed += 1
-                    except Exception as exc:  # noqa: BLE001 - one attempt's failure must not stop the pass
-                        # Aggregate locally rather than log per row (AGENTS.md bounded
-                        # row-loop cadence); count every failure and still continue the pass.
-                        self.errors += 1
-                        failed_this_pass += 1
-                        if len(failed_attempts) < _RENEWAL_ERROR_DETAIL_LIMIT:
-                            failed_attempts.append({"attempt_id": row["attempt_id"],
-                                                    "error": type(exc).__name__})
-            done += 1
-            now = self.clock.monotonic()
-            if now - last_progress >= _RENEWAL_PROGRESS_SECONDS:
-                elapsed = now - pass_started
-                rate = done / elapsed if elapsed > 0 else 0.0
-                eta = (total - done) / rate if rate > 0 else 0.0
-                self._log("pass progress", pass_number=self.passes, done=done, total=total,
-                          rate_per_second=round(rate, 2), eta_seconds=round(eta, 2),
-                          renewed=renewed, errors=self.errors, elapsed_seconds=round(elapsed, 2),
-                          rss_kb=_rss_kb())
-                last_progress = now
+        exclusions_seen = set()
+        stopped = False
+        try:
+            for page in self._live_attempt_pages(conn):
+                for row in page:
+                    # Check between rows, never mid-heartbeat: a stop requested during a
+                    # pass lets the in-flight renewal finish and cuts the pass short at
+                    # the next row instead of working through every remaining attempt.
+                    if self._stop.is_set():
+                        self._log("pass cut short by stop", pass_number=self.passes, done=done,
+                                  total=total, renewed=renewed, rss_kb=_rss_kb())
+                        stopped = True
+                        break
+                    attempt_id = row["attempt_id"]
+                    if attempt_id in excluded_before_query:
+                        exclusions_seen.add(attempt_id)
+                    with self._lock:
+                        if attempt_id not in self._excluded_attempts:
+                            try:
+                                if heartbeat(conn, attempt_id, row["fence"], clock=self.clock,
+                                             lease_seconds=self.lease_seconds):
+                                    renewed += 1
+                            except Exception as exc:  # noqa: BLE001 - one row's failure must not stop the pass
+                                # Aggregate locally rather than log per row (AGENTS.md bounded
+                                # row-loop cadence); count every failure and still continue the pass.
+                                self.errors += 1
+                                failed_this_pass += 1
+                                if len(failed_attempts) < _RENEWAL_ERROR_DETAIL_LIMIT:
+                                    failed_attempts.append({"attempt_id": attempt_id,
+                                                            "error": type(exc).__name__})
+                    done += 1
+                    last_progress = self._log_pass_progress(self.clock.monotonic(), pass_started,
+                                                            last_progress, done, total, renewed)
+                if stopped:
+                    break
+        except Exception as exc:  # noqa: BLE001 - a page query failure is retried next interval
+            # No prune: the live set is only partially seen, so every snapshot
+            # exclusion the rows so far omitted might still appear on a later page.
+            self.errors += 1
+            self._log("lease query failed; retried next interval", error=type(exc).__name__)
+            self.renewed += renewed
+            return (renewed, total)
+        if not stopped:
+            self._retire_stale_exclusions(excluded_before_query, exclusions_seen)
         self.renewed += renewed
         if failed_this_pass:
             self._log("renewal errors this pass", pass_number=self.passes,
                       failed=failed_this_pass, failed_attempts=failed_attempts,
                       truncated=failed_this_pass > len(failed_attempts))
-        self._log("pass complete", pass_number=self.passes, attempts=len(rows),
-                  renewed=renewed, skipped=len(rows) - renewed, errors=self.errors,
+        self._log("pass complete", pass_number=self.passes, attempts=total,
+                  renewed=renewed, skipped=total - renewed, errors=self.errors,
                   elapsed_seconds=self.clock.monotonic() - pass_started, rss_kb=_rss_kb())
-        return (renewed, len(rows))
+        return (renewed, total)
 
     def stop(self):
         """Signal the thread and join it to completion: after this returns the

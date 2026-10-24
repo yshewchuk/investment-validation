@@ -157,7 +157,7 @@ def test_renew_pass_never_revives_void_fence_cancellation_or_expired_lease(tmp_p
 def test_renew_pass_selects_only_the_current_fence_running_attempt(tmp_path):
     """A ``running`` attempt whose JOB fence was bumped is never handed to heartbeat.
 
-    ``_LIVE_EPOCH_ATTEMPTS`` joins ``jobs.fence = attempts.fence``, so a job whose
+    ``_LIVE_EPOCH_ATTEMPT_FILTER`` joins ``jobs.fence = attempts.fence``, so a job whose
     fence advanced past its own attempt row (recovery fenced it off) is excluded at
     SELECT -- not merely refused inside the fenced heartbeat. Two live ``running``
     claims under this epoch, both leases captured, one second of clock drift, then a
@@ -346,6 +346,9 @@ def test_renew_stop_between_rows_cuts_the_pass_short(tmp_path, monkeypatch):
         def execute(self, *args, **kwargs):
             return self
 
+        def fetchone(self):
+            return (len(rows),)
+
         def fetchall(self):
             return list(rows)
 
@@ -376,6 +379,9 @@ def test_renew_pass_keeps_an_exclusion_recorded_while_the_query_runs(tmp_path, m
         def execute(self, *args, **kwargs):
             return self
 
+        def fetchone(self):
+            return (1,)
+
         def fetchall(self):
             renewer.exclude_attempt("late")
             return [{"attempt_id": "a1", "fence": 1}]
@@ -391,6 +397,57 @@ def test_renew_pass_keeps_an_exclusion_recorded_while_the_query_runs(tmp_path, m
     assert renewer.renew_pass(_ExcludingDuringFetchConnection()) == (1, 1)
     assert renewed_ids == ["a1"]
     assert "late" in renewer._excluded_attempts
+
+
+def test_renew_pass_pages_a_257_row_live_set_in_bounded_fetches(tmp_path, monkeypatch):
+    """A 257-row live set streams in keyset pages, never materialized whole.
+
+    The paged query carries ``a.attempt_id > ?`` plus ``ORDER BY a.attempt_id``
+    and ``LIMIT ?``, and every issued limit and fetched page is bounded by
+    ``_RENEWAL_PAGE_ROWS`` (128). A fake connection applies the keyset filter
+    and cap itself; a recording heartbeat proves ALL 257 attempts are renewed,
+    exactly once each, in attempt-id order, with a short final page ending the
+    pass.
+    """
+    clock = FakeClock()
+    stream = _CapturingStream()
+    renewer = LeaseRenewer(tmp_path / DB_NAME, clock=clock, epoch_id="epoch",
+                           lease_seconds=LEASE_SECONDS, stream=stream)
+    rows = [{"attempt_id": f"att{i:05d}", "fence": 1} for i in range(1, 258)]
+    issued = []
+
+    class _PagedConnection:
+        def execute(self, sql, params=(), **kwargs):
+            self.sql, self.params = sql, params
+            return self
+
+        def fetchone(self):
+            assert self.sql.startswith("SELECT COUNT(")
+            return (len(rows),)
+
+        def fetchall(self):
+            assert "a.attempt_id > ?" in self.sql and "ORDER BY a.attempt_id" in self.sql
+            assert "LIMIT ?" in self.sql
+            last_id, limit = self.params[1], self.params[2]
+            page = [row for row in rows if row["attempt_id"] > last_id][:limit]
+            issued.append((limit, len(page)))
+            return page
+
+    renewed_ids = []
+
+    def recording_heartbeat(conn, attempt_id, fence, *, clock, lease_seconds):
+        renewed_ids.append(attempt_id)
+        return True
+
+    monkeypatch.setattr(supervisor_module, "heartbeat", recording_heartbeat)
+
+    assert renewer.renew_pass(_PagedConnection()) == (257, 257)
+    assert supervisor_module._RENEWAL_PAGE_ROWS == 128
+    assert renewed_ids == [row["attempt_id"] for row in rows]
+    assert issued == [(128, 128), (128, 128), (128, 1)]
+    assert all(limit <= 128 and page_rows <= 128 for limit, page_rows in issued)
+    complete = next(p for p in _log_payloads(stream) if "skipped" in p)
+    assert complete["attempts"] == 257 and complete["renewed"] == 257
 
 
 # ---------------------------------------------------------------------------
@@ -827,7 +884,7 @@ def test_renew_pass_retires_an_exclusion_once_the_attempt_leaves_the_live_set(tm
     """A stranded exclusion is retired only after recovery fences its attempt.
 
     While the excluded attempt is still a live, current-fence row it appears in
-    ``_LIVE_EPOCH_ATTEMPTS``, so the post-query prune KEEPS the exclusion and the
+    ``_LIVE_EPOCH_ATTEMPT_PAGE``, so the exhausted-pass prune KEEPS the exclusion and the
     pass still skips the heartbeat. Once ``expire_leases`` moves it to
     ``recovery_pending`` and bumps the job fence it leaves the live rows, and the
     next pass drops the now-unusable id instead of holding it forever."""
