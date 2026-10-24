@@ -7,7 +7,7 @@ from datetime import date, datetime
 from types import MappingProxyType
 from typing import Any
 
-from engine.v2.foundation import content_hash, from_document
+from engine.v2.foundation import content_hash, from_document, to_document
 from engine.v2.models.deployment import StagedManifest
 from engine.v2.models.serving_fold_loader import (
     ServingFoldError,
@@ -21,9 +21,16 @@ from engine.v2.scoring.gate_forecast_source import GateForecastSource
 __all__ = ["SizeFoldCatalog", "index_size_folds", "select_gate_forecast_source"]
 
 _MEMBER_ID = "tier4_folds:size"
+_CATALOG_MEMBER_ID = "phase5_release.json"
 _INVALID = "size fold catalog is not valid"
 _PHASE5_RELEASE_SCHEMA = "phase5_staged_release.v1.0"
-_ISSUED = object()
+
+
+def _proof(catalog_hash: str, descriptors: Mapping[str, ServingFoldDescriptor]) -> str:
+    return content_hash({
+        "catalog": catalog_hash,
+        "descriptors": {k: to_document(v) for k, v in sorted(descriptors.items())},
+    })
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -33,11 +40,11 @@ class SizeFoldCatalog:
     parent: StagedManifest
     catalog_hash: str
     descriptors: Mapping[str, ServingFoldDescriptor]
-    _issued: object = field(default=None, repr=False, compare=False)
+    _issued: str | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self._issued is not _ISSUED:
-            raise TypeError("SizeFoldCatalog is issued only by index_size_folds")
+        if self._issued != _proof(self.catalog_hash, dict(self.descriptors)):
+            raise TypeError("SizeFoldCatalog proof does not match its descriptors")
         object.__setattr__(self, "descriptors", MappingProxyType(dict(self.descriptors)))
 
 
@@ -46,7 +53,7 @@ def index_size_folds(catalog: Mapping, parent: StagedManifest) -> SizeFoldCatalo
     from engine.v2.scoring.release_bindings import ModelNotReady
 
     if not isinstance(catalog, Mapping):
-        raise ModelNotReady(_MEMBER_ID, _INVALID)
+        raise ModelNotReady(_CATALOG_MEMBER_ID, _INVALID)
     try:
         if catalog.get("schema_version") != _PHASE5_RELEASE_SCHEMA:
             raise ValueError("schema_version")
@@ -55,10 +62,14 @@ def index_size_folds(catalog: Mapping, parent: StagedManifest) -> SizeFoldCatalo
         digest = catalog.get("manifest_hash")
         if digest != content_hash({k: v for k, v in catalog.items() if k != "manifest_hash"}):
             raise ValueError("manifest_hash")
-        rows = _size_fold_rows(catalog)
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        raise ModelNotReady(_CATALOG_MEMBER_ID, _INVALID) from None
+    rows = _size_fold_rows(catalog)
+    try:
         if len(rows) != 1 or rows[0].get("status") != "STAGED":
             return SizeFoldCatalog(
-                parent=parent, catalog_hash=digest, descriptors={}, _issued=_ISSUED)
+                parent=parent, catalog_hash=digest, descriptors={},
+                _issued=_proof(digest, {}))
         objects = rows[0].get("objects")
         if not isinstance(objects, list):
             raise ValueError("objects")
@@ -69,7 +80,8 @@ def index_size_folds(catalog: Mapping, parent: StagedManifest) -> SizeFoldCatalo
                 raise ValueError("duplicate")
             descriptors[descriptor.fold_start] = descriptor
         return SizeFoldCatalog(
-            parent=parent, catalog_hash=digest, descriptors=descriptors, _issued=_ISSUED)
+            parent=parent, catalog_hash=digest, descriptors=descriptors,
+            _issued=_proof(digest, descriptors))
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
         raise ModelNotReady(_MEMBER_ID, _INVALID) from None
 
@@ -79,9 +91,9 @@ def _size_fold_rows(catalog: Mapping) -> list:
 
     members = catalog.get("members")
     if not isinstance(members, list):
-        raise ModelNotReady(_MEMBER_ID, _INVALID)
+        raise ModelNotReady(_CATALOG_MEMBER_ID, _INVALID)
     if any(not isinstance(row, Mapping) for row in members):
-        raise ModelNotReady(_MEMBER_ID, _INVALID)
+        raise ModelNotReady(_CATALOG_MEMBER_ID, _INVALID)
     rows = [row for row in members if row.get("member_id") == _MEMBER_ID]
     if len(rows) > 1:
         raise ModelNotReady(_MEMBER_ID, _INVALID)
@@ -115,7 +127,8 @@ def select_gate_forecast_source(binding, event_date, as_of) -> GateForecastSourc
 
     fold_start = min(_month(event_date), _month(as_of)).isoformat()
     catalog = getattr(binding, "size_folds", None)
-    descriptor = catalog.descriptors.get(fold_start) if catalog is not None else None
+    descriptor = (catalog.descriptors.get(fold_start)
+                  if isinstance(catalog, SizeFoldCatalog) else None)
     if (descriptor is None or descriptor.fold_start != fold_start
             or getattr(binding, "frozen_inference", None) is None):
         raise ModelNotReady(_MEMBER_ID, f"no staged size fold for {fold_start}")

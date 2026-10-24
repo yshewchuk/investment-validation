@@ -21,7 +21,7 @@ import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Callable, Mapping, TypeVar
+from typing import Callable, Mapping, TypeVar
 
 from engine.v2.foundation import content_hash
 from engine.v2.models import deployment
@@ -51,9 +51,7 @@ from engine.v2.models.residual_artifact import (
     residual_artifact_from_document,
 )
 from engine.v2.models.trailing_cutoff_artifact import TrailingCutoffArtifact
-
-if TYPE_CHECKING:
-    from engine.v2.scoring.gate_fold_selection import SizeFoldCatalog
+from engine.v2.scoring.gate_fold_selection import SizeFoldCatalog, index_size_folds
 
 __all__ = [
     "ModelIdentity",
@@ -223,7 +221,6 @@ def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
 
     model_identity, model_artifact_refs = _resolve_model_bindings(dep_root, release)
     catalog = _read_state_catalog(root, pointer.release_id)
-    from engine.v2.scoring.gate_fold_selection import index_size_folds
     size_folds = index_size_folds(catalog, manifest)
     payoff = _resolve_state_group(
         dep_root, catalog, lambda member_id: member_id.startswith(_PAYOFF_PREFIXES), _load_payoff)

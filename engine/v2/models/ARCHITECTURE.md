@@ -385,7 +385,10 @@ Selection uses the exact earlier of the event month and decision month,
 the registered size model and feature order, and the pinned panel byte hash.
 It never chooses the newest available fold or substitutes a full-refit model.
 The panel hash comes from the already-pinned snapshot's single original
-`feature_panel` object; an unsupported multi-fragment layout is refused.
+`feature_panel` object; an unsupported multi-fragment layout is refused. The
+scoring selector (`gate_fold_selection.py`) applies the month rule and the
+release-staged descriptor checks only; comparing the descriptor's panel hash
+with the pinned snapshot is the batch wiring's duty, not yet built.
 Snapshot ID, dataset version and panel byte hash remain distinct identities.
 Selection returns a separate content-addressed, single-binding inference view
 linked to its parent release and descriptor; it does not mutate or promote the

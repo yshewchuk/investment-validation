@@ -31,6 +31,7 @@ from tests.v2.models.serving_fold_support import fold_bytes, fold_name, release_
 from tools.phase5_serving_folds import describe_size_fold
 
 MEMBER = "tier4_folds:size"
+CATALOG_MEMBER = "phase5_release.json"
 
 
 class Predictor:
@@ -101,6 +102,13 @@ def _catalog(parent, *rows, digest=None, schema_version=_SCHEMA, release_id=None
 def _assert_model_not_ready(caught, detail=None):
     assert caught.value.code == "MODEL_NOT_READY"
     assert caught.value.member_id == MEMBER
+    if detail is not None:
+        assert detail in caught.value.detail
+
+
+def _assert_catalog_not_ready(caught, detail=None):
+    assert caught.value.code == "MODEL_NOT_READY"
+    assert caught.value.member_id == CATALOG_MEMBER
     if detail is not None:
         assert detail in caught.value.detail
 
@@ -224,10 +232,29 @@ def test_size_fold_catalog_descriptors_are_read_only(tmp_path):
         catalog.descriptors["2026-11-01"] = descriptor
 
 
-def test_size_fold_catalog_requires_issuing(tmp_path):
+def test_size_fold_catalog_rejects_wrong_proof(tmp_path):
     parent = _staged(tmp_path, _cache())
     with pytest.raises(TypeError):
-        SizeFoldCatalog(parent=parent, catalog_hash="x", descriptors={})
+        SizeFoldCatalog(parent=parent, catalog_hash="x", descriptors={}, _issued="wrong")
+
+
+def test_size_fold_catalog_rejects_changed_descriptors(tmp_path):
+    cache = _cache()
+    parent = _staged(tmp_path, cache)
+    descriptor = _descriptor(cache, parent)
+    catalog = index_size_folds(_catalog(parent, _row([descriptor])), parent)
+    changed = replace(descriptor, policy=replace(descriptor.policy, interval_floor=0.5))
+    with pytest.raises(TypeError):
+        replace(catalog, descriptors={"2026-10-01": changed})
+
+
+def test_size_fold_catalog_rejects_wrong_key(tmp_path):
+    cache = _cache()
+    parent = _staged(tmp_path, cache)
+    descriptor = _descriptor(cache, parent)
+    catalog = index_size_folds(_catalog(parent, _row([descriptor])), parent)
+    with pytest.raises(TypeError):
+        replace(catalog, descriptors={"2026-11-01": descriptor})
 
 
 @pytest.mark.parametrize("mutate", [
@@ -350,6 +377,15 @@ def test_selection_without_catalog_refuses(tmp_path):
     _assert_model_not_ready(caught, "no staged size fold for 2026-10-01")
 
 
+def test_selection_with_non_catalog_refuses(tmp_path):
+    binding = SimpleNamespace(
+        frozen_inference=FrozenInference(tmp_path),
+        size_folds=SimpleNamespace(descriptors={}))
+    with pytest.raises(ModelNotReady) as caught:
+        select_gate_forecast_source(binding, "2026-10-05", "2026-10-06")
+    _assert_model_not_ready(caught, "no staged size fold for 2026-10-01")
+
+
 def test_selection_without_inference_refuses(fold):
     binding = SimpleNamespace(frozen_inference=None, size_folds=fold.binding.size_folds)
     with pytest.raises(ModelNotReady) as caught:
@@ -364,7 +400,7 @@ def test_index_wrong_schema_version_refuses(tmp_path, schema_version):
     catalog = _catalog(parent, schema_version=schema_version)
     with pytest.raises(ModelNotReady) as caught:
         index_size_folds(catalog, parent)
-    _assert_model_not_ready(caught, "size fold catalog is not valid")
+    _assert_catalog_not_ready(caught, "size fold catalog is not valid")
 
 
 def test_index_wrong_release_id_refuses(tmp_path):
@@ -372,7 +408,7 @@ def test_index_wrong_release_id_refuses(tmp_path):
     catalog = _catalog(parent, release_id="some-other-release")
     with pytest.raises(ModelNotReady) as caught:
         index_size_folds(catalog, parent)
-    _assert_model_not_ready(caught, "size fold catalog is not valid")
+    _assert_catalog_not_ready(caught, "size fold catalog is not valid")
 
 
 def test_index_wrong_manifest_hash_refuses(tmp_path):
@@ -380,14 +416,14 @@ def test_index_wrong_manifest_hash_refuses(tmp_path):
     catalog = _catalog(parent, digest="sha256:" + "0" * 64)
     with pytest.raises(ModelNotReady) as caught:
         index_size_folds(catalog, parent)
-    _assert_model_not_ready(caught, "size fold catalog is not valid")
+    _assert_catalog_not_ready(caught, "size fold catalog is not valid")
 
 
 def test_index_non_mapping_catalog_refuses(tmp_path):
     parent = _staged(tmp_path, _cache())
     with pytest.raises(ModelNotReady) as caught:
         index_size_folds([], parent)
-    _assert_model_not_ready(caught, "size fold catalog is not valid")
+    _assert_catalog_not_ready(caught, "size fold catalog is not valid")
 
 
 def test_index_members_not_a_list_refuses(tmp_path):
@@ -396,7 +432,7 @@ def test_index_members_not_a_list_refuses(tmp_path):
                        "members": "not-a-list"})
     with pytest.raises(ModelNotReady) as caught:
         index_size_folds(catalog, parent)
-    _assert_model_not_ready(caught, "size fold catalog is not valid")
+    _assert_catalog_not_ready(caught, "size fold catalog is not valid")
 
 
 def test_index_non_mapping_member_row_refuses(tmp_path):
@@ -405,7 +441,7 @@ def test_index_non_mapping_member_row_refuses(tmp_path):
                        "members": ["not-a-row"]})
     with pytest.raises(ModelNotReady) as caught:
         index_size_folds(catalog, parent)
-    _assert_model_not_ready(caught, "size fold catalog is not valid")
+    _assert_catalog_not_ready(caught, "size fold catalog is not valid")
 
 
 def test_index_descriptor_mid_month_refuses(tmp_path):
