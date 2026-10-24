@@ -479,6 +479,7 @@ def _verify_journal_files(root, files, keepalive):
 
 def _replay_journal(journal, files, trees, keepalive):
     for path in files:
+        _renew(keepalive)
         _unlink(path)
     for path in trees:
         if path is not None:
