@@ -15,8 +15,11 @@ __all__ = ["fit_ridge_hgb_predictions"]
 
 
 def _matrices(train_features, train_labels, prediction_features, width):
-    train, labels, prediction = (np.array(value, dtype=float, copy=True)
-        for value in (train_features, train_labels, prediction_features))
+    try:
+        train, labels, prediction = (np.array(value, dtype=float, copy=True)
+            for value in (train_features, train_labels, prediction_features))
+    except (TypeError, OverflowError) as exc:
+        raise ValueError("magnitude inputs must be convertible to floating-point values") from exc
     for matrix in (train, prediction):
         if (matrix.ndim != 2 or matrix.shape[0] == 0 or matrix.shape[1] != width
                 or np.isinf(matrix).any()):

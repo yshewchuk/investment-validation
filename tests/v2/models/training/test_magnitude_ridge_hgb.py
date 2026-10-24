@@ -223,6 +223,21 @@ def test_invalid_numeric_inputs_refuse_before_estimator_fit(kind, which, bad, ob
     assert not observed
 
 
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("which", ["train", "labels", "prediction"])
+@pytest.mark.parametrize("bad,cause", [
+    pytest.param(10**400, OverflowError, id="oversized-numeric"),
+    pytest.param(object(), TypeError, id="not-convertible"),
+])
+def test_conversion_failures_refuse_as_value_error_before_fit(kind, which, bad, cause, observed):
+    inputs = {"train": [[0]], "labels": [1], "prediction": [[1]]}
+    inputs[which] = [bad] if which == "labels" else [[bad]]
+    with pytest.raises(ValueError, match="magnitude inputs must be convertible to floating-point values") as exc:
+        _fit(_recipe(kind, width=1), **inputs)
+    assert type(exc.value.__cause__) is cause
+    assert not observed
+
+
 @pytest.mark.parametrize("kind,cls", [("history_ridge", Ridge), ("history_hgb", HistGradientBoostingRegressor)])
 @pytest.mark.parametrize("bad", [[np.nan], [np.inf], [-np.inf], [[1]], [1, 2], 1.0])
 def test_bad_predictions_refuse_after_real_fit(kind, cls, bad, monkeypatch):

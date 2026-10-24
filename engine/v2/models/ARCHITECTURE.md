@@ -98,7 +98,7 @@ and source closures remain unchanged.
 | Ridge/HGB condition | Outcome |
 |---|---|
 | Either no-fit guard active | Its `RuntimeFitForbidden` precedes recipe, column or array inspection |
-| Invalid closed policy/order, matrix shape, infinite features or nonfinite/negative labels | `ValueError` before fit; no partial result |
+| Invalid closed policy/order, unconvertible inputs, matrix shape, infinite features or nonfinite/negative labels | `ValueError` before fit; no partial result |
 | Wrong prediction shape or nonfinite predictions | `ValueError` after fit, before projection; no partial result |
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, retry, transaction or partial-write concerns | No cache, retry, persistence or publication |
