@@ -94,6 +94,8 @@ def _size_fold_rows(catalog: Mapping) -> list:
         raise ModelNotReady(_CATALOG_MEMBER_ID, _INVALID)
     if any(not isinstance(row, Mapping) for row in members):
         raise ModelNotReady(_CATALOG_MEMBER_ID, _INVALID)
+    if any(not isinstance(row.get("member_id", ""), str) for row in members):
+        raise ModelNotReady(_CATALOG_MEMBER_ID, _INVALID)
     rows = [row for row in members if row.get("member_id") == _MEMBER_ID]
     if len(rows) > 1:
         raise ModelNotReady(_MEMBER_ID, _INVALID)

@@ -364,11 +364,13 @@ One declared legacy adapter (`checks/legacy_adapters.json`, package
 
 `release_bindings.py` and `gate_fold_selection.py` import each other
 (`resolve_release_binding` calls `index_size_folds`; the selector raises
-`ModelNotReady`); both imports are function-local, so no import-time cycle.
+`ModelNotReady`). `release_bindings.py` imports it at top level (the worker
+source-manifest closure follows top-level imports); the reverse import is
+function-local, so there is no import-time cycle.
 `gate_fold_selection.py` also imports `engine.v2.foundation`,
 `engine.v2.models.deployment`, `engine.v2.models.serving_fold_loader`,
 `engine.v2.models.serving_folds` and `gate_forecast_source.py`;
-`release_bindings.py` imports it only under `TYPE_CHECKING` and function-locally.
+`release_bindings.py` imports it at top level.
 
 `nightly_source_bundle.py` adds one new intra-package import edge
 (`.source_inputs`, for its own leakage check). It does not import
@@ -547,7 +549,7 @@ rather than its own. `native_score_batch` goes through `score_one`, never
   | `resolve_production_release_binding()` only: no/blank `MODEL_RELEASE_ROOT` | `ModelNotReady("release_root", "no production release root is configured")` |
   | once resolved, any member (model binding, payoff/recalibration/analog artifact) missing, wrong status, hash mismatch, or fails its typed load | `ModelNotReady(member_id, ...)`, naming the exact member (e.g. `"model:gate:STR-THRU"`) |
   | Release-local `phase5_release.json`: unreadable, bad self-hash, wrong schema or release ID | `ModelNotReady("phase5_release.json", ...)` before any state-family row is read; a valid root copy never overrides this refusal |
-  | `tier4_folds:size` row malformed (more than one row, non-mapping rows or objects, bad descriptor, name/bytes mismatch, duplicate `fold_start`) | `ModelNotReady("tier4_folds:size", ...)` at resolve; an absent or non-`STAGED` row indexes empty (see "Forward forecast assembly") |
+  | `tier4_folds:size` row malformed (more than one row, non-mapping objects, bad descriptor, name/bytes mismatch, duplicate `fold_start`) | `ModelNotReady("tier4_folds:size", ...)` at resolve; a non-list `members`, a non-mapping members row or a non-string `member_id` is `ModelNotReady("phase5_release.json", ...)`; an absent or non-`STAGED` row indexes empty (see "Forward forecast assembly") |
   | Release-local catalog absent | Read the legacy root catalog only if its schema, self-hash and release ID match; otherwise `ModelNotReady` |
 
   Catalogs beside each staged model manifest survive promotion and rollback.

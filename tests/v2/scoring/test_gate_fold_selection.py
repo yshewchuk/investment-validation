@@ -238,6 +238,15 @@ def test_size_fold_catalog_rejects_wrong_proof(tmp_path):
         SizeFoldCatalog(parent=parent, catalog_hash="x", descriptors={}, _issued="wrong")
 
 
+def test_size_fold_catalog_rejects_wrong_catalog_hash(tmp_path):
+    cache = _cache()
+    parent = _staged(tmp_path, cache)
+    descriptor = _descriptor(cache, parent)
+    catalog = index_size_folds(_catalog(parent, _row([descriptor])), parent)
+    with pytest.raises(TypeError):
+        replace(catalog, catalog_hash="0" * 64)
+
+
 def test_size_fold_catalog_rejects_changed_descriptors(tmp_path):
     cache = _cache()
     parent = _staged(tmp_path, cache)
@@ -439,6 +448,15 @@ def test_index_non_mapping_member_row_refuses(tmp_path):
     parent = _staged(tmp_path, _cache())
     catalog = _sealed({"schema_version": _SCHEMA, "release_id": parent.release.release_id,
                        "members": ["not-a-row"]})
+    with pytest.raises(ModelNotReady) as caught:
+        index_size_folds(catalog, parent)
+    _assert_catalog_not_ready(caught, "size fold catalog is not valid")
+
+
+def test_index_non_string_member_id_refuses(tmp_path):
+    parent = _staged(tmp_path, _cache())
+    catalog = _sealed({"schema_version": _SCHEMA, "release_id": parent.release.release_id,
+                       "members": [{"member_id": 17}]})
     with pytest.raises(ModelNotReady) as caught:
         index_size_folds(catalog, parent)
     _assert_catalog_not_ready(caught, "size fold catalog is not valid")
