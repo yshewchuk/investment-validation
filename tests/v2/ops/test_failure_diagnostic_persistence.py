@@ -39,6 +39,7 @@ def service_for(conn, clock, store):
     service.conn, service.clock, service.store = conn, clock, store
     service.launches, service._progress_state = {}, {}
     service._claim_keepalive_cache = None
+    service._renewer = None
     return service
 
 
