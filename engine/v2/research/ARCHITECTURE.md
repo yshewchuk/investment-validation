@@ -37,8 +37,8 @@ The context is reconstructed-only; historical inputs cannot be relabeled observe
 Each source declares a canonical SHA-256 `content_hash` for its contributing observation.
 Pure validation checks digest syntax/binding, not source membership or value equality.
 
-`magnitude_panel_plan` reconstructs protected population/calendar metadata and checks
-exact history receipts and isolated history/prior-outcome fragments without payloads.
+`magnitude_panel_plan` (no production caller; grants no raw-payload read authority) reconstructs protected population/calendar
+metadata and checks exact history receipts and isolated history/prior-outcome fragments without payloads.
 Its context binds snapshots, history identity, dictionary, producer/environment,
 and the complete observed forecast calendar with its separately bound source metadata.
 Detached validation checks JSON types, closed event/request/recipe/producer schemas,
