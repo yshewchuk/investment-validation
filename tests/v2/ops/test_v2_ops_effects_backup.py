@@ -715,6 +715,7 @@ def test_restore_accepts_legacy_manifest_without_size_fields(tmp_path):
     (backup / manifest["database_file"]).rename(backup / "legacy.sqlite")
     manifest.pop("database_file")
     manifest.pop("database_size")
+    manifest.pop("database_rows")
     manifest["artifacts"]["evidence.bin"].pop("byte_size")
     (backup / "legacy.manifest.json").write_text(json.dumps(manifest))
 

@@ -642,12 +642,15 @@ def _restore_manifest_rows(manifest, manifest_path):
     expected_key = manifest_path.name.removesuffix(".manifest.json")
     if (manifest.get("schema_version") != "catalog_backup.v1.0"
             or not isinstance(backup_key, str)
-            or _single_filename(backup_key) != expected_key
-            or not isinstance(database_rows, dict)
+            or _single_filename(backup_key) != expected_key):
+        raise ValueError("invalid backup identity")
+    if database_rows is None and manifest.get("database_file") is None:
+        return None
+    if (not isinstance(database_rows, dict)
             or any(not isinstance(name, str) or not name
                    or type(count) is not int or count < 0
                    for name, count in database_rows.items())):
-        raise ValueError("invalid backup identity or row counts")
+        raise ValueError("invalid backup row counts")
     return database_rows
 
 
@@ -690,7 +693,8 @@ def _restore_contents(source, destination, database_source, database_hash,
                     raise
                 else:
                     progress.finish()
-                if errors or _table_row_counts(probe) != database_rows:
+                if errors or (database_rows is not None
+                              and _table_row_counts(probe) != database_rows):
                     raise fail("INTEGRITY_FAILED", "restored catalog integrity or row counts mismatch")
             finally:
                 probe.set_progress_handler(None, 0)
