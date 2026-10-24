@@ -97,7 +97,7 @@ def _database(path, expected, keepalive=None):
         raise fail("INTEGRITY_FAILED", "backup database hash does not match its manifest",
                    details={"reason_key": "backup_database_hash_mismatch"})
     try:
-        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
         try:
             problems = integrity_errors(conn)
         finally:

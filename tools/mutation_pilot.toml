@@ -1035,6 +1035,7 @@ mutate = [
     "engine/v2/ops/publication*.py",
     "engine/v2/ops/outbox.py",
     "engine/v2/ops/backup.py",
+    "engine/v2/ops/retention.py",
     "engine/v2/ops/generation_binding.py",
     "engine/v2/ledger/*.py",
 ]

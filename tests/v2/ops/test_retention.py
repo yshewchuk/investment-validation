@@ -138,6 +138,40 @@ def test_verified_backups_prune_past_keep_and_rerun_is_noop(tmp_path, catalog):
     assert _files(ops) == before
 
 
+def test_verification_creates_no_scope_entries(tmp_path, catalog):
+    """Read-only verification must not add SQLite sidecars to the backup scope.
+
+    Production backups come from a WAL-mode catalog. Opening such a database
+    read-only without ``immutable=1`` can create a ``-shm``/``-wal`` sidecar
+    after ``_scope_files`` enumerates the scope; the next retention pass then
+    refuses that sidecar as a stray file. Verification must leave the scope
+    unchanged and a second pass must still succeed.
+    """
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"a.bin": b"artifact"})
+    database = scope / "b1.sqlite"
+    conn = sqlite3.connect(database)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("INSERT INTO sample(value) VALUES ('wal')")
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        conn.close()
+    manifest = _manifest(scope, "b1")
+    manifest["database"] = file_hash(database)
+    _save_manifest(scope, "b1", manifest)
+
+    before = _files(ops)
+    assert enforce_retention(ops, conn=catalog, store=object(),
+                             keep=1, materialization_keep=1) == []
+    assert _files(ops) == before
+    assert enforce_retention(ops, conn=catalog, store=object(),
+                             keep=1, materialization_keep=1) == []
+    assert _files(ops) == before
+
+
 @pytest.mark.parametrize(("damage", "reason"), [
     ("empty", "backup_database_invalid"),
     ("hash", "backup_database_hash_mismatch"),
