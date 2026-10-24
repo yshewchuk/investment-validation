@@ -9,8 +9,7 @@ publishing exactly as before; this package adds parallel `tools/v2_*` CLIs
 that read a pinned v2 snapshot instead.
 
 `tools/log_diagnostics.py` is deliberately **not** moved here: it reads only
-a local transactions-log CSV, never the Tier-2 store, so it needs no
-snapshot-pinned counterpart.
+a local transactions-log CSV, never the Tier-2 store, so it needs no snapshot-pinned counterpart.
 
 ## Purpose
 
@@ -38,8 +37,8 @@ The context is reconstructed-only; historical inputs cannot be relabeled observe
 Each source declares a canonical SHA-256 `content_hash` for its contributing observation.
 Pure validation checks digest syntax/binding, not source membership or value equality.
 
-`magnitude_panel_plan` reconstructs protected population/calendar metadata and checks
-exact history receipts and isolated history/prior-outcome fragments without payloads.
+`magnitude_panel_plan` (no production caller; grants no raw-payload read authority) reconstructs protected population/calendar
+metadata and checks exact history receipts and isolated history/prior-outcome fragments without payloads.
 Its context binds snapshots, history identity, dictionary, producer/environment,
 and the complete observed forecast calendar with its separately bound source metadata.
 Detached validation checks JSON types, closed event/request/recipe/producer schemas,
@@ -625,8 +624,7 @@ This bounds retained unmatched rows, not total process RSS.
   (`_pricing.trading_calendar_from_snapshot`, reading only the `date`
   column through `_scan.read_table`) — never from a local file or
   `INVESTING_PLAN_ROOT`. A snapshot with no `daily_market` table refuses
-  (`CONTRACT_MISMATCH`) rather than inventing a calendar; see Failure
-  semantics.
+  (`CONTRACT_MISMATCH`) rather than inventing a calendar; see Failure semantics.
 - `--since`, `--min-date`, `--years`, `--strategy` (repeatable, from
   `_pricing.STRUCTURES`): per-tool read/filter narrowing; never widen a read
   past the resolved snapshot.

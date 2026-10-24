@@ -14,7 +14,7 @@ from pathlib import Path
 from engine.v2.foundation import fsync_directory, safe_relative_path
 from engine.v2.ops.catalog import decode_bounded_text, integrity_errors, sql_text_budget
 from engine.v2.ops.errors import OpsError, fail
-from engine.v2.ops.fingerprints import file_hash
+from engine.v2.ops.fingerprints import NotRegularFile, atomic_file_info, file_hash
 from engine.v2.ops.reclaim import remove_tree
 from engine.v2.ops.snapshot_roots import default_materialization_base, materialization_root
 from engine.v2.ops.snapshot_stages import request_from_artifact
@@ -126,12 +126,35 @@ def _journal_invalid():
     return fail("INTEGRITY_FAILED", "retention journal is invalid",
                 details={"reason_key": "retention_journal_invalid"})
 
+def _journal_progress(stage):
+    started = time.monotonic()
+    last = started
+
+    def on_progress(bytes_read, total):
+        nonlocal last
+        now = time.monotonic()
+        if now - last < 60.0:
+            return
+        last = now
+        elapsed = now - started
+        rate = bytes_read / elapsed if elapsed > 0 else 0.0
+        eta = (total - bytes_read) / rate if rate > 0 and total > bytes_read else None
+        _stderr("RETENTION_PROGRESS", stage=stage, done=bytes_read,
+                total=total, bytes_per_s=round(rate, 3),
+                eta_s=None if eta is None else round(eta, 1),
+                rss_peak_mb=_rss_peak_mb())
+
+    return on_progress
+
 def _journal_record(path, ops_root, keepalive=None):
-    info = path.lstat()
-    if not stat.S_ISREG(info.st_mode):
-        raise _journal_invalid()
+    try:
+        digest, size = atomic_file_info(
+            path, keepalive=keepalive, max_bytes=MAX_BACKUP_STREAM_BYTES,
+            on_progress=_journal_progress("verify_backup_file"))
+    except NotRegularFile:
+        raise _journal_invalid() from None
     return {"path": path.relative_to(ops_root).as_posix(),
-            "content_hash": _digest(path, keepalive), "byte_size": info.st_size}
+            "content_hash": digest, "byte_size": size}
 
 def _journal_backup_parts(relative):
     if not isinstance(relative, str):
@@ -227,12 +250,15 @@ def _journal_tree_record(root, base, keepalive=None):
             for name in filenames:
                 _renew(keepalive)
                 child = parent / name
-                info = child.lstat()
-                if not stat.S_ISREG(info.st_mode):
-                    raise _journal_invalid()
+                try:
+                    digest, size = atomic_file_info(
+                        child, keepalive=keepalive,
+                        max_bytes=MAX_BACKUP_STREAM_BYTES,
+                        on_progress=_journal_progress("verify_backup_file"))
+                except NotRegularFile:
+                    raise _journal_invalid() from None
                 files.append({"path": child.relative_to(root).as_posix(),
-                              "content_hash": _digest(child, keepalive),
-                              "byte_size": info.st_size})
+                              "content_hash": digest, "byte_size": size})
     except OSError:
         raise fail("INTEGRITY_FAILED", "materialization root could not be verified",
                    details={"reason_key": "materialization_root_incomplete"}) from None
@@ -844,7 +870,8 @@ def _live_roots(base, conn, store, keepalive=None):
                            details={"reason_key": "live_request_binding_invalid",
                                     "attempt_id": attempt_id})
             try:
-                request = request_from_artifact(conn, store, bound[0][0])
+                request = request_from_artifact(conn, store, bound[0][0],
+                                                max_bytes=MAX_LIVE_SPEC_BYTES)
             except OpsError as error:
                 if error.code != "INPUT_CHANGED":
                     raise

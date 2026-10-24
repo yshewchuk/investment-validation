@@ -217,6 +217,66 @@ def test_corrupt_backup_refusal_names_the_failing_backup_key(tmp_path, catalog):
     assert set(error.problem.details) == {"reason_key", "backup_key"}
 
 
+def test_atomic_file_info_returns_actual_byte_count_and_sha256_for_journal_records(tmp_path):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    database = scope / "b1.sqlite"
+
+    digest, size = fingerprints_module.atomic_file_info(database)
+    assert digest == file_hash(database)
+    assert size == database.stat().st_size
+
+    record = retention_module._journal_record(database, ops)
+    assert record["content_hash"] == digest
+    assert record["byte_size"] == size
+
+    tree = retention_module._journal_tree_record(scope, ops)
+    entries = {item["path"]: item for item in tree["files"]}
+    assert entries["b1.sqlite"]["content_hash"] == digest
+    assert entries["b1.sqlite"]["byte_size"] == size
+
+
+def test_mutation_during_journal_record_read_refuses_and_deletes_nothing(tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+
+    targets = [path for path in scope.rglob("*") if path.is_file()]
+    mutated = {"done": False}
+
+    def mutating_progress(stage):
+        def on_progress(bytes_read, total):
+            if not mutated["done"]:
+                mutated["done"] = True
+                for target in targets:
+                    original = target.stat()
+                    payload = target.read_bytes()
+                    payload = (bytes([payload[0] ^ 0xFF]) + payload[1:]) if payload else b""
+                    target.write_bytes(payload)
+                    os.utime(target, ns=(original.st_atime_ns, original.st_mtime_ns))
+        return on_progress
+
+    monkeypatch.setattr(retention_module, "_journal_progress", mutating_progress)
+
+    before = _files(ops)
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(), keep=1, materialization_keep=1)
+
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "file_changed"
+    after = _files(ops)
+    assert set(after) == set(before)
+    for path in before:
+        if not path.startswith("backups/shadow/"):
+            assert after[path] == before[path]
+
+
 def test_database_pathname_replaced_during_pinned_verification_refuses_with_typed_failure(
         tmp_path, catalog, monkeypatch):
     ops = tmp_path / "ops"
@@ -375,7 +435,7 @@ def test_newest_materializations_and_live_request_root_survive(tmp_path, catalog
     _live_attempt(catalog, [(REQUEST_BINDING, "art_live")])
     captured = []
 
-    def request_from_artifact(conn, store, artifact_id):
+    def request_from_artifact(conn, store, artifact_id, *, max_bytes=None):
         captured.append(artifact_id)
         return SimpleNamespace(request_hash=LIVE_HASH)
 
@@ -407,7 +467,7 @@ def test_live_crosscheck_bound_request_root_survives(tmp_path, catalog, monkeypa
                     ("att_check", REQUEST_BINDING, "art_check"))
     monkeypatch.setattr(
         retention_module, "request_from_artifact",
-        lambda conn, store, artifact_id: SimpleNamespace(request_hash=LIVE_HASH))
+        lambda conn, store, artifact_id, *, max_bytes=None: SimpleNamespace(request_hash=LIVE_HASH))
 
     enforce_retention(ops, conn=catalog, store=object(),
                       keep=1, materialization_keep=1)
@@ -449,7 +509,7 @@ def test_live_attempt_without_materialization_intent_is_skipped(tmp_path, catalo
     captured = []
     monkeypatch.setattr(
         retention_module, "request_from_artifact",
-        lambda conn, store, artifact_id: captured.append(artifact_id))
+        lambda conn, store, artifact_id, *, max_bytes=None: captured.append(artifact_id))
 
     enforce_retention(ops, conn=catalog, store=object(),
                       keep=1, materialization_keep=1)
@@ -946,7 +1006,7 @@ def test_completed_attempt_snapshot_binding_does_not_retain_old_root(
                     ("att_done", REQUEST_BINDING, "art_done"))
     captured = []
 
-    def request_from_artifact(conn, store, artifact_id):
+    def request_from_artifact(conn, store, artifact_id, *, max_bytes=None):
         captured.append(artifact_id)
         return SimpleNamespace(request_hash="sha256:" + "cd" * 32)
 
@@ -969,7 +1029,7 @@ def test_corrupt_live_request_artifact_refuses_as_integrity_failed(
     _materialization_dir(base, "root-old", 2)
     _live_attempt(catalog, [(REQUEST_BINDING, "art_live")])
 
-    def corrupt(conn, store, artifact_id):
+    def corrupt(conn, store, artifact_id, *, max_bytes=None):
         raise fail("INPUT_CHANGED", "materialization request hash does not cover its content")
 
     monkeypatch.setattr(retention_module, "request_from_artifact", corrupt)
@@ -982,6 +1042,44 @@ def test_corrupt_live_request_artifact_refuses_as_integrity_failed(
                                      "attempt_id": "att_live"}
 
 
+def test_oversized_live_request_artifact_refuses_before_store_read(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    _live_attempt(catalog, [(REQUEST_BINDING, "art_live")])
+
+    class StoreSpy:
+        def __init__(self):
+            self.read_verified_calls = []
+
+        def read_verified(self, ref):
+            self.read_verified_calls.append(ref)
+            return b"{}"
+
+    store = StoreSpy()
+
+    def registered_artifact(conn, artifact_id):
+        return SimpleNamespace(byte_size=retention_module.MAX_LIVE_SPEC_BYTES + 1,
+                               content_hash="sha256:" + "0" * 64,
+                               artifact_id=artifact_id)
+
+    monkeypatch.setattr("engine.v2.ops.snapshot_stages.registered_artifact",
+                        registered_artifact)
+
+    before = _files(tmp_path)
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=store,
+                          keep=1, materialization_keep=1)
+
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "live_request_too_large"
+    assert _files(tmp_path) == before
+    assert store.read_verified_calls == []
+
+
 def test_lease_lost_from_live_request_artifact_propagates_unchanged(
         tmp_path, catalog, monkeypatch):
     ops = tmp_path / "ops"
@@ -992,7 +1090,7 @@ def test_lease_lost_from_live_request_artifact_propagates_unchanged(
     _live_attempt(catalog, [(REQUEST_BINDING, "art_live")])
     error = fail("LEASE_LOST", "the attempt lost its lease while reading its request")
 
-    def lease_lost(conn, store, artifact_id):
+    def lease_lost(conn, store, artifact_id, *, max_bytes=None):
         raise error
 
     monkeypatch.setattr(retention_module, "request_from_artifact", lease_lost)
@@ -1226,3 +1324,15 @@ def test_unknown_creation_residue_refuses_without_changes(tmp_path, catalog):
     assert caught.value.code == "INTEGRITY_FAILED"
     assert caught.value.problem.details["reason_key"] == "backup_creation_residue_unverified"
     assert _files(ops) == before
+
+
+def test_atomic_file_info_exact_max_bytes_boundary(tmp_path):
+    """A file whose size exactly equals max_bytes is hashed in full."""
+    limit = 64 * 1024
+    path = tmp_path / "boundary.bin"
+    path.write_bytes(b"x" * limit)
+
+    digest, size = fingerprints_module.atomic_file_info(path, max_bytes=limit)
+
+    assert size == limit
+    assert digest == file_hash(path)
