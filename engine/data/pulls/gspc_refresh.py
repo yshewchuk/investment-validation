@@ -80,8 +80,8 @@ MAX_EXISTING_BYTES = 64 * 1024 * 1024
 #: Ceiling on the fetched fresh body, refused as unparseable before decoding.
 MAX_FRESH_BYTES = 64 * 1024 * 1024
 
-#: The stored series starts 2006-01-03 but yfinance ``period="max"`` reaches
-#: back to 1927, so fetched rows before this date are cut in ``_parse_body``:
+#: The stored series' first row is 2006-01-03 but yfinance ``period="max"`` reaches
+#: back to 1927, so fetched rows before this lower bound (2006-01-01, not the first stored date) are cut in ``_parse_body``:
 #: a refresh appends rows; only older Close values are guarded (see the
 #: module docstring). A body left with no rows after the cut is unparseable.
 SERIES_START = pd.Timestamp("2006-01-01")
