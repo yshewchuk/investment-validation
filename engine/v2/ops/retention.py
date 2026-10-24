@@ -30,6 +30,7 @@ _MAX_MANIFEST_BYTES = 10 * 1024 * 1024
 MAX_BACKUP_STREAM_BYTES = 4 * 1024 * 1024 * 1024
 MAX_LIVE_SPEC_BYTES = 1024 * 1024
 _INTEGRITY_PROGRESS_INTERVAL = 1000
+_INTEGRITY_PROGRESS_LOG_SECONDS = 60.0
 
 def _stderr(event, **fields):
     sys.stderr.write(json.dumps({"event": event, **fields}, sort_keys=True) + "\n")
@@ -79,7 +80,7 @@ def _limit(keep, env, default, label):
     return keep
 
 def _safe_name(name, *, artifact=False):
-    bad = not isinstance(name, str) or not name or name in (".", "..")
+    bad = not isinstance(name, str) or not name or name in (".", "..") or "\x00" in name
     if artifact:
         bad = bad or "/" in name or "\\" in name
     elif not bad:
@@ -133,22 +134,37 @@ def _database(path, expected, keepalive=None):
             raise fail("INTEGRITY_FAILED", "backup database hash does not match its manifest",
                        details={"reason_key": "backup_database_hash_mismatch"})
         callback_error = None
+        state = {"batches": 0, "started": time.monotonic(), "last_log": time.monotonic()}
 
         def _progress():
             nonlocal callback_error
-            try:
-                keepalive()
-            except Exception as error:
-                callback_error = error
-                return 1
+            state["batches"] += 1
+            if keepalive is not None:
+                try:
+                    keepalive()
+                except Exception as error:
+                    callback_error = error
+                    return 1
+            now = time.monotonic()
+            if now - state["last_log"] >= _INTEGRITY_PROGRESS_LOG_SECONDS:
+                elapsed = now - state["started"]
+                state["last_log"] = now
+                rate = state["batches"] / elapsed if elapsed > 0 else 0.0
+                _stderr("RETENTION_PROGRESS", stage="verify_backup_database",
+                        done=state["batches"], total=None,
+                        rate_per_s=round(rate, 3), eta_s=None,
+                        elapsed_s=round(elapsed, 3), rss_peak_mb=_rss_peak_mb())
             return 0
 
         try:
             conn = sqlite3.connect(proc_fd.as_uri() + "?mode=ro&immutable=1", uri=True)
             try:
-                if keepalive is not None:
-                    conn.set_progress_handler(_progress, _INTEGRITY_PROGRESS_INTERVAL)
-                problems = integrity_errors(conn)
+                conn.set_progress_handler(_progress, _INTEGRITY_PROGRESS_INTERVAL)
+                started = _stage("verify_backup_database", None)
+                try:
+                    problems = integrity_errors(conn)
+                finally:
+                    _stage_end("verify_backup_database", started, state["batches"], None)
             finally:
                 try:
                     conn.set_progress_handler(None, 0)
@@ -384,7 +400,15 @@ def _live_roots(base, conn, store, keepalive=None):
                            "live materialization attempt has no single request binding",
                            details={"reason_key": "live_request_binding_invalid",
                                     "attempt_id": attempt_id})
-            request = request_from_artifact(conn, store, bound[0][0])
+            try:
+                request = request_from_artifact(conn, store, bound[0][0])
+            except OpsError as error:
+                if error.code != "INPUT_CHANGED":
+                    raise
+                raise fail("INTEGRITY_FAILED",
+                           "live materialization request artifact is invalid",
+                           details={"reason_key": "live_request_artifact_invalid",
+                                    "attempt_id": attempt_id}) from None
             _renew(keepalive)
             roots.add(materialization_root(base, request.request_hash).name)
         return roots
@@ -444,8 +468,16 @@ def _remove_tree(path, keepalive=None):
 
     Raw ``OSError`` maps to materialization_delete_failed; an ``OpsError``
     raised by ``keepalive`` propagates unchanged."""
+    progress = None
+
+    def on_progress(done, total):
+        nonlocal progress
+        if progress is None:
+            progress = _Progress("delete_materialization_root", total)
+        progress.tick(done)
+
     try:
-        remove_tree(path, lambda: _renew(keepalive))
+        remove_tree(path, lambda: _renew(keepalive), on_progress=on_progress)
     except OSError:
         raise fail("INTEGRITY_FAILED", "materialization deletion failed",
                    details={"reason_key": "materialization_delete_failed"}) from None

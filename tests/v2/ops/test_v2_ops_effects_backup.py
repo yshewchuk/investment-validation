@@ -221,9 +221,10 @@ def test_backup_effect_propagates_retention_sentinel_after_successful_backup(tmp
     """Synthetic: ``enforce_retention`` refuses with a typed ``OpsError`` after the
     backup and its watermark are already durable. The refusal must leave
     ``backup_effect`` unchanged — same code and ``reason_key`` — with the backup
-    effect delivered. Both the ``retention`` module attribute (the requested
-    patch site) and the ``effects_graph`` binding ``backup_effect`` actually
-    calls (the name is imported at module scope) point at the same stub."""
+    effect delivered, and the configured ``materialization_base`` must reach
+    ``enforce_retention`` unchanged. Both the ``retention`` module attribute (the
+    requested patch site) and the ``effects_graph`` binding ``backup_effect``
+    actually calls (the name is imported at module scope) point at the same stub."""
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:
         scope = "shadow"
@@ -233,6 +234,7 @@ def test_backup_effect_propagates_retention_sentinel_after_successful_backup(tmp
         sentinel = fail("INTEGRITY_FAILED", "synthetic retention refusal",
                         details={"reason_key": "synthetic_retention_failed"})
         calls = []
+        configured_base = tmp_path / "custom-materialization-base"
 
         def boom(*args, **kwargs):
             state = conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0]
@@ -242,10 +244,12 @@ def test_backup_effect_propagates_retention_sentinel_after_successful_backup(tmp
         monkeypatch.setattr("engine.v2.ops.retention.enforce_retention", boom)
         monkeypatch.setattr("engine.v2.ops.effects_graph.enforce_retention", boom)
         with pytest.raises(OpsError) as raised:
-            backup_effect(conn, store, claim, root, clock=clock)
+            backup_effect(conn, store, claim, root, clock=clock,
+                          materialization_base=configured_base)
 
         assert len(calls) == 1
         assert calls[0][2] == "delivered"
+        assert calls[0][1]["materialization_base"] == configured_base
         assert raised.value is sentinel
         assert raised.value.code == sentinel.code == "INTEGRITY_FAILED"
         assert raised.value.problem.details["reason_key"] == "synthetic_retention_failed"

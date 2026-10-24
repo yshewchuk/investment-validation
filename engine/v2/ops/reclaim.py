@@ -43,32 +43,47 @@ def _size(path, keepalive):
     return total
 
 
-def remove_tree(path, keepalive):
+def remove_tree(path, keepalive, on_progress=None):
     """Remove one entry without ever following a link; ``keepalive`` runs
     before and after every unlink/rmdir (and after each chmod) so an expired
     lease stops before the next file is removed and a slow removal cannot
-    starve a running attempt's lease."""
+    starve a running attempt's lease; ``on_progress`` (if given) receives
+    ``(done, total)`` after each removal."""
     if path.is_symlink() or not path.is_dir():
         keepalive()
         path.unlink()
         keepalive()
+        if on_progress is not None:
+            on_progress(1, 1)
         return
-    for dirpath, _dirs, _files in os.walk(path):
+    removed_total = 0
+    for dirpath, dirs, files in os.walk(path):
         os.chmod(dirpath, 0o700)
+        removed_total += len(dirs) + len(files)
         keepalive()
+    total, done = removed_total + 1, 0
     for dirpath, dirs, files in os.walk(path, topdown=False):
         for name in files:
             keepalive()
             os.unlink(os.path.join(dirpath, name))
             keepalive()
+            done += 1
+            if on_progress is not None:
+                on_progress(done, total)
         for name in dirs:
             child = os.path.join(dirpath, name)
             keepalive()
             (os.unlink if os.path.islink(child) else os.rmdir)(child)
             keepalive()
+            done += 1
+            if on_progress is not None:
+                on_progress(done, total)
     keepalive()
     path.rmdir()
     keepalive()
+    done += 1
+    if on_progress is not None:
+        on_progress(done, total)
 
 
 def _entry(kind, path, attempt_id, apply, out, keepalive, top):

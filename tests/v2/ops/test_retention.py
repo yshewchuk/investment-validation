@@ -1,6 +1,7 @@
 """Retention pruning of verified backups and unreferenced materializations."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import engine.v2.ops.fingerprints as fingerprints_module
 import engine.v2.ops.retention as retention_module
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import file_hash
@@ -810,3 +812,173 @@ def test_completed_attempt_snapshot_binding_does_not_retain_old_root(
     assert captured == []
     assert newest.is_dir() and (newest / "sentinel.bin").is_file()
     assert not bound.exists()
+
+
+def test_corrupt_live_request_artifact_refuses_as_integrity_failed(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, LIVE_HASH.removeprefix("sha256:"), 1)
+    _materialization_dir(base, "root-old", 2)
+    _live_attempt(catalog, [(REQUEST_BINDING, "art_live")])
+
+    def corrupt(conn, store, artifact_id):
+        raise fail("INPUT_CHANGED", "materialization request hash does not cover its content")
+
+    monkeypatch.setattr(retention_module, "request_from_artifact", corrupt)
+
+    error = _refusal(tmp_path, ops, catalog, "live_request_artifact_invalid",
+                     keep=1, materialization_keep=1)
+
+    assert error.code == "INTEGRITY_FAILED"
+    assert error.problem.details == {"reason_key": "live_request_artifact_invalid",
+                                     "attempt_id": "att_live"}
+
+
+def test_lease_lost_from_live_request_artifact_propagates_unchanged(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, LIVE_HASH.removeprefix("sha256:"), 1)
+    _materialization_dir(base, "root-old", 2)
+    _live_attempt(catalog, [(REQUEST_BINDING, "art_live")])
+    error = fail("LEASE_LOST", "the attempt lost its lease while reading its request")
+
+    def lease_lost(conn, store, artifact_id):
+        raise error
+
+    monkeypatch.setattr(retention_module, "request_from_artifact", lease_lost)
+
+    before = _files(tmp_path)
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+
+    assert caught.value is error
+    assert caught.value.code == "LEASE_LOST"
+    assert _files(tmp_path) == before
+
+
+def test_nul_in_backup_artifact_name_refuses_typed(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"a.bin": b"artifact"})
+    manifest = _manifest(scope, "b1")
+    metadata = manifest["artifacts"].pop("a.bin")
+    manifest["artifacts"]["a\x00.bin"] = metadata
+    _save_manifest(scope, "b1", manifest)
+
+    _refusal(ops, ops, catalog, "backup_artifact_name_unsafe",
+             keep=1, materialization_keep=1)
+
+
+def test_nul_in_backup_name_refuses_typed_instead_of_raw_artifact_error():
+    with pytest.raises(OpsError) as caught:
+        retention_module._safe_name("b1\x00x")
+
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details == {"reason_key": "backup_name_unsafe"}
+
+
+def test_malformed_live_job_spec_refuses_with_attempt_id(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    catalog.execute("INSERT INTO jobs VALUES (?, ?, ?)",
+                    ("job_bad_spec", "legacy_materialize", "{not json"))
+    catalog.execute("INSERT INTO attempts VALUES (?, ?, ?)",
+                    ("att_bad_spec", "job_bad_spec", "running"))
+
+    error = _refusal(tmp_path, ops, catalog, "live_job_spec_malformed",
+                     keep=1, materialization_keep=1)
+
+    assert error.code == "INTEGRITY_FAILED"
+    assert error.problem.details == {"reason_key": "live_job_spec_malformed",
+                                     "attempt_id": "att_bad_spec"}
+
+
+def test_file_hash_zero_max_bytes_hashes_no_bytes_of_a_nonempty_file(tmp_path, monkeypatch):
+    empty = tmp_path / "empty.bin"
+    empty.write_bytes(b"")
+    assert file_hash(empty, max_bytes=0) == "sha256:" + hashlib.sha256(b"").hexdigest()
+
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"x" * 64)
+    updates = []
+    real_sha256 = hashlib.sha256
+
+    class _SpyDigest:
+        def __init__(self):
+            self._real = real_sha256()
+
+        def update(self, chunk):
+            updates.append(chunk)
+            self._real.update(chunk)
+
+        def hexdigest(self):
+            return self._real.hexdigest()
+
+    monkeypatch.setattr(fingerprints_module, "hashlib", SimpleNamespace(sha256=_SpyDigest))
+
+    with pytest.raises(OpsError) as caught:
+        file_hash(payload, max_bytes=0)
+
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details == {"reason_key": "stream_too_large", "max_bytes": 0}
+    assert updates == []
+
+
+def test_database_verification_logs_bounded_stage_and_progress(
+        tmp_path, catalog, monkeypatch, capsys):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"a.bin": b"artifact"})
+    monkeypatch.setattr(retention_module, "_INTEGRITY_PROGRESS_INTERVAL", 1)
+    monkeypatch.setattr(retention_module, "_INTEGRITY_PROGRESS_LOG_SECONDS", 0.0)
+
+    enforce_retention(ops, conn=catalog, store=object(),
+                      keep=1, materialization_keep=1)
+
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()
+              if line.startswith("{")]
+    starts = [e for e in events if e["event"] == "RETENTION_STAGE_START"
+              and e["stage"] == "verify_backup_database"]
+    ends = [e for e in events if e["event"] == "RETENTION_STAGE_END"
+            and e["stage"] == "verify_backup_database"]
+    progress = [e for e in events if e["event"] == "RETENTION_PROGRESS"
+                and e["stage"] == "verify_backup_database"]
+    assert len(starts) == 1 and starts[0]["total"] is None
+    assert len(ends) == 1 and ends[0]["total"] is None
+    assert ends[0]["done"] >= 1
+    assert "elapsed_s" in ends[0] and "rss_peak_mb" in ends[0]
+    assert progress
+    assert all(e["total"] is None and e["eta_s"] is None for e in progress)
+    assert all(e["done"] >= 1 and "elapsed_s" in e and "rss_peak_mb" in e
+               for e in progress)
+
+
+def test_remove_tree_emits_bounded_progress_after_each_removal(
+        tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    (root / "one.txt").write_bytes(b"one")
+    (root / "sub" / "two.txt").write_bytes(b"two")
+
+    class _EagerProgress(retention_module._Progress):
+        def __init__(self, stage, total, interval=0.0):
+            super().__init__(stage, total, interval)
+
+    monkeypatch.setattr(retention_module, "_Progress", _EagerProgress)
+
+    retention_module._remove_tree(root, keepalive=None)
+
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()
+              if line.startswith("{")]
+    progress = [e for e in events if e["event"] == "RETENTION_PROGRESS"
+                and e["stage"] == "delete_materialization_root"]
+    assert [(e["done"], e["total"]) for e in progress] == [(1, 4), (2, 4), (3, 4), (4, 4)]
+    assert not root.exists()

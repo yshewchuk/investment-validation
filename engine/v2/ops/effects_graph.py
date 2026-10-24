@@ -855,11 +855,10 @@ def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=
         watermark(conn, "nightly", scope, "backup", session, content_hash(manifest), clock=clock,
                  generation=generation)
     # Retention runs only after the backup and its watermark are durable; a
-    # refusal propagates as a typed OpsError so the next nightly retries it.
-    # Both steps are idempotent. After a deletion I/O error, earlier deletions
-    # may remain durable; the next run refuses an incomplete/stray scope and
-    # deletes nothing. See #1251 for journal recovery and broader preflight,
-    # which must preserve no-deletion-on-unverified-state.
+    # refusal propagates as a typed OpsError with the backup effect already
+    # delivered. A backup deletion I/O error can leave earlier backup deletions
+    # durable; later runs refuse an incomplete/stray backup scope. Partial
+    # materialization-root recovery is deferred to #1251.
     enforce_retention(ops_root, conn=conn, store=store, keepalive=keepalive, materialization_base=materialization_base)
     return None, ()
 

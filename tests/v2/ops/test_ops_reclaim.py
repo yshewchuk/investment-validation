@@ -137,10 +137,10 @@ def test_orphan_partial_roots_follow_the_same_rule(world):
 def test_a_failed_removal_is_reported_and_the_rest_still_run(world, monkeypatch):
     real = reclaim_module.remove_tree
 
-    def flaky(path, keepalive):
+    def flaky(path, keepalive, on_progress=None):
         if world.ids["succeeded"] in str(path):
             raise PermissionError("denied")
-        real(path, keepalive)
+        real(path, keepalive, on_progress=on_progress)
 
     monkeypatch.setattr(reclaim_module, "remove_tree", flaky)
     entries = reclaim(world.conn, world.root, apply=True)
@@ -217,6 +217,22 @@ def test_removal_renews_leases_per_file_so_slow_cleanup_cannot_starve_them(world
     calls = []
     reclaim(world.conn, world.root, apply=True, keepalive=lambda: calls.append(1))
     assert len(calls) >= 21
+
+
+def test_remove_tree_reports_progress_after_each_removal(tmp_path):
+    root = tmp_path / "root"
+    (root / "dirs" / "nested").mkdir(parents=True)
+    (root / "a.bin").write_bytes(b"a")
+    (root / "dirs" / "b.bin").write_bytes(b"b")
+    (root / "dirs" / "nested" / "c.bin").write_bytes(b"c")
+    progress, renewals = [], []
+
+    reclaim_module.remove_tree(root, lambda: renewals.append(1),
+                               on_progress=lambda done, total: progress.append((done, total)))
+
+    assert progress == [(1, 6), (2, 6), (3, 6), (4, 6), (5, 6), (6, 6)]
+    assert len(renewals) >= 12
+    assert not root.exists()
 
 
 def test_the_tick_pass_passes_the_lease_renewal_into_reclaim(world):
