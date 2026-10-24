@@ -314,7 +314,7 @@ def _copy_artifacts(payload, store, target, fault, keepalive):
     for name, document in payload.get("artifacts", {}).items():
         keepalive()
         ref = from_document(ArtifactRef, document)
-        if "/" in name or name in ("", ".", ".."):
+        if "/" in name or "\\" in name or name in ("", ".", ".."):
             raise fail("INVALID_REQUEST", "unsafe backup artifact name")
         copied[name] = _copy_artifact(store, target, name, ref, fault)
     return copied

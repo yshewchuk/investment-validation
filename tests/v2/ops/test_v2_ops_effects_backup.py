@@ -61,6 +61,24 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
     assert (tmp_path / "restored" / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
 
 
+def test_backup_rejects_backslash_artifact_name_before_ack(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    artifact_name = "evidence" + chr(92) + "bin"
+    prepare_backup(conn, "backslash-name", {artifact_name: ref}, clock=clock)
+    backup = tmp_path / "backup"
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="backslash-name", owner="worker", target=backup,
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INVALID_REQUEST"
+    assert not (backup / "backslash-name.manifest.json").exists()
+    state = conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0]
+    assert state != "delivered"
+
+
 @pytest.mark.parametrize("case", [
     "missing_database", "missing_artifacts", "artifact_list", "bad_artifact",
     "bad_database_rows", "nonmapping_database_rows", "bad_database_hash", "bad_schema",
