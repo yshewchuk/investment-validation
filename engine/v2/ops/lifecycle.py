@@ -146,8 +146,9 @@ def heartbeat(conn: sqlite3.Connection, attempt_id: str, fence: int, *, clock: C
     """Extend the lease; the fenced renewal used by every live-attempt poll.
 
     Callers are the supervisor's worker poll (``Service._poll``), an explicit
-    coordinator :class:`Keepalive`, and the supervisor's dedicated
-    ``LeaseRenewer`` thread (which also renews sibling attempts). The write is
+    coordinator :class:`Keepalive` (``Keepalive.__call__``, for its own
+    attempt), and the supervisor's dedicated ``LeaseRenewer`` thread
+    (``LeaseRenewer.renew_pass``, including sibling attempts). The write is
     fenced: a void fence, a cancelling job or an already-expired lease refuses
     with ``False`` and no write, so renewal never revives an attempt that
     recovery has fenced off or a lease whose time already ran out.

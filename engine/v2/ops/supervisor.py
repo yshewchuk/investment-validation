@@ -97,7 +97,7 @@ from engine.v2.ops.store_barrier import (
     read_set_complete,
     verified_write_in,
 )
-from engine.v2.ops.worker_progress import STEPS_FILENAME, read_new_records
+from engine.v2.ops.worker_progress import STEPS_FILENAME, _rss_bytes, read_new_records
 
 #: Kinds whose coordinator effect does real, non-idempotent catalog/outbox/
 #: filesystem work every attempt — the generic checkpoint-reuse shortcut
@@ -218,15 +218,8 @@ _RENEWAL_PROGRESS_SECONDS = 60
 
 
 def _rss_kb():
-    """VmRSS in KiB from ``/proc/self/status``; ``None`` when unreadable."""
-    try:
-        with open("/proc/self/status", encoding="ascii") as handle:
-            for line in handle:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1])
-    except (OSError, ValueError):
-        return None
-    return None
+    """VmRSS in KiB via :func:`worker_progress._rss_bytes`; unavailable RSS is 0."""
+    return _rss_bytes() // 1024
 
 
 class LeaseRenewer:
@@ -255,8 +248,8 @@ class LeaseRenewer:
         # ``interval_seconds`` overrides the cadence for tests only; production
         # always uses the ``lease_seconds / 4`` contract.
         self.interval = (lease_seconds / 4) if interval_seconds is None else interval_seconds
-        if self.interval <= 0:
-            raise ValueError("interval_seconds must be positive")
+        if not math.isfinite(self.interval) or self.interval <= 0:
+            raise ValueError("interval_seconds must be a finite positive number")
         self._connect = connect
         self._stream = sys.stderr if stream is None else stream
         self._stop = threading.Event()
@@ -331,7 +324,12 @@ class LeaseRenewer:
         cancelling job, an expired lease) counts against ``total`` but not
         ``renewed`` and is left for the main loop's expiry/reconcile path; a
         raised renewal (a locked catalog) is caught here, counted as an error,
-        and retried at the next interval.
+        and retried at the next interval. Stop is honored between rows, so a
+        pass already under way ends after the heartbeat in flight and the
+        remaining rows are left for the expiry sweep or the next pass. A
+        successful query also prunes ``_excluded_attempts`` to the live rows, so
+        an exclusion is retired once recovery has fenced or settled its attempt
+        and never keeps a stale id off the set of attempts this thread renews.
         """
         self.passes += 1
         pass_started = self.clock.monotonic()
@@ -343,12 +341,25 @@ class LeaseRenewer:
             self._log("lease query failed; retried next interval", error=type(exc).__name__)
             return (0, 0)
         total = len(rows)
+        live_ids = {row["attempt_id"] for row in rows}
+        with self._lock:
+            # An exclusion is retired only once its attempt leaves this epoch's live
+            # set (fenced or settled), so the set cannot grow past the attempts this
+            # thread can still hand to a heartbeat.
+            self._excluded_attempts.intersection_update(live_ids)
         self._log("pass starting", pass_number=self.passes, total=total, rss_kb=_rss_kb())
         renewed = 0
         failed_this_pass = 0
         failed_attempts = []
         done = 0
         for row in rows:
+            # Check between rows, never mid-heartbeat: a stop requested during a
+            # pass lets the in-flight renewal finish and cuts the pass short at
+            # the next row instead of working through every remaining attempt.
+            if self._stop.is_set():
+                self._log("pass cut short by stop", pass_number=self.passes, done=done,
+                          total=total, renewed=renewed, rss_kb=_rss_kb())
+                break
             with self._lock:
                 if row["attempt_id"] not in self._excluded_attempts:
                     try:
@@ -1289,7 +1300,8 @@ class Service:
         """A pause that outlasted a lease must not fence a live worker (B2, #1239).
 
         Reached from ``_clock_check`` (before ``expire_leases`` runs later this
-        tick) on either a wall-clock jump or a long monotonic tick pause. Only
+        tick) when a process-wide monotonic pause exceeds ``LEASE_SECONDS`` or
+        a wall/monotonic discrepancy indicates host suspend. Only
         THIS supervisor's own tracked attempts are ever touched, and only while
         it still holds the exclusive process lock (``start()`` took it,
         ``close()`` releases it, and ``tick()`` runs only between them): an
@@ -1302,11 +1314,27 @@ class Service:
         supervisor still holds under its live fence. No other attempt is fenced
         or revived by a pause.
         """
+        tracked = renewed = refused = not_live = errors = 0
         for attempt_id, running in self.running.items():
+            tracked += 1
             identity = running.identities[0] if running.identities else None
-            if identity is not None and is_alive(identity, self.boot):
-                renew_after_resume(self.conn, attempt_id, running.claim.fence,
-                                   clock=self.clock, lease_seconds=LEASE_SECONDS)
+            if identity is None or not is_alive(identity, self.boot):
+                not_live += 1
+                continue
+            try:
+                if renew_after_resume(self.conn, attempt_id, running.claim.fence,
+                                      clock=self.clock, lease_seconds=LEASE_SECONDS):
+                    renewed += 1
+                else:
+                    refused += 1
+            except Exception:  # noqa: BLE001 - one bad attempt must not strand the rest
+                errors += 1
+        if tracked:
+            print(json.dumps({"event": "lease_resume", "tracked": tracked,
+                              "renewed": renewed, "refused": refused,
+                              "not_live": not_live, "errors": errors,
+                              "rss_kb": _rss_kb()}, sort_keys=True),
+                  file=sys.stderr, flush=True)
 
     def _launch(self, claim):
         try:
@@ -1499,9 +1527,18 @@ class Service:
         claim = running.claim
         row = self.conn.execute("SELECT state FROM jobs WHERE job_id = ?", (claim.job_id,)).fetchone()
         cancelled = row[0] == "cancelling"
-        if cancelled or not heartbeat(self.conn, claim.attempt_id, claim.fence,
-                                      clock=self.clock, lease_seconds=LEASE_SECONDS):
+        # A refused heartbeat voids this supervisor's claim on the attempt, so
+        # drop it from the renewal thread BEFORE the worker is stopped: the
+        # renewer holds its own connection and would otherwise keep extending a
+        # lease of an attempt this loop no longer tracks (and a later
+        # verification refusal could leave it renewable again).
+        lease_lost = not cancelled and not heartbeat(
+            self.conn, claim.attempt_id, claim.fence,
+            clock=self.clock, lease_seconds=LEASE_SECONDS)
+        if cancelled or lease_lost:
             running.failure = "CANCELLED" if cancelled else "LEASE_LOST"
+            if lease_lost and self._renewer is not None:
+                self._renewer.exclude_attempt(claim.attempt_id)
             executor.stop(running, boot_id=self.boot, clock=self.clock)
         self._track_steps(running, status)
         if self._observation_due(running, status):
@@ -1862,7 +1899,7 @@ class Service:
                 and attempt["state"] == "cancelling"):
             complete_cancel(self.conn, claim.job_id, process_state="verified_dead", clock=self.clock)
             return
-        renewer = getattr(self, "_renewer", None)
+        renewer = self._renewer
         if renewer is not None:
             renewer.exclude_attempt(claim.attempt_id)
         expire_leases(self.conn, clock=self.clock)
