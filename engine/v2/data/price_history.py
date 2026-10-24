@@ -68,6 +68,7 @@ retrieval" discipline applies to them too.
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 import pandas as pd
@@ -75,6 +76,7 @@ import pandas as pd
 from . import errors
 
 __all__ = [
+    "CLOSE_ADJ_RTOL",
     "PRICE_HISTORY_VALUE_COLUMNS",
     "as_of_view",
     "check_not_backdated",
@@ -86,6 +88,13 @@ __all__ = [
 #: The three float columns a version's identity is compared on ("any value
 #: differs from that ticker/date's latest stored version").
 PRICE_HISTORY_VALUE_COLUMNS = ("close_adj", "close_raw", "high_raw")
+
+#: Relative tolerance for ``close_adj`` equality (#1285): the vendor's
+#: adjusted close jitters at ~1e-6 relative between downloads, and exact
+#: equality turned that jitter into a full-history rewrite per ticker per
+#: day. A genuine dividend or split restatement (>= ~1e-3 relative) still
+#: exceeds this and versions every affected date.
+CLOSE_ADJ_RTOL = 1e-5
 
 #: The one pinned read rule (user decision 2026-09-14, replacing an earlier
 #: two-policy design -- "let's not have a special rule for parity runs, it's
@@ -110,15 +119,28 @@ _STORED_ROW_COLUMNS = ("date", "close_adj", "close_raw", "high_raw", "retrieved_
 
 
 def _float_equal(a: float, b: float) -> bool:
-    """Exact float64 equality, NaN equal to NaN (design doc §2)."""
+    """Exact float64 equality, NaN equal to NaN (design doc §2): the rule for
+    ``close_raw``/``high_raw`` and the first pass for ``close_adj`` before the
+    :data:`CLOSE_ADJ_RTOL` relative tolerance in :func:`_values_equal`."""
     if a != a and b != b:  # both NaN: the only float that compares unequal to itself
         return True
     return a == b
 
 
 def _values_equal(left, right) -> bool:
-    return all(_float_equal(getattr(left, column), getattr(right, column))
-              for column in PRICE_HISTORY_VALUE_COLUMNS)
+    """Whether a retrieval row matches a stored latest version's values.
+
+    ``close_raw`` and ``high_raw`` compare exactly (:func:`_float_equal`, NaN
+    equal to NaN). ``close_adj`` is equal when exactly equal OR both finite
+    and within :data:`CLOSE_ADJ_RTOL` relative tolerance (#1285 vendor float
+    jitter); one NaN against a finite value is NOT equal."""
+    adj_left, adj_right = getattr(left, "close_adj"), getattr(right, "close_adj")
+    adj_close_equal = _float_equal(adj_left, adj_right) or (
+        math.isfinite(adj_left) and math.isfinite(adj_right)
+        and abs(adj_left - adj_right) <= CLOSE_ADJ_RTOL * max(abs(adj_left), abs(adj_right)))
+    return (adj_close_equal
+            and _float_equal(getattr(left, "close_raw"), getattr(right, "close_raw"))
+            and _float_equal(getattr(left, "high_raw"), getattr(right, "high_raw")))
 
 
 def check_not_backdated(stored_retrieved_ats: Sequence[str], candidate_retrieved_at: str) -> None:
@@ -158,7 +180,10 @@ def diff_retrieval(stored_rows: pd.DataFrame, retrieval: pd.DataFrame, *, retrie
     emits a tombstone (``deleted=True``): it refuses instead (issue #719).
     A previously deleted row is still revived by a later retrieval that
     carries its date again (the ``prior.deleted`` branch below), so legacy
-    tombstoned rows stay fixable.
+    tombstoned rows stay fixable. A date is "changed" on an exact
+    ``close_raw``/``high_raw`` difference or a ``close_adj`` difference
+    beyond the :data:`CLOSE_ADJ_RTOL` relative tolerance, so sub-tolerance
+    vendor jitter on ``close_adj`` no longer rewrites history (#1285).
 
     ``stored_rows``: every version row known for this ticker so far (any
     order; only ``latest_state`` of it is used). ``retrieval``: this
