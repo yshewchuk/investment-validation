@@ -862,8 +862,9 @@ Root doc §5 invariants this package is responsible for:
   conflict: a capture whose `retrieved_at` is not later than every recorded
   successful attempt for the ticker (`added`, `no_change` or `duplicate_source_hash`) is refused
   `INPUT_CHANGED` (`refused_backdate`), so an incoming row can never overwrite or
-  sit beside a stored row at the same `retrieved_at`; nothing is written and the
-  stored rows stay live. A retrieval with no new or changed date is `no_change`
+  sit beside a stored row at the same `retrieved_at`; no price-history version or
+  fragment is added (only the `refused_backdate` attempt is logged in
+  `data_price_captures`) and the stored rows stay live. A retrieval with no new or changed date is `no_change`
   and adds no fragment version.
 - **Registered contract definitions are immutable.** `catalog.commit_snapshot`
   refuses (`IDENTITY_CONFLICT`) a changed definition under an existing
