@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import hashlib
+
 import pytest
 
 from engine.v2.foundation.artifacts import read_bounded_bytes
-
 from tools.v2_controlled_failure_drill import _manifest_is_consistent
 
 
@@ -23,6 +23,21 @@ def test_manifest_check_honors_selected_file_and_refuses_symlink(tmp_path):
     }
 
     assert _manifest_is_consistent(manifest, tmp_path, "drill")
+    missing_artifacts = dict(manifest)
+    missing_artifacts.pop("artifacts")
+    assert not _manifest_is_consistent(missing_artifacts, tmp_path, "drill")
+
+    artifact_bytes = b"drill artifact"
+    outside_artifacts = tmp_path / "outside-artifacts"
+    outside_artifacts.mkdir()
+    (outside_artifacts / "evidence.bin").write_bytes(artifact_bytes)
+    manifest["artifacts"] = {"evidence.bin": {
+        "content_hash": "sha256:" + hashlib.sha256(artifact_bytes).hexdigest(),
+        "byte_size": len(artifact_bytes),
+    }}
+    (tmp_path / "artifacts").symlink_to(outside_artifacts, target_is_directory=True)
+    assert not _manifest_is_consistent(manifest, tmp_path, "drill")
+    (tmp_path / "artifacts").unlink()
 
     outside = tmp_path / "outside.sqlite"
     outside.write_bytes(content)

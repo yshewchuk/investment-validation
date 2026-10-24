@@ -7,8 +7,9 @@ import threading
 
 import pytest
 
-from engine.v2.foundation import ArtifactStore, to_document
+from engine.v2.foundation import ArtifactError, ArtifactStore, to_document
 from engine.v2.ops import backup as backup_module
+from engine.v2.ops import catalog as catalog_module
 from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
 from engine.v2.ops.catalog import integrity_errors
 from engine.v2.ops.effects_graph import backup_effect
@@ -39,6 +40,75 @@ def _row_counts(conn):
             for name in tables}
 
 
+def test_artifact_store_verify_respects_explicit_byte_cap(tmp_path):
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"larger than cap", schema_ref="evidence.v1.0")
+    with pytest.raises(ArtifactError):
+        store.verify(ref, max_bytes=4)
+
+    source = store.root / ref.storage_key
+    source.chmod(0o644)
+    source.write_bytes(b"grown beyond the registered size")
+    with pytest.raises(ArtifactError):
+        store.verify(ref, max_bytes=ref.byte_size)
+
+
+def test_restore_requires_artifacts_mapping(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"must not be silently omitted", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "missing-artifacts", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key="missing-artifacts", owner="worker", target=backup,
+               clock=clock, store=store)
+    manifest_path = backup / "missing-artifacts.manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["artifacts"]
+    manifest_path.write_text(json.dumps(manifest))
+
+    destination = tmp_path / "restored"
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, destination)
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert not destination.exists()
+
+
+def test_backup_manifest_publication_oserror_is_retryable(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "publish-error", {}, clock=clock)
+
+    def fail_publish(*_args, **_kwargs):
+        raise OSError("synthetic disk failure")
+
+    monkeypatch.setattr(backup_module, "_publish_manifest", fail_publish)
+    with pytest.raises(OpsError) as failed:
+        run_backup(conn, key="publish-error", owner="worker",
+                   target=tmp_path / "backup", clock=clock, store=store)
+    assert failed.value.code == "WORKER_FAILED"
+    assert failed.value.problem.retryable is True
+
+
+def test_backup_integrity_scan_renews_keepalive(tmp_path, monkeypatch):
+    source = sqlite3.connect(tmp_path / "source.sqlite")
+    source.execute("CREATE TABLE sample (value INTEGER)")
+    source.commit()
+    renewed = []
+
+    def long_integrity_scan(conn):
+        conn.execute(
+            "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL "
+            "SELECT x + 1 FROM n WHERE x < 20000) SELECT MAX(x) FROM n").fetchone()
+        return []
+
+    monkeypatch.setattr(catalog_module, "integrity_errors", long_integrity_scan)
+    backup_module.backup_to(
+        source, tmp_path / "copy.sqlite", keepalive=lambda: renewed.append(True))
+    source.close()
+
+    assert renewed
+
+
 def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
@@ -57,6 +127,25 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
     assert refused.value.code == "INVALID_REQUEST"
     assert refused.value.problem.retryable is False
     assert artifact.read_bytes() == original
+
+
+def test_delivered_backup_rejects_symlinked_artifacts_directory(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"delivered artifact", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "delivered-link", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    receipt = run_backup(conn, key="delivered-link", owner="worker", target=backup,
+                         clock=clock, store=store)
+
+    moved = tmp_path / "moved-artifacts"
+    (backup / "artifacts").rename(moved)
+    (backup / "artifacts").symlink_to(moved, target_is_directory=True)
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="delivered-link", owner="worker", target=backup,
+                   clock=clock, store=store)
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert receipt["artifacts"]
 
 
 def test_restore_rejects_unsafe_manifest_artifact_before_creating_destination(tmp_path):
@@ -136,8 +225,8 @@ def test_staged_row_count_mismatch_is_refused_with_table_details(tmp_path, monke
     prepare_backup(conn, "b8", {}, clock=clock)
     real_backup_to = backup_module.backup_to
 
-    def corrupt(conn, destination, *, progress=None):
-        real_backup_to(conn, destination, progress=progress)
+    def corrupt(conn, destination, *, progress=None, keepalive=None):
+        real_backup_to(conn, destination, progress=progress, keepalive=keepalive)
         damaged = sqlite3.connect(destination)
         try:
             damaged.execute("DELETE FROM outbox")
@@ -167,7 +256,7 @@ def test_backup_counts_and_copy_share_one_snapshot(tmp_path, monkeypatch):
     real_backup_to = backup_module.backup_to
     observed = []
 
-    def racing_backup_to(source, destination, *, progress=None):
+    def racing_backup_to(source, destination, *, progress=None, keepalive=None):
         writer = sqlite3.connect(database)
         try:
             writer.execute("INSERT INTO synthetic_change VALUES (1)")
@@ -175,7 +264,7 @@ def test_backup_counts_and_copy_share_one_snapshot(tmp_path, monkeypatch):
         finally:
             writer.close()
         observed.append(_row_counts(source))
-        real_backup_to(source, destination, progress=progress)
+        real_backup_to(source, destination, progress=progress, keepalive=keepalive)
 
     monkeypatch.setattr(backup_module, "backup_to", racing_backup_to)
     manifest = run_backup(conn, key="b13", owner="worker", target=tmp_path / "backup",
@@ -277,7 +366,7 @@ def test_backup_rejects_symlinked_artifact_source(tmp_path, monkeypatch):
     prepare_backup(conn, "symlink-artifact", {"evidence.bin": ref}, clock=clock)
     source = tmp_path / "changed-source"
     source.symlink_to(store.verify(ref))
-    monkeypatch.setattr(store, "verify", lambda _ref: source)
+    monkeypatch.setattr(store, "verify", lambda _ref, **_kwargs: source)
     backup = tmp_path / "backup"
 
     with pytest.raises(OpsError) as refused:
@@ -649,6 +738,26 @@ def test_relative_backup_root_retry_after_manifest_crash_succeeds(tmp_path, monk
     assert (tmp_path / "backup" / "relative.manifest.json").is_file()
     assert conn.execute(
         "SELECT state FROM outbox WHERE logical_key='relative'").fetchone()[0] == "delivered"
+    delivered_receipt = run_backup(
+        conn, key="relative", owner="worker", target="backup", clock=clock, store=store)
+    assert delivered_receipt == receipt
+
+
+def test_durable_manifest_propagates_lease_loss(tmp_path, monkeypatch):
+    manifest = {
+        "backup_key": "lease",
+        "database": "sha256:" + "0" * 64,
+        "database_size": 0,
+        "database_rows": {},
+    }
+
+    def lose_lease(*_args, **_kwargs):
+        raise fail("LEASE_LOST", "synthetic lease loss")
+
+    monkeypatch.setattr(backup_module, "verified_file_hash", lose_lease)
+    with pytest.raises(OpsError) as lost:
+        backup_module._verify_durable_manifest(tmp_path, "lease", manifest)
+    assert lost.value.code == "LEASE_LOST"
 
 
 def test_durable_manifest_with_corrupt_database_is_not_reused(tmp_path):
