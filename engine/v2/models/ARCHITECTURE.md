@@ -80,10 +80,11 @@ The separate `magnitude_ridge_hgb_recipe` API constructs/validates source-free
 `magnitude_ridge_hgb_recipe.v1` metadata for the bounded stage-2 Ridge/HGB grid.
 It binds explicit ordered unique columns, a canonical dictionary hash, fixed
 preprocessing/estimator policy and derived width; no dictionary or source is read.
-The `history_ridge`/`history_hgb` family names reuse the same-package private
-estimator constructor unchanged; each numeric adapter owns its guards and fitting,
-not the constructor. This is not the fixed eleven-column v1 execution envelope. Dictionary membership and
-truthful matrix order remain caller-owned; a hash alone grants no admission.
+The `history_ridge`/`history_hgb` family names reuse the training-layer private
+estimator constructor (`training/_magnitude_estimators.build_estimator`,
+imported by the training fitters) unchanged; each numeric adapter owns its
+guards and fitting, not the constructor. This is not the fixed eleven-column
+v1 execution envelope. Dictionary membership and truthful matrix order remain caller-owned; a hash alone grants no admission.
 `training.magnitude_ridge_hgb.fit_ridge_hgb_predictions(..., columns=...)`
 checks both no-fit guards before inspecting metadata or numeric inputs, validates
 the closed recipe and exact declared column order, then copies numeric matrices.
@@ -430,9 +431,7 @@ the chooser producer artifacts below; this alone admits neither training sources
 nor a nightly chooser declaration.
 
 Selection uses the exact earlier of the event month and decision month,
-and the registered size model and feature order. The panel byte hash is the
-pinned snapshot's, compared by the batch caller, not the selector.
-It never chooses the newest available fold or substitutes a full-refit model.
+and the registered size model and feature order. It never chooses the newest available fold or substitutes a full-refit model.
 The panel hash comes from the already-pinned snapshot's single original
 `feature_panel` object; an unsupported multi-fragment layout is refused. The
 scoring selector (`gate_fold_selection.py`) applies the month rule and the
