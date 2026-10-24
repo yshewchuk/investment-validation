@@ -243,7 +243,13 @@ def _run_before_any_release(deployment: _Deployment) -> dict:
 
         manifest_path = deployment.backup_root / (key + ".manifest.json")
         manifest_present = manifest_path.is_file()
-        manifest = json.loads(manifest_path.read_text()) if manifest_present else None
+        if manifest_present:
+            from engine.v2.ops.backup import MAX_MANIFEST_BYTES
+            from engine.v2.ops.workflows.commands import read_bounded_bytes
+
+            manifest = json.loads(read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
+        else:
+            manifest = None
         manifest_verified = manifest_present and _manifest_is_consistent(
             manifest, deployment.backup_root, key)
         row = conn.execute(
