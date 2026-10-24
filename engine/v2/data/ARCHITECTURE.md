@@ -853,20 +853,18 @@ Root doc §5 invariants this package is responsible for:
 - **A `price_history` refresh writes only new or changed dates.** A date is
   unchanged when its latest stored (live) version equals the retrieval on
   `close_raw` and `high_raw` exactly (NaN equals NaN) and on `close_adj` within a
-  relative tolerance of `1e-5` (`CLOSE_ADJ_RTOL`; the provider's adjusted close
-  jitters at ~1e-6 between downloads, which exact equality turned into a full
-  history rewrite per ticker per day, #1285). The comparison is always against
+  relative tolerance of `1e-5` (`CLOSE_ADJ_RTOL`, above the provider's ~1e-6
+  download jitter). The comparison is always against
   the latest stored version, never the first, so accepted drift stays below the
   tolerance; a genuine dividend or split adjustment (>= ~1e-3) exceeds it and
   versions every affected date. A changed, new or previously tombstoned date
   gets one new version row at the capture's `retrieved_at`. Same-knowledge-date
   conflict: a capture whose `retrieved_at` is not later than every recorded
-  attempt for the ticker is refused `INPUT_CHANGED` (`refused_backdate`), so an
-  incoming row can never overwrite or sit beside a stored row at the same
-  `retrieved_at`; nothing is written and the stored rows stay live. A retrieval
-  with no new or changed date is `no_change` and adds no fragment version.
-  Already-written duplicate versions are not deleted; they are recalculated by
-  the standard rebuild (runbook), never a migration.
+  successful attempt for the ticker (`added`, `no_change` or `duplicate_source_hash`) is refused
+  `INPUT_CHANGED` (`refused_backdate`), so an incoming row can never overwrite or
+  sit beside a stored row at the same `retrieved_at`; nothing is written and the
+  stored rows stay live. A retrieval with no new or changed date is `no_change`
+  and adds no fragment version.
 - **Registered contract definitions are immutable.** `catalog.commit_snapshot`
   refuses (`IDENTITY_CONFLICT`) a changed definition under an existing
   `contract_id`; a table picks its next `contract_id`/`semantic_version` per

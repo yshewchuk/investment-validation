@@ -12,6 +12,7 @@ import pytest
 
 from engine.v2.data import price_history
 from engine.v2.data.errors import DataError
+from engine.v2.data.price_history import CLOSE_ADJ_RTOL
 
 _STORED_COLUMNS = ["date", "close_adj", "close_raw", "high_raw", "retrieved_at", "deleted",
                    "source_kind", "source_hash", "capture_id"]
@@ -60,6 +61,9 @@ def test_dividend_like_close_adj_shift_versions_every_date():
     assert list(out["date"]) == ["2024-01-01", "2024-01-02"]
     assert list(out["retrieved_at"]) == [_T1, _T1]
     assert not out["deleted"].any()
+    assert out["close_adj"].tolist() == pytest.approx([100.0 * (1 + 1e-3), 99.0 * (1 + 1e-3)])
+    assert list(out["close_raw"]) == [100.0, 99.0]
+    assert list(out["high_raw"]) == [105.0, 103.0]
 
 
 def test_one_ulp_close_raw_difference_versions_the_date():
@@ -70,6 +74,24 @@ def test_one_ulp_close_raw_difference_versions_the_date():
                            ("2024-01-02", 99.0, 99.0, 103.0))
     out = _diff(stored, retrieval)
     assert list(out["date"]) == ["2024-01-01"]
+    assert list(out["close_adj"]) == [100.0]
+    assert list(out["close_raw"]) == [ulp]
+    assert list(out["high_raw"]) == [105.0]
+    assert list(out["retrieved_at"]) == [_T1]
+
+
+def test_one_ulp_high_raw_difference_with_identical_raw_adj_versions_the_date():
+    ulp = math.nextafter(105.0, math.inf)
+    stored = _stored(("2024-01-01", 100.0, 100.0, 105.0, _T0, False),
+                     ("2024-01-02", 99.0, 99.0, 103.0, _T0, False))
+    retrieval = _retrieval(("2024-01-01", 100.0, 100.0, ulp),
+                           ("2024-01-02", 99.0, 99.0, 103.0))
+    out = _diff(stored, retrieval)
+    assert list(out["date"]) == ["2024-01-01"]
+    assert list(out["close_adj"]) == [100.0]
+    assert list(out["close_raw"]) == [100.0]
+    assert list(out["high_raw"]) == [ulp]
+    assert list(out["retrieved_at"]) == [_T1]
 
 
 def test_nan_close_adj_matches_only_nan():
@@ -82,6 +104,11 @@ def test_nan_close_adj_matches_only_nan():
                            ("2024-01-03", nan, 98.0, 102.0))
     out = _diff(stored, retrieval)
     assert list(out["date"]) == ["2024-01-02", "2024-01-03"]
+    assert out["close_adj"].iloc[0] == 99.0
+    assert math.isnan(out["close_adj"].iloc[1])
+    assert list(out["close_raw"]) == [99.0, 98.0]
+    assert list(out["high_raw"]) == [103.0, 102.0]
+    assert list(out["retrieved_at"]) == [_T1, _T1]
 
 
 def test_accepted_drift_does_not_accumulate():
@@ -95,9 +122,44 @@ def test_accepted_drift_does_not_accumulate():
     drift_b = v0 * (1 + 1.6e-5)
     out = _diff(stored, _retrieval(("2024-01-01", drift_b, v0, 105.0)))
     assert len(out) == 1
+    assert out["close_adj"].tolist() == pytest.approx([drift_b])
+    assert list(out["close_raw"]) == [v0]
+    assert list(out["high_raw"]) == [105.0]
+    assert list(out["retrieved_at"]) == [_T1]
 
 
-def test_tombstoned_date_revived_even_when_values_match_within_tolerance():
+@pytest.mark.parametrize("adj", [0.06, 10000.0])
+def test_close_adj_tolerance_scales_relatively_not_absolutely(adj):
+    # An absolute tolerance would pass 0.06*2e-6 = 1.2e-7 but reject
+    # 10000.0*2e-5 = 0.2; the relative rule gives the same verdict at both
+    # magnitudes: 2e-6 relative is jitter, 2e-5 relative versions.
+    high = adj * 1.05
+    stored = _stored(("2024-01-01", adj, adj, high, _T0, False))
+    under = adj * (1 + 2e-6)
+    assert _diff(stored, _retrieval(("2024-01-01", under, adj, high))).empty
+    over = adj * (1 + 2e-5)
+    out = _diff(stored, _retrieval(("2024-01-01", over, adj, high)))
+    assert list(out["date"]) == ["2024-01-01"]
+    assert out["close_adj"].tolist() == pytest.approx([over])
+    assert list(out["close_raw"]) == [adj]
+    assert list(out["high_raw"]) == [high]
+    assert list(out["retrieved_at"]) == [_T1]
+
+
+def test_close_adj_boundary_relative_diff_just_under_and_over_rtol():
+    stored = _stored(("2024-01-01", 100.0, 100.0, 105.0, _T0, False))
+    under = 100.0 * (1 + 0.9 * CLOSE_ADJ_RTOL)
+    assert _diff(stored, _retrieval(("2024-01-01", under, 100.0, 105.0))).empty
+    over = 100.0 * (1 + 1.1 * CLOSE_ADJ_RTOL)
+    out = _diff(stored, _retrieval(("2024-01-01", over, 100.0, 105.0)))
+    assert list(out["date"]) == ["2024-01-01"]
+    assert out["close_adj"].tolist() == pytest.approx([over])
+    assert list(out["close_raw"]) == [100.0]
+    assert list(out["high_raw"]) == [105.0]
+    assert list(out["retrieved_at"]) == [_T1]
+
+
+def test_tombstoned_date_revived_with_identical_values_ignores_unchanged_live_date():
     stored = _stored(("2024-01-01", 50.0, 50.0, 52.0, _T0, False),
                      ("2024-01-01", 50.0, 50.0, 52.0, _T1, True),
                      ("2024-01-02", 100.0, 100.0, 105.0, _T1, False))
@@ -107,6 +169,9 @@ def test_tombstoned_date_revived_even_when_values_match_within_tolerance():
     assert list(out["date"]) == ["2024-01-01"]
     assert not bool(out["deleted"].iloc[0])
     assert out["retrieved_at"].iloc[0] == _T2
+    assert list(out["close_adj"]) == [50.0]
+    assert list(out["close_raw"]) == [50.0]
+    assert list(out["high_raw"]) == [52.0]
 
 
 def test_omitted_live_date_still_refuses_whole_response():
