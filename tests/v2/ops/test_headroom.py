@@ -412,6 +412,25 @@ def test_rss_cap_uses_the_latest_epoch_peak_not_the_global_max(catalog):
     assert by_name["rss_cap_gb"]["status"] == "OK"
 
 
+def test_old_high_peak_attempt_outside_the_recent_window_is_ignored(
+        catalog, monkeypatch):
+    """The window is the most recent _RECENT_ATTEMPTS attempts by insertion;
+    an older higher peak outside it feeds neither the profile entry nor the
+    rss cap."""
+    conn, _store, _clock = catalog
+    monkeypatch.setattr(headroom, "_RECENT_ATTEMPTS", 2)
+    _seed_finished_attempt(conn, attempt_id="old1", profile="legacy_score",
+                           memory_bytes=10000, peak=10000, ended_at="2026-09-01T00:00:00Z")
+    _seed_finished_attempt(conn, attempt_id="a1", profile="legacy_score",
+                           memory_bytes=10000, peak=500, ended_at="2026-10-02T00:00:00Z")
+    _seed_finished_attempt(conn, attempt_id="a2", profile="legacy_score",
+                           memory_bytes=10000, peak=600, ended_at="2026-10-03T00:00:00Z")
+    by_name = {item["name"]: item
+               for item in headroom._memory_entries(conn, max_rss_gb=1.0)}
+    assert by_name["memory_peak:legacy_score"]["usage"] == 600  # old1's 10000 is out
+    assert by_name["rss_cap_gb"]["usage"] == 600
+
+
 def test_entries_have_no_projection_yet(catalog):
     """No covered limit has growth history: the key is present and always None."""
     conn, store, clock = catalog

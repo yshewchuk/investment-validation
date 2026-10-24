@@ -214,6 +214,9 @@ def _scratch_entries(conn, store, plan):
 def _memory_entries(conn, max_rss_gb):
     """``memory_peak:<profile>`` entries from the most recent finished attempts.
 
+    The window is the most recent ``_RECENT_ATTEMPTS`` attempts by insertion
+    order (rowid: an attempts row is created when the attempt starts, so the
+    highest rowids are the most recent attempts and no sort is needed).
     The enforced memory limit and the profile name live on the attempt's
     ``resource_reservations`` row (``scheduler._create_attempt`` writes both
     beside ``resources_json``); rows with a NULL peak are skipped, as are
@@ -223,12 +226,13 @@ def _memory_entries(conn, max_rss_gb):
     """
     entries = []
     rows = conn.execute(
+        "WITH recent AS (SELECT rowid AS r FROM attempts "
+        "ORDER BY rowid DESC LIMIT ?) "
         "SELECT rr.profile AS profile, rr.memory_bytes AS memory_bytes, "
         "MAX(a.memory_peak_bytes) AS peak FROM attempts a "
         "JOIN resource_reservations rr ON rr.attempt_id = a.attempt_id "
-        "WHERE a.attempt_id IN (SELECT attempt_id FROM attempts "
-        "WHERE ended_at IS NOT NULL AND memory_peak_bytes IS NOT NULL "
-        "ORDER BY COALESCE(ended_at, created_at) DESC LIMIT ?) "
+        "WHERE a.rowid IN (SELECT r FROM recent) "
+        "AND a.ended_at IS NOT NULL AND a.memory_peak_bytes IS NOT NULL "
         "GROUP BY rr.profile, rr.memory_bytes ORDER BY peak DESC",
         (_RECENT_ATTEMPTS,)).fetchall()
     if not rows:
@@ -240,22 +244,30 @@ def _memory_entries(conn, max_rss_gb):
                               "max memory_peak_bytes of recent finished attempts "
                               "in this reservation profile"))
     if max_rss_gb is not None:
-        # "most recent session" is the latest supervisor epoch: attempts carry
-        # their submitting supervisor's epoch_id, so this bounds the scan to
-        # one daemon lifetime.
+        # Scope the cap to the same recent window: the epoch of the latest
+        # finished attempt in the window, and the peak over only that epoch's
+        # finished attempts inside the window. An attempts row is created when
+        # the attempt starts, so rowid order is insertion order and the window
+        # needs no sort.
         peak = conn.execute(
-            "SELECT MAX(memory_peak_bytes) AS peak FROM attempts "
-            "WHERE memory_peak_bytes IS NOT NULL AND supervisor_epoch = "
-            "(SELECT supervisor_epoch FROM attempts "
-            "WHERE ended_at IS NOT NULL AND memory_peak_bytes IS NOT NULL "
-            "ORDER BY COALESCE(ended_at, created_at) DESC LIMIT 1)").fetchone()["peak"]
+            "WITH recent AS (SELECT rowid AS r FROM attempts "
+            "ORDER BY rowid DESC LIMIT ?) "
+            "SELECT MAX(a.memory_peak_bytes) AS peak FROM attempts a "
+            "WHERE a.rowid IN (SELECT r FROM recent) "
+            "AND a.ended_at IS NOT NULL AND a.memory_peak_bytes IS NOT NULL "
+            "AND a.supervisor_epoch = "
+            "(SELECT b.supervisor_epoch FROM attempts b "
+            "WHERE b.rowid IN (SELECT r FROM recent) "
+            "AND b.ended_at IS NOT NULL AND b.memory_peak_bytes IS NOT NULL "
+            "ORDER BY b.rowid DESC LIMIT 1)",
+            (_RECENT_ATTEMPTS,)).fetchone()["peak"]
         if peak is None:
             entries.append(_unmeasured("rss_cap_gb", int(max_rss_gb * _GIB), "bytes",
                                        "no finished attempt has a recorded memory peak"))
         else:
             entries.append(_entry("rss_cap_gb", int(peak), int(max_rss_gb * _GIB), "bytes",
                                   "largest attempt memory peak of the most recent "
-                                  "supervisor epoch vs --max-rss-gb"))
+                                  "supervisor epoch in the recent window vs --max-rss-gb"))
     return entries
 
 
