@@ -168,6 +168,8 @@ either required table. Their current consumer is
 
 ## Consumers
 
+`experiments/magnitude_search_request.py` consumes `errors.fail` for typed source-free declaration refusals.
+
 `experiments/runup_exit_report.py` consumes `fingerprints.source_closure` /
 `environment_identity` and `errors.OpsError` / `fail` for exploratory identity
 and typed refusals; `experiments/v2_runup_exits.py` consumes those typed errors;

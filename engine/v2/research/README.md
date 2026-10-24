@@ -211,6 +211,9 @@ or stored-panel admission. There is no writer, CLI, fit or automatic execution.
 
 ## Consumers
 
+`experiments/magnitude_search_request.py` consumes `magnitude_panel_table.recipe`
+and `eligibility_policy.eligibility_policy` for source-free dictionary/policy declarations, not data admission.
+
 Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
