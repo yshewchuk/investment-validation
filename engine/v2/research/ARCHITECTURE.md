@@ -9,7 +9,7 @@ publishing exactly as before; this package adds parallel `tools/v2_*` CLIs
 that read a pinned v2 snapshot instead.
 
 `tools/log_diagnostics.py` is deliberately **not** moved here: it reads only
-a local transactions-log CSV, never the Tier-2 store, so it needs no snapshot-pinned counterpart.
+a local transactions-log CSV (plus an optional sibling `metrics_*.json`), never the Tier-2 store, so it needs no snapshot-pinned counterpart.
 
 ## Purpose
 

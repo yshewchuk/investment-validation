@@ -369,8 +369,7 @@ source-manifest closure follows top-level imports); the reverse import is
 function-local, so there is no import-time cycle.
 `gate_fold_selection.py` also imports `engine.v2.foundation`,
 `engine.v2.models.deployment`, `engine.v2.models.serving_fold_loader`,
-`engine.v2.models.serving_folds` and `gate_forecast_source.py`;
-`release_bindings.py` imports it at top level.
+`engine.v2.models.serving_folds` and `gate_forecast_source.py`.
 
 `nightly_source_bundle.py` adds one new intra-package import edge
 (`.source_inputs`, for its own leakage check). It does not import
