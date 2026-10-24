@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -46,6 +46,7 @@ __all__ = [
 BUSY_TIMEOUT_MS = 5_000
 MAX_JOB_FAILURE_BYTES = 1024 * 1024
 _SYNC_FULL = 2
+_BACKUP_PAGE_BATCH = 128
 
 
 def connect(path: Path | str, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS,
@@ -87,15 +88,27 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         raise
 
 
-def backup_to(conn: sqlite3.Connection, dest: Path | str) -> None:
+def backup_to(conn: sqlite3.Connection, dest: Path | str, *,
+              progress: Callable[[int, int, int], None] | None = None,
+              keepalive: Callable[[], None] | None = None) -> None:
     """A consistent copy through the online backup API, integrity-checked."""
     dest = Path(dest)
     if dest.exists():
         raise FileExistsError(dest)
     target = sqlite3.connect(str(dest))
     try:
-        conn.backup(target)
-        problems = integrity_errors(target)
+        conn.backup(target, pages=_BACKUP_PAGE_BATCH, progress=progress)
+        if keepalive is None:
+            problems = integrity_errors(target)
+        else:
+            def pulse() -> int:
+                keepalive()
+                return 0
+            target.set_progress_handler(pulse, 10000)
+            try:
+                problems = integrity_errors(target)
+            finally:
+                target.set_progress_handler(None, 0)
     finally:
         target.close()
     if problems:

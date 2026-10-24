@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 from dataclasses import replace
 from pathlib import Path
 
 from engine.v2.foundation import ArtifactStore, to_document
+from engine.v2.foundation.artifacts import read_bounded_bytes
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import artifact, register_artifact
 from engine.v2.ops.discovery import sample_capacity
@@ -29,36 +29,6 @@ from engine.v2.ops.submission import NamespacePolicy, submit, submit_graph
 
 MAX_EXPECTED_POPULATION_BYTES = 16 * 1024 * 1024
 MAX_INPUT_MANIFEST_BYTES = 64 * 1024 * 1024
-
-
-def read_bounded_bytes(path, max_bytes):
-    """Read at most ``max_bytes`` from a regular, non-symlink file.
-
-    Raises ``OSError``/``ValueError`` unchanged, and
-    ``ValueError("not a bounded regular file")`` for a non-regular or oversize
-    file (a symlink raises ``OSError`` from ``O_NOFOLLOW``).
-    """
-    fd = None
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
-            raise ValueError("not a bounded regular file")
-        chunks = []
-        remaining = max_bytes + 1
-        while remaining > 0:
-            chunk = os.read(fd, min(65536, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        data = b"".join(chunks)
-        if len(data) > max_bytes:
-            raise ValueError("not a bounded regular file")
-        return data
-    finally:
-        if fd is not None:
-            os.close(fd)
 
 
 def read_bounded_json(path, max_bytes):

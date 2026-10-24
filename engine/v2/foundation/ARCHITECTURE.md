@@ -2,6 +2,8 @@
 
 ## Purpose
 
+Layer 0.5 also owns `artifacts.read_bounded_bytes(path, max_bytes)`: a regular-file read capped at `max_bytes`, opened with `O_NOFOLLOW | O_NONBLOCK`. Symlinks and non-regular or oversized files are refused; callers translate `OSError`/`ValueError` to their typed failure. The standard library has no single helper that combines these checks with a byte cap.
+
 Layer 0.5 in the root `/ARCHITECTURE.md`; owns pure session arithmetic ported from `engine/calendar.py`.
 
 ## Primary contracts and public interfaces
