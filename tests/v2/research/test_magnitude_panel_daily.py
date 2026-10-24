@@ -57,6 +57,8 @@ def native(tmp_path_factory):
                 row["spot"] = 100.0 + index / 10 + (index * 7) % 17 + 20 * ((index // 40) % 2)
             if day == "2024-08-13":
                 row.update(implied_move=0.0, mcap_asof=pd.Timestamp("2030-01-01"), mcap_log=999999.0)
+            if day == "2024-08-14":
+                row["mcap_asof"] = pd.Timestamp("2024-08-15")
             if day == "2024-08-15":
                 row["src_iv"] = None
             market.append(row)
@@ -170,7 +172,9 @@ def spy_oracle(closes):
 
 
 def test_spy_independent_nine_value_oracle(native):
-    for row in build(native)["rows"]:
+    rows = build(native)["rows"]
+    assert rows
+    for row in rows:
         prefix = [r for r in native.market if r["ticker"] == "SPY"
                   and r["date"].date().isoformat() <= row["source_session_ceiling"]]
         expected = spy_oracle([r["spot"] for r in prefix])
@@ -180,39 +184,47 @@ def test_spy_independent_nine_value_oracle(native):
 
 def test_daily_values_use_each_forecasts_last_iv_surface(native):
     admitted_cap_lags = set()
-    for row in build(native)["rows"]:
+    rows = build(native)["rows"]
+    for row in rows:
         candidates = [r for r in native.market if r["ticker"] == "SYNTH" and r["src_iv"] is not None
                       and r["date"].date().isoformat() <= row["source_session_ceiling"]]
         source = max(candidates, key=lambda r: r["date"])
         expected = {name: source[name] for name in DAILY}
+        missing = {}
         if source["implied_move"] == 0:
             expected["implied_move"] = None
+            missing["implied_move"] = "no_quote"
         if source["mcap_asof"] > source["date"]:
             expected["mcap_log"] = None
+            missing["mcap_log"] = "late_capture"
         else:
             admitted_cap_lags.add((source["date"] - source["mcap_asof"]).days)
             assert "mcap_log" not in row["daily_market"]["missing"]
         assert row["daily_market"]["values"] == expected
+        assert row["daily_market"]["missing"] == missing
         assert row["daily_market"]["anchor"]["source_date"] == source["date"].date().isoformat()
         assert row["daily_market"]["anchor"]["mcap_asof"] == source["mcap_asof"].date().isoformat()
         if row["source_session_ceiling"] == "2024-08-15":
             assert source["date"] == pd.Timestamp("2024-08-14")
     assert admitted_cap_lags == {0, 1}  # Both same-day and prior-day captures survive.
+    assert "2024-08-15" in {row["source_session_ceiling"] for row in rows}
 
 
 @pytest.mark.parametrize("index", [0, 4, 5, 19, 20, 21, 59, 60, 62, 63, 251, 252, 253])
 def test_spy_oracle_at_history_boundaries(index):
-    # The pure block seam isolates exact warm-up edges without rebuilding thirteen
-    # admitted snapshots; the nine-value test above covers the public reader.
+    # Pure block cases isolate exact history edges; the nine-value test above
+    # covers the public reader and snapshot admission.
     days = pd.bdate_range("2020-01-01", periods=256).strftime("%Y-%m-%d").tolist()
     closes = [100.0 + i / 10 + (i * 7) % 17 for i in range(len(days))]
     closes[0] = 1000.0  # Excluded from the 252-price drawdown at index 252.
+    closes[1] = 900.0  # Oldest included drawdown price at index 252 must survive.
     rows = [{"date": day, "spot": close} for day, close in zip(days, closes)]
     events = [{"event_id": "synthetic", "event_date": days[-1], "forecasts": [
         {"horizon_sessions": 1, "source_session_ceiling": days[index]}]}]
     actual = daily._spy_blocks(events, rows)["synthetic", 1]
     expected = spy_oracle(closes[:index + 1])
     assert actual["values"] == pytest.approx(expected, rel=1e-12, abs=1e-12)
+    assert actual["missing"] == {name: "insufficient_history" for name, value in expected.items() if value is None}
     assert actual["source_dates"] == days[max(0, index - 252):index + 1]
 
 
