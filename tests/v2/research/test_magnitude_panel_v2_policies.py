@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+from importlib import import_module
 from pathlib import Path
 
 import numpy as np
@@ -136,14 +137,20 @@ def test_policy_hashes_are_canonical_content_not_source_attestation():
 
 
 def test_declared_existing_math_outputs_are_real_synthetic_outputs():
+    declared = owner.policy_definitions()["derivation_policies"]
+    functions = {}
+    for output in _RUNUP + _REGIME:
+        module, function = declared[output]["function"].rsplit(".", 1)
+        functions[output] = getattr(import_module(module), function)
+        assert functions[output] is (runup_math.add_runup_features if output in _RUNUP else regime.add_regime_features)
     dates = pd.date_range("2020-01-01", periods=310)
     closes = 100.0 + np.arange(len(dates))
     prices = pd.DataFrame({"date": dates, "close_adj": closes})
     events = pd.DataFrame({"ticker": ["SYN", "SYN"], "date": dates[-2:], "move": [1.0, -1.0],
         "n_prior": [12, 13], "ema12_prior_abs_move": [2.0, 3.0], "mean_prior_abs_move": [4.0, 5.0]})
-    runup = runup_math.add_runup_features(events, {"SYN": prices}, "date")
+    runup = functions["dist_ema"](events, {"SYN": prices}, "date")
     market = prices.rename(columns={"close_adj": "close"})
-    regime_values = regime.add_regime_features(events, market)
+    regime_values = functions["spy_ret21"](events, market)
     # Independent linear-price ratios, closed-form EMA and sample-volatility fixtures.
     expected = {
         "signed_streak": (0.0, 1.0), "dist_high": (0.0, 0.0),
@@ -160,8 +167,14 @@ def test_declared_existing_math_outputs_are_real_synthetic_outputs():
         "spy_vol252": (1.7320068898775558, 1.7175113885160873),
         "spy_vol20_rel252": (-0.9654936043648296, -0.9653773191288793),
     }
-    declared = owner.policy_definitions()["derivation_policies"]
     for output, frame in [(name, runup) for name in _RUNUP] + [(name, regime_values) for name in _REGIME]:
         assert declared[output]["output"] == output
         assert len(frame) == 2
         assert frame[output].tolist() == pytest.approx(expected[output], rel=1e-10, abs=1e-10)
+    # A synthetic preceding peak makes both drawdowns nonzero and unequal: 407/500, 408/500.
+    prices.loc[306, "close_adj"] = 500.0
+    runup = functions["dist_high"](events, {"SYN": prices}, "date")
+    regime_values = functions["spy_dd252"](events, prices.rename(columns={"close_adj": "close"}))
+    for output, frame in (("dist_high", runup), ("spy_dd252", regime_values)):
+        assert len(frame) == 2
+        assert frame[output].tolist() == pytest.approx([-18.6, -18.4], rel=1e-10, abs=1e-10)
