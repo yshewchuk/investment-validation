@@ -3,6 +3,8 @@ from collections import Counter
 from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
+from math import sqrt
+from statistics import stdev
 from types import SimpleNamespace
 
 import pandas as pd
@@ -47,12 +49,15 @@ def native(tmp_path_factory):
     market = []
     for ticker in ("SYNTH", "SPY"):
         for index, day in enumerate(days):
-            row = {name: float(i + 1) for i, name in enumerate(DAILY)}
+            row = {name: float(i + 1) + index / 100 for i, name in enumerate(DAILY)}
             row.update(ticker=ticker, date=pd.Timestamp(day), year=int(day[:4]), src_iv=f"synthetic-{index}-" + "x" * 256,
-                       spot=100.0 + index, mcap_asof=pd.Timestamp(day), mcap_log=20.0)
+                       spot=100.0 + index, mcap_asof=pd.Timestamp(days[max(0, index - index % 2)]),
+                       mcap_log=20.0 + index / 1000)
+            if ticker == "SPY":
+                row["spot"] = 100.0 + index / 10 + (index * 7) % 17 + 20 * ((index // 40) % 2)
             if day == "2024-08-13":
                 row.update(implied_move=0.0, mcap_asof=pd.Timestamp("2030-01-01"), mcap_log=999999.0)
-            if day == "2024-08-14":
+            if day == "2024-08-15":
                 row["src_iv"] = None
             market.append(row)
     inputs = {"earnings_events": all_events, "daily_market": market,
@@ -96,7 +101,7 @@ def native(tmp_path_factory):
     producer = {"source_closure": source_closure(ROOT, ["engine/v2/research/magnitude_panel_daily.py"]),
                 "environment": environment_identity(1)}
     yield SimpleNamespace(**vars(source), stored=stored, parent=parent, policy=policy,
-                          metadata=metadata, events=events, days=days, producer=producer)
+                          metadata=metadata, events=events, days=days, producer=producer, market=market)
     conn.close()
 
 
@@ -138,21 +143,77 @@ def test_literal_daily_values_quote_and_late_cap(native):
                and r["horizon_sessions"] == 3)
     block = row["daily_market"]
     assert row["source_session_ceiling"] == "2024-08-13"
-    expected = {name: float(i + 1) for i, name in enumerate(DAILY)}
-    expected.update(implied_move=None, mcap_log=None, spot=100.0 + native.days.index("2024-08-13"))
+    index = native.days.index("2024-08-13")
+    expected = {name: float(i + 1) + index / 100 for i, name in enumerate(DAILY)}
+    expected.update(implied_move=None, mcap_log=None, spot=100.0 + index)
     assert block["values"] == expected
     assert block["missing"] == {"implied_move": "no_quote", "mcap_log": "late_capture"}
     assert block["quote_status"] == "zero" and block["anchor"]["mcap_asof"] == "2030-01-01"
 
 
-def test_spy_independent_return_oracles(native):
-    result = build(native)
-    for row in result["rows"]:
-        idx = native.days.index(row["source_session_ceiling"])
-        values = row["spy"]["values"]
-        for window in (21, 63, 252):
-            expected = ((100 + idx) / (100 + idx - window) - 1) * 100 if idx >= window else None
-            assert values[f"spy_ret{window}"] == pytest.approx(expected) if expected is not None else values[f"spy_ret{window}"] is None
+def spy_oracle(closes):
+    """Scalar input-only oracle, independent of the numpy regime implementation."""
+    expected = dict.fromkeys(SPY)
+    for window in (21, 63, 252):
+        if len(closes) > window:
+            expected[f"spy_ret{window}"] = (closes[-1] / closes[-1 - window] - 1) * 100
+    if len(closes) > 252:
+        expected["spy_dd252"] = (closes[-1] / max(closes[-252:]) - 1) * 100
+    for window in (5, 20, 60, 252):
+        if len(closes) > window:
+            tail = closes[-window - 1:]
+            returns = [right / left - 1 for left, right in zip(tail, tail[1:])]
+            expected[f"spy_vol{window}"] = stdev(returns) * sqrt(252) * 100
+    if expected["spy_vol252"] not in (None, 0):
+        expected["spy_vol20_rel252"] = expected["spy_vol20"] / expected["spy_vol252"] - 1
+    return expected
+
+
+def test_spy_independent_nine_value_oracle(native):
+    for row in build(native)["rows"]:
+        prefix = [r for r in native.market if r["ticker"] == "SPY"
+                  and r["date"].date().isoformat() <= row["source_session_ceiling"]]
+        expected = spy_oracle([r["spot"] for r in prefix])
+        assert row["spy"]["values"] == pytest.approx(expected, rel=1e-12, abs=1e-12)
+        assert row["spy"]["source_dates"] == [r["date"].date().isoformat() for r in prefix[-253:]]
+
+
+def test_daily_values_use_each_forecasts_last_iv_surface(native):
+    admitted_cap_lags = set()
+    for row in build(native)["rows"]:
+        candidates = [r for r in native.market if r["ticker"] == "SYNTH" and r["src_iv"] is not None
+                      and r["date"].date().isoformat() <= row["source_session_ceiling"]]
+        source = max(candidates, key=lambda r: r["date"])
+        expected = {name: source[name] for name in DAILY}
+        if source["implied_move"] == 0:
+            expected["implied_move"] = None
+        if source["mcap_asof"] > source["date"]:
+            expected["mcap_log"] = None
+        else:
+            admitted_cap_lags.add((source["date"] - source["mcap_asof"]).days)
+            assert "mcap_log" not in row["daily_market"]["missing"]
+        assert row["daily_market"]["values"] == expected
+        assert row["daily_market"]["anchor"]["source_date"] == source["date"].date().isoformat()
+        assert row["daily_market"]["anchor"]["mcap_asof"] == source["mcap_asof"].date().isoformat()
+        if row["source_session_ceiling"] == "2024-08-15":
+            assert source["date"] == pd.Timestamp("2024-08-14")
+    assert admitted_cap_lags == {0, 1}  # Both same-day and prior-day captures survive.
+
+
+@pytest.mark.parametrize("index", [0, 4, 5, 19, 20, 21, 59, 60, 62, 63, 251, 252, 253])
+def test_spy_oracle_at_history_boundaries(index):
+    # The pure block seam isolates exact warm-up edges without rebuilding thirteen
+    # admitted snapshots; the nine-value test above covers the public reader.
+    days = pd.bdate_range("2020-01-01", periods=256).strftime("%Y-%m-%d").tolist()
+    closes = [100.0 + i / 10 + (i * 7) % 17 for i in range(len(days))]
+    closes[0] = 1000.0  # Excluded from the 252-price drawdown at index 252.
+    rows = [{"date": day, "spot": close} for day, close in zip(days, closes)]
+    events = [{"event_id": "synthetic", "event_date": days[-1], "forecasts": [
+        {"horizon_sessions": 1, "source_session_ceiling": days[index]}]}]
+    actual = daily._spy_blocks(events, rows)["synthetic", 1]
+    expected = spy_oracle(closes[:index + 1])
+    assert actual["values"] == pytest.approx(expected, rel=1e-12, abs=1e-12)
+    assert actual["source_dates"] == days[max(0, index - 252):index + 1]
 
 
 @pytest.mark.parametrize("field,value", [("max_events", 0), ("max_source_rows", True), ("max_events", 1_000_001)])
