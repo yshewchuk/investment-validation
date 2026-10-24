@@ -697,7 +697,11 @@ def test_restore_accepts_legacy_manifest_without_size_fields(tmp_path):
 def test_durable_manifest_with_corrupt_database_is_not_reused(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    prepare_backup(conn, "resume", {}, clock=clock)
+    ref = store.publish_bytes(b"retry evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "resume", {"evidence.bin": ref}, clock=clock)
+    payload = json.loads(conn.execute(
+        "SELECT payload_json FROM outbox WHERE kind='backup' AND logical_key='resume'").fetchone()[0])
+    refs = backup_module._validated_artifact_names(payload)
     backup = tmp_path / "backup"
 
     def crash_after_manifest(name):
@@ -709,11 +713,20 @@ def test_durable_manifest_with_corrupt_database_is_not_reused(tmp_path):
                    clock=clock, store=store, fault=crash_after_manifest)
     manifest_path = backup / "resume.manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    assert backup_module._durable_manifest(manifest_path, "resume") == manifest
+    assert backup_module._durable_manifest(manifest_path, "resume", payload, refs) == manifest
+
+    manifest["artifacts"] = {}
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(OpsError) as mismatch:
+        backup_module._durable_manifest(manifest_path, "resume", payload, refs)
+    assert mismatch.value.code == "INTEGRITY_FAILED"
+
+    manifest["artifacts"] = {"evidence.bin": {
+        "content_hash": ref.content_hash, "byte_size": ref.byte_size}}
+    manifest_path.write_text(json.dumps(manifest))
     database = backup / manifest["database_file"]
     database.write_bytes(database.read_bytes() + b"corruption")
-
-    assert backup_module._durable_manifest(manifest_path, "resume") is None
+    assert backup_module._durable_manifest(manifest_path, "resume", payload, refs) is None
 
 
 def test_backup_destination_fsync_failure_is_retryable(tmp_path, monkeypatch):
@@ -830,3 +843,19 @@ def test_sparse_file_over_the_byte_cap_is_refused_without_a_destination(
     assert refused.value.problem.retryable is False
 
     assert not destination.exists()
+
+
+def test_source_catalog_over_byte_cap_is_refused_before_table_scan(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "oversized", {}, clock=clock)
+    monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", 1)
+    monkeypatch.setattr(backup_module, "_table_row_counts",
+                        lambda _conn: pytest.fail("oversized source was scanned"))
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="oversized", owner="worker", target=tmp_path / "backup",
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert not list((tmp_path / "backup").glob("*.sqlite"))
