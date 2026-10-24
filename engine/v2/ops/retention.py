@@ -29,8 +29,8 @@ _REQUEST_BINDING = "materialization_request.json"
 _MAX_MANIFEST_BYTES = 10 * 1024 * 1024
 _MAX_JOURNAL_BYTES = 4 * 1024 * 1024
 _JOURNAL_NAME = ".retention-journal.json"
-_JOURNAL_SCHEMA = "retention_journal.v1.0"
-_JOURNAL_KEYS = frozenset({"schema_version", "files", "roots"})
+_JOURNAL_SCHEMA = "retention_journal.v1.1"
+_JOURNAL_KEYS = frozenset({"schema_version", "files", "roots", "backup_keep"})
 _JOURNAL_FILE_KEYS = frozenset({"path", "content_hash", "byte_size"})
 MAX_BACKUP_STREAM_BYTES = 4 * 1024 * 1024 * 1024
 MAX_LIVE_SPEC_BYTES = 1024 * 1024
@@ -254,6 +254,18 @@ def _journal_tree_entry(entry):
             "directories": _journal_tree_directories(entry["directories"]),
             "files": _journal_tree_files(entry["files"])}
 
+def _journal_document_backup_keep(document, raw):
+    backup_keep = document.get("backup_keep") if isinstance(document, dict) else None
+    if len(raw) > _MAX_JOURNAL_BYTES or not isinstance(document, dict) \
+            or set(document) != _JOURNAL_KEYS \
+            or document["schema_version"] != _JOURNAL_SCHEMA \
+            or not isinstance(document["files"], list) \
+            or not isinstance(document["roots"], list) \
+            or isinstance(backup_keep, bool) or not isinstance(backup_keep, int) \
+            or backup_keep <= 0:
+        raise _journal_invalid()
+    return backup_keep
+
 def _journal_files(journal):
     try:
         info = journal.lstat()
@@ -271,16 +283,14 @@ def _journal_files(journal):
     except (OSError, ValueError, RecursionError):
         raise fail("INTEGRITY_FAILED", "retention journal could not be read",
                    details={"reason_key": "retention_journal_unreadable"}) from None
-    if len(raw) > _MAX_JOURNAL_BYTES or not isinstance(document, dict) \
-            or set(document) != _JOURNAL_KEYS \
-            or document["schema_version"] != _JOURNAL_SCHEMA \
-            or not isinstance(document["files"], list) \
-            or not isinstance(document["roots"], list):
-        raise _journal_invalid()
-    return [_journal_entry(entry) for entry in document["files"]], [_journal_tree_entry(entry) for entry in document["roots"]]
+    backup_keep = _journal_document_backup_keep(document, raw)
+    return ([_journal_entry(entry) for entry in document["files"]],
+            [_journal_tree_entry(entry) for entry in document["roots"]],
+            backup_keep)
 
-def _write_journal(journal, files, roots):
+def _write_journal(journal, files, roots, backup_keep):
     payload = json.dumps({"schema_version": _JOURNAL_SCHEMA,
+                          "backup_keep": backup_keep,
                           "files": files, "roots": roots},
                          sort_keys=True).encode("utf-8")
     if len(payload) > _MAX_JOURNAL_BYTES:
@@ -448,13 +458,18 @@ def _replay_journal(journal, files, trees, keepalive):
             _remove_tree(path, keepalive)
     _clear_journal(journal)
 
-def _recover_journal(ops_root, materialization_base, conn, store, keep, keepalive=None):
+def _recover_journal(ops_root, materialization_base, conn, store, keep, backup_keep=None, keepalive=None):
     root = Path(ops_root)
     journal = root / _JOURNAL_NAME
     entries = _read_journal_or_discard_pending(journal)
     if entries is None:
         return False
-    files, trees = entries
+    files, trees, recorded_backup_keep = entries
+    if backup_keep > recorded_backup_keep:
+        raise fail("INTEGRITY_FAILED", "backup retention limit increased during interrupted prune",
+                   details={"reason_key": "retention_journal_policy_changed",
+                            "recorded_keep": recorded_backup_keep,
+                            "current_keep": backup_keep})
     base = _validated_journal_base(materialization_base, trees)
     _check_journal_roots_live(base, trees, conn, store, keepalive)
     tree_by_name = {entry["name"]: entry for entry in trees}
@@ -593,7 +608,71 @@ def _manifest(key, path, database, artifacts_dir, keepalive=None):
         _artifact(artifacts_dir, name, info, keepalive)
     return {"key": key, "when": when, "artifacts": set(artifacts)}
 
-def _scope_files(scope, keepalive=None):
+def _residue_keys(scope, keepalive):
+    names = set()
+    for path in scope.iterdir():
+        _renew(keepalive)
+        names.add(path.name)
+    manifests = {name[:-len(_MANIFEST)] for name in names
+                 if name.endswith(_MANIFEST)}
+    databases = {name[:-len(_DB)] for name in names if name.endswith(_DB)}
+    pending_suffix = ".manifest.pending"
+    pending = {name[:-len(pending_suffix)] for name in names
+               if name.endswith(pending_suffix)}
+    return (databases - manifests) | (pending - manifests)
+
+def _residue_row(conn, key, limit):
+    _safe_name(key)
+    try:
+        row = conn.execute(
+            "SELECT state, length(CAST(payload_json AS BLOB)) AS payload_bytes, "
+            "CASE WHEN typeof(payload_json)='text' AND "
+            "length(CAST(payload_json AS BLOB))<=? "
+            "THEN CAST(payload_json AS BLOB) END AS payload_json "
+            "FROM outbox WHERE kind='backup' AND logical_key=?",
+            (limit, key)).fetchone()
+    except sqlite3.Error:
+        row = None
+    if row is None or row[0] not in ("pending", "failed"):
+        raise fail("INTEGRITY_FAILED", "backup creation residue is not verifiably abandoned",
+                   details={"reason_key": "backup_creation_residue_unverified",
+                            "backup_key": key})
+    if row[2] is None or row[1] > limit:
+        raise fail("INTEGRITY_FAILED", "backup creation payload is too large or invalid",
+                   details={"reason_key": "backup_creation_payload_invalid",
+                            "backup_key": key})
+    return row
+
+def _residue_payload(row, encoding, limit, key):
+    try:
+        text = decode_bounded_text(row[2], encoding, limit)
+        payload = json.loads(text)
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        raise fail("INTEGRITY_FAILED", "backup creation payload is invalid",
+                   details={"reason_key": "backup_creation_payload_invalid",
+                            "backup_key": key}) from None
+    if not isinstance(payload, dict) or payload.get("backup_key") != key \
+            or not isinstance(payload.get("artifacts"), dict):
+        raise fail("INTEGRITY_FAILED", "backup creation payload does not match residue",
+                   details={"reason_key": "backup_creation_payload_invalid",
+                            "backup_key": key})
+    return payload
+
+def _failed_creation_residue(scope, conn, keepalive=None):
+    keys = _residue_keys(scope, keepalive)
+    if not keys:
+        return set(), set()
+    encoding, limit = sql_text_budget(conn, MAX_LIVE_SPEC_BYTES)
+    artifacts = set()
+    for key in sorted(keys):
+        row = _residue_row(conn, key, limit)
+        payload = _residue_payload(row, encoding, limit, key)
+        for name in payload["artifacts"]:
+            _safe_name(name, artifact=True)
+            artifacts.add(name)
+    return keys, artifacts
+
+def _scope_files(scope, keepalive=None, residue_keys=()):
     manifests, databases = {}, {}
     entries = []
     for path in scope.iterdir():
@@ -609,7 +688,16 @@ def _scope_files(scope, keepalive=None):
         if path.name.endswith(_MANIFEST):
             manifests[_safe_name(path.name[:-len(_MANIFEST)])] = path
         elif path.name.endswith(_DB):
-            databases[_safe_name(path.name[:-len(_DB)])] = path
+            key = _safe_name(path.name[:-len(_DB)])
+            if key in residue_keys and key not in manifests:
+                continue
+            databases[key] = path
+        elif path.name.endswith(".manifest.pending"):
+            key = _safe_name(path.name[:-len(".manifest.pending")])
+            if key in residue_keys and key not in manifests:
+                continue
+            raise fail("INTEGRITY_FAILED", "backup scope contains a stray file",
+                       details={"reason_key": "backup_scope_stray_file"})
         else:
             raise fail("INTEGRITY_FAILED", "backup scope contains a stray file",
                        details={"reason_key": "backup_scope_stray_file"})
@@ -648,23 +736,29 @@ def _scope_records(manifests, databases, artifacts_dir, keepalive=None):
                                                      "backup_key": key})) from None
     return records
 
-def _read_scope(scope, keepalive=None):
+def _read_scope(scope, keepalive=None, conn=None):
+    residue_keys, residue_artifacts = _failed_creation_residue(scope, conn, keepalive)
     artifacts_dir = _scope_artifacts_dir(scope)
-    manifests, databases = _scope_files(scope, keepalive)
+    manifests, databases = _scope_files(scope, keepalive, residue_keys)
     records = _scope_records(manifests, databases, artifacts_dir, keepalive)
     referenced = set().union(*(record["artifacts"] for record in records)) if records else set()
     present = _present_artifacts(artifacts_dir, keepalive)
-    if present != referenced:
+    unrecognized = present - referenced - residue_artifacts
+    if unrecognized:
         raise fail("INTEGRITY_FAILED", "backup artifacts are stray or incomplete",
                    details={"reason_key": "backup_artifacts_mismatch"})
-    return records, artifacts_dir, present
+    if residue_keys:
+        _stderr("RETENTION_BACKUP_RESIDUE_KEPT", backup_count=len(residue_keys),
+                artifact_count=len(residue_artifacts))
+    return records, artifacts_dir, present, residue_artifacts
 
-def _plan(scope, keep, keepalive=None):
-    records, artifacts_dir, present = _read_scope(scope, keepalive)
+def _plan(scope, keep, keepalive=None, conn=None):
+    records, artifacts_dir, present, residue_artifacts = _read_scope(
+        scope, keepalive, conn)
     ordered = sorted(records, key=lambda r: (r["when"], r["key"]), reverse=True)
     retained = ordered[:keep]
     kept = set().union(*(r["artifacts"] for r in retained)) if retained else set()
-    return scope, ordered[keep:], artifacts_dir, present - kept
+    return scope, ordered[keep:], artifacts_dir, present - kept - residue_artifacts
 
 def _live_spec_too_large(attempt_id, spec_bytes):
     return fail("INTEGRITY_FAILED", "live job spec exceeds its byte bound",
@@ -845,7 +939,7 @@ def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=
         raise fail("INTEGRITY_FAILED", "retention filesystem verification failed",
                    details={"reason_key": "retention_io_failed"}) from None
 
-def _verified_backup_plans(root, keep, keepalive):
+def _verified_backup_plans(root, keep, keepalive, conn):
     if not root.exists():
         return []
     if root.is_symlink() or not root.is_dir():
@@ -863,14 +957,14 @@ def _verified_backup_plans(root, keep, keepalive):
     progress, done, plans = _Progress("verify_backups", len(scopes)), 0, []
     try:
         for scope in scopes:
-            plans.append(_plan(scope, keep, keepalive))
+            plans.append(_plan(scope, keep, keepalive, conn=conn))
             done += 1
             progress.tick(done)
     finally:
         _stage_end("verify_backups", started, done, len(scopes))
     return plans
 
-def _write_deletion_journal(ops_root, plans, roots, base, keepalive):
+def _write_deletion_journal(ops_root, plans, roots, base, backup_keep=None, keepalive=None):
     files = []
     for scope, discarded, artifacts_dir, artifact_names in plans:
         for record in discarded:
@@ -882,7 +976,7 @@ def _write_deletion_journal(ops_root, plans, roots, base, keepalive):
     journal = ops_root / _JOURNAL_NAME
     active = bool(files or trees)
     if active:
-        _write_journal(journal, files, trees)
+        _write_journal(journal, files, trees, backup_keep)
     return journal, active
 
 def _delete_backup_plans(plans, keepalive):
@@ -927,8 +1021,8 @@ def _enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep
                                   DEFAULT_MATERIALIZATION_KEEP, "materialization")
     ops_root = Path(ops_root)
     base = Path(materialization_base or default_materialization_base(ops_root))
-    _recover_journal(ops_root, base, conn, store, materialization_keep, keepalive)
-    plans = _verified_backup_plans(ops_root / "backups", keep, keepalive)
+    _recover_journal(ops_root, base, conn, store, materialization_keep, keep, keepalive)
+    plans = _verified_backup_plans(ops_root / "backups", keep, keepalive, conn)
     roots = _materialization_plan(ops_root, materialization_keep, conn, store,
                                   base=base, keepalive=keepalive)
     backup_total = sum(len(discarded) + len(artifact_names)
@@ -937,7 +1031,7 @@ def _enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep
             materialization_total=len(roots), keep=keep,
             materialization_keep=materialization_keep, scopes=len(plans))
     journal, journal_active = _write_deletion_journal(
-        ops_root, plans, roots, base, keepalive)
+        ops_root, plans, roots, base, keep, keepalive)
     deleted = _delete_backup_plans(plans, keepalive)
     _delete_materialization_plans(roots, keepalive)
     if journal_active:

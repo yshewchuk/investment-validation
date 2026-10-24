@@ -734,9 +734,11 @@ def test_journal_mismatch_refuses_before_deleting_remaining_entries(
         return real_unlink(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "unlink", fail_manifest)
-    with pytest.raises(OpsError):
+    with pytest.raises(OpsError) as caught:
         enforce_retention(ops, conn=catalog, store=object(),
                           keep=1, materialization_keep=1)
+    assert caught.value.code == "BACKUP_FAILED"
+    assert caught.value.problem.details["reason_key"] == "backup_delete_failed"
     monkeypatch.setattr(Path, "unlink", real_unlink)
     (scope / "b1.manifest.json").write_bytes(b"changed")
     before = _files(ops)
@@ -1101,9 +1103,11 @@ def test_database_verification_logs_bounded_stage_and_progress(
     assert "elapsed_s" in ends[0] and "rss_peak_mb" in ends[0]
     assert progress
     assert len(progress) >= 2
-    assert all(e["total"] is None and e["eta_s"] is None for e in progress)
-    assert all(e["done"] >= 1 and "elapsed_s" in e and "rss_peak_mb" in e
-               for e in progress)
+    for e in progress:
+        assert "rate_per_s" in e
+        assert "eta_s" in e
+        assert e["total"] is None and e["eta_s"] is None
+        assert e["done"] >= 1 and "elapsed_s" in e and "rss_peak_mb" in e
     done_counts = [e["done"] for e in progress]
     assert all(previous < current
                for previous, current in zip(done_counts, done_counts[1:]))
@@ -1130,3 +1134,95 @@ def test_remove_tree_emits_bounded_progress_after_each_removal(
                 and e["stage"] == "delete_materialization_root"]
     assert [(e["done"], e["total"]) for e in progress] == [(1, 4), (2, 4), (3, 4), (4, 4)]
     assert not root.exists()
+
+
+def test_interrupted_backup_deletion_refuses_on_increased_keep(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    real_unlink = Path.unlink
+
+    def fail_manifest(self, *args, **kwargs):
+        if self.name == "b1.manifest.json":
+            raise OSError(5, "injected")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_manifest)
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+    assert caught.value.code == "BACKUP_FAILED"
+    assert caught.value.problem.details["reason_key"] == "backup_delete_failed"
+    assert not (scope / "b1.sqlite").exists()
+    assert (scope / "b1.manifest.json").is_file()
+    assert (ops / ".retention-journal.json").is_file()
+
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    before = _files(ops)
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=2, materialization_keep=1)
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "retention_journal_policy_changed"
+    assert _files(ops) == before
+
+
+def _create_outbox_table(conn):
+    conn.execute(
+        "CREATE TABLE outbox "
+        "(kind TEXT, logical_key TEXT, state TEXT, payload_json TEXT)")
+
+
+def test_failed_creation_residue_is_preserved_when_recognized(
+        tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    _create_outbox_table(catalog)
+    payload = json.dumps({
+        "backup_key": "b3",
+        "artifacts": {"residue.bin": "sha256:" + "0" * 64},
+    })
+    catalog.execute(
+        "INSERT INTO outbox VALUES (?, ?, ?, ?)",
+        ("backup", "b3", "failed", payload))
+    catalog.commit()
+
+    b3_sqlite = scope / "b3.sqlite"
+    b3_sqlite.write_bytes(b"incomplete")
+    b3_pending = scope / "b3.manifest.pending"
+    b3_pending.write_bytes(b"pending")
+    residue = scope / "artifacts" / "residue.bin"
+    residue.write_bytes(b"residue")
+
+    deleted = enforce_retention(ops, conn=catalog, store=object(),
+                                keep=1, materialization_keep=1)
+
+    assert deleted == ["b1"]
+    assert (scope / "b2.sqlite").is_file()
+    assert (scope / "b2.manifest.json").is_file()
+    assert not (scope / "b1.sqlite").exists()
+    assert not (scope / "b1.manifest.json").exists()
+    assert b3_sqlite.read_bytes() == b"incomplete"
+    assert b3_pending.read_bytes() == b"pending"
+    assert residue.read_bytes() == b"residue"
+
+
+def test_unknown_creation_residue_refuses_without_changes(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    _create_outbox_table(catalog)
+    (scope / "b3.sqlite").write_bytes(b"incomplete")
+
+    before = _files(ops)
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.details["reason_key"] == "backup_creation_residue_unverified"
+    assert _files(ops) == before

@@ -331,3 +331,21 @@ def test_a_symlinked_materialization_base_is_refused_not_followed(world, tmp_pat
                if e["kind"] == "partial_materialization"]
     assert [e["error"] for e in entries] == ["SymlinkedAncestor"]
     assert (partial / "tables" / "t.csv").is_file()
+
+
+def test_lease_renewal_immediately_before_unlink(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "file.txt").touch()
+
+    events = []
+    real_unlink = reclaim_module.os.unlink
+
+    def mock_unlink(path, *args, **kwargs):
+        events.append("unlink")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(reclaim_module.os, "unlink", mock_unlink)
+    reclaim_module.remove_tree(root, lambda: events.append("renew"))
+
+    assert events == ["renew", "renew", "unlink", "renew", "renew", "renew"]

@@ -856,9 +856,9 @@ def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=
                  generation=generation)
     # Retention runs only after the backup and its watermark are durable; a
     # refusal propagates as a typed OpsError with the backup effect already
-    # delivered. A backup deletion I/O error can leave earlier backup deletions
-    # durable; later runs refuse an incomplete/stray backup scope. Partial
-    # materialization-root recovery is deferred to #1251.
+    # delivered. Interrupted pruning replays verified journal targets. Known
+    # incomplete creation residue from a pending/failed outbox row stays
+    # untouched and is excluded; unknown or active residue refuses pruning.
     enforce_retention(ops_root, conn=conn, store=store, keepalive=keepalive, materialization_base=materialization_base)
     return None, ()
 
