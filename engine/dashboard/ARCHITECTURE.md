@@ -134,11 +134,13 @@ inside function bodies):
   `DAILY_STATE_FIELDS`, for the projected `daily_market` read; other uses lazy),
   `engine.memprobe` (`nightly.py`, also provided to `engine.score` and
   `engine.replay`, which are outside this package).
-- Lazy, `warm_serving.py` only: `engine.data.features.tier4` (`serving_model`,
+- Lazy, `warm_serving.py` and `nightly.py::run_nightly`: `engine.data.features.tier4`
+  (`serving_model`,
   `fold_start_of`, `feature_model`, `PRODUCES`, panel hashing through
   `store.file_sha256` and `paths.PANEL`, private `_serving_path`; the child
-  temporarily reassigns `SERVING_DIR` to stage writes) and `engine.features`
-  (`load_panel`, child only).
+  temporarily reassigns `SERVING_DIR` to stage writes; `clear_prepared_frames`
+  from `run_nightly`) and `engine.features`
+  (`load_panel` in the child; `clear_panel_caches` from `run_nightly`).
 - Lazy (function-local) only, never at module top level: `engine.calendar`
   (`model_evidence.py::_dataset_for`, `nightly.py::_date_change_flag`/
   `_panel_staleness_flags`/`refresh_forward_chains`/`run_nightly`);
@@ -152,7 +154,8 @@ inside function bodies):
   (`nightly.py::refresh_calendar_data`); `engine.data.rebuild`
   (`nightly.py::refresh_calendar_data`/`run_nightly`/`mark_tiers_degraded`);
   `engine.data.manifest` (`nightly.py::_write_flag_report`);
-  `engine.data.schemas`
+  `engine.data.normalize.n_daily`
+  (`nightly.py::run_nightly`); `engine.data.schemas`
   (`model_evidence.py::_replay_trades`); `engine.entry_rules`
   (`render.py::build_strategies`); `engine.features`
   (`model_evidence.py::_champion_block_impl`/`_dataset_for`,
@@ -227,7 +230,11 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   running anything. Gating failures behave as in a full run (red validate,
   non-final session, rotated credential, typed `TIER4_*` stop: `NightlyStop`,
   exit 1, no report), and so does a warm_serving failure
-  (`WARM_SERVING_FAILED`, see the table). `run_nightly(fetch_only=True)` with
+  (`WARM_SERVING_FAILED`, see the table). Before warm_serving the run releases
+  its event frames, the Tier rebuild result and the process-global panel,
+  Tier-4 prepared-frame and daily-index caches, so the warm subprocess does not
+  overlap the parent's panel memory; the failure contract is unchanged.
+  `run_nightly(fetch_only=True)` with
   refresh off, tiers off or backup on raises `ValueError` before any work
   (the CLI turns the same rule into the exit 2 above). Refresh and tiers degrade as in a full run and are
   recorded in `steps`/`flags`. The run writes the flag report and the
