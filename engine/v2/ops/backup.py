@@ -308,14 +308,21 @@ def _copy_artifact(store, target, name, ref, fault):
     return {"content_hash": ref.content_hash, "byte_size": ref.byte_size}
 
 
+def _validate_backup_artifact_names(artifacts):
+    for name in artifacts:
+        try:
+            if len(safe_relative_path(name)) != 1:
+                raise ValueError("unsafe backup artifact name")
+        except (ArtifactError, ValueError) as exc:
+            raise fail("INVALID_REQUEST", "unsafe backup artifact name") from exc
+
+
 def _copy_artifacts(payload, store, target, fault, keepalive):
     """Copy every payload artifact into the target and return their manifest entries."""
     copied = {}
     for name, document in payload.get("artifacts", {}).items():
         keepalive()
         ref = from_document(ArtifactRef, document)
-        if "/" in name or "\\" in name or name in ("", ".", ".."):
-            raise fail("INVALID_REQUEST", "unsafe backup artifact name")
         copied[name] = _copy_artifact(store, target, name, ref, fault)
     return copied
 
@@ -342,6 +349,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
     if effect is None:
         return _verify_delivered_backup(conn, key, target)
     payload = json.loads(effect["payload_json"])
+    _validate_backup_artifact_names(payload.get("artifacts", {}))
     target = Path(target)
     if target.exists() and target.is_symlink():
         raise fail("INVALID_REQUEST", "backup target is a symlink")
