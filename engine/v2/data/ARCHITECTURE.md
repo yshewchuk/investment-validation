@@ -80,8 +80,8 @@ Only event_date/session/src_orats values are inspected; extra payload is ignored
 Dates/null cells retain native guard semantics, including aware midnights;
 this is not strict Arrow source-type/clock admission. No coercion,
 ordinal, conflict check, source authentication or contributor admission occurs.
-Caller-owned bounds remain necessary: several linear passes over rows/labels and
-O(rows) result/temporaries, not an RSS guarantee. No I/O, cache, retry, transaction,
+Caller-owned bounds remain necessary: several linear passes over rows/labels,
+O(rows) output and O(rows + column labels) working space, not an RSS guarantee. No I/O, cache, retry, transaction,
 partial result or input mutation; no production caller is wired.
 
 | Metadata condition | Outcome |
@@ -595,7 +595,7 @@ own local `BEGIN IMMEDIATE`); the local filesystem (legacy Parquet/CSV via
 `legacy_adapter.py`, the artifact store's content-addressed backing store,
 and one package-resource read for `legacy_mapping.py`'s bundled
 annotations file); `pyarrow`/`pyarrow.parquet` (every fragment is Parquet;
-commit/scan stream Arrow batches); `numpy`/`pandas` (`computed_moves.py`,
+commit/scan stream Arrow batches); `numpy`/`pandas` (`computed_moves.py`, `confirmed_event_metadata.py`,
 `price_history*.py`). No network access: every provider fetch is injected
 by the caller as a plain callable.
 
