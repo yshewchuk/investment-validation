@@ -954,14 +954,25 @@ Root doc §5 invariants this package is responsible for:
 
 ### Scalar-only bounded catalog prerequisite
 
-`_bounded_catalog.probe_catalog` borrows the caller's read transaction, returning
-only counts/stored-byte totals for the future [session](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md), not a public factory.
-Stdlib SQLite capped COUNT/LIMIT,
-typeof and BLOB-length probes enforce all five explicit caps before transfer. Charge
-snapshot once, binding/dataset/contract per table, membership/fragment/object
-per occurrence, including unselected tables, repeated IDs and zero-row fragments.
-Missing joins/types refuse; only integer/NULL scalars cross into Python one row
-at a time. No connection settings or transaction ownership change. Limits bound
-transfer, not SQLite CPU/RSS. Payload/UTF-8 checks, native identity and lifetime-safe
-facade/scanner wiring remain separate prerequisites. This proves no source,
-coverage, confirmation, PIT or execution property; existing readers stay intact.
+`_bounded_catalog.probe_catalog` is internal and has no production caller. It
+borrows an active caller transaction and emits only SELECTs, returning counts and
+SQL BLOB-length totals, not payloads, native identities or admission capabilities.
+Stdlib SQLite capped COUNT/LIMIT, typeof and BLOB-length probes enforce five caps.
+Charge snapshot once, binding/dataset/contract per table, membership/fragment/object
+per occurrence, including unrelated tables, repeated IDs and zero-row fragments.
+Integer fields count their BLOB-cast decimal text, not SQLite on-disk cell sizes.
+Only integer/NULL scalars cross into Python incrementally. The caller guarantees
+read-transaction provenance; no settings or transaction lifecycle are changed.
+Limits bound transfer, not SQLite CPU/RSS. No source, coverage, confirmation, PIT
+or execution property is established; existing readers stay intact. See the
+[bounded-session design](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md) for the surrounding contract.
+
+| Probe condition | Refusal (fixed redacted message; no partial result) | Retryable |
+|---|---|---|
+| Wrong holder/string types, empty IDs/table, malformed limits, no active transaction or missing selected table | `CONTRACT_MISMATCH` | no |
+| Requested snapshot absent | `SNAPSHOT_UNRESOLVED` | no |
+| Any explicit count or SQL BLOB byte cap exceeded | `RESULT_LIMIT_EXCEEDED` | no |
+| Missing joins, wrong SQL types or inconsistent membership | `MANIFEST_CORRUPT` | no |
+| SQLite primary BUSY/LOCKED/IOERR/CANTOPEN/FULL/NOMEM, including extended codes | `RESOURCE_UNAVAILABLE` | yes; caller owns retries |
+| Other SQLite errors, including code-less or closed-connection errors | `MANIFEST_CORRUPT` | no |
+| Existing native `DataError` | Unchanged code, message and retryability | unchanged |

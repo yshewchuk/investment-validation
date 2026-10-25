@@ -5,6 +5,7 @@ import sys
 import pytest
 
 from engine.v2.data import _bounded_catalog as probes
+from engine.v2.data import schema
 from engine.v2.data.errors import DataError
 
 LIMITS = dict(max_catalog_tables=2, max_catalog_fragments=4, max_catalog_bytes=10_000,
@@ -77,10 +78,16 @@ def probe(conn, **changes):
     return probes.probe_catalog(conn, "s", "a", {**LIMITS, **changes})
 
 
-def refused(conn, code, **changes):
+def refused(conn, code, *, message=None, **changes):
     with pytest.raises(DataError) as caught:
         probe(conn, **changes)
     assert caught.value.code == code
+    assert caught.value.problem.message == (message or {
+        "RESULT_LIMIT_EXCEEDED": "catalog probe exceeds limit",
+        "CONTRACT_MISMATCH": "invalid catalog probe configuration",
+        "MANIFEST_CORRUPT": "catalog probe has invalid field or join",
+    }[code])
+    assert caught.value.problem.details == {}
     assert conn.in_transaction
     return caught.value
 
@@ -113,19 +120,17 @@ def test_unrequested_huge_metadata_and_ids_never_transfer(catalog, field):
 @pytest.mark.parametrize("table", ["dataset_versions", "contracts", "fragments", "objects"])
 def test_missing_join_refuses(catalog, table):
     catalog.execute(f"DELETE FROM data_{table}")
-    refused(catalog, "MANIFEST_CORRUPT")
+    refused(catalog, "MANIFEST_CORRUPT", message=("catalog probe has missing contract"
+            if table == "fragments" else "catalog probe has invalid field or join"))
 
 
-@pytest.mark.parametrize("table,field,value", [
-    ("snapshots", "calendar_version", b"not text"),
-    ("dataset_versions", "row_count", "0"),
-    ("contracts", "definition_json", None),
-    ("version_fragments", "ordinal", 1.5),
-    ("fragments", "row_count", "0"),
-    ("objects", "byte_size", None),
+@pytest.mark.parametrize("table,field", [
+    (table, field) for table, row in ROWS.items() for field in row
+    if field not in {"snapshot_id", "table_name", "dataset_version_id", "fragment_id",
+                     "contract_id", "object_id"}
 ])
-def test_types_refuse_without_decode(catalog, table, field, value):
-    catalog.execute(f"UPDATE data_{table} SET {field}=?", (value,))
+def test_payload_types_refuse_without_decode(catalog, table, field):
+    catalog.execute(f"UPDATE data_{table} SET {field}=?", (b"wrong SQL type",))
     refused(catalog, "MANIFEST_CORRUPT")
 
 
@@ -168,27 +173,28 @@ def test_only_scalar_reads_preserve_connection_and_transaction(catalog):
     assert not catalog.in_transaction
 
 
-@pytest.mark.parametrize("value", [True, 0, -1, 1.5, sys.maxsize])
-def test_invalid_limits(catalog, value):
-    refused(catalog, "CONTRACT_MISMATCH", max_catalog_bytes=value)
+@pytest.mark.parametrize("cap", sorted(LIMITS))
+@pytest.mark.parametrize("value", [None, True, 0, -1, 1.5, "1", sys.maxsize])
+def test_invalid_limits(catalog, cap, value):
+    refused(catalog, "CONTRACT_MISMATCH", **{cap: value})
 
 
 def test_configuration_snapshot_and_schema_refusals(catalog):
     class CustomLimits(dict):
         pass
 
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with pytest.raises(DataError, match="^CONTRACT_MISMATCH: invalid catalog probe configuration$"):
         probes.probe_catalog(catalog, "s", "a", CustomLimits(LIMITS))
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with pytest.raises(DataError, match="^CONTRACT_MISMATCH: invalid catalog probe configuration$"):
         probes.probe_catalog(catalog, "s", "a", {**LIMITS, "extra": 1})
-    with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
+    with pytest.raises(DataError, match="^SNAPSHOT_UNRESOLVED: catalog probe snapshot unavailable$"):
         probes.probe_catalog(catalog, "missing", "a", LIMITS)
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with pytest.raises(DataError, match="^CONTRACT_MISMATCH: catalog probe table unavailable$"):
         probes.probe_catalog(catalog, "s", "missing", LIMITS)
     catalog.execute("DROP TABLE data_objects")
-    refused(catalog, "MANIFEST_CORRUPT")
+    refused(catalog, "MANIFEST_CORRUPT", message="catalog probe malformed")
     catalog.rollback()
-    with pytest.raises(DataError, match="CONTRACT_MISMATCH"):
+    with pytest.raises(DataError, match="^CONTRACT_MISMATCH: catalog probe requires a read transaction$"):
         probe(catalog)
 
 
@@ -210,7 +216,9 @@ def test_sqlite_failure_mapping_is_numeric_and_redacted(catalog, monkeypatch, co
         raise exc
 
     monkeypatch.setattr(probes, "_count", fail)
-    caught = refused(catalog, expected)
+    message = ("native" if code == "native" else "catalog probe unavailable"
+               if expected == "RESOURCE_UNAVAILABLE" else "catalog probe malformed")
+    caught = refused(catalog, expected, message=message)
     if code == "native":
         assert caught is exc
     assert "private" not in str(caught)
@@ -228,5 +236,97 @@ def test_unused_fields_are_not_charged_or_transferred(catalog):
 def test_closed_connection_maps_catalog_error():
     conn = sqlite3.connect(":memory:")
     conn.close()
-    with pytest.raises(DataError, match="MANIFEST_CORRUPT"):
+    with pytest.raises(DataError, match="^MANIFEST_CORRUPT: catalog probe malformed$"):
         probe(conn)
+
+
+@pytest.mark.parametrize("key", sorted(LIMITS))
+def test_missing_limit_refuses(catalog, key):
+    with pytest.raises(DataError, match="^CONTRACT_MISMATCH: invalid catalog probe configuration$"):
+        probes.probe_catalog(catalog, "s", "a", {k: v for k, v in LIMITS.items() if k != key})
+
+
+@pytest.mark.parametrize("position,value", [(0, None), (1, None), (1, ""), (1, 1),
+                                          (2, None), (2, ""), (2, 1), (3, None), (3, [])])
+def test_invalid_holder_and_arguments(catalog, position, value):
+    args = [catalog, "s", "a", LIMITS]
+    args[position] = value
+    with pytest.raises(DataError, match="^CONTRACT_MISMATCH: invalid catalog probe configuration$"):
+        probes.probe_catalog(*args)
+
+
+def test_isolated_fragment_contract_join_refuses(catalog):
+    catalog.execute("UPDATE data_fragments SET contract_id='absent'")
+    refused(catalog, "MANIFEST_CORRUPT", message="catalog probe has missing contract")
+
+
+def test_distinct_selected_partitions_exclude_unrelated_table(catalog):
+    catalog.execute("UPDATE data_fragments SET partition_key='p1'")
+    insert(catalog, "dataset_versions", {**ROWS["dataset_versions"], "dataset_version_id": "other"})
+    insert(catalog, "version_fragments", {**ROWS["version_fragments"],
+                                        "dataset_version_id": "other", "fragment_id": "f3"})
+    insert(catalog, "fragments", {**ROWS["fragments"], "fragment_id": "f3", "partition_key": "p3"})
+    catalog.execute("UPDATE data_snapshot_tables SET dataset_version_id='other' WHERE table_name='z'")
+    result = probe(catalog, max_fragments=2, max_partitions=1)
+    assert (result.tables, result.catalog_fragments, result.fragments, result.partitions) == (2, 3, 2, 1)
+
+
+@pytest.mark.parametrize("table,field,charge", [("snapshots", "parent_snapshot_id", 1),
+    ("dataset_versions", "parent_dataset_version_id", 2), ("fragments", "time_bounds_json", 4)])
+def test_nullable_payload_nonnull_bytes_are_charged(catalog, table, field, charge):
+    catalog.execute(f"UPDATE data_{table} SET {field}=?", ("雪\0",))
+    expected = 167 + 4 * charge
+    assert probe(catalog, max_catalog_bytes=expected).stored_bytes == expected
+    refused(catalog, "RESULT_LIMIT_EXCEEDED", max_catalog_bytes=expected - 1)
+
+
+@pytest.mark.parametrize("expected,message", [(0, "changed"), (3, "has missing membership")])
+def test_membership_mismatch_messages(catalog, expected, message):
+    cursor = catalog.cursor()
+    full = "membership changed" if message == "changed" else message
+    with pytest.raises(DataError, match=f"^MANIFEST_CORRUPT: catalog probe {full}$"):
+        probes._measure(cursor, "s.calendar_version", "data_snapshots s", "1", (), expected, 0, 100)
+    cursor.close()
+
+
+def test_production_schema_ddl_with_synthetic_rows():
+    conn = sqlite3.connect(":memory:", factory=ScalarConnection)
+    conn.execute("PRAGMA foreign_keys=ON")
+    for migration in schema.MIGRATIONS:
+        for sql in migration[2]:
+            conn.execute(sql)
+    for table in ("contracts", "objects", "fragments", "dataset_versions", "version_fragments",
+                  "snapshots", "snapshot_tables"):
+        row = {k: "sha256:" + "0" * 64 if k.endswith("hash") else v for k, v in ROWS[table].items()}
+        if table not in {"version_fragments", "snapshot_tables"}:
+            row["registered_at"] = "2024-01-01T00:00:00Z"
+        if table == "objects":
+            row["storage_key"] = "not-opened"
+        if table == "snapshots":
+            row["commit_receipt_ref"] = "not-followed"
+        insert(conn, table, row)
+    conn.commit()
+    conn.execute("BEGIN")
+    conn.text_factory = lambda _: pytest.fail("TEXT crossed SQL boundary")
+    result = probe(conn)
+    assert (result.tables, result.catalog_fragments, result.fragments, result.partitions) == (1, 1, 1, 1)
+    assert result.stored_bytes == 630  # 70 original bytes + eight hash expansions of 70.
+    conn.close()
+
+
+@pytest.mark.parametrize("field,tables", [
+    ("dataset_version_id", ("dataset_versions", "snapshot_tables", "version_fragments")),
+    ("contract_id", ("contracts", "dataset_versions", "fragments")),
+    ("fragment_id", ("fragments", "version_fragments")),
+    ("object_id", ("objects", "fragments")),
+])
+def test_linked_identifier_types_refuse_without_losing_joins(catalog, field, tables):
+    for table in tables:
+        catalog.execute(f"UPDATE data_{table} SET {field}=?", (b"bad identifier",))
+    refused(catalog, "MANIFEST_CORRUPT")
+
+
+@pytest.mark.parametrize("table,where", [("snapshot_tables", "table_name='z'"), ("contracts", "1")])
+def test_names_refuse_without_losing_selected_table(catalog, table, where):
+    catalog.execute(f"UPDATE data_{table} SET table_name=? WHERE {where}", (b"bad name",))
+    refused(catalog, "MANIFEST_CORRUPT")
