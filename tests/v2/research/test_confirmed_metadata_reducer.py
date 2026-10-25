@@ -25,7 +25,6 @@ def refused(events, code="CONTRACT_MISMATCH", tickers=None):
         reducer.reduce_sequences(events, tickers=["A"] if tickers is None else tickers)
     assert caught.value.code == code
     assert caught.value.problem.retryable is False
-    assert "private" not in caught.value.problem.message
 
 
 def test_exact_states_evidence_warmup_order_and_detachment():
@@ -74,6 +73,10 @@ def test_public_primitives_once_per_call_and_ticker(monkeypatch):
         {"ticker": t, "status": "absent_in_snapshot", "selected_rows": 0,
          "confirmed_rows": 0, "first_confirmed_date": None, "events": []} for t in ["A", "Z"]]
     assert calls == [("classify", 0), ("sequence", [], 4), ("sequence", [], 4)]
+    calls.clear()
+    reducer.reduce_sequences(frame().iloc[::-1], tickers=["B", "A"])
+    assert calls == [("classify", 6),
+        ("sequence", [f"2001-{i + 1:02d}-01" for i in range(6)], 4), ("sequence", [], 4)]
     monkeypatch.setattr(reducer, "classify_metadata", lambda events: ("not_orats",) * len(events))
     assert reducer.reduce_sequences(frame(), tickers=["A"])[0]["confirmed_rows"] == 0
 
@@ -103,8 +106,9 @@ def test_exact_repeats_refuse_and_cross_ticker_clusters_are_independent():
 
 @pytest.mark.parametrize("tickers", [[], (), "A", {"A"}, iter(["A"]), ["A", "A"],
     [None], [1], [""], [" A"], ["A "], ["A\0"], ["\ud800"], [np.str_("A")]])
-def test_bad_requests_refuse_before_frame_access(tickers):
-    refused(object(), tickers=tickers)
+def test_bad_requests_refuse_before_frame_access(tickers, monkeypatch):
+    monkeypatch.setattr(reducer, "_rows", lambda *args: pytest.fail("invalid request reached metadata"))
+    refused(frame(), tickers=tickers)
 
 
 @pytest.mark.parametrize("bad", [None, [], {}, pd.DataFrame(),
@@ -119,6 +123,7 @@ def test_bad_frame_shapes(bad):
     ("ticker", "B"), ("ticker", None), ("ticker", " A"),
     ("event_cluster_id", ""), ("event_cluster_id", [None]), ("event_cluster_id", 1),
     ("event_cluster_id", "\ud800"), ("date_conflict", 1), ("date_conflict", None),
+    ("event_cluster_id", 0.0), ("event_cluster_id", np.inf), ("event_cluster_id", -np.inf),
     ("date_conflict", "false"), ("src_orats", 1), ("src_orats", "true"),
     ("src_orats", None), ("session", "bmo"), ("session", ""),
     ("session", [None]), ("session", 1), ("session", pd.NaT),
@@ -167,6 +172,7 @@ def test_native_dataerror_propagates_unchanged_without_partial_output(monkeypatc
 
 @pytest.mark.parametrize("events,code,message", [
     (None, "CONTRACT_MISMATCH", "metadata requires a DataFrame"),
+    (frame().assign(ticker="private row value"), "CONTRACT_MISMATCH", "metadata ticker is outside the request"),
     (pd.concat([frame(), frame()]), "IDENTITY_CONFLICT", "metadata view has conflicting event identities"),
 ])
 def test_complete_refusal_envelopes(events, code, message):

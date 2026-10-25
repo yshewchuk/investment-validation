@@ -1,9 +1,8 @@
 # `engine/v2/research` — architecture
 
 Layer 7.0 in both `checks/layer_map.py` and the root `/ARCHITECTURE.md` layer table.
-Native snapshot-reading counterparts to `tools/signal_screen.py`, `tools/fill_quality.py`,
-`engine/data/pulls/polygon_fills.py`'s read path, `engine/replay.py` (over a committed snapshot)
-and `engine/build_trades.py`'s v2 write path. The legacy modules themselves are untouched and keep
+Native snapshot-reading counterparts to `tools/signal_screen.py`, `tools/fill_quality.py`, `engine/data/pulls/polygon_fills.py`'s read path,
+`engine/replay.py` (over a committed snapshot) and `engine/build_trades.py`'s v2 write path. The legacy modules themselves are untouched and keep
 publishing exactly as before; this package adds parallel `tools/v2_*` CLIs that read a pinned v2 snapshot instead.
 
 `tools/log_diagnostics.py` is deliberately **not** moved here: it reads only
@@ -21,12 +20,10 @@ published, never the legacy mutable store. Completed experiments need not remain
 ## Stage-2 magnitude panel foundation
 
 `_confirmed_metadata.reduce_sequences` is internal/synthetic-only: a pure seven-column DataFrame reducer of a complete caller-supplied view, not evidence of completeness.
-Strict naive `datetime64[ns]` types precede public `confirmed_event_metadata.classify_metadata`; public `event_sequence(warmup=4)` supplies ordinals.
+Strict naive `datetime64[ns]` types precede public `confirmed_event_metadata.classify_metadata`; public `event_sequence(warmup=4)` counts only confirmed rows from zero, including pre-history metadata.
 All rows participate in duplicate ID, ticker/day, date-conflict and ticker/cluster refusal, including unconfirmed siblings; equal clusters across tickers are independent.
-Detached sequences retain exact empty states/counts/seven-field evidence. Malformed requests/rows (including unrequested tickers): `CONTRACT_MISMATCH`;
-semantic conflicts: `IDENTITY_CONFLICT`; native `DataError` unchanged. Work is O(n log n + t log t), state O(n + t) for n rows/t tickers; caller allocation is not an RSS bound.
-Later bounded composition owns retention/proof caps. No partial output, I/O, cache, retry, transaction, index identity,
-source admission, coverage, holdout/value eligibility or runtime integration exists.
+Detached sequences retain exact empty states/counts/seven-field evidence. Work is O(n log n + t log t), state O(n + t) for n rows/t tickers; no hard cap or RSS bound exists here.
+No partial output, I/O, cache, retry, transaction, index identity, source admission, coverage, holdout/value eligibility or runtime integration exists.
 
 `magnitude_panel_table` uses native `TableContract`/`ColumnContract`, JSON and canonical hashing.
 Its immutable v1 event/context/horizon key has ordered H/HM/HMO dictionaries, excluding learned Tier4 outputs/current-event outcomes.
@@ -57,6 +54,9 @@ Native contract hashing and dictionary hashing are distinct; neither qualifies s
 
 | Condition | Outcome |
 | --- | --- |
+| Malformed reducer request/frame/row, including unrequested ticker | `CONTRACT_MISMATCH`; no partial sequence |
+| Reducer duplicate ID, ticker/day, date-conflict or ticker/cluster conflict | `IDENTITY_CONFLICT`; no partial sequence |
+| Reducer native failure | Existing `DataError` code/retryability unchanged; no partial sequence |
 | `policy_definitions()` | No arguments; detached metadata only, no I/O/fits/verification or retry/cache. Shared declaration exceptions propagate unchanged. |
 | Invalid v2 subset (not a plain H/HM/HMO string); omitted argument | `CONTRACT_MISMATCH`; omitted argument raises Python `TypeError`. Detached metadata only; no I/O/fits/admission or retry/cache. |
 | Invalid detached panel identity/schema, nested digest/folds, snapshot, calendar, cutoff or row | `CONTRACT_MISMATCH` |
@@ -653,7 +653,7 @@ This bounds retained unmatched rows, not total process RSS.
   committed through `engine.v2.data.generic_incremental`, plus a JSON
   outcome summary (`committed`, `outcome`, `committed_snapshot_id`,
   `emitted_revisions`) — never a rewrite of the table version the run read.
-- Every output that carries data also carries the `snapshot_id` it was
+- Every snapshot-reading output that carries data also carries the `snapshot_id` it was
   read from, so a report is reproducible without re-resolving anything.
   `experiment_trades.load_trades` includes its explicit snapshot and holdout
   context columns alongside the legacy-compatible trade columns.
@@ -661,7 +661,7 @@ This bounds retained unmatched rows, not total process RSS.
 ## Dependencies
 
 `engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `incremental_tables`,
-`catalog`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`,
+`catalog`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`, `confirmed_event_metadata`, `event_history`,
 `iv_crush_table`), `engine.v2.contracts` (`RevisionCandidate`, `CompletedCoverage`,
 `CoverageKey`, `CoverageOutcome`, `TimeInterval`), `engine.v2.contracts.data`
 (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`, `ObjectRef`,
