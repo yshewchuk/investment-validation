@@ -166,17 +166,29 @@ def _snapshot_estimate(snapshot):
     return estimate
 
 
+def _missing_snapshot_inputs(snapshot):
+    """The ``nightly._SNAPSHOT_REQUIRED`` keys absent from ``snapshot``.
+
+    Submission refuses through ``nightly._snapshot_inputs`` unless every
+    pinned key is present, so headroom names the same tuple, in its order.
+    """
+    return [key for key in nightly._SNAPSHOT_REQUIRED if key not in snapshot]
+
+
 def _checked_plan_fields(plan):
-    """The validated plan fields, mirroring ``nightly._snapshot_inputs`` and
-    the ``plans.py``/submit-side field checks: returns
-    ``(input_mode, snapshot, manifest_id)``.
+    """The validated plan fields, mirroring ``nightly._snapshot_inputs``,
+    ``nightly._resolve_refresh_plan`` and the ``plans.py``/submit-side field
+    checks: returns ``(input_mode, snapshot, manifest_id)``.
 
     Absent ``input_mode``/``refresh_mode`` mean ``"legacy"``, exactly as
     ``_submit_nightly`` reads them; a present-but-wrong value is an operator
     input error on this write-free command and refuses ``INVALID_REQUEST``
     rather than being coerced. ``snapshot_inputs`` is required to be a JSON
-    object in snapshot mode; its ``scratch_estimate_bytes`` stays validated
-    per plan-stage by ``_snapshot_estimate``.
+    object carrying every ``nightly._SNAPSHOT_REQUIRED`` key in snapshot
+    mode (the refusal ``_snapshot_inputs`` makes at submission); its
+    ``scratch_estimate_bytes`` stays validated per plan-stage by
+    ``_snapshot_estimate``. ``refresh_mode`` must be a member of the set
+    ``_resolve_refresh_plan`` allows, legacy or native.
     """
     input_mode = plan.get("input_mode", "legacy")
     if input_mode not in ("legacy", "snapshot"):
@@ -185,11 +197,20 @@ def _checked_plan_fields(plan):
     if input_mode == "snapshot" and not isinstance(snapshot, dict):
         raise fail("INVALID_REQUEST",
                    "snapshot input mode needs snapshot_inputs to be a JSON object")
+    if input_mode == "snapshot":
+        missing = _missing_snapshot_inputs(snapshot)
+        if missing:
+            raise fail("INVALID_REQUEST",
+                       "snapshot input mode needs every pinned snapshot input; "
+                       f"missing keys: {', '.join(missing)}")
     manifest_id = plan.get("input_manifest_ref")
     if "input_manifest_ref" in plan and not (isinstance(manifest_id, str) and manifest_id):
         raise fail("INVALID_REQUEST", "input_manifest_ref must be a non-empty string")
-    if not isinstance(plan.get("refresh_mode", "legacy"), str):
+    refresh_mode = plan.get("refresh_mode", "legacy")
+    if not isinstance(refresh_mode, str):
         raise fail("INVALID_REQUEST", "refresh_mode must be a string")
+    if refresh_mode not in ("legacy", "native"):
+        raise fail("INVALID_REQUEST", "refresh_mode must be legacy or native")
     return input_mode, snapshot, manifest_id
 
 
@@ -238,19 +259,23 @@ def _scratch_entries(conn, store, plan):
     return entries
 
 
-def _memory_entries(conn, max_rss_gb):
-    """``memory_peak:<profile>`` entries from the most recent finished attempts.
+def _memory_profile_entries(conn):
+    """``memory_peak:<profile>`` entries for every reservation profile with
+    attempts in the recent window.
 
-    The window is the most recent ``_RECENT_ATTEMPTS`` attempts by insertion
-    order (rowid: an attempts row is created when the attempt starts, so the
-    highest rowids are the most recent attempts and no sort is needed).
-    The enforced memory limit and the profile name live on the attempt's
-    ``resource_reservations`` row (``scheduler._create_attempt`` writes both
-    beside ``resources_json``); rows with a NULL peak are skipped, as are
-    attempts outside the recent window. With no recorded peak at all the
-    limits are ``UNMEASURED``, never an OK zero: a catalog that has never
-    run an attempt is not a catalog with idle memory.
+    A group with at least one finished attempt carrying a recorded peak gets
+    a measured entry; a group whose window attempts are all unfinished (or
+    peak-less) gets an ``UNMEASURED`` entry against its reserved
+    ``memory_bytes`` -- a profile the plan's attempts ran under but never
+    measured must show as unmeasured, never as absent. The generic
+    ``memory_peak`` UNMEASURED entry is kept only for a window with no
+    attempts at all: a catalog that has never run an attempt.
     """
+    if not conn.execute("SELECT 1 FROM attempts LIMIT 1").fetchone():
+        # The window is the newest _RECENT_ATTEMPTS rowids, so it holds no
+        # attempts exactly when the table is empty.
+        return [_unmeasured("memory_peak", 0, "bytes",
+                            "no finished attempt has a recorded memory peak")]
     entries = []
     rows = conn.execute(
         "WITH recent AS (SELECT rowid AS r FROM attempts "
@@ -262,14 +287,42 @@ def _memory_entries(conn, max_rss_gb):
         "AND a.ended_at IS NOT NULL AND a.memory_peak_bytes IS NOT NULL "
         "GROUP BY rr.profile, rr.memory_bytes ORDER BY peak DESC",
         (_RECENT_ATTEMPTS,)).fetchall()
-    if not rows:
-        entries.append(_unmeasured("memory_peak", 0, "bytes",
-                                   "no finished attempt has a recorded memory peak"))
     for row in rows:
         entries.append(_entry(f"memory_peak:{row['profile']}", row["peak"],
                               row["memory_bytes"], "bytes",
                               "max memory_peak_bytes of recent finished attempts "
                               "in this reservation profile"))
+    unmeasured_rows = conn.execute(
+        "WITH recent AS (SELECT rowid AS r FROM attempts "
+        "ORDER BY rowid DESC LIMIT ?) "
+        "SELECT rr.profile AS profile, rr.memory_bytes AS memory_bytes FROM attempts a "
+        "JOIN resource_reservations rr ON rr.attempt_id = a.attempt_id "
+        "WHERE a.rowid IN (SELECT r FROM recent) "
+        "GROUP BY rr.profile, rr.memory_bytes "
+        "HAVING SUM(CASE WHEN a.ended_at IS NOT NULL AND a.memory_peak_bytes IS NOT NULL "
+        "THEN 1 ELSE 0 END) = 0 ORDER BY rr.profile, rr.memory_bytes",
+        (_RECENT_ATTEMPTS,)).fetchall()
+    for row in unmeasured_rows:
+        entries.append(_unmeasured(f"memory_peak:{row['profile']}", row["memory_bytes"],
+                                   "bytes", "no finished attempt with a recorded "
+                                   "memory peak in the recent window"))
+    return entries
+
+
+def _memory_entries(conn, max_rss_gb):
+    """``memory_peak:<profile>`` entries plus the optional ``rss_cap_gb`` one.
+
+    The window is the most recent ``_RECENT_ATTEMPTS`` attempts by insertion
+    order (rowid: an attempts row is created when the attempt starts, so the
+    highest rowids are the most recent attempts and no sort is needed).
+    The enforced memory limit and the profile name live on the attempt's
+    ``resource_reservations`` row (``scheduler._create_attempt`` writes both
+    beside ``resources_json``); rows with a NULL peak are skipped, as are
+    attempts outside the recent window. Per-profile entries come from
+    ``_memory_profile_entries``; with no recorded peak anywhere in the
+    window the limits are ``UNMEASURED``, never an OK zero.
+    """
+    entries = _memory_profile_entries(conn)
     if max_rss_gb is not None:
         # Scope the cap to the same recent window: the epoch of the latest
         # finished attempt in the window, and the peak over only that epoch's

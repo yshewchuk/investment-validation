@@ -10,7 +10,7 @@ import types
 import pytest
 
 from engine.v2.foundation import ArtifactStore
-from engine.v2.ops import cli, headroom
+from engine.v2.ops import cli, headroom, nightly
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.checkpoints import register_artifact, registered_artifact
 from engine.v2.ops.errors import OpsError
@@ -66,6 +66,14 @@ def nightly_plan_document(manifest_id=None, **extra):
 
 def manifest_document(total_bytes):
     return {"file_refs": [{"byte_size": total_bytes}]}
+
+
+def snapshot_inputs_document(estimate=1024):
+    """A snapshot_inputs object carrying every ``nightly._SNAPSHOT_REQUIRED``
+    key, the way submission requires; ``estimate`` overrides the pin."""
+    return {"snapshot_ref_artifact_id": "snapshot-ref-1",
+            "materialization_request_ref": "materialization-request-1",
+            "scratch_estimate_bytes": estimate}
 
 
 def report_for(catalog, plan, **kwargs):
@@ -146,7 +154,7 @@ def test_non_nightly_plan_scratch_is_unmeasured(catalog):
 def test_snapshot_plan_scratch_entry_uses_pinned_estimate(catalog):
     estimate = MATERIALIZE_SCRATCH_BYTES // 4
     document = report_for(catalog, nightly_plan_document(
-        input_mode="snapshot", snapshot_inputs={"scratch_estimate_bytes": estimate}))
+        input_mode="snapshot", snapshot_inputs=snapshot_inputs_document(estimate)))
     scratch = [item for item in document["limits"]
                if item["name"].startswith("scratch_bytes:")]
     assert [item["name"] for item in scratch] == ["scratch_bytes:materialize"]
@@ -185,22 +193,37 @@ def test_empty_manifest_file_refs_is_zero_usage_ok(catalog):
     assert scratch and all(item["usage"] == 0 and item["status"] == "OK" for item in scratch)
 
 
-@pytest.mark.parametrize("snapshot_inputs", [
-    {},                                      # estimate missing (must not default to 0)
-    {"scratch_estimate_bytes": None},
-    {"scratch_estimate_bytes": True},
-    {"scratch_estimate_bytes": -1},
-    {"scratch_estimate_bytes": "1024"},
-    {"scratch_estimate_bytes": 1.5},
-], ids=["empty", "null", "bool", "negative", "str", "float"])
-def test_bad_snapshot_scratch_estimate_refuses_invalid_request(catalog, snapshot_inputs):
+@pytest.mark.parametrize("estimate", [
+    None,
+    True,
+    -1,
+    "1024",
+    1.5,
+], ids=["null", "bool", "negative", "str", "float"])
+def test_bad_snapshot_scratch_estimate_refuses_invalid_request(catalog, estimate):
     plan = nightly_plan_document(input_mode="snapshot")
-    plan["snapshot_inputs"] = snapshot_inputs
+    plan["snapshot_inputs"] = snapshot_inputs_document(estimate)
     with pytest.raises(OpsError) as excinfo:
         report_for(catalog, plan)
     assert excinfo.value.code == "INVALID_REQUEST"
     assert excinfo.value.problem.message == \
         "snapshot scratch_estimate_bytes must be a non-negative integer"
+
+
+@pytest.mark.parametrize("missing", list(nightly._SNAPSHOT_REQUIRED),
+                         ids=list(nightly._SNAPSHOT_REQUIRED))
+def test_snapshot_inputs_missing_required_key_refuses(catalog, missing):
+    """Plan validation mirrors ``nightly._snapshot_inputs``: snapshot mode
+    without every pinned key is refused, naming the missing key(s)."""
+    plan = nightly_plan_document(input_mode="snapshot")
+    inputs = snapshot_inputs_document()
+    del inputs[missing]
+    plan["snapshot_inputs"] = inputs
+    with pytest.raises(OpsError) as excinfo:
+        report_for(catalog, plan)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert missing in excinfo.value.problem.message
+    assert "missing keys:" in excinfo.value.problem.message
 
 
 # A plan can be built and saved by a caller other than ``plan nightly``, so
@@ -227,10 +250,13 @@ def test_bad_snapshot_scratch_estimate_refuses_invalid_request(catalog, snapshot
     ({"refresh_mode": None}, "refresh_mode must be a string"),
     ({"refresh_mode": 5}, "refresh_mode must be a string"),
     ({"refresh_mode": ["native"]}, "refresh_mode must be a string"),
+    ({"refresh_mode": "bogus"}, "refresh_mode must be legacy or native"),
+    ({"refresh_mode": "native "}, "refresh_mode must be legacy or native"),
 ], ids=["mode-trailing-space", "mode-native", "mode-null", "mode-int",
         "snapshot-inputs-absent", "snapshot-inputs-null", "snapshot-inputs-list",
         "snapshot-inputs-str", "manifest-empty", "manifest-null", "manifest-int",
-        "manifest-list", "refresh-null", "refresh-int", "refresh-list"])
+        "manifest-list", "refresh-null", "refresh-int", "refresh-list",
+        "refresh-bogus", "refresh-trailing-space"])
 def test_unvalidated_plan_fields_refuse_like_nightly_submission(catalog, extra, message):
     with pytest.raises(OpsError) as excinfo:
         report_for(catalog, nightly_plan_document(**extra))
@@ -239,16 +265,17 @@ def test_unvalidated_plan_fields_refuse_like_nightly_submission(catalog, extra, 
 
 
 def test_default_and_native_plan_fields_still_pass(catalog):
-    """Absent input_mode means legacy and absent refresh_mode means legacy; a
-    non-member but string refresh_mode keeps the legacy DAG, exactly as
-    ``_submit_nightly`` reads them -- none of these refuse."""
+    """Absent input_mode means legacy and absent refresh_mode means legacy;
+    both refresh_mode members of ``_resolve_refresh_plan``'s set pass, exactly
+    as ``_submit_nightly`` reads them. A non-member string now refuses
+    (``refresh-bogus`` above), the way submission refuses it."""
     conn, store, clock = catalog
     manifest_id = publish(conn, store, clock, manifest_document(1000),
                           "legacy_input_manifest.v1.0")
     document = report_for(catalog, nightly_plan_document(manifest_id))
     assert any(item["name"].startswith("scratch_bytes:") for item in document["limits"])
     for extra in ({"input_mode": "legacy", "refresh_mode": "legacy"},
-                  {"refresh_mode": "native"}, {"refresh_mode": "anything-else"}):
+                  {"refresh_mode": "native"}):
         document = report_for(catalog, nightly_plan_document(manifest_id, **extra))
         assert any(item["name"].startswith("scratch_bytes:") for item in document["limits"])
 
@@ -422,6 +449,54 @@ def _seed_finished_attempt(conn, *, attempt_id, profile, memory_bytes, peak,
                  "VALUES (?, 'v1', ?, ?, 0, 0, 0, 0, ?)",
                  (attempt_id, profile, memory_bytes, ended_at))
     conn.commit()
+
+
+def _seed_unfinished_attempt(conn, *, attempt_id, profile, memory_bytes,
+                             created_at="2026-10-04T00:00:00Z",
+                             epoch="ep-1", boot="boot-1"):
+    """A running attempt: reserved memory, but no ended_at and no recorded
+    peak -- the shape ``_memory_profile_entries`` must report UNMEASURED."""
+    conn.execute("INSERT OR IGNORE INTO supervisor_epochs "
+                 "(epoch_id, boot_id, pid, started_at) VALUES (?, ?, 1, ?)",
+                 (epoch, boot, created_at))
+    conn.execute("INSERT INTO jobs (job_id, namespace, idempotency_key, request_digest, "
+                 "principal, kind, spec_json, resource_class, checkpoint_contract_ref, "
+                 "retry_json, state, priority, max_attempts, created_at, updated_at) "
+                 "VALUES (?, 'ns', ?, 'd', 'op', 'k', '{}', 'rc', 'cc', '{}', "
+                 "'queued', 0, 1, ?, ?)", (attempt_id, attempt_id, created_at, created_at))
+    conn.execute("INSERT INTO attempts (attempt_id, job_id, attempt_number, fence, "
+                 "supervisor_epoch, host_boot_id, state, process_state, resources_json, "
+                 "created_at, lease_expires_at, ended_at, memory_peak_bytes) "
+                 "VALUES (?, ?, 1, 1, ?, ?, 'running', 'alive', '{}', ?, ?, NULL, NULL)",
+                 (attempt_id, attempt_id, epoch, boot, created_at, created_at))
+    conn.execute("INSERT INTO resource_reservations (attempt_id, policy_version, profile, "
+                 "memory_bytes, scratch_bytes, heavy, disk_heavy, measured, created_at) "
+                 "VALUES (?, 'v1', ?, ?, 0, 0, 0, 0, ?)",
+                 (attempt_id, profile, memory_bytes, created_at))
+    conn.commit()
+
+
+def test_profile_with_only_unfinished_attempts_is_unmeasured_not_absent(catalog):
+    """Profile A finished with a peak measures OK; profile B has only the
+    unfinished attempt in the window, so it appears as its own UNMEASURED
+    entry (never the generic empty-window one) and the report exits 1."""
+    conn, store, clock = catalog
+    manifest_id = publish(conn, store, clock, manifest_document(1000),
+                          "legacy_input_manifest.v1.0")
+    _seed_finished_attempt(conn, attempt_id="a1", profile="legacy_score",
+                           memory_bytes=10000, peak=1000, ended_at="2026-10-01T00:00:00Z")
+    _seed_unfinished_attempt(conn, attempt_id="u1", profile="validation",
+                             memory_bytes=2000)
+    document = report_for(catalog, nightly_plan_document(manifest_id))
+    by_name = {item["name"]: item for item in document["limits"]}
+    assert by_name["memory_peak:legacy_score"]["status"] == "OK"
+    assert "memory_peak" not in by_name  # the generic entry is for an empty window
+    entry = by_name["memory_peak:validation"]
+    assert (entry["status"], entry["usage"], entry["limit"], entry["pct"]) == \
+        ("UNMEASURED", 0, 2000, None)
+    assert entry["detail"] == \
+        "no finished attempt with a recorded memory peak in the recent window"
+    assert (document["status"], document["exit_code"]) == ("UNMEASURED", 1)
 
 
 def test_memory_entries_group_by_profile_and_scope_rss_to_latest_epoch(catalog):
