@@ -35,6 +35,7 @@ from engine.v2.foundation.clock import (
     format_timestamp,
     parse_timestamp,
 )
+from engine.v2.foundation.market_schedule import latest_completed_session
 from engine.v2.foundation.typed import (
     DocumentError,
     from_document,
@@ -58,6 +59,7 @@ __all__ = [
     "from_document",
     "fsync_directory",
     "iter_canonical_json",
+    "latest_completed_session",
     "parse_schema_version",
     "parse_timestamp",
     "safe_relative_path",

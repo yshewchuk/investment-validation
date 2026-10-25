@@ -15,6 +15,8 @@ Replaces (§4.4): `paths.py`, `env.py`, `jsonio.py`, `audit.py`, `session arithm
 - Canonical JSON (RFC 8785) and content hashing, per contracts §2.2.
 - Path and environment resolution.
 - Session arithmetic: BMO/AMC anchoring, trading-day offsets.
+- The latest completed NYSE session at a serving clock's moment, including the
+  16:00 America/New_York close and scheduled holiday observations.
 - Pure holiday-year sets are immutable and LRU-bounded to 128 years; supplied
   sessions and anchor requests are validated afresh on every call.
 - Causality primitives — the cutoff comparison every feature respects.
@@ -47,11 +49,12 @@ underscore convention, and an import of a name absent from this list fails
 | `artifact_reference` | The identity `ArtifactStore.publish_bytes` would give some bytes, computed without touching storage — so a worker or coordinator that already holds the exact bytes of a published artifact can recompute its `ArtifactRef` and agree with the store by construction. |
 | `safe_relative_path`, `ensure_directory`, `fsync_directory` | The path and durability primitives the store is built from. |
 | `score_population.population_key`, `score_population.population_difference` | Shared legacy score population identity and planned-versus-observed rule for ops and serving. |
+| `latest_completed_session` | The latest completed NYSE session at `now` (or a parseable snapshot `frozen_at`; `"unknown"` means live), using the existing holiday rules and the 16:00 America/New_York close. |
 | `market_horizon.trading_days_before_print`, `market_horizon.CalendarCoverageError` | Pure pre-print session distance and its distinct insufficient-coverage refusal; no calendar fetch or gap filling. |
 | `experiment_holdouts.ExperimentHoldouts`, `experiment_holdouts.calendar_date` | Canonical day validation and shared deterministic, versioned random/rolling membership; no final-read authority. |
 | `experiment_exits.valid_exit_recipe`, `experiment_exits.valid_threshold_units` | Pure, closed exit declaration/unit admission shared by planning, walking and the RUNUP request. |
 
-<!-- public-interface: experiment_exits, experiment_exits.valid_exit_recipe, experiment_exits.valid_threshold_units, final_holdout, final_holdout.declaration_from_document, final_holdout.request_from_document, final_holdout.request_from_registration, canonical_json, iter_canonical_json, content_hash, CONTENT_HASH_PREFIX, tag_nonfinite, untag_nonfinite, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, ArtifactStore, ArtifactError, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed, market_calendar, market_horizon, score_population, experiment_holdouts, experiment_holdouts.ExperimentHoldouts, experiment_holdouts.calendar_date -->
+<!-- public-interface: experiment_exits, experiment_exits.valid_exit_recipe, experiment_exits.valid_threshold_units, final_holdout, final_holdout.declaration_from_document, final_holdout.request_from_document, final_holdout.request_from_registration, canonical_json, iter_canonical_json, content_hash, CONTENT_HASH_PREFIX, tag_nonfinite, untag_nonfinite, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, latest_completed_session, ArtifactStore, ArtifactError, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed, market_calendar, market_horizon, market_schedule, score_population, experiment_holdouts, experiment_holdouts.ExperimentHoldouts, experiment_holdouts.calendar_date -->
 
 ## Consumers
 

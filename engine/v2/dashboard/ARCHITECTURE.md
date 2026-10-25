@@ -77,6 +77,27 @@ and, when a refresh root is configured, queued refresh job ids from
 `POST /actions/refresh`. Native parity has no dashboard preview route or
 launcher option; its application presentation belongs to React.
 
+### Operations shell freshness contract
+
+The legacy frame is pinned to one release for the browser session. The shell
+shows that pin and the latest published release separately; when they differ,
+it marks the displayed board stale and offers a reload to opt into the new
+release. It never moves the frame automatically. The health observation's
+`generated_at` age is always shown. An observation more than 24 hours old is
+stale; a future or malformed timestamp is unknown. The shell shows both
+`requested_session` and `resolved_session` (the effective quote/input
+session), and evaluates session lag against scheduled NYSE sessions using the
+existing market-calendar rules. Once a later scheduled session is due, a
+health snapshot that still describes an earlier input session is stale, even
+if it is under 24 hours old. Missing or malformed session or schedule evidence
+is unknown, never current. The latest outcome exposed by health evidence is
+shown explicitly: withheld publication, failed engineering observations, and
+unknown scheduled observations remain visible, and absent evidence is unknown.
+Health is current only when its timestamp and input session are fresh, its
+release identity matches both the frame pin and latest published release, and
+its available outcome and schedule evidence pass. Stale, degraded, and unknown
+are distinct visible states.
+
 ## Dependencies
 
 `only_imports=(7.0,)` (root doc §2): this package may import anything on
