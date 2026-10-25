@@ -66,12 +66,14 @@ def test_cli_forwards_default_or_explicit_finite_budget_and_closes(tmp_path, mon
     assert calls == [CAP if budget is None else budget] and closed == [conn]
 
 
-@pytest.mark.parametrize("cli", CLIS, ids=lambda cli: cli.__name__.rsplit(".", 1)[-1])
+@pytest.mark.parametrize("cli,register", [(cli, False) for cli in CLIS] + [(v2_gate, True), (v2_prediction, True)])
 @pytest.mark.parametrize("budget", ["0", "-1", "1.5", "inf", "None", str(2**62), str(2**100)])
-def test_cli_rejects_invalid_budget_before_catalog_or_store(tmp_path, monkeypatch, capsys, cli, budget):
+def test_cli_rejects_invalid_budget_before_catalog_or_store(tmp_path, monkeypatch, capsys, cli, register, budget):
     def forbid(*args, **kwargs):
         pytest.fail("invalid registration budget reached storage")
     args = arguments(cli, tmp_path) + ["--max-registration-bytes", budget]
+    if register:
+        args[0] = "register"
     monkeypatch.setattr(cli, "connect", forbid)
     monkeypatch.setattr(cli if cli is v2_magnitude_search else cli.foundation, "ArtifactStore", forbid)
     monkeypatch.setattr(cli.Path, "read_text", forbid)
