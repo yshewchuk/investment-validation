@@ -31,7 +31,7 @@ access. The index is not an alternative holdout/grouped-membership classifier.
 
 ## Public boundary and native compatibility
 
-**Blocking prerequisite (1.B0–1.B3):** current Repository.resolve/resolve_full
+**Blocking prerequisite (1.B0 plus B1a/B1b/B2/B3a/B3b):** current Repository.resolve/resolve_full
 materialize all-table membership before caps; they cannot admit this index.
 Before any admit_snapshot/resolve call, a separately reviewed data-owned bounded
 read session must cap all-snapshot table count, fragment memberships and catalog
@@ -43,7 +43,7 @@ check-then-unbounded-resolve race. Reuse that admitted view for all later native
 lookups/scans. Native manifest/snapshot reconstruction still proves exact identity.
 No research-side SQL, caller receipt/boolean or ordinary pinned Repository can
 substitute. 1.B0 must freeze/prove the public API and an additive implementation
-route preserving existing bytes; index implementation waits for all of 1.B0–1.B3.
+route preserving existing bytes; index implementation waits for B0 review and all five code slices.
 
 Proposed signatures below are design vocabulary, not installed/exported APIs:
 `engine.v2.research.magnitude_confirmed_metadata.build_index(repository, snapshot, *, tickers, limits)`.
@@ -313,8 +313,9 @@ The data factory alone opens and admits the bounded view before yielding a sessi
 Research `build_index` calls this factory with table_name="earnings_events" and
 the five catalog/selected-table limits below, then passes the yielded session to
 `snapshot_inputs.admit_snapshot`; a caller-created receipt/boolean cannot replace it.
-Reject non-native holders, malformed native SnapshotRef, empty/non-string table
-names, unsupported connection configuration and an already-active transaction.
+The factory rejects a missing/malformed SnapshotRef with SNAPSHOT_UNRESOLVED.
+Non-native holders, empty/non-string table names, unsupported connection
+configuration and an already-active transaction refuse CONTRACT_MISMATCH.
 An absent selected table refuses CONTRACT_MISMATCH before the factory yields.
 Support the native sqlite3.Connection with sqlite3.Row and str text factories;
 no supplied callbacks, connection adapters or subclass overrides are admission.
@@ -332,9 +333,11 @@ Admission failure exposes no session or partial proof. Reopening performs fresh 
 no process-global cache, automatic retry, durable write or temporary catalog copy.
 
 The facade exposes only the following native-compatible operations; returned
-native dataclasses and every nested mapping/list are deep-detached from its state:
+native dataclasses and every nested mapping/list are deep-detached from its state.
+Every method and iterator resume first checks lifetime: use after exit refuses
+CONTRACT_MISMATCH before any ID/ref check. The table applies only while active.
 
-| Method | Closed behavior |
+| Method | Behavior while active |
 | --- | --- |
 | resolve(snapshot_id) | Exact admitted ID only; detached SnapshotRef, otherwise SNAPSHOT_NOT_FOUND. |
 | resolve_full(snapshot_id) | Same ID rule; detached native ResolvedSnapshot, complete all-table membership. |
@@ -343,7 +346,8 @@ native dataclasses and every nested mapping/list are deep-detached from its stat
 | scan_population_bound(snapshot_id, *, table_name, table_contract_ref, key_filter=(), time_interval=None) | Selected table only; native plan_scan_population candidate-row sum, never result-count estimation. |
 | scan(query, *, table_name, max_object_bytes) | Selected table only; required positive native byte cap and unchanged DataQuery semantics; provisional Arrow batches until exhaustion. |
 
-Unknown tables, nonexact refs or scans outside the selected table refuse
+On the active facade, unknown tables, nonexact refs passed to table_contract/
+fragment_records, or scans outside the selected table refuse
 CONTRACT_MISMATCH. There are no exposed latest/head/get_event/get_chain/price
 helpers, write methods, raw connection, mutable caches or caller-supplied records.
 The facade is request-local, not a serializable provenance token. A missing store
@@ -389,8 +393,9 @@ After all stored-byte/count probes pass, transfer one admitted row at a time
 in the same transaction. Verify types and independently accumulate decoded
 TEXT UTF-8 bytes before any JSON parse; this second counter also must fit
 max_catalog_bytes. SQL BLOB length uses database encoding, not assumed UTF-8;
-UTF-16 and embedded-NUL fixtures must exercise both checks. Invalid Unicode
-refuses. Fixed-width scalars remain count-bounded; no BLOB field is expected.
+UTF-16 and embedded-NUL fixtures must exercise both checks. Catalog text decode/
+re-encode UnicodeError refuses MANIFEST_CORRUPT, never leaks a builtin exception.
+Fixed-width scalars remain count-bounded; no BLOB field is expected.
 Use the native JSON duplicate-key hook and strict native document decoder;
 JSON syntax/depth/shape failures refuse rather than yielding an empty record.
 No re-query through ordinary Repository is allowed after these guards.
@@ -419,12 +424,18 @@ This is same-package native reuse, not a research private import. Each facade
 call and iterator resume checks lifetime; only one active scan is permitted.
 No silent native fallback when construction or an override is unsupported.
 
-| Admission/session failure | Outcome (fixed redacted message, no partial session) |
+Factory snapshot-reference failures use SNAPSHOT_UNRESOLVED. Active facade
+resolve/resolve_full retain native SNAPSHOT_NOT_FOUND for a different ID;
+research admit_snapshot translates it to SNAPSHOT_UNRESOLVED (engine/v2/research/snapshot_inputs.py:14–25).
+The index's exact earnings-contract allowlist still refuses UNSUPPORTED_CONTRACT;
+the generic session authenticates catalog identity, not that research allowlist.
+
+| Failure boundary | Outcome (fixed redacted message; admission returns no partial session) |
 | --- | --- |
 | Bad request/holder/configuration, nested use or use after exit | CONTRACT_MISMATCH, nonretryable. |
-| Missing/malformed SnapshotRef, missing requested snapshot or supplied ref differs | SNAPSHOT_UNRESOLVED, nonretryable. |
+| Factory: missing/malformed SnapshotRef, missing requested snapshot or supplied ref differs | SNAPSHOT_UNRESOLVED, nonretryable. |
 | Any explicit count or either byte counter exceeds cap | RESULT_LIMIT_EXCEEDED, nonretryable; no cap relaxation. |
-| Broken join/type/JSON/native identity or other SQLite catalog error | MANIFEST_CORRUPT, nonretryable. |
+| Catalog: broken join/type/JSON/Unicode/native identity or other SQLite catalog error | MANIFEST_CORRUPT, nonretryable. |
 | SQLite BUSY/LOCKED/IOERR | RESOURCE_UNAVAILABLE, retryable by registry only; no automatic retry. |
 | Native DataError from identity/query/object checks | Preserve code and retryability; do not blanket-wrap. |
 
@@ -438,5 +449,5 @@ nonselected object reads. Verify deep mutation isolation, fresh reopen, failure
 cleanup, early/never-started generator closure and exact bound/scan parity.
 A concurrent second-connection commit between probes and transfer must not
 change the admitted view; no fixture may stand in for private source coverage.
-B1a/B1b/B2/B3a/B3b remain separate <=400 combined code/test/doc PRs above;
+B1a/B1b/B2/B3a/B3b estimates top out at 360 combined lines, within the <=400 ceiling;
 re-estimate/split if tests exceed them. Index work waits for all five slices.
