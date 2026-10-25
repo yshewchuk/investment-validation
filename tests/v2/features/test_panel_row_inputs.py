@@ -1453,6 +1453,71 @@ def test_44_implied_carry_ignores_a_late_availability_that_history_respects():
     assert panel["n_prior"] == 0
 
 
+def test_22_daily_state_is_read_strictly_before_an_event_dated_on_the_decision_day():
+    """An event dated on the decision day must not see its own day's (post-print) state."""
+    snapshot = _snapshot()
+    batches = _default_batches()
+    rows = _dm_rows("AAA", ["2024-02-13", "2024-02-14", "2024-02-15"])
+    rows[0]["implied_move"] = 1.0
+    rows[1]["implied_move"] = 9.0
+    rows[2]["implied_move"] = 77.0
+    batches[("daily_market", "AAA")] = rows
+
+    def _panel(event_date):
+        repo = _FakeRepository(snapshot, _contracts(), batches)
+        key = BoardRequest(ticker="AAA", strategy="STR-X",
+                           event_date=pd.Timestamp(event_date), session="BMO")
+        return scan_panel_row(repo, snapshot, key, history_start=_HISTORY_START,
+                              decision_session=_DECISION)
+
+    same_day = _panel("2024-02-14")
+    assert same_day.panel_row["im"] == 1.0
+    assert same_day.panel_row["or_implied"] == 1.0
+    # An event after the decision day reads the decision-day state, never a later row:
+    # the decision ceiling (not just event_day - 1) bounds the read.
+    later = _panel("2024-02-20")
+    assert later.panel_row["im"] == 9.0
+    assert _panel("2024-02-15").panel_row["im"] == 9.0
+    # panel_anchor follows the daily-state source session, which is the capped one.
+    assert same_day.panel_anchor == pd.Timestamp("2024-02-13")
+    assert later.panel_anchor == pd.Timestamp("2024-02-14")
+
+
+def test_23_event_before_the_decision_day_reads_the_day_before_the_event():
+    """An event before the decision day reads the row strictly before the event."""
+    snapshot = _snapshot()
+    batches = _default_batches()
+    rows = _dm_rows("AAA", ["2024-02-11", "2024-02-12", "2024-02-13", "2024-02-14"])
+    rows[0]["implied_move"] = 1.0
+    rows[1]["implied_move"] = 2.0
+    rows[2]["implied_move"] = 3.0
+    rows[3]["implied_move"] = 4.0
+    batches[("daily_market", "AAA")] = rows
+
+    repo = _FakeRepository(snapshot, _contracts(), batches)
+    key = BoardRequest(ticker="AAA", strategy="STR-X",
+                       event_date=pd.Timestamp("2024-02-13"), session="BMO")
+    result = scan_panel_row(repo, snapshot, key, history_start=_HISTORY_START,
+                            decision_session=_DECISION)
+    assert result.panel_row["im"] == 2.0
+
+
+def test_23b_event_on_or_before_history_start_refuses():
+    """An event on or before history_start has no eligible daily window."""
+    snapshot = _snapshot()
+    batches = _default_batches()
+    rows = _dm_rows("AAA", ["2024-02-13", "2024-02-14"])
+    batches[("daily_market", "AAA")] = rows
+
+    repo = _FakeRepository(snapshot, _contracts(), batches)
+    key = BoardRequest(ticker="AAA", strategy="STR-X",
+                       event_date=pd.Timestamp("2024-02-13"), session="BMO")
+    with pytest.raises(DataError) as exc:
+        scan_panel_row(repo, snapshot, key, history_start=pd.Timestamp("2024-02-13"),
+                       decision_session=_DECISION)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+
+
 def test_45_gspc_rows_before_history_start_are_excluded_from_regime_inputs():
     """A ^GSPC row older than ``history_start`` never reaches the regime
     series, and the rows that do reach it are actually used: the composed
