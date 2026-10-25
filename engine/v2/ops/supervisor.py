@@ -1719,7 +1719,7 @@ class Service:
                                       keepalive=keepalive)
         if claim.spec.kind == "backup":
             return backup_effect(self.conn, self.store, claim, self.root, clock=self.clock,
-                                 keepalive=keepalive, materialization_base=self.materialization_base)
+                                 keepalive=keepalive)
         if claim.spec.kind == "snapshot_import":
             return snapshot_import_effect(self.conn, self.store, claim, refs, clock=self.clock,
                                           keepalive=keepalive)

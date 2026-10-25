@@ -8,8 +8,7 @@ from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
 from engine.v2.ops.effects_graph import backup_effect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
-from engine.v2.ops.supervisor import Service
-from tests.ops_support import REGISTRY, TEST_POLICY, catalog
+from tests.ops_support import catalog
 from tests.v2.ops.test_v2_ops_effects_graph import (
     SESSION, _commit, _open, _params, _row, _seed_decisions, _submit_and_claim,
 )
@@ -248,10 +247,9 @@ def test_backup_effect_propagates_retention_sentinel_after_successful_backup(tmp
     """Synthetic: ``enforce_retention`` refuses with a typed ``OpsError`` after the
     backup and its watermark are already durable. The refusal must leave
     ``backup_effect`` unchanged — same code and ``reason_key`` — with the backup
-    effect delivered, and the configured ``materialization_base`` must reach
-    ``enforce_retention`` unchanged. Both the ``retention`` module attribute (the
-    requested patch site) and the ``effects_graph`` binding ``backup_effect``
-    actually calls (the name is imported at module scope) point at the same stub."""
+    effect delivered. Both the ``retention`` module attribute (the requested
+    patch site) and the ``effects_graph`` binding ``backup_effect`` actually
+    calls (the name is imported at module scope) point at the same stub."""
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:
         scope = "shadow"
@@ -261,7 +259,6 @@ def test_backup_effect_propagates_retention_sentinel_after_successful_backup(tmp
         sentinel = fail("INTEGRITY_FAILED", "synthetic retention refusal",
                         details={"reason_key": "synthetic_retention_failed"})
         calls = []
-        configured_base = tmp_path / "custom-materialization-base"
 
         def boom(*args, **kwargs):
             state = conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0]
@@ -271,12 +268,11 @@ def test_backup_effect_propagates_retention_sentinel_after_successful_backup(tmp
         monkeypatch.setattr("engine.v2.ops.retention.enforce_retention", boom)
         monkeypatch.setattr("engine.v2.ops.effects_graph.enforce_retention", boom)
         with pytest.raises(OpsError) as raised:
-            backup_effect(conn, store, claim, root, clock=clock,
-                          materialization_base=configured_base)
+            backup_effect(conn, store, claim, root, clock=clock)
 
         assert len(calls) == 1
         assert calls[0][2] == "delivered"
-        assert calls[0][1]["materialization_base"] == configured_base
+        assert calls[0][1] == {"conn": conn, "store": store}
         assert raised.value is sentinel
         assert raised.value.code == sentinel.code == "INTEGRITY_FAILED"
         assert raised.value.problem.details["reason_key"] == "synthetic_retention_failed"
@@ -289,34 +285,30 @@ def test_backup_effect_propagates_retention_sentinel_after_successful_backup(tmp
         conn.close()
 
 
-def test_coordinator_effect_dispatches_configured_materialization_base(tmp_path, monkeypatch):
-    """Synthetic: the ``backup`` branch of ``supervisor.Service._coordinator_effect``
-    must dispatch to ``backup_effect`` with the service's configured
-    ``materialization_base`` passed through unchanged; the effect itself is
-    stubbed at the ``supervisor`` module binding and captures its kwargs. The
-    claim is made under the frozen ``scheduler.Supervisor`` identity (the
-    object ``_open`` returns), while ``_coordinator_effect`` is the real
-    ``supervisor.Service`` method, constructed here with the configured
-    materialization base."""
+def test_backup_effect_prunes_older_real_backup(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPS_BACKUP_RETENTION_KEEP", "1")
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:
         scope = "shadow"
-        _seed_decisions(conn, clock, scope, SESSION, predictions=[_row("evt-1", "pred")])
-        claim = _submit_and_claim(conn, clock, supervisor, kind="backup", key="backup-1",
-                                  parameters=_params("backup", SESSION, scope))
-        configured_base = tmp_path / "custom-materialization-base"
-        service = Service(conn, root, REGISTRY, TEST_POLICY, clock=clock,
-                          code_source=root, materialization_base=configured_base)
-        captured = []
-
-        def spy(*args, **kwargs):
-            captured.append(kwargs)
-            return (None, ())
-
-        monkeypatch.setattr("engine.v2.ops.supervisor.backup_effect", spy)
-        result = service._coordinator_effect(claim, (), keepalive=lambda: None)
-        assert result == (None, ())
-        assert len(captured) == 1
-        assert captured[0]["materialization_base"] == configured_base
+        for session, key in ((SESSION, "retention-old"), ("2026-09-13", "retention-new")):
+            _seed_decisions(conn, clock, scope, session,
+                            predictions=[_row("evt-" + session, "pred")])
+            claim = _submit_and_claim(conn, clock, supervisor, kind="backup", key=key,
+                                      parameters=_params("backup", session, scope))
+            result = backup_effect(conn, store, claim, root, clock=clock)
+            _commit(conn, clock, claim, result)
+            if key == "retention-old":
+                backup_dir = root / "backups" / scope
+                old_manifests = list(backup_dir.glob("*.manifest.json"))
+                assert len(old_manifests) == 1
+                old_key = old_manifests[0].name.removesuffix(".manifest.json")
+            clock.advance(1)
+        manifests = list(backup_dir.glob("*.manifest.json"))
+        assert len(manifests) == 1
+        new_key = manifests[0].name.removesuffix(".manifest.json")
+        assert new_key != old_key
+        assert (backup_dir / (new_key + ".sqlite")).exists()
+        assert not (backup_dir / (old_key + ".manifest.json")).exists()
+        assert not (backup_dir / (old_key + ".sqlite")).exists()
     finally:
         conn.close()

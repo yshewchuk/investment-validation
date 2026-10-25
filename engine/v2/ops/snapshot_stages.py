@@ -48,7 +48,7 @@ from engine.v2.data.reference_inputs import (
 )
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import CONTENT_HASH_PREFIX, content_hash, to_document
-from engine.v2.ops.checkpoints import registered_artifact
+from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.core.snapshot_contracts import SNAPSHOT_BINDINGS
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.input_bindings import recorded_bindings, resolve_bindings
@@ -137,28 +137,8 @@ def _catalog_path(conn) -> str:
     raise fail("RESOURCE_UNAVAILABLE", "the operations catalog has no file path")
 
 
-def _read_json(conn, store, artifact_id, *, max_bytes=None):
-    if max_bytes is not None and (isinstance(max_bytes, bool)
-                                  or not isinstance(max_bytes, int) or max_bytes < 0):
-        raise fail("INVALID_REQUEST", "artifact byte limit must be a non-negative integer",
-                   details={"reason_key": "artifact_byte_limit_invalid"})
-    ref = registered_artifact(conn, artifact_id, max_metadata_bytes=max_bytes)
-    if max_bytes is not None and ref.byte_size > max_bytes:
-        raise fail("INTEGRITY_FAILED",
-                   "live materialization request artifact exceeds the byte limit",
-                   details={"reason_key": "live_request_too_large",
-                            "artifact_id": artifact_id,
-                            "byte_size": ref.byte_size,
-                            "byte_limit": max_bytes})
-    data = store.read_verified(ref)
-    if max_bytes is not None and len(data) > max_bytes:
-        raise fail("INTEGRITY_FAILED",
-                   "live materialization request artifact exceeds the byte limit",
-                   details={"reason_key": "live_request_too_large",
-                            "artifact_id": artifact_id,
-                            "byte_size": len(data),
-                            "byte_limit": max_bytes})
-    return json.loads(data)
+def _read_json(conn, store, artifact_id):
+    return json.loads(store.read_verified(artifact(conn, store, artifact_id)))
 
 
 def _decode(cls, document):
@@ -176,9 +156,8 @@ def _bound(resolved, name):
     return item
 
 
-def request_from_artifact(conn, store, artifact_id, *, max_bytes=None) -> LegacyMaterializationRequest:
-    request = _decode(LegacyMaterializationRequest,
-                      _read_json(conn, store, artifact_id, max_bytes=max_bytes))
+def request_from_artifact(conn, store, artifact_id) -> LegacyMaterializationRequest:
+    request = _decode(LegacyMaterializationRequest, _read_json(conn, store, artifact_id))
     document = to_document(request)
     del document["request_hash"]
     if content_hash(document) != request.request_hash:

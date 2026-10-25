@@ -13,7 +13,7 @@ from pathlib import Path
 
 from engine.v2.ops.snapshot_roots import default_materialization_base
 
-__all__ = ["READ_ONCE", "reclaim", "remove_tree"]
+__all__ = ["READ_ONCE", "reclaim"]
 
 #: Subtrees of ``attempts/<id>/staging`` the worker reads only during the attempt.
 READ_ONCE = ("legacy",)
@@ -43,47 +43,24 @@ def _size(path, keepalive):
     return total
 
 
-def remove_tree(path, keepalive, on_progress=None):
-    """Remove one entry without ever following a link; ``keepalive`` runs
-    before and after every unlink/rmdir (and after each chmod) so an expired
-    lease stops before the next file is removed and a slow removal cannot
-    starve a running attempt's lease; ``on_progress`` (if given) receives
-    ``(done, total)`` after each removal."""
+def _remove(path, keepalive):
+    """Remove one entry without ever following a link; ``keepalive`` runs per
+    directory and per file so a slow removal cannot starve a running attempt's lease."""
     if path.is_symlink() or not path.is_dir():
-        keepalive()
         path.unlink()
-        keepalive()
-        if on_progress is not None:
-            on_progress(1, 1)
         return
-    removed_total = 0
-    for dirpath, dirs, files in os.walk(path):
+    for dirpath, _dirs, _files in os.walk(path):
         os.chmod(dirpath, 0o700)
-        removed_total += len(dirs) + len(files)
         keepalive()
-    total, done = removed_total + 1, 0
     for dirpath, dirs, files in os.walk(path, topdown=False):
         for name in files:
-            keepalive()
             os.unlink(os.path.join(dirpath, name))
             keepalive()
-            done += 1
-            if on_progress is not None:
-                on_progress(done, total)
         for name in dirs:
             child = os.path.join(dirpath, name)
-            keepalive()
             (os.unlink if os.path.islink(child) else os.rmdir)(child)
             keepalive()
-            done += 1
-            if on_progress is not None:
-                on_progress(done, total)
-    keepalive()
     path.rmdir()
-    keepalive()
-    done += 1
-    if on_progress is not None:
-        on_progress(done, total)
 
 
 def _entry(kind, path, attempt_id, apply, out, keepalive, top):
@@ -102,7 +79,7 @@ def _entry(kind, path, attempt_id, apply, out, keepalive, top):
               "bytes": _size(path, keepalive), "removed": False}
     if apply:
         try:
-            remove_tree(path, keepalive)
+            _remove(path, keepalive)
             record["removed"] = True
         except OSError as exc:
             record["error"] = type(exc).__name__

@@ -135,14 +135,14 @@ def test_orphan_partial_roots_follow_the_same_rule(world):
 
 
 def test_a_failed_removal_is_reported_and_the_rest_still_run(world, monkeypatch):
-    real = reclaim_module.remove_tree
+    real = reclaim_module._remove
 
-    def flaky(path, keepalive, on_progress=None):
+    def flaky(path, keepalive):
         if world.ids["succeeded"] in str(path):
             raise PermissionError("denied")
-        real(path, keepalive, on_progress=on_progress)
+        real(path, keepalive)
 
-    monkeypatch.setattr(reclaim_module, "remove_tree", flaky)
+    monkeypatch.setattr(reclaim_module, "_remove", flaky)
     entries = reclaim(world.conn, world.root, apply=True)
     by_id = {entry["attempt_id"]: entry for entry in entries}
     assert by_id[world.ids["succeeded"]]["error"] == "PermissionError"
@@ -217,22 +217,6 @@ def test_removal_renews_leases_per_file_so_slow_cleanup_cannot_starve_them(world
     calls = []
     reclaim(world.conn, world.root, apply=True, keepalive=lambda: calls.append(1))
     assert len(calls) >= 21
-
-
-def test_remove_tree_reports_progress_after_each_removal(tmp_path):
-    root = tmp_path / "root"
-    (root / "dirs" / "nested").mkdir(parents=True)
-    (root / "a.bin").write_bytes(b"a")
-    (root / "dirs" / "b.bin").write_bytes(b"b")
-    (root / "dirs" / "nested" / "c.bin").write_bytes(b"c")
-    progress, renewals = [], []
-
-    reclaim_module.remove_tree(root, lambda: renewals.append(1),
-                               on_progress=lambda done, total: progress.append((done, total)))
-
-    assert progress == [(1, 6), (2, 6), (3, 6), (4, 6), (5, 6), (6, 6)]
-    assert len(renewals) == 3 + 3 * 2 + 2 * 2 + 2
-    assert not root.exists()
 
 
 def test_the_tick_pass_passes_the_lease_renewal_into_reclaim(world):
@@ -331,21 +315,3 @@ def test_a_symlinked_materialization_base_is_refused_not_followed(world, tmp_pat
                if e["kind"] == "partial_materialization"]
     assert [e["error"] for e in entries] == ["SymlinkedAncestor"]
     assert (partial / "tables" / "t.csv").is_file()
-
-
-def test_lease_renewal_immediately_before_unlink(tmp_path, monkeypatch):
-    root = tmp_path / "root"
-    root.mkdir()
-    (root / "file.txt").touch()
-
-    events = []
-    real_unlink = reclaim_module.os.unlink
-
-    def mock_unlink(path, *args, **kwargs):
-        events.append("unlink")
-        return real_unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(reclaim_module.os, "unlink", mock_unlink)
-    reclaim_module.remove_tree(root, lambda: events.append("renew"))
-
-    assert events == ["renew", "renew", "unlink", "renew", "renew", "renew"]

@@ -715,28 +715,16 @@ and nothing on this diagram writes to the legacy board.
 
 #### Contract
 
-Backup retention is applied per backup scope and runs only after a successful backup; a failed or absent backup invokes nothing and deletes nothing. Selection retains newest N complete verified backups per scope and newest K roots plus persisted live-attempt references; all backup scopes and live refs are preflighted before any fresh deletion; each fresh target matches the durable journal snapshot before first unlink; replay verifies remaining targets, binds roots to their recorded device and inode, and checks recorded mtime on intact trees before ranking recovery candidates; partial deletion retains the original rank only for the same directory identity, and changed/live/retained roots refuse. N defaults to `OPS_BACKUP_RETENTION_KEEP=7` and K defaults to `OPS_MATERIALIZATION_RETENTION_KEEP=11`. A complete backup has the exact manifest schema, a non-empty hash-matched database with clean SQLite integrity/foreign-key checks, and the exact on-disk artifact set with matching sizes and hashes. Current publication has no root binding, so retention keeps the newest 11 roots conservatively and emits `RETENTION_CURRENT_PUBLICATION_UNBOUND`. Refusal outcomes are `INVALID_REQUEST`, `INPUT_CHANGED`, `INTEGRITY_FAILED`, `LEASE_LOST` and `BACKUP_FAILED`. Rerunning against unchanged state is a no-op.
+Retention runs after a successful backup. Per scope it retains the newest N complete backups; it also retains the newest K materialization roots and roots bound to live materialization attempts. N defaults to `OPS_BACKUP_RETENTION_KEEP=7`; K defaults to `OPS_MATERIALIZATION_RETENTION_KEEP=11`. A complete backup has the expected manifest keys, a non-empty database matching its manifest hash and passing SQLite integrity/foreign-key checks, and exactly the listed artifacts with matching sizes and hashes. Every backup scope and live request binding is checked before deletion. Current publication has no root binding, so the newest K roots are kept conservatively and `RETENTION_CURRENT_PUBLICATION_UNBOUND` is emitted. There is no deletion journal in this PR: a filesystem error can leave earlier unlinks in place; the error propagates, and a later run re-inventories state. An incomplete backup then refuses the whole retention pass until repaired. Journaled recovery and broader race-safe preflight are tracked in [#1251](https://github.com/yshewchuk/investment-validation/issues/1251).
 
 | Condition | Outcome |
 | --- | --- |
 | Invalid retention count limit (zero, negative, non-integer or malformed) | `INVALID_REQUEST`; no deletion. |
-| Oversized or unverifiable backup or live request artifact, malformed live-attempt evidence, or unresolved live use | `INTEGRITY_FAILED`; no new deletion. |
-| Pinned backup file unreadable, changed during verification, or above its streaming limit | `INTEGRITY_FAILED`; no new deletion. |
-| Unsafe backup or artifact name | `INTEGRITY_FAILED`; no deletion. |
-| Live attempt with a missing or duplicate request binding | `INPUT_CHANGED`; no new deletion. |
-| Lease renewal failure during retention | `LEASE_LOST`; work stops. |
-| Journal write or backup unlink `OSError` | `BACKUP_FAILED`; earlier unlinks may persist with a valid journal for retry. |
-| Stale journal temporary-file cleanup `OSError` | `BACKUP_FAILED`; no retention target is deleted. |
-| Journal clear `OSError` after unlinks | `BACKUP_FAILED`; target deletion is complete and the journal may be absent; the next run is a no-op. |
-| Current backup keep limit rises above the journaled limit | `INTEGRITY_FAILED`; no journal targets are removed. |
-| Known incomplete backup candidate from a pending/failed outbox row | Residue is retained untouched; verified backups may be planned after all preflight succeeds. |
-| Unknown, active, or inconsistent backup residue | `INTEGRITY_FAILED`; no new deletion. |
-| Interrupted prune with a valid journal | Every remaining file and tree entry is verified before any are removed; absent entries count as completed. |
-| Journal unreadable, invalid, or any target mismatches its record | `INTEGRITY_FAILED`; no journal targets are removed. |
-| Deletion journal exceeding its supported bound | `INTEGRITY_FAILED`; no deletion. |
-| Journaled root is now live or among the newest K roots | `INTEGRITY_FAILED`; no journal targets are removed. |
-| Materialization tree removal `OSError` | `BACKUP_FAILED`; earlier deletes may persist and the next invocation verifies and completes the journaled remainder. |
-| Visible materialization candidate that is not a real readonly 0555 directory | `INTEGRITY_FAILED`; no new deletion. |
+| Unverifiable backup or malformed live-attempt evidence | `INTEGRITY_FAILED`; no deletion begins. |
+| Unsafe backup or artifact name | `INTEGRITY_FAILED`; no deletion begins. |
+| Live attempt with a missing or duplicate request binding | `INPUT_CHANGED`; no deletion begins. |
+| Filesystem error during deletion | The `OSError` propagates; earlier deletions may persist. There is no journal replay; the next run re-inventories before considering more deletions. |
+| Partial backup remains after an interrupted deletion | The incomplete scope fails preflight with `INTEGRITY_FAILED`; no further deletion starts until repaired. |
 | Any retention refusal | The current nightly backup attempt fails, even though backup/watermark may already be durable. |
 
 ## 5. Invariants

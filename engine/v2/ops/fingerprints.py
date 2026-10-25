@@ -2,13 +2,10 @@
 from __future__ import annotations
 
 import ast
-import errno
 import hashlib
 import importlib.metadata
-import os
 import platform
 import shutil
-import stat
 from collections.abc import Callable
 from pathlib import Path
 
@@ -19,128 +16,18 @@ from engine.v2.foundation import ensure_directory, safe_relative_path
 from engine.v2.ops.errors import fail
 
 
-def _check_max_bytes(max_bytes):
-    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
-        raise fail("INVALID_REQUEST", "max_bytes must be a nonnegative integer",
-                   details={"max_bytes": max_bytes})
-
-
-def file_hash(path, *, keepalive: Callable[[], None] | None = None,
-              max_bytes: int | None = None,
-              on_progress: Callable[[int], None] | None = None):
-    """SHA-256 of ``path``; ``keepalive`` per 1MB chunk; ``max_bytes`` bounds
-    each read to the remaining ceiling plus one probe byte, failed typed
-    before that probe byte is hashed; ``on_progress`` (if given) receives the
-    cumulative bytes read after each hashed chunk."""
-    _check_max_bytes(max_bytes)
+def file_hash(path, *, keepalive: Callable[[], None] | None = None):
+    """SHA-256 of ``path``. ``keepalive`` (issue #106 round 3): optional
+    zero-arg renewal callable invoked once per 1MB chunk -- the same seam as
+    ``legacy_adapter._digest`` -- so pinning ONE huge file renews during its
+    hash, not only between files. ``None`` keeps today's exact behavior."""
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
-        while True:
-            want = 1 << 20
-            if max_bytes is not None:
-                want = min(want, max_bytes - stream.tell() + 1)
-            chunk = stream.read(want)
-            if not chunk:
-                break
-            if max_bytes is not None and stream.tell() > max_bytes:
-                raise fail("INTEGRITY_FAILED", "file exceeds the streaming byte ceiling",
-                           details={"reason_key": "stream_too_large", "max_bytes": max_bytes})
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
             digest.update(chunk)
-            keepalive() if keepalive is not None else None
-            on_progress(stream.tell()) if on_progress is not None else None
+            if keepalive is not None:
+                keepalive()
     return "sha256:" + digest.hexdigest()
-
-
-class NotRegularFile(OSError):
-    """The path does not resolve to a regular file."""
-
-
-def _open_pinned_regular(path):
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    try:
-        fd = os.open(path, flags)
-    except FileNotFoundError:
-        raise
-    except OSError as exc:
-        if exc.errno == errno.ELOOP:
-            raise NotRegularFile("path is a symlink") from exc
-        raise fail("INTEGRITY_FAILED", "backup file could not be read",
-                   details={"reason_key": "backup_file_unreadable"}) from exc
-    try:
-        pinned = os.fstat(fd)
-        if not stat.S_ISREG(pinned.st_mode):
-            raise NotRegularFile("path is not a regular file")
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd, pinned
-
-
-def _read_pinned_digest(fd, pinned, *, keepalive=None, max_bytes=None, on_progress=None):
-    digest = hashlib.sha256()
-    total = 0
-    while True:
-        want = 1 << 20
-        if max_bytes is not None:
-            want = min(want, max_bytes - total + 1)
-        try:
-            chunk = os.read(fd, want)
-        except OSError as exc:
-            raise fail("INTEGRITY_FAILED", "backup file could not be read",
-                       details={"reason_key": "backup_file_unreadable"}) from exc
-        if not chunk:
-            break
-        total += len(chunk)
-        if max_bytes is not None and total > max_bytes:
-            raise fail("INTEGRITY_FAILED", "file exceeds the streaming byte ceiling",
-                       details={"reason_key": "stream_too_large",
-                                "max_bytes": max_bytes})
-        digest.update(chunk)
-        keepalive() if keepalive is not None else None
-        on_progress(total, pinned.st_size) if on_progress is not None else None
-    return "sha256:" + digest.hexdigest(), total
-
-
-def _recheck_pinned(fd, pinned, path):
-    current = os.fstat(fd)
-    if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns,
-            current.st_ctime_ns) != \
-            (pinned.st_dev, pinned.st_ino, pinned.st_size, pinned.st_mtime_ns,
-             pinned.st_ctime_ns):
-        raise fail("INTEGRITY_FAILED", "file changed during verification",
-                   details={"reason_key": "file_changed"})
-    try:
-        path_info = os.lstat(path)
-    except OSError:
-        path_info = None
-    if path_info is None or (path_info.st_dev, path_info.st_ino) != \
-            (pinned.st_dev, pinned.st_ino):
-        raise fail("INTEGRITY_FAILED", "file changed during verification",
-                   details={"reason_key": "file_changed"})
-
-
-def atomic_file_info(path, *, keepalive: Callable[[], None] | None = None,
-                     max_bytes: int | None = None,
-                     on_progress: Callable[[int, int], None] | None = None):
-    """Return ``(digest, byte_size)`` from a single pinned read of a regular file.
-
-    ``keepalive`` is called per chunk; ``max_bytes`` bounds each read to the
-    remaining ceiling plus one probe byte, failed typed before that probe byte
-    is hashed; ``on_progress`` (if given) receives ``(cumulative_bytes_read,
-    total_size)`` after each hashed chunk.  The open uses no-follow and
-    nonblocking flags; the pinned descriptor is checked before and after the
-    read, as is the path's identity, so a replaced or modified file refuses.
-    """
-    _check_max_bytes(max_bytes)
-    fd, pinned = _open_pinned_regular(path)
-    try:
-        digest, total = _read_pinned_digest(
-            fd, pinned, keepalive=keepalive, max_bytes=max_bytes,
-            on_progress=on_progress)
-        _recheck_pinned(fd, pinned, path)
-        return digest, total
-    finally:
-        os.close(fd)
 
 
 #: Largest declared `.py` file `source_closure` will read (the repo's largest is far below it).

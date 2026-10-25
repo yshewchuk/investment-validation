@@ -811,7 +811,7 @@ def publication_effect(conn, store, claim, ops_root, repo_root, *, clock, store_
 # --------------------------------------------------------------------------
 
 
-def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=_no_keepalive, materialization_base=None):
+def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=_no_keepalive):
     """Prepare then run one backup; a failure releases its outbox effect back
     to pending (rather than waiting out its lease) so an immediate retry can
     claim it — the job's own retry policy is what makes this "retryable"."""
@@ -856,10 +856,9 @@ def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=
                  generation=generation)
     # Retention runs only after the backup and its watermark are durable; a
     # refusal propagates as a typed OpsError with the backup effect already
-    # delivered. Interrupted pruning replays verified journal targets. Known
-    # incomplete creation residue from a pending/failed outbox row stays
-    # untouched and is excluded; unknown or active residue refuses pruning.
-    enforce_retention(ops_root, conn=conn, store=store, keepalive=keepalive, materialization_base=materialization_base)
+    # delivered. Filesystem errors can leave earlier deletes in place, and
+    # there is no journal replay.
+    enforce_retention(ops_root, conn=conn, store=store)
     return None, ()
 
 
