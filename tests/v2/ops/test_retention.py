@@ -81,6 +81,8 @@ def _catalog_schema(conn):
                  "(attempt_id TEXT PRIMARY KEY, job_id TEXT, state TEXT)")
     conn.execute("CREATE TABLE attempt_input_bindings "
                  "(attempt_id TEXT, name TEXT, artifact_id TEXT)")
+    conn.execute("CREATE TABLE artifacts "
+                 "(artifact_id TEXT PRIMARY KEY, ref_json TEXT, attempt_id TEXT, registered_at TEXT)")
 
 
 @pytest.fixture
@@ -102,6 +104,19 @@ def _live_attempt(conn, bindings=(), *, kind="legacy_materialize",
                  (attempt_id, job_id, "running"))
     conn.executemany("INSERT INTO attempt_input_bindings VALUES (?, ?, ?)",
                      [(attempt_id, name, artifact_id) for name, artifact_id in bindings])
+
+
+def _register_artifact(conn, artifact_id, *, byte_size=2):
+    ref = {
+        "artifact_id": artifact_id,
+        "content_hash": ZERO_HASH,
+        "schema_ref": "legacy_materialization_request.v1.0",
+        "byte_size": byte_size,
+        "storage_key": "objects/" + artifact_id,
+        "schema_version": "artifact_ref.v1.0",
+    }
+    conn.execute("INSERT INTO artifacts VALUES (?, ?, ?, ?)",
+                 (artifact_id, json.dumps(ref), "att_live", "2026-01-01T00:00:00+00:00"))
 
 
 def _refusal(snapshot_root, ops_root, conn, reason, **kwargs):
@@ -242,6 +257,7 @@ def test_newest_materializations_and_live_request_root_survive(
     _materialization_dir(base, "root-c", 3)
     _materialization_dir(base, "root-d", 4)
     newest = _materialization_dir(base, "root-e", 5)
+    _register_artifact(catalog, "art_live")
     _live_attempt(catalog, [(REQUEST_BINDING, "art_live")], kind=kind)
     monkeypatch.setattr(
         retention_module, "request_from_artifact",
@@ -296,6 +312,27 @@ def test_live_job_spec_oversized_refuses_and_deletes_nothing(
     monkeypatch.setattr(retention_module, "_LIVE_SPEC_LIMIT", 16)
 
     _refusal(tmp_path, ops, catalog, "live_job_spec_oversized",
+             keep=1, materialization_keep=1)
+
+
+def test_oversized_live_request_artifact_refuses_and_deletes_nothing(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "old", "2026-01-01T00:00:00+00:00")
+    _write_backup(scope, "new", "2026-01-02T00:00:00+00:00")
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    _register_artifact(catalog, "art_oversized",
+                       byte_size=retention_module._LIVE_REQUEST_LIMIT + 1)
+    _live_attempt(catalog, [(REQUEST_BINDING, "art_oversized")])
+    monkeypatch.setattr(
+        retention_module, "request_from_artifact",
+        lambda *args: pytest.fail("oversized request artifact was read"))
+
+    _refusal(tmp_path, ops, catalog, "live_request_oversized",
              keep=1, materialization_keep=1)
 
 
@@ -356,7 +393,11 @@ def test_backup_keep_defaults_to_seven(tmp_path, catalog, monkeypatch):
 
     assert enforce_retention(ops, conn=catalog, store=object(),
                              materialization_keep=1) == ["backup-00"]
-    assert (scope / "backup-07.sqlite").exists()
+    assert sorted(path.name for path in scope.iterdir() if path.is_file()) == [
+        f"backup-{index:02d}.{suffix}"
+        for index in range(1, 8)
+        for suffix in ("manifest.json", "sqlite")
+    ]
 
 
 @pytest.mark.parametrize(("damage", "reason"), [
@@ -391,15 +432,32 @@ def test_naive_manifest_cutoff_refuses_and_preserves_backup_scope(tmp_path, cata
     _refusal(ops, ops, catalog, "backup_cutoff_invalid", keep=1, materialization_keep=1)
 
 
-def test_keepalive_callback_covers_verification_and_deletion(tmp_path, catalog):
+def test_keepalive_callback_covers_verification_and_deletion(
+        tmp_path, catalog, monkeypatch):
     ops = tmp_path / "ops"
     scope = ops / "backups" / "shadow"
     _write_backup(scope, "b2", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
     _write_backup(scope, "b1", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
     calls = []
+    verification_calls = []
+    original_digest = retention_module._digest
+    in_digest = False
 
     def keepalive():
+        nonlocal in_digest
         calls.append((scope / "b2.sqlite").exists())
+        if in_digest:
+            verification_calls.append(True)
+
+    def digest(fd, keepalive_callback):
+        nonlocal in_digest
+        in_digest = True
+        try:
+            return original_digest(fd, keepalive_callback)
+        finally:
+            in_digest = False
+
+    monkeypatch.setattr(retention_module, "_digest", digest)
 
     deleted = enforce_retention(ops, conn=catalog, store=object(),
                                 keep=1, materialization_keep=1,
@@ -407,6 +465,7 @@ def test_keepalive_callback_covers_verification_and_deletion(tmp_path, catalog):
 
     assert deleted == ["b2"]
     assert len(calls) >= 5
+    assert verification_calls, "keepalive must run during verification reads"
     assert True in calls
     assert False in calls
     assert not (scope / "b2.sqlite").exists()
@@ -494,3 +553,32 @@ def test_live_ordinary_attempt_without_bindings_does_not_block_backup_pruning(
     assert not (scope / "old.manifest.json").exists()
     assert (scope / "new.sqlite").exists()
     assert (scope / "new.manifest.json").exists()
+
+
+def test_digest_refuses_in_place_growth_beyond_file_limit(tmp_path, monkeypatch):
+    path = tmp_path / "growing.bin"
+    path.write_bytes(b"x")
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        monkeypatch.setattr(retention_module, "_FILE_LIMIT", 4)
+        chunks = iter([b"xx", b"xx", b"x", b""])
+        monkeypatch.setattr(retention_module.os, "read", lambda fd, size: next(chunks))
+        calls = []
+        with pytest.raises(OpsError) as caught:
+            retention_module._digest(fd, lambda: calls.append(None))
+        assert caught.value.problem.details["reason_key"] == "backup_file_unreadable"
+        assert len(calls) == 3
+    finally:
+        os.close(fd)
+
+
+def test_manifest_document_refuses_in_place_growth_beyond_manifest_limit(
+        tmp_path, monkeypatch):
+    path = tmp_path / "manifest.json"
+    path.write_bytes(b"{}")
+    monkeypatch.setattr(retention_module, "_MANIFEST_LIMIT", 4)
+    chunks = iter([b"xx", b"xx", b"x", b""])
+    monkeypatch.setattr(retention_module.os, "read", lambda fd, size: next(chunks))
+    with pytest.raises(OpsError) as caught:
+        retention_module._manifest_document(path)
+    assert caught.value.problem.details["reason_key"] == "backup_manifest_oversized"

@@ -1,8 +1,9 @@
 """Prune verified catalog backups and unreferenced materialization roots.
 
 A scope under ``ops_root/backups`` holds ``<key>.sqlite``, ``<key>.manifest.json``
-and a shared ``artifacts/`` directory. Everything is verified before deletion;
-any malformed, stray or incomplete file refuses the whole call. Roots beside ``ops_root`` are kept by mtime, plus every root a live attempt still binds."""
+and a shared ``artifacts/`` directory. All candidates are verified and planned
+before deletion starts, though deletion itself is not atomic; any malformed,
+stray or incomplete file refuses the whole call. Roots beside ``ops_root`` are kept by mtime, plus every root a live attempt still binds."""
 from __future__ import annotations
 
 import hashlib
@@ -17,6 +18,7 @@ from pathlib import Path
 
 from engine.v2.foundation import safe_relative_path
 from engine.v2.ops.catalog import integrity_errors
+from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import fail
 from engine.v2.ops.snapshot_roots import default_materialization_base, materialization_root
 from engine.v2.ops.snapshot_stages import request_from_artifact
@@ -31,6 +33,7 @@ _LIVE_STATES = ("starting", "running", "cancelling", "recovery_pending")
 _REQUEST_BINDING = "materialization_request.json"
 _LIVE_ATTEMPT_LIMIT = 10_000
 _LIVE_SPEC_LIMIT = 16 * 1024
+_LIVE_REQUEST_LIMIT = 16 * 1024
 _PROTECTED_KINDS = frozenset({"legacy_materialize", "legacy_finality", "legacy_features"})
 _OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
@@ -65,15 +68,24 @@ def _safe_name(name, *, artifact=False):
                    details={"reason_key": reason})
     return name
 
+def _read_limited(fd, limit, reason_key, message, keepalive=_no_keepalive):
+    total = 0
+    while True:
+        chunk = os.read(fd, min(1 << 20, limit - total + 1))
+        if not chunk:
+            break
+        keepalive()
+        total += len(chunk)
+        if total > limit:
+            raise fail("INTEGRITY_FAILED", message, details={"reason_key": reason_key})
+        yield chunk
+
 def _digest(fd, keepalive):
     try:
         os.lseek(fd, 0, os.SEEK_SET)
         hasher = hashlib.sha256()
-        while True:
-            chunk = os.read(fd, 1 << 20)
-            if not chunk:
-                break
-            keepalive()
+        for chunk in _read_limited(fd, _FILE_LIMIT, "backup_file_unreadable",
+                                   "backup file could not be read", keepalive):
             hasher.update(chunk)
         return f"sha256:{hasher.hexdigest()}"
     except OSError:
@@ -159,12 +171,8 @@ def _manifest_document(path):
                 raise fail("INTEGRITY_FAILED", "backup manifest exceeds the 10 MiB limit",
                            details={"reason_key": "backup_manifest_oversized"})
             os.lseek(fd, 0, os.SEEK_SET)
-            pieces = []
-            while True:
-                piece = os.read(fd, 1 << 20)
-                if not piece:
-                    break
-                pieces.append(piece)
+            pieces = list(_read_limited(fd, _MANIFEST_LIMIT, "backup_manifest_oversized",
+                                        "backup manifest exceeds the 10 MiB limit"))
             return json.loads(b"".join(pieces))
         finally:
             os.close(fd)
@@ -301,18 +309,29 @@ def _live_roots(base, conn, store, keepalive=_no_keepalive):
     roots = set()
     for attempt_id in active:
         keepalive()
-        bound = conn.execute(
-            "SELECT artifact_id FROM attempt_input_bindings "
-            "WHERE attempt_id = ? AND name = ?",
-            (attempt_id, _REQUEST_BINDING)).fetchall()
-        if len(bound) != 1:
-            raise fail("INPUT_CHANGED",
-                       "live materialization attempt has no single request binding",
-                       details={"reason_key": "live_request_binding_invalid",
-                                "attempt_id": attempt_id})
-        request = request_from_artifact(conn, store, bound[0][0])
-        roots.add(materialization_root(base, request.request_hash).name)
+        roots.add(_live_request_root(base, conn, store, attempt_id))
     return roots
+
+
+def _live_request_root(base, conn, store, attempt_id):
+    bound = conn.execute(
+        "SELECT artifact_id FROM attempt_input_bindings "
+        "WHERE attempt_id = ? AND name = ?",
+        (attempt_id, _REQUEST_BINDING)).fetchall()
+    if len(bound) != 1:
+        raise fail("INPUT_CHANGED",
+                   "live materialization attempt has no single request binding",
+                   details={"reason_key": "live_request_binding_invalid",
+                            "attempt_id": attempt_id})
+    request_ref = registered_artifact(conn, bound[0][0])
+    if request_ref.byte_size > _LIVE_REQUEST_LIMIT:
+        raise fail("INTEGRITY_FAILED",
+                   "live materialization request artifact exceeds the 16 KiB limit",
+                   details={"reason_key": "live_request_oversized",
+                            "attempt_id": attempt_id,
+                            "byte_size": request_ref.byte_size})
+    request = request_from_artifact(conn, store, bound[0][0])
+    return materialization_root(base, request.request_hash).name
 
 def _materialization_plan(ops_root, keep, conn, store, keepalive=_no_keepalive):
     base = default_materialization_base(ops_root)
