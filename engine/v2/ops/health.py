@@ -20,7 +20,7 @@ from engine.v2.ops.schema import NATIVE_STAGE_FAILURE_TEXT_BYTES
 
 NATIVE_STAGE_FAILURE_DIAGNOSTIC = json.dumps({
     "code": "RESOURCE_LIMIT_EXCEEDED",
-    "category": "RESOURCE_LIMIT",
+    "category": "resource",
     "retryable": False,
     "message": "native stage failure text exceeded health read bound",
 }, sort_keys=True, separators=(",", ":"))
@@ -455,20 +455,26 @@ def health(conn, *, clock, executor_mode="watchdog"):
 
 #: Per-string-field byte budget used when :func:`write_health` deterministically
 #: trims long optional text (e.g. job queue reasons) to keep the artifact
-#: inside ``OPERATIONS_HEALTH_MAX_BYTES``.
+#: inside ``OPERATIONS_HEALTH_MAX_BYTES``. The budget INCLUDES the appended
+#: truncation marker, so a trimmed field never exceeds it.
 HEALTH_TEXT_FIELD_MAX_BYTES = 4096
 _HEALTH_TEXT_TRUNCATION_MARKER = "…[truncated]"
+_HEALTH_TEXT_MARKER_BYTES = len(_HEALTH_TEXT_TRUNCATION_MARKER.encode("utf-8"))
 
 
 def _trim_long_optional_text(row):
     """Clamp every string field of one health row longer than
-    ``HEALTH_TEXT_FIELD_MAX_BYTES`` to that budget (UTF-8 safe prefix plus a
-    fixed marker). Mutates ``row``; returns the number of fields trimmed."""
+    ``HEALTH_TEXT_FIELD_MAX_BYTES`` to that budget, the fixed truncation
+    marker INCLUDED (UTF-8 safe prefix plus the marker, the whole result
+    never over budget). Mutates ``row``; returns the number of fields
+    trimmed."""
     trimmed = 0
     for field, value in list(row.items()):
         if not isinstance(value, str) or len(value.encode("utf-8")) <= HEALTH_TEXT_FIELD_MAX_BYTES:
             continue
-        kept = value.encode("utf-8")[:HEALTH_TEXT_FIELD_MAX_BYTES].decode("utf-8", errors="ignore")
+        kept = value.encode("utf-8")[
+            :HEALTH_TEXT_FIELD_MAX_BYTES - _HEALTH_TEXT_MARKER_BYTES
+        ].decode("utf-8", errors="ignore")
         row[field] = kept + _HEALTH_TEXT_TRUNCATION_MARKER
         trimmed += 1
     return trimmed
@@ -476,8 +482,8 @@ def _trim_long_optional_text(row):
 
 def _is_operations_health_document(document):
     """True when ``schema_version`` names an ``operations_health`` document;
-    every other artifact ``write_health`` may be asked to publish is bound
-    untouched."""
+    every other artifact ``write_health`` may be asked to publish passes
+    through untouched."""
     schema_version = document.get("schema_version")
     return (isinstance(schema_version, str)
             and schema_version.startswith("operations_health."))
@@ -513,9 +519,10 @@ def _trim_jobs_text(jobs):
 
 def _drop_oldest_jobs(jobs, overshoot):
     """Row-drop stage: remove the oldest job rows in bulk until the
-    deliberately conservative ``overshoot`` estimate is freed (the
-    truncation marker costs at most ~256 bytes more, and the caller's
-    re-dump is the exact check). Returns the number of rows dropped."""
+    deliberately conservative ``overshoot`` estimate is freed (the ``+256``
+    margin covers JSON-escaping drift around the marker-bounded trim, and
+    the caller's re-dump is the exact check). Returns the number of rows
+    dropped."""
     freed = 0
     drop_now = 0
     while drop_now < len(jobs) and freed < overshoot:
@@ -590,6 +597,13 @@ def _bounded_health_payload(document):
 
 
 def write_health(path, document):
+    """Atomically publish one ops JSON artifact (temp file, fsync, rename,
+    directory fsync). The ``OPERATIONS_HEALTH_MAX_BYTES`` bounding -- trim,
+    the ``health_truncated`` disclosure and the oversize refusal -- applies
+    ONLY to ``operations_health`` documents; any other artifact written
+    through here, the ``operations_status.v1.0`` publication sidecar
+    included, is serialized UNCHANGED whatever its size (see
+    :func:`_bounded_health_payload`)."""
     path = Path(path)
     payload = _bounded_health_payload(document)
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex)

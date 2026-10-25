@@ -66,9 +66,9 @@ failure rather than a stale sentence.
   corpus, receipts and baseline hash through the one implementation.
 
 - engine/v2/data — `DocumentError`, `from_document`, `parse_timestamp` for the strict document checks `engine.v2.foundation.typed` cannot express from annotations alone.
-- engine/v2/ops — content identity, safe artifact storage, typed decoding, clocks and `experiment_exits.valid_exit_recipe` plan admission.
+- engine/v2/ops — content identity, safe artifact storage, typed decoding, clocks, `OPERATIONS_HEALTH_MAX_BYTES` as the health artifact write cap and `experiment_exits.valid_exit_recipe` plan admission.
 - engine/v2/ledger — canonical append-only payloads and durable export paths.
-- engine/v2/serving — safe immutable release paths and health timestamps.
+- engine/v2/serving — safe immutable release paths, health timestamps and `OPERATIONS_HEALTH_MAX_BYTES` as the health artifact read cap.
 - engine/v2/models — `canonical_json`/`content_hash` (P5-4) to identify and
   verify payoff-calibration artifacts; `content_hash`, `to_document`/
   `from_document`, `fsync_directory` and `Clock`/`SystemClock`/

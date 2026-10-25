@@ -154,3 +154,21 @@ def test_shell_renders_native_stage_failures_in_browser(tmp_path):
             browser.close()
     finally:
         playwright.stop()
+
+
+@pytest.mark.parametrize("reader", [_read_health, _read_calibration_health])
+def test_health_readers_accept_artifact_exactly_at_the_cap(tmp_path, reader):
+    """The boundary is cap-INCLUSIVE for readers too: exactly
+    ``_HEALTH_ARTIFACT_MAX_BYTES`` bytes decode and are served; only strictly
+    larger artifacts are refused."""
+    artifact = tmp_path / "operations-health.json"
+    document = {"schema_version": "operations_health.v1.2",
+                "generated_at": "2026-10-25T12:00:00Z", "pad": ""}
+    document["pad"] = "x" * (_HEALTH_ARTIFACT_MAX_BYTES
+                             - len(json.dumps(document).encode("utf-8")))
+    payload = json.dumps(document).encode("utf-8")
+    assert len(payload) == _HEALTH_ARTIFACT_MAX_BYTES
+    artifact.write_bytes(payload)
+    served = json.loads(reader(artifact))
+    assert served["schema_version"] == "operations_health.v1.2"
+    assert served["pad"] == document["pad"]

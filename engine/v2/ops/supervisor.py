@@ -766,7 +766,6 @@ class Service:
         problem = make_problem(
             "MODEL_NOT_READY", "native score batch release binding is unavailable",
             details={"reason": detail_code})
-        from engine.v2.ops.catalog import transaction
         stamp = format_timestamp(self.clock.now())
         problem_json = json.dumps(to_document(problem), sort_keys=True, separators=(",", ":"))
         try:

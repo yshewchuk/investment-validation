@@ -128,7 +128,7 @@ export interface LegacyScoreBridge {
 export type EngineeringNightStatus = "pass" | "fail" | "unknown";
 
 /** UI-consumed subset of the `operations_status.v1.0` `/api/v1/operations` sidecar,
- *  distinct from `operations_health.v1.0` `/health.json`. */
+ *  distinct from the `operations_health` `/health.json` artifact (currently `v1.2`). */
 export interface OperationsStatus {
   generated_at: string;
   release_id: string | null;

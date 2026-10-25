@@ -523,7 +523,9 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
    still holds) and returns a typed `OPERATIONS_UNAVAILABLE` Problem when it
    is missing or malformed; missing engineering history renders as
    `unknown`, never green. `/health.json` (`engine/v2/serving/operations.py`)
-   is untouched and keeps its existing `operations_health.v1.0` fields. See
+   reads bounded at the shared `OPERATIONS_HEALTH_MAX_BYTES` cap and accepts
+   `operations_health.v1.0` through `v1.2`; `v1.2` adds the additive
+   `native_stage_failures` list. See
    `tests/v2/ops/test_v2_ops_engineering_history.py` (conflicts/degraded evidence/
    selfcheck carried; requested vs. resolved session; failed update keeps the
    old release and shows the reason; an unobserved window renders as

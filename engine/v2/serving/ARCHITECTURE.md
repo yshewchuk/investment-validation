@@ -13,7 +13,12 @@ Application rendering belongs in the [React app](../../../ui/ARCHITECTURE.md).
 the additive `native_stage_failures` list; either absent or malformed session
 field leaves currency `unknown` without a default. The operations shell renders
 each listed native-stage failure in its health banner as a degraded reason,
-using only the occurrence, stage, status and problem code.
+using only the occurrence, stage, status and problem code. Both health readers
+(`_read_health`, `_read_calibration_health`) enforce the shared
+`engine.v2.foundation.OPERATIONS_HEALTH_MAX_BYTES` (1 MiB) artifact cap: they
+read at most cap+1 bytes and refuse an over-cap artifact before JSON decoding,
+so ops (which bounds the same cap on write) and serving cannot drift apart on
+what is servable.
 The [README](README.md) lists the checked exports (the only names other packages may import). By module:
 - `operations.create_server` (authenticated HTTP listener).
 - `api`: `create_app` (authenticated read-only JSON API), `ApiError`; run as
@@ -206,8 +211,9 @@ not projection content, and the binding file is bound as an ops artifact when pu
 `operations_status.json` as UTF-8 regular files, at most 1 MiB, without following a symlink at
 the final path component (the `releases/<id>/` directory is followed). Unsafe or invalid input
 reads as absent (`NO_CURRENT_RELEASE` for the pointer chain, `OPERATIONS_UNAVAILABLE` for the
-status document). The operations listener's reads and the native-parity report load are not
-bounded.
+status document). The operations listener bounds its health and calibration-health reads with the
+same shared cap (refused before decoding above it); its other reads -- the native-parity report
+load included -- are not bounded.
 `/operations` serves `<publication_root>/operations_status.json` only; it is the publication-time
 status document, never a serving-projection status sidecar, so under the
 serving `publisher/` it answers `OPERATIONS_UNAVAILABLE` (503) until a producer writes that file.
@@ -226,7 +232,7 @@ ceiling, while a larger population retains the lookup limit.
 |---|---|
 | Missing input: identity | No or wrong token: `UNAUTHORIZED` (401). Event-scores and score-detail routes without a release pin: `RELEASE_ID_REQUIRED` (400); no route searches across releases. `GET /events` without a pin uses the current release. |
 | Missing input: data | Unknown release/event/score: 404. No current release: `NO_CURRENT_RELEASE` (503, retryable). Binding that fails re-verification: `CURRENT_BINDING_INVALID` (500, not retryable). Bad filter/limit: `INVALID_REQUEST` (422). |
-| Missing input: files | Absent, indirect or unreadable health file: 503. Analog index missing, failing to open, or outdated: 503 with a `reason_code`; post-open `sqlite3.Error` or `json.JSONDecodeError` during currency checks or analog reads returns `SERVING_INDEX_UNREADABLE` (503, typed JSON). API `sqlite3.Error` while opening the index (except the native-parity freshness check, which reads a `sqlite3.OperationalError` re-open or release read as `available`, while a resolver `SERVING_INDEX_UNREADABLE` stays 503), or post-open `sqlite3.Error`, `json.JSONDecodeError` or `DocumentError` (a stored release of an older schema) during index projection reads or current-binding verification returns `SERVING_INDEX_UNREADABLE` (503, retryable `Problem`, no raw exception text); connections always close. Artifact decoding failures retain their existing behavior. Parity report absent is `no_report` (200); malformed is `unavailable` (503). Legacy bundle: `LegacyBundleError` with a code, never coerced or dropped. |
+| Missing input: files | Absent, indirect, unreadable or over-cap health file (above the shared 1 MiB health-artifact bound, refused before JSON decoding): 503. Analog index missing, failing to open, or outdated: 503 with a `reason_code`; post-open `sqlite3.Error` or `json.JSONDecodeError` during currency checks or analog reads returns `SERVING_INDEX_UNREADABLE` (503, typed JSON). API `sqlite3.Error` while opening the index (except the native-parity freshness check, which reads a `sqlite3.OperationalError` re-open or release read as `available`, while a resolver `SERVING_INDEX_UNREADABLE` stays 503), or post-open `sqlite3.Error`, `json.JSONDecodeError` or `DocumentError` (a stored release of an older schema) during index projection reads or current-binding verification returns `SERVING_INDEX_UNREADABLE` (503, retryable `Problem`, no raw exception text); connections always close. Artifact decoding failures retain their existing behavior. Parity report absent is `no_report` (200); malformed is `unavailable` (503). Legacy bundle: `LegacyBundleError` with a code, never coerced or dropped. |
 | Cache | `/releases/current` is `no-store` with a strong ETag over the complete response including `scope` (304 on match; a changed `scope` changes the ETag). `/releases/{id}`, event-scores and score detail are immutable with an ETag (304 on match). `/events`: current reads are `no-store` without an ETag; explicit-release reads are immutable with an ETag but never 304. A cursor bound to another release or filter set: `CURSOR_MISMATCH` (409). |
 | Retry | None inside serving: no read retries and no job is started by a GET. Callers retry only when `retryable`. Command POSTs pass through the configured callback's status and body (a queued job identity or typed refusal is the callback's contract); a callback exception is 500. |
 | Transaction | The serving index uses short `BEGIN IMMEDIATE` transactions; any error rolls back. A schema newer than the code, or an edited migration: `INTEGRITY_FAILED`. The operations analog read opens the index `mode=ro` and never migrates; the API opens it through `connect`, which applies pending migrations. |

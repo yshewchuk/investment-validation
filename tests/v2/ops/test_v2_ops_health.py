@@ -7,7 +7,7 @@ import pytest
 
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import OpsError
-from engine.v2.ops.health import NATIVE_STAGE_FAILURE_DIAGNOSTIC, health, write_health
+from engine.v2.ops.health import health, write_health
 from tests.ops_support import catalog, seed_delivered_health_release
 
 
@@ -84,6 +84,11 @@ def test_write_health_is_byte_identical_across_repeated_calls(tmp_path):
     write_health(first, health(conn, clock=clock))
     write_health(second, health(conn, clock=clock))
     assert first.read_bytes() == second.read_bytes()
+    # identity alone cannot pass on a constant writer output: the bytes must
+    # carry the health document the catalog actually holds
+    published = json.loads(first.read_bytes())
+    assert published["schema_version"] == "operations_health.v1.2"
+    assert published["current_release"]["release_id"] == "r5"
 
 
 def test_native_stage_failures_health_bounds_and_ordering(tmp_path):
@@ -141,7 +146,10 @@ def test_native_stage_failures_oversized_text_is_bounded_or_refused(tmp_path):
     row = failures[0]
     assert row["status"] == "FAILED"
     assert row["error_code"] == "RESOURCE_LIMIT_EXCEEDED"
-    assert row["problem_json"] == NATIVE_STAGE_FAILURE_DIAGNOSTIC
+    assert row["problem_json"] == (
+        '{"category":"resource","code":"RESOURCE_LIMIT_EXCEEDED",'
+        '"message":"native stage failure text exceeded health read bound",'
+        '"retryable":false}')
     conn.close()
 
 
@@ -237,12 +245,19 @@ def test_write_health_trims_optional_content_and_preserves_native_failures(tmp_p
     assert served["native_stage_failures"] == document["native_stage_failures"]
     # truncation is indicated, and it only ever touched optional content
     truncation = served["health_truncated"]
+    assert len(document["jobs"]) == 400
+    assert truncation["trimmed_text_fields"] == 400
     assert truncation["dropped_jobs"] > 0
-    assert truncation["trimmed_text_fields"] > 0
-    assert len(served["jobs"]) == len(document["jobs"]) - truncation["dropped_jobs"]
+    assert len(served["jobs"]) == 400 - truncation["dropped_jobs"]
+    # the dropped rows are exactly the OLDEST ones: the retained ids are the
+    # document's newest tail, in original order
+    assert [row["job_id"] for row in served["jobs"]] == \
+        [row["job_id"] for row in document["jobs"]][truncation["dropped_jobs"]:]
     # the newest job row is retained, with its oversized queue reason trimmed
+    # to within the per-field budget, truncation marker included
     assert served["jobs"][-1]["job_id"] == document["jobs"][-1]["job_id"]
     assert served["jobs"][-1]["queue_reason_json"].endswith("…[truncated]")
+    assert len(served["jobs"][-1]["queue_reason_json"].encode("utf-8")) <= 4096
     # the artifact serving refuses above is exactly the one ops wrote: the
     # serving read accepts it and canonicalizes the bytes it was handed
     canonical = json.dumps(served, sort_keys=True, separators=(",", ":")).encode() + b"\n"
@@ -273,3 +288,30 @@ def test_write_health_refuses_impossible_mandatory_rows_without_replacing(tmp_pa
     assert artifact.read_bytes() == original
     assert not list(tmp_path.glob("health.json.*"))
     conn.close()
+
+
+def test_write_health_passes_non_health_documents_through_unchanged(tmp_path):
+    """The sidecar path of the writer: a non-``operations_health`` document is
+    serialized UNCHANGED -- no trim, no ``health_truncated`` key and no
+    refusal -- even when it is larger than the health cap."""
+    from engine.v2.foundation import OPERATIONS_HEALTH_MAX_BYTES
+    document = {"schema_version": "operations_status.v1.0",
+                "pad": "x" * (OPERATIONS_HEALTH_MAX_BYTES + 4096)}
+    artifact = tmp_path / "operations_status.json"
+    write_health(artifact, document)
+    assert artifact.read_bytes() == json.dumps(document).encode("utf-8")
+
+
+def test_write_health_accepts_health_document_exactly_at_the_cap(tmp_path):
+    """The boundary is cap-INCLUSIVE: an ``operations_health`` document of
+    exactly ``OPERATIONS_HEALTH_MAX_BYTES`` bytes is written verbatim, not
+    trimmed and not refused."""
+    from engine.v2.foundation import OPERATIONS_HEALTH_MAX_BYTES
+    document = {"schema_version": "operations_health.v1.2", "pad": ""}
+    document["pad"] = "x" * (OPERATIONS_HEALTH_MAX_BYTES
+                             - len(json.dumps(document).encode("utf-8")))
+    payload = json.dumps(document).encode("utf-8")
+    assert len(payload) == OPERATIONS_HEALTH_MAX_BYTES
+    artifact = tmp_path / "health.json"
+    write_health(artifact, document)
+    assert artifact.read_bytes() == payload
