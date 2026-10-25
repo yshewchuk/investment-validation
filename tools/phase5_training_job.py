@@ -235,17 +235,18 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         # ``build_chooser_analog_pool_artifact`` drops rows closed on/after
         # ``cutoff``; the parquet is read in stored order so the pool keeps
         # legacy's tie-break. A missing cutoff or a missing source parquet
-        # refuses (SystemExit -> VALIDATION_FAILED via ``_tool_failure``); an
-        # existing output file with different bytes is the existing
-        # RESUME_MISMATCH; the atomic write leaves no partial output; a rerun
-        # on identical inputs is byte-idempotent.
+        # refuses (SystemExit -> VALIDATION_FAILED via ``_tool_failure``), as
+        # does a non-regular or oversized source; an existing output file
+        # with different bytes is the existing RESUME_MISMATCH; the atomic
+        # write leaves no partial output; a rerun on identical inputs is
+        # byte-idempotent.
         import time
 
         from engine import paths
         from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
         from tools.phase5_prepare_release import (
             CHOOSER_POOL_ID,
-            CHOOSER_POOL_MAX_BYTES,
+            read_chooser_pool_frame,
             require_chooser_pool_columns,
         )
 
@@ -256,12 +257,13 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         except (TypeError, ValueError):
             raise SystemExit("chooser_analog_pool cutoff must be an ISO date (YYYY-MM-DD)")
         source = paths.FEATURES / _CHOOSER_POOL_FILE
-        if not source.is_file():
-            raise SystemExit("chooser analog pool source is missing")
-        if source.stat().st_size > CHOOSER_POOL_MAX_BYTES:
-            raise SystemExit("chooser analog pool source is too large")
         started = time.perf_counter()
-        frame = pd.read_parquet(source)
+        try:
+            frame = read_chooser_pool_frame(source)
+        except FileNotFoundError:
+            raise SystemExit("chooser analog pool source is missing") from None
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         read_s = time.perf_counter() - started
         print(f"[p5-3] chooser_analog_pool: read {len(frame)} rows in {read_s:.1f}s",
               file=sys.stderr, flush=True)
@@ -328,6 +330,11 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
                               "tier3.panel": data.file_digest(paths.PANEL)}
     out.mkdir(parents=True, exist_ok=True)
     if artifact is None:
+        # An empty pool writes no state file, so a stale earlier output would
+        # survive the "empty" rerun unnoticed and get staged: refuse instead.
+        name = state_file_name(member)
+        if (out / name).exists():
+            raise SystemExit(f"RESUME_MISMATCH: {name} exists but the pool is empty")
         summary["status"] = "empty"
     else:
         path = out / state_file_name(member)

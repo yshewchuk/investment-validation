@@ -5,6 +5,7 @@ output, ``engine.paths.FEATURES`` is monkeypatched to a tmp dir, and the frozen
 state round-trips through the real ``FrozenStateLoader``.
 """
 import json
+import os
 import re
 
 import pandas as pd
@@ -30,6 +31,7 @@ _NO_CUTOFF = "chooser_analog_pool needs a cutoff"
 _BAD_CUTOFF = "chooser_analog_pool cutoff must be an ISO date (YYYY-MM-DD)"
 _MISSING_SOURCE = "chooser analog pool source is missing"
 _TOO_LARGE = "chooser analog pool source is too large"
+_NOT_REGULAR = "chooser analog pool source is not a regular file"
 _LACKS_COLUMNS = "chooser analog pool source lacks required columns"
 _BUILDER_CUTOFF = "chooser analog pool cutoff must be YYYY-MM-DD"
 _AT_MOST_ONE = "at most one cutoff, only for paired_residual_pool or chooser_analog_pool"
@@ -241,6 +243,72 @@ def test_prepare_release_reader_refuses_oversized_source(tmp_path, monkeypatch):
     monkeypatch.setattr(release, "CHOOSER_POOL_MAX_BYTES", 10)
     with pytest.raises(ValueError, match=_exact(_TOO_LARGE)):
         release.chooser_pool_payloads(source / "chooser_analog_pool.parquet")
+
+
+def test_reader_missing_source_raises_file_not_found(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        release.read_chooser_pool_frame(tmp_path / "absent.parquet")
+
+
+def test_reader_reads_regular_source_within_cap(tmp_path, monkeypatch):
+    path = _write_source(tmp_path, _mixed_frame()) / "chooser_analog_pool.parquet"
+    monkeypatch.setattr(release, "CHOOSER_POOL_MAX_BYTES", path.stat().st_size)
+    assert len(release.read_chooser_pool_frame(path)) == 5
+    monkeypatch.setattr(release, "CHOOSER_POOL_MAX_BYTES", path.stat().st_size - 1)
+    with pytest.raises(ValueError, match=_exact(_TOO_LARGE)):
+        release.read_chooser_pool_frame(path)
+
+
+def test_reader_refuses_symlink_source(tmp_path):
+    real = _write_source(tmp_path, _mixed_frame()) / "chooser_analog_pool.parquet"
+    link = tmp_path / "link.parquet"
+    link.symlink_to(real)
+    with pytest.raises(ValueError, match=_exact(_NOT_REGULAR)):
+        release.read_chooser_pool_frame(link)
+    with pytest.raises(ValueError, match=_exact(_NOT_REGULAR)):
+        release.chooser_pool_payloads(link)
+
+
+def test_reader_refuses_directory_source(tmp_path):
+    with pytest.raises(ValueError, match=_exact(_NOT_REGULAR)):
+        release.read_chooser_pool_frame(tmp_path)
+    with pytest.raises(ValueError, match=_exact(_NOT_REGULAR)):
+        release.chooser_pool_payloads(tmp_path)
+
+
+def test_reader_refuses_fifo_source(tmp_path):
+    fifo = tmp_path / "chooser_analog_pool.parquet"
+    os.mkfifo(fifo)
+    with pytest.raises(ValueError, match=_exact(_NOT_REGULAR)):
+        release.read_chooser_pool_frame(fifo)
+    with pytest.raises(ValueError, match=_exact(_NOT_REGULAR)):
+        release.chooser_pool_payloads(fifo)
+
+
+def test_job_refuses_symlink_source(tmp_path, monkeypatch):
+    real = tmp_path / "real.parquet"
+    _mixed_frame().to_parquet(real, index=False)
+    source = tmp_path / "features"
+    source.mkdir()
+    (source / "chooser_analog_pool.parquet").symlink_to(real)
+    monkeypatch.setattr(paths, "FEATURES", source)
+    out = tmp_path / "out"
+    with pytest.raises(SystemExit, match=_exact(_NOT_REGULAR)):
+        job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+    assert not (out / "chooser_analog_pool.json").exists()
+
+
+def test_empty_rerun_refuses_existing_output(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _mixed_frame()))
+    out = tmp_path / "out"
+    job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+
+    # Every exit is on/after this cutoff: the pool is empty and an "empty"
+    # rerun must not leave the earlier non-empty state file standing.
+    with pytest.raises(SystemExit, match=_exact(
+            "RESUME_MISMATCH: chooser_analog_pool.json exists but the pool is empty")):
+        job.run_state_job("chooser_analog_pool", out, cutoff="2026-01-01")
+    assert (out / "chooser_analog_pool.json").is_file()
 
 
 def test_all_rows_after_cutoff_is_empty(tmp_path, monkeypatch):

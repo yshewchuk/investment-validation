@@ -36,16 +36,22 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import errno
 import hashlib
+import io
 import json
+import os
 import re
 import shutil
+import stat
 import sys
 from pathlib import Path
 from typing import Iterable, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+import pandas as pd  # noqa: E402
 
 from checks.phase5_modules import modules_available  # noqa: E402
 from engine.v2.foundation import CONTENT_HASH_PREFIX, to_document  # noqa: E402
@@ -294,21 +300,59 @@ def require_chooser_pool_columns(columns: Iterable[str]) -> None:
         raise ValueError("chooser analog pool source lacks required columns")
 
 
+def read_chooser_pool_frame(path: Path) -> pd.DataFrame:
+    """Bounded single-handle read of the chooser analog pool parquet source.
+
+    Opens the fd once (``O_NOFOLLOW``: a symlinked source is refused, never
+    followed; ``O_NONBLOCK``: a FIFO cannot wedge the read), checks the fd's
+    own ``fstat`` so the size bound and the read describe the same object the
+    type check saw, and parses at most ``st_size + 1`` bytes -- more arriving
+    means the file grew since the check, so it is refused as too large. A
+    plainly missing file raises ``FileNotFoundError``; a non-regular or
+    oversized source raises ``ValueError``. The cap is the module constant,
+    read at call time.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        if getattr(exc, "errno", None) == errno.ELOOP:
+            raise ValueError("chooser analog pool source is not a regular file") from None
+        raise
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("chooser analog pool source is not a regular file")
+        if info.st_size > CHOOSER_POOL_MAX_BYTES:
+            raise ValueError("chooser analog pool source is too large")
+        limit = info.st_size + 1
+        chunks, read = [], 0
+        while read < limit:
+            block = os.read(fd, limit - read)
+            if not block:
+                break
+            chunks.append(block)
+            read += len(block)
+    finally:
+        os.close(fd)
+    if read > info.st_size:
+        raise ValueError("chooser analog pool source is too large")
+    return pd.read_parquet(io.BytesIO(b"".join(chunks)))
+
+
 def chooser_pool_payloads(path: Path) -> dict[str, dict[str, bytes]]:
     """The frozen chooser analog pool built from ``tools/build_chooser_pool.py``'s
     parquet, in its stored order. The pool is static, so its causal cutoff is
-    the day after its last exit: every row it holds is inside the key."""
-    import pandas as pd
-
+    the day after its last exit: every row it holds is inside the key.
+    A plainly missing source is ``{}``; a symlink, non-regular or oversized
+    source refuses through ``read_chooser_pool_frame``."""
     from engine.v2.models.frozen_state import serialize_frozen_state
     from engine.v2.models.lineage import DataDependency, Lineage
     from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
 
-    if not Path(path).is_file():
+    try:
+        frame = read_chooser_pool_frame(path)
+    except FileNotFoundError:
         return {}
-    if Path(path).stat().st_size > CHOOSER_POOL_MAX_BYTES:
-        raise ValueError("chooser analog pool source is too large")
-    frame = pd.read_parquet(path)
     require_chooser_pool_columns(frame.columns)
     exits = pd.to_datetime(frame["exit_date"]).dropna()
     if exits.empty:

@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 from checks import phase5_acceptance as gate
-from engine.v2.models import release_layout as layout
 from engine.v2.models import (
     ArtifactInventoryMember,
     ArtifactMember,
@@ -28,6 +27,7 @@ from engine.v2.models import (
     promote,
     stage_release,
 )
+from engine.v2.models import release_layout as layout
 from engine.v2.models.admissible_table import legacy_n_admissible_table
 from engine.v2.models.frozen_state import serialize_frozen_state
 from engine.v2.models.lineage import DataDependency, Lineage
@@ -705,6 +705,40 @@ def test_preparer_refuses_chooser_parquet_missing_pnl(tmp_path):
     frame.to_parquet(tmp_path / "chooser_analog_pool.parquet", index=False)
     with pytest.raises(ValueError, match="chooser analog pool source lacks required columns"):
         prep.chooser_pool_payloads(tmp_path / "chooser_analog_pool.parquet")
+
+
+def test_preparer_refuses_chooser_symlink_and_directory_sources(tmp_path):
+    import pandas as pd
+
+    frame = pd.DataFrame([{"strategy": "CTR5", "exit_date": pd.Timestamp("2026-02-10"),
+                           "pnl": 1.0, "exp_pnl_sim": 0.5, "width_over_forecast": 1.0,
+                           "n_legs": 5.0, "anchor_over_spot": 1.0, "rel_spread": 0.2}])
+    real = tmp_path / "chooser_analog_pool.parquet"
+    frame.to_parquet(real, index=False)
+    link = tmp_path / "pool_link.parquet"
+    link.symlink_to(real)
+    directory = tmp_path / "pool_dir"
+    directory.mkdir()
+    for path in (link, directory):
+        with pytest.raises(ValueError,
+                           match="chooser analog pool source is not a regular file"):
+            prep.read_chooser_pool_frame(path)
+        with pytest.raises(ValueError,
+                           match="chooser analog pool source is not a regular file"):
+            prep.chooser_pool_payloads(path)
+
+
+def test_preparer_chooser_size_cap_is_read_at_call_time(tmp_path, monkeypatch):
+    import pandas as pd
+
+    frame = pd.DataFrame([{"strategy": "CTR5", "exit_date": pd.Timestamp("2026-02-10"),
+                           "pnl": 1.0, "exp_pnl_sim": 0.5, "width_over_forecast": 1.0,
+                           "n_legs": 5.0, "anchor_over_spot": 1.0, "rel_spread": 0.2}])
+    path = tmp_path / "chooser_analog_pool.parquet"
+    frame.to_parquet(path, index=False)
+    monkeypatch.setattr(prep, "CHOOSER_POOL_MAX_BYTES", path.stat().st_size - 1)
+    with pytest.raises(ValueError, match="chooser analog pool source is too large"):
+        prep.chooser_pool_payloads(path)
 
 
 def test_acceptance_main_marks_release_only_after_release_pass(tmp_path, monkeypatch):
