@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from engine.data.pulls.gspc_refresh import HEADER_LINES
 from engine.v2.data import catalog as data_catalog
 from engine.v2.data import manifests, reference_catalog
 from engine.v2.data.repository import Repository
@@ -37,6 +38,19 @@ from tests.v2.ops.test_planned_price_refresh import (
 from tests.v2.ops.test_planned_price_refresh import (
     shadow_root as shadow_root,
 )
+
+
+def _write_gspc(source_root):
+    """Seed the legacy ``gspc_daily.csv`` the price_history capture requires
+    for ``REGIME_TICKER`` (see ``test_regime_ticker_price_history.py``)."""
+    directory = Path(source_root) / "earnings_predictions" / "data" / "raw" / "polygon"
+    directory.mkdir(parents=True, exist_ok=True)
+    lines = list(HEADER_LINES)
+    for day, close in (("2024-01-02", 4700.913), ("2024-01-03", 4742.83),
+                       ("2024-01-04", 4756.01)):
+        lines.append(f"{day},{close + 100.0},{close},{close + 5.0},{close - 3.0},"
+                     f"{close - 1.0},{close * 1e9:.0f}\n")
+    (directory / "gspc_daily.csv").write_text("".join(lines))
 
 
 def _new_import(state, label, *, ticker="OTHER"):
@@ -398,6 +412,7 @@ def test_real_nightly_planner_pins_refreshed_capture_before_input_manifest(
 
     args = cli.parser().parse_args(_plan_files(case))
     calls = install_fetcher(case.tmp)
+    _write_gspc(case.tmp)  # the capture now requires REGIME_TICKER alongside SPY
     open_catalog = bootstrap.open_catalog
     monkeypatch.setattr(bootstrap, "open_catalog", lambda path, **kwargs:
                         open_catalog(case.tmp / "catalog.sqlite", **kwargs))

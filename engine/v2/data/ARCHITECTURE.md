@@ -72,6 +72,24 @@ close on completion, errors or generator closure; existing row/integrity checks 
 
 ## Primary contracts and public interfaces
 
+**Confirmed-event metadata.** `confirmed_event_metadata.classify_metadata(events)`
+returns one tuple entry per supplied row, preserving order, duplicates and index
+independence. It shares computed_moves' native input guards and per-event reasons,
+without the public population classifier's collapse, price or ticker overrides.
+Only event_date/session/src_orats values are inspected; extra payload is ignored.
+Dates/null cells retain native guard semantics, including aware midnights;
+this is not strict Arrow source-type/clock admission. No coercion,
+ordinal, conflict check, source authentication or contributor admission occurs.
+Caller-owned bounds remain necessary: several linear passes over rows/labels,
+O(rows) output and O(rows + column labels) working space, not an RSS guarantee. No I/O, cache, retry, transaction,
+partial result or input mutation; no production caller is wired.
+
+| Metadata condition | Outcome |
+|---|---|
+| DataFrame with unique column labels and event_date/session/src_orats | Native validation, then ordered tuple: false src_orats → `not_orats`; otherwise null session → `no_session`; otherwise `None`. |
+| Correctly typed empty frame | Empty tuple; required columns/types still validated. |
+| Bad frame/columns, native validation refusal or builtin shape/value failure | Nonretryable `CONTRACT_MISMATCH`; native DataErrors preserved, builtin failures normalized with a fixed redacted message. |
+
 **IV-crush target construction.** `iv_crush.build_rows` is a pure, bounded,
 single-ticker builder for `iv_crush_table.IV_CRUSH_CONTRACT`
 (`iv_crush_targets.v2`). It consumes caller-supplied event date/session and
@@ -256,7 +274,9 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
    full, and a requested limit above the bound is refused with
    `QUERY_NOT_BOUNDED` before any fragment opens, so the read cannot
    exceed it (`RESULT_LIMIT_EXCEEDED` applies only to streamed rows past
-   an accepted limit). The reader exposes only bars dated
+   an accepted limit). Both readers take an optional `max_object_bytes` keyword
+   forwarded to `Repository.scan`, bounding each fragment's bytes before its
+   values decode (`None` leaves the read byte-unbounded). The reader exposes only bars dated
   on or before the decision session. This permits a session close fetched
   after midnight to be used for that session, while a later-dated bar remains
   unavailable. A vendor may revise historical values in a later retrieval,
@@ -577,7 +597,7 @@ own local `BEGIN IMMEDIATE`); the local filesystem (legacy Parquet/CSV via
 `legacy_adapter.py`, the artifact store's content-addressed backing store,
 and one package-resource read for `legacy_mapping.py`'s bundled
 annotations file); `pyarrow`/`pyarrow.parquet` (every fragment is Parquet;
-commit/scan stream Arrow batches); `numpy`/`pandas` (`computed_moves.py`,
+commit/scan stream Arrow batches); `numpy`/`pandas` (`computed_moves.py`, `confirmed_event_metadata.py`,
 `price_history*.py`). No network access: every provider fetch is injected
 by the caller as a plain callable.
 
@@ -845,6 +865,27 @@ Root doc §5 invariants this package is responsible for:
   but fully tombstoned ticker refuses); for a ticker the source does not list,
   in the prior dataset version. The gap surfaces at capture rather than as a failed native calendar scan
   (`CONTRACT_MISMATCH`, no `price_history` for the ticker) in the nightly.
+- **The regime ticker is a declared `price_history` dependency; `daily_market.spot`
+  is never a close.** `daily_market.spot` is the ORATS `stockPrice` intraday
+  snapshot, not an official close.
+  `price_history_table.REGIME_TICKER` (`^GSPC`) is the declared dependency
+  feeding the panel's nine `spy_*` regime features (the names are historical;
+  they are `^GSPC`-based), sourced from `gspc_daily.csv`
+  (`source_kind="legacy_gspc_csv"`, parsed `close_adj = close_raw = Close`,
+  `high_raw = High` — an index close carries no dividend adjustment). Capture
+  requires it exactly as the calendar ticker. The refresher caches its own
+  `period=max` fetch as a Tier-1 `^GSPC` retrieval: it supersedes the CSV
+  (the same fetch, a superset of its 2006+ truncation); with none, live
+  stored rows predating the CSV's first date are carried into its frame —
+  never a refused partial retrieval. The `gspc_daily.csv` outcomes:
+
+   | Condition | Outcome |
+   | --- | --- |
+   | missing, non-regular or symlinked at discovery | not discovered (no retrieval entry) |
+   | non-regular, over-cap or an unparseable file at read | that ticker's capture fails — the same error path as a malformed px csv |
+   | required with no live `^GSPC` rows (the run's state, or the prior version when the source lists nothing) | `SOURCE_NOT_FOUND` before any write |
+   | a row with a null Close or High or an unparseable date | dropped |
+
 - **A `price_history` retrieval never drops stored history.** A full-history
   retrieval that omits any currently live stored date (truncated end,
   mid-history gap, or empty), or starts later than the live history, is refused

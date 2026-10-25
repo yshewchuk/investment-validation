@@ -115,19 +115,11 @@ Bumped to v20: ``tests/test_v2_ops_training_job.py`` moved to
 the move and ``PHASE1_RENAMED`` registers the relocation. Counts and source
 hashes remain historical, not a fresh measurement.
 
-Bumped to v21: the two root browser suites
-``tests/test_v2_ops_serving_browser.py`` to
-``tests/v2/serving/test_ops_serving_browser.py`` (renamed as well) and
-``tests/test_v2_dashboard_browser.py`` to
-``tests/v2/dashboard/test_v2_dashboard_browser.py``. Their recorded baseline
-paths now follow the relocation; ``PHASE1_RENAMED`` keeps older v20 baselines
-resolvable. Counts and source hashes remain historical, not a fresh
-measurement.
-
-Bumped to v22: ``tests/test_v2_ops_health.py`` moved to ``tests/v2/ops/``
-(test-layout ratchet); its recorded baseline path follows the move and
-``PHASE1_RENAMED`` registers the relocation. Counts and source hashes
-remain historical, not a fresh measurement.
+Bumped to v21: ``tests/test_v2_ops_partition_consumer.py`` moved and renamed
+to ``tests/v2/ops/test_partition_consumer.py`` (test-layout ratchet); the
+baseline records the new path directly, so the declared file list and the
+measurement identity it feeds refresh. Counts and source hashes remain
+historical, not a fresh measurement.
 
 phase2 profile
 --------------
@@ -156,9 +148,6 @@ produce the ``coverage_receipt_ref`` evidence document and
 ratchet it, reusing this module's ``package_counts`` rather than
 reimplementing it. The baseline schema was bumped to v1.1 when two
 fixed-suite paths relocated under tests/v2/serving/; counts remain
-historical. Bumped again to v1.2 (PR #1312) when
-``tests/test_v2_dashboard_browser.py`` relocated to
-``tests/v2/dashboard/test_v2_dashboard_browser.py``; counts remain
 historical.
 """
 from __future__ import annotations
@@ -175,7 +164,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from checks.layer_map import PACKAGES, package_of  # noqa: E402
+from checks.layer_map import PACKAGES, package_of
 
 # --------------------------------------------------------------------------
 # shared: reused verbatim by every profile
@@ -225,7 +214,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v22"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v21"
 
 
 # Baseline tests whose file was renamed (not just moved) after the baseline was written.
@@ -240,10 +229,7 @@ PHASE1_RENAMED = {
     "tests/test_v2_data_computed_moves.py": "tests/v2/data/test_computed_moves.py",
     "tests/test_v2_data_computed_moves_table.py": "tests/v2/data/test_computed_moves_table.py",
     "tests/test_v2_serving_bridge.py": "tests/v2/serving/test_v2_serving_bridge.py",
-    "tests/test_v2_ops_serving_browser.py": "tests/v2/serving/test_ops_serving_browser.py",
-    "tests/test_v2_dashboard_browser.py": "tests/v2/dashboard/test_v2_dashboard_browser.py",
     "tests/test_v2_ops_training_job.py": "tests/v2/ops/test_v2_ops_training_job.py",
-    "tests/test_v2_ops_health.py": "tests/v2/ops/test_v2_ops_health.py",
 }
 # Relocated tests kept explicitly in the suite, including moved baseline paths.
 PHASE1_EXTRA = (
@@ -634,7 +620,7 @@ def phase2_validate_measurement(measured, root=ROOT, registry=None):
 
 PHASE3_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase3_baseline.json"
 PHASE3_COVERAGE_SCHEMA = "phase3_coverage.v1.0"
-PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.2"
+PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.1"
 
 #: A scope choice (no phase3_acceptance.json "tests" registry exists to
 #: derive this from, unlike phase1/phase2) -- every real test file that
@@ -648,7 +634,7 @@ PHASE3_FIXED_SUITE = (
     "tests/test_v2_serving_projections.py",
     "tests/v2/serving/test_v2_serving_publication_binding.py",
     "tests/test_v2_dashboard_preview.py",
-    "tests/v2/dashboard/test_v2_dashboard_browser.py",
+    "tests/test_v2_dashboard_browser.py",
     "tests/v2/dashboard/test_v2_dashboard_integration.py",
     "tests/v2/serving/test_checks_phase3_gate.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",
