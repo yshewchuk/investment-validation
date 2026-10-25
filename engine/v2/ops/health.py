@@ -397,7 +397,10 @@ def health(conn, *, clock, executor_mode="watchdog"):
         "AND generation_ref IS NULL").fetchone()[0]
     requested_session, resolved_session = _release_session_evidence(conn, current,
                                                                     expected_scope=current_scope)
-    return {"schema_version": "operations_health.v1.1", "generated_at": format_timestamp(clock.now()),
+    native_stage_failures = [dict(row) for row in conn.execute(
+        "SELECT occurrence,scope_hash,stage_id,status,error_code,problem_json,created_at,updated_at "
+        "FROM native_stage_failures ORDER BY occurrence DESC, scope_hash, stage_id")]
+    return {"schema_version": "operations_health.v1.2", "generated_at": format_timestamp(clock.now()),
             "executor_mode": executor_mode, "containment": "best_effort" if executor_mode == "watchdog" else "kernel",
             "jobs": jobs, "watermarks": [dict(row) for row in conn.execute("SELECT * FROM watermarks ORDER BY pipeline, scope, stage")],
             "current_release": dict(current) if current else None,
@@ -405,7 +408,8 @@ def health(conn, *, clock, executor_mode="watchdog"):
             "withheld_release": withheld_release,
             "code_budgets": budget_streak(conn), "activation": "shadow_only",
             "decision_divergences": divergences,
-            "undetermined_outcome_sessions": undetermined_outcome_sessions}
+            "undetermined_outcome_sessions": undetermined_outcome_sessions,
+            "native_stage_failures": native_stage_failures}
 
 
 def write_health(path, document):

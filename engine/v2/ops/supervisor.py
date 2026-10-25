@@ -761,19 +761,24 @@ class Service:
                           "problem": {field: to_document(problem)[field]
                                       for field in ("code", "category", "retryable", "message")}}))
 
-    def _report_native_release_problem(self, detail_code, message):
-        """Dedup-by-(code, message) report for a release-unavailable
-        outcome (MissingReleaseRoot, an unreadable pointer file,
-        ModelNotReady, NoCurrentRelease, or "nothing ever promoted") --
-        the identical dedup pattern _report_computed_moves_problem uses.
-        Takes a plain (detail_code, message) pair rather than an exception
-        because deployment.py/release_bindings.py raise plain ValueError
-        subclasses, never OpsError, and NoCurrentRelease carries no .code
-        attribute at all (Cutover PR-7a). The unregistered deployment-layer
-        detail_code is folded into the message text of an always-registered
-        VALIDATION_FAILED problem rather than passed to make_problem as its
-        code."""
-        problem = make_problem("VALIDATION_FAILED", f"{detail_code}: {message}")
+    def _report_native_release_problem(self, detail_code, message, *, occurrence, scope_hash):
+        """Persist and deduplicate a typed native stage release failure."""
+        problem = make_problem(
+            "MODEL_NOT_READY", "native score batch release binding is unavailable",
+            details={"reason": detail_code})
+        from engine.v2.ops.catalog import transaction
+        stamp = format_timestamp(self.clock.now())
+        problem_json = json.dumps(to_document(problem), sort_keys=True, separators=(",", ":"))
+        with transaction(self.conn):
+            self.conn.execute(
+                """INSERT INTO native_stage_failures
+                   (occurrence, scope_hash, stage_id, status, error_code,
+                    problem_json, created_at, updated_at)
+                   VALUES (?, ?, 'native_score_batch', 'FAILED', ?, ?, ?, ?)
+                   ON CONFLICT(occurrence, scope_hash, stage_id) DO UPDATE SET
+                     status = excluded.status, error_code = excluded.error_code,
+                     problem_json = excluded.problem_json, updated_at = excluded.updated_at""",
+                (occurrence, scope_hash, problem.code, problem_json, stamp, stamp))
         problem_key = (problem.code, problem.message)
         if problem_key == self._last_native_release_problem:
             return
@@ -782,7 +787,7 @@ class Service:
                           "problem": {field: to_document(problem)[field]
                                       for field in ("code", "category", "retryable", "message")}}))
 
-    def _native_release_root_or_none(self):
+    def _native_release_root_or_none(self, *, occurrence, scope_hash):
         """Cutover PR-7a: the cheap release-identity gate -- see
         ARCHITECTURE.md "Inputs"/"Cutover PR-7a's input sourcing". Runs on
         EVERY tick, unconditionally, ahead of and independent of
@@ -810,17 +815,21 @@ class Service:
         try:
             root = deployment.production_release_root()
         except deployment.MissingReleaseRoot as exc:
-            self._report_native_release_problem("MISSING_RELEASE_ROOT", str(exc))
+            self._report_native_release_problem(
+                "MISSING_RELEASE_ROOT", str(exc),
+                occurrence=occurrence, scope_hash=scope_hash)
             return None
         try:
             pointer = deployment.current_pointer(root / "deployment")
         except (OSError, ValueError):
             self._report_native_release_problem(
-                "MODEL_NOT_READY", "the deployment pointer could not be read")
+                "MODEL_NOT_READY", "the deployment pointer could not be read",
+                occurrence=occurrence, scope_hash=scope_hash)
             return None
         if pointer is None:
             self._report_native_release_problem(
-                "NO_CURRENT_RELEASE", "no release has ever been promoted at this release root")
+                "NO_CURRENT_RELEASE", "no release has ever been promoted at this release root",
+                occurrence=occurrence, scope_hash=scope_hash)
             return None
         memo = self._native_release_memo
         if (memo is not None and memo["root"] == str(root)
@@ -832,13 +841,16 @@ class Service:
         except (release_bindings.ModelNotReady, release_bindings.NoCurrentRelease) as exc:
             self._native_release_memo = {"root": str(root), "release_id": pointer.release_id,
                                          "ok": False}
-            self._report_native_release_problem(getattr(exc, "code", "MODEL_NOT_READY"), str(exc))
+            self._report_native_release_problem(
+                getattr(exc, "code", "MODEL_NOT_READY"), str(exc),
+                occurrence=occurrence, scope_hash=scope_hash)
             return None
         except Exception:
             self._native_release_memo = {"root": str(root), "release_id": pointer.release_id,
                                          "ok": False}
             self._report_native_release_problem(
-                "MODEL_NOT_READY", "release verification failed")
+                "MODEL_NOT_READY", "release verification failed",
+                occurrence=occurrence, scope_hash=scope_hash)
             return None
         self._native_release_memo = {"root": str(root), "release_id": pointer.release_id,
                                      "ok": True}
@@ -1093,13 +1105,14 @@ class Service:
         from engine.v2.ops.submission import NamespacePolicy
 
         now = self.clock.monotonic()
-        release_root = self._native_release_root_or_none()
-        if release_root is None:
-            return
         identity = self._native_score_batch_identity_or_none(now)
         if identity is None:
             return
-        session, _scope_hash, producer_parameters = identity
+        session, scope_hash, producer_parameters = identity
+        release_root = self._native_release_root_or_none(
+            occurrence=session, scope_hash=scope_hash)
+        if release_root is None:
+            return
         memo = self._native_score_batch_memo
         if memo is None or memo["identity"] != identity:
             memo = {"identity": identity, "attempts": 0, "not_before": 0.0}

@@ -44,6 +44,12 @@ STATEMENTS = (
         run_id TEXT NOT NULL REFERENCES nightly_runs(run_id), stage_id TEXT NOT NULL,
         job_id TEXT NOT NULL REFERENCES jobs(job_id), PRIMARY KEY(run_id, stage_id)
     ) STRICT""",
+    """CREATE TABLE native_stage_failures (
+        occurrence TEXT NOT NULL, scope_hash TEXT NOT NULL, stage_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status = 'FAILED'), error_code TEXT NOT NULL,
+        problem_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY(occurrence, scope_hash, stage_id)
+    ) STRICT""",
     """CREATE TABLE watermarks (
         pipeline TEXT NOT NULL, scope TEXT NOT NULL, stage TEXT NOT NULL,
         occurrence TEXT NOT NULL, receipt_ref TEXT NOT NULL, completed_at TEXT NOT NULL,

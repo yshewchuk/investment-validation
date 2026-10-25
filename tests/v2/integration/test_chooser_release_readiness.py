@@ -6,6 +6,8 @@ import pytest
 
 from engine.v2.models import deployment
 from engine.v2.models.frozen_state import serialize_frozen_state
+from engine.v2.ops import health as health_module
+from engine.v2.ops.health import health
 from engine.v2.ops.native_score_batch import run_native_score_batch_worker
 from engine.v2.ops.supervisor import Service
 from engine.v2.scoring import release_bindings
@@ -41,7 +43,8 @@ def test_str_thru_release_readiness_and_worker_follow_declared_chooser_state(
     (work / "events.json").write_text(json.dumps([_event_doc(strategy="STR-THRU")]))
     parameters = _worker_parameters(tmp_path, expected_ids=["evt-1"])
     try:
-        root = service._native_release_root_or_none()
+        root = service._native_release_root_or_none(
+            occurrence="2026-01-15", scope_hash="test-scope-hash")
         if status in (None, "VALID", "AT_LIMIT", "BELOW_LIMIT"):
             assert root == str(tmp_path)
             assert service._native_release_memo["ok"] is True
@@ -59,10 +62,33 @@ def test_str_thru_release_readiness_and_worker_follow_declared_chooser_state(
             assert service._native_release_memo["ok"] is False
             problem = json.loads(capsys.readouterr().out)
             assert problem["event"] == "native_score_batch_release_unavailable"
-            assert problem["problem"]["code"] == "VALIDATION_FAILED"
-            assert "MODEL_NOT_READY" in problem["problem"]["message"]
-            assert member in problem["problem"]["message"]
+            assert problem["problem"]["code"] == "MODEL_NOT_READY"
+            assert member not in problem["problem"]["message"]
             assert str(tmp_path) not in problem["problem"]["message"]
+            failures = conn.execute(
+                "SELECT occurrence, scope_hash, status, error_code, problem_json "
+                "FROM native_stage_failures WHERE occurrence = ? AND scope_hash = ?",
+                ("2026-01-15", "test-scope-hash")).fetchall()
+            assert len(failures) == 1
+            failure = failures[0]
+            assert failure["status"] == "FAILED"
+            assert failure["error_code"] == "MODEL_NOT_READY"
+            assert json.loads(failure["problem_json"])["code"] == "MODEL_NOT_READY"
+            monkeypatch.setattr(
+                health_module, "_current_delivered_release_with_scope",
+                lambda conn: (None, None))
+            monkeypatch.setattr(
+                health_module, "_withheld_release",
+                lambda conn, current: None)
+            monkeypatch.setattr(
+                health_module, "_release_session_evidence",
+                lambda conn, current, expected_scope: (None, None))
+            document = health(conn, clock=clock)
+            assert any(
+                row["occurrence"] == "2026-01-15"
+                and row["status"] == "FAILED"
+                and row["error_code"] == "MODEL_NOT_READY"
+                for row in document["native_stage_failures"])
             with pytest.raises(ModelNotReady) as error:
                 run_native_score_batch_worker(parameters, work)
             assert error.value.member_id == member
