@@ -105,6 +105,7 @@ def _compare_incumbent_bindings(release_root: Path, prior_release_id, inventory,
 def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
     """Assemble and stage a bootstrap candidate; returns a JSON-safe summary."""
     from checks.phase5_release_assembly import (
+        PRIOR_NONE,
         PRIOR_NO_POOL_CATALOG,
         PRIOR_USABLE,
         ReleaseAssemblyRefusal,
@@ -157,6 +158,15 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
          f"rss_kb={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}")
 
     try:
+        if prior_class.kind == PRIOR_NONE:
+            try:
+                pointer = deployment.current_pointer(Path(release_root) / "deployment")
+            except (deployment.DeploymentError, OSError, ValueError) as exc:
+                raise StageRefused("prior release could not be read",
+                                   {"code": "PRIOR_MISMATCH"}) from exc
+            if pointer is not None:
+                raise StageRefused("a release is already deployed",
+                                   {"code": "PRIOR_MISMATCH"})
         try:
             inventory, drift = current_release_inventory()
         except (OSError, ValueError, KeyError, TypeError, ArtifactError,
@@ -198,8 +208,8 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
             merge_payloads(found, artifact_file_payloads(artifact_files))
         except StageRefused:
             raise
-        except (FrozenStateError, BoundedStateReadError, OSError, ValueError, KeyError,
-                TypeError, ArtifactError, RecursionError) as exc:
+        except (FrozenStateError, BoundedStateReadError, PrepareRefused, OSError, ValueError,
+                KeyError, TypeError, ArtifactError, RecursionError) as exc:
             raise StageRefused("a bound state file could not be loaded") from exc
 
         _log(f"[bootstrap] stage inputs loaded members={len(found)} "
@@ -279,10 +289,10 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
                                            {"code": "ID_CONFLICT"})
             except StageRefused:
                 raise
-            except ReleaseLayoutError as exc:
+            except (ReleaseLayoutError, AttributeError, TypeError) as exc:
                 raise StageRefused("candidate release could not be published",
                                    {"code": "ID_CONFLICT"}) from exc
-            except (OSError, ValueError, KeyError, TypeError) as exc:
+            except (OSError, ValueError, KeyError) as exc:
                 raise StageRefused("candidate release could not be published") from exc
 
         try:

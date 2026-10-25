@@ -244,34 +244,32 @@ def artifact_file_payloads(files: Iterable[Path | tuple[Path, bytes]]) -> dict[s
         RecalibrationArtifactLoader,
         RecalibrationArtifactRef,
     )
-    from tools.phase5_state_stage_job import StageRefused
-
     found: dict[str, dict[str, bytes]] = {}
     for item in files:
         if isinstance(item, tuple):
             path, data = item
             if not isinstance(data, bytes) or len(data) > MAX_STATE_BYTES:
-                raise StageRefused("a bound state file could not be loaded")
+                raise PrepareRefused("a bound state file could not be loaded")
         else:
             path = Path(item)
             try:
                 data = read_bounded_state(path, MAX_STATE_BYTES, no_follow=True)
-            except BoundedStateReadError as exc:
-                raise StageRefused("a bound state file could not be loaded") from exc
+            except (BoundedStateReadError, OSError) as exc:
+                raise PrepareRefused("a bound state file could not be loaded") from exc
         try:
             document = json.loads(data)
         except (ValueError, TypeError) as exc:
-            raise StageRefused("a bound state file could not be loaded") from exc
+            raise PrepareRefused("a bound state file could not be loaded") from exc
         schema = document.get("schema_version") if isinstance(document, dict) else None
         if not isinstance(schema, str):
-            raise StageRefused("a bound state file could not be loaded")
+            raise PrepareRefused("a bound state file could not be loaded")
         if schema in (PAYOFF_LINE_ARTIFACT_V1, PAYOFF_SURFACE_ARTIFACT_V1):
             artifact = PayoffArtifactLoader(path.parent).load_bytes(
                 data, sha256_bytes(data))
             name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
             member = payoff_member_id(artifact)
             if name in found.setdefault(member, {}):
-                raise StageRefused("a state object appears twice", {"member": member})
+                raise PrepareRefused("a state object appears twice", {"member": member})
             found[member][name] = data
         elif schema == RECALIBRATION_MAP_ARTIFACT_V1:
             artifact = RecalibrationArtifactLoader(path.parent).load_bytes(
@@ -279,10 +277,10 @@ def artifact_file_payloads(files: Iterable[Path | tuple[Path, bytes]]) -> dict[s
             name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
             member = f"recalibration_map:{artifact.strategy}"
             if name in found.setdefault(member, {}):
-                raise StageRefused("a state object appears twice", {"member": member})
+                raise PrepareRefused("a state object appears twice", {"member": member})
             found[member][name] = data
         else:
-            raise StageRefused("a bound state file could not be loaded")
+            raise PrepareRefused("a bound state file could not be loaded")
     return found
 
 

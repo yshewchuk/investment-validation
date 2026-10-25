@@ -394,7 +394,7 @@ When the prior is `NONE` or `NO_POOL_CATALOG` (§2.2), the stage job, once a sid
 
 | Condition | Outcome (`VALIDATION_FAILED`, fixed message) |
 |---|---|
-| Prior `DAMAGED` / `USABLE` | `details.code` `PRIOR_MISMATCH` / `PRIOR_USABLE` |
+| Prior `DAMAGED` / `USABLE`; prior `NONE` while the pointer is unreadable or a release is deployed | `details.code` `PRIOR_MISMATCH` / `PRIOR_USABLE`; `PRIOR_MISMATCH` |
 | Registry drift, inventory unreadable; every other refusal below marked "message only" | fixed message, `details` as §2.2 (`issues` for drift, `members`, `member`); nothing written unless stated |
 | Bindings differ from the incumbent's | `BINDINGS_DIFFER`; nothing written |
 | A catalog state not `STAGED` | `EMPTY_MEMBER`, `details.members`; nothing written |

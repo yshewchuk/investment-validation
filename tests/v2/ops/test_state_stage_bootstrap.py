@@ -295,6 +295,35 @@ def test_none_prior_stages_a_candidate_catalog_only(tmp_path, monkeypatch):
     assert _catalog_pairs(tmp_path) == _expected_bootstrap_pairs(_bootstrap_states())
 
 
+def test_none_prior_refuses_when_a_release_is_deployed(tmp_path, monkeypatch):
+    inventory, _body = _stage_prior(tmp_path, prior_names=None)
+    (tmp_path / phase5_release.MANIFEST_NAME).unlink(missing_ok=True)
+    monkeypatch.setattr(deployment, "current_pointer", lambda root: object())
+    parameters, staging = _mock_bootstrap_inputs(
+        monkeypatch, tmp_path, prior_release_id=None, inventory=inventory)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: a release is already deployed"
+    assert err.value.problem.details == {"code": "PRIOR_MISMATCH"}
+    assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+
+
+def test_none_prior_refuses_when_pointer_is_unreadable(tmp_path, monkeypatch):
+    inventory, _body = _stage_prior(tmp_path, prior_names=None)
+    (tmp_path / phase5_release.MANIFEST_NAME).unlink(missing_ok=True)
+
+    def broken(root):
+        raise deployment.DeploymentError("boom")
+
+    monkeypatch.setattr(deployment, "current_pointer", broken)
+    parameters, staging = _mock_bootstrap_inputs(
+        monkeypatch, tmp_path, prior_release_id=None, inventory=inventory)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: prior release could not be read"
+    assert err.value.problem.details == {"code": "PRIOR_MISMATCH"}
+
+
 def test_no_pool_catalog_requires_matching_bindings(tmp_path, monkeypatch):
     parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
     phase5_release.catalog_path(tmp_path, "prior1").unlink()
@@ -416,6 +445,27 @@ def test_id_conflict_on_a_different_pre_existing_catalog(tmp_path, monkeypatch):
     assert err.value.problem.details == {"code": "ID_CONFLICT"}
 
 
+def test_id_conflict_on_a_catalog_with_non_dict_sources(tmp_path, monkeypatch):
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+    release, inventory, payloads = _fixture("cand1")
+    deployment.stage_release(phase5_release.deployment_root(tmp_path), release,
+                             inventory, payloads)
+    body = {
+        "schema_version": phase5_release.PHASE5_RELEASE_SCHEMA,
+        "release_id": "cand1",
+        "deployment_id": "d1",
+        "members": [],
+        "sources": ["not a dict"],
+    }
+    body["manifest_hash"] = content_hash(body)
+    phase5_release.write_catalog(phase5_release.catalog_path(tmp_path, "cand1"), body)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: candidate release could not be published"
+    assert err.value.problem.details == {"code": "ID_CONFLICT"}
+
+
 def test_rerun_is_idempotent(tmp_path, monkeypatch):
     parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
     phase5_release.catalog_path(tmp_path, "prior1").unlink()
@@ -501,26 +551,48 @@ def test_write_manifest_candidate_only_requires_identical_content(tmp_path):
 def test_artifact_file_payloads_refuses_an_unknown_schema(tmp_path):
     path = tmp_path / "unknown.json"
     path.write_text(json.dumps({"schema_version": "mystery.v1"}))
-    from tools.phase5_state_stage_job import StageRefused
+    from tools.phase5_prepare_release import PrepareRefused
 
-    with pytest.raises(StageRefused) as err:
+    with pytest.raises(PrepareRefused) as err:
         phase5_prepare_release.artifact_file_payloads([path])
     assert str(err.value) == "a bound state file could not be loaded"
 
 
 def test_artifact_file_payloads_refuses_invalid_tuple_data(tmp_path, monkeypatch):
-    from tools.phase5_state_stage_job import StageRefused
+    from tools.phase5_prepare_release import PrepareRefused
 
     monkeypatch.setattr(phase5_prepare_release, "MAX_STATE_BYTES", 10)
     path = tmp_path / "payoff.json"
 
-    with pytest.raises(StageRefused) as err:
+    with pytest.raises(PrepareRefused) as err:
         phase5_prepare_release.artifact_file_payloads([(path, b"x" * 11)])
     assert str(err.value) == "a bound state file could not be loaded"
 
-    with pytest.raises(StageRefused) as err:
+    with pytest.raises(PrepareRefused) as err:
         phase5_prepare_release.artifact_file_payloads([(path, "not bytes")])
     assert str(err.value) == "a bound state file could not be loaded"
+
+
+def test_artifact_file_payloads_refuses_a_missing_file(tmp_path):
+    from tools.phase5_prepare_release import PrepareRefused
+
+    missing = tmp_path / "missing.json"
+    with pytest.raises(PrepareRefused) as err:
+        phase5_prepare_release.artifact_file_payloads([missing])
+    assert str(err.value) == "a bound state file could not be loaded"
+
+
+def test_prepare_release_main_refuses_a_missing_bound_state_file(tmp_path, monkeypatch, capsys):
+    def broken(args, pinned_panel=None):
+        phase5_prepare_release.artifact_file_payloads([tmp_path / "missing.json"])
+
+    monkeypatch.setattr(phase5_prepare_release, "_real_inputs", broken)
+    rc = phase5_prepare_release.main(
+        ["--release-id", "cand1", "--out", str(tmp_path / "out")])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "refused: PrepareRefused: a bound state file could not be loaded" in err
+
 
 @pytest.mark.parametrize("vary,value", [
     ("model_id", "m2"),
