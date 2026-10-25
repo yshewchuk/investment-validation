@@ -123,7 +123,7 @@ class _PinnedFakeRepository:
                             details={"table_name": table_name})
         return self.selected_population
 
-    def scan(self, query, *, table_name):
+    def scan(self, query, *, table_name, max_object_bytes=None):
         self.scan_calls += 1
         self.queries.append(query)
         for index, rows in enumerate(self._batches):

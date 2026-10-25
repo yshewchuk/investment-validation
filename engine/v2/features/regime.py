@@ -1,12 +1,30 @@
 """Pure market-regime calculations over caller-supplied source observations."""
 from __future__ import annotations
 
+import math
+from typing import Iterable
+
 import numpy as np
 import pandas as pd
 
 from .panel_math import _anchor_index
 
-__all__ = ["add_regime_features"]
+__all__ = ["add_regime_features", "validated_regime_closes"]
+
+
+def validated_regime_closes(values: Iterable[float]) -> list[float]:
+    """The one regime-close acceptance rule shared by the panel and research
+    readers: every value must be a finite, strictly positive number.
+
+    Pure -- converts nothing and repairs nothing; a non-finite (NaN or
+    infinite) or non-positive value raises ``ValueError``, which each caller
+    wraps in its own contract refusal, so both paths accept exactly the same
+    closes.
+    """
+    closes = list(values)
+    if any(not math.isfinite(close) or close <= 0 for close in closes):
+        raise ValueError("regime closes must be finite and positive")
+    return closes
 
 
 def add_regime_features(

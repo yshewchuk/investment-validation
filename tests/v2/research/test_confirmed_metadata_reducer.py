@@ -176,8 +176,10 @@ def test_nulls_real_booleans_column_order_and_opaque_ids(null):
 
 
 @pytest.mark.parametrize("helper", ["classify_metadata", "event_sequence"])
-def test_native_dataerror_propagates_unchanged_without_partial_output(monkeypatch, helper):
-    error = fail("MANIFEST_CORRUPT", "native refusal")
+@pytest.mark.parametrize("code,category,retryable", [
+    ("MANIFEST_CORRUPT", "integrity", False), ("TRANSIENT_SOURCE", "source", True)])
+def test_native_dataerror_propagates_unchanged_without_partial_output(monkeypatch, helper, code, category, retryable):
+    error = fail(code, "native refusal", stage="native", details={"probe": "retained"})
     def stop(*args, **kwargs):
         raise error
     monkeypatch.setattr(reducer, helper, stop)
@@ -186,7 +188,21 @@ def test_native_dataerror_propagates_unchanged_without_partial_output(monkeypatc
     with pytest.raises(DataError) as caught:
         reducer.reduce_sequences(events, tickers=["A", "B"])
     assert caught.value is error
+    assert caught.value.problem == Problem(code=code, category=category, retryable=retryable,
+        message="native refusal", stage="native", details={"probe": "retained"})
     pd.testing.assert_frame_equal(events, before)
+
+
+@pytest.mark.parametrize("column,value", [("event_date", pd.NaT),
+    ("event_date", pd.Timestamp("2001-01-01 00:00:00.000000001")), ("src_orats", 1), ("session", "private")])
+def test_native_validation_envelopes_match_the_public_facade(column, value):
+    events = frame().iloc[:1].copy()
+    events[column] = pd.Series([value], dtype="datetime64[ns]" if column == "event_date" else object)
+    with pytest.raises(DataError) as native:
+        reducer.classify_metadata(events)
+    with pytest.raises(DataError) as caught:
+        reducer.reduce_sequences(events, tickers=["A"])
+    assert caught.value.problem == native.value.problem
 
 
 @pytest.mark.parametrize("events,code,message", [

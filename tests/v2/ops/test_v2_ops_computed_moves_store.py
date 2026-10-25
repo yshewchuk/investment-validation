@@ -1882,7 +1882,7 @@ def test__scan_rows_committed_zero_row_year_fragment_is_a_valid_empty_result(tmp
 # cleanup contract that keeps this streaming safe -- a caller that edits a
 # leased list still gets its creation-time charge discharged and the very
 # list it mutated cleared -- is exercised by the already-merged
-# tests/test_v2_ops_partition_consumer.py::test_release_discharges_the_creation_charge_after_the_list_is_edited,
+# tests/v2/ops/test_partition_consumer.py::test_release_discharges_the_creation_charge_after_the_list_is_edited,
 # and, through the wired ``_scan_rows`` consumer itself, by
 # test__scan_rows_discharges_the_creation_charge_of_an_edited_leased_batch below.
 # --------------------------------------------------------------------------
@@ -2082,7 +2082,7 @@ def test__scan_rows_discharges_the_creation_charge_of_an_edited_leased_batch(tmp
     """Integration regression for caller mutation of a yielded lease list
     through the WIRED ``_scan_rows`` path -- not merely a direct
     ``RetainedBatch`` unit test (that one lives in
-    ``tests/test_v2_ops_partition_consumer.py``). A generator wrapper
+    ``tests/v2/ops/test_partition_consumer.py``). A generator wrapper
     monkeypatched over ``iter_pinned_scan_batches`` enters each real lease,
     copies the rows still to come, pops one row WHILE the lease is live --
     a deliberate violation of the no-resize rule -- and yields the same

@@ -204,9 +204,12 @@ The manual no-ledger `experiments.v2_gate_variant` CLI consumes
 calendar plans and fresh per-arm pricing for exploratory fold reports.
 
 `magnitude_panel_daily.build_daily_blocks` constructs only reconstructed partial
-daily-market and SPY blocks from an exact parent panel plan and the opt-in grouped
-eligibility policy. It requires explicit source/event/physical-and-expanded byte bounds, retains all horizons
-of each retained event, and shares one value scan per ticker/year. Missing/late
+daily-market and `spy_*` regime blocks from an exact parent panel plan and the opt-in grouped
+eligibility policy. The nine `spy_*` values read a pinned `price_history` snapshot's `REGIME_TICKER`
+(`^GSPC`) close -- one regime source, never a `daily_market` SPY spot (the names are historical);
+the snapshot's identity is bound into the context. It requires explicit source/event/physical-and-expanded byte bounds, retains all horizons
+of each retained event, and shares one value scan per event ticker/year (the regime series is read
+once as of the latest ceiling). Missing/late
 market cap and zero implied quotes stay null with explicit reasons. Its separate
 context binds producer-declared label bounds without verifying them; neither the
 result nor the parent metadata-only context grants training, observed-PIT, holdout
