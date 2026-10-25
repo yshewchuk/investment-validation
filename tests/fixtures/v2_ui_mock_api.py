@@ -180,7 +180,9 @@ class MockState:
         "schema_version": "operations_health.v1.0",
         "generated_at": "2026-09-14T00:00:00Z",
         "withheld_release": None,
-        "code_budgets": {"consecutive_nights": 0},
+        "code_budgets": {"ok": True, "first_failed_on": None, "consecutive_nights": 0,
+                         "unknown_occurrences": [], "latest": {"occurrence": "2026-09-14"},
+                         "latest_occurrence": "2026-09-14", "override": None},
     })
 
     def set_current(self, release_id: str | None) -> None:

@@ -37,6 +37,7 @@ def test_shell_renders_all_legacy_views_and_deep_link(tmp_path, browser_name):
                                   "withheld_release": {"release_id": "r0"},
                                   "code_budgets": {"ok": False,
                                                    "latest": {"occurrence": "2026-09-11"},
+                                                   "latest_occurrence": "2026-09-11",
                                                    "consecutive_nights": 2,
                                                    "unknown_occurrences": []}}))
     server = create_server(("127.0.0.1", 0), token="browser-secret", health_path=health,
@@ -100,6 +101,7 @@ def test_shell_marks_old_pinned_board_and_missing_scheduled_observation(tmp_path
         "withheld_release": None,
         "current_release": {"release_id": "r1"},
         "code_budgets": {"ok": True, "latest": {"occurrence": scheduled},
+                         "latest_occurrence": scheduled,
                          "consecutive_nights": 0,
                          "unknown_occurrences": [scheduled]},
     }))
@@ -199,6 +201,7 @@ def test_shell_requires_session_and_published_identity_for_current(tmp_path):
                        "current_release": {"release_id": "r1"},
                        "code_budgets": {"ok": True,
                                         "latest": {"occurrence": "2026-10-02"},
+                                        "latest_occurrence": "2026-10-02",
                                         "consecutive_nights": 0,
                                         "unknown_occurrences": []}}
     health.write_text(json.dumps(health_document))
@@ -513,6 +516,7 @@ def test_shell_discards_superseded_current_release_responses(tmp_path):
                                   "current_release": {"release_id": "r1"},
                                   "code_budgets": {"ok": True,
                                                    "latest": {"occurrence": "2026-10-02"},
+                                                   "latest_occurrence": "2026-10-02",
                                                    "consecutive_nights": 0,
                                                    "unknown_occurrences": []},
                                   "requested_session": "2026-10-04",
@@ -550,7 +554,9 @@ def test_shell_discards_superseded_current_release_responses(tmp_path):
                 ' if (url.indexOf("/release/current.json") < 0) return _fetch.call(window, input, init);'
                 ' window.__currentCalls += 1;'
                 ' var id = "r" + window.__currentCalls;'
-                ' var response = {ok: true, json: function () {'
+                ' var response = {ok: true, headers: {get: function (name) {'
+                ' return name === "X-Expected-Session" ? "2026-10-02" : null; }},'
+                ' json: function () {'
                 ' window.__consumed.push(id);'
                 ' return Promise.resolve({release_id: id});'
                 ' }};'

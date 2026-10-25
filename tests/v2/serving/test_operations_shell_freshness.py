@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -96,13 +98,20 @@ def test_latest_completed_session_accepts_a_valid_frozen_snapshot_clock():
     assert latest_completed_session(frozen_at="2026-11-27T17:59:00Z") == "2026-11-25"
 
 
-@pytest.mark.parametrize("frozen_at", ["", "not-a-timestamp", "2026-10-05",
-                                       "2026-13-01T00:00:00Z",
-                                       0, False, [], {}])
-def test_latest_completed_session_refuses_malformed_frozen_clock(frozen_at):
-    with pytest.raises(ValueError):
+@pytest.mark.parametrize(("frozen_at", "message"), [
+    ("", "frozen_at must be a parseable ISO timestamp or 'unknown'"),
+    ("not-a-timestamp", "frozen_at 'not-a-timestamp' is not a parseable ISO timestamp"),
+    ("2026-10-05", "frozen_at '2026-10-05' is a date, not an ISO timestamp"),
+    ("2026-13-01T00:00:00Z", "frozen_at '2026-13-01T00:00:00Z' is not a parseable ISO timestamp"),
+    (0, "frozen_at must be a parseable ISO timestamp or 'unknown'"),
+    (False, "frozen_at must be a parseable ISO timestamp or 'unknown'"),
+    ([], "frozen_at must be a parseable ISO timestamp or 'unknown'"),
+    ({}, "frozen_at must be a parseable ISO timestamp or 'unknown'"),
+])
+def test_latest_completed_session_refuses_malformed_frozen_clock(frozen_at, message):
+    with pytest.raises(ValueError, match=re.escape(message)):
         latest_completed_session(frozen_at=frozen_at)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=re.escape(message)):
         latest_completed_session(datetime(2026, 10, 5, 21, tzinfo=timezone.utc),
                                  frozen_at=frozen_at)
 
@@ -202,6 +211,34 @@ def test_current_json_live_clock_before_close_resolves_the_exact_previous_sessio
         _stop(server, thread)
 
 
+def test_current_json_refusals_send_no_cache_control(tmp_path):
+    """The 200 route is ``no-store``; the 401 and 404 refusals carry no
+    ``Cache-Control`` at all -- a cached refusal would freeze the shell's
+    pin or expected-session resolution between its polls."""
+    _write_bundle(tmp_path, "r1")
+    (tmp_path / "CURRENT").write_text("outside/deeper\n")  # unsafe pointer -> 404
+    health = tmp_path / "health.json"
+    health.write_text(json.dumps({"schema_version": "operations_health.v1.0",
+                                  "generated_at": "2026-10-05T17:00:00Z"}))
+    server, thread = _serve(tmp_path, health)
+    url = f"http://127.0.0.1:{server.server_port}/release/current.json"
+    try:
+        with pytest.raises(HTTPError) as refused:
+            urlopen(Request(url), timeout=5)
+        assert refused.value.code == 401
+        assert "Cache-Control" not in refused.value.headers
+        assert refused.value.read() == b"unauthorized\n"
+        request = Request(url)
+        request.add_header("Authorization", "Bearer browser-secret")
+        with pytest.raises(HTTPError) as missing:
+            urlopen(request, timeout=5)
+        assert missing.value.code == 404
+        assert "Cache-Control" not in missing.value.headers
+        assert missing.value.read() == b"unknown release\n"
+    finally:
+        _stop(server, thread)
+
+
 @pytest.mark.browser
 @pytest.mark.xdist_group("serial")
 def test_shell_marks_recent_old_session_stale_and_keeps_its_pin(tmp_path):
@@ -262,6 +299,7 @@ def test_shell_marks_recent_old_session_stale_and_keeps_its_pin(tmp_path):
             assert page.locator("#expected").inner_text() == f"expected session: {expected}"
             assert page.locator("#ops").get_attribute("class") == "stale"
             assert "no failures recorded" in page.locator("#outcome").inner_text()
+            assert "scheduled observations missing" not in page.locator("#outcome").inner_text()
             assert "/release/r1/" in (page.locator("#legacy").get_attribute("src") or "")
 
             (tmp_path / "CURRENT").write_text("r2\n")
@@ -413,8 +451,14 @@ def test_shell_shows_the_real_producer_streak_shapes(tmp_path):
     health["code_budgets"] = fresh
     result = _shell_status(tmp_path, health)
     assert fresh["ok"] is False and fresh["latest"] is None
+    assert fresh["latest_occurrence"] is None
+    assert fresh["consecutive_nights"] == 0 and fresh["unknown_occurrences"] == []
     assert result["outcome"] == (
-        "latest outcome: unknown: engineering schedule evidence missing or malformed")
+        "latest outcome: unknown: latest engineering outcome unknown (not observed)")
+    assert "missing or malformed" not in result["outcome"]
+    assert result["state"].startswith("unknown:")
+    assert "engineering schedule evidence missing or malformed" not in result["state"]
+    assert "current" not in result["state"]
     assert result["banner"] == "unknown"
 
     record_check(conn, "2026-10-02", "engineering", True, {"attempt": 1})
@@ -422,6 +466,7 @@ def test_shell_shows_the_real_producer_streak_shapes(tmp_path):
     health["code_budgets"] = passing
     result = _shell_status(tmp_path, health)
     assert passing["ok"] is True and passing["consecutive_nights"] == 0
+    assert passing["latest_occurrence"] == "2026-10-02"
     assert result["outcome"] == "latest outcome: pass: no failures recorded"
     assert result["state"] == "current"
     assert result["banner"] == ""
@@ -429,6 +474,7 @@ def test_shell_shows_the_real_producer_streak_shapes(tmp_path):
     record_check(conn, "2026-10-05", "engineering", None, {"attempt": 1})
     unobserved = budget_streak(conn)
     health["code_budgets"] = unobserved
+    assert unobserved["latest_occurrence"] == "2026-10-05"
     result = _shell_status(tmp_path, health)
     assert unobserved["ok"] is False and unobserved["consecutive_nights"] == 0
     assert unobserved["unknown_occurrences"] == ["2026-10-05"]
@@ -444,12 +490,47 @@ def test_shell_shows_the_real_producer_streak_shapes(tmp_path):
     health["code_budgets"] = failed
     result = _shell_status(tmp_path, health)
     assert failed["ok"] is False and failed["consecutive_nights"] == 1
+    assert failed["latest_occurrence"] == "2026-10-05"
     assert result["outcome"].startswith("latest outcome: fail:")
     assert "latest engineering outcome failed" in result["outcome"]
     assert "1 consecutive failed engineering night(s)" in result["outcome"]
     assert "unknown (not observed)" not in result["outcome"]
     assert result["state"].startswith("degraded:")
     assert result["banner"] == "degraded"
+    conn.close()
+
+
+@_needs_node
+def test_shell_calls_a_failed_latest_night_failed_behind_an_older_unknown(tmp_path):
+    """Producer-backed: the latest row failed and an older row was unknown.
+
+    ``budget_streak``'s ``latest_occurrence`` names the failed night, so the
+    outcome line calls the latest failure while the older missing observation
+    and the consecutive-failure streak stay visible; the banner remains
+    unknown because a scheduled observation is missing.
+    """
+    conn, _, _ = catalog(tmp_path)
+    health = _health_document()
+    record_check(conn, "2026-09-28", "engineering", True, {"attempt": 1})
+    record_check(conn, "2026-10-02", "engineering", None, {"attempt": 1})
+    record_check(conn, "2026-10-05", "engineering", False, {"attempt": 1})
+    streak = budget_streak(conn)
+    health["code_budgets"] = streak
+    assert streak["ok"] is False
+    assert streak["latest_occurrence"] == "2026-10-05"
+    assert streak["consecutive_nights"] == 1
+    assert streak["unknown_occurrences"] == ["2026-10-02"]
+    result = _shell_status(tmp_path, health)
+    assert result["outcome"].startswith("latest outcome: fail:")
+    assert "latest engineering outcome failed" in result["outcome"]
+    assert "unknown (not observed)" not in result["outcome"]
+    assert "1 consecutive failed engineering night(s)" in result["outcome"]
+    assert "scheduled observations missing: 2026-10-02" in result["outcome"]
+    assert result["state"].startswith("unknown:")
+    assert "latest engineering outcome failed" in result["state"]
+    assert "failed engineering nights: 1 consecutive" in result["state"]
+    assert "scheduled observations missing: 2026-10-02" in result["state"]
+    assert result["banner"] == "unknown"
     conn.close()
 
 
@@ -598,6 +679,21 @@ def test_shell_treats_a_missing_expected_session_header_as_unknown(tmp_path):
     assert result["banner"] == "unknown"
 
 
+@_needs_node
+@pytest.mark.parametrize("session", ["2026-02-30", "2026-04-31", "eng-night-2026-02-30"])
+def test_shell_treats_an_impossible_calendar_date_session_as_unknown(tmp_path, session):
+    """The ``sessionDate`` shape regex is not the whole gate: a syntactically
+    shaped but impossible calendar date must fail the parse/round-trip check
+    and read unknown, never resolve to a neighbouring day."""
+    health = _health_document()
+    health["requested_session"] = session
+    result = _shell_status(tmp_path, health)
+    assert result["requested"] == f"requested session: {session}"
+    assert result["state"].startswith("unknown:")
+    assert "session identity evidence missing or malformed" in result["state"]
+    assert result["banner"] == "unknown"
+
+
 @pytest.mark.parametrize("value", ["", "r0", False, 0, [], ["r0"]])
 @_needs_node
 def test_shell_treats_malformed_withheld_evidence_as_unknown(tmp_path, value):
@@ -663,6 +759,20 @@ def test_shell_treats_resolved_session_later_than_expected_as_unknown(tmp_path):
      "consecutive_nights": 0, "unknown_occurrences": {}},
     {"ok": True, "latest": {"occurrence": "2026-10-05"},
      "consecutive_nights": 0, "unknown_occurrences": "2026-10-04"},
+    {"ok": True, "latest": None,
+     "consecutive_nights": 0, "unknown_occurrences": []},
+    {"ok": False, "latest": None,
+     "consecutive_nights": 1, "unknown_occurrences": []},
+    {"ok": False, "latest": None, "consecutive_nights": 0,
+     "unknown_occurrences": [], "latest_occurrence": "2026-10-05"},
+    {"ok": False, "latest": None, "consecutive_nights": 0,
+     "unknown_occurrences": [], "latest_occurrence": 5},
+    {"ok": True, "latest": {"occurrence": "2026-10-05"}, "consecutive_nights": 0,
+     "unknown_occurrences": [], "latest_occurrence": True},
+    {"ok": True, "latest": {"occurrence": "2026-10-05"}, "consecutive_nights": 0,
+     "unknown_occurrences": [], "latest_occurrence": ["2026-10-05"]},
+    {"ok": True, "latest": {"occurrence": "2026-10-05"}, "consecutive_nights": 0,
+     "unknown_occurrences": [], "latest_occurrence": None},
 ])
 @_needs_node
 def test_shell_admits_only_the_typed_schedule_evidence(tmp_path, code_budgets):

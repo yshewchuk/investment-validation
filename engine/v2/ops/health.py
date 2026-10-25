@@ -167,6 +167,7 @@ def budget_streak(conn):
     return {"ok": bool(rows) and rows[0]["ok"] == 1, "first_failed_on": first,
             "consecutive_nights": failures, "unknown_occurrences": unknown,
             "latest": json.loads(rows[0]["receipt_json"]) if rows else None,
+            "latest_occurrence": rows[0]["occurrence"] if rows else None,
             "override": None}
 
 

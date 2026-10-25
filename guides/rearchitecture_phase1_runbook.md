@@ -125,10 +125,12 @@ requires `--idempotency-key`, but what it MEANS depends on the plan kind:
 `jobs` (everything not succeeded/cancelled, with queue reasons), `watermarks`,
 `current_release` (latest delivered), `withheld_release` (latest `eligible=0`),
 `code_budgets` (`ok`, `first_failed_on`, `consecutive_nights`,
-`unknown_occurrences`, `latest`, `override` — always `null` while D5 stands)
-and `activation: shadow_only`. The streak counts scheduled nightly
+`unknown_occurrences`, `latest`, `latest_occurrence` — the newest observed
+night, `null` when none exists — and `override`, always `null` while D5
+stands) and `activation: shadow_only`. The streak counts scheduled nightly
 *occurrences*, not attempts (§10.4); missing checks land in
-`unknown_occurrences`, never as green.
+`unknown_occurrences`, never as green; `latest_occurrence` lets consumers
+tell a missing latest night from an older gap behind a failed one.
 
 **No timer writes `health.json` yet.** The producer is the CLI:
 
@@ -403,7 +405,7 @@ The rehearsal is a test, not a hope:
 | CLI printed a Problem and exited 2 | The JSON on stdout is the envelope (`problem.v1.0`). `INVALID_REQUEST` on submit usually means a blocked plan (nightly without `--input-manifest`) or a plan kind not enabled for submission. |
 | Bounded job exited 137 | Read the tail: `CAP BREACH, killing tree` + a per-process memory breakdown = the watchdog did its job; raise the cap only with reviewed evidence. A bare `[bounded] exited -9` with the last heartbeat under cap = the **kernel** OOM killer — the cap was not the binding constraint; re-budget against `free -m` (AGENTS.md). |
 | Replay/canary receipt refused by the gate | Receipts are content-bound: a changed corpus, code, dependency set or baseline invalidates them. Re-run §5c/§5d; never edit a receipt. |
-| Health looks stale | The banner shows `unknown / stale` on any fetch failure — by design, never green. `code_budgets.unknown_occurrences` lists nights whose check is missing (absence is not health). For the legacy Models view inside the shell, AGENTS.md's `model_evidence_stale` flag applies: a failed evidence rebuild degrades to the cached table; check the flag before trusting the page. |
+| Health looks stale | The shell banner classifies its evidence — by design, never green: `unknown` on any fetch failure or missing/malformed identity, session or schedule evidence or any missing scheduled observation; `stale` when the observation is older than 24 hours or `resolved_session` is older than the `X-Expected-Session` served with `/release/current.json`; `degraded` for a failed latest night or withheld release. `code_budgets.unknown_occurrences` lists nights whose check is missing (absence is not health) — when `latest_occurrence` names a failed night the gaps are older, the outcome line still says failed and the banner stays unknown. For the legacy Models view inside the shell, AGENTS.md's `model_evidence_stale` flag applies: a failed evidence rebuild degrades to the cached table; check the flag before trusting the page. |
 | Competing unknown processes | `doctor` → `diagnostics.unmanaged_processes`; reconcile before resuming (§7 step 3). |
 
 ## 9. Host discipline

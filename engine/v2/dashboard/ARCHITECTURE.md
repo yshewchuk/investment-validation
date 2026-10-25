@@ -80,48 +80,48 @@ launcher option; its application presentation belongs to React.
 ### Operations shell freshness contract
 
 The legacy frame is pinned to one release for the browser session; the shell
-shows that pin and the latest published release separately -- when they
-differ it marks the displayed board stale and offers a reload opt-in, never
-re-pointing the frame automatically. While a usable health observation exists
-the stamp shows its `generated_at` age; a fetch/parse failure or an unusable
-artifact replaces it with the offline frozen-at line and an unknown banner,
-and an observation more than 24 hours old is stale. The shell displays
-health's `requested_session` and `resolved_session` (the effective
-quote/input session is the resolved one) as-is, comparing them by ISO date --
-accepting the producer `YYYY-MM-DD` form or the UI `eng-night-YYYY-MM-DD`
-form -- against the `X-Expected-Session` header, which the server derives
-from `market_schedule`: 16:00 America/New_York except the three early-close
-days it models privately (a session July 3, the Friday after Thanksgiving, a
-session Christmas Eve) at 13:00; exceptional half-days beyond these rules
-keep 16:00 and the shell applies none. Once a later scheduled session is
-due, a health snapshot describing an earlier input session is stale even
-under 24 hours. Missing or malformed session or schedule evidence is
-unknown, never current; `consecutive_nights` is trusted only as a
-nonnegative integer. The outcome line shows it explicitly: withheld
-publication reads degraded, like its banner; nonempty `unknown_occurrences`
-makes the latest outcome unknown even alongside a nonzero older failure
-streak -- streak evidence stays visible, the latest-failed wording does not;
-an ``ok``-false summary with neither failed streak nor missing observation
-is the producers' unobserved latest night, unknown never failed; absent
-evidence is unknown. Health is current only when every condition below
-passes, precedence **unknown > stale > degraded**: unknown beats stale,
-stale beats degraded, current only when nothing fails; the banner class is
-`unknown`, `stale`, `degraded` or empty.
+shows pin and published release separately -- when they differ it marks the
+board stale and offers a reload opt-in, never re-pointing the frame. A
+usable observation's stamp shows its `generated_at` age; a fetch/parse
+failure or unusable artifact gives the offline frozen-at line and an
+unknown banner; more than 24 hours old is stale. The shell shows health's
+`requested_session` and `resolved_session` (the resolved one is effective)
+as-is, ISO-date compared (producer `YYYY-MM-DD` or UI `eng-night-YYYY-MM-DD`)
+against the `X-Expected-Session` header `market_schedule` derives: 16:00
+America/New_York, 13:00 on
+the three modelled early-close days (a session July 3, Black Friday, a
+session Christmas Eve); other half-days keep 16:00 and the shell applies
+none. Once a later scheduled session is due, a snapshot of an earlier
+input session is stale even under 24 hours. `code_budgets` is trusted only
+as typed evidence: boolean `ok`, nonnegative integer `consecutive_nights`,
+array `unknown_occurrences`, object `latest` -- `null` only in the
+producers' fresh no-observation shape (`ok` false, zero streak, empty
+list), valid evidence read unknown, never malformed -- and optional
+`latest_occurrence` naming the newest row; `null` pairs only with the
+fresh shape above and names no unknown row; any other shape is unknown,
+never current. The outcome line: withheld publication qualifies a passing
+outcome to degraded; `unknown_occurrences` containing `latest_occurrence`
+makes the latest outcome unknown; with the optional field absent,
+conservatively any nonempty list does -- so an older gap behind a failed
+latest night keeps the latest-failed wording, gap and streak visible,
+banner unknown. Health is current only when every condition
+below passes; precedence **unknown >
+stale > degraded**; banner class `unknown`/`stale`/`degraded` or empty.
 
 | Condition | Visible outcome |
 |---|---|
 | Health fetch/parse failure, unsupported schema, or missing/malformed/future `generated_at` | unknown |
 | `withheld_release` missing, or present as anything other than `null` or a non-array object (empty string, `false`, `0`, arrays) | unknown |
-| `withheld_release` is a non-array object | degraded (release withheld; outcome line reads degraded too) |
+| `withheld_release` is a non-array object | degraded (release withheld; the outcome line qualifies a passing outcome to degraded) |
 | `generated_at` older than 24 hours | stale |
 | `requested_session` or `resolved_session` missing or malformed | unknown |
 | Expected session not yet observed, missing, or malformed | unknown |
 | Resolved session later than the expected or requested session | unknown |
 | Resolved session older than the expected session | stale |
-| `code_budgets` missing or malformed (`consecutive_nights` must be a nonnegative integer) | unknown |
-| Engineering `ok` false, nonzero `consecutive_nights`, no missing observations | degraded (latest night failed; streak shown) |
-| Engineering `ok` false with zero `consecutive_nights` (producers' unknown latest night) | unknown |
-| `unknown_occurrences` nonempty, even alongside a nonzero older failure streak | unknown (latest outcome; streak evidence stays visible) |
+| `code_budgets` missing or mistyped (required types above; `latest` `null` only in the fresh no-observation shape) | unknown |
+| Engineering `ok` false, nonzero `consecutive_nights` | degraded outcome line (latest night failed; streak shown; when `latest_occurrence` shows only older rows missing, this wording stands and the banner is unknown) |
+| Engineering `ok` false with zero `consecutive_nights` (valid `latest`-null fresh no-observation shape; producers' unknown latest night) | unknown |
+| `unknown_occurrences` contains `latest_occurrence` (a field-less document conservatively reads any nonempty list this way) | unknown (latest outcome; streak evidence stays visible) |
 | `current_release.release_id` missing | unknown |
 | Health release differs from the frame pin or the published current | stale (pin unavailable or published not yet observed: unknown) |
 | Pin and published current differ | stale drift notice plus reload opt-in |

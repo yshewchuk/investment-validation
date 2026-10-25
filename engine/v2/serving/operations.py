@@ -163,8 +163,9 @@ async function pollCurrent(){const seq=++currentSeq,found=await readCurrent();if
 function withheldEvidence(h){if(!Object.prototype.hasOwnProperty.call(h,'withheld_release'))return {missing:true,malformed:true,value:null};const value=h.withheld_release;if(value===null)return {missing:false,malformed:false,value:null};if(typeof value!=='object'||Array.isArray(value))return {missing:false,malformed:true,value:null};return {missing:false,malformed:false,value:value};}
 function withheldReason(w){return w.missing?'withheld release evidence missing':'withheld release evidence missing or malformed';}
 function withheldDetail(){return 'release withheld: (details omitted)';}
-function scheduleEvidence(h){const cb=h&&h.code_budgets;if(!cb||typeof cb!=='object'||Array.isArray(cb)||typeof cb.ok!=='boolean'||!cb.latest||typeof cb.latest!=='object'||Array.isArray(cb.latest)||!Number.isInteger(cb.consecutive_nights)||cb.consecutive_nights<0||!Array.isArray(cb.unknown_occurrences))return null;return cb;}
-function outcome(){if(!health)return 'latest outcome: unknown (health unavailable)';const parts=[],w=withheldEvidence(health),cb=scheduleEvidence(health);if(w.malformed){parts.push(withheldReason(w));return 'latest outcome: unknown: '+parts.join('; ');}if(w.value)parts.push(withheldDetail());if(!cb){parts.push('engineering schedule evidence missing or malformed');return 'latest outcome: unknown: '+parts.join('; ');}let verdict=cb.ok?'pass':(cb.unknown_occurrences.length>0?'unknown':(cb.consecutive_nights!==0?'fail':'unknown'));if(!cb.ok){if(cb.unknown_occurrences.length>0||cb.consecutive_nights===0)parts.push('latest engineering outcome unknown (not observed)');else parts.push('latest engineering outcome failed');}if(cb.consecutive_nights!==0)parts.push(cb.consecutive_nights+' consecutive failed engineering night(s)');if(cb.unknown_occurrences.length>0){verdict='unknown';parts.push('scheduled observations missing: '+cb.unknown_occurrences.join(', '));}if(w.value&&verdict==='pass')verdict='degraded';if(verdict==='pass')parts.push('no failures recorded');return 'latest outcome: '+verdict+': '+parts.join('; ');}
+function scheduleEvidence(h){const cb=h&&h.code_budgets;if(!cb||typeof cb!=='object'||Array.isArray(cb)||typeof cb.ok!=='boolean'||!Number.isInteger(cb.consecutive_nights)||cb.consecutive_nights<0||!Array.isArray(cb.unknown_occurrences))return null;if(Object.prototype.hasOwnProperty.call(cb,'latest_occurrence')&&cb.latest_occurrence!==null&&typeof cb.latest_occurrence!=='string')return null;const lt=cb.latest;if(lt===null)return cb.ok===false&&cb.consecutive_nights===0&&cb.unknown_occurrences.length===0&&(!Object.prototype.hasOwnProperty.call(cb,'latest_occurrence')||cb.latest_occurrence===null)?cb:null;if(!lt||typeof lt!=='object'||Array.isArray(lt))return null;if(Object.prototype.hasOwnProperty.call(cb,'latest_occurrence')&&cb.latest_occurrence===null)return null;return cb;}
+function latestUnknownObs(cb){if(!Object.prototype.hasOwnProperty.call(cb,'latest_occurrence'))return cb.unknown_occurrences.length>0;return cb.latest_occurrence===null||cb.unknown_occurrences.indexOf(cb.latest_occurrence)>=0;}
+function outcome(){if(!health)return 'latest outcome: unknown (health unavailable)';const parts=[],w=withheldEvidence(health),cb=scheduleEvidence(health);if(w.malformed){parts.push(withheldReason(w));return 'latest outcome: unknown: '+parts.join('; ');}if(w.value)parts.push(withheldDetail());if(!cb){parts.push('engineering schedule evidence missing or malformed');return 'latest outcome: unknown: '+parts.join('; ');}const lu=latestUnknownObs(cb);let verdict=cb.ok?'pass':(lu?'unknown':(cb.consecutive_nights!==0?'fail':'unknown'));if(!cb.ok){if(lu||cb.consecutive_nights===0)parts.push('latest engineering outcome unknown (not observed)');else parts.push('latest engineering outcome failed');}if(cb.consecutive_nights!==0)parts.push(cb.consecutive_nights+' consecutive failed engineering night(s)');if(cb.unknown_occurrences.length>0){if(lu)verdict='unknown';parts.push('scheduled observations missing: '+cb.unknown_occurrences.join(', '));}if(w.value&&verdict==='pass')verdict='degraded';if(verdict==='pass')parts.push('no failures recorded');return 'latest outcome: '+verdict+': '+parts.join('; ');}
 '''
 
 
@@ -192,11 +193,14 @@ def _shell_script(frozen: str) -> str:
     reason (missing/malformed identity, session or schedule evidence is
     unknown, never current; ``consecutive_nights`` is trusted only as a
     nonnegative integer). A withheld release reads degraded, like its banner.
-    Missing scheduled observations make the latest outcome unknown even
-    alongside a nonzero older failure streak: the streak evidence stays
-    visible, but the latest-failed wording does not; ok false without a
-    failed streak and without missing observations reads unknown, not
-    failed. Any fetch or parse failure shows unknown/unavailable without
+    ``latest_occurrence``, when supplied, names the newest observation: an
+    unknown list that does not name it is older missing evidence -- the
+    outcome line still calls the latest night failed, streak and gap stay
+    visible, the banner is unknown; without the field any nonempty list
+    conservatively reads as the latest night unknown. Ok false without a
+    streak or gap -- the producers' fresh no-observation shape, whose null
+    ``latest``/``latest_occurrence`` live only there -- reads unknown, never failed or
+    malformed. Any fetch or parse failure shows unknown/unavailable without
     erasing the pin or throwing out of the shell.
     """
     return f'''<script>
@@ -224,7 +228,7 @@ else if(rs>rq)add('resolved session is later than requested session','unknown');
 else if(rs<ex)add('resolved session is older than expected session','stale');
 const cb=scheduleEvidence(health);
 if(!cb)add('engineering schedule evidence missing or malformed','unknown');
-else{{if(cb.ok===false){{if(cb.unknown_occurrences.length>0||cb.consecutive_nights===0)add('latest engineering outcome unknown (not observed)','unknown');else add('latest engineering outcome failed','degraded');}}if(cb.consecutive_nights!==0)add('failed engineering nights: '+cb.consecutive_nights+' consecutive','degraded');if(cb.unknown_occurrences.length>0)add('scheduled observations missing: '+cb.unknown_occurrences.join(', '),'unknown');}}
+else{{const lu=latestUnknownObs(cb);if(cb.ok===false){{if(lu||cb.consecutive_nights===0)add('latest engineering outcome unknown (not observed)','unknown');else add('latest engineering outcome failed','degraded');}}if(cb.consecutive_nights!==0)add('failed engineering nights: '+cb.consecutive_nights+' consecutive','degraded');if(cb.unknown_occurrences.length>0)add('scheduled observations missing: '+cb.unknown_occurrences.join(', '),'unknown');}}
 stamp.textContent='updated '+text+' ago';
 if(reasons.length===0){{state.textContent='current';banner.className='';return;}}
 state.textContent=(unknown?'unknown: ':stale?'stale: ':'degraded: ')+reasons.join('; ')+' (observation '+text+' old)';

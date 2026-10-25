@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -553,6 +554,7 @@ def test_is_scheduled_session_answers_weekday_and_holiday_rules(day, expected) -
     None,
 ])
 def test_is_scheduled_session_refuses_a_datetime_and_non_date(wrong) -> None:
-    with pytest.raises(CalendarInputError) as excinfo:
+    with pytest.raises(CalendarInputError,
+                       match=rf"session day must be a date: {re.escape(repr(wrong))}") as excinfo:
         is_scheduled_session(wrong)
     assert excinfo.value.code == "INVALID_REQUEST"
