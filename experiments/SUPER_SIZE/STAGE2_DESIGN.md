@@ -232,8 +232,8 @@ inside each training fold, never stored globally or used to preselect features.
 v1 dictionary, helpers, row admission and identities. V2 dictionary entries bind
 ordered names, units, missing policy, source dependencies, the regime-source policy
 and the two derivation policies above; dictionary_hash remains content_hash of that ordered dictionary.
-H's eleven values/order remain unchanged; an unchanged H dictionary hash alone
-does not make the new versioned recipe/context identical. HM/HMO hashes change.
+H's eleven values/order remain unchanged, but its dictionary hash changes because
+v2 descriptors bind source dependencies and derivation policy. HM/HMO hashes also change.
 New producers bind v2 schema/policies, full HMO dictionary hash, source/history
 snapshots, eligibility, prefix lineage and environment. Never relabel v1 or
 partial daily blocks as v2 rows, overwrite old snapshots, or reuse a success
@@ -681,7 +681,9 @@ No version field, default, `latest`, subset hash, opaque model ID or arbitrary
 column list may substitute. A dictionary version is not another search axis.
 Use the corresponding public `recipe(subset)` for every H/HM/HMO specification;
 even H's unchanged values do not make a v2 recipe identical to v1. Preserve v2
-11/28/42 raw columns and its HMO-only quote indicator as supplied by the recipe.
+dictionary widths of 11/28/42 and recipe `model_columns` widths of 11/28/43.
+HMO's final `has_implied_quote` column is outside the numeric dictionary/table,
+as supplied by the public recipe.
 
 **Reuse without mutating the old compiler.** Standard-library JSON and foundation
 canonical hashing already cover normalization and identities; no new dependency.
