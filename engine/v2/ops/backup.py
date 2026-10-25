@@ -213,6 +213,10 @@ def _verified_prior_backup(manifest_path, database, source_rows, key, payload):
         return None
     if not isinstance(manifest, dict):
         return None
+    try:
+        _validate_backup_manifest(manifest)
+    except (ArtifactError, TypeError, ValueError):
+        return None
     if (manifest.get("backup_key") != key
             or manifest.get("schema_version") != payload["schema_version"]
             or manifest.get("cutoff") != payload["cutoff"]):
@@ -229,11 +233,10 @@ def _verified_prior_backup(manifest_path, database, source_rows, key, payload):
 
 
 def _verify_staged(staged, source_rows):
-    """Verify a staged copy against the source row counts and integrity."""
+    """Verify a staged copy's row counts against the source snapshot."""
     probe = sqlite3.connect(staged)
     try:
         staged_rows = _table_row_counts(probe)
-        problems = integrity_errors(probe)
     finally:
         probe.close()
     if staged_rows != source_rows:
@@ -241,9 +244,6 @@ def _verify_staged(staged, source_rows):
                      if source_rows.get(name) != staged_rows.get(name)]
         raise fail("INTEGRITY_FAILED", "backup row counts differ from source",
                    details={"tables": differing})
-    if problems:
-        raise fail("INTEGRITY_FAILED", "backup integrity check failed",
-                   details={"first_problem": problems[0]})
 
 
 def _stage_database(conn, target, key, database, source_rows):
@@ -280,13 +280,15 @@ def _stage_database(conn, target, key, database, source_rows):
 def _copy_artifact(store, target, name, ref, fault):
     """Atomically publish one verified artifact and run its fault hook."""
     try:
-        source = store.verify(ref)
+        source = store.verify(ref, max_bytes=MAX_BACKUP_FILE_BYTES)
         destination = target / "artifacts" / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         stage_fd, stage_name = tempfile.mkstemp(
             dir=str(destination.parent), prefix=f".{name}.", suffix=".staging")
         os.close(stage_fd)
         os.unlink(stage_name)
+    except ArtifactError as exc:
+        raise fail("INTEGRITY_FAILED", "backup artifact is invalid or oversized") from exc
     except OSError as exc:
         raise fail("WORKER_FAILED", "backup artifact staging failed") from exc
     staged = Path(stage_name)
@@ -356,11 +358,22 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
         raise fail("INVALID_REQUEST", "backup target is a symlink")
     target.mkdir(parents=True, exist_ok=True)
     database = target / (key + ".sqlite")
-    source_rows = _table_row_counts(conn)
     manifest_path = target / (key + ".manifest.json")
-    prior = _verified_prior_backup(manifest_path, database, source_rows, key, payload)
-    if prior is None:
-        _stage_database(conn, target, key, database, source_rows)
+    try:
+        conn.execute("BEGIN")
+        try:
+            source_rows = _table_row_counts(conn)
+            prior = _verified_prior_backup(
+                manifest_path, database, source_rows, key, payload)
+            if prior is None:
+                _stage_database(conn, target, key, database, source_rows)
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    except sqlite3.Error as exc:
+        raise fail("WORKER_FAILED", "backup source snapshot failed") from exc
     copied = _copy_artifacts(payload, store, target, fault, keepalive)
     manifest = {"schema_version": payload["schema_version"], "backup_key": key,
                 "cutoff": payload["cutoff"],

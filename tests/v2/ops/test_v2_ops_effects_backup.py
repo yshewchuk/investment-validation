@@ -61,6 +61,78 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
     assert (tmp_path / "restored" / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
 
 
+def test_backup_counts_and_copies_one_read_snapshot(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    conn.execute("CREATE TABLE snapshot_probe (value TEXT)")
+    conn.execute("INSERT INTO snapshot_probe VALUES ('before')")
+    conn.commit()
+    database_path = conn.execute("PRAGMA database_list").fetchone()[2]
+    sibling = sqlite3.connect(database_path, isolation_level=None)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "snapshot-race", {}, clock=clock)
+    original_backup_to = backup_module.backup_to
+
+    def commit_between_count_and_copy(source, destination):
+        sibling.execute("INSERT INTO snapshot_probe VALUES ('after')")
+        original_backup_to(source, destination)
+
+    monkeypatch.setattr(backup_module, "backup_to", commit_between_count_and_copy)
+    backup = tmp_path / "backup"
+    try:
+        manifest = run_backup(conn, key="snapshot-race", owner="worker", target=backup,
+                              clock=clock, store=store)
+    finally:
+        sibling.close()
+
+    snapshot = sqlite3.connect(backup / "snapshot-race.sqlite")
+    try:
+        assert snapshot.execute("SELECT COUNT(*) FROM snapshot_probe").fetchone()[0] == 1
+        assert manifest["database_rows"]["snapshot_probe"] == 1
+    finally:
+        snapshot.close()
+    assert conn.execute("SELECT COUNT(*) FROM snapshot_probe").fetchone()[0] == 2
+
+
+def test_backup_source_snapshot_read_error_is_retryable(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "snapshot-read-error", {}, clock=clock)
+
+    def fail_count(_conn):
+        raise sqlite3.OperationalError("synthetic source read error")
+
+    monkeypatch.setattr(backup_module, "_table_row_counts", fail_count)
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="snapshot-read-error", owner="worker",
+                   target=tmp_path / "backup", clock=clock, store=store)
+
+    assert refused.value.code == "WORKER_FAILED"
+    assert refused.value.problem.retryable is True
+    assert not conn.in_transaction
+
+
+def test_backup_refuses_oversized_artifact_before_hashing(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"oversized", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "oversized-artifact", {"evidence.bin": ref}, clock=clock)
+    monkeypatch.setattr(backup_module, "MAX_BACKUP_FILE_BYTES", 4)
+    monkeypatch.setattr(
+        "engine.v2.foundation.artifacts._hash_fd",
+        lambda *_args, **_kwargs: pytest.fail("oversized artifact was hashed"),
+    )
+    backup = tmp_path / "backup"
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="oversized-artifact", owner="worker", target=backup,
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert not (backup / "oversized-artifact.manifest.json").exists()
+    assert conn.execute(
+        "SELECT state FROM outbox WHERE logical_key='oversized-artifact'").fetchone()[0] != "delivered"
+
+
 @pytest.mark.parametrize("artifact_name", [
     "evidence/bin",
     "..",
@@ -233,7 +305,7 @@ def test_backup_refuses_failed_sqlite_integrity_check(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "bad-integrity", {}, clock=clock)
-    monkeypatch.setattr("engine.v2.ops.backup.integrity_errors",
+    monkeypatch.setattr("engine.v2.ops.catalog.integrity_errors",
                         lambda _conn: ["synthetic integrity failure"])
 
     with pytest.raises(OpsError) as refused:
@@ -373,6 +445,25 @@ def test_oversized_prior_manifest_is_rebuilt(tmp_path):
     assert path.stat().st_size <= backup_module.MAX_MANIFEST_BYTES
     assert conn.execute(
         "SELECT state FROM outbox WHERE logical_key='large-prior'").fetchone()[0] == "delivered"
+
+
+def test_prior_backup_reuse_rejects_malformed_manifest_metadata(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "bad-prior", {}, clock=clock)
+    backup = tmp_path / "backup"
+    manifest = run_backup(conn, key="bad-prior", owner="worker", target=backup,
+                          clock=clock, store=store)
+    manifest_path = backup / "bad-prior.manifest.json"
+    prior = json.loads(manifest_path.read_text())
+    prior["artifacts"] = []
+    manifest_path.write_text(json.dumps(prior))
+    payload = json.loads(conn.execute(
+        "SELECT payload_json FROM outbox WHERE logical_key='bad-prior'").fetchone()[0])
+
+    assert backup_module._verified_prior_backup(
+        manifest_path, backup / "bad-prior.sqlite", manifest["database_rows"],
+        "bad-prior", payload) is None
 
 
 @pytest.mark.parametrize("unsafe_prior", ["symlink", "oversized"])
