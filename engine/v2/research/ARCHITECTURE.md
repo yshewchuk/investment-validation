@@ -41,7 +41,7 @@ Detached validation checks JSON types, closed event/request/recipe/producer sche
 repository preflight authenticates membership/source truth. Horizon cutoffs require native calendar reconstruction, not hashes alone.
 Public history interfaces `validate_context_identity`, `validate_event_forecasts`,
 `preflight_source` and `validate_features` share existing validation without new authority.
-`magnitude_features.calendar_input` exposes session metadata; `magnitude_inputs.target_object_identity` detaches admitted event/fragment IDs.
+`magnitude_features.calendar_input` exposes session metadata; `magnitude_inputs.target_object_identity` detaches admitted `event_id`, `fragment_id`, `object_id` and object `content_hash` without reading target payload values.
 `magnitude_panel_table.canonical_day` requires canonical date strings or refuses `CONTRACT_MISMATCH`. No raw payload permission is issued;
 raw-source protected-event policy is not implemented by this plan. There is no writer,
 materializer, CLI, model or registration integration.
