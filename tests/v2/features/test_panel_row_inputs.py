@@ -1346,3 +1346,26 @@ def test_44_implied_carry_ignores_a_late_availability_that_history_respects():
     # the prior history).
     assert panel["mean_prior_or_implied"] == pytest.approx(3.0)
     assert panel["n_prior"] == 0
+
+
+def test_22_daily_state_is_read_strictly_before_an_event_dated_on_the_decision_day():
+    """An event dated on the decision day must not see its own day's (post-print) state."""
+    snapshot = _snapshot()
+    batches = _default_batches()
+    rows = _dm_rows("AAA", ["2024-02-13", "2024-02-14"])
+    rows[0]["implied_move"] = 1.0
+    rows[1]["implied_move"] = 9.0
+    batches[("daily_market", "AAA")] = rows
+
+    def _panel(event_date):
+        repo = _FakeRepository(snapshot, _contracts(), batches)
+        key = BoardRequest(ticker="AAA", strategy="STR-X",
+                           event_date=pd.Timestamp(event_date), session="BMO")
+        return scan_panel_row(repo, snapshot, key, history_start=_HISTORY_START,
+                              decision_session=_DECISION)
+
+    same_day = _panel("2024-02-14")
+    assert same_day.panel_row["im"] == 1.0
+    assert same_day.panel_row["or_implied"] == 1.0
+    # An event after the decision day is unchanged: the decision-day state is known.
+    assert _panel("2024-02-15").panel_row["im"] == 9.0

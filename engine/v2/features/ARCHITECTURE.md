@@ -155,6 +155,7 @@ source date could pass that cutoff while a later contributing date would
 not. A missing or null contributor never advances the max; empty history
 contributes none, yet computed history contributes even when `runup_asof`
 cannot resolve.
+The daily state is read at the last session strictly before `key.event_date` and on-or-before `decision_session` (the legacy `engine/features.py` rule), so an event dated on the decision day never sees its own post-print state.
 `panel_row` also carries the legacy-named model inputs that the panel math
 does not produce, derived with legacy semantics: `or_implied` and `or_rvol30`
 are the daily-state `im` and `rvol30` (absent when those are absent;

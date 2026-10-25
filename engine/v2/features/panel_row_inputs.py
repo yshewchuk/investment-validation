@@ -484,15 +484,18 @@ def scan_panel_row(
     before the first repository read, so a directly constructed invalid key
     refuses with ``CONTRACT_MISMATCH``/``field=event_date`` without touching the
     data layer; every later use is the validated ``event_day``, never a reread.
+    The daily state is read at the last session strictly before the event and
+    on-or-before the decision.
     """
     start, decision = _window(history_start, decision_session)
 
     # Refuse/normalize once, here, before any repository access.
     event_day = _session_day(key.event_date, "event_date", normalize_intraday=True)
 
+    state_cap = min(decision, event_day - pd.Timedelta(days=1))
     daily_state = daily_state_inputs.scan_daily_state_inputs(
         repository, snapshot, ticker=key.ticker,
-        history_start=start, decision_session=decision,
+        history_start=start, decision_session=state_cap,
     )
 
     computed_rows = _read_computed_moves(repository, snapshot, key.ticker, start, decision, event_day)
