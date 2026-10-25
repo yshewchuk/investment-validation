@@ -240,6 +240,8 @@ scan validation and failures propagate.
 | `daily_market` has no row for `"SPY"` | `regime`'s own no-history behavior: its fields stay `NaN` (its own Inputs table); `panel_math`'s keys are unaffected (independent read) |
 | `price_history` has no row for this ticker | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
 | `get_price_series`'s `session_date > observation_ceiling` | `QUERY_NOT_BOUNDED`, propagated unchanged — never a silent future read |
+| `key.event_date` is on or before the decision day | the daily state is read at the last session strictly before `key.event_date` (the event day's own post-print state is never read); later events read the decision-day state, never a later row |
+| `key.event_date` is on or before `history_start` (an empty eligible daily window) | `CONTRACT_MISMATCH` from the daily-state window check (`history_start must be on or before decision_session`); unreachable from the nightly producer, which requires 253 observed sessions |
 | retry with the same pinned snapshot/key/`decision_session`/`history_start` | identical result; optional SPY reuse is limited to a caller-supplied build-local cache with the same snapshot/version/window key; no write, nothing to roll back |
 
 `regime.add_regime_features(events, market, *, as_of_column="date")` is

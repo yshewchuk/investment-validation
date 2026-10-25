@@ -1352,9 +1352,10 @@ def test_22_daily_state_is_read_strictly_before_an_event_dated_on_the_decision_d
     """An event dated on the decision day must not see its own day's (post-print) state."""
     snapshot = _snapshot()
     batches = _default_batches()
-    rows = _dm_rows("AAA", ["2024-02-13", "2024-02-14"])
+    rows = _dm_rows("AAA", ["2024-02-13", "2024-02-14", "2024-02-15"])
     rows[0]["implied_move"] = 1.0
     rows[1]["implied_move"] = 9.0
+    rows[2]["implied_move"] = 77.0
     batches[("daily_market", "AAA")] = rows
 
     def _panel(event_date):
@@ -1367,5 +1368,11 @@ def test_22_daily_state_is_read_strictly_before_an_event_dated_on_the_decision_d
     same_day = _panel("2024-02-14")
     assert same_day.panel_row["im"] == 1.0
     assert same_day.panel_row["or_implied"] == 1.0
-    # An event after the decision day is unchanged: the decision-day state is known.
+    # An event after the decision day reads the decision-day state, never a later row:
+    # the decision ceiling (not just event_day - 1) bounds the read.
+    later = _panel("2024-02-20")
+    assert later.panel_row["im"] == 9.0
     assert _panel("2024-02-15").panel_row["im"] == 9.0
+    # panel_anchor follows the daily-state source session, which is the capped one.
+    assert same_day.panel_anchor == pd.Timestamp("2024-02-13")
+    assert later.panel_anchor == pd.Timestamp("2024-02-14")
