@@ -1108,7 +1108,8 @@ class Service:
         "Outputs"/"Failure semantics" for the full account.
 
         identity lookup runs first and returns without a release check when no
-        eligible identity exists; then release binding is checked; a
+        eligible identity exists or the identity is not snapshot-pinned
+        (`producer_parameters is None`); otherwise release binding is checked; a
         release-unavailable result never consumes `_native_score_batch_memo`
         attempts; identity lookup continues to use its separate
         `_native_score_batch_lookup_memo`. After release binding succeeds, the
@@ -1128,6 +1129,8 @@ class Service:
         if identity is None:
             return
         session, scope_hash, producer_parameters = identity
+        if producer_parameters is None:
+            return
         release_root = self._native_release_root_or_none(
             occurrence=session, scope_hash=scope_hash)
         if release_root is None:

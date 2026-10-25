@@ -841,6 +841,32 @@ def test_service_sidecar_keeps_legacy_unpinned_identity_as_noop(tmp_path, monkey
     assert service._native_score_batch_lookup_memo is None
 
 
+def test_service_tick_noop_without_pinned_snapshot_skips_release_checker(tmp_path, monkeypatch):
+    """A succeeded legacy score's identity carries no pinned snapshot; the tick
+    returns before release-root validation/report/persistence, so the release
+    checker is not called and no native_stage_failures row is created."""
+    conn, clock, _ = catalog(tmp_path)
+    _mark_score_succeeded(conn, clock, session="2026-01-01")
+    identity = nightly._native_score_batch_identity(conn)
+    assert identity is not None and identity[2] is None
+    service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    calls = []
+
+    def _spy_native_release_root_or_none(**kwargs):
+        calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(service, "_native_release_root_or_none", _spy_native_release_root_or_none)
+
+    service._reconcile_native_score_batch_shadow()
+
+    assert calls == []
+    assert _native_score_batch_job_count(conn) == 0
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM native_stage_failures").fetchone()["n"] == 0
+
+
 def test_service_tick_never_submits_with_release_root_but_no_promoted_release(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     _mark_score_succeeded(conn, clock, session="2026-01-01")

@@ -30,6 +30,17 @@ _ATTEMPT_STATES = ("'starting','running','succeeded','failed','cancelling',"
                    "'cancelled','recovery_pending'")
 _PROCESS_STATES = "'unlaunched','alive','exited','verified_dead','unknown','quarantined'"
 
+NATIVE_STAGE_FAILURE_TEXT_BYTES = {
+    "occurrence": 64,
+    "scope_hash": 128,
+    "stage_id": 128,
+    "status": 16,
+    "error_code": 128,
+    "problem_json": 8192,
+    "created_at": 64,
+    "updated_at": 64,
+}
+
 _V1 = (
     """CREATE TABLE supervisor_epochs (
         epoch_id TEXT PRIMARY KEY,
@@ -306,10 +317,16 @@ MIGRATIONS = (
     )),
     Migration(version=14, name="native_stage_failures", statements=(
         """CREATE TABLE native_stage_failures (
-            occurrence TEXT NOT NULL, scope_hash TEXT NOT NULL, stage_id TEXT NOT NULL,
-            status TEXT NOT NULL CHECK(status = 'FAILED'), error_code TEXT NOT NULL,
-            problem_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            occurrence TEXT NOT NULL CHECK (length(CAST(occurrence AS BLOB)) <= {occurrence}),
+            scope_hash TEXT NOT NULL CHECK (length(CAST(scope_hash AS BLOB)) <= {scope_hash}),
+            stage_id TEXT NOT NULL CHECK (length(CAST(stage_id AS BLOB)) <= {stage_id}),
+            status TEXT NOT NULL CHECK (status = 'FAILED')
+                CHECK (length(CAST(status AS BLOB)) <= {status}),
+            error_code TEXT NOT NULL CHECK (length(CAST(error_code AS BLOB)) <= {error_code}),
+            problem_json TEXT NOT NULL CHECK (length(CAST(problem_json AS BLOB)) <= {problem_json}),
+            created_at TEXT NOT NULL CHECK (length(CAST(created_at AS BLOB)) <= {created_at}),
+            updated_at TEXT NOT NULL CHECK (length(CAST(updated_at AS BLOB)) <= {updated_at}),
             PRIMARY KEY(occurrence, scope_hash, stage_id)
-        ) STRICT""",
+        ) STRICT""".format(**NATIVE_STAGE_FAILURE_TEXT_BYTES),
     )),
 )

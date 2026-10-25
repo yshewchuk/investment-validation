@@ -12,6 +12,14 @@ from engine.v2.foundation import format_timestamp, fsync_directory
 from engine.v2.ops.catalog import dumps, transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.publication import current as release_current
+from engine.v2.ops.schema import NATIVE_STAGE_FAILURE_TEXT_BYTES
+
+NATIVE_STAGE_FAILURE_DIAGNOSTIC = json.dumps({
+    "code": "RESOURCE_LIMIT_EXCEEDED",
+    "category": "RESOURCE_LIMIT",
+    "retryable": False,
+    "message": "native stage failure text exceeded health read bound",
+}, sort_keys=True, separators=(",", ":"))
 
 
 def _record_check(conn, occurrence, kind, ok, receipt):
@@ -397,9 +405,38 @@ def health(conn, *, clock, executor_mode="watchdog"):
         "AND generation_ref IS NULL").fetchone()[0]
     requested_session, resolved_session = _release_session_evidence(conn, current,
                                                                     expected_scope=current_scope)
+    limits = NATIVE_STAGE_FAILURE_TEXT_BYTES
+    oversized = " OR ".join(
+        f"length(CAST({field} AS BLOB)) > {limits[field]}"
+        for field in ("occurrence", "scope_hash", "stage_id", "status",
+                      "error_code", "problem_json", "created_at", "updated_at"))
     native_stage_failures = [dict(row) for row in conn.execute(
-        "SELECT occurrence,scope_hash,stage_id,status,error_code,problem_json,created_at,updated_at "
-        "FROM native_stage_failures ORDER BY occurrence DESC, scope_hash, stage_id LIMIT 100")]
+        "SELECT "
+        f"CASE WHEN length(CAST(raw_occurrence AS BLOB)) > {limits['occurrence']} "
+        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE raw_occurrence END AS occurrence, "
+        f"CASE WHEN length(CAST(raw_scope_hash AS BLOB)) > {limits['scope_hash']} "
+        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE raw_scope_hash END AS scope_hash, "
+        f"CASE WHEN length(CAST(raw_stage_id AS BLOB)) > {limits['stage_id']} "
+        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE raw_stage_id END AS stage_id, "
+        "CASE WHEN any_oversized THEN 'FAILED' ELSE raw_status END AS status, "
+        "CASE WHEN any_oversized THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE raw_error_code END AS error_code, "
+        f"CASE WHEN length(CAST(raw_problem_json AS BLOB)) > {limits['problem_json']} "
+        "THEN ? ELSE raw_problem_json END AS problem_json, "
+        f"CASE WHEN length(CAST(raw_created_at AS BLOB)) > {limits['created_at']} "
+        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE raw_created_at END AS created_at, "
+        f"CASE WHEN length(CAST(raw_updated_at AS BLOB)) > {limits['updated_at']} "
+        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE raw_updated_at END AS updated_at "
+        "FROM ("
+        "SELECT occurrence AS raw_occurrence, scope_hash AS raw_scope_hash, "
+        "stage_id AS raw_stage_id, status AS raw_status, "
+        "error_code AS raw_error_code, problem_json AS raw_problem_json, "
+        "created_at AS raw_created_at, updated_at AS raw_updated_at, "
+        f"CASE WHEN {oversized} THEN 1 ELSE 0 END AS any_oversized "
+        "FROM native_stage_failures "
+        "ORDER BY occurrence DESC, scope_hash, stage_id LIMIT 100"
+        ") "
+        "ORDER BY raw_occurrence DESC, raw_scope_hash, raw_stage_id",
+        (NATIVE_STAGE_FAILURE_DIAGNOSTIC,))]
     return {"schema_version": "operations_health.v1.2", "generated_at": format_timestamp(clock.now()),
             "executor_mode": executor_mode, "containment": "best_effort" if executor_mode == "watchdog" else "kernel",
             "jobs": jobs, "watermarks": [dict(row) for row in conn.execute("SELECT * FROM watermarks ORDER BY pipeline, scope, stage")],
