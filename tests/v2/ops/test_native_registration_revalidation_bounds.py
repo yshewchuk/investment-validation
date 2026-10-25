@@ -98,12 +98,24 @@ def test_finite_revalidation_default_and_exact_boundary_preserve_bytes(source, m
     assert (catalog_rows(source.conn), object_bytes(source.store)) == before
 
 
-@pytest.mark.parametrize("budget", [None, True, 0, -1, 1.0, "1024", 2**62])
-def test_require_rejects_unbounded_or_invalid_budget_before_preparation(monkeypatch, budget):
+@pytest.mark.parametrize("entry,budget", [(entry, budget) for entry in ("require", "magnitude", "prepare")
+    for budget in (None, True, 0, -1, 1.0, "1024", 2**62) if entry != "prepare" or budget is not None])
+def test_helper_boundaries_reject_invalid_budget_before_preparation(monkeypatch, entry, budget):
+    prepare = native.prepare_native_registration
     monkeypatch.setattr(native, "prepare_native_registration", forbid)
+    monkeypatch.setattr(native, "resolve_experiment_plan", forbid)
+    monkeypatch.setattr(magnitude_inputs, "preflight_magnitude_targets", forbid)
     with pytest.raises(OpsError) as caught:
-        native.require_native_registration(None, None, None, None, code_root=None, as_of_month=None,
-                                           max_evidence_bytes=budget)
+        if entry == "prepare":
+            prepare(None, None, code_root=None, as_of_month=None, scope=None, event_ids=None,
+                    max_evidence_bytes=budget)
+        elif entry == "magnitude":
+            magnitude_inputs.admit_magnitude_inputs(None, None, None, None, code_root=None,
+                as_of_month=MONTH, magnitude_training_start="2020-01-01", magnitude_labels_before="2025-01-01",
+                max_evidence_bytes=budget)
+        else:
+            native.require_native_registration(None, None, None, None, code_root=None, as_of_month=None,
+                                               max_evidence_bytes=budget)
     assert_refusal(caught.value, "INVALID_EXPERIMENT_SPEC",
                    "registration read requires a positive SQLite-safe byte budget")
 
