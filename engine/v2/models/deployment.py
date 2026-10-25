@@ -357,6 +357,7 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
 
 
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
+MAX_POINTER_BYTES = 64 * 1024
 
 
 def _read_bounded_regular(path: Path, limit: int) -> bytes:
@@ -814,11 +815,20 @@ def resolve_release(root: Path, release_id: str) -> ModelRelease:
 
 
 def current_pointer(root: Path) -> PointerState | None:
-    """The live pointer state, or ``None`` if nothing has ever been promoted."""
+    """The live pointer state, or ``None`` if nothing has ever been promoted.
+
+    Reads the pointer through a bounded, no-follow open capped at
+    :data:`MAX_POINTER_BYTES` (64 KiB); a symlink or oversize file raises
+    :class:`ValueError`.
+    """
     path = _pointer_path(Path(root))
-    if not path.is_file():
+    try:
+        data = read_bounded_state(path, MAX_POINTER_BYTES, no_follow=True)
+    except FileNotFoundError:
         return None
-    return _decode(PointerState, path.read_bytes())
+    except (BoundedStateReadError, OSError):
+        raise ValueError("deployment pointer is not a bounded regular file") from None
+    return _decode(PointerState, data)
 
 
 def pointer_history(root: Path) -> tuple[PointerState, ...]:

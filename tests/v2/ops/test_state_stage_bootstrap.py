@@ -324,6 +324,21 @@ def test_none_prior_refuses_when_pointer_is_unreadable(tmp_path, monkeypatch):
     assert err.value.problem.details == {"code": "PRIOR_MISMATCH"}
 
 
+def test_none_prior_refuses_when_pointer_is_oversize(tmp_path, monkeypatch):
+    inventory, _body = _stage_prior(tmp_path, prior_names=None)
+    (tmp_path / phase5_release.MANIFEST_NAME).unlink(missing_ok=True)
+    pointer = phase5_release.deployment_root(tmp_path) / "DEPLOYED"
+    pointer.write_bytes(b"x" * (deployment.MAX_POINTER_BYTES + 1))
+
+    parameters, staging = _mock_bootstrap_inputs(
+        monkeypatch, tmp_path, prior_release_id=None, inventory=inventory)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: prior release could not be read"
+    assert err.value.problem.details == {"code": "PRIOR_MISMATCH"}
+    assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+
+
 def test_no_pool_catalog_requires_matching_bindings(tmp_path, monkeypatch):
     parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
     phase5_release.catalog_path(tmp_path, "prior1").unlink()
