@@ -240,7 +240,7 @@ def test_backup_cleanup_failure_is_retryable(tmp_path, monkeypatch):
     assert cleanup_attempts == [backup / "cleanup-failure.sqlite"]
 
 
-def test_backup_rejects_existing_catalog_with_foreign_key_violation(tmp_path):
+def test_backup_rejects_existing_catalog_with_foreign_key_violation(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "fk-copy", {}, clock=clock)
@@ -257,11 +257,20 @@ def test_backup_rejects_existing_catalog_with_foreign_key_violation(tmp_path):
         )
     finally:
         invalid.close()
+    real_connect = backup_module.sqlite3.connect
+    verification_connects = []
+
+    def recording_connect(database, *args, **kwargs):
+        verification_connects.append((database, kwargs.get("uri")))
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(backup_module.sqlite3, "connect", recording_connect)
     with pytest.raises(OpsError) as error:
         run_backup(conn, key="fk-copy", owner="worker", target=backup, clock=clock, store=store)
     assert error.value.code == "BACKUP_FAILED"
     assert error.value.problem.message == "backup database verification failed"
     assert error.value.problem.retryable is True
+    assert verification_connects == [(destination.resolve().as_uri() + "?mode=ro", True)]
     assert not destination.exists()
     state = conn.execute(
         "SELECT state FROM outbox WHERE kind='backup' AND logical_key='fk-copy'"
@@ -384,12 +393,24 @@ def test_backup_fsyncs_database_copy(tmp_path, monkeypatch):
         publication_events.append("manifest_replace")
         return real_replace(source, destination)
 
+    real_open = Path.open
+    open_modes = []
+
+    def recording_open(self, *args, **kwargs):
+        stream = real_open(self, *args, **kwargs)
+        mode = kwargs.get("mode", args[0] if args else "r")
+        if self.name == "fsync-copy.sqlite":
+            open_modes.append(mode)
+        return stream
+
     monkeypatch.setattr(backup_module.os, "fsync", recording_fsync)
     monkeypatch.setattr(backup_module.os, "replace", recording_replace)
+    monkeypatch.setattr(Path, "open", recording_open)
     run_backup(conn, key="fsync-copy", owner="worker", target=backup,
                clock=clock, store=store)
     assert publication_events.count("database_fsync") == 1
     assert publication_events.index("database_fsync") < publication_events.index("manifest_replace")
+    assert "rb+" in open_modes
 
 
 @pytest.mark.parametrize("failed_stage", ["fsync", "hash"])
