@@ -396,6 +396,8 @@ class PayoffArtifactLoader:
         suffix = f": {path}" if path else ""
         if not isinstance(raw, bytes):
             raise PayoffArtifactError("payoff artifact bytes must be bytes")
+        if len(raw) > MAX_ARTIFACT_BYTES:
+            raise PayoffArtifactError("payoff artifact exceeds byte limit")
         digest = CONTENT_HASH_PREFIX + hashlib.sha256(raw).hexdigest()
         if digest != content_hash:
             raise PayoffArtifactError(f"payoff artifact hash mismatch{suffix}")

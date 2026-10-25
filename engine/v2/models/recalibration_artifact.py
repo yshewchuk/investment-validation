@@ -45,7 +45,12 @@ from engine.v2.foundation.canonical import (
     untag_nonfinite,
 )
 
-from .payoff_artifact import PayoffArtifactKey, payoff_artifact_key, read_artifact_bytes
+from .payoff_artifact import (
+    MAX_ARTIFACT_BYTES,
+    PayoffArtifactKey,
+    payoff_artifact_key,
+    read_artifact_bytes,
+)
 
 __all__ = [
     "RECALIBRATION_MAP_ARTIFACT_V1",
@@ -259,6 +264,8 @@ class RecalibrationArtifactLoader:
         suffix = f": {path}" if path else ""
         if not isinstance(raw, bytes):
             raise RecalibrationArtifactError("recalibration artifact bytes must be bytes")
+        if len(raw) > MAX_ARTIFACT_BYTES:
+            raise RecalibrationArtifactError("recalibration artifact exceeds byte limit")
         if CONTENT_HASH_PREFIX + hashlib.sha256(raw).hexdigest() != content_hash:
             raise RecalibrationArtifactError(f"recalibration artifact hash mismatch{suffix}")
         cached = self._cache.get(content_hash)

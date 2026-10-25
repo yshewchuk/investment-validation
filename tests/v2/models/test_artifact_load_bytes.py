@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 import engine.v2.models.payoff_artifact as payoff_artifact_module
+import engine.v2.models.recalibration_artifact as recalibration_artifact_module
 from engine.v2.models.payoff_artifact import (
     PayoffArtifactError,
     PayoffArtifactLoader,
@@ -148,6 +149,28 @@ def test_recalibration_loader_load_bytes_refuses_non_bytes(tmp_path):
     with pytest.raises(RecalibrationArtifactError,
                        match="recalibration artifact bytes must be bytes"):
         loader.load_bytes("not bytes", "sha256:" + "0" * 64)
+
+
+def test_loader_load_bytes_refuses_oversize_bytes(tmp_path, monkeypatch):
+    artifact = make_payoff_line_artifact(
+        _LINE_FIT, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+    )
+    raw = serialize_payoff_artifact(artifact)
+    monkeypatch.setattr(payoff_artifact_module, "MAX_ARTIFACT_BYTES", len(raw) - 1)
+    loader = PayoffArtifactLoader(tmp_path)
+    with pytest.raises(PayoffArtifactError, match="payoff artifact exceeds byte limit"):
+        loader.load_bytes(raw, artifact.content_hash)
+
+
+def test_recalibration_loader_load_bytes_refuses_oversize_bytes(tmp_path, monkeypatch):
+    artifact = build_recalibration_map_artifact(_pairs(), strategy="STR-THRU", alpha=0.5,
+                                                before=CUTOFF)
+    raw = serialize_recalibration_artifact(artifact)
+    monkeypatch.setattr(recalibration_artifact_module, "MAX_ARTIFACT_BYTES", len(raw) - 1)
+    loader = RecalibrationArtifactLoader(tmp_path)
+    with pytest.raises(RecalibrationArtifactError,
+                       match="recalibration artifact exceeds byte limit"):
+        loader.load_bytes(raw, artifact.content_hash)
 
 
 def _write_payoff(tmp_path, artifact) -> PayoffArtifactRef:
