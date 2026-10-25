@@ -117,7 +117,7 @@ def native(tmp_path_factory):
                 "environment": environment_identity(1)}
     yield SimpleNamespace(**vars(source), stored=stored, parent=parent, policy=policy,
                           metadata=metadata, events=events, days=days, producer=producer, market=market,
-                          regime=regime_snapshot, regime_rows=regime_rows)
+                          regime=regime_snapshot, regime_rows=regime_rows, clock=clock, store=store)
     conn.close()
 
 
@@ -453,14 +453,66 @@ def test_regime_history_absent_refuses_before_values(native):
     assert caught.value.code == "CONTRACT_MISMATCH"
 
 
+def _commit_regime_snapshot(native, label, *, shift=0.0):
+    """A second committed ^GSPC ``price_history`` snapshot (distinct closes,
+    distinct dataset version) for identity-drift and rebinding tests."""
+    rows = [dict(ticker=REGIME_TICKER, date=row["date"], close_adj=row["close"] + shift,
+                 close_raw=row["close"] + shift, high_raw=row["close"] + shift,
+                 retrieved_at="2025-01-02T00:00:00Z", deleted=False,
+                 source_kind="legacy_gspc_csv", source_hash="sha256:" + "cd" * 32,
+                 capture_id=f"synthetic-gspc-{label}") for row in native.regime_rows]
+    record = publish_and_inspect(native.store, PRICE_HISTORY_CONTRACT,
+        contract_ref_for(PRICE_HISTORY_CONTRACT),
+        sorted(rows, key=lambda r: (r["ticker"], r["date"], r["retrieved_at"])), REGIME_TICKER)
+    return commit_tables(native.conn, native.clock,
+        {PRICE_HISTORY_TABLE_NAME: [record]}, {PRICE_HISTORY_TABLE_NAME: PRICE_HISTORY_CONTRACT},
+        scope=f"regime-{label}", receipt_id=f"regime-{label}-r1", store=native.store)
+
+
+@pytest.mark.parametrize("case,message", [
+    ("none", "an exact native snapshot reference is required"),
+    ("mapping", "an exact native snapshot reference is required"),
+    ("drift", "snapshot differs from its committed identity")])
+def test_price_history_snapshot_is_admitted_before_it_is_bound(native, case, message):
+    """The regime snapshot goes through the shared ``admit_snapshot`` helper
+    like this module's other snapshot inputs: a missing or non-native reference
+    and a reference that differs from its committed identity all refuse, and
+    nothing is bound into a materialization context."""
+    if case == "none":
+        rejected = None
+    elif case == "mapping":
+        rejected = to_document(native.regime)
+    else:
+        version = native.regime.table_versions[PRICE_HISTORY_TABLE_NAME]
+        rejected = replace(native.regime, table_versions={
+            **native.regime.table_versions,
+            PRICE_HISTORY_TABLE_NAME: replace(version, dataset_version_id="dsv-not-committed")})
+    with pytest.raises(DataError, match=message) as caught:
+        build(native, price_history_snapshot=rejected)
+    assert caught.value.code == "SNAPSHOT_UNRESOLVED"
+
+
+def test_context_binds_the_admitted_price_history_snapshot(native):
+    """The admitted reference is what the context binds: committing a different
+    ^GSPC version and rebuilding changes the bound identity and the
+    ``context_id``, never silently reusing the earlier context."""
+    original = build(native)
+    other = _commit_regime_snapshot(native, "v2", shift=1.0)
+    assert other.table_versions[PRICE_HISTORY_TABLE_NAME].dataset_version_id != \
+        native.regime.table_versions[PRICE_HISTORY_TABLE_NAME].dataset_version_id
+    changed = build(native, price_history_snapshot=other)
+    assert changed["context"]["price_history_snapshot"] != original["context"]["price_history_snapshot"]
+    assert changed["context"]["context_id"] != original["context"]["context_id"]
+
+
 def test_nonpositive_regime_close_refuses(native, monkeypatch):
     """A non-positive ^GSPC close is refused by the existing 'must be positive'
     CONTRACT_MISMATCH; the bad series never reaches add_regime_features."""
     from dataclasses import replace as _replace
     from engine.v2.data import price_history_query
     good = price_history_query.get_price_series
-    def poisoned(repository, query, snapshot):
-        rows = good(repository, query, snapshot)
+    def poisoned(repository, query, snapshot, **kwargs):
+        rows = good(repository, query, snapshot, **kwargs)
         return tuple(_replace(row, close_raw=-1.0) if index == 30 else row
                      for index, row in enumerate(rows))
     monkeypatch.setattr(price_history_query, "get_price_series", poisoned)

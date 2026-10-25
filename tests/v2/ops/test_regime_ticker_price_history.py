@@ -263,7 +263,7 @@ def test_oversize_gspc_file_refuses_before_any_byte_is_read(tmp_path, monkeypatc
         return _ReadRecording()
 
     monkeypatch.setattr(price_history_store.os, "fdopen", _recording_fdopen)
-    with pytest.raises(OpsError) as exc:
+    with pytest.raises(OpsError, match="SOURCE_NOT_FOUND") as exc:
         capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
                 required_tickers=(REGIME_TICKER,))
     assert exc.value.problem.code == "SOURCE_NOT_FOUND"
@@ -290,7 +290,7 @@ def test_symlinked_gspc_file_is_skipped(tmp_path):
     path = _gspc_path(source_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.symlink_to(outside)
-    with pytest.raises(OpsError) as exc:
+    with pytest.raises(OpsError, match="SOURCE_NOT_FOUND") as exc:
         capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
                 required_tickers=(REGIME_TICKER,))
     assert exc.value.problem.code == "SOURCE_NOT_FOUND"
@@ -299,6 +299,13 @@ def test_symlinked_gspc_file_is_skipped(tmp_path):
 
     report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
     assert report["failures"] == []
+    assert report["tickers_seen"] == 2  # AAPL and SPY only -- the link was never a source
+    # The symlinked file was never opened: the committed snapshot has no ^GSPC
+    # partition, so the regime ticker is simply absent from this run.
+    repository = Repository(conn, store)
+    records = repository.fragment_records(
+        repository.resolve(report["result_snapshot_id"]), PRICE_HISTORY_TABLE_NAME)
+    assert REGIME_TICKER not in {record.partition_key for record in records}
 
 
 @pytest.mark.parametrize("shape", ["directory", "fifo"])
@@ -315,7 +322,7 @@ def test_nonregular_gspc_path_is_skipped(tmp_path, shape):
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         os.mkfifo(path)
-    with pytest.raises(OpsError) as exc:
+    with pytest.raises(OpsError, match="SOURCE_NOT_FOUND") as exc:
         capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
                 required_tickers=(REGIME_TICKER,))
     assert exc.value.problem.code == "SOURCE_NOT_FOUND"
@@ -351,7 +358,7 @@ def test_parse_gspc_directly_refuses_swapped_nonregular_paths(tmp_path, shape):
             "2024-01-02,4800.913,4700.913,4705.913,4697.913,4699.913,4700913000000\n"]
         outside.write_text("".join(lines))
         path.symlink_to(outside)
-        with pytest.raises(OSError):
+        with pytest.raises(OSError, match="Too many levels of symbolic links"):
             price_history_store._parse_gspc(entry)
 
 
@@ -361,7 +368,7 @@ def test_malformed_required_regime_ticker_file_fails_like_a_malformed_px_csv(tmp
     _write_sources(source_root, with_spy=True)
     _gspc_path(source_root).parent.mkdir(parents=True, exist_ok=True)
     _gspc_path(source_root).write_bytes(b"not,a,price\nfile\n")
-    with pytest.raises(OpsError) as exc:
+    with pytest.raises(OpsError, match="SOURCE_NOT_FOUND") as exc:
         capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
                 required_tickers=(REGIME_TICKER,))
     assert exc.value.problem.code == "SOURCE_NOT_FOUND"
@@ -389,7 +396,7 @@ def test_missing_required_regime_ticker_refuses_source_not_found(tmp_path):
     conn, clock, store, base = _base_snapshot(tmp_path)
     source_root = tmp_path / "legacy"
     _write_sources(source_root, with_spy=True)  # SPY present, ^GSPC absent
-    with pytest.raises(OpsError) as exc:
+    with pytest.raises(OpsError, match="SOURCE_NOT_FOUND") as exc:
         capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
                  required_tickers=REQUIRED_CAPTURE_TICKERS)
     assert exc.value.problem.code == "SOURCE_NOT_FOUND"
@@ -475,7 +482,9 @@ def test_nightly_trigger_capture_passes_the_shared_required_tickers(
 def test_gspc_read_back_growth_refuses(tmp_path, monkeypatch):
     """A small regular gspc file whose bytes grow past the cap between the
     fstat size check and the capped read still refuses: the fdopen handle's
-    read returns cap+1 bytes, so the read-back length branch fires (not fstat)."""
+    read returns cap+1 bytes, so the read-back length branch fires (not fstat).
+    The refusal is asserted on the read-back error itself, so removing that
+    guard fails here instead of passing on some other refusal reason."""
     conn, clock, store, base = _base_snapshot(tmp_path)
     source_root = tmp_path / "legacy"
     _write_sources(source_root, with_spy=True)
@@ -507,12 +516,18 @@ def test_gspc_read_back_growth_refuses(tmp_path, monkeypatch):
         return _Grown()
 
     monkeypatch.setattr(price_history_store.os, "fdopen", fake_fdopen)
-    with pytest.raises(OpsError) as exc:
-        capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
-                required_tickers=(REGIME_TICKER,))
-    assert exc.value.problem.code == "SOURCE_NOT_FOUND"
-    assert _shadow_head(conn)["snapshot_id"] == base.snapshot_id
+    entry = {"ticker": REGIME_TICKER, "path": path, "byte_size": stat_before.st_size,
+             "mtime": stat_before.st_mtime}
+    with pytest.raises(ValueError, match=f"gspc_daily.csv read back {_GSPC_MAX_BYTES + 1} bytes, "
+                                         f"over the {_GSPC_MAX_BYTES}-byte capture cap"):
+        price_history_store._parse_gspc(entry)
     assert seen == [_GSPC_MAX_BYTES + 1]  # the refusal came from the read-back length, not fstat
+    seen.clear()
+    with pytest.raises(OpsError, match="SOURCE_NOT_FOUND"):
+        capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
+                 required_tickers=(REGIME_TICKER,))
+    assert _shadow_head(conn)["snapshot_id"] == base.snapshot_id
+    assert seen == [_GSPC_MAX_BYTES + 1]
 
 
 def test_gspc_retrieved_at_uses_parse_time_mtime_not_discovery(tmp_path, monkeypatch):

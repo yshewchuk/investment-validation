@@ -407,7 +407,7 @@ def test_panel_reader_called_once_per_ticker(
     reads = []
 
     class CountingRepository(fixture._FakeRepository):
-        def scan(self, query, *, table_name):
+        def scan(self, query, *, table_name, max_object_bytes=None):
             ticker = (query.key_filter[0].values[0]
                       if query.key_filter else "*")
             reads.append((table_name, ticker))
@@ -527,7 +527,7 @@ def test_real_panel_spy_corruption_changes_pinned_event_digest(monkeypatch):
             super().__init__(snapshot, contracts, batches_by_key)
             self.regime_reads = 0
 
-        def scan(self, query, *, table_name):
+        def scan(self, query, *, table_name, max_object_bytes=None):
             if (table_name == fixture.PRICE_HISTORY_TABLE_NAME and query.key_filter
                     and query.key_filter[0].values == ("^GSPC",)):
                 self.regime_reads += 1
@@ -618,7 +618,7 @@ def test_panel_regime_cache_key_includes_snapshot_version_and_window():
             super().__init__(snapshot, contracts, batches_by_key)
             self.regime_scans = 0
 
-        def scan(self, query, *, table_name):
+        def scan(self, query, *, table_name, max_object_bytes=None):
             if (table_name == fixture.PRICE_HISTORY_TABLE_NAME
                     and query.key_filter
                     and query.key_filter[0].values == ("^GSPC",)):
@@ -945,7 +945,7 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
 
     # Create an interval-aware repository subclass
     class IntervalAwareRepository(fixture._FakeRepository):
-        def scan(self, query, *, table_name):
+        def scan(self, query, *, table_name, max_object_bytes=None):
             # Apply the interval/key predicate filtering if query has time_interval
             if query.time_interval is not None:
                 ticker = query.key_filter[0].values[0]

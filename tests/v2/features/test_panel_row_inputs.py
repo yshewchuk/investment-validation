@@ -107,7 +107,7 @@ class _FakeRepository:
                    if stored_table == table_name
                    for row in rows if _bound_row_selected(row, key_filter, time_interval))
 
-    def scan(self, query, *, table_name):
+    def scan(self, query, *, table_name, max_object_bytes=None):
         self.queries.append(query)
         ticker = query.key_filter[0].values[0]
         rows = self._batches.get((table_name, ticker), [])
@@ -440,7 +440,7 @@ def test_12_computed_moves_capped_at_decision_session_not_just_event_date():
         """The shared fake, but honoring the emitted window for ``computed_moves``
         (which the base fake ignores, returning every row for the ticker)."""
 
-        def scan(self, query, *, table_name):
+        def scan(self, query, *, table_name, max_object_bytes=None):
             rows = self._batches.get((table_name, query.key_filter[0].values[0]), [])
             interval = query.time_interval
             if table_name == COMPUTED_MOVES_TABLE_NAME and interval is not None:
@@ -555,21 +555,23 @@ def test_15c_regime_price_query_bounds_pinned_to_decision(monkeypatch):
     """The regime read is exactly one ``get_price_series`` of the pinned
     ``REGIME_TICKER`` as of ``decision_session``: the ``PriceQuery`` bounds
     (ticker, session_date/observation_ceiling, ``lookback_sessions=0``) are
-    asserted, not just the values they return."""
+    asserted, not just the values they return, and the read is byte-bounded by
+    the module's own cap."""
     from engine.v2.data import price_history_query
 
     calls: list = []
     real = price_history_query.get_price_series
 
-    def recording(repository, query, snapshot):
-        calls.append(query)
-        return real(repository, query, snapshot)
+    def recording(repository, query, snapshot, **kwargs):
+        calls.append((query, kwargs))
+        return real(repository, query, snapshot, **kwargs)
 
     monkeypatch.setattr(price_history_query, "get_price_series", recording)
     _scan()
-    regime_queries = [query for query in calls if query.ticker == REGIME_TICKER]
-    assert len(regime_queries) == 1
-    query = regime_queries[0]
+    regime_calls = [(query, kwargs) for query, kwargs in calls if query.ticker == REGIME_TICKER]
+    assert len(regime_calls) == 1
+    query, kwargs = regime_calls[0]
+    assert kwargs == {"max_object_bytes": panel_row_inputs._REGIME_MAX_OBJECT_BYTES}
     assert query.session_date == _DECISION.date().isoformat()
     assert query.observation_ceiling == _DECISION.date().isoformat()
     assert query.lookback_sessions == 0
@@ -643,7 +645,7 @@ class _WindowedComputedRepository(_FakeRepository):
     ``computed_moves`` (like test_12's local variant), so the availability
     filter -- not the fake -- is what the eligibility tests exercise."""
 
-    def scan(self, query, *, table_name):
+    def scan(self, query, *, table_name, max_object_bytes=None):
         rows = self._batches.get((table_name, query.key_filter[0].values[0]), [])
         interval = query.time_interval
         if table_name == COMPUTED_MOVES_TABLE_NAME and interval is not None:
@@ -841,7 +843,7 @@ def test_24_event_day_decision_reads_identically_for_midnight_and_intraday_event
         stored row for the ticker). Key/table selection and every fixture
         value are otherwise unchanged."""
 
-        def scan(self, query, *, table_name):
+        def scan(self, query, *, table_name, max_object_bytes=None):
             rows = self._batches.get((table_name, query.key_filter[0].values[0]), [])
             interval = query.time_interval
             if table_name == "daily_market" and interval is not None:
@@ -898,7 +900,7 @@ class _NoReadRepository(_FakeRepository):
                               key_filter=(), time_interval=None):
         raise AssertionError(f"event_date refusal must precede the {table_name} population bound")
 
-    def scan(self, query, *, table_name):
+    def scan(self, query, *, table_name, max_object_bytes=None):
         raise AssertionError(f"event_date refusal must precede the {table_name} scan")
 
 
@@ -1115,7 +1117,7 @@ class _BoundRecordingRepository(_FakeRepository):
                                              key_filter=key_filter,
                                              time_interval=time_interval)
 
-    def scan(self, query, *, table_name):
+    def scan(self, query, *, table_name, max_object_bytes=None):
         self.scans.append((table_name, query))
         rows = self._batches.get((table_name, query.key_filter[0].values[0]), [])
         selected = [row for row in rows if _bound_row_selected(
@@ -1453,20 +1455,38 @@ def test_44_implied_carry_ignores_a_late_availability_that_history_respects():
 
 def test_45_gspc_rows_before_history_start_are_excluded_from_regime_inputs():
     """A ^GSPC row older than ``history_start`` never reaches the regime
-    series: the panel equals the one over the same fixture without it (the
-    early rows' sentinel closes must not shift the anchor or any ``spy_*``
-    value)."""
-    early = [{"date": day, "close_adj": 1.0, "close_raw": 1.0, "high_raw": 2.0,
-              "retrieved_at": "2024-02-01T00:00:00Z", "deleted": False,
-              "source_kind": "legacy_gspc_csv", "source_hash": fake_hash("gspc-early")}
-             for day in ("2023-11-01", "2023-12-15")]
+    series, and the rows that do reach it are actually used: the composed
+    ``spy_*`` values are the real ``regime.add_regime_features`` outcome over
+    ONLY the in-window fixture rows (the early rows' sentinel closes must not
+    shift the anchor or any value), and the windows the 44 in-window closes can
+    compute are finite -- a panel that discarded the regime data entirely would
+    show every one of them NaN."""
+    in_window = _gspc_rows(periods=44, end="2024-02-14")  # 2024-01-02 .. 2024-02-14
+    assert in_window[0]["date"] == str(_HISTORY_START.date())
+    early = [{"date": day, "close_adj": 900.0 + index, "close_raw": 900.0 + index,
+              "high_raw": 950.0 + index, "retrieved_at": "2024-02-01T00:00:00Z",
+              "deleted": False, "source_kind": "legacy_gspc_csv",
+              "source_hash": fake_hash("gspc-early")}
+             for index, day in enumerate(
+                 str(stamp.date()) for stamp in pd.date_range("2023-04-21", "2024-01-01"))]
     batches = _default_batches()
-    batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)] = (
-        early + batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)])
+    batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)] = early + in_window
     with_early = _scan(batches=batches)
-    baseline = _scan()
+    batches = _default_batches()
+    batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)] = in_window
+    baseline = _scan(batches=batches)
     _rows_equal(with_early.panel_row, baseline.panel_row)
     assert with_early.panel_anchor == baseline.panel_anchor
+    # In-window rows produce real features, never an all-NaN discard.
+    for name in ("spy_ret21", "spy_vol5", "spy_vol20"):
+        assert math.isfinite(baseline.panel_row[name]), baseline.panel_row[name]
+    expected = regime.add_regime_features(
+        pd.DataFrame({"date": [_EVENT], "decision": [_DECISION]}),
+        pd.DataFrame({"date": pd.to_datetime([row["date"] for row in in_window]),
+                      "close": [row["close_raw"] for row in in_window]}),
+        as_of_column="decision").iloc[0]
+    for name in panel_row_inputs._REGIME_COLUMNS:
+        assert _nan_equal(baseline.panel_row[name], expected[name])
 
 
 def test_46_history_start_includes_the_exact_boundary_day_not_the_day_before():
@@ -1482,3 +1502,86 @@ def test_46_history_start_includes_the_exact_boundary_day_not_the_day_before():
     rows = panel_row_inputs._read_regime_prices(repo, snapshot, _HISTORY_START, _DECISION)
     assert rows[0].date == "2024-01-02"
     assert "2024-01-01" not in {row.date for row in rows}
+
+
+class _ByteBoundRepository(_FakeRepository):
+    """The shared fake with ``Repository.scan``'s pre-decode byte bound added:
+    a scan whose ``max_object_bytes`` is below the selected rows' rough object
+    size refuses the repository's own bound error before any row is yielded,
+    and every forwarded cap is recorded per table."""
+
+    def __init__(self, snapshot, contracts, batches_by_key) -> None:
+        super().__init__(snapshot, contracts, batches_by_key)
+        self.byte_caps: list[tuple[str, object]] = []
+
+    def scan(self, query, *, table_name, max_object_bytes=None):
+        self.byte_caps.append((table_name, max_object_bytes))
+        ticker = query.key_filter[0].values[0]
+        rows = self._batches.get((table_name, ticker), [])
+        selected = [row for row in rows if _bound_row_selected(
+            row, query.key_filter, query.time_interval)]
+        if max_object_bytes is not None and sum(len(str(row)) for row in selected) > max_object_bytes:
+            from engine.v2.data import errors
+            raise DataError(errors.make_problem("RESULT_LIMIT_EXCEEDED",
+                                                "object exceeds max_object_bytes",
+                                                details={"table_name": table_name}))
+        yield _Batch(selected)
+
+
+def _byte_bound_reads():
+    snapshot = _snapshot()
+    repo = _ByteBoundRepository(snapshot, _contracts(), _default_batches())
+    return snapshot, repo
+
+
+def test_47_regime_read_forwards_the_module_byte_cap():
+    """The ^GSPC regime read is bounded by ``_REGIME_MAX_OBJECT_BYTES`` (the run-up
+    read of ``key.ticker`` is not this reader's concern and stays uncapped)."""
+    snapshot, repo = _byte_bound_reads()
+    rows = panel_row_inputs._read_regime_prices(repo, snapshot, _HISTORY_START, _DECISION)
+    assert rows and rows[0].close_raw is not None
+    assert repo.byte_caps == [(PRICE_HISTORY_TABLE_NAME,
+                               panel_row_inputs._REGIME_MAX_OBJECT_BYTES)]
+
+
+def test_48_tiny_regime_byte_cap_refuses_before_decode(monkeypatch):
+    """With the cap driven tiny, the regime read refuses the repository's own
+    bound error instead of decoding the fixture's rows."""
+    monkeypatch.setattr(panel_row_inputs, "_REGIME_MAX_OBJECT_BYTES", 1)
+    snapshot, repo = _byte_bound_reads()
+    with pytest.raises(DataError, match="object exceeds max_object_bytes") as caught:
+        panel_row_inputs._read_regime_prices(repo, snapshot, _HISTORY_START, _DECISION)
+    assert caught.value.code == "RESULT_LIMIT_EXCEEDED"
+    assert repo.byte_caps == [(PRICE_HISTORY_TABLE_NAME, 1)]
+
+
+def test_49_nonfinite_regime_close_refuses_in_both_readers():
+    """The shared ``regime.validated_regime_closes`` rule: an infinite close is
+    refused by the panel reader and by the research block builder alike."""
+    from engine.v2.research import magnitude_panel_daily as research_daily
+    rows = list(_gspc_rows(periods=25))
+    rows[5] = {**rows[5], "close_raw": float("inf")}
+    snapshot, repo = _byte_bound_reads()
+    from engine.v2.contracts import PriceSeriesRow
+    series = tuple(PriceSeriesRow(date=row["date"], close_adj=row["close_adj"],
+                                  close_raw=row["close_raw"], high_raw=row["high_raw"],
+                                  retrieved_at=row["retrieved_at"], source_hash=row["source_hash"])
+                   for row in rows)
+    with pytest.raises(DataError, match="regime source closes must be positive") as caught:
+        panel_row_inputs._regime_from_prices(series, _EVENT, _DECISION)
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    with pytest.raises(DataError, match="regime source closes must be positive") as caught:
+        research_daily._spy_blocks(
+            [{"event_id": "synthetic", "event_date": "2024-02-15", "forecasts": [
+                {"horizon_sessions": 1, "source_session_ceiling": "2024-02-14"}]}],
+            [{"date": row["date"], "close": row["close_raw"]} for row in rows])
+    assert caught.value.code == "CONTRACT_MISMATCH"
+
+
+def test_50_regime_closes_validator_is_pure_and_exact():
+    """The shared validator accepts finite positives and raises ``ValueError``
+    (never a typed refusal) for a non-finite or non-positive value."""
+    assert regime.validated_regime_closes([1.0, 4700.5]) == [1.0, 4700.5]
+    for bad in (0.0, -1.0, float("inf"), float("-inf"), float("nan")):
+        with pytest.raises(ValueError, match="finite and positive"):
+            regime.validated_regime_closes([1.0, bad])

@@ -44,7 +44,7 @@ def prediction_dataset():
 
 
 class RegistrationRepository(Repository):
-    def scan(self, query, *, table_name):
+    def scan(self, query, *, table_name, max_object_bytes=None):
         assert table_name == "earnings_events", "registration must not read targets"
         yield from super().scan(query, table_name=table_name)
 

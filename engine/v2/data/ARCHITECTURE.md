@@ -256,7 +256,9 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
    full, and a requested limit above the bound is refused with
    `QUERY_NOT_BOUNDED` before any fragment opens, so the read cannot
    exceed it (`RESULT_LIMIT_EXCEEDED` applies only to streamed rows past
-   an accepted limit). The reader exposes only bars dated
+   an accepted limit). Both readers take an optional `max_object_bytes` keyword
+   forwarded to `Repository.scan`, bounding each fragment's bytes before its
+   values decode (`None` leaves the read byte-unbounded). The reader exposes only bars dated
   on or before the decision session. This permits a session close fetched
   after midnight to be used for that session, while a later-dated bar remains
   unavailable. A vendor may revise historical values in a later retrieval,

@@ -85,7 +85,7 @@ class _FakeRepository:
                    if stored_table == table_name
                    for row in rows if _bound_row_selected(row, key_filter, time_interval))
 
-    def scan(self, query, *, table_name):
+    def scan(self, query, *, table_name, max_object_bytes=None):
         ticker = query.key_filter[0].values[0]
         rows = self._batches.get((table_name, ticker), [])
         selected = [row for row in rows if _bound_row_selected(

@@ -662,13 +662,13 @@ This bounds retained unmatched rows, not total process RSS.
 
 `engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `incremental_tables`,
 `catalog`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`,
-`iv_crush_table`), `engine.v2.contracts` (`RevisionCandidate`, `CompletedCoverage`,
+`iv_crush_table`, `price_history_query`, `price_history_table`, `snapshot_inputs`), `engine.v2.contracts` (`RevisionCandidate`, `CompletedCoverage`,
 `CoverageKey`, `CoverageOutcome`, `TimeInterval`), `engine.v2.contracts.data`
 (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`, `ObjectRef`,
 `TableContractRef`, `ColumnContract`, `TableContract`),
 `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
 `engine.v2.features.panel_math` (`history_features`, `DAILY_STATE_FIELDS`) and
-`engine.v2.features.regime` (`add_regime_features`),
+`engine.v2.features.regime` (`add_regime_features`, `validated_regime_closes`),
 `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`, `iter_canonical_json`,
 `content_hash`, `from_document`, `to_document`, `format_timestamp`, `market_calendar`,
 `experiment_exits.valid_exit_recipe`,

@@ -72,6 +72,12 @@ _RESULT_LIMIT = 10000
 #: Generous margin over add_runup_features's 300-session minimum.
 _RUNUP_LOOKBACK_SESSIONS = 400
 
+#: Pre-decode byte cap for the one ^GSPC regime fragment read per scan: the
+#: regime partition holds the whole index history (tens of MB), so this caps a
+#: pathological rewrite before any value decodes while staying far above any
+#: real ^GSPC series.
+_REGIME_MAX_OBJECT_BYTES = 64 * 1024 * 1024
+
 _IMPLIED_COLUMNS = ("event_ordinal", "admitted", "implied_move_pct",
                     "mean_prior_or_implied", "n_prior_implied")
 _COMPUTED_COLUMNS = ("ticker", "event_date", "realized_move_pct", "skipped",
@@ -307,6 +313,8 @@ def _read_regime_prices(data_repository: repository.Repository, snapshot: Snapsh
     ``close``; ``get_price_series`` refuses ``CONTRACT_MISMATCH`` when the
     pinned snapshot has no rows for the ticker at all -- by decision there is
     no empty-source fallback here (the nightly requires the ticker at capture).
+    The read is byte-bounded by :data:`_REGIME_MAX_OBJECT_BYTES`, so a
+    pathological ^GSPC fragment refuses before its values decode.
     """
     query = PriceQuery(
         ticker=price_history_table.REGIME_TICKER,
@@ -314,7 +322,8 @@ def _read_regime_prices(data_repository: repository.Repository, snapshot: Snapsh
         observation_ceiling=decision.date().isoformat(),
         lookback_sessions=0,
     )
-    rows = price_history_query.get_price_series(data_repository, query, snapshot)
+    rows = price_history_query.get_price_series(data_repository, query, snapshot,
+                                                max_object_bytes=_REGIME_MAX_OBJECT_BYTES)
     start = history_start.date().isoformat()
     return tuple(row for row in rows if row.date >= start)
 
@@ -347,8 +356,9 @@ def _regime_from_prices(regime_rows: tuple[PriceSeriesRow, ...], event_day: pd.T
     The event frame is built from the validated ``event_day`` (no other key
     field is needed): an unnormalized event timestamp would let ``_anchor_index``
     select the event day's own close. A non-finite or non-positive close refuses
-    ``CONTRACT_MISMATCH`` (``regime source closes must be positive``), mirroring
-    the research path's positive-close check.
+    ``CONTRACT_MISMATCH`` (``regime source closes must be positive``) through the
+    shared ``regime.validated_regime_closes`` rule, so this panel path and the
+    research path accept exactly the same values.
     """
     if regime_rows:
         ordered = sorted(regime_rows, key=lambda row: row.date)
@@ -358,10 +368,12 @@ def _regime_from_prices(regime_rows: tuple[PriceSeriesRow, ...], event_day: pd.T
             raise errors.fail("CONTRACT_MISMATCH", "price_history value conversion failed",
                               details={"table_name":
                                        price_history_table.PRICE_HISTORY_TABLE_NAME}) from None
-        if any(not math.isfinite(close) or close <= 0 for close in closes):
+        try:
+            closes = regime.validated_regime_closes(closes)
+        except ValueError:
             raise errors.fail("CONTRACT_MISMATCH", "regime source closes must be positive",
                               details={"table_name":
-                                       price_history_table.PRICE_HISTORY_TABLE_NAME})
+                                       price_history_table.PRICE_HISTORY_TABLE_NAME}) from None
         market = pd.DataFrame(
             {"date": pd.to_datetime([row.date for row in ordered]), "close": closes},
         )

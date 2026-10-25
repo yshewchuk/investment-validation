@@ -17,6 +17,7 @@ from engine.v2.research import (
     magnitude_panel_plan,
     magnitude_panel_table,
     progress,
+    snapshot_inputs,
 )
 
 _DAILY = tuple(panel_math.DAILY_STATE_FIELDS)
@@ -160,7 +161,7 @@ def _source_rows(repository, snapshot, ticker, start, end, limit, max_object_byt
     return sorted(rows, key=lambda row: row["date"])
 
 
-def _read_regime_series(repository, snapshot, start, end, max_source_rows):
+def _read_regime_series(repository, snapshot, start, end, max_source_rows, max_object_bytes):
     """The pinned ``REGIME_TICKER`` (^GSPC) ``price_history`` closes on ``[start, end]``.
 
     Read exactly like ``features.panel_row_inputs._read_regime_prices`` -- one
@@ -169,11 +170,14 @@ def _read_regime_series(repository, snapshot, start, end, max_source_rows):
     series carries no dividend adjustment). A missing ^GSPC partition propagates
     ``get_price_series``'s ``CONTRACT_MISMATCH`` unchanged (no ``daily_market``
     spot fallback); a non-convertible close refuses the same way the panel reader
-    does, and the bounded row cap reuses ``max_source_rows``.
+    does, and the bounded row cap reuses ``max_source_rows``. The materialization's
+    ``max_object_bytes`` is forwarded to that read, so a regime fragment is bound
+    before its values decode, exactly like the daily-market source reads.
     """
     request = PriceQuery(ticker=price_history_table.REGIME_TICKER, session_date=end,
         observation_ceiling=end, lookback_sessions=0)
-    series = price_history_query.get_price_series(repository, request, snapshot)
+    series = price_history_query.get_price_series(repository, request, snapshot,
+        max_object_bytes=max_object_bytes)
     rows = []
     for row in series:
         if row.date < start:
@@ -237,8 +241,10 @@ def _spy_blocks(events, rows):
         "decision": [pd.Timestamp(c["source_session_ceiling"]) for _, c in forecasts]})
     market = pd.DataFrame({"date": pd.to_datetime([row["date"] for row in rows]),
         "close": [row["close"] for row in rows]})
-    if any(row["close"] <= 0 for row in rows):
-        raise errors.fail("CONTRACT_MISMATCH", "regime source closes must be positive")
+    try:
+        regime.validated_regime_closes([row["close"] for row in rows])
+    except ValueError:
+        raise errors.fail("CONTRACT_MISMATCH", "regime source closes must be positive") from None
     calculated = regime.add_regime_features(frame, market, as_of_column="decision")
     dates = [row["date"] for row in rows]
     result = {}
@@ -269,6 +275,9 @@ def build_daily_blocks(repository, source_snapshot, history_snapshot, panel_cont
     with progress.stage("daily block admission", report_refusals=True):
         events, eligibility = _admit(repository, source_snapshot, history_snapshot,
             panel_context, policy, eligibility_metadata, source_start, max_events)
+        # Admitted exactly like the other snapshot inputs, before the regime
+        # reference is bound into the materialization identity below.
+        price_history_snapshot = snapshot_inputs.admit_snapshot(repository, price_history_snapshot)
     ends, by_ticker = {}, {}
     for event in events:
         by_ticker.setdefault(event["ticker"], []).append(event)
@@ -290,7 +299,7 @@ def build_daily_blocks(repository, source_snapshot, history_snapshot, panel_cont
     context = {**identity, "context_id": content_hash(identity)}
     with progress.stage("daily block sources", report_refusals=True):
         regime_rows = _read_regime_series(repository, price_history_snapshot, source_start,
-            regime_end, max_source_rows)
+            regime_end, max_source_rows, max_object_bytes)
         spy = _spy_blocks(events, regime_rows)
     output = []
     meter = progress.Progress("daily block events", len(events))

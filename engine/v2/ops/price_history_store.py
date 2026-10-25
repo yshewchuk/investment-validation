@@ -306,11 +306,12 @@ def _parse_gspc(entry: dict) -> tuple[pd.DataFrame, bytes, str]:
     this ticker's capture exactly as a malformed px csv does (see
     :func:`_parse_and_order_entries`).
 
-    The file is opened once (``O_RDONLY | O_NOFOLLOW | O_NONBLOCK`` -- the
-    ``NOFOLLOW``/``NONBLOCK`` flags refuse, respectively, a symlink swapped in
-    after the discovery check and a FIFO swapped in there, never blocking the
-    open), its type, size and mtime taken from that same fd's ``fstat``, and
-    its bytes read once: a non-regular file or a ``st_size`` over
+    The file is opened once (``O_RDONLY | O_NOFOLLOW | O_NONBLOCK``: ``NOFOLLOW``
+    refuses a symlink swapped in after the discovery check; ``NONBLOCK`` does not
+    refuse a FIFO swapped in there, it only keeps that open from stalling, and
+    the ``S_ISREG`` check on the same fd then refuses the FIFO -- a refusal, never
+    a silent skip), its type, size and mtime taken from that same fd's
+    ``fstat``, and its bytes read once: a non-regular file or a ``st_size`` over
     :data:`_GSPC_MAX_BYTES` raises BEFORE any byte is read (the same error
     path as a malformed csv), and the read itself is capped -- at most
     ``_GSPC_MAX_BYTES + 1`` bytes are taken and more than the cap raises too
