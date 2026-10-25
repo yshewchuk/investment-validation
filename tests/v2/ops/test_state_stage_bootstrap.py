@@ -74,6 +74,18 @@ def _catalog_contents(root, release_id="cand1"):
     return members, hashes
 
 
+def _catalog_pairs(root, release_id="cand1"):
+    body = json.loads(phase5_release.catalog_path(root, release_id).read_bytes())
+    return {(row["member_id"], obj["name"])
+            for row in body["members"] for obj in row["objects"]}
+
+
+def _expected_bootstrap_pairs(states):
+    pairs = {pair for pair in states.values()}
+    pairs.add(("admissible_table:dyn_sv", "t|1"))
+    return pairs
+
+
 _LINE_FIT = {
     "intercept": 0.05, "slope": 0.004, "resid_sd": 0.01, "n": 250,
     "r": 0.42, "residuals": [0.01, -0.02, 0.03, -0.01],
@@ -195,8 +207,19 @@ def test_carry_plan_omits_bootstrap_and_keeps_the_spec_hash(tmp_path):
                             state_refs={"a.json": "j#o"}, manifest_ref="artifact_manifest",
                             source_root=REPO_ROOT)
     assert "bootstrap" not in plan["parameters"]
+    expected_parameters = {
+        "expected_ids": ("phase5_state_stage",),
+        "release_root": str(tmp_path.resolve()),
+        "prior_release_id": "prior1",
+        "release_id": "cand1",
+        "cutoff": "2026-10-01",
+        "state_files": ("a.json",),
+        "input_bindings": {"a.json": "j#o", "legacy_manifest.json": "artifact_manifest"},
+        "mode": "carry",
+    }
+    assert plan["parameters"] == expected_parameters
     spec_hash = plan["spec_hash"]
-    assert spec_hash == content_hash(plan["parameters"])
+    assert spec_hash == content_hash(expected_parameters)
     for key in ("expected_ids", "release_root", "prior_release_id", "release_id",
                 "cutoff", "state_files", "input_bindings", "mode"):
         assert key in plan["parameters"]
@@ -252,6 +275,7 @@ def test_none_prior_stages_a_candidate_catalog_only(tmp_path, monkeypatch):
     assert summary["n_carried"] == 0
     assert summary["release_id"] == "cand1"
     assert _catalog_contents(tmp_path) == (expected_members, expected_hashes)
+    assert _catalog_pairs(tmp_path) == _expected_bootstrap_pairs(_bootstrap_states())
 
 
 def test_no_pool_catalog_requires_matching_bindings(tmp_path, monkeypatch):
@@ -264,6 +288,7 @@ def test_no_pool_catalog_requires_matching_bindings(tmp_path, monkeypatch):
     expected_members, expected_hashes = _expected_bootstrap_objects(_bootstrap_states())
     assert summary["n_new"] == len(expected_hashes)
     assert _catalog_contents(tmp_path) == (expected_members, expected_hashes)
+    assert _catalog_pairs(tmp_path) == _expected_bootstrap_pairs(_bootstrap_states())
 
 
 def test_bindings_differ_refuses_without_writing(tmp_path, monkeypatch):
@@ -383,6 +408,7 @@ def test_rerun_is_idempotent(tmp_path, monkeypatch):
     summary = json.loads((staging / "stage_result.json").read_text())
     assert summary["n_new"] == len(expected_hashes)
     assert _catalog_contents(tmp_path) == (expected_members, expected_hashes)
+    assert _catalog_pairs(tmp_path) == _expected_bootstrap_pairs(_bootstrap_states())
     first = phase5_release.catalog_path(tmp_path, "cand1").read_bytes()
     run_state_stage_worker(parameters, staging)
     assert phase5_release.catalog_path(tmp_path, "cand1").read_bytes() == first
@@ -443,6 +469,8 @@ def test_artifact_file_payloads_refuses_an_unknown_schema(tmp_path):
     ("strategy_id", "other"),
     ("output_names", ("other",)),
     ("role", "other"),
+    ("binding_id", "b2"),
+    ("name", "changed-member"),
 ])
 def test_bindings_differ_by_field_refuses(tmp_path, monkeypatch, vary, value):
     parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
@@ -456,6 +484,9 @@ def test_bindings_differ_by_field_refuses(tmp_path, monkeypatch, vary, value):
         binding = release.bindings[0]
         if vary == "content_hash":
             member = dataclasses.replace(binding.members[0], content_hash=value)
+            binding = dataclasses.replace(binding, members=(member,))
+        elif vary == "name":
+            member = dataclasses.replace(binding.members[0], name=value)
             binding = dataclasses.replace(binding, members=(member,))
         else:
             binding = dataclasses.replace(binding, **{vary: value})
@@ -606,6 +637,7 @@ def test_matching_candidate_cutoff_does_not_conflict_in_pre_check(tmp_path, monk
     summary = json.loads((staging / "stage_result.json").read_text())
     assert summary["n_new"] == len(expected_hashes)
     assert _catalog_contents(tmp_path) == (expected_members, expected_hashes)
+    assert _catalog_pairs(tmp_path) == _expected_bootstrap_pairs(_bootstrap_states())
 
     calls = []
     original_write = phase5_prepare_release.write_release
@@ -716,6 +748,28 @@ def test_write_release_failure_refuses(tmp_path, monkeypatch, error):
     assert "secret-internal-detail" not in str(err.value)
 
 
+@pytest.mark.parametrize("code,expected_details", [
+    ("RELEASE_ID_REUSED", {"code": "ID_CONFLICT"}),
+    ("MANIFEST_UNREADABLE", {"code": "ID_CONFLICT"}),
+    ("DUPLICATE_BINDING", {}),
+])
+def test_write_release_staging_refused_maps_codes(tmp_path, monkeypatch, code,
+                                                   expected_details):
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+
+    def broken(*args, **kwargs):
+        raise deployment.StagingRefused((deployment.ReleaseIssue(
+            path="$.releases[cand1]", code=code, detail="secret-internal-detail"),))
+
+    monkeypatch.setattr(phase5_prepare_release, "write_release", broken)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: candidate release could not be published"
+    assert err.value.problem.details == expected_details
+    assert "secret-internal-detail" not in str(err.value)
+
+
 def test_inventory_build_failure_refuses(tmp_path, monkeypatch):
     parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
     phase5_release.catalog_path(tmp_path, "prior1").unlink()
@@ -764,8 +818,9 @@ def test_tier4_fold_payload_is_in_catalog(tmp_path, monkeypatch):
     body = json.loads(phase5_release.catalog_path(tmp_path, "cand1").read_bytes())
     row = next(row for row in body["members"]
                if row["member_id"] == "tier4_folds:size")
-    names = {obj["name"] for obj in row["objects"]}
-    assert "fold-object.joblib" in names
+    entry = next(obj for obj in row["objects"] if obj["name"] == "fold-object.joblib")
+    stored = (phase5_release.deployment_root(tmp_path) / entry["path"]).read_bytes()
+    assert stored == b"fold-bytes"
 
 
 def test_pinned_panel_identity_is_recorded_in_catalog(tmp_path, monkeypatch):

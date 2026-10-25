@@ -45,7 +45,7 @@ from engine.v2.foundation.canonical import (
     untag_nonfinite,
 )
 
-from .payoff_artifact import PayoffArtifactKey, payoff_artifact_key
+from .payoff_artifact import PayoffArtifactKey, payoff_artifact_key, read_artifact_bytes
 
 __all__ = [
     "RECALIBRATION_MAP_ARTIFACT_V1",
@@ -249,7 +249,7 @@ class RecalibrationArtifactLoader:
         except ValueError as exc:
             raise RecalibrationArtifactError("artifact path escapes artifact root") from exc
         try:
-            raw = path.read_bytes()
+            raw = read_artifact_bytes(path)
         except OSError as exc:
             raise RecalibrationArtifactError(f"missing recalibration artifact: {ref.path}") from exc
         return self.load_bytes(raw, ref.content_hash, path=ref.path)

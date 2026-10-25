@@ -284,6 +284,12 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
         except CatalogConflict as exc:
             raise StageRefused("candidate release could not be published",
                                {"code": "ID_CONFLICT"}) from exc
+        except deployment.StagingRefused as exc:
+            codes = {issue.code for issue in exc.issues}
+            if codes & {"RELEASE_ID_REUSED", "MANIFEST_UNREADABLE"}:
+                raise StageRefused("candidate release could not be published",
+                                   {"code": "ID_CONFLICT"}) from exc
+            raise StageRefused("candidate release could not be published") from exc
         except (PrepareRefused, deployment.DeploymentError, ObjectVerificationError,
                 OSError, ValueError) as exc:
             raise StageRefused("candidate release could not be published") from exc

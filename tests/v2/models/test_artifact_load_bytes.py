@@ -5,15 +5,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import engine.v2.models.payoff_artifact as payoff_artifact_module
 from engine.v2.models.payoff_artifact import (
     PayoffArtifactError,
     PayoffArtifactLoader,
+    PayoffArtifactRef,
     make_payoff_line_artifact,
     serialize_payoff_artifact,
 )
 from engine.v2.models.recalibration_artifact import (
     RecalibrationArtifactError,
     RecalibrationArtifactLoader,
+    RecalibrationArtifactRef,
     serialize_recalibration_artifact,
 )
 from engine.v2.models.training.recalibration import build_recalibration_map_artifact
@@ -122,3 +125,54 @@ def test_recalibration_loader_load_bytes_refuses_non_bytes(tmp_path):
     with pytest.raises(RecalibrationArtifactError,
                        match="recalibration artifact bytes must be bytes"):
         loader.load_bytes("not bytes", "sha256:" + "0" * 64)
+
+
+def _write_payoff(tmp_path, artifact) -> PayoffArtifactRef:
+    raw = serialize_payoff_artifact(artifact)
+    (tmp_path / "artifact.json").write_bytes(raw)
+    return PayoffArtifactRef(path="artifact.json", content_hash=artifact.content_hash)
+
+
+def _write_recalibration(tmp_path, artifact) -> RecalibrationArtifactRef:
+    raw = serialize_recalibration_artifact(artifact)
+    (tmp_path / "artifact.json").write_bytes(raw)
+    return RecalibrationArtifactRef(path="artifact.json", content_hash=artifact.content_hash)
+
+
+def test_loader_load_refuses_oversize_file(tmp_path, monkeypatch):
+    artifact = make_payoff_line_artifact(
+        _LINE_FIT, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+    )
+    ref = _write_payoff(tmp_path, artifact)
+    monkeypatch.setattr(payoff_artifact_module, "MAX_ARTIFACT_BYTES",
+                        len(serialize_payoff_artifact(artifact)) - 1)
+    with pytest.raises(PayoffArtifactError, match="missing payoff artifact: artifact.json"):
+        PayoffArtifactLoader(tmp_path).load(ref)
+
+
+def test_loader_load_loads_normal_file(tmp_path):
+    artifact = make_payoff_line_artifact(
+        _LINE_FIT, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+    )
+    ref = _write_payoff(tmp_path, artifact)
+    loaded = PayoffArtifactLoader(tmp_path).load(ref)
+    assert loaded == artifact
+
+
+def test_recalibration_loader_load_refuses_oversize_file(tmp_path, monkeypatch):
+    artifact = build_recalibration_map_artifact(_pairs(), strategy="STR-THRU", alpha=0.5,
+                                                before=CUTOFF)
+    ref = _write_recalibration(tmp_path, artifact)
+    monkeypatch.setattr(payoff_artifact_module, "MAX_ARTIFACT_BYTES",
+                        len(serialize_recalibration_artifact(artifact)) - 1)
+    with pytest.raises(RecalibrationArtifactError,
+                       match="missing recalibration artifact: artifact.json"):
+        RecalibrationArtifactLoader(tmp_path).load(ref)
+
+
+def test_recalibration_loader_load_loads_normal_file(tmp_path):
+    artifact = build_recalibration_map_artifact(_pairs(), strategy="STR-THRU", alpha=0.5,
+                                                before=CUTOFF)
+    ref = _write_recalibration(tmp_path, artifact)
+    loaded = RecalibrationArtifactLoader(tmp_path).load(ref)
+    assert loaded == artifact
