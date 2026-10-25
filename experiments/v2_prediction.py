@@ -78,9 +78,11 @@ def main(argv=None):
         registration = native.read_native_registration(conn, store, spec,
                                                        max_evidence_bytes=args.max_registration_bytes)
         if magnitude:
-            registration, _ = admit_magnitude_inputs(conn, store, repository, spec, **binding)
+            registration, _ = admit_magnitude_inputs(conn, store, repository, spec, **binding,
+                                                    max_evidence_bytes=args.max_registration_bytes)
         else:
-            registration = native.require_native_registration(conn, store, repository, spec, expected=registration, **binding)
+            registration = native.require_native_registration(conn, store, repository, spec, expected=registration, **binding,
+                                                             max_evidence_bytes=args.max_registration_bytes)
         exp_number = None
         experiment_id = registration.document["execution_plan"]["experiment_id"]
         if args.no_record_export:

@@ -88,3 +88,40 @@ def test_cli_rejects_invalid_budget_before_catalog_or_store(tmp_path, monkeypatc
         assert diagnostic == f"argument --max-registration-bytes: invalid int value: {budget!r}"
     else:
         assert diagnostic == "--max-registration-bytes must be a positive SQLite-safe byte budget"
+
+
+@pytest.mark.parametrize("route", ["gate", "positive", "magnitude"])
+@pytest.mark.parametrize("budget", [None, CAP + 1])
+def test_cli_carries_initial_read_budget_into_current_request_revalidation(tmp_path, monkeypatch, capsys, route, budget):
+    cli = v2_gate if route == "gate" else v2_prediction
+    calls, closed = [], []
+    connection = SimpleNamespace(close=lambda: closed.append(True))
+    registration = SimpleNamespace(document={})
+    monkeypatch.setattr(cli, "connect", lambda *a, **k: connection)
+    monkeypatch.setattr(cli, "experiment_spec_from_document", lambda document: None)
+    monkeypatch.setattr(cli.foundation, "ArtifactStore", lambda path: None)
+    monkeypatch.setattr(cli, "Repository", lambda *a, **k: None)
+    owner = cli.gate if route == "gate" else cli.magnitude_report if route == "magnitude" else cli.prediction
+    monkeypatch.setattr(owner, "validate_gate_spec" if route == "gate" else "validate_prediction_spec", lambda spec: None)
+    def initial(*args, **kwargs):
+        calls.append(("read", kwargs["max_evidence_bytes"]))
+        return registration
+    def revalidate(*args, **kwargs):
+        calls.append(("revalidate", kwargs["max_evidence_bytes"]))
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration exceeds its UTF-8 byte budget",
+                   details={"registration_bytes": limit + 1, "max_registration_bytes": limit})
+    monkeypatch.setattr(native, "read_native_registration", initial)
+    monkeypatch.setattr(cli if route == "magnitude" else native,
+                        "admit_magnitude_inputs" if route == "magnitude" else "require_native_registration", revalidate)
+    monkeypatch.setattr(cli.outcomes, "publish_native_refusal", lambda *a, **k: None)
+    args = arguments(cli, tmp_path)
+    if route == "magnitude":
+        args += ["--target", "absolute_move", "--magnitude-training-start", "2020-01-01",
+                 "--magnitude-labels-before", "2025-01-01"]
+    limit = CAP if budget is None else budget
+    if budget is not None:
+        args += ["--max-registration-bytes", str(budget)]
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().out) == {"refused": "RESOURCE_LIMIT_EXCEEDED", "refusal_ref": None,
+        "details": {"registration_bytes": limit + 1, "max_registration_bytes": limit}}
+    assert calls == [("read", limit), ("revalidate", limit)] and closed == [True]

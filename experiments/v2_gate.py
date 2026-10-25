@@ -59,7 +59,7 @@ def main(argv=None):
         if "final_read" in registration.document:
             raise fail("HOLDOUT_ACCESS_DENIED", "gate evaluation has no final-read authority")
         registration = native.require_native_registration(conn, store, repository, spec,
-                                                          expected=registration, **binding)
+            expected=registration, **binding, max_evidence_bytes=args.max_registration_bytes)
         exp_number = None
         experiment_id = registration.document["execution_plan"]["experiment_id"]
         if args.no_record_export:

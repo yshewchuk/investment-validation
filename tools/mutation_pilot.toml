@@ -717,6 +717,7 @@ tests = [
     "tests/v2/ops/test_headroom.py",
     "tests/v2/ops/test_native_evidence_bounds.py",
     "tests/v2/ops/test_native_registration_read_bounds.py",
+    "tests/v2/ops/test_native_registration_revalidation_bounds.py",
     "tests/v2/ops/test_native_registration_large_binding.py",
     "tests/v2/ops/test_sweep_native_bounds.py",
     "tests/v2/ops/test_sweep_report_bounds.py",

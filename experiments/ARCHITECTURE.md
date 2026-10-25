@@ -80,7 +80,8 @@ fold training candidates and evaluation IDs. It calls the research physical
 preflight on exactly that union before any label read, returning the original
 registration and detached preflight evidence. Unused selected-window events
 are excluded. Admission/metadata/isolation refusals propagate with no writes,
-retry or partial return. The magnitude CLI uses this admission before replay.
+retry or partial return. The magnitude CLI uses this admission before replay;
+its finite `max_evidence_bytes` (default 16 MiB, None invalid) reaches both registration rechecks before label preflight.
 
 ### Fixed magnitude baseline
 
@@ -202,7 +203,7 @@ Registration/replay never fit. Native smoke/recorded publication remains unchang
 | Current scope head cannot be resolved | `SNAPSHOT_UNRESOLVED`; no fallback. |
 | Invalid context or explicitly excluded/unknown event | Shared `HOLDOUT_ACCESS_DENIED`; no outcome read. |
 | Admission has no native registration | `INVALID_EXPERIMENT_SPEC`; no implicit registration. |
-| Loader/register budget is not a built-in integer in `[1, 2**62 - 1]` | `INVALID_EXPERIMENT_SPEC` before preparation or catalog/store access; booleans and None are invalid. |
+| Loader/register/require budget is not a built-in integer in `[1, 2**62 - 1]` | `INVALID_EXPERIMENT_SPEC` before preparation or catalog/store access; booleans and None are invalid. Magnitude admission delegates this finite bound after pure clock validation, before labels. |
 | Any CLI action accepting `--max-registration-bytes`, including gate/prediction register, receives an invalid value | Argument-parser error exits 2 before catalog/store access; noninteger text uses argparse's integer-conversion diagnostic, out-of-range integers use the positive SQLite-safe budget diagnostic. |
 | Prepared registration bytes or a schema/expected-ref-valid stored registration reference exceed the explicit cap | Non-retryable `RESOURCE_LIMIT_EXCEEDED`, fixed message and integer `registration_bytes`/`max_registration_bytes` details; before publication/reservation or object read. Existing oversized bindings need a consistent explicit larger finite cap, not repair. Prediction/gate CLI expose details and may publish their existing refusal receipt, never a reservation/outcome. |
 | Catalog evidence exceeds its UTF-8/canonical budget, has malformed text/JSON, or registration evidence fails integrity | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; SQL transfer and reference-size admission precede decoding/object reads, respectively. No writes. |

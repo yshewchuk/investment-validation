@@ -56,7 +56,7 @@ def test_large_history_binding_requires_finite_override_and_loads_unchanged(tmp_
                                        code_root=support.ROOT, as_of_month=support.MONTH)
         assert support.catalog_rows(source.conn) == before_rows
         assert object_bytes(source.store) == before_objects
-        # Persist a stored-shape fixture through the existing reservation writer.
+        # Persist a stored-shape fixture through public register's explicit-cap path.
         # This does not claim the expanded metadata passed fresh preparation.
         with monkeypatch.context() as patch:
             patch.setattr(native, "prepare_native_registration", lambda *a, **k: (registration, spec))

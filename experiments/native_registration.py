@@ -93,8 +93,10 @@ class NativeRegistration:
 def prepare_native_registration(repository, spec, *, code_root, as_of_month, scope, event_ids,
              final_read=None, expected=None, magnitude_training_start=None, magnitude_labels_before=None,
              admission=None, magnitude_feature_snapshot_id=None, magnitude_history_start=None, magnitude_fit_model=None,
-             snapshot=None, extra_environment=None):
+             snapshot=None, extra_environment=None, max_evidence_bytes=None):
     """Prepare immutable registration/spec inputs without reserving or evaluating."""
+    if max_evidence_bytes is not None and not valid_registration_read_budget(max_evidence_bytes):
+        raise fail("INVALID_EXPERIMENT_SPEC", "registration read requires a positive SQLite-safe byte budget")
     if not isinstance(spec, ExperimentSpec):
         raise fail("INVALID_EXPERIMENT_SPEC", "native registration requires an experiment specification")
     plan = resolve_experiment_plan(spec)
@@ -179,7 +181,7 @@ def prepare_native_registration(repository, spec, *, code_root, as_of_month, sco
     key = content_hash({"experiment_id": plan.experiment_id, "arm": plan.arms[0]})
     run_id = "native_" + key.removeprefix("sha256:")
     if admission is not None:
-        original = verified_registration_bytes(*admission, run_id)
+        original = verified_registration_bytes(*admission, run_id, max_evidence_bytes=max_evidence_bytes)
         if original is None and magnitude is not None:
             raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
         if original is not None:
@@ -308,15 +310,19 @@ def reserve_native_registration(conn, store, registration, spec, *, max_evidence
 def require_native_registration(conn, store, repository, spec, *, code_root,
                                 as_of_month, scope="shadow", event_ids=None, final_read=None, expected=None,
                                 magnitude_training_start=None, magnitude_labels_before=None,
-                                magnitude_feature_snapshot_id=None, magnitude_history_start=None, magnitude_fit_model=None):
+                                magnitude_feature_snapshot_id=None, magnitude_history_start=None, magnitude_fit_model=None,
+                                max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES):
     """Read-only admission; never create registration, ledger, or result rows."""
+    if not valid_registration_read_budget(max_evidence_bytes):
+        raise fail("INVALID_EXPERIMENT_SPEC", "registration read requires a positive SQLite-safe byte budget")
     registration, _ = prepare_native_registration(repository, spec, code_root=code_root, as_of_month=as_of_month,
                                scope=scope, event_ids=event_ids, final_read=final_read, expected=expected,
                                magnitude_training_start=magnitude_training_start,
                                magnitude_labels_before=magnitude_labels_before, admission=(conn, store),
                                magnitude_feature_snapshot_id=magnitude_feature_snapshot_id,
-                               magnitude_history_start=magnitude_history_start, magnitude_fit_model=magnitude_fit_model)
-    if not native_registration_exists(conn, store, registration):
+                               magnitude_history_start=magnitude_history_start, magnitude_fit_model=magnitude_fit_model,
+                               max_evidence_bytes=max_evidence_bytes)
+    if not native_registration_exists(conn, store, registration, max_evidence_bytes=max_evidence_bytes):
         raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
     return registration
 
