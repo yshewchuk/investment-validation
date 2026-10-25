@@ -26,16 +26,20 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path, monkeypatch):
     prepare_backup(conn, "b1", {"evidence.bin": ref}, clock=clock)
     backup = tmp_path / "backup"
     recorded_uris = []
+    recorded_sql = []
     real_connect = backup_module.sqlite3.connect
 
     def recording_connect(database, *args, **kwargs):
+        connection = real_connect(database, *args, **kwargs)
         if kwargs.get("uri"):
             recorded_uris.append(database)
-        return real_connect(database, *args, **kwargs)
+            connection.set_trace_callback(recorded_sql.append)
+        return connection
 
     monkeypatch.setattr(backup_module.sqlite3, "connect", recording_connect)
     manifest = run_backup(conn, key="b1", owner="worker", target=backup, clock=clock, store=store)
     assert recorded_uris == [(backup / "b1.sqlite").resolve().as_uri() + "?mode=ro"]
+    assert any(statement.upper() == "PRAGMA QUICK_CHECK" for statement in recorded_sql)
     assert manifest["artifacts"]["evidence.bin"]["content_hash"] == ref.content_hash
     assert manifest["database"] == "sha256:" + hashlib.sha256(
         (backup / "b1.sqlite").read_bytes()).hexdigest()
@@ -106,9 +110,11 @@ def test_backup_cleanup_failure_is_retryable(tmp_path, monkeypatch):
         destination.write_bytes(b"not a sqlite database")
 
     real_unlink = Path.unlink
+    cleanup_attempts = []
 
     def selective_unlink(self, *args, **kwargs):
         if self.name == "cleanup-failure.sqlite":
+            cleanup_attempts.append(self)
             raise OSError("simulated cleanup failure")
         return real_unlink(self, *args, **kwargs)
 
@@ -120,6 +126,7 @@ def test_backup_cleanup_failure_is_retryable(tmp_path, monkeypatch):
     assert error.value.code == "BACKUP_FAILED"
     assert error.value.problem.retryable is True
     assert (backup / "cleanup-failure.sqlite").exists()
+    assert cleanup_attempts == [backup / "cleanup-failure.sqlite"]
 
 
 def test_backup_rejects_existing_catalog_with_foreign_key_violation(tmp_path):
@@ -150,18 +157,71 @@ def test_backup_rejects_existing_catalog_with_foreign_key_violation(tmp_path):
     assert state == "running"
 
 
-def test_backup_reject_oversized_manifest(tmp_path):
+def test_backup_rejects_oversized_manifest(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "oversized-manifest", {}, clock=clock)
     backup = tmp_path / "backup"
     backup.mkdir()
     (backup / "oversized-manifest.manifest.json").write_bytes(b"x" * (1024 * 1024 + 1))
+
+    real_open = Path.open
+    read_sizes = []
+
+    class _RecordingStream:
+        def __init__(self, stream):
+            self._stream = stream
+
+        def __enter__(self):
+            self._stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._stream.__exit__(*args)
+
+        def read(self, size=-1):
+            read_sizes.append(size)
+            return self._stream.read(size)
+
+    def recording_open(self, *args, **kwargs):
+        stream = real_open(self, *args, **kwargs)
+        mode = kwargs.get("mode", args[0] if args else "r")
+        if self.name == "oversized-manifest.manifest.json" and mode == "rb":
+            return _RecordingStream(stream)
+        return stream
+
+    monkeypatch.setattr(Path, "open", recording_open)
     with pytest.raises(OpsError) as error:
         run_backup(conn, key="oversized-manifest", owner="worker", target=backup,
                    clock=clock, store=store)
     assert error.value.code == "BACKUP_FAILED"
     assert error.value.problem.retryable is True
+    assert read_sizes == [backup_module._MAX_MANIFEST_BYTES + 1]
+
+
+def test_backup_accept_manifest_at_size_cap(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "cap-manifest", {}, clock=clock)
+    backup = tmp_path / "backup"
+
+    def crash(point):
+        if point == "after_manifest_before_ack":
+            raise RuntimeError("ack lost")
+
+    with pytest.raises(RuntimeError):
+        run_backup(conn, key="cap-manifest", owner="worker", target=backup,
+                   clock=clock, store=store, fault=crash)
+    manifest_path = backup / "cap-manifest.manifest.json"
+    manifest = manifest_path.read_bytes()
+    manifest_path.write_bytes(
+        manifest + b" " * (backup_module._MAX_MANIFEST_BYTES - len(manifest)))
+    clock.advance(301)
+    run_backup(conn, key="cap-manifest", owner="retry", target=backup,
+               clock=clock, store=store)
+    assert conn.execute(
+        "SELECT state FROM outbox WHERE kind='backup' AND logical_key='cap-manifest'"
+    ).fetchone()[0] == "delivered"
 
 
 def test_manifest_success_before_ack_is_idempotent_and_keys_are_safe(tmp_path):
