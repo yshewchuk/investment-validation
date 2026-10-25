@@ -22,11 +22,11 @@ The `design/ops-package-split` PR records the proposed module homes and move sli
 
 | Condition | Outcome |
 |---|---|
+| Catalog backup copy or verification fails | `BACKUP_FAILED` with retryable flag; rejected-copy removal is attempted and may fail. |
 | Catalog read | Uses the supplied connection directly; no health-specific transaction or cache (an existing caller transaction still applies). |
 | Receipt evidence invalid | `VALIDATION_FAILED`; CLI removes the configured output and does not retry. |
 | Persisted release association omits its primary ID | `VALIDATION_FAILED`; session evidence is not emitted. |
-| Temporary write, file fsync or replace fails | Before replacement, the prior destination remains; a partial or complete sibling temporary file may remain. |
-| Directory fsync fails after replacement | The new destination exists; crash durability is uncertain. |
+| Local output persistence fails | Before replacement, the prior destination remains and a sibling temporary may remain; after replacement, directory-fsync failure leaves the new destination with uncertain crash durability. |
 
 The operator interface is the versioned command protocol exposed by `engine/v2/ops/cli.py`
 (`python3 -m engine.v2.ops <command>`), derived directly from its `argparse` definitions:

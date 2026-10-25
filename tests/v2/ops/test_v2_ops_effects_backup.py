@@ -176,8 +176,11 @@ def test_backup_effect_preserves_safe_refusal_message(tmp_path, monkeypatch):
             raise fail("BACKUP_FAILED", "backup database is empty")
 
         monkeypatch.setattr(backup_module, "_verified_database_hash", reject_copy)
-        with pytest.raises(OpsError):
+        with pytest.raises(OpsError) as error:
             backup_effect(conn, store, claim, root, clock=clock)
+        assert error.value.code == "BACKUP_FAILED"
+        assert error.value.problem.message == "backup database is empty"
+        assert error.value.problem.retryable is True
         row = conn.execute(
             "SELECT state, receipt_json FROM outbox WHERE kind='backup'"
         ).fetchone()
@@ -311,6 +314,7 @@ def test_backup_rejects_oversized_manifest(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(("contents", "message"), [
     (b"{", "backup manifest is invalid"),
+    (b"\xff", "backup manifest is invalid"),
     (b"{}", "backup manifest differs"),
 ])
 def test_backup_rejects_invalid_existing_manifest(tmp_path, contents, message):
@@ -323,7 +327,7 @@ def test_backup_rejects_invalid_existing_manifest(tmp_path, contents, message):
         if point == "after_manifest_before_ack":
             raise RuntimeError("ack lost")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="ack lost"):
         run_backup(conn, key="bad-manifest", owner="worker", target=backup,
                    clock=clock, store=store, fault=crash)
     (backup / "bad-manifest.manifest.json").write_bytes(contents)
@@ -340,18 +344,56 @@ def test_backup_fsyncs_database_copy(tmp_path, monkeypatch):
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "fsync-copy", {}, clock=clock)
     backup = tmp_path / "backup"
-    fsynced_database_paths = []
+    publication_events = []
     real_fsync = backup_module.os.fsync
+    real_replace = backup_module.os.replace
 
     def recording_fsync(fd):
         if Path(f"/proc/self/fd/{fd}").resolve().name == "fsync-copy.sqlite":
-            fsynced_database_paths.append(fd)
+            publication_events.append("database_fsync")
         return real_fsync(fd)
 
+    def recording_replace(source, destination):
+        publication_events.append("manifest_replace")
+        return real_replace(source, destination)
+
     monkeypatch.setattr(backup_module.os, "fsync", recording_fsync)
+    monkeypatch.setattr(backup_module.os, "replace", recording_replace)
     run_backup(conn, key="fsync-copy", owner="worker", target=backup,
                clock=clock, store=store)
-    assert len(fsynced_database_paths) == 1
+    assert publication_events.count("database_fsync") == 1
+    assert publication_events.index("database_fsync") < publication_events.index("manifest_replace")
+
+
+@pytest.mark.parametrize("failed_stage", ["fsync", "hash"])
+def test_backup_fsync_or_hash_failure_is_retryable(tmp_path, monkeypatch, failed_stage):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    key = "copy-" + failed_stage + "-failure"
+    prepare_backup(conn, key, {}, clock=clock)
+    backup = tmp_path / "backup"
+    real_fsync = backup_module.os.fsync
+    real_hash = backup_module.file_hash
+
+    def fail_fsync(_fd):
+        raise OSError("simulated database fsync failure")
+
+    def fail_hash(path, **kwargs):
+        if Path(path).name == key + ".sqlite":
+            raise OSError("simulated database hash failure")
+        return real_hash(path, **kwargs)
+
+    if failed_stage == "fsync":
+        monkeypatch.setattr(backup_module.os, "fsync", fail_fsync)
+    else:
+        monkeypatch.setattr(backup_module, "file_hash", fail_hash)
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key=key, owner="worker", target=backup, clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.message == "backup database verification failed"
+    assert error.value.problem.retryable is True
+    assert not (backup / (key + ".sqlite")).exists()
+    assert not (backup / (key + ".manifest.json")).exists()
 
 
 def test_backup_accept_manifest_at_size_cap(tmp_path):
@@ -364,7 +406,7 @@ def test_backup_accept_manifest_at_size_cap(tmp_path):
         if point == "after_manifest_before_ack":
             raise RuntimeError("ack lost")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="ack lost"):
         run_backup(conn, key="cap-manifest", owner="worker", target=backup,
                    clock=clock, store=store, fault=crash)
     manifest_path = backup / "cap-manifest.manifest.json"

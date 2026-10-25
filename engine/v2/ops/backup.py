@@ -72,7 +72,7 @@ def _delivered_or_stale(conn, kind, logical_key):
 
 
 def _verified_database_hash(database, *, check_integrity=True):
-    """Return the hash after read-only quick_check and integrity checks."""
+    """Return the hash after read-only quick_check and optional integrity checks."""
     try:
         if database.stat().st_size == 0:
             raise fail("BACKUP_FAILED", "backup database is empty")
@@ -116,7 +116,7 @@ def _verify_existing_manifest(manifest_path, manifest):
         raise fail("BACKUP_FAILED", "backup manifest exceeds 1 MiB")
     try:
         existing = json.loads(captured)
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise fail("INTEGRITY_FAILED", "backup manifest is invalid") from error
     if existing != manifest:
         raise fail("INTEGRITY_FAILED", "backup manifest differs")
