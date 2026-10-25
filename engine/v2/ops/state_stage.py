@@ -161,13 +161,15 @@ def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, stat
         prior_release_id=prior_release_id, release_id=release_id, cutoff=cutoff,
         state_files=tuple(sorted(refs)),
         input_bindings={**refs, "legacy_manifest.json": manifest_ref}, mode=mode,
-        bootstrap=dict(bootstrap) if bootstrap is not None else None)
+        bootstrap=bootstrap)
     problems = state_stage_parameter_problems(None, params)
     if problems:
         raise fail("INVALID_REQUEST", "state stage plan is invalid",
                    details={"problems": list(problems)})
     parameters = vars(params)
-    if parameters.get("bootstrap") is None:
+    if parameters.get("bootstrap") is not None:
+        parameters = {**parameters, "bootstrap": dict(parameters["bootstrap"])}
+    else:
         parameters = {key: value for key, value in parameters.items() if key != "bootstrap"}
     root3 = Path(source_root)
     return {"schema_version": "operations_plan.v1.0", "kind": "phase5_state_stage",

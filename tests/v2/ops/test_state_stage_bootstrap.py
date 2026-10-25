@@ -950,3 +950,21 @@ def test_frozen_state_replaced_between_classification_and_load(tmp_path, monkeyp
         run_state_stage_worker(parameters, staging)
     assert str(err.value) == "VALIDATION_FAILED: a bound state file could not be loaded"
     assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+
+
+@pytest.mark.parametrize("bootstrap", [
+    [("tier4_dir", "/t"), ("panel_catalog", "/c"), ("panel_snapshot_id", "s"),
+     ("panel_artifact_root", "/a")],
+    "bootstrap",
+    42,
+])
+def test_plan_refuses_a_non_mapping_bootstrap_as_invalid_request(tmp_path, bootstrap):
+    with pytest.raises(OpsError) as err:
+        state_stage_plan(release_root=str(tmp_path), prior_release_id=None,
+                         release_id="cand1", cutoff="2026-10-01",
+                         state_refs={"a.json": "j#o"}, manifest_ref="artifact_manifest",
+                         source_root=REPO_ROOT, mode="bootstrap", bootstrap=bootstrap)
+    assert err.value.code == "INVALID_REQUEST"
+    assert err.value.problem.details == {"problems": [
+        "bootstrap must be a mapping with tier4_dir, panel_catalog, "
+        "panel_snapshot_id and panel_artifact_root"]}
