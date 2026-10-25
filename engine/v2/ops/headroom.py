@@ -266,54 +266,98 @@ def _scratch_entries(conn, store, plan):
     return entries
 
 
+def _profile_memory_limit(name, recorded_bytes):
+    """The current policy ``memory_bytes`` for a reservation profile name.
+
+    Reservation rows pin the ``memory_bytes`` of the policy in force when the
+    attempt was admitted; tonight's headroom is measured against the limit
+    still in force, so a name that remains in ``DEFAULT_POLICY`` reports that
+    profile's ``memory_bytes``. A retired name has no current limit: the
+    largest ``memory_bytes`` recorded for it in the window is reported
+    instead, never the row's arbitrary last-seen value.
+    """
+    try:
+        return profile_named(DEFAULT_POLICY, name).memory_bytes
+    except OpsError:
+        return recorded_bytes
+
+
 def _memory_profile_entries(conn):
-    """``memory_peak:<profile>`` entries for every reservation profile with
+    """One ``memory_peak:<profile>`` entry per reservation profile with
     attempts in the recent window.
 
-    A group with at least one finished attempt carrying a recorded peak gets
-    a measured entry; a group whose window attempts are all unfinished (or
-    peak-less) gets an ``UNMEASURED`` entry against its reserved
-    ``memory_bytes`` -- a profile the plan's attempts ran under but never
-    measured must show as unmeasured, never as absent. The generic
-    ``memory_peak`` UNMEASURED entry is kept only for a window with no
-    attempts at all: a catalog that has never run an attempt.
+    Grouping is by profile name alone, so a profile admitted under several
+    reservation limits (policy changes across the window) still reports one
+    entry, never a duplicate name. A profile with at least one finished
+    attempt carrying a recorded peak gets a measured entry whose peak is the
+    group MAX; a profile whose window attempts are all unfinished (or
+    peak-less) gets an ``UNMEASURED`` entry -- a profile the plan's attempts
+    ran under but never measured must show as unmeasured, never as absent.
+    The limit is the current policy ``memory_bytes`` when the profile still
+    exists in it, else the max recorded ``memory_bytes`` for that profile.
+    The generic ``memory_peak`` UNMEASURED entry is kept only for a window
+    with no attempts at all: a catalog that has never run an attempt.
     """
     if not conn.execute("SELECT 1 FROM attempts LIMIT 1").fetchone():
         # The window is the newest _RECENT_ATTEMPTS rowids, so it holds no
         # attempts exactly when the table is empty.
         return [_unmeasured("memory_peak", 0, "bytes",
                             "no finished attempt has a recorded memory peak")]
-    entries = []
     rows = conn.execute(
         "WITH recent AS (SELECT rowid AS r FROM attempts "
         "ORDER BY rowid DESC LIMIT ?) "
-        "SELECT rr.profile AS profile, rr.memory_bytes AS memory_bytes, "
-        "MAX(a.memory_peak_bytes) AS peak FROM attempts a "
+        "SELECT rr.profile AS profile, "
+        "MAX(CASE WHEN a.ended_at IS NOT NULL AND a.memory_peak_bytes IS NOT NULL "
+        "THEN a.memory_peak_bytes END) AS peak, "
+        "MAX(rr.memory_bytes) AS memory_bytes FROM attempts a "
         "JOIN resource_reservations rr ON rr.attempt_id = a.attempt_id "
         "WHERE a.rowid IN (SELECT r FROM recent) "
-        "AND a.ended_at IS NOT NULL AND a.memory_peak_bytes IS NOT NULL "
-        "GROUP BY rr.profile, rr.memory_bytes ORDER BY peak DESC",
+        "GROUP BY rr.profile ORDER BY peak DESC, profile",
         (_RECENT_ATTEMPTS,)).fetchall()
+    entries = []
     for row in rows:
-        entries.append(_entry(f"memory_peak:{row['profile']}", row["peak"],
-                              row["memory_bytes"], "bytes",
-                              "max memory_peak_bytes of recent finished attempts "
-                              "in this reservation profile"))
-    unmeasured_rows = conn.execute(
+        limit = _profile_memory_limit(row["profile"], row["memory_bytes"])
+        if row["peak"] is None:
+            entries.append(_unmeasured(f"memory_peak:{row['profile']}", limit, "bytes",
+                                       "no finished attempt with a recorded "
+                                       "memory peak in the recent window"))
+        else:
+            entries.append(_entry(f"memory_peak:{row['profile']}", row["peak"], limit,
+                                  "bytes", "max memory_peak_bytes of recent finished "
+                                  "attempts in this reservation profile"))
+    return entries
+
+
+def _rss_cap_entry(conn, max_rss_gb):
+    """The ``rss_cap_gb`` entry, scoped to the newest attempt's epoch.
+
+    The epoch is that of the newest attempt in the recent window -- the
+    ``ORDER BY rowid DESC LIMIT 1`` row, whether it finished or measured
+    nothing -- and the usage is the peak over only that epoch's finished
+    attempts with a recorded peak inside the window. An epoch with no such
+    attempt is ``UNMEASURED``: the cap must not silently fall back to an
+    older supervisor epoch's peak and report OK for a newest epoch that was
+    never measured. An attempts row is created when the attempt starts, so
+    rowid order is insertion order and the window needs no sort.
+    """
+    peak = conn.execute(
         "WITH recent AS (SELECT rowid AS r FROM attempts "
         "ORDER BY rowid DESC LIMIT ?) "
-        "SELECT rr.profile AS profile, rr.memory_bytes AS memory_bytes FROM attempts a "
-        "JOIN resource_reservations rr ON rr.attempt_id = a.attempt_id "
+        "SELECT MAX(a.memory_peak_bytes) AS peak FROM attempts a "
         "WHERE a.rowid IN (SELECT r FROM recent) "
-        "GROUP BY rr.profile, rr.memory_bytes "
-        "HAVING SUM(CASE WHEN a.ended_at IS NOT NULL AND a.memory_peak_bytes IS NOT NULL "
-        "THEN 1 ELSE 0 END) = 0 ORDER BY rr.profile, rr.memory_bytes",
-        (_RECENT_ATTEMPTS,)).fetchall()
-    for row in unmeasured_rows:
-        entries.append(_unmeasured(f"memory_peak:{row['profile']}", row["memory_bytes"],
-                                   "bytes", "no finished attempt with a recorded "
-                                   "memory peak in the recent window"))
-    return entries
+        "AND a.ended_at IS NOT NULL AND a.memory_peak_bytes IS NOT NULL "
+        "AND a.supervisor_epoch = "
+        "(SELECT b.supervisor_epoch FROM attempts b "
+        "WHERE b.rowid IN (SELECT r FROM recent) "
+        "ORDER BY b.rowid DESC LIMIT 1)",
+        (_RECENT_ATTEMPTS,)).fetchone()["peak"]
+    if peak is None:
+        return _unmeasured("rss_cap_gb", int(max_rss_gb * _GIB), "bytes",
+                           "the newest supervisor epoch has no finished attempt "
+                           "with a recorded memory peak")
+    return _entry("rss_cap_gb", int(peak), int(max_rss_gb * _GIB), "bytes",
+                  "largest attempt memory peak of the most recent supervisor "
+                  "epoch in the recent window vs --max-rss-gb")
 
 
 def _memory_entries(conn, max_rss_gb):
@@ -331,30 +375,7 @@ def _memory_entries(conn, max_rss_gb):
     """
     entries = _memory_profile_entries(conn)
     if max_rss_gb is not None:
-        # Scope the cap to the same recent window: the epoch of the latest
-        # finished attempt in the window, and the peak over only that epoch's
-        # finished attempts inside the window. An attempts row is created when
-        # the attempt starts, so rowid order is insertion order and the window
-        # needs no sort.
-        peak = conn.execute(
-            "WITH recent AS (SELECT rowid AS r FROM attempts "
-            "ORDER BY rowid DESC LIMIT ?) "
-            "SELECT MAX(a.memory_peak_bytes) AS peak FROM attempts a "
-            "WHERE a.rowid IN (SELECT r FROM recent) "
-            "AND a.ended_at IS NOT NULL AND a.memory_peak_bytes IS NOT NULL "
-            "AND a.supervisor_epoch = "
-            "(SELECT b.supervisor_epoch FROM attempts b "
-            "WHERE b.rowid IN (SELECT r FROM recent) "
-            "AND b.ended_at IS NOT NULL AND b.memory_peak_bytes IS NOT NULL "
-            "ORDER BY b.rowid DESC LIMIT 1)",
-            (_RECENT_ATTEMPTS,)).fetchone()["peak"]
-        if peak is None:
-            entries.append(_unmeasured("rss_cap_gb", int(max_rss_gb * _GIB), "bytes",
-                                       "no finished attempt has a recorded memory peak"))
-        else:
-            entries.append(_entry("rss_cap_gb", int(peak), int(max_rss_gb * _GIB), "bytes",
-                                  "largest attempt memory peak of the most recent "
-                                  "supervisor epoch in the recent window vs --max-rss-gb"))
+        entries.append(_rss_cap_entry(conn, max_rss_gb))
     return entries
 
 

@@ -19,6 +19,9 @@ from tests.ops_support import FakeClock
 
 MINIMUM_SCRATCH_BYTES = profile_named(DEFAULT_POLICY, "legacy_score").scratch_bytes
 MATERIALIZE_SCRATCH_BYTES = profile_named(DEFAULT_POLICY, "materialize").scratch_bytes
+LEGACY_SCORE_MEMORY_BYTES = profile_named(DEFAULT_POLICY, "legacy_score").memory_bytes
+VALIDATION_MEMORY_BYTES = profile_named(DEFAULT_POLICY, "validation").memory_bytes
+MATERIALIZE_MEMORY_BYTES = profile_named(DEFAULT_POLICY, "materialize").memory_bytes
 
 
 @pytest.mark.parametrize("pct,expected", [
@@ -119,14 +122,20 @@ def test_mixed_statuses_aggregate_to_the_worst_exit_two(catalog):
     manifest_id = publish(conn, store, clock, manifest_document(MINIMUM_SCRATCH_BYTES // 4),
                           "legacy_input_manifest.v1.0")
     _seed_finished_attempt(conn, attempt_id="ok1", profile="legacy_score",
-                           memory_bytes=1000, peak=500, ended_at="2026-10-01T00:00:00Z")
+                           memory_bytes=LEGACY_SCORE_MEMORY_BYTES,
+                           peak=LEGACY_SCORE_MEMORY_BYTES // 2,
+                           ended_at="2026-10-01T00:00:00Z")
     ok = report_for(catalog, nightly_plan_document(manifest_id))
     assert {item["status"] for item in ok["limits"]} == {"OK"}
     assert (ok["status"], ok["exit_code"]) == ("OK", 0)
     _seed_finished_attempt(conn, attempt_id="warn1", profile="validation",
-                           memory_bytes=1000, peak=850, ended_at="2026-10-02T00:00:00Z")
+                           memory_bytes=VALIDATION_MEMORY_BYTES,
+                           peak=int(0.85 * VALIDATION_MEMORY_BYTES),
+                           ended_at="2026-10-02T00:00:00Z")
     _seed_finished_attempt(conn, attempt_id="fail1", profile="materialize",
-                           memory_bytes=1000, peak=990, ended_at="2026-10-03T00:00:00Z")
+                           memory_bytes=MATERIALIZE_MEMORY_BYTES,
+                           peak=int(0.99 * MATERIALIZE_MEMORY_BYTES),
+                           ended_at="2026-10-03T00:00:00Z")
     mixed = report_for(catalog, nightly_plan_document(manifest_id))
     statuses = {item["status"] for item in mixed["limits"]}
     assert {"OK", "WARN", "FAIL"} <= statuses
@@ -299,7 +308,8 @@ def test_rss_cap_entry_only_when_requested(catalog):
     assert entry["limit"] == int(1.5 * 1024 ** 3)
     assert entry["status"] == "UNMEASURED"
     assert entry["pct"] is None
-    assert "no finished attempt has a recorded memory peak" in entry["detail"]
+    assert "the newest supervisor epoch has no finished attempt with a " \
+        "recorded memory peak" in entry["detail"]
     assert document["status"] == "UNMEASURED"
     assert document["exit_code"] == 1
 
@@ -493,7 +503,7 @@ def test_profile_with_only_unfinished_attempts_is_unmeasured_not_absent(catalog)
     assert "memory_peak" not in by_name  # the generic entry is for an empty window
     entry = by_name["memory_peak:validation"]
     assert (entry["status"], entry["usage"], entry["limit"], entry["pct"]) == \
-        ("UNMEASURED", 0, 2000, None)
+        ("UNMEASURED", 0, VALIDATION_MEMORY_BYTES, None)
     assert entry["detail"] == \
         "no finished attempt with a recorded memory peak in the recent window"
     assert (document["status"], document["exit_code"]) == ("UNMEASURED", 1)
@@ -512,8 +522,9 @@ def test_memory_entries_group_by_profile_and_scope_rss_to_latest_epoch(catalog):
     by_name = {item["name"]: item
                for item in headroom._memory_entries(conn, max_rss_gb=1.0)}
     assert by_name["memory_peak:legacy_score"]["usage"] == 900
-    assert by_name["memory_peak:legacy_score"]["limit"] == 1000
+    assert by_name["memory_peak:legacy_score"]["limit"] == LEGACY_SCORE_MEMORY_BYTES
     assert by_name["memory_peak:validation"]["usage"] == 600  # MAX over the profile group
+    assert by_name["memory_peak:validation"]["limit"] == VALIDATION_MEMORY_BYTES
     # the rss peak follows the most recent finished attempt's epoch (ep-2), not a
     # global max: b1/b2 (500, 600) count, a1's higher 900 in ep-1 does not.
     assert by_name["rss_cap_gb"]["usage"] == 600
@@ -534,6 +545,61 @@ def test_rss_cap_uses_the_latest_epoch_peak_not_the_global_max(catalog):
     assert by_name["memory_peak:legacy_score"]["usage"] == 9000  # both epochs count
     assert by_name["rss_cap_gb"]["usage"] == 1000  # only ep-2, the latest epoch
     assert by_name["rss_cap_gb"]["status"] == "OK"
+
+
+def test_rss_cap_unmeasured_when_newest_epoch_has_no_finished_peak(catalog):
+    """The newest attempt in the window is ep-2's running attempt; ep-1's
+    finished 9000 peak must not feed the cap through an older-epoch fallback:
+    the newest epoch has no finished attempt with a peak, so the limit is
+    UNMEASURED and the report exits 1, never OK."""
+    conn, store, clock = catalog
+    manifest_id = publish(conn, store, clock, manifest_document(1000),
+                          "legacy_input_manifest.v1.0")
+    _seed_finished_attempt(conn, attempt_id="a1", profile="legacy_score",
+                           memory_bytes=10000, peak=9000, ended_at="2026-10-01T00:00:00Z")
+    _seed_unfinished_attempt(conn, attempt_id="u1", profile="legacy_score",
+                             memory_bytes=10000, epoch="ep-2", boot="boot-2")
+    document = report_for(catalog, nightly_plan_document(manifest_id), max_rss_gb=1.0)
+    by_name = {item["name"]: item for item in document["limits"]}
+    entry = by_name["rss_cap_gb"]
+    assert (entry["status"], entry["usage"], entry["pct"]) == ("UNMEASURED", 0, None)
+    assert entry["limit"] == int(1.0 * 1024 ** 3)
+    assert entry["detail"] == \
+        "the newest supervisor epoch has no finished attempt with a recorded memory peak"
+    assert by_name["memory_peak:legacy_score"]["status"] == "OK"  # the profile peak stands
+    assert (document["status"], document["exit_code"]) == ("UNMEASURED", 1)
+
+
+def test_one_memory_entry_per_profile_across_reservation_limits(catalog):
+    """Two reservations for one profile with different memory_bytes produce
+    one entry, not one per (profile, memory_bytes) group: the peak is the
+    group MAX and the limit is the current policy memory_bytes."""
+    conn, _store, _clock = catalog
+    _seed_finished_attempt(conn, attempt_id="a1", profile="legacy_score",
+                           memory_bytes=1000, peak=500, ended_at="2026-10-01T00:00:00Z")
+    _seed_finished_attempt(conn, attempt_id="a2", profile="legacy_score",
+                           memory_bytes=2000, peak=900, ended_at="2026-10-02T00:00:00Z")
+    entries = headroom._memory_entries(conn, max_rss_gb=None)
+    assert [item["name"] for item in entries] == ["memory_peak:legacy_score"]
+    entry = entries[0]
+    assert entry["usage"] == 900  # MAX over the group, not per-limit rows
+    assert entry["limit"] == LEGACY_SCORE_MEMORY_BYTES
+    assert entry["status"] == "OK"
+
+
+def test_retired_profile_limit_is_max_recorded_memory(catalog):
+    """A reservation profile no longer in DEFAULT_POLICY falls back to the
+    largest memory_bytes recorded for it in the window, never a refusal."""
+    conn, _store, _clock = catalog
+    _seed_finished_attempt(conn, attempt_id="a1", profile="retired_kind",
+                           memory_bytes=1000, peak=500, ended_at="2026-10-01T00:00:00Z")
+    _seed_finished_attempt(conn, attempt_id="a2", profile="retired_kind",
+                           memory_bytes=2000, peak=1500, ended_at="2026-10-02T00:00:00Z")
+    entries = headroom._memory_entries(conn, max_rss_gb=None)
+    assert [item["name"] for item in entries] == ["memory_peak:retired_kind"]
+    assert entries[0]["limit"] == 2000
+    assert entries[0]["usage"] == 1500
+    assert entries[0]["status"] == "OK"  # 75% of the max recorded limit
 
 
 def test_old_high_peak_attempt_outside_the_recent_window_is_ignored(
