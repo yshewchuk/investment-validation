@@ -395,13 +395,13 @@ def test_panel_reader_called_once_per_ticker(
 
     history = pd.bdate_range(end=fixture._DECISION, periods=300)
     batches = fixture._default_batches()
-    batches[("daily_market", "SPY")] = fixture._spy_rows(periods=300)
+    batches[(fixture.PRICE_HISTORY_TABLE_NAME, "^GSPC")] = fixture._gspc_rows(periods=300)
     for ticker in ("AAA", "BBB"):
         batches[(fixture.COMPUTED_MOVES_TABLE_NAME, ticker)] = \
             fixture._computed_rows([(history[20].date().isoformat(), 4.0, False)])
     price_history_table, price_history_rows = next(
         (table, rows) for (table, _ticker), rows in batches.items()
-        if table == "price_history" and rows)
+        if table == "price_history" and rows and _ticker != "^GSPC")
     batches[(price_history_table, "BBB")] = price_history_rows
     snapshot, contracts = _panel_snapshot_with_option_chains(fixture)
     reads = []
@@ -471,7 +471,7 @@ def test_panel_reader_called_once_per_ticker(
     assert {event["key"]["ticker"] for event in events} == {"AAA", "BBB"}
     counts = Counter(reads)
     first_build_pairs = (
-        ("daily_market", "SPY"),
+        (fixture.PRICE_HISTORY_TABLE_NAME, "^GSPC"),
         (fixture.COMPUTED_MOVES_TABLE_NAME, "AAA"),
         (fixture.COMPUTED_MOVES_TABLE_NAME, "BBB"),
         (fixture.PRICE_HISTORY_TABLE_NAME, "AAA"),
@@ -479,10 +479,11 @@ def test_panel_reader_called_once_per_ticker(
         ("daily_market", "AAA"),
         ("daily_market", "BBB"),
     )
-    assert counts[("daily_market", "SPY")] == 1
+    assert counts[(fixture.PRICE_HISTORY_TABLE_NAME, "^GSPC")] == 1
     for pair in first_build_pairs[1:]:
         assert counts[pair] == 1, pair
-    assert batches[("daily_market", "SPY")] == fixture._spy_rows(periods=300)
+    assert batches[(fixture.PRICE_HISTORY_TABLE_NAME, "^GSPC")] == \
+        fixture._gspc_rows(periods=300)
     event_bytes = json.dumps(
         events, sort_keys=True, separators=(",", ":")).encode("utf-8")
     # Pinned digest of the event bytes: the shared panel read must not change output.
@@ -509,13 +510,13 @@ def test_real_panel_spy_corruption_changes_pinned_event_digest(monkeypatch):
 
     history = pd.bdate_range(end=fixture._DECISION, periods=300)
     batches = fixture._default_batches()
-    spy_rows = fixture._spy_rows(periods=300)
-    batches[("daily_market", "SPY")] = spy_rows
+    regime_rows = fixture._gspc_rows(periods=300)
+    batches[(fixture.PRICE_HISTORY_TABLE_NAME, "^GSPC")] = regime_rows
     batches[(fixture.COMPUTED_MOVES_TABLE_NAME, "AAA")] = fixture._computed_rows([
         (history[20].date().isoformat(), 4.0, False)])
     price_table, price_rows = next(
         (table, rows) for (table, _ticker), rows in batches.items()
-        if table == fixture.PRICE_HISTORY_TABLE_NAME and rows)
+        if table == fixture.PRICE_HISTORY_TABLE_NAME and rows and _ticker != "^GSPC")
     batches[(price_table, "AAA")] = price_rows
     snapshot, contracts = _panel_snapshot_with_option_chains(fixture)
     event_key = BoardRequest(
@@ -524,12 +525,12 @@ def test_real_panel_spy_corruption_changes_pinned_event_digest(monkeypatch):
     class CountingRepository(fixture._FakeRepository):
         def __init__(self, batches_by_key):
             super().__init__(snapshot, contracts, batches_by_key)
-            self.spy_reads = 0
+            self.regime_reads = 0
 
         def scan(self, query, *, table_name):
-            if (table_name == "daily_market" and query.key_filter
-                    and query.key_filter[0].values == ("SPY",)):
-                self.spy_reads += 1
+            if (table_name == fixture.PRICE_HISTORY_TABLE_NAME and query.key_filter
+                    and query.key_filter[0].values == ("^GSPC",)):
+                self.regime_reads += 1
             yield from super().scan(query, table_name=table_name)
 
         def fragment_records(self, snapshot_ref, table_name):
@@ -579,14 +580,15 @@ def test_real_panel_spy_corruption_changes_pinned_event_digest(monkeypatch):
         events, sort_keys=True, separators=(",", ":")).encode("utf-8")
     assert hashlib.sha256(event_bytes).hexdigest() == (
         "4d5a12389ad105096b6a7cb3e0198b4f03003ba5490cfc7e3de4391a88762ccc")
-    assert repository.spy_reads == 1
+    assert repository.regime_reads == 1
 
     changed_batches = {
         **batches,
-        ("daily_market", "SPY"): [dict(row) for row in spy_rows],
+        (fixture.PRICE_HISTORY_TABLE_NAME, "^GSPC"): [dict(row) for row in regime_rows],
     }
-    changed_batches[("daily_market", "SPY")][-1]["spot"] = (
-        float(changed_batches[("daily_market", "SPY")][-1]["spot"]) + 100.0)
+    changed_batches[(fixture.PRICE_HISTORY_TABLE_NAME, "^GSPC")][-1]["close_raw"] = (
+        float(changed_batches[(fixture.PRICE_HISTORY_TABLE_NAME, "^GSPC")][-1]["close_raw"])
+        + 100.0)
     changed_repository = CountingRepository(changed_batches)
     changed_events, changed_refusals = nrp.build_native_score_batch_events(
         changed_repository, snapshot, as_of=fixture._DECISION.date().isoformat(),
@@ -594,18 +596,19 @@ def test_real_panel_spy_corruption_changes_pinned_event_digest(monkeypatch):
     assert changed_refusals["refusals"] == []
     assert changed_events[0]["panel_row"]["spy_ret252"] != (
         events[0]["panel_row"]["spy_ret252"]), (
-        "the mutated final SPY value must reach the real regime calculation")
+        "the mutated final ^GSPC close must reach the real regime calculation")
     changed_bytes = json.dumps(
         changed_events, sort_keys=True, separators=(",", ":")).encode("utf-8")
     assert hashlib.sha256(changed_bytes).hexdigest() != (
         "4d5a12389ad105096b6a7cb3e0198b4f03003ba5490cfc7e3de4391a88762ccc"), (
-        "changing a consumed SPY value must break the pinned event digest")
-    assert changed_repository.spy_reads == 1
+        "changing a consumed ^GSPC close must break the pinned event digest")
+    assert changed_repository.regime_reads == 1
 
 
-def test_panel_spy_cache_key_includes_snapshot_version_and_window():
-    """The build-scoped SPY cache separates by snapshot identity, pinned daily_market
-    dataset version and read window -- and never stubs the real panel path."""
+def test_panel_regime_cache_key_includes_snapshot_version_and_window():
+    """The build-scoped regime cache separates by snapshot identity, pinned
+    ``price_history`` dataset version and read window -- and never stubs the
+    real panel path."""
     import dataclasses
 
     import tests.v2.features.test_panel_row_inputs as fixture
@@ -613,13 +616,13 @@ def test_panel_spy_cache_key_includes_snapshot_version_and_window():
     class CountingRepository(fixture._FakeRepository):
         def __init__(self, snapshot, contracts, batches_by_key) -> None:
             super().__init__(snapshot, contracts, batches_by_key)
-            self.spy_scans = 0
+            self.regime_scans = 0
 
         def scan(self, query, *, table_name):
-            if (table_name == "daily_market"
+            if (table_name == fixture.PRICE_HISTORY_TABLE_NAME
                     and query.key_filter
-                    and query.key_filter[0].values == ("SPY",)):
-                self.spy_scans += 1
+                    and query.key_filter[0].values == ("^GSPC",)):
+                self.regime_scans += 1
             yield from super().scan(query, table_name=table_name)
 
     def _run(repository, snapshot, *, history_start):
@@ -628,15 +631,15 @@ def test_panel_spy_cache_key_includes_snapshot_version_and_window():
             history_start=history_start, spy_market_cache=shared)
 
     batches = fixture._default_batches()
-    batches[("daily_market", "SPY")] = fixture._spy_rows(periods=300)
+    batches[(fixture.PRICE_HISTORY_TABLE_NAME, "^GSPC")] = fixture._gspc_rows(periods=300)
     original = fixture._snapshot()
     version_changed = dataclasses.replace(
         original,
         table_versions={
             **original.table_versions,
-            "daily_market": dataclasses.replace(
-                original.table_versions["daily_market"],
-                dataset_version_id="dsv-dm-next"),
+            fixture.PRICE_HISTORY_TABLE_NAME: dataclasses.replace(
+                original.table_versions[fixture.PRICE_HISTORY_TABLE_NAME],
+                dataset_version_id="dsv-ph-next"),
         })
     snapshot_changed = dataclasses.replace(original, snapshot_id="snap-panel-next")
 
@@ -651,9 +654,9 @@ def test_panel_spy_cache_key_includes_snapshot_version_and_window():
     _run(version_repo, version_changed, history_start=fixture._HISTORY_START)
     _run(snapshot_repo, snapshot_changed, history_start=fixture._HISTORY_START)
 
-    assert original_repo.spy_scans == 2
-    assert version_repo.spy_scans == 1
-    assert snapshot_repo.spy_scans == 1
+    assert original_repo.regime_scans == 2
+    assert version_repo.regime_scans == 1
+    assert snapshot_repo.regime_scans == 1
     assert len(shared) == 4
 
 
@@ -935,7 +938,7 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
     old_day = history[20].date().isoformat()
     assert old_day < history[-253].date().isoformat()
     batches = fixture._default_batches()
-    batches[("daily_market", "SPY")] = fixture._spy_rows(periods=300)
+    batches[(fixture.PRICE_HISTORY_TABLE_NAME, "^GSPC")] = fixture._gspc_rows(periods=300)
     batches[(fixture.COMPUTED_MOVES_TABLE_NAME, "AAA")] = \
         fixture._computed_rows([(old_day, 4.0, False)])
     snapshot, contracts = _panel_snapshot_with_option_chains(fixture)
@@ -1052,11 +1055,12 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
 
     # Regression: sufficient decision-calendar history must not admit a row
     # whose real panel read cannot produce the longest regime value. Same
-    # calendar history and price-history coverage, a thin SPY daily_market
-    # batch, and the real scan_panel_row path -- never a mocked
+    # calendar history and price-history coverage, a thin ^GSPC
+    # price_history batch, and the real scan_panel_row path -- never a mocked
     # _shared_panel_rows or panel reader.
     thin_batches = dict(batches)
-    thin_batches[("daily_market", "SPY")] = fixture._spy_rows(periods=22)
+    thin_batches[(fixture.PRICE_HISTORY_TABLE_NAME, "^GSPC")] = \
+        fixture._gspc_rows(periods=22)
     thin_repository = IntervalAwareRepository(snapshot, contracts,
                                               thin_batches)
     calendar_calls_before_thin = len(calendar_row_calls)

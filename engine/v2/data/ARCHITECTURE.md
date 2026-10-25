@@ -845,6 +845,16 @@ Root doc §5 invariants this package is responsible for:
   but fully tombstoned ticker refuses); for a ticker the source does not list,
   in the prior dataset version. The gap surfaces at capture rather than as a failed native calendar scan
   (`CONTRACT_MISMATCH`, no `price_history` for the ticker) in the nightly.
+- **The regime ticker is a declared `price_history` dependency; `daily_market.spot`
+  is never a close.** `daily_market.spot` is the ORATS `stockPrice` intraday
+  snapshot, not an official close — never use it as a close series.
+  `price_history_table.REGIME_TICKER` (`^GSPC`) is the declared dependency
+  feeding the panel's nine `spy_*` regime features (the names are historical;
+  they are `^GSPC`-based), sourced from `gspc_daily.csv`
+  (`source_kind="legacy_gspc_csv"`, parsed `close_adj = close_raw = Close`,
+  `high_raw = High` — an index close carries no dividend adjustment). Capture
+  requires it exactly as the calendar ticker: the nightly and
+  `ops price-history capture` refuse `SOURCE_NOT_FOUND` when it is absent.
 - **A `price_history` retrieval never drops stored history.** A full-history
   retrieval that omits any currently live stored date (truncated end,
   mid-history gap, or empty), or starts later than the live history, is refused

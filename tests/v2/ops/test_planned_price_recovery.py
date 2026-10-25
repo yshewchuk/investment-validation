@@ -14,6 +14,7 @@ from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.recovery import SupervisorLock
 from tests.data_scan_support import RECEIPT, fake_hash, publish_and_inspect
 from tests.v2.ops.test_v2_ops_price_history import _SEC, _SEC_REF, _securities_row
+from tests.v2.ops.test_regime_ticker_price_history import _write_gspc
 from tests.v2.ops.test_v2_ops_snapshot_stages import (
     SESSION as PLAN_SESSION,
 )
@@ -398,6 +399,7 @@ def test_real_nightly_planner_pins_refreshed_capture_before_input_manifest(
 
     args = cli.parser().parse_args(_plan_files(case))
     calls = install_fetcher(case.tmp)
+    _write_gspc(case.tmp)  # the capture now requires REGIME_TICKER alongside SPY
     open_catalog = bootstrap.open_catalog
     monkeypatch.setattr(bootstrap, "open_catalog", lambda path, **kwargs:
                         open_catalog(case.tmp / "catalog.sqlite", **kwargs))

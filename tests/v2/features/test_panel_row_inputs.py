@@ -1,11 +1,11 @@
 """Direct tests for ``engine.v2.features.panel_row_inputs.scan_panel_row``.
 
 One fake repository serves the four pinned-snapshot reads the composition needs
-from a single fixture: ``daily_market`` (for both ``key.ticker`` and the fixed
-``"SPY"``), ``computed_moves``, and ``price_history``. Every row of the
-ARCHITECTURE.md panel-row R1-R6 table is exercised, plus retry idempotency and
-strategy independence. The construction style mirrors
-``tests/test_v2_features_daily_state_inputs.py``.
+from a single fixture: ``daily_market`` (``key.ticker``), ``computed_moves``,
+and ``price_history`` (both the ``REGIME_TICKER`` ``"^GSPC"`` regime series and
+``key.ticker``'s run-up series). Every row of the ARCHITECTURE.md panel-row
+R1-R6 table is exercised, plus retry idempotency and strategy independence.
+The construction style mirrors ``tests/test_v2_features_daily_state_inputs.py``.
 """
 from __future__ import annotations
 
@@ -25,8 +25,12 @@ from engine.v2.contracts.data import (
 from engine.v2.data.computed_moves import build_rows
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_TABLE_NAME
 from engine.v2.data.errors import DataError
-from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT, PRICE_HISTORY_TABLE_NAME
-from engine.v2.features import panel_math, panel_row_inputs
+from engine.v2.data.price_history_table import (
+    PRICE_HISTORY_CONTRACT,
+    PRICE_HISTORY_TABLE_NAME,
+    REGIME_TICKER,
+)
+from engine.v2.features import panel_math, panel_row_inputs, regime
 from engine.v2.features.panel_row_inputs import PanelRowInputs, scan_panel_row
 from engine.v2.ops.native_board_universe import BoardRequest
 from tests.data_scan_support import contract_for, contract_ref_for, fake_hash
@@ -187,18 +191,30 @@ def _price_rows(n=320, *, end="2024-01-20"):
 def _default_batches():
     return {
         ("daily_market", "AAA"): _dm_rows("AAA", ["2024-02-04", _DAILY_STATE_SOURCE]),
-        ("daily_market", "SPY"): _spy_rows(),
+        (PRICE_HISTORY_TABLE_NAME, REGIME_TICKER): _gspc_rows(),
         (COMPUTED_MOVES_TABLE_NAME, "AAA"): _computed_rows(
             [("2024-01-10", 2.0, False), ("2024-01-11", -1.0, False)]),
         (PRICE_HISTORY_TABLE_NAME, "AAA"): _price_rows(),
     }
 
 
-def _spy_rows(periods=20):
-    days = [str(d.date()) for d in pd.date_range(end=_REGIME_SOURCE, periods=periods, freq="D")]
-    return [{"ticker": "SPY", "date": pd.Timestamp(day), "spot": 500.0 + i,
-             "src_iv": "orats", "implied_move": 1.0}
+def _gspc_rows(periods=20, *, end=_REGIME_SOURCE):
+    """The ``REGIME_TICKER`` ``price_history`` fixture rows: the regime
+    series' closes (``close_raw``, 500.0+i on consecutive days ending
+    ``end``)."""
+    days = [str(d.date()) for d in pd.date_range(end=end, periods=periods, freq="D")]
+    return [{"date": day, "close_adj": 500.0 + i, "close_raw": 500.0 + i,
+             "high_raw": 500.0 + i, "retrieved_at": "2024-02-01T00:00:00Z",
+             "deleted": False, "source_kind": "legacy_gspc_csv",
+             "source_hash": fake_hash("gspc")}
             for i, day in enumerate(days)]
+
+
+def _gspc_rows_after_decision(periods=3, *, end="2024-02-18"):
+    """Rows that exist but resolve no eligible bar at ``_DECISION``: the
+    regime series' own no-history input (NaN features, NaT anchor), never a
+    missing-ticker refusal. Pass a later ``end`` for a later decision."""
+    return _gspc_rows(periods=periods, end=end)
 
 
 def _key(strategy="STR-X"):
@@ -232,11 +248,11 @@ def _rows_equal(a, b):
 
 def test_1_happy_path_all_four_reads_and_max_anchor():
     # add_regime_features needs j >= 21 (22 rows, anchor at the last) for a
-    # non-NaN spy_ret21, so this test widens the SPY batch; every other test
+    # non-NaN spy_ret21, so this test widens the ^GSPC batch; every other test
     # keeps the default 20-row fixture.
-    spy = _spy_rows(periods=22)
+    gspc = _gspc_rows(periods=22)
     batches = _default_batches()
-    batches[("daily_market", "SPY")] = spy
+    batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)] = gspc
     result = _scan(batches=batches)
     assert isinstance(result, PanelRowInputs)
     panel = result.panel_row
@@ -249,11 +265,11 @@ def test_1_happy_path_all_four_reads_and_max_anchor():
     # the earlier 2024-01-12); the anchor is the latest.
     assert result.panel_anchor == pd.Timestamp(_DAILY_STATE_SOURCE)
     # spy_* and runup_* keys survive as plain floats; the ema fallback is the mean.
-    # regime.py's formula, mirrored over the same spots: every SPY date is
+    # regime.py's formula, mirrored over the same closes: every ^GSPC date is
     # strictly before both the event and the decision, so the anchor is the
-    # last row (j = len - 1) and spy_ret21 = (spot / closes[j - 21] - 1) * 100.
-    spots = [row["spot"] for row in spy]
-    expected_ret21 = (spots[-1] / spots[-1 - 21] - 1.0) * 100
+    # last row (j = len - 1) and spy_ret21 = (close / closes[j - 21] - 1) * 100.
+    closes = [row["close_raw"] for row in gspc]
+    expected_ret21 = (closes[-1] / closes[-1 - 21] - 1.0) * 100
     assert panel["spy_ret21"] == pytest.approx(expected_ret21)
     assert isinstance(panel["signed_streak"], float)
     assert panel["ema12r_abs"] == 1.5  # n_prior < 12 -> falls back to mean_prior_abs_move
@@ -295,7 +311,9 @@ def test_4_no_computed_moves_rows_keeps_history_empty():
 
 def test_5_no_spy_rows_gives_nan_regime_features():
     batches = _default_batches()
-    batches[("daily_market", "SPY")] = []
+    # Rows exist (the read itself succeeds) but none is eligible through the
+    # decision: regime's own no-history input, never a missing-ticker refusal.
+    batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)] = _gspc_rows_after_decision()
     panel = _scan(batches=batches).panel_row
     for col in ("spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol5",
                 "spy_vol20", "spy_vol60", "spy_vol252", "spy_vol20_rel252"):
@@ -361,8 +379,8 @@ def test_8_all_contributing_anchors_absent_gives_none():
     batches = _default_batches()
     # No eligible daily_state row (src_iv absent) -> source_session None.
     batches[("daily_market", "AAA")] = _dm_rows("AAA", ["2024-02-05"], src_iv=None)
-    # No SPY history -> regime NaT anchor.
-    batches[("daily_market", "SPY")] = []
+    # No eligible ^GSPC row -> regime NaT anchor.
+    batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)] = _gspc_rows_after_decision()
     # No computed history -> n_prior 0.
     batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = []
     # Too little price history to resolve a runup anchor -> runup_asof NaT.
@@ -460,24 +478,55 @@ def test_13_signed_streak_reflects_prior_computed_moves():
     assert panel["signed_streak"] == 3.0
 
 
-def test_14_spy_columns_exist_in_the_real_daily_market_contract():
-    """_SPY_COLUMNS must name real daily_market columns -- the fake
-    repository's scan() does not validate this, so without this test a
-    revert back to the old "close" bug would still pass every other test
-    in this file."""
-    from engine.v2.features import panel_row_inputs
-    real_columns = {column.name for column in contract_for("daily_market").columns}
-    assert set(panel_row_inputs._SPY_COLUMNS) <= real_columns
+def test_14_regime_features_read_price_history_closes_not_daily_market_spot():
+    """The nine ``spy_*`` features come from the ``REGIME_TICKER``
+    ``price_history`` closes -- never a ``daily_market`` spot.
 
-
-def test_15_null_spy_spot_raises_contract_mismatch():
+    The fixture seeds ``daily_market`` SPY rows with wildly different
+    (quadratic) spot values alongside the default linear ^GSPC closes: the
+    panel's ``spy_*`` values must equal ``regime.add_regime_features`` over
+    the closes and must differ from the same computation over the spots.
+    After the cutover the SPY ``daily_market`` rows are read by nobody on
+    this path -- they exist only to make a spot-based computation observable
+    and unmistakably wrong."""
     batches = _default_batches()
-    spy_rows = _spy_rows()
-    spy_rows[3] = {**spy_rows[3], "spot": None}  # daily_market.spot is nullable
-    batches[("daily_market", "SPY")] = spy_rows
+    gspc_fixture = [dict(row) for row in batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)]]
+    spot_rows = [{"ticker": "SPY", "date": pd.Timestamp(row["date"]),
+                  "spot": 400.0 + i * i, "src_iv": "orats", "implied_move": 1.0}
+                 for i, row in enumerate(gspc_fixture)]
+    batches[("daily_market", "SPY")] = spot_rows
+    panel = _scan(batches=batches).panel_row
+
+    events = pd.DataFrame({"date": [_EVENT], "decision": [_DECISION]})
+    expected = regime.add_regime_features(
+        events,
+        pd.DataFrame({"date": pd.to_datetime([row["date"] for row in gspc_fixture]),
+                      "close": [float(row["close_raw"]) for row in gspc_fixture]}),
+        as_of_column="decision").iloc[0]
+    spot_based = regime.add_regime_features(
+        events,
+        pd.DataFrame({"date": pd.to_datetime([row["date"] for row in spot_rows]),
+                      "close": [float(row["spot"]) for row in spot_rows]}),
+        as_of_column="decision").iloc[0]
+    for column in panel_row_inputs._REGIME_COLUMNS:
+        value, other = panel[column], spot_based[column]
+        if math.isnan(value):
+            assert math.isnan(expected[column])
+        else:
+            assert value == pytest.approx(expected[column])
+            if not math.isnan(other):
+                assert value != pytest.approx(other, rel=1e-6)
+
+
+def test_15_null_regime_close_raises_contract_mismatch():
+    batches = _default_batches()
+    rows = _gspc_rows()
+    rows[3] = {**rows[3], "close_raw": None}  # a null close conversion refuses
+    batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)] = rows
     with pytest.raises(DataError) as exc:
         _scan(batches=batches)
     assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {"table_name": PRICE_HISTORY_TABLE_NAME}
 
 
 def test_16_zero_day_computed_moves_window_returns_empty_not_a_query_error():
@@ -732,7 +781,7 @@ def test_24_event_day_decision_reads_identically_for_midnight_and_intraday_event
 
     Board enumeration legitimately preserves the intraday event clock
     (``native_board_universe``), so this is a real key shape, not a malformed
-    one. The fixture spikes the event day's own SPY close and adjusted close so
+    one. The fixture spikes the event day's own ^GSPC close and adjusted close so
     that an unnormalized key -- whose ``_anchor_index`` bound would be the
     event-day timestamp, selecting the final bar -- is unmistakably wrong
     instead of merely different. Both regime and runup math run for real here;
@@ -743,10 +792,8 @@ def test_24_event_day_decision_reads_identically_for_midnight_and_intraday_event
     class _WindowedDailyMarketRepository(_FakeRepository):
         """The shared fake, but honoring the emitted half-open window on the
         ``daily_market`` scan (which the base fake ignores, returning every
-        stored row for the ticker): the dense SPY fixture's rows are filtered by
-        ``query.time_interval`` before yielding, so the in-window rows agree with
-        the interval-aware population bound. Key/table selection and every
-        fixture value are otherwise unchanged."""
+        stored row for the ticker). Key/table selection and every fixture
+        value are otherwise unchanged."""
 
         def scan(self, query, *, table_name):
             rows = self._batches.get((table_name, query.key_filter[0].values[0]), [])
@@ -760,12 +807,10 @@ def test_24_event_day_decision_reads_identically_for_midnight_and_intraday_event
 
     def _scan_with(event_date):
         batches = _default_batches()
-        spy_days = [str(d.date()) for d in pd.date_range(end="2024-02-15", periods=320, freq="D")]
-        spy = [{"ticker": "SPY", "date": pd.Timestamp(day), "spot": 500.0 + i,
-                "src_iv": "orats", "implied_move": 1.0}
-               for i, day in enumerate(spy_days)]
-        spy[-1] = {**spy[-1], "spot": 1500.0}  # the event day's own SPY close, spiked
-        batches[("daily_market", "SPY")] = spy
+        gspc = _gspc_rows(periods=320, end="2024-02-15")
+        gspc[-1] = {**gspc[-1], "close_raw": 1500.0,
+                    "close_adj": 1500.0}  # the event day's own close, spiked
+        batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)] = gspc
         prices = _price_rows(n=320, end="2024-02-15")
         prices[-1] = {**prices[-1], "close_adj": 4000.0}  # the event day's own close, spiked
         batches[(PRICE_HISTORY_TABLE_NAME, "AAA")] = prices
@@ -786,7 +831,7 @@ def test_24_event_day_decision_reads_identically_for_midnight_and_intraday_event
     # above is the two normalized event-day-14 anchors, never the event itself.
 
     panel = intraday.panel_row
-    # The anchored bar is the PRIOR day: SPY index 318 is 818 vs index 297's 797;
+    # The anchored bar is the PRIOR day: ^GSPC index 318 is 818 vs index 297's 797;
     # price index 318 is 418 vs index 313's 413 (the fixture starts at 100.0+i).
     assert panel["spy_ret21"] == pytest.approx((818.0 / 797.0 - 1.0) * 100)
     assert panel["ret5"] == pytest.approx((418.0 / 413.0 - 1.0) * 100)
@@ -975,11 +1020,13 @@ def test_30_used_history_alone_resolves_anchor():
     batches = _default_batches()
     batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = [_used_history_row()]
     # Every market contributor's own date is unresolvable -- the daily-state
-    # query returns only rows without an eligible src_iv, SPY is empty, and
-    # ten price rows cannot resolve a runup anchor -- yet the queries still
-    # have real rows where required, so no empty-source refusal happens.
+    # query returns only rows without an eligible src_iv, no ^GSPC row is
+    # eligible through the 2024-02-20 decision, and ten price rows cannot
+    # resolve a runup anchor -- yet the queries still have real rows where
+    # required, so no empty-source refusal happens.
     batches[("daily_market", "AAA")] = _dm_rows("AAA", ["2024-02-05"], src_iv=None)
-    batches[("daily_market", "SPY")] = []
+    batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)] = \
+        _gspc_rows_after_decision(end="2024-02-25")
     batches[(PRICE_HISTORY_TABLE_NAME, "AAA")] = _price_rows(n=10)
     result = _scan_at(batches, decision=pd.Timestamp("2024-02-20"),
                       event=pd.Timestamp("2024-02-21"))
@@ -1035,12 +1082,13 @@ def _bound_reads(bounds):
     snapshot = _snapshot()
     batches = _default_batches()
     cm_fixture = batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")]
-    spy_fixture = batches[("daily_market", "SPY")]
+    regime_fixture = batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)]
     repo = _BoundRecordingRepository(snapshot, _contracts(), batches, bounds)
     computed = panel_row_inputs._read_computed_moves(repo, snapshot, "AAA",
                                                      _HISTORY_START, _DECISION, _EVENT)
-    spy = panel_row_inputs._read_spy_market(repo, snapshot, _HISTORY_START, _DECISION)
-    return computed, spy, repo, cm_fixture, spy_fixture
+    regime_rows = panel_row_inputs._read_regime_prices(repo, snapshot,
+                                                       _HISTORY_START, _DECISION)
+    return computed, regime_rows, repo, cm_fixture, regime_fixture
 
 
 def _assert_bound_matches_query(call, table_name, expected_ref, query):
@@ -1054,60 +1102,69 @@ def _assert_bound_matches_query(call, table_name, expected_ref, query):
 
 def test_31_bound_plan_receives_the_exact_query_identity_for_both_reads():
     _, _, repo, _, _ = _bound_reads(
-        {COMPUTED_MOVES_TABLE_NAME: 5, "daily_market": 25})
+        {COMPUTED_MOVES_TABLE_NAME: 5, PRICE_HISTORY_TABLE_NAME: 25})
     assert [call["table_name"] for call in repo.bound_calls] == [
-        COMPUTED_MOVES_TABLE_NAME, "daily_market"]
-    (cm_table, cm_query), (spy_table, spy_query) = repo.scans
-    assert (cm_table, spy_table) == (COMPUTED_MOVES_TABLE_NAME, "daily_market")
+        COMPUTED_MOVES_TABLE_NAME, PRICE_HISTORY_TABLE_NAME]
+    (cm_table, cm_query), (reg_table, reg_query) = repo.scans
+    assert (cm_table, reg_table) == (COMPUTED_MOVES_TABLE_NAME, PRICE_HISTORY_TABLE_NAME)
     _assert_bound_matches_query(repo.bound_calls[0], COMPUTED_MOVES_TABLE_NAME, _CM_REF, cm_query)
-    _assert_bound_matches_query(repo.bound_calls[1], "daily_market", _DM_REF, spy_query)
+    _assert_bound_matches_query(repo.bound_calls[1], PRICE_HISTORY_TABLE_NAME,
+                                _PH_REF, reg_query)
     # And the exact literals, not just internal consistency.
     assert repo.bound_calls[0]["key_filter"] == (
         KeyPredicate(column="ticker", operator="eq", values=("AAA",)),)
     assert repo.bound_calls[1]["key_filter"] == (
-        KeyPredicate(column="ticker", operator="eq", values=("SPY",)),)
+        KeyPredicate(column="ticker", operator="eq", values=(REGIME_TICKER,)),)
     assert repo.bound_calls[0]["time_interval"] == TimeInterval(
         column="event_date", start_inclusive="2024-01-02",
         end_exclusive=_DECISION.date().isoformat())
-    assert repo.bound_calls[1]["time_interval"] == TimeInterval(
-        column="date", start_inclusive="2024-01-02",
-        end_exclusive=(_DECISION + pd.Timedelta(days=1)).date().isoformat())
+    # The regime read is a plain get_price_series: pinned membership bound,
+    # no time interval -- the session/window bounds are its own.
+    assert repo.bound_calls[1]["time_interval"] is None
 
 
 def test_32_positive_selected_bound_lowers_query_limits_and_rows_match_fixtures():
     cm_count = len(_computed_rows([("2024-01-10", 2.0, False),
                                    ("2024-01-11", -1.0, False)]))
-    spy_count = len(_spy_rows())
-    computed, spy, repo, cm_fixture, spy_fixture = _bound_reads(
-        {COMPUTED_MOVES_TABLE_NAME: cm_count, "daily_market": spy_count})
-    (_cm, cm_query), (_spy, spy_query) = repo.scans
-    cases = ((cm_query, len(cm_fixture)), (spy_query, len(spy_fixture)))
+    regime_count = len(_gspc_rows())
+    computed, regime_rows, repo, cm_fixture, regime_fixture = _bound_reads(
+        {COMPUTED_MOVES_TABLE_NAME: cm_count, PRICE_HISTORY_TABLE_NAME: regime_count})
+    (_cm, cm_query), (_reg, reg_query) = repo.scans
+    cases = ((cm_query, len(cm_fixture)), (reg_query, len(regime_fixture)))
     for query, bound in cases:
         assert 0 < bound < panel_row_inputs._RESULT_LIMIT
         assert query.max_result_rows == bound
         assert 0 < query.max_batch_rows <= bound
     assert len(computed) <= cm_query.max_result_rows
     assert computed == cm_fixture  # both fixture rows, in fixture order
-    assert len(spy) <= spy_query.max_result_rows
-    assert spy == spy_fixture
+    assert len(regime_rows) <= reg_query.max_result_rows
+    assert [(row.date, row.close_raw) for row in regime_rows] == \
+        [(row["date"], row["close_raw"]) for row in regime_fixture]
 
 
 def test_33_zero_selected_bound_uses_zero_result_limit_and_positive_batch():
     batches = _default_batches()
     batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = []
-    batches[("daily_market", "SPY")] = []
+    batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)] = []
     snapshot = _snapshot()
-    repo = _BoundRecordingRepository(snapshot, _contracts(), batches)
+    # Inject the zero bound: the fake's row-count bound counts price_history
+    # rows across the AAA fixture too (fixture dicts carry no ticker column),
+    # so the empty ^GSPC selection's bound is stated, not counted.
+    repo = _BoundRecordingRepository(snapshot, _contracts(), batches,
+                                     {PRICE_HISTORY_TABLE_NAME: 0})
     computed = panel_row_inputs._read_computed_moves(
         repo, snapshot, "AAA", _HISTORY_START, _DECISION, _EVENT)
-    spy = panel_row_inputs._read_spy_market(repo, snapshot, _HISTORY_START, _DECISION)
-    (_cm, cm_query), (_spy, spy_query) = repo.scans
+    # A zero-row pinned membership is still a bounded query; the read then
+    # propagates get_price_series' missing-ticker CONTRACT_MISMATCH as-is.
+    with pytest.raises(DataError) as exc:
+        panel_row_inputs._read_regime_prices(repo, snapshot, _HISTORY_START, _DECISION)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    (_cm, cm_query), (_reg, reg_query) = repo.scans
     assert cm_query.max_result_rows == 0
     assert cm_query.max_batch_rows > 0
-    assert spy_query.max_result_rows == 0
-    assert spy_query.max_batch_rows > 0
+    assert reg_query.max_result_rows == 0
+    assert reg_query.max_batch_rows > 0
     assert computed == []
-    assert spy == []
 
 
 # --------------------------------------------------------------------------

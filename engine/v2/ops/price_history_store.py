@@ -165,7 +165,11 @@ from engine.v2.data import catalog as data_catalog
 from engine.v2.data import manifests, objects, price_history, reference_catalog
 from engine.v2.data import price_download_sources as sources
 from engine.v2.data.errors import DataError
-from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT, PRICE_HISTORY_TABLE_NAME
+from engine.v2.data.price_history_table import (
+    PRICE_HISTORY_CONTRACT,
+    PRICE_HISTORY_TABLE_NAME,
+    REGIME_TICKER,
+)
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, Clock, SystemClock, content_hash
 from engine.v2.ops.errors import fail
@@ -191,7 +195,7 @@ _PRICE_HISTORY_CONTRACT_REF = TableContractRef(contract_id=PRICE_HISTORY_CONTRAC
 
 
 # --------------------------------------------------------------------------
-# scanning the two legacy sources (read-only)
+# scanning the three legacy sources (read-only)
 # --------------------------------------------------------------------------
 
 
@@ -211,6 +215,25 @@ def _scan_legacy_px_tree(source_root: Path) -> list[dict]:
         out.append({"ticker": path.stem[len("px_"):], "path": path, "byte_size": info.st_size,
                     "mtime": info.st_mtime})
     return out
+
+
+_GSPC_RELPATH = ("earnings_predictions", "data", "raw", "polygon", "gspc_daily.csv")
+
+
+def _gspc_retrievals(source_root: Path) -> dict[str, dict]:
+    """The one legacy ``gspc_daily.csv`` (the same yfinance-sourced series
+    ``engine.data.features.panel._gspc_series`` reads for the regime features,
+    refreshed nightly by ``legacy_adapter._refresh_gspc``), scanned as the
+    ``REGIME_TICKER``'s price_history retrieval. Skipped -- never an error --
+    when the file is missing, not a regular file, or a symlink; the required-
+    ticker check in :func:`capture` is what refuses its absence for a nightly
+    capture."""
+    path = Path(source_root).joinpath(*_GSPC_RELPATH)
+    if not path.is_file() or path.is_symlink():
+        return {}
+    info = path.stat()
+    return {REGIME_TICKER: {"ticker": REGIME_TICKER, "path": path,
+                            "byte_size": info.st_size, "mtime": info.st_mtime}}
 
 
 def _iso_from_epoch(epoch: float) -> str:
@@ -256,6 +279,35 @@ def _parse_px(entry: dict) -> tuple[pd.DataFrame, bytes, str]:
     frame = _stringify_dates(sources.read_legacy_px_csv(entry["path"]))
     retrieved_at = _iso_from_epoch(entry["mtime"])
     return frame, raw, retrieved_at
+
+
+#: The legacy ``gspc_daily.csv`` data-row layout after its three header lines
+#: (``Price/Ticker/Date`` rows 0-2: Adj Close, Close, High, Low, Open, Volume),
+#: exactly the positional read of ``engine.data.features.panel._gspc_series``.
+_GSPC_POSITIONAL_COLUMNS = ("date", "adj", "close", "high", "low", "open", "volume")
+
+
+def _parse_gspc(entry: dict) -> tuple[pd.DataFrame, bytes, str]:
+    """One ``gspc_daily.csv`` into the normalized ``(date, close_adj,
+    close_raw, high_raw)`` frame. ``^GSPC`` carries no dividend adjustment
+    (index closes are never adjusted), so ``close_adj`` and ``close_raw`` are
+    both the file's Close -- the same series the legacy regime features read.
+    A malformed file raises here and fails this ticker's capture exactly as a
+    malformed px csv does (see :func:`_parse_and_order_entries`);
+    hash/``retrieved_at`` handling mirrors :func:`_parse_px`."""
+    raw = entry["path"].read_bytes()
+    frame = pd.read_csv(entry["path"], skiprows=3, header=None,
+                        float_precision="round_trip")
+    frame.columns = _GSPC_POSITIONAL_COLUMNS[: frame.shape[1]]
+    close = pd.to_numeric(frame["close"], errors="coerce")
+    dates = pd.to_datetime(frame["date"], errors="coerce")
+    out = pd.DataFrame({"date": dates,
+                        "close_adj": close,
+                        "close_raw": close,
+                        "high_raw": pd.to_numeric(frame["high"], errors="coerce")})
+    out = out.dropna(subset=["date"]).sort_values("date")
+    retrieved_at = _iso_from_epoch(entry["mtime"])
+    return _stringify_dates(out), raw, retrieved_at
 
 
 def _tier1_meta_bytes(entry) -> bytes:
@@ -460,8 +512,12 @@ def _parse_and_order_entries(ticker: str, entries: list[tuple[str, dict]],
     parsed: list[dict] = []
     for source_kind, entry in entries:
         try:
-            frame, raw, retrieved_at = (_parse_px(entry) if source_kind == "legacy_px_csv"
-                                        else _parse_tier1(entry))
+            if source_kind == "legacy_px_csv":
+                frame, raw, retrieved_at = _parse_px(entry)
+            elif source_kind == "legacy_gspc_csv":
+                frame, raw, retrieved_at = _parse_gspc(entry)
+            else:
+                frame, raw, retrieved_at = _parse_tier1(entry)
         except Exception as exc:  # noqa: BLE001 -- see the docstring above.
             results.append({"ticker": ticker, "outcome": "error",
                            "error": getattr(exc, "code", type(exc).__name__)})
@@ -657,8 +713,9 @@ def _commit_generation(conn: sqlite3.Connection, store: ArtifactStore, scope: st
 def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *, scope: str,
            root: Path, dry_run: bool = False, clock: Clock | None = None,
            required_tickers: Iterable[str] = (), expected_snapshot_id: str | None = None) -> dict:
-    """Read both legacy sources (read-only), capture EVERY not-yet-captured
-    retrieval per ticker as its own row-version event -- the px file (if any)
+    """Read the legacy sources (read-only), capture EVERY not-yet-captured
+    retrieval per ticker as its own row-version event -- the px file (if any),
+    the ``gspc_daily.csv`` regime file for ``REGIME_TICKER`` (if present)
     AND every dated/undated Tier-1 ``history`` entry, merged into one
     ascending-``retrieved_at`` order (px precedence is a read-time policy,
     never a capture-time exclusion -- see the module docstring) -- and,
@@ -725,8 +782,9 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
     clock = clock or SystemClock()
     source_root = Path(source_root)
     px = _px_retrievals(source_root)
+    gspc = _gspc_retrievals(source_root)
     tier1 = _tier1_retrievals(source_root)
-    tickers = sorted(set(px) | set(tier1))
+    tickers = sorted(set(px) | set(gspc) | set(tier1))
     created_at = clock.now().isoformat()
 
     repository = Repository(conn, store)
@@ -742,6 +800,8 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
         entries: list[tuple[str, dict]] = []
         if ticker in px:
             entries.append(("legacy_px_csv", px[ticker]))
+        if ticker in gspc:
+            entries.append(("legacy_gspc_csv", gspc[ticker]))
         entries.extend(("tier1_fetch", e) for e in tier1.get(ticker, []))
         stored = _read_fragment_rows(store, prior_by_ticker.get(ticker))
         return _capture_ticker(conn, ticker, entries, stored=stored, created_at=created_at)

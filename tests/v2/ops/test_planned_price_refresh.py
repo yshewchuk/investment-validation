@@ -28,6 +28,7 @@ from engine.v2.ops.errors import OpsError
 from engine.v2.ops.legacy_adapter import invoke_price_refresh
 from tests.data_scan_support import commit_tables, publish_and_inspect
 from tests.ops_support import FakeClock
+from tests.v2.ops.test_regime_ticker_price_history import _write_gspc
 from tests.v2.ops.test_v2_ops_price_history import (
     _SEC,
     _SEC_REF,
@@ -64,6 +65,9 @@ def shadow_root(tmp_path):
     root = tmp_path / "selected-source"
     ops_root = root / "data" / "operations"
     ops_root.mkdir(parents=True)
+    # The nightly price capture now requires REGIME_TICKER (^GSPC) alongside
+    # SPY: seed the legacy gspc_daily.csv it reads.
+    _write_gspc(root)
     clock = FakeClock()
     conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
     store = ArtifactStore(ops_root)
@@ -137,7 +141,11 @@ def test_never_fetched_planned_ticker_is_fetched_and_captured(shadow_root, insta
     state = shadow_root
     calls = install_fetcher(state.root)
     assert not (state.root / "data" / "raw").exists()
-    assert not (state.root / "earnings_predictions").exists()
+    # Only the fixture-seeded gspc_daily.csv exists under
+    # earnings_predictions: the yfinance fetch/px tree is still absent.
+    assert not (state.root / "earnings_predictions" / "data" / "raw" / "yfinance").exists()
+    assert (state.root / "earnings_predictions" / "data" / "raw" / "polygon"
+            / "gspc_daily.csv").is_file()
     assert "earnings_events" not in state.base.table_versions
 
     snapshot_id = nightly_trigger._refresh_plan_prices(
