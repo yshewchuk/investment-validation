@@ -98,12 +98,12 @@ def _copy_verified_database(conn, database):
             backup_to(conn, database)
         return _verified_database_hash(database, check_integrity=not is_new)
     except (OpsError, OSError, sqlite3.Error) as error:
+        message = (error.problem.message if isinstance(error, OpsError)
+                   else "backup database copy or verification failed")
         try:
             database.unlink(missing_ok=True)
         except OSError as unlink_error:
-            raise fail("BACKUP_FAILED", "backup database cleanup failed") from unlink_error
-        message = (error.problem.message if isinstance(error, OpsError)
-                   else "backup database copy or verification failed")
+            raise fail("BACKUP_FAILED", f"{message}; backup database cleanup failed") from unlink_error
         raise fail("BACKUP_FAILED", message) from error
 
 

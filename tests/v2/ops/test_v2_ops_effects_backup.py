@@ -259,7 +259,8 @@ def test_backup_cleanup_failure_is_retryable(tmp_path, monkeypatch):
         run_backup(conn, key="cleanup-failure", owner="worker", target=backup,
                    clock=clock, store=store)
     assert error.value.code == "BACKUP_FAILED"
-    assert error.value.problem.message == "backup database cleanup failed"
+    assert error.value.problem.message == (
+        "backup database verification failed; backup database cleanup failed")
     assert error.value.problem.retryable is True
     assert (backup / "cleanup-failure.sqlite").exists()
     assert cleanup_attempts == [backup / "cleanup-failure.sqlite"]
