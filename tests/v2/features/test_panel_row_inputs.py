@@ -533,6 +533,48 @@ def test_15_null_regime_close_raises_contract_mismatch():
     assert exc.value.problem.details == {"table_name": PRICE_HISTORY_TABLE_NAME}
 
 
+@pytest.mark.parametrize("close_raw", [0.0, -4700.0, float("inf")])
+def test_15b_nonpositive_or_nonfinite_regime_close_raises_contract_mismatch(close_raw):
+    """The regime read mirrors the research path's positive-close check: a
+    stored ``close_raw`` that is zero, negative or non-finite refuses before
+    any ``regime.add_regime_features`` arithmetic runs. (A NaN close never
+    reaches this guard: ``get_price_series`` nulls it, so it refuses as the
+    null-conversion case of ``test_15``.)"""
+    batches = _default_batches()
+    rows = _gspc_rows()
+    rows[3] = {**rows[3], "close_raw": close_raw}
+    batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)] = rows
+    with pytest.raises(DataError) as exc:
+        _scan(batches=batches)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert "regime source closes must be positive" in str(exc.value)
+    assert exc.value.problem.details == {"table_name": PRICE_HISTORY_TABLE_NAME}
+
+
+def test_15c_regime_price_query_bounds_pinned_to_decision(monkeypatch):
+    """The regime read is exactly one ``get_price_series`` of the pinned
+    ``REGIME_TICKER`` as of ``decision_session``: the ``PriceQuery`` bounds
+    (ticker, session_date/observation_ceiling, ``lookback_sessions=0``) are
+    asserted, not just the values they return."""
+    from engine.v2.data import price_history_query
+
+    calls: list = []
+    real = price_history_query.get_price_series
+
+    def recording(repository, query, snapshot):
+        calls.append(query)
+        return real(repository, query, snapshot)
+
+    monkeypatch.setattr(price_history_query, "get_price_series", recording)
+    _scan()
+    regime_queries = [query for query in calls if query.ticker == REGIME_TICKER]
+    assert len(regime_queries) == 1
+    query = regime_queries[0]
+    assert query.session_date == _DECISION.date().isoformat()
+    assert query.observation_ceiling == _DECISION.date().isoformat()
+    assert query.lookback_sessions == 0
+
+
 def test_16_zero_day_computed_moves_window_returns_empty_not_a_query_error():
     """``history_start == min(event_date, decision)`` means a zero-row window.
 

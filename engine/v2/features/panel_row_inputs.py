@@ -60,10 +60,10 @@ from engine.v2.features import daily_state_inputs, panel_math, regime, runup_mat
 __all__ = ["CONTEXT_TICKERS", "PanelRowInputs", "scan_panel_row"]
 
 _COMPUTED_MOVES_TABLE = "computed_moves"
-#: Fixed market-context tickers the nightly's per-ticker history backfill
-#: includes (they have no earnings event, so nothing else would backfill
-#: them). ``"SPY"`` here only keeps its ``daily_market`` history populated for
-#: the legacy market-wide read; the ``spy_*`` regime features never read it --
+#: The dashboard nightly's context-history backfill list and nothing else
+#: (these tickers have no earnings event, so nothing else would backfill
+#: them): ``"SPY"`` here only keeps its ``daily_market`` history populated for
+#: the legacy market-wide read. The ``spy_*`` regime features never read it --
 #: their source is the ``REGIME_TICKER`` ``price_history`` close.
 CONTEXT_TICKERS: tuple[str, ...] = ("SPY",)
 _BATCH_LIMIT = 1000
@@ -346,19 +346,25 @@ def _regime_from_prices(regime_rows: tuple[PriceSeriesRow, ...], event_day: pd.T
 
     The event frame is built from the validated ``event_day`` (no other key
     field is needed): an unnormalized event timestamp would let ``_anchor_index``
-    select the event day's own close.
+    select the event day's own close. A non-finite or non-positive close refuses
+    ``CONTRACT_MISMATCH`` (``regime source closes must be positive``), mirroring
+    the research path's positive-close check.
     """
     if regime_rows:
         ordered = sorted(regime_rows, key=lambda row: row.date)
         try:
-            market = pd.DataFrame(
-                {"date": pd.to_datetime([row.date for row in ordered]),
-                 "close": [float(row.close_raw) for row in ordered]},
-            )
+            closes = [float(row.close_raw) for row in ordered]
         except (TypeError, ValueError, OverflowError):
             raise errors.fail("CONTRACT_MISMATCH", "price_history value conversion failed",
                               details={"table_name":
                                        price_history_table.PRICE_HISTORY_TABLE_NAME}) from None
+        if any(not math.isfinite(close) or close <= 0 for close in closes):
+            raise errors.fail("CONTRACT_MISMATCH", "regime source closes must be positive",
+                              details={"table_name":
+                                       price_history_table.PRICE_HISTORY_TABLE_NAME})
+        market = pd.DataFrame(
+            {"date": pd.to_datetime([row.date for row in ordered]), "close": closes},
+        )
     else:
         market = pd.DataFrame({"date": [], "close": []})
     events = pd.DataFrame({"date": [event_day], "decision": [decision]})

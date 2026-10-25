@@ -216,9 +216,8 @@ construction and the
 `PriceSeriesRow`-to-DataFrame conversion are implementation detail, not
 contract — see the PR body.
 
-The fixed market-context tickers named once, in
-`panel_row_inputs.CONTEXT_TICKERS` (currently `("SPY",)`), drive only the
-nightly's per-ticker `daily_market` history backfill (see the dashboard
+`panel_row_inputs.CONTEXT_TICKERS` (currently `("SPY",)`) is the dashboard
+nightly's context-history backfill list and nothing else (see the dashboard
 doc; its legacy mirror constant is test-pinned to this one): such a ticker has
 no earnings event and would otherwise hold only the market-wide daily pull's
 short history. `regime` does not read them: its source is the
@@ -244,6 +243,7 @@ Normal repository scan validation and failures propagate.
 | an eligible non-skipped `computed_moves` row has a null `realized_move_pct` (a repository-integrity violation — the contract allows that only when `skipped=true`) | `CONTRACT_MISMATCH`, refused before `panel_math.history_features` runs, never silently coerced |
 | `price_history` has no row at all for `REGIME_TICKER` (`"^GSPC"`) | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — the regime read has no empty-source fallback; a live `^GSPC` partition is required at capture |
 | a `REGIME_TICKER` row's `close_raw` cannot be converted to a float | `CONTRACT_MISMATCH` (`price_history value conversion failed`), refused rather than coerced; a NaN close cannot reach this read — capture drops null-close rows |
+| a converted `REGIME_TICKER` close is not positive or not finite (a stored-series integrity violation) | `CONTRACT_MISMATCH` (`regime source closes must be positive`), refused before `regime.add_regime_features` — mirrors the research path's positive-close check |
 | the `REGIME_TICKER` rows are all outside `[history_start, decision_session]` | `regime`'s own no-history behavior: its fields stay `NaN` (its own Inputs table), `regime_asof` `NaT`; `panel_math`'s keys are unaffected (independent read) |
 | `price_history` has no row for `key.ticker` | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
 | `get_price_series`'s `session_date > observation_ceiling` | `QUERY_NOT_BOUNDED`, propagated unchanged — never a silent future read |

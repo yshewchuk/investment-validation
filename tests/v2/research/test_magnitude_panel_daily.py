@@ -467,3 +467,15 @@ def test_nonpositive_regime_close_refuses(native, monkeypatch):
     with pytest.raises(DataError, match="must be positive") as caught:
         build(native)
     assert caught.value.code == "CONTRACT_MISMATCH"
+
+
+def test_regime_series_row_bound_refuses(native):
+    """Dedicated regime-series cap: a ``max_source_rows`` smaller than the
+    pinned ^GSPC series refuses ``RESULT_LIMIT_EXCEEDED`` from the regime
+    read's own row bound (its distinct message), before any daily source
+    scan of the tickers runs."""
+    native.repository.scans.clear()
+    with pytest.raises(DataError, match="regime row bound") as caught:
+        build(native, max_source_rows=100)
+    assert caught.value.code == "RESULT_LIMIT_EXCEEDED"
+    assert all(table != "daily_market" for table, _query in native.repository.scans)

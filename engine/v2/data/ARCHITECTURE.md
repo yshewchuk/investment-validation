@@ -852,18 +852,16 @@ Root doc §5 invariants this package is responsible for:
   feeding the panel's nine `spy_*` regime features (the names are historical;
   they are `^GSPC`-based), sourced from `gspc_daily.csv`
   (`source_kind="legacy_gspc_csv"`, parsed `close_adj = close_raw = Close`,
-   `high_raw = High` — an index close carries no dividend adjustment). Capture
-    requires it exactly as the calendar ticker: the nightly and
-    `ops price-history capture` refuse `SOURCE_NOT_FOUND` when it is absent.
-    Outcome: at discovery a missing, non-regular or symlinked `gspc_daily.csv` is
-    SKIPPED (`_gspc_retrievals` returns no entry — never an error; the required-
-    ticker check is what then refuses its absence for a nightly capture when no
-    prior history is held). At parse a regular file is read once
-    (`O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, type/size/mtime from that fd's `fstat`):
-    a symlink or FIFO/non-regular file swapped in after discovery, or a `st_size`
-    over `_GSPC_MAX_BYTES`, RAISES before any byte is read (a cap overrun between
-    `fstat` and read also raises), failing this ticker's capture — the same error
-    path as a malformed csv; rows with a null Close or High are dropped.
+  `high_raw = High` — an index close carries no dividend adjustment). Capture
+   requires it exactly as the calendar ticker; the `gspc_daily.csv` outcomes:
+
+   | Condition | Outcome |
+   | --- | --- |
+   | missing, non-regular or symlinked at discovery | not discovered (no retrieval entry) |
+   | non-regular, over-cap or malformed at read | that ticker's capture fails — the same error path as a malformed px csv |
+   | required with no live `^GSPC` rows (the run's state, or the prior version when the source lists nothing) | `SOURCE_NOT_FOUND` before any write |
+   | a row with a null Close or High | dropped |
+
 - **A `price_history` retrieval never drops stored history.** A full-history
   retrieval that omits any currently live stored date (truncated end,
   mid-history gap, or empty), or starts later than the live history, is refused

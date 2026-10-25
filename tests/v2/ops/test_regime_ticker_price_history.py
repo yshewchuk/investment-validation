@@ -326,6 +326,35 @@ def test_nonregular_gspc_path_is_skipped(tmp_path, shape):
     assert report["tickers_seen"] == 2  # AAPL and SPY only -- ^GSPC was skipped
 
 
+@pytest.mark.parametrize("shape", ["directory", "fifo", "symlink"])
+def test_parse_gspc_directly_refuses_swapped_nonregular_paths(tmp_path, shape):
+    """Parse-time guards proven directly on ``_parse_gspc`` (importing the
+    private function is accepted here only because no public hook reaches a
+    path swapped in after discovery): a directory or a FIFO at the listed path
+    raises on the ``S_ISREG`` ``fstat`` check BEFORE any byte is read, and a
+    symlink raises on the ``O_NOFOLLOW`` open -- all with no fd leak past the
+    refusal."""
+    path = _gspc_path(tmp_path / "legacy")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {"ticker": REGIME_TICKER, "path": path, "byte_size": 64, "mtime": 0.0}
+    if shape == "directory":
+        path.mkdir()
+        with pytest.raises(ValueError, match="not a regular file"):
+            price_history_store._parse_gspc(entry)
+    elif shape == "fifo":
+        os.mkfifo(path)
+        with pytest.raises(ValueError, match="not a regular file"):
+            price_history_store._parse_gspc(entry)
+    else:
+        outside = tmp_path / "real_gspc.csv"
+        lines = list(HEADER_LINES) + [
+            "2024-01-02,4800.913,4700.913,4705.913,4697.913,4699.913,4700913000000\n"]
+        outside.write_text("".join(lines))
+        path.symlink_to(outside)
+        with pytest.raises(OSError):
+            price_history_store._parse_gspc(entry)
+
+
 def test_malformed_required_regime_ticker_file_fails_like_a_malformed_px_csv(tmp_path):
     conn, clock, store, base = _base_snapshot(tmp_path)
     source_root = tmp_path / "legacy"
