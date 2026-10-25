@@ -629,8 +629,9 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
         if candidate_only and snapshot is not None and _staging_id_conflict(exc):
             try:
                 deployment.restore_staging_success_record(root, release.release_id, snapshot)
-            except OSError as restore_exc:
-                raise exc from restore_exc
+            except (OSError, deployment.DeploymentError) as restore_exc:
+                raise PrepareRefused(
+                    "staging success record could not be restored") from restore_exc
         raise
 
 

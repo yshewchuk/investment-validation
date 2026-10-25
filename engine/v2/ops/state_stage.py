@@ -36,7 +36,7 @@ class StateStageParameters:
     mode: str = "carry"
     #: Bootstrap-only assembly inputs: ``tier4_dir``, ``panel_catalog``,
     #: ``panel_snapshot_id`` and ``panel_artifact_root`` (all non-empty strings).
-    bootstrap: dict | None = None
+    bootstrap: dict[str, str] | None = None
 
 
 def _safe_id(value) -> bool:

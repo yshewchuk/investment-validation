@@ -345,7 +345,7 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 
 | Rule | Behaviour |
 |---|---|
-| R1 verified input | Bound files are bounded regular files, re-classified by schema and member (self-consistency only: the loader hashes the bytes it read, no recorded hash is compared); assembly validates prior, cutoff, objects and inventory; an incomplete or extra member set refuses |
+| R1 verified input | Bound files are bounded regular files, re-classified by schema and member (self-consistency only: the loader hashes the bytes it read, no recorded hash is compared); assembly validates prior, cutoff, objects and inventory; in `carry` mode an incomplete or extra member set refuses; in `bootstrap` mode a bound member outside the catalog's states refuses (§2.2.2) |
 | R2 cache | None; bound files, prior catalog and inventory are re-read each call |
 | R3 retry | One attempt (`RetryPolicy("none", 1)`); a failed job is not retried |
 | R4 transaction | New objects go to the shared content-addressed store; the staged manifest and catalog exist only under the new id; `deployment.mark_staging_succeeded` (the record `models_promote` requires) and then `stage_result.json` follow the light checks |
@@ -398,7 +398,9 @@ When the prior is `NONE` or `NO_POOL_CATALOG` (§2.2), the stage job, once a sid
 | Registry drift, inventory unreadable; every other refusal below marked "message only" | fixed message, `details` as §2.2 (`issues` for drift, `members`, `member`); nothing written unless stated |
 | Bindings differ from the incumbent's | `BINDINGS_DIFFER`; nothing written |
 | A catalog state not `STAGED` | `EMPTY_MEMBER`, `details.members`; nothing written |
-| A bound file or model artifact unreadable, oversize, unclassifiable or duplicating an object; a pool object cutoff or trailing month off the session cutoff | message only; nothing written |
+| A bound file or model artifact unreadable, oversize, unclassifiable, duplicating an object, or naming a member outside the catalog's states; a pool object cutoff, or a trailing object month after the session cutoff | message only; nothing written |
+| Champion registry or Tier-4 producer recipe unreadable or disagreeing with the registered recipe (`RegistryError`, `Tier4Error`) | message only; nothing written |
+| The staging-success record cannot be restored after an id conflict | "staging success could not be recorded" |
 | Pinned panel unverifiable, or a fold or policy or preflight disagrees with it (the `PrepareRefused` text is not echoed) | message only; no catalog written |
 | Candidate catalog present with different content, or the candidate id already staged with different content (`RELEASE_ID_REUSED`, `MANIFEST_UNREADABLE`); the existing candidate and its staging-success record are preserved | `ID_CONFLICT` |
 | Candidate does not read back `USABLE` | "candidate release failed the light checks" |

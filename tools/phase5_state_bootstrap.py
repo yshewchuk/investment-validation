@@ -111,6 +111,8 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
         classify_prior,
     )
     from engine import paths
+    from engine.data.features.tier4 import Tier4Error
+    from engine.models.registry import RegistryError
     from engine.v2.foundation import ArtifactError
     from engine.v2.models import deployment
     from engine.v2.models.frozen_state import FrozenStateError
@@ -123,6 +125,7 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
         CatalogConflict,
         ObjectVerificationError,
         ReleaseLayoutError,
+        STATE_SPECS,
         catalog_path,
         read_catalog,
     )
@@ -157,7 +160,8 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
         try:
             inventory, drift = current_release_inventory()
         except (OSError, ValueError, KeyError, TypeError, ArtifactError,
-                deployment.DeploymentError, ReleaseAssemblyRefusal) as exc:
+                deployment.DeploymentError, ReleaseAssemblyRefusal,
+                RegistryError) as exc:
             raise StageRefused("release inventory could not be built") from exc
         if drift:
             raise StageRefused("release inventory drifted", {"issues": len(drift)})
@@ -216,6 +220,11 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
                  if binding.strategy_id == "*"},
                 snapshot, None))
 
+            unknown = sorted(set(found) - {spec.member_id for spec in STATE_SPECS})
+            if unknown:
+                raise StageRefused("state files name a member outside the catalog",
+                                   {"members": unknown})
+
             size_policy, chooser_policies = fold_policies(found, snapshot)
             states = build_states(found, size_fold_policy=size_policy,
                                   chooser_fold_policies=chooser_policies)
@@ -224,7 +233,7 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
         except (PrepareRefused, PayoffArtifactError, RecalibrationArtifactError,
                 FrozenStateError, BoundedStateReadError, OSError, ValueError, KeyError,
                 TypeError, deployment.DeploymentError, ArtifactError,
-                ReleaseLayoutError) as exc:
+                ReleaseLayoutError, RegistryError, Tier4Error) as exc:
             raise StageRefused("candidate release could not be prepared") from exc
 
         empty = sorted(build.spec.member_id for build in states
@@ -247,8 +256,7 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
                                {"members": sorted(bad)})
         trailing = {build.spec.member_id: build.payloads for build in states
                     if build.spec.member_id == "trailing_pnl_cutoff"}
-        if trailing:
-            check_trailing_months(trailing, cutoff)
+        check_trailing_months(trailing, cutoff)
 
         existing_catalog = catalog_path(release_root, parameters["release_id"])
         if existing_catalog.exists():

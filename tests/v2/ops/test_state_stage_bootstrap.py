@@ -22,6 +22,7 @@ from engine.v2.models.recalibration_artifact import serialize_recalibration_arti
 from engine.v2.models.training.recalibration import build_recalibration_map_artifact
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.state_stage import (
+    StateStageParameters,
     run_state_stage_worker,
     state_stage_parameter_problems,
     state_stage_plan,
@@ -968,3 +969,109 @@ def test_plan_refuses_a_non_mapping_bootstrap_as_invalid_request(tmp_path, boots
     assert err.value.problem.details == {"problems": [
         "bootstrap must be a mapping with tier4_dir, panel_catalog, "
         "panel_snapshot_id and panel_artifact_root"]}
+
+
+def test_bootstrap_plan_parameters_decode_with_the_real_decoder(tmp_path):
+    from engine.v2.foundation import from_document
+
+    bootstrap = {"tier4_dir": "/t", "panel_catalog": "/c",
+                 "panel_snapshot_id": "s", "panel_artifact_root": "/a"}
+    plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
+                            release_id="cand1", cutoff="2026-10-01",
+                            state_refs={"a.json": "j#o"}, manifest_ref="artifact_manifest",
+                            source_root=REPO_ROOT, mode="bootstrap", bootstrap=bootstrap)
+    decoded = from_document(StateStageParameters,
+                            json.loads(json.dumps(plan["parameters"])))
+    assert isinstance(decoded, StateStageParameters)
+    assert decoded.bootstrap == bootstrap
+
+    carry = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
+                             release_id="cand1", cutoff="2026-10-01",
+                             state_refs={"a.json": "j#o"}, manifest_ref="artifact_manifest",
+                             source_root=REPO_ROOT)
+    decoded_carry = from_document(StateStageParameters,
+                                  json.loads(json.dumps(carry["parameters"])))
+    assert decoded_carry.bootstrap is None
+
+
+@pytest.mark.parametrize("target_name,attribute,error_name,message", [
+    ("inventory", "current_release_inventory", "RegistryError",
+     "release inventory could not be built"),
+    ("prepare", "fold_policies", "Tier4Error",
+     "candidate release could not be prepared"),
+    ("prepare", "tier4_fold_payloads", "Tier4Error",
+     "candidate release could not be prepared"),
+])
+def test_registry_and_producer_failures_refuse(tmp_path, monkeypatch, target_name,
+                                               attribute, error_name, message):
+    from engine.data.features.tier4 import Tier4Error
+    from engine.models.registry import RegistryError
+
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+    target = inventory_module if target_name == "inventory" else phase5_prepare_release
+    errors = {"RegistryError": RegistryError, "Tier4Error": Tier4Error}
+
+    def broken(*args, **kwargs):
+        raise errors[error_name]("secret-internal-detail")
+
+    monkeypatch.setattr(target, attribute, broken)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == f"VALIDATION_FAILED: {message}"
+    assert err.value.problem.details == {}
+    assert "secret-internal-detail" not in str(err.value)
+
+
+def test_unknown_bound_member_refuses(tmp_path, monkeypatch):
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+
+    def unknown(paths, max_bytes=None):
+        path = Path(paths[0])
+        return {"unknown_member": {path.name: path.read_bytes()}}
+
+    monkeypatch.setattr(phase5_prepare_release, "frozen_state_payloads", unknown)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: state files name a member outside the catalog"
+    assert err.value.problem.details == {"members": ["unknown_member"]}
+
+
+def test_id_conflict_on_a_different_pool_cutoff(tmp_path, monkeypatch):
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+    run_state_stage_worker(parameters, staging)
+    catalog = phase5_release.catalog_path(tmp_path, "cand1")
+    body = json.loads(catalog.read_bytes())
+    body["sources"]["pool_cutoff"] = "2020-01-01"
+    catalog.write_bytes(json.dumps(body).encode())
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: candidate release could not be published"
+    assert err.value.problem.details == {"code": "ID_CONFLICT"}
+
+
+def test_bootstrap_conflict_restore_failure_refuses(tmp_path, monkeypatch):
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+    first = run_state_stage_worker(parameters, staging)
+    assert first["completed_ids"] == ["phase5_state_stage"]
+
+    monkeypatch.setattr(
+        phase5_prepare_release, "_run_preflights",
+        lambda release, states, pinned_panel, sources: (
+            {**dict(sources or {}), "panel_copy_sha256": "b" * 64},
+            {name: types.SimpleNamespace(digest="dummy")
+             for build in states for name in build.payloads},
+            {}))
+
+    def broken(*args, **kwargs):
+        raise deployment.DeploymentError("secret-internal-detail")
+
+    monkeypatch.setattr(deployment, "restore_staging_success_record", broken)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: candidate release could not be published"
+    assert err.value.problem.details == {}
+    assert "secret-internal-detail" not in str(err.value)

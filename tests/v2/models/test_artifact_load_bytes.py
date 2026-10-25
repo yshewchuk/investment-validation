@@ -88,6 +88,29 @@ def test_recalibration_loader_load_bytes_loads_good_bytes(tmp_path):
     assert loader.cache_size == 1
 
 
+def test_loader_load_bytes_reuses_the_cached_object(tmp_path):
+    artifact = make_payoff_line_artifact(
+        _LINE_FIT, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+    )
+    raw = serialize_payoff_artifact(artifact)
+    loader = PayoffArtifactLoader(tmp_path)
+    first = loader.load_bytes(raw, artifact.content_hash)
+    second = loader.load_bytes(raw, artifact.content_hash)
+    assert first is second
+    assert loader.cache_size == 1
+
+
+def test_recalibration_loader_load_bytes_reuses_the_cached_object(tmp_path):
+    artifact = build_recalibration_map_artifact(_pairs(), strategy="STR-THRU", alpha=0.5,
+                                                before=CUTOFF)
+    raw = serialize_recalibration_artifact(artifact)
+    loader = RecalibrationArtifactLoader(tmp_path)
+    first = loader.load_bytes(raw, artifact.content_hash)
+    second = loader.load_bytes(raw, artifact.content_hash)
+    assert first is second
+    assert loader.cache_size == 1
+
+
 def test_loader_load_bytes_checks_hash_before_cache(tmp_path):
     good = make_payoff_line_artifact(
         _LINE_FIT, strategy="STR-THRU", driver="abs_move", alpha=0.5,
