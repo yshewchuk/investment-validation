@@ -1,12 +1,15 @@
 """Local immutable backup and isolated restore controls."""
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
+import engine.v2.ops.backup as backup_module
 from engine.v2.foundation import ArtifactStore
 from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
 from engine.v2.ops.effects_graph import backup_effect
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import fail, OpsError
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
 from tests.ops_support import catalog
 from tests.v2.ops.test_v2_ops_effects_graph import (
@@ -22,6 +25,8 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
     backup = tmp_path / "backup"
     manifest = run_backup(conn, key="b1", owner="worker", target=backup, clock=clock, store=store)
     assert manifest["artifacts"]["evidence.bin"]["content_hash"] == ref.content_hash
+    assert manifest["database"] == "sha256:" + hashlib.sha256(
+        (backup / "b1.sqlite").read_bytes()).hexdigest()
     restored = restore_backup(backup, tmp_path / "restored")
     assert (restored / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "delivered"
@@ -43,6 +48,27 @@ def test_backup_copy_failure_remains_retryable(tmp_path):
     clock.advance(301)
     run_backup(conn, key="b2", owner="retry", target=tmp_path / "backup", clock=clock, store=store)
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "delivered"
+
+
+@pytest.mark.parametrize("contents", [b"", b"not a sqlite database"])
+def test_backup_bad_copy_remains_retryable(tmp_path, monkeypatch, contents):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "bad-copy", {}, clock=clock)
+
+    def bad_copy(_conn, destination):
+        destination.write_bytes(contents)
+
+    monkeypatch.setattr(backup_module, "backup_to", bad_copy)
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key="bad-copy", owner="worker", target=tmp_path / "backup",
+                   clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.retryable is True
+    state = conn.execute(
+        "SELECT state FROM outbox WHERE kind='backup' AND logical_key='bad-copy'"
+    ).fetchone()[0]
+    assert state != "delivered"
 
 
 def test_manifest_success_before_ack_is_idempotent_and_keys_are_safe(tmp_path):

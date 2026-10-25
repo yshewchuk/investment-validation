@@ -69,6 +69,22 @@ def _delivered_or_stale(conn, kind, logical_key):
     return delivered
 
 
+def _verified_database_hash(database):
+    """Return the backup database hash after a read-only quick_check."""
+    try:
+        if database.stat().st_size == 0:
+            raise fail("BACKUP_FAILED", "backup database is empty")
+        probe = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            if probe.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+                raise fail("BACKUP_FAILED", "backup database verification failed")
+        finally:
+            probe.close()
+        return file_hash(database)
+    except (OSError, sqlite3.Error) as error:
+        raise fail("BACKUP_FAILED", "backup database verification failed") from error
+
+
 def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=_no_keepalive):
     effect = claim(conn, "backup", owner=owner, clock=clock, logical_key=key)
     if effect is None:
@@ -81,12 +97,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
     database = target / (key + ".sqlite")
     if not database.exists():
         backup_to(conn, database)
-    probe = sqlite3.connect(database)
-    try:
-        if integrity_errors(probe):
-            raise fail("INTEGRITY_FAILED", "backup integrity check failed")
-    finally:
-        probe.close()
+    database_hash = _verified_database_hash(database)
     copied = {}
     for name, document in payload.get("artifacts", {}).items():
         keepalive()
@@ -103,7 +114,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
             raise fail("INTEGRITY_FAILED", "backup artifact hash mismatch")
         copied[name] = {"content_hash": ref.content_hash, "byte_size": ref.byte_size}
     manifest = {"schema_version": payload["schema_version"], "backup_key": key,
-                "cutoff": payload["cutoff"], "database": file_hash(database),
+                "cutoff": payload["cutoff"], "database": database_hash,
                 "artifacts": copied}
     manifest_path = target / (key + ".manifest.json")
     if manifest_path.exists() and json.loads(manifest_path.read_text()) != manifest:
