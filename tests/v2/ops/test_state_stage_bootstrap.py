@@ -507,6 +507,21 @@ def test_artifact_file_payloads_refuses_an_unknown_schema(tmp_path):
         phase5_prepare_release.artifact_file_payloads([path])
     assert str(err.value) == "a bound state file could not be loaded"
 
+
+def test_artifact_file_payloads_refuses_invalid_tuple_data(tmp_path, monkeypatch):
+    from tools.phase5_state_stage_job import StageRefused
+
+    monkeypatch.setattr(phase5_prepare_release, "MAX_STATE_BYTES", 10)
+    path = tmp_path / "payoff.json"
+
+    with pytest.raises(StageRefused) as err:
+        phase5_prepare_release.artifact_file_payloads([(path, b"x" * 11)])
+    assert str(err.value) == "a bound state file could not be loaded"
+
+    with pytest.raises(StageRefused) as err:
+        phase5_prepare_release.artifact_file_payloads([(path, "not bytes")])
+    assert str(err.value) == "a bound state file could not be loaded"
+
 @pytest.mark.parametrize("vary,value", [
     ("model_id", "m2"),
     ("feature_order", ("y",)),
@@ -719,7 +734,10 @@ def test_tier4_fold_payloads_filters_by_snapshot(tmp_path):
     non_matching = tmp_path / f"model1_202610_{'b' * 12}.joblib"
     non_matching.write_bytes(b"other-data")
     result = tier4_fold_payloads(tmp_path, {"role": "model1"}, snap, None)
-    assert set(result.get("tier4_folds:role", {}).keys()) == {matching.name}
+    folds = result.get("tier4_folds:role", {})
+    assert set(folds.keys()) == {matching.name}
+    assert folds[matching.name] == matching.read_bytes()
+    assert non_matching.read_bytes() not in folds.values()
 
 
 def test_id_conflict_on_matching_cutoff_but_different_objects(tmp_path, monkeypatch):

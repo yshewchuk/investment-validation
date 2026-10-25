@@ -250,6 +250,8 @@ def artifact_file_payloads(files: Iterable[Path | tuple[Path, bytes]]) -> dict[s
     for item in files:
         if isinstance(item, tuple):
             path, data = item
+            if not isinstance(data, bytes) or len(data) > MAX_STATE_BYTES:
+                raise StageRefused("a bound state file could not be loaded")
         else:
             path = Path(item)
             try:
