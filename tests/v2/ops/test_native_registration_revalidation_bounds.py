@@ -78,13 +78,23 @@ def test_both_revalidation_reads_refuse_catalog_growth_before_object_access(sour
 
 
 @pytest.mark.parametrize("limit", [None, "exact", "short"])
-def test_finite_revalidation_default_and_exact_boundary_preserve_bytes(source, limit):
+def test_finite_revalidation_default_and_exact_boundary_preserve_bytes(source, monkeypatch, limit):
     registration = call_native_registration(source)
     cap = len(registration.binding_json)
     before = catalog_rows(source.conn), object_bytes(source.store)
+    seen = []
+    def observe(method):
+        def call(*args, **kwargs):
+            seen.append(kwargs["max_evidence_bytes"])
+            return method(*args, **kwargs)
+        return call
+    for name in ("prepare_native_registration", "native_registration_exists"):
+        monkeypatch.setattr(native, name, observe(getattr(native, name)))
     kwargs = {} if limit is None else {"max_evidence_bytes": cap - (limit == "short")}
     with size_refusal(cap, cap - 1) if limit == "short" else nullcontext():
         assert call_native_registration(source, admit=True, **kwargs) == registration
+    expected = native.MAX_NATIVE_EVIDENCE_BYTES if limit is None else kwargs["max_evidence_bytes"]
+    assert seen == [expected] * (1 if limit == "short" else 2)
     assert (catalog_rows(source.conn), object_bytes(source.store)) == before
 
 

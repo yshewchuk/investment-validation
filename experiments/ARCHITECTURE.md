@@ -28,7 +28,7 @@ budgets in `[1, 2**62 - 1]`, leaving SQLite headroom for UTF-16. The loader and 
 five CLI parsers (including RUNUP's evidence-budget flag) and `register_native` share it; None cannot disable either public boundary.
 `register_native` defaults to 16 MiB; prediction/gate register forward their flag to the same bounded reservation used by RUNUP.
 The cap is serialized UTF-8 bytes checked after preparation but before binding publication/catalog reservation, not construction memory/RSS.
-Later admission/outcome APIs retain their policies; changed source fingerprints require fresh preregistration, never seal migration.
+Public require/magnitude admission forward finite bounds through both rechecks; low-level optional admission/outcome APIs retain their policies. Changed source fingerprints require fresh preregistration, never seal migration.
 
 Registration publishes canonical bytes through `ArtifactStore`, then reserves
 the existing primary `hypotheses`/`experiment_runs` records in one catalog
@@ -902,7 +902,7 @@ Whole-cohort coverage and daily-mark units remain the exploratory comparison con
 | Registration population/holdout refusal | Native typed failure; no reservation or attempted variant. |
 | Admitted comparison emits a supported scientific failure | Immutable failed/refused terminal, attempted count one, no report or partial cohort. Other typed failures propagate without a terminal. |
 | Resource/publication interruption | Later snapshot/artifact/repository filesystem or SQLite failures remain `RESOURCE_UNAVAILABLE`; no synthesized scientific failure. A durable intent resumes without market reads; before intent exists, an exact retry may repeat the deterministic comparison. |
-| Malformed/oversized stored evidence or conflicting terminal | Existing native integrity refusal; no evidence replacement. Both register/run enforce the 16 MiB default or explicit JSON budget. Reservation preflights binding/catalog bytes before publication and bounds both stored-evidence checks; report/market bytes retain their own policies. |
+| Malformed/oversized stored evidence or conflicting terminal | Catalog/terminal integrity failures retain the native integrity refusal; admitted registration-reference or prepared-binding overflow instead gives nonretryable `RESOURCE_LIMIT_EXCEEDED` with `registration_bytes`/`max_registration_bytes`. No evidence replacement. Both register/run enforce the 16 MiB default or explicit JSON budget. Reservation preflights binding/catalog bytes before publication and bounds both stored-evidence checks; report/market bytes retain their own policies. |
 
 ## Selected-candidate outer evaluation
 

@@ -19,6 +19,7 @@ from engine.v2.foundation import (
     canonical_json,
     content_hash,
     from_document,
+    to_document,
 )
 from engine.v2.ops import schema, stages
 from engine.v2.ops.catalog import connect
@@ -1363,7 +1364,12 @@ def test_oversized_new_roster_cannot_create_unreplayable_seal(source, monkeypatc
         patch.setattr(source.store, "publish_bytes", _forbid)
         with pytest.raises(OpsError) as caught:
             _call(source)
-        assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+        assert type(caught.value) is OpsError and caught.value.problem.retryable is False
+        assert to_document(caught.value.problem) == {
+            "schema_version": "problem.v1.0", "code": "INVALID_EXPERIMENT_SPEC", "category": "validation",
+            "retryable": False, "message": "native sweep requires bounded JSON object evidence",
+            "stage": None, "trace_id": None, "dependency_refs": [], "retry_after_seconds": None,
+            "diagnostic_ref": None, "details": {}}
         assert list(source.conn.iterdump()) == before
     identity = _call(source)
     assert _call(source) == identity

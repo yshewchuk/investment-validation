@@ -207,7 +207,7 @@ submitted jobs inline, or switch production authority: it queues the plan and
 returns the job ids, leaving execution to a separately started supervisor.
 
 The top-level `experiments/native_registration.py` library consumes the narrow
-registration surface above, including `native_registration.native_evidence_json` for bounded reservation serialization. Like other `experiments/` callers, it is outside
+registration surface above, including `native_registration.native_evidence_json` for bounded reservation serialization and `native_registration.MAX_NATIVE_EVIDENCE_BYTES` for its finite public default. Like other `experiments/` callers, it is outside
 the engine import graph; it introduces no peer-layer engine dependency.
 `experiments/native_outcomes.py` consumes `catalog.transaction`, `native_registration.read_native_evidence`/`native_evidence_json` and
 `errors.OpsError`/`fail` for catalog-owned publication and typed refusal.
