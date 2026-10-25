@@ -96,7 +96,8 @@ def test_latest_completed_session_accepts_a_valid_frozen_snapshot_clock():
     assert latest_completed_session(frozen_at="2026-11-27T17:59:00Z") == "2026-11-25"
 
 
-@pytest.mark.parametrize("frozen_at", ["", "not-a-timestamp", "2026-13-01T00:00:00Z",
+@pytest.mark.parametrize("frozen_at", ["", "not-a-timestamp", "2026-10-05",
+                                       "2026-13-01T00:00:00Z",
                                        0, False, [], {}])
 def test_latest_completed_session_refuses_malformed_frozen_clock(frozen_at):
     with pytest.raises(ValueError):
@@ -165,6 +166,37 @@ def test_current_json_refuses_a_malformed_frozen_clock_without_live_time(tmp_pat
         response = urlopen(request, timeout=5)
         assert json.loads(response.read()) == {"release_id": "r1"}
         assert "X-Expected-Session" not in response.headers
+        assert response.headers["Cache-Control"] == "no-store"
+    finally:
+        _stop(server, thread)
+
+
+def test_current_json_live_clock_before_close_resolves_the_exact_previous_session(tmp_path,
+                                                                                   monkeypatch):
+    """``frozen_at="unknown"`` routes through the live wall clock, and a live
+    instant one minute before the close answers the most recent *completed*
+    session -- Friday 2026-10-02, never the in-progress Monday."""
+    _write_bundle(tmp_path, "r1")
+    (tmp_path / "CURRENT").write_text("r1\n")
+    health = tmp_path / "health.json"
+    health.write_text(json.dumps({"schema_version": "operations_health.v1.0",
+                                  "generated_at": "2026-10-05T17:00:00Z"}))
+    fixed = datetime(2026, 10, 5, 15, 59, tzinfo=ZoneInfo("America/New_York"))
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr(market_schedule, "datetime", FrozenDatetime)
+    server, thread = _serve(tmp_path, health, frozen_at="unknown")
+    try:
+        request = Request(
+            f"http://127.0.0.1:{server.server_port}/release/current.json")
+        request.add_header("Authorization", "Bearer browser-secret")
+        response = urlopen(request, timeout=5)
+        assert json.loads(response.read()) == {"release_id": "r1"}
+        assert response.headers["X-Expected-Session"] == "2026-10-02"
         assert response.headers["Cache-Control"] == "no-store"
     finally:
         _stop(server, thread)
@@ -271,7 +303,8 @@ def _shell_status(tmp_path, health, *, pinned="r1", published="r1",
         "const __outcome = outcome();",
         "render();",
         "JSON.stringify({outcome: __outcome, state: state.textContent, "
-        "banner: banner.className, expected: expectedEl.textContent});",
+        "banner: banner.className, expected: expectedEl.textContent, "
+        "requested: requestedEl.textContent, resolved: resolvedEl.textContent});",
     ])
     harness = tmp_path / "shell-status.js"
     harness.write_text(
@@ -421,6 +454,94 @@ def test_shell_shows_the_real_producer_streak_shapes(tmp_path):
 
 
 @_needs_node
+def test_shell_treats_older_failures_behind_an_unknown_latest_night_as_unknown(tmp_path):
+    """Producer-backed: an older failed night under a latest unobserved night.
+
+    ``budget_streak`` reports a nonzero consecutive-failure streak together
+    with ``unknown_occurrences`` here -- the latest outcome is unknown, so
+    neither the outcome line nor the evaluator may say "latest engineering
+    outcome failed", while the streak evidence stays visible.
+    """
+    conn, _, _ = catalog(tmp_path)
+    health = _health_document()
+    record_check(conn, "2026-10-02", "engineering", False, {"attempt": 1})
+    record_check(conn, "2026-10-05", "engineering", None, {"attempt": 1})
+    streak = budget_streak(conn)
+    health["code_budgets"] = streak
+    assert streak["ok"] is False
+    assert streak["consecutive_nights"] == 1
+    assert streak["unknown_occurrences"] == ["2026-10-05"]
+    result = _shell_status(tmp_path, health)
+    assert result["outcome"].startswith("latest outcome: unknown:")
+    assert "latest engineering outcome failed" not in result["outcome"]
+    assert "latest engineering outcome unknown (not observed)" in result["outcome"]
+    assert "1 consecutive failed engineering night(s)" in result["outcome"]
+    assert "scheduled observations missing: 2026-10-05" in result["outcome"]
+    assert result["state"].startswith("unknown:")
+    assert "latest engineering outcome failed" not in result["state"]
+    assert "failed engineering nights: 1 consecutive" in result["state"]
+    assert "scheduled observations missing: 2026-10-05" in result["state"]
+    assert result["banner"] == "unknown"
+    conn.close()
+
+
+@_needs_node
+def test_shell_banner_precedence_is_unknown_over_stale_over_degraded(tmp_path):
+    health = _health_document()
+    health["generated_at"] = "2026-10-03T20:00:00Z"
+    health["withheld_release"] = {"release_id": "r0", "occurrence": "2026-10-04"}
+    health["code_budgets"] = {"ok": False, "latest": {"occurrence": "2026-10-05"},
+                              "consecutive_nights": 2, "unknown_occurrences": []}
+    result = _shell_status(tmp_path, health)
+    assert result["state"].startswith("stale:")
+    assert "observation older than 24 hours" in result["state"]
+    assert "failed engineering nights: 2 consecutive" in result["state"]
+    assert result["banner"] == "stale"
+
+    health["code_budgets"]["unknown_occurrences"] = ["2026-10-05"]
+    result = _shell_status(tmp_path, health)
+    assert result["state"].startswith("unknown:")
+    assert "scheduled observations missing: 2026-10-05" in result["state"]
+    assert result["banner"] == "unknown"
+
+    health["generated_at"] = "2026-10-05T20:00:00Z"
+    del health["code_budgets"]["unknown_occurrences"][:]
+    health["withheld_release"] = None
+    result = _shell_status(tmp_path, health)
+    assert result["state"].startswith("degraded:")
+    assert result["banner"] == "degraded"
+
+
+@_needs_node
+def test_shell_renders_requested_resolved_and_expected_sessions_distinctly(tmp_path):
+    health = _health_document()
+    health["requested_session"] = "eng-night-2026-10-05"
+    health["resolved_session"] = "2026-10-04"
+    result = _shell_status(tmp_path, health, expected="2026-10-05")
+    assert result["requested"] == "requested session: eng-night-2026-10-05"
+    assert result["resolved"] == "resolved session: 2026-10-04"
+    assert result["expected"] == "expected session: 2026-10-05"
+    assert result["state"].startswith("stale:")
+    assert "resolved session is older than expected session" in result["state"]
+    assert "session identity evidence missing or malformed" not in result["state"]
+    assert result["banner"] == "stale"
+
+
+@_needs_node
+def test_shell_refuses_a_resolved_session_later_than_the_requested_session(tmp_path):
+    health = _health_document()
+    health["requested_session"] = "2026-10-04"
+    health["resolved_session"] = "2026-10-05"
+    result = _shell_status(tmp_path, health)
+    assert result["requested"] == "requested session: 2026-10-04"
+    assert result["resolved"] == "resolved session: 2026-10-05"
+    assert result["state"].startswith("unknown:")
+    assert "resolved session is later than requested session" in result["state"]
+    assert "resolved session is older than expected session" not in result["state"]
+    assert result["banner"] == "unknown"
+
+
+@_needs_node
 def test_shell_keeps_malformed_evidence_unknown_with_unknown_occurrences(tmp_path):
     health = _health_document()
     health["code_budgets"] = {"ok": False, "latest": None,
@@ -445,9 +566,18 @@ def test_shell_admits_null_and_object_withheld_evidence(tmp_path):
     health = _health_document()
     health["withheld_release"] = {"release_id": "r0", "occurrence": "2026-10-04"}
     result = _shell_status(tmp_path, health)
-    assert result["outcome"] == "latest outcome: fail: release withheld: (details omitted)"
+    assert result["outcome"] == "latest outcome: degraded: release withheld: (details omitted)"
     assert result["state"].startswith("degraded:")
     assert "release withheld: (details omitted)" in result["state"]
+    assert result["banner"] == "degraded"
+
+    health["code_budgets"] = {"ok": False, "latest": {"occurrence": "2026-10-05"},
+                              "consecutive_nights": 1, "unknown_occurrences": []}
+    result = _shell_status(tmp_path, health)
+    assert result["outcome"].startswith("latest outcome: fail:")
+    assert "release withheld: (details omitted)" in result["outcome"]
+    assert "latest engineering outcome failed" in result["outcome"]
+    assert result["state"].startswith("degraded:")
     assert result["banner"] == "degraded"
 
 
@@ -524,6 +654,10 @@ def test_shell_treats_resolved_session_later_than_expected_as_unknown(tmp_path):
      "consecutive_nights": "0", "unknown_occurrences": []},
     {"ok": True, "latest": {"occurrence": "2026-10-05"},
      "consecutive_nights": True, "unknown_occurrences": []},
+    {"ok": True, "latest": {"occurrence": "2026-10-05"},
+     "consecutive_nights": 2.5, "unknown_occurrences": []},
+    {"ok": False, "latest": {"occurrence": "2026-10-05"},
+     "consecutive_nights": -1, "unknown_occurrences": []},
     {"ok": True, "latest": {"occurrence": "2026-10-05"}, "consecutive_nights": 0},
     {"ok": True, "latest": {"occurrence": "2026-10-05"},
      "consecutive_nights": 0, "unknown_occurrences": {}},

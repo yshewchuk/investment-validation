@@ -36,8 +36,9 @@ def _snapshot_clock(frozen_at: str | None) -> datetime | None:
     """The snapshot clock, or ``None`` for the live wall clock.
 
     Only an absent value or the exact string ``"unknown"`` means live. Every
-    other value must be a parseable ISO timestamp; empty, malformed and
-    non-string evidence is refused rather than silently replaced by live time.
+    other value must be a parseable ISO timestamp; a date-only string is
+    refused, never read as midnight. Empty, malformed and non-string evidence
+    is refused rather than silently replaced by live time.
     """
     if frozen_at is None:
         return None
@@ -46,9 +47,12 @@ def _snapshot_clock(frozen_at: str | None) -> datetime | None:
     if frozen_at == "unknown":
         return None
     try:
-        return datetime.fromisoformat(frozen_at.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(frozen_at.replace("Z", "+00:00"))
     except ValueError as err:
         raise ValueError(f"frozen_at {frozen_at!r} is not a parseable ISO timestamp") from err
+    if len(frozen_at) <= 10:
+        raise ValueError(f"frozen_at {frozen_at!r} is a date, not an ISO timestamp")
+    return parsed
 
 
 def latest_completed_session(now: datetime | None = None,

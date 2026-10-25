@@ -145,8 +145,9 @@ absent `frozen_at` or the exact string `"unknown"` means live; a malformed,
 empty or non-string configured clock is refused and the route omits the header
 instead of substituting live time, so clients show expected session unknown.
 The shell compares that expected session with health's `resolved_session` and
-uses `requested_session` for the later-than-requested refusal. Every 200
-response carries `Cache-Control: no-store`: the release pointer and the
+uses `requested_session` for the later-than-requested refusal. Successful
+(200) responses from this route carry `Cache-Control: no-store` -- refusals
+(401, 404) are sent without it: the release pointer and the
 scheduled-session clock can change between the shell's 30-second polls, and a
 cached header would silently freeze the freshness evaluation at an old
 session.

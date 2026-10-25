@@ -152,6 +152,22 @@ def _shell_markup(frozen: str) -> str:
 <nav>{views}</nav><main><iframe id="legacy" title="legacy dashboard" src="about:blank" style="width:100%;height:90vh;border:0"></iframe></main>'''
 
 
+#: The shell's session/evidence-parsing and outcome-line helpers, held as a
+#: plain JS chunk (no Python interpolation) that ``_shell_script`` splices in
+#: verbatim where they always stood -- one responsibility per piece, identical
+#: emitted bytes.
+_SHELL_EVIDENCE_JS = '''function sessionDate(s){if(typeof s!=='string'||!s)return null;const m=/^(?:eng-night-)?([0-9]{4}-[0-9]{2}-[0-9]{2})$/.exec(s);if(!m)return null;const tail=m[1];const at=Date.parse(tail);if(Number.isNaN(at))return null;return new Date(at).toISOString().slice(0,10)===tail?at:null;}
+function expectedSession(s){if(typeof s!=='string'||!s)return null;const at=sessionDate(s);return at===null?null:new Date(at).toISOString().slice(0,10);}
+async function readCurrent(){let ok=false,id=null,exp=null;try{const r=await fetch('/release/current.json',{credentials:'same-origin'});if(!r.ok)throw Error('http');const j=await r.json();id=(j&&typeof j.release_id==='string'&&j.release_id)?j.release_id:null;exp=expectedSession(r.headers.get('X-Expected-Session'));ok=true;}catch(e){}return {ok:ok,id:id,exp:exp};}
+async function pollCurrent(){const seq=++currentSeq,found=await readCurrent();if(seq!==currentSeq)return;published=found.ok?found.id:null;expected=found.ok?found.exp:null;render();}
+function withheldEvidence(h){if(!Object.prototype.hasOwnProperty.call(h,'withheld_release'))return {missing:true,malformed:true,value:null};const value=h.withheld_release;if(value===null)return {missing:false,malformed:false,value:null};if(typeof value!=='object'||Array.isArray(value))return {missing:false,malformed:true,value:null};return {missing:false,malformed:false,value:value};}
+function withheldReason(w){return w.missing?'withheld release evidence missing':'withheld release evidence missing or malformed';}
+function withheldDetail(){return 'release withheld: (details omitted)';}
+function scheduleEvidence(h){const cb=h&&h.code_budgets;if(!cb||typeof cb!=='object'||Array.isArray(cb)||typeof cb.ok!=='boolean'||!cb.latest||typeof cb.latest!=='object'||Array.isArray(cb.latest)||!Number.isInteger(cb.consecutive_nights)||cb.consecutive_nights<0||!Array.isArray(cb.unknown_occurrences))return null;return cb;}
+function outcome(){if(!health)return 'latest outcome: unknown (health unavailable)';const parts=[],w=withheldEvidence(health),cb=scheduleEvidence(health);if(w.malformed){parts.push(withheldReason(w));return 'latest outcome: unknown: '+parts.join('; ');}if(w.value)parts.push(withheldDetail());if(!cb){parts.push('engineering schedule evidence missing or malformed');return 'latest outcome: unknown: '+parts.join('; ');}let verdict=cb.ok?'pass':(cb.unknown_occurrences.length>0?'unknown':(cb.consecutive_nights!==0?'fail':'unknown'));if(!cb.ok){if(cb.unknown_occurrences.length>0||cb.consecutive_nights===0)parts.push('latest engineering outcome unknown (not observed)');else parts.push('latest engineering outcome failed');}if(cb.consecutive_nights!==0)parts.push(cb.consecutive_nights+' consecutive failed engineering night(s)');if(cb.unknown_occurrences.length>0){verdict='unknown';parts.push('scheduled observations missing: '+cb.unknown_occurrences.join(', '));}if(w.value&&verdict==='pass')verdict='degraded';if(verdict==='pass')parts.push('no failures recorded');return 'latest outcome: '+verdict+': '+parts.join('; ');}
+'''
+
+
 def _shell_script(frozen: str) -> str:
     """Status polling and presentation, client-side only.
 
@@ -166,16 +182,22 @@ def _shell_script(frozen: str) -> str:
     ``operations_health.v1.0`` or ``operations_health.v1.1`` object with a
     parseable, non-future ``generated_at``; age shows in whole days/hours
     (minimum one hour when nonzero, more than 24h stale). The shell shows the
-    requested/resolved/expected sessions and the latest outcome evidence.
-    "current" requires age <=24h, a resolved session not older than the
-    expected completed session, a health ``current_release.release_id``
-    matching BOTH the pin and the latest published id, no withheld release,
-    zero consecutive failed nights and no missing scheduled observations --
-    each failed gate names its own explicit reason (missing/malformed
-    identity, session or schedule evidence is unknown, never current; ok
-    false without a failed streak reads unknown, not failed). Any fetch or
-    parse failure shows unknown/unavailable without erasing the pin or
-    throwing out of the shell.
+    requested/resolved/expected sessions (session ids date-parse as
+    ``YYYY-MM-DD`` with an optional ``eng-night-`` prefix) and the latest
+    outcome evidence. "current" requires age <=24h, a resolved session not
+    older than the expected completed session, a health
+    ``current_release.release_id`` matching BOTH the pin and the latest
+    published id, no withheld release, zero consecutive failed nights and no
+    missing scheduled observations -- each failed gate names its own explicit
+    reason (missing/malformed identity, session or schedule evidence is
+    unknown, never current; ``consecutive_nights`` is trusted only as a
+    nonnegative integer). A withheld release reads degraded, like its banner.
+    Missing scheduled observations make the latest outcome unknown even
+    alongside a nonzero older failure streak: the streak evidence stays
+    visible, but the latest-failed wording does not; ok false without a
+    failed streak and without missing observations reads unknown, not
+    failed. Any fetch or parse failure shows unknown/unavailable without
+    erasing the pin or throwing out of the shell.
     """
     return f'''<script>
 const FROZEN='{frozen}',DAY=86400000;
@@ -184,16 +206,7 @@ let pinned=null,published,expected,health=null,healthNote='health not fetched ye
 function age(ms){{let h=Math.floor(ms/3600000);if(ms>0&&h<1)h=1;const d=Math.floor(h/24);return d?d+'d '+(h%24)+'h':h+'h';}}
 function usable(j){{if(!j||typeof j!=='object'||Array.isArray(j)||!['operations_health.v1.0','operations_health.v1.1'].includes(j.schema_version))return false;const at=Date.parse(j.generated_at);return !Number.isNaN(at)&&at<=Date.now();}}
 async function pollHealth(){{const seq=++healthSeq;try{{const r=await fetch('/health.json',{{credentials:'same-origin'}});if(seq!==healthSeq)return;if(!r.ok)throw Error('http');const j=await r.json();if(seq!==healthSeq)return;if(usable(j)){{health=j;healthNote='';}}else{{health=null;healthNote='health artifact unusable: schema or generated_at';}}}}catch(e){{if(seq!==healthSeq)return;health=null;healthNote='health fetch failed: unavailable';}}if(seq!==healthSeq)return;render();}}
-function sessionDate(s){{if(typeof s!=='string'||!s)return null;const m=/^(?:eng-night-)?([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})$/.exec(s);if(!m)return null;const tail=m[1];const at=Date.parse(tail);if(Number.isNaN(at))return null;return new Date(at).toISOString().slice(0,10)===tail?at:null;}}
-function expectedSession(s){{if(typeof s!=='string'||!s)return null;const at=sessionDate(s);return at===null?null:new Date(at).toISOString().slice(0,10);}}
-async function readCurrent(){{let ok=false,id=null,exp=null;try{{const r=await fetch('/release/current.json',{{credentials:'same-origin'}});if(!r.ok)throw Error('http');const j=await r.json();id=(j&&typeof j.release_id==='string'&&j.release_id)?j.release_id:null;exp=expectedSession(r.headers.get('X-Expected-Session'));ok=true;}}catch(e){{}}return {{ok:ok,id:id,exp:exp}};}}
-async function pollCurrent(){{const seq=++currentSeq,found=await readCurrent();if(seq!==currentSeq)return;published=found.ok?found.id:null;expected=found.ok?found.exp:null;render();}}
-function withheldEvidence(h){{if(!Object.prototype.hasOwnProperty.call(h,'withheld_release'))return {{missing:true,malformed:true,value:null}};const value=h.withheld_release;if(value===null)return {{missing:false,malformed:false,value:null}};if(typeof value!=='object'||Array.isArray(value))return {{missing:false,malformed:true,value:null}};return {{missing:false,malformed:false,value:value}};}}
-function withheldReason(w){{return w.missing?'withheld release evidence missing':'withheld release evidence missing or malformed';}}
-function withheldDetail(){{return 'release withheld: (details omitted)';}}
-function scheduleEvidence(h){{const cb=h&&h.code_budgets;if(!cb||typeof cb!=='object'||Array.isArray(cb)||typeof cb.ok!=='boolean'||!cb.latest||typeof cb.latest!=='object'||Array.isArray(cb.latest)||typeof cb.consecutive_nights!=='number'||!Array.isArray(cb.unknown_occurrences))return null;return cb;}}
-function outcome(){{if(!health)return 'latest outcome: unknown (health unavailable)';const parts=[],w=withheldEvidence(health),cb=scheduleEvidence(health);if(w.malformed){{parts.push(withheldReason(w));return 'latest outcome: unknown: '+parts.join('; ');}}if(w.value)parts.push(withheldDetail());if(!cb){{parts.push('engineering schedule evidence missing or malformed');return 'latest outcome: unknown: '+parts.join('; ');}}let verdict=cb.ok?'pass':(cb.consecutive_nights!==0?'fail':'unknown');if(!cb.ok){{if(cb.consecutive_nights!==0)parts.push('latest engineering outcome failed');else parts.push('latest engineering outcome unknown (not observed)');}}if(cb.consecutive_nights!==0){{verdict='fail';parts.push(cb.consecutive_nights+' consecutive failed engineering night(s)');}}if(cb.unknown_occurrences.length>0){{verdict='unknown';parts.push('scheduled observations missing: '+cb.unknown_occurrences.join(', '));}}if(w.value)verdict=verdict==='unknown'?'unknown':'fail';if(verdict==='pass')parts.push('no failures recorded');return 'latest outcome: '+verdict+': '+parts.join('; ');}}
-function evaluate(){{const ms=Date.now()-Date.parse(health.generated_at),text=age(ms),reasons=[];let unknown=false,stale=false;
+{_SHELL_EVIDENCE_JS}function evaluate(){{const ms=Date.now()-Date.parse(health.generated_at),text=age(ms),reasons=[];let unknown=false,stale=false;
 function add(reason,kind){{reasons.push(reason);if(kind==='unknown')unknown=true;else if(kind==='stale')stale=true;}}
 if(ms>DAY)add('observation older than 24 hours','stale');
 const w=withheldEvidence(health);
@@ -211,7 +224,7 @@ else if(rs>rq)add('resolved session is later than requested session','unknown');
 else if(rs<ex)add('resolved session is older than expected session','stale');
 const cb=scheduleEvidence(health);
 if(!cb)add('engineering schedule evidence missing or malformed','unknown');
-else{{if(cb.ok===false){{if(cb.consecutive_nights!==0)add('latest engineering outcome failed','degraded');else add('latest engineering outcome unknown (not observed)','unknown');}}if(cb.consecutive_nights!==0)add('failed engineering nights: '+cb.consecutive_nights+' consecutive','degraded');if(cb.unknown_occurrences.length>0)add('scheduled observations missing: '+cb.unknown_occurrences.join(', '),'unknown');}}
+else{{if(cb.ok===false){{if(cb.unknown_occurrences.length>0||cb.consecutive_nights===0)add('latest engineering outcome unknown (not observed)','unknown');else add('latest engineering outcome failed','degraded');}}if(cb.consecutive_nights!==0)add('failed engineering nights: '+cb.consecutive_nights+' consecutive','degraded');if(cb.unknown_occurrences.length>0)add('scheduled observations missing: '+cb.unknown_occurrences.join(', '),'unknown');}}
 stamp.textContent='updated '+text+' ago';
 if(reasons.length===0){{state.textContent='current';banner.className='';return;}}
 state.textContent=(unknown?'unknown: ':stale?'stale: ':'degraded: ')+reasons.join('; ')+' (observation '+text+' old)';

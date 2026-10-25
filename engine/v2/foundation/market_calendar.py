@@ -105,7 +105,7 @@ def _holidays(year: int) -> frozenset[date]:
 def is_scheduled_session(day: date) -> bool:
     """Public weekday/non-holiday predicate shared by projection, calendar
     validation and the serving clock; bounded by the holiday-year LRU."""
-    if not isinstance(day, date):
+    if not isinstance(day, date) or isinstance(day, datetime):
         raise CalendarInputError(f"session day must be a date: {day!r}")
     return day.weekday() < 5 and day not in _holidays(day.year)
 

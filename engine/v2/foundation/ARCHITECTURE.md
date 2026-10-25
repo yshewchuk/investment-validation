@@ -33,13 +33,15 @@ returns the latest completed NYSE session at `now`, or at the snapshot
 passed and it is a scheduled session, else the most recent earlier session
 day. `frozen_at=None` and the exact string `"unknown"` mean live; every other
 empty, malformed or non-string value raises `ValueError` rather than silently
-switching to live time.
+switching to live time. That validation of a supplied `frozen_at` runs even
+when `now` is given explicitly: `now` selects the clock, it never excuses a
+malformed `frozen_at`.
 
 | Serving-clock condition | Outcome |
 |---|---|
 | `now` supplied, or `frozen_at` a parseable ISO timestamp | Session at that moment (naive treated Eastern) |
 | `frozen_at` absent or exactly `"unknown"`, `now` omitted | Live wall clock |
-| `frozen_at` empty, malformed or non-string | `ValueError`; never live time |
+| `frozen_at` empty, malformed or non-string -- even when `now` is supplied | `ValueError`; never live time |
 | Scheduled session day, clock at or after its modelled close-hour boundary | That day |
 | Before the close hour, weekend or holiday | Most recent earlier session day |
 | July 3 session / Black Friday / session Christmas Eve at 12:59 vs 13:00 | Prior session / that day |
