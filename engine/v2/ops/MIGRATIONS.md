@@ -17,3 +17,4 @@ checksum; historical unflagged checksums remain unchanged.
 | R5 — restoration and concurrency | Foreign-key enforcement is restored to `ON` on every exit. The pragma is per connection; other connections retain their setting. `BEGIN IMMEDIATE` serializes catalog writers while readers may continue. |
 | R6 — retry | The same pending migration may be retried after correcting its cause; applied steps remain checksum-protected and are never edited. No internal retry occurs. |
 | R7 — additive schema | New durable tables are added in a new numbered migration; already-applied migration statements and checksums are immutable. |
+| R8 — additive column | A new nullable column is added by a new numbered migration with its own byte bound; existing rows keep the additive default. Migration 15 adds nullable, bounded `resolved_at` to `native_stage_failures`, so resolved history stays in the catalog while health selects only unresolved rows. |

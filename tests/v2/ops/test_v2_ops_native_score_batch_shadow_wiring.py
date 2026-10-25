@@ -23,24 +23,26 @@ from types import SimpleNamespace
 import pytest
 
 from engine.paths import ROOT
-from engine.v2.contracts import JobReceipt
+from engine.v2.contracts import JobReceipt, JobSpec, SubmitRequest
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, canonical_json, content_hash
 from engine.v2.models import deployment
 from engine.v2.ops import nightly
 from engine.v2.ops.checkpoints import registered_artifact
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.fingerprints import environment_identity
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
+from engine.v2.ops.scheduler import claim_next
 from engine.v2.ops.stages import LegacyParameters, registry
 from engine.v2.ops.submission import (
     NamespacePolicy,
     job_id_for,
     request_digest,
+    submit,
     submit_graph,
 )
 from engine.v2.ops.supervisor import Service
-from tests.ops_support import TEST_POLICY, catalog
+from tests.ops_support import TEST_POLICY, catalog, sample
 
 _POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 
@@ -234,6 +236,23 @@ def test_identity_skips_row_with_missing_created_at(tmp_path):
 
     assert identity is not None
     assert identity[:2] == nightly._session_scope_from_score_key(valid_key)
+
+
+def test_identity_fails_closed_when_newest_succeeded_spec_is_oversized(tmp_path):
+    """An older valid score row must never stand in for a newer oversized
+    one: the newest row wins the one-row lookup, then its unreadable spec
+    makes the whole identity ``None`` instead of falling back."""
+    conn, clock, _ = catalog(tmp_path)
+    _mark_score_succeeded(conn, clock, session="2026-01-01")
+    clock.advance(3600)
+    newer_key = _mark_score_succeeded(conn, clock, session="2026-01-02")
+    oversized = ('{"padding": "' + "x" * nightly.MAX_NATIVE_SCORE_IDENTITY_SPEC_BYTES
+                 + '"}')
+    conn.execute("UPDATE jobs SET spec_json = ? WHERE job_id = ?",
+                 (oversized, job_id_for("shadow", newer_key)))
+    conn.commit()
+
+    assert nightly._native_score_batch_identity(conn) is None
 
 
 def test_identity_tie_breaks_deterministically_when_created_at_matches(tmp_path):
@@ -937,3 +956,97 @@ def test_identity_lookup_failure_never_spends_a_real_identitys_attempt_budget(tm
     # ...and the real identity's own memo (attempts=3) is untouched.
     assert service._native_score_batch_memo == {"identity": real_identity, "attempts": 3,
                                                  "not_before": 0.0}
+
+
+def _claim_native_score_batch(conn, clock, supervisor, *, occurrence, scope_hash):
+    key = nightly._native_score_batch_key(occurrence, scope_hash)
+    request = SubmitRequest(
+        namespace="shadow", idempotency_key=key, principal="operator",
+        job=JobSpec(
+            kind="native_score_batch", implementation_ref="code", spec_hash=None,
+            environment_ref="env",
+            parameters={
+                "expected_ids": (), "release_root": "release-root",
+                "as_of": occurrence, "snapshot_id": "snapshot-1",
+                "calendar_revision": "calendar-1", "feature_names": (),
+            },
+            output_namespace="shadow", resource_class="projection",
+            retry_policy_ref="bounded",
+            checkpoint_contract_ref="native_score_batch_records.v2.0"))
+    submit(conn, registry(), _POLICY, request, clock=clock)
+    claim = claim_next(conn, policy=TEST_POLICY, sample=sample(clock),
+                       supervisor=supervisor, clock=clock, registry=registry())
+    assert claim is not None and claim.spec.kind == "native_score_batch"
+    return claim
+
+
+def test_worker_reported_model_not_ready_survives_validation_to_native_row(
+        tmp_path, capsys):
+    """A worker-reported MODEL_NOT_READY passes the supervisor's typed-problem
+    validation and reaches the durable failure table even though the existing
+    native job makes the sidecar short-circuit."""
+    conn, clock, supervisor = catalog(tmp_path)
+    claim = _claim_native_score_batch(
+        conn, clock, supervisor, occurrence="2026-01-15", scope_hash="scope-hash")
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    worker_problem = make_problem(
+        "MODEL_NOT_READY", "native score batch release binding is unavailable")
+    running = SimpleNamespace(
+        claim=claim, failure=None, peak=0, started=0.0, stop_at=None,
+        data=json.dumps({
+            "schema_version": "worker_result.v1.0",
+            "failure": worker_problem.code,
+            "problem": {
+                "code": worker_problem.code,
+                "category": worker_problem.category,
+                "retryable": worker_problem.retryable,
+                "message": worker_problem.message,
+            },
+        }).encode())
+
+    service._finish(running, {"exit_code": 1})
+
+    row = conn.execute(
+        "SELECT occurrence, scope_hash, stage_id, status, error_code, "
+        "problem_json, resolved_at FROM native_stage_failures "
+        "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
+        ("2026-01-15", "scope-hash", "native_score_batch")).fetchone()
+    assert row is not None
+    assert row["status"] == "FAILED"
+    assert row["error_code"] == "MODEL_NOT_READY"
+    assert row["resolved_at"] is None
+    saved = json.loads(row["problem_json"])
+    assert saved["code"] == "MODEL_NOT_READY"
+    assert saved["details"]["reason"] == "WORKER_MODEL_NOT_READY"
+    assert saved["message"] == "native score batch release binding is unavailable"
+    event = json.loads(capsys.readouterr().out)
+    assert event["event"] == "native_score_batch_release_unavailable"
+    assert event["reason"] == "WORKER_MODEL_NOT_READY"
+    conn.close()
+
+
+def test_successful_native_worker_resolves_scope_failures(tmp_path, monkeypatch):
+    conn, clock, supervisor = catalog(tmp_path)
+    claim = _claim_native_score_batch(
+        conn, clock, supervisor, occurrence="2026-01-15", scope_hash="scope-hash")
+    problem = json.dumps({"code": "MODEL_NOT_READY"})
+    conn.execute(
+        "INSERT INTO native_stage_failures "
+        "(occurrence,scope_hash,stage_id,status,error_code,problem_json,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        ("2026-01-15", "scope-hash", "native_score_batch", "FAILED",
+         "MODEL_NOT_READY", problem, "2026-01-15T00:00:00Z", "2026-01-15T00:00:00Z"))
+    conn.commit()
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    monkeypatch.setattr(service, "_commit_success", lambda *args, **kwargs: None)
+
+    service._finish(SimpleNamespace(claim=claim), {"exit_code": 0})
+
+    row = conn.execute(
+        "SELECT resolved_at FROM native_stage_failures "
+        "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
+        ("2026-01-15", "scope-hash", "native_score_batch")).fetchone()
+    assert row["resolved_at"] is not None
+    conn.close()

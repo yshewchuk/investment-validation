@@ -117,6 +117,36 @@ def test_native_stage_failures_health_bounds_and_ordering(tmp_path):
     conn.close()
 
 
+def test_resolved_native_stage_failures_leave_health_but_stay_in_catalog(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    seed_delivered_health_release(conn, release_id="r5", requested_session="2026-09-05",
+                                  resolved_session="2026-09-05")
+    problem = json.dumps({"code": "MODEL_NOT_READY"})
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO native_stage_failures "
+            "(occurrence,scope_hash,stage_id,status,error_code,problem_json,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("2026-09-15", "test-scope-hash", "native_score_batch", "FAILED",
+             "MODEL_NOT_READY", problem, "2026-09-15T00:00:00Z", "2026-09-15T00:00:00Z"))
+    assert len(health(conn, clock=clock)["native_stage_failures"]) == 1
+
+    with transaction(conn):
+        conn.execute(
+            "UPDATE native_stage_failures SET resolved_at = ? "
+            "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
+            ("2026-09-16T00:00:00Z", "2026-09-15", "test-scope-hash", "native_score_batch"))
+
+    document = health(conn, clock=clock)
+    assert document["native_stage_failures"] == []
+    retained = conn.execute(
+        "SELECT resolved_at FROM native_stage_failures "
+        "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
+        ("2026-09-15", "test-scope-hash", "native_score_batch")).fetchone()
+    assert retained["resolved_at"] == "2026-09-16T00:00:00Z"
+    conn.close()
+
+
 def test_native_stage_failures_oversized_text_is_bounded_or_refused(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     seed_delivered_health_release(conn, release_id="r5", requested_session="2026-09-05",

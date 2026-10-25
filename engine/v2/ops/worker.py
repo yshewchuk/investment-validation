@@ -84,9 +84,11 @@ def _failure_result(root: Path, exc: BaseException) -> dict:
 def _classify(exc: BaseException):
     """A typed ``Problem`` for a caught worker exception.
 
-    Three narrow, reviewed branches whose message shape is known to carry no
+    Four narrow, reviewed branches whose message shape is known to carry no
     data value; anything else falls to :func:`_generic_problem`, which never
     includes the message at all (see its docstring)."""
+    from engine.v2.scoring.release_bindings import ModelNotReady, NoCurrentRelease
+
     if isinstance(exc, OpsError):
         return exc.problem
     if isinstance(exc, (ModuleNotFoundError, ImportError)):
@@ -99,6 +101,14 @@ def _classify(exc: BaseException):
             "INPUT_CHANGED",
             f"worker import failed: no module named {getattr(exc, 'name', None) or exc}",
             details={"module": getattr(exc, "name", None)})
+    if isinstance(exc, (ModelNotReady, NoCurrentRelease)):
+        # A native release that disappeared or stopped verifying between
+        # submission and execution is the same MODEL_NOT_READY condition the
+        # sidecar reports, never a deterministic adapter defect. The fixed
+        # message is redacted: the exception text names a member or path.
+        return make_problem(
+            "MODEL_NOT_READY",
+            "native score batch release binding is unavailable")
     if isinstance(exc, ValueError):
         # A bare ValueError out of adapter/dispatch code is a deterministic
         # defect in what the worker tried to produce, not a transient crash

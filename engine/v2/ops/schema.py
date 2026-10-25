@@ -329,4 +329,10 @@ MIGRATIONS = (
             PRIMARY KEY(occurrence, scope_hash, stage_id)
         ) STRICT""".format(**NATIVE_STAGE_FAILURE_TEXT_BYTES),
     )),
+    Migration(version=15, name="native_stage_failure_resolution", statements=(
+        """ALTER TABLE native_stage_failures ADD COLUMN resolved_at TEXT
+            CHECK (resolved_at IS NULL
+                   OR length(CAST(resolved_at AS BLOB)) <= {updated_at})""".format(
+                       **NATIVE_STAGE_FAILURE_TEXT_BYTES),
+    )),
 )

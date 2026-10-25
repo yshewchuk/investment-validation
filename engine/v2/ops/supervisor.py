@@ -770,7 +770,7 @@ class Service:
         problem_json = json.dumps(to_document(problem), sort_keys=True, separators=(",", ":"))
         try:
             existing = self.conn.execute(
-                "SELECT 1 FROM native_stage_failures "
+                "SELECT resolved_at FROM native_stage_failures "
                 "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
                 (occurrence, scope_hash, "native_score_batch")).fetchone()
             if existing is None:
@@ -783,6 +783,17 @@ class Service:
                            ON CONFLICT(occurrence, scope_hash, stage_id) DO NOTHING""",
                         (occurrence, scope_hash, "native_score_batch", problem.code,
                          problem_json, stamp, stamp))
+            elif existing["resolved_at"] is not None:
+                # A new failure after recovery must become current health again:
+                # reopen the retained history row rather than leaving it resolved.
+                with transaction(self.conn):
+                    self.conn.execute(
+                        """UPDATE native_stage_failures
+                           SET status = 'FAILED', error_code = ?, problem_json = ?,
+                               updated_at = ?, resolved_at = NULL
+                           WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?""",
+                        (problem.code, problem_json, stamp, occurrence, scope_hash,
+                         "native_score_batch"))
         except Exception as exc:
             print(json.dumps({"event": "native_stage_failure_persistence_failed",
                               "occurrence": occurrence,
@@ -797,6 +808,64 @@ class Service:
                           "reason": detail_code,
                           "problem": {field: to_document(problem)[field]
                                       for field in ("code", "category", "retryable", "message")}}))
+
+    def _resolve_native_stage_failures(self, scope_hash):
+        """Mark every unresolved ``native_score_batch`` failure for one scope
+        resolved with a single timestamp and transaction. Catalog history is
+        kept: the rows stay, only ``resolved_at`` is set. A persistence
+        failure is logged and leaves the rows unresolved, exactly like the
+        reporter's own failure path."""
+        stamp = format_timestamp(self.clock.now())
+        try:
+            with transaction(self.conn):
+                self.conn.execute(
+                    "UPDATE native_stage_failures SET resolved_at = ? "
+                    "WHERE scope_hash = ? AND stage_id = 'native_score_batch' "
+                    "AND resolved_at IS NULL",
+                    (stamp, scope_hash))
+        except Exception as exc:
+            print(json.dumps({"event": "native_stage_failure_resolution_failed",
+                              "scope_hash": scope_hash,
+                              "stage_id": "native_score_batch",
+                              "exception_type": type(exc).__name__}))
+
+    def _native_score_batch_identity_from_claim(self, claim):
+        """Recover ``(occurrence, scope_hash)`` from a claimed
+        ``native_score_batch`` job's own idempotency key, or ``None`` for any
+        other kind or an unreadable row."""
+        if claim.spec.kind != "native_score_batch":
+            return None
+        row = self.conn.execute("SELECT idempotency_key FROM jobs WHERE job_id = ?",
+                                (claim.job_id,)).fetchone()
+        if row is None:
+            return None
+        from engine.v2.ops.nightly import _scope_from_native_score_batch_key
+
+        return _scope_from_native_score_batch_key(row["idempotency_key"])
+
+    def _report_native_worker_release_problem(self, claim, problem):
+        """A worker-side release refusal must leave the same durable row the
+        sidecar writes. The existing-job short circuit skips the sidecar once
+        this job exists, so the terminal failure path records it directly
+        from the job's idempotency key, with a fixed safe reason code."""
+        if problem.code != "MODEL_NOT_READY":
+            return
+        parsed = self._native_score_batch_identity_from_claim(claim)
+        if parsed is None:
+            return
+        occurrence, scope_hash = parsed
+        self._report_native_release_problem(
+            "WORKER_MODEL_NOT_READY",
+            "native score batch worker release binding is unavailable",
+            occurrence=occurrence, scope_hash=scope_hash)
+
+    def _resolve_native_score_batch_success(self, claim):
+        """A succeeded ``native_score_batch`` worker proves the release is
+        usable for its scope, so clear any unresolved rows left by an earlier
+        failed attempt."""
+        parsed = self._native_score_batch_identity_from_claim(claim)
+        if parsed is not None:
+            self._resolve_native_stage_failures(parsed[1])
 
     def _native_release_root_or_none(self, *, occurrence, scope_hash):
         """Cutover PR-7a: the cheap release-identity gate -- see
@@ -847,6 +916,7 @@ class Service:
                 and memo["release_id"] == pointer.release_id):
             if memo["ok"]:
                 self._last_native_release_problem = None
+                self._resolve_native_stage_failures(scope_hash)
                 return str(root)
             self._report_native_release_problem(
                 memo.get("error_code", "MODEL_NOT_READY"),
@@ -873,6 +943,7 @@ class Service:
         self._native_release_memo = {"root": str(root), "release_id": pointer.release_id,
                                      "ok": True}
         self._last_native_release_problem = None
+        self._resolve_native_stage_failures(scope_hash)
         return str(root)
 
     def _native_score_batch_backoff(self, memo, now):
@@ -1815,7 +1886,10 @@ class Service:
         except Exception as exc:
             problem = (exc.problem if isinstance(exc, OpsError)
                        else self._completion_problem(claim, exc))
+            self._report_native_worker_release_problem(claim, problem)
             self._record_failure(claim, status, problem)
+        else:
+            self._resolve_native_score_batch_success(claim)
         finally:
             self._progress_state.pop(claim.attempt_id, None)
 

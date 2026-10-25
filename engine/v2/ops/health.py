@@ -436,7 +436,7 @@ def health(conn, *, clock, executor_mode="watchdog"):
         "error_code AS raw_error_code, problem_json AS raw_problem_json, "
         "created_at AS raw_created_at, updated_at AS raw_updated_at, "
         f"CASE WHEN {oversized} THEN 1 ELSE 0 END AS any_oversized "
-        "FROM native_stage_failures "
+        "FROM native_stage_failures WHERE resolved_at IS NULL "
         "ORDER BY occurrence DESC, scope_hash, stage_id LIMIT 100"
         ") "
         "ORDER BY raw_occurrence DESC, raw_scope_hash, raw_stage_id",
@@ -562,16 +562,16 @@ def _bounded_health_payload(document):
     ``OPERATIONS_HEALTH_MAX_BYTES`` the serving read enforces, so ops never
     publishes an artifact serving will refuse to serve -- trimming is
     deterministic and only ever touches optional content, in preference
-    order: long optional text fields (job queue reasons and any other
-    oversized row text) are clamped first by :func:`_trim_jobs_text`, then
-    the OLDEST optional job rows are dropped by :func:`_drop_oldest_jobs`
-    (``health()`` orders jobs by ``created_at, job_id``, so index 0 is the
-    oldest). Every ``native_stage_failures`` row is always preserved
-    verbatim, as are the mandatory top-level fields. Any trimming is
-    indicated by a ``health_truncated`` object counting what went. If the
-    mandatory skeleton plus the preserved native failure rows still exceed
-    the cap, :func:`_refuse_oversized_health` raises typed
-    ``RESOURCE_LIMIT_EXCEEDED`` BEFORE the old health artifact is replaced.
+    order: long optional text fields on job rows (job queue reasons) are
+    clamped first by :func:`_trim_jobs_text`, then the OLDEST optional job
+    rows are dropped by :func:`_drop_oldest_jobs` (``health()`` orders jobs
+    by ``created_at, job_id``, so index 0 is the oldest). Every unresolved
+    ``native_stage_failures`` row is always preserved verbatim, as are the
+    mandatory top-level fields. Any trimming is indicated by a
+    ``health_truncated`` object counting what went. If the mandatory skeleton
+    plus the preserved native failure rows still exceed the cap,
+    :func:`_refuse_oversized_health` raises typed ``RESOURCE_LIMIT_EXCEEDED``
+    BEFORE the old health artifact is replaced.
     """
     payload = json.dumps(document).encode("utf-8")
     if (not _is_operations_health_document(document)

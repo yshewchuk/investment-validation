@@ -13,7 +13,11 @@ Application rendering belongs in the [React app](../../../ui/ARCHITECTURE.md).
 the additive `native_stage_failures` list; either absent or malformed session
 field leaves currency `unknown` without a default. The operations shell renders
 each listed native-stage failure in its health banner as a degraded reason,
-using only the occurrence, stage, status and problem code. Both health readers
+using only the occurrence, stage, status and problem code. The list carries only
+unresolved rows: a recovered release binding or a succeeded native batch worker
+marks its scope's rows resolved in the ops catalog, so a cleared failure is
+never served as a current degraded reason; resolved history remains in the
+catalog rather than the health artifact. Both health readers
 (`_read_health`, `_read_calibration_health`) enforce the shared
 `engine.v2.foundation.OPERATIONS_HEALTH_MAX_BYTES` (1 MiB) artifact cap: they
 read at most cap+1 bytes and refuse an over-cap artifact before JSON decoding,
