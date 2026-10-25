@@ -339,6 +339,33 @@ def test_backup_rejects_invalid_existing_manifest(tmp_path, contents, message):
     assert error.value.problem.message == message
 
 
+def test_backup_manifest_read_error_is_typed_retryable(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    key = "unreadable-manifest"
+    prepare_backup(conn, key, {}, clock=clock)
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    manifest_path = backup / (key + ".manifest.json")
+    manifest_path.write_bytes(b"{}")
+    real_open = Path.open
+
+    def unreadable_manifest(self, *args, **kwargs):
+        if self == manifest_path:
+            raise OSError("simulated manifest read failure")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", unreadable_manifest)
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key=key, owner="worker", target=backup, clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.message == "backup manifest could not be read"
+    assert error.value.problem.retryable is True
+    assert conn.execute(
+        "SELECT state FROM outbox WHERE kind='backup' AND logical_key=?", (key,)
+    ).fetchone()[0] == "running"
+
+
 def test_backup_fsyncs_database_copy(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")

@@ -110,8 +110,11 @@ def _copy_verified_database(conn, database):
 def _verify_existing_manifest(manifest_path, manifest):
     if not manifest_path.exists():
         return
-    with manifest_path.open("rb") as stream:
-        captured = stream.read(_MAX_MANIFEST_BYTES + 1)
+    try:
+        with manifest_path.open("rb") as stream:
+            captured = stream.read(_MAX_MANIFEST_BYTES + 1)
+    except OSError as error:
+        raise fail("BACKUP_FAILED", "backup manifest could not be read") from error
     if len(captured) > _MAX_MANIFEST_BYTES:
         raise fail("BACKUP_FAILED", "backup manifest exceeds 1 MiB")
     try:
