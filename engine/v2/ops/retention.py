@@ -30,6 +30,9 @@ _MANIFEST_KEYS = frozenset({"schema_version", "backup_key", "cutoff", "database"
 _ARTIFACT_KEYS = frozenset({"content_hash", "byte_size"})
 _LIVE_STATES = ("starting", "running", "cancelling", "recovery_pending")
 _REQUEST_BINDING = "materialization_request.json"
+_LIVE_ATTEMPT_LIMIT = 10_000
+_LIVE_SPEC_LIMIT = 16 * 1024
+_PROTECTED_KINDS = frozenset({"legacy_materialize", "legacy_finality", "legacy_features"})
 
 def _stderr(event, **fields):
     sys.stderr.write(json.dumps({"event": event, **fields}, sort_keys=True) + "\n")
@@ -235,18 +238,30 @@ def _plan(scope, keep, keepalive=_no_keepalive):
     kept = set().union(*(r["artifacts"] for r in retained)) if retained else set()
     return scope, ordered[keep:], artifacts_dir, present - kept
 
-def _live_roots(base, conn, store):
+def _live_roots(base, conn, store, keepalive=_no_keepalive):
+    keepalive()
     rows = conn.execute(
-        "SELECT a.attempt_id, j.kind, j.spec_json FROM attempts a "
-        "JOIN jobs j ON j.job_id = a.job_id WHERE a.state IN (?,?,?,?)",
-        _LIVE_STATES).fetchall()
+        "SELECT a.attempt_id, j.kind, "
+        "CASE WHEN length(CAST(j.spec_json AS BLOB)) <= ? THEN j.spec_json END, "
+        "length(CAST(j.spec_json AS BLOB)) FROM attempts a "
+        "JOIN jobs j ON j.job_id = a.job_id WHERE a.state IN (?,?,?,?) "
+        "LIMIT ?",
+        (_LIVE_SPEC_LIMIT, *_LIVE_STATES, _LIVE_ATTEMPT_LIMIT + 1)).fetchall()
     total = len(rows)
     started = _stage("resolve_live_roots", total)
     progress = _Progress("resolve_live_roots", total)
     done = 0
     try:
+        if total > _LIVE_ATTEMPT_LIMIT:
+            raise fail("INTEGRITY_FAILED", "live attempt count exceeds the 10,000 limit",
+                       details={"reason_key": "live_attempt_count_exceeded"})
         active = []
-        for attempt_id, kind, spec_json in rows:
+        for attempt_id, kind, spec_json, spec_bytes in rows:
+            keepalive()
+            if spec_bytes is not None and spec_bytes > _LIVE_SPEC_LIMIT:
+                raise fail("INTEGRITY_FAILED", "live job spec exceeds the 16 KiB limit",
+                           details={"reason_key": "live_job_spec_oversized",
+                                    "attempt_id": attempt_id})
             try:
                 spec = json.loads(spec_json)
             except (TypeError, ValueError):
@@ -260,8 +275,8 @@ def _live_roots(base, conn, store):
                 raise fail("INTEGRITY_FAILED", "live job parameters are malformed",
                            details={"reason_key": "live_job_parameters_malformed",
                                     "attempt_id": attempt_id})
-            if kind != "legacy_materialize" \
-                    and spec.get("kind") != "legacy_materialize" \
+            if kind not in _PROTECTED_KINDS \
+                    and spec.get("kind") not in _PROTECTED_KINDS \
                     and parameters.get("input_mode") != "snapshot":
                 done += 1
                 progress.tick(done)
@@ -273,6 +288,7 @@ def _live_roots(base, conn, store):
             return set()
         roots = set()
         for attempt_id in active:
+            keepalive()
             bound = conn.execute(
                 "SELECT artifact_id FROM attempt_input_bindings "
                 "WHERE attempt_id = ? AND name = ?",
@@ -288,7 +304,7 @@ def _live_roots(base, conn, store):
     finally:
         _stage_end("resolve_live_roots", started, done, total)
 
-def _materialization_plan(ops_root, keep, conn, store):
+def _materialization_plan(ops_root, keep, conn, store, keepalive=_no_keepalive):
     base = default_materialization_base(ops_root)
     if base.is_symlink() or (base.exists() and not base.is_dir()):
         raise fail("INTEGRITY_FAILED", "materialization root is not a directory",
@@ -316,7 +332,7 @@ def _materialization_plan(ops_root, keep, conn, store):
         ordered = sorted(entries, key=lambda item: item.stat().st_mtime_ns, reverse=True)
     finally:
         _stage_end("verify_materialization", started, done, len(all_entries))
-    live = _live_roots(base, conn, store)
+    live = _live_roots(base, conn, store, keepalive=keepalive)
     retained = {item.name for item in ordered[:keep]} | live
     return [item for item in ordered if item.name not in retained]
 
@@ -356,7 +372,8 @@ def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=
                 progress.tick(done)
         finally:
             _stage_end("verify_backups", started, done, len(scopes))
-    roots = _materialization_plan(ops_root, materialization_keep, conn, store)
+    roots = _materialization_plan(ops_root, materialization_keep, conn, store,
+                                  keepalive=keepalive)
     deleted = []
     backup_total = sum(len(discarded) + len(artifact_names)
                        for _, discarded, _, artifact_names in plans)

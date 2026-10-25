@@ -715,7 +715,7 @@ and nothing on this diagram writes to the legacy board.
 
 #### Contract
 
-Retention runs after a successful backup. Per scope it retains the newest N complete backups; it also retains the newest K materialization roots and roots bound to live materialization attempts. N defaults to `OPS_BACKUP_RETENTION_KEEP=7`; K defaults to `OPS_MATERIALIZATION_RETENTION_KEEP=11`. A complete backup has the expected manifest keys, a non-empty database matching its manifest hash and passing SQLite integrity/foreign-key checks, and exactly the listed artifacts with matching sizes and hashes. Each manifest is at most 10 MiB; each database and artifact is at most 4 GiB. Every backup scope and live request binding is checked before deletion. Current publication has no root binding, so the newest K roots are kept conservatively and `RETENTION_CURRENT_PUBLICATION_UNBOUND` is emitted. Filesystem errors propagate and may leave earlier unlinks in place; a later run inventories state again. An incomplete backup then refuses the whole retention pass until repaired.
+Retention runs after a successful backup. Per scope it retains the newest N complete backups; it also retains the newest K materialization roots and roots bound to live materialization, finality, or features attempts. N defaults to `OPS_BACKUP_RETENTION_KEEP=7`; K defaults to `OPS_MATERIALIZATION_RETENTION_KEEP=11`. A complete backup has the expected manifest keys, a non-empty database matching its manifest hash and passing SQLite integrity/foreign-key checks, and exactly the listed artifacts with matching sizes and hashes. Each manifest is at most 10 MiB; each database and artifact is at most 4 GiB. Live-attempt scanning is bounded to 10,000 rows and 16 KiB per job spec; exceeding either limit refuses deletion. Every backup scope and live request binding is checked before deletion. Current publication has no root binding, so the newest K roots are kept conservatively and `RETENTION_CURRENT_PUBLICATION_UNBOUND` is emitted. Filesystem errors propagate and may leave earlier unlinks in place; an incomplete remaining backup scope refuses with `INTEGRITY_FAILED` until manually repaired.
 
 | Condition | Outcome |
 | --- | --- |
@@ -726,6 +726,7 @@ Retention runs after a successful backup. Per scope it retains the newest N comp
 | Invalid materialization root or entry | `INTEGRITY_FAILED`; no deletion begins. |
 | Unsafe backup or artifact name | `INTEGRITY_FAILED`; no deletion begins. |
 | Live attempt with a missing or duplicate request binding | `INPUT_CHANGED`; no deletion begins. |
+| Live-attempt scan exceeds 10,000 rows or a job spec exceeds 16 KiB | `INTEGRITY_FAILED`; no deletion begins. |
 | Filesystem error during deletion | The `OSError` propagates; earlier deletions may persist. There is no journal replay; an incomplete remaining backup scope refuses with `INTEGRITY_FAILED` until manually repaired. |
 | Partial backup remains after an interrupted deletion | The incomplete scope fails preflight with `INTEGRITY_FAILED`; no further deletion starts until repaired. |
 | Any retention refusal | The current nightly backup attempt fails, even though backup/watermark may already be durable. |

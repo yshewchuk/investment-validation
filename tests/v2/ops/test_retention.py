@@ -91,14 +91,17 @@ def catalog():
     conn.close()
 
 
-def _live_attempt(conn, bindings=()):
-    spec = {"kind": "legacy_materialize", "parameters": {"input_mode": "snapshot"}}
+def _live_attempt(conn, bindings=(), *, kind="legacy_materialize",
+                  attempt_id="att_live", job_id="job_live"):
+    spec = {"kind": kind, "parameters": {}}
+    if kind == "legacy_materialize":
+        spec["parameters"]["input_mode"] = "snapshot"
     conn.execute("INSERT INTO jobs VALUES (?, ?, ?)",
-                 ("job_live", "legacy_materialize", json.dumps(spec)))
+                 (job_id, kind, json.dumps(spec)))
     conn.execute("INSERT INTO attempts VALUES (?, ?, ?)",
-                 ("att_live", "job_live", "running"))
+                 (attempt_id, job_id, "running"))
     conn.executemany("INSERT INTO attempt_input_bindings VALUES (?, ?, ?)",
-                     [("att_live", name, artifact_id) for name, artifact_id in bindings])
+                     [(attempt_id, name, artifact_id) for name, artifact_id in bindings])
 
 
 def _refusal(snapshot_root, ops_root, conn, reason, **kwargs):
@@ -227,7 +230,10 @@ def test_materialization_keep_defaults_to_eleven(tmp_path, catalog, monkeypatch)
     assert all(root.is_dir() for root in roots[1:])
 
 
-def test_newest_materializations_and_live_request_root_survive(tmp_path, catalog, monkeypatch):
+@pytest.mark.parametrize("kind", [
+    "legacy_materialize", "legacy_finality", "legacy_features"])
+def test_newest_materializations_and_live_request_root_survive(
+        tmp_path, catalog, monkeypatch, kind):
     ops = tmp_path / "ops"
     base = default_materialization_base(ops)
     base.mkdir(parents=True)
@@ -236,7 +242,7 @@ def test_newest_materializations_and_live_request_root_survive(tmp_path, catalog
     _materialization_dir(base, "root-c", 3)
     _materialization_dir(base, "root-d", 4)
     newest = _materialization_dir(base, "root-e", 5)
-    _live_attempt(catalog, [(REQUEST_BINDING, "art_live")])
+    _live_attempt(catalog, [(REQUEST_BINDING, "art_live")], kind=kind)
     monkeypatch.setattr(
         retention_module, "request_from_artifact",
         lambda conn, store, artifact_id: SimpleNamespace(request_hash=LIVE_HASH))
@@ -264,6 +270,35 @@ def test_live_attempt_without_single_request_binding_refuses_and_deletes_nothing
     _live_attempt(catalog, bindings)
 
     _refusal(tmp_path, ops, catalog, "live_request_binding_invalid",
+             keep=1, materialization_keep=1)
+
+
+def test_live_job_spec_oversized_refuses_and_deletes_nothing(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    _live_attempt(catalog)
+    monkeypatch.setattr(retention_module, "_LIVE_SPEC_LIMIT", 16)
+
+    _refusal(tmp_path, ops, catalog, "live_job_spec_oversized",
+             keep=1, materialization_keep=1)
+
+
+def test_live_attempt_count_exceeded_refuses_and_deletes_nothing(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    _live_attempt(catalog, kind="other", attempt_id="att_a", job_id="job_a")
+    _live_attempt(catalog, kind="other", attempt_id="att_b", job_id="job_b")
+    monkeypatch.setattr(retention_module, "_LIVE_ATTEMPT_LIMIT", 1)
+
+    _refusal(tmp_path, ops, catalog, "live_attempt_count_exceeded",
              keep=1, materialization_keep=1)
 
 
@@ -352,7 +387,7 @@ def test_keepalive_callback_covers_verification_and_deletion(tmp_path, catalog):
     calls = []
 
     def keepalive():
-        calls.append(None)
+        calls.append((scope / "b2.sqlite").exists())
 
     deleted = enforce_retention(ops, conn=catalog, store=object(),
                                 keep=1, materialization_keep=1,
@@ -360,6 +395,8 @@ def test_keepalive_callback_covers_verification_and_deletion(tmp_path, catalog):
 
     assert deleted == ["b2"]
     assert len(calls) >= 5
+    assert True in calls
+    assert False in calls
     assert not (scope / "b2.sqlite").exists()
     assert not (scope / "b2.manifest.json").exists()
     assert not (scope / "artifacts" / "old.bin").exists()
