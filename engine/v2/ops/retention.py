@@ -26,8 +26,7 @@ _MANIFEST_KEYS = frozenset({"schema_version", "backup_key", "cutoff", "database"
 _ARTIFACT_KEYS = frozenset({"content_hash", "byte_size"})
 _LIVE_STATES = ("starting", "running", "cancelling", "recovery_pending")
 _REQUEST_BINDING = "materialization_request.json"
-_LIVE_SPEC_LIMIT = 16 * 1024
-_LIVE_REQUEST_LIMIT = 16 * 1024
+_LIVE_SPEC_LIMIT, _LIVE_REQUEST_LIMIT = 16 * 1024, 16 * 1024
 _PROTECTED_KINDS = frozenset({"legacy_materialize", "legacy_finality", "legacy_features"})
 _OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
@@ -214,14 +213,12 @@ def _scope_files(scope):
 
 def _present_artifacts(artifacts_dir):
     present = set()
-    count = 0
     if artifacts_dir.exists():
         for path in artifacts_dir.iterdir():
             if path.is_symlink() or not path.is_file():
                 raise fail("INTEGRITY_FAILED", "stray backup artifact",
                            details={"reason_key": "backup_artifact_stray"})
-            count += 1
-            if count > _BACKUP_ARTIFACT_LIMIT:
+            if len(present) >= _BACKUP_ARTIFACT_LIMIT:
                 raise fail("INTEGRITY_FAILED", "backup artifact inventory exceeds the 10,000-entry limit",
                            details={"reason_key": "backup_artifact_inventory_exceeded"})
             present.add(path.name)
@@ -327,7 +324,8 @@ def _live_request_root(base, conn, store, attempt_id):
                    details={"reason_key": "live_request_oversized",
                             "attempt_id": attempt_id,
                             "byte_size": request_ref.byte_size})
-    request = request_from_artifact(conn, store, bound[0][0])
+    request = request_from_artifact(conn, store, bound[0][0],
+                                    max_metadata_bytes=_LIVE_REQUEST_LIMIT)
     return materialization_root(base, request.request_hash).name
 
 def _materialization_plan(ops_root, keep, conn, store, keepalive=_no_keepalive):

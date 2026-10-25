@@ -261,7 +261,7 @@ def test_newest_materializations_and_live_request_root_survive(
     _live_attempt(catalog, [(REQUEST_BINDING, "art_live")], kind=kind)
     monkeypatch.setattr(
         retention_module, "request_from_artifact",
-        lambda conn, store, artifact_id: SimpleNamespace(request_hash=LIVE_HASH))
+        lambda conn, store, artifact_id, **kwargs: SimpleNamespace(request_hash=LIVE_HASH))
 
     enforce_retention(ops, conn=catalog, store=object(),
                       keep=1, materialization_keep=2)
@@ -330,7 +330,7 @@ def test_oversized_live_request_artifact_refuses_and_deletes_nothing(
     _live_attempt(catalog, [(REQUEST_BINDING, "art_oversized")])
     monkeypatch.setattr(
         retention_module, "request_from_artifact",
-        lambda *args: pytest.fail("oversized request artifact was read"))
+        lambda *args, **kwargs: pytest.fail("oversized request artifact was read"))
 
     _refusal(tmp_path, ops, catalog, "live_request_oversized",
              keep=1, materialization_keep=1)
@@ -602,7 +602,7 @@ def test_oversized_live_ref_metadata_refuses_and_deletes_nothing(
          "art_live"))
     monkeypatch.setattr(
         retention_module, "request_from_artifact",
-        lambda *args: pytest.fail("oversized ref metadata was read"))
+        lambda *args, **kwargs: pytest.fail("oversized ref metadata was read"))
     before = _files(ops)
 
     with pytest.raises(OpsError) as caught:
@@ -610,6 +610,44 @@ def test_oversized_live_ref_metadata_refuses_and_deletes_nothing(
                           keep=1, materialization_keep=1)
 
     assert caught.value.code == "INTEGRITY_FAILED"
+    assert _files(ops) == before
+
+
+def test_ref_json_growth_after_bounded_lookup_refuses_capped_reload(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "old", "2026-01-01T00:00:00+00:00")
+    _write_backup(scope, "new", "2026-01-02T00:00:00+00:00")
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    _register_artifact(catalog, "art_live")
+    _live_attempt(catalog, [(REQUEST_BINDING, "art_live")])
+    real_lookup = retention_module.registered_artifact
+    mutated = []
+
+    def lookup_then_corrupt(conn, artifact_id, **kwargs):
+        ref = real_lookup(conn, artifact_id, **kwargs)
+        if not mutated:
+            mutated.append(artifact_id)
+            conn.execute(
+                "UPDATE artifacts SET ref_json = ? WHERE artifact_id = ?",
+                (json.dumps({"pad": "x" * (retention_module._LIVE_REQUEST_LIMIT + 1)}),
+                 artifact_id))
+        return ref
+
+    monkeypatch.setattr(retention_module, "registered_artifact", lookup_then_corrupt)
+    before = _files(ops)
+
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+
+    assert mutated == ["art_live"]
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert caught.value.problem.message == "artifact reference requires bounded text"
     assert _files(ops) == before
 
 

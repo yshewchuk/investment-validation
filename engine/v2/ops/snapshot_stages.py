@@ -48,7 +48,7 @@ from engine.v2.data.reference_inputs import (
 )
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import CONTENT_HASH_PREFIX, content_hash, to_document
-from engine.v2.ops.checkpoints import artifact
+from engine.v2.ops.checkpoints import artifact, registered_artifact
 from engine.v2.ops.core.snapshot_contracts import SNAPSHOT_BINDINGS
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.input_bindings import recorded_bindings, resolve_bindings
@@ -156,8 +156,11 @@ def _bound(resolved, name):
     return item
 
 
-def request_from_artifact(conn, store, artifact_id) -> LegacyMaterializationRequest:
-    request = _decode(LegacyMaterializationRequest, _read_json(conn, store, artifact_id))
+def request_from_artifact(conn, store, artifact_id, *,
+                          max_metadata_bytes=None) -> LegacyMaterializationRequest:
+    ref = registered_artifact(conn, artifact_id, max_metadata_bytes=max_metadata_bytes)
+    store.verify(ref)
+    request = _decode(LegacyMaterializationRequest, json.loads(store.read_verified(ref)))
     document = to_document(request)
     del document["request_hash"]
     if content_hash(document) != request.request_hash:
