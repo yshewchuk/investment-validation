@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.outbox import claim, complete, enqueue
+from engine.v2.ops.workflows.commands import read_bounded_json
 
 _MAX_MANIFEST_BYTES = 1024 * 1024
 
@@ -93,9 +95,16 @@ def _verified_database_hash(database, *, check_integrity=True):
 
 def _copy_verified_database(conn, database):
     try:
+        expected_size = (conn.execute("PRAGMA page_count").fetchone()[0] *
+                         conn.execute("PRAGMA page_size").fetchone()[0])
         is_new = not database.exists()
         if is_new:
             backup_to(conn, database)
+        actual_size = database.stat().st_size
+        if actual_size == 0:
+            raise fail("BACKUP_FAILED", "backup database is empty")
+        if actual_size != expected_size:
+            raise fail("BACKUP_FAILED", "backup database size differs from source")
         return _verified_database_hash(database, check_integrity=not is_new)
     except (OpsError, OSError, sqlite3.Error) as error:
         message = (error.problem.message if isinstance(error, OpsError)
@@ -145,7 +154,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
         source = store.verify(ref)
         destination = target / "artifacts" / name
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(source.read_bytes())
+        shutil.copyfile(source, destination)
         if fault:
             fault(name)
         if file_hash(destination) != ref.content_hash:
@@ -177,10 +186,10 @@ def restore_backup(source, destination):
     manifests = list(source.glob("*.manifest.json"))
     if len(manifests) != 1:
         raise fail("INTEGRITY_FAILED", "backup manifest is missing or ambiguous")
-    manifest = json.loads(manifests[0].read_text())
+    manifest = read_bounded_json(manifests[0], _MAX_MANIFEST_BYTES)
     destination.mkdir(parents=True)
     database = destination / "ops.sqlite"
-    database.write_bytes((source / (manifest["backup_key"] + ".sqlite")).read_bytes())
+    shutil.copyfile(source / (manifest["backup_key"] + ".sqlite"), database)
     probe = sqlite3.connect(database)
     try:
         if integrity_errors(probe) or file_hash(database) != manifest["database"]:
@@ -190,7 +199,7 @@ def restore_backup(source, destination):
     for name, info in manifest["artifacts"].items():
         path = destination / "artifacts" / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes((source / "artifacts" / name).read_bytes())
+        shutil.copyfile(source / "artifacts" / name, path)
         if file_hash(path) != info["content_hash"]:
             raise fail("INTEGRITY_FAILED", "restored artifact failed verification")
     return destination

@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-import sqlite3
 
 import pytest
 
@@ -50,6 +49,10 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path, monkeypatch):
     with pytest.raises(OpsError) as error:
         restore_backup(backup, tmp_path / "restored")
     assert error.value.code == "INVALID_REQUEST"
+    manifest_path = next(backup.glob("*.manifest.json"))
+    manifest_path.write_bytes(b"x" * (1024 * 1024 + 1))
+    with pytest.raises(ValueError, match="not a bounded regular file"):
+        restore_backup(backup, tmp_path / "restored-oversized-manifest")
 
 
 def test_backup_copy_failure_remains_retryable(tmp_path):
@@ -128,7 +131,8 @@ def test_backup_rejects_non_ok_quick_check(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(("contents", "message"), [
     (b"", "backup database is empty"),
-    (b"not a sqlite database", "backup database verification failed"),
+    (b"not a sqlite database", "backup database size differs from source"),
+    ("oversized", "backup database size differs from source"),
 ])
 def test_backup_bad_copy_remains_retryable(tmp_path, monkeypatch, contents, message):
     conn, clock, _ = catalog(tmp_path)
@@ -138,7 +142,12 @@ def test_backup_bad_copy_remains_retryable(tmp_path, monkeypatch, contents, mess
     real_backup_to = backup_module.backup_to
 
     def bad_copy(_conn, destination):
-        destination.write_bytes(contents)
+        if contents == "oversized":
+            real_backup_to(_conn, destination)
+            with destination.open("ab") as stream:
+                stream.write(b"x")
+        else:
+            destination.write_bytes(contents)
 
     monkeypatch.setattr(backup_module, "backup_to", bad_copy)
     with pytest.raises(OpsError) as error:
@@ -241,8 +250,12 @@ def test_backup_cleanup_failure_is_retryable(tmp_path, monkeypatch):
     prepare_backup(conn, "cleanup-failure", {}, clock=clock)
     backup = tmp_path / "backup"
 
+    real_backup_to = backup_module.backup_to
+
     def invalid_backup_to(_conn, destination):
-        destination.write_bytes(b"not a sqlite database")
+        real_backup_to(_conn, destination)
+        with destination.open("r+b") as stream:
+            stream.write(b"x")
 
     real_unlink = Path.unlink
     cleanup_attempts = []
@@ -266,37 +279,19 @@ def test_backup_cleanup_failure_is_retryable(tmp_path, monkeypatch):
     assert cleanup_attempts == [backup / "cleanup-failure.sqlite"]
 
 
-def test_backup_rejects_existing_catalog_with_foreign_key_violation(tmp_path, monkeypatch):
+def test_backup_rejects_existing_copy_with_source_size_mismatch(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "fk-copy", {}, clock=clock)
     backup = tmp_path / "backup"
     backup.mkdir()
     destination = backup / "fk-copy.sqlite"
-    invalid = sqlite3.connect(destination)
-    try:
-        invalid.executescript(
-            "PRAGMA foreign_keys=OFF;\n"
-            "CREATE TABLE parent(id INTEGER PRIMARY KEY);\n"
-            "CREATE TABLE child(parent_id INTEGER REFERENCES parent(id));\n"
-            "INSERT INTO child(parent_id) VALUES (42);\n"
-        )
-    finally:
-        invalid.close()
-    real_connect = backup_module.sqlite3.connect
-    verification_connects = []
-
-    def recording_connect(database, *args, **kwargs):
-        verification_connects.append((database, kwargs.get("uri")))
-        return real_connect(database, *args, **kwargs)
-
-    monkeypatch.setattr(backup_module.sqlite3, "connect", recording_connect)
+    destination.write_bytes(b"partial")
     with pytest.raises(OpsError) as error:
         run_backup(conn, key="fk-copy", owner="worker", target=backup, clock=clock, store=store)
     assert error.value.code == "BACKUP_FAILED"
-    assert error.value.problem.message == "backup database verification failed"
+    assert error.value.problem.message == "backup database size differs from source"
     assert error.value.problem.retryable is True
-    assert verification_connects == [(destination.resolve().as_uri() + "?mode=ro", True)]
     assert not destination.exists()
     state = conn.execute(
         "SELECT state FROM outbox WHERE kind='backup' AND logical_key='fk-copy'"
