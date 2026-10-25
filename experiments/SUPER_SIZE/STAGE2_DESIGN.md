@@ -489,6 +489,10 @@ gain/promotion rule is a separate future decision; this run reports evidence onl
 
 ## 5. Small PR sequence and acceptance
 
+The [confirmed-event metadata proof checkpoint](CONFIRMED_METADATA_DESIGN.md)
+proposes a metadata-first split of the historical-implied prefix work. It proves
+only complete pinned-view membership; coverage and numerical admission remain separate.
+
 This is the original core roadmap. The section-1 parity P1–P3 substeps refine
 its named slices; row 0's estimate describes the original checkpoint, not the
 size of this later amendment or the separate request-compiler checkpoint.
