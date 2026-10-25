@@ -38,6 +38,12 @@ stored artifact reader, caching service or runtime caller is added in this slice
 Use native Repository/DataQuery, strict native document/ref decoding, standard
 Python sorting, public event_sequence and foundation canonical hashing. A new
 schema framework, registry, custom Parquet reader or legacy adapter is unnecessary.
+First add `data.confirmed_event_metadata.classify_metadata(events)`, a public facade over
+`computed_moves._validate_inputs` and `_event_reasons`, then consume that facade
+from research. It validates with empty price sequences and min_scoreable=0 and
+returns a tuple of native per-row reasons, without collapse/order/build/price access.
+Do not copy their date/bool/session checks or confirmation predicate. The facade
+is additive; existing computed_moves and all v1 source-closure files stay unchanged.
 
 `snapshot` is an exact native SnapshotRef, admitted through
 `snapshot_inputs.admit_snapshot`; no ID-only/latest/path substitute. Use a fresh
@@ -86,9 +92,10 @@ Sort ticker names lexicographically for canonical output; input order is immater
 2. Preflight all partitions before the first object open. Use public
    `query.plan_scan_population` on native records and matching
    `Repository.scan_population_bound`, not estimated matching-row counts.
-   Predicates are year equality plus ticker membership; no time interval or
-   confirmation predicate can erase an earlier event. Candidate membership must
-   exhaust the manifest partitions. Reject inconsistent native planning evidence.
+   The only predicate is year equality: scan all tickers to qualify cluster
+   siblings before selecting requested tickers. No time/confirmation filter or
+   ticker pruning may hide a sibling. Candidate membership must exhaust the
+   manifest partitions. Reject inconsistent native planning evidence.
 3. Make one earnings `Repository.scan` per manifest partition, with those same
    predicates, `order_by=("event_id",)`, explicit native candidate-row bound and
    capped batch size. The projection is exactly `event_id`, `ticker`,
@@ -96,22 +103,24 @@ Sort ticker names lexicographically for canonical output; input order is immater
    Repository may read its hidden year predicate column; no numerical field is
    projected. Supply max_object_bytes on every scan. Exhaust every stream before
    publishing any result; do not rescan per ticker, event or horizon.
-4. Validate all selected metadata before confirmation filtering. event_id is
+4. Validate all scanned metadata before ticker/confirmation filtering. event_id is
    an opaque nonempty string, not parsed/rebuilt from ticker/date. Dates must
    represent a nonnull midnight calendar day, serialized YYYY-MM-DD without
    truncating a time or converting zones. session is null/BMO/AMC only;
    src_orats/date_conflict are actual booleans; cluster is null or a nonempty
    string. Do not coerce strings/numbers to booleans or repair malformed rows.
-5. Refuse duplicate event_id (even byte-identical repeats), duplicate
-   (ticker,event_date), any true date_conflict, or a nonnull cluster associated
-   with multiple event IDs/tickers/dates in the requested view. Detect conflicts
-   across partitions and batches, including unconfirmed rows. Null clusters are
-   permitted by this exact contract and do not assert cluster completeness.
+5. Retain the bounded global metadata view until conflict qualification finishes.
+   Refuse duplicate event_id, including byte-identical repeats across years.
+   For requested tickers refuse duplicate (ticker,event_date), true date_conflict,
+   or any nonnull cluster shared with another event ID/ticker/date anywhere in
+   the pinned dataset, including unrequested tickers and unconfirmed rows.
+   A sibling encountered before its requested event counts equally. Null clusters
+   are permitted by this contract and do not assert cluster completeness.
    Do not import computed-move deduplication or prefer one session/source/date.
    This deliberately refuses ambiguous full views rather than silently choosing
-   a target-specific prefix; it does not attest unrelated tickers' cluster state.
+   a target-specific prefix. Unrelated clusters confer no qualification claim.
 6. Confirm exactly when src_orats is true and session is BMO or AMC, matching
-   the native src_orats-plus-nonnull-session definition after validation. For
+   the facade's native reason=None after validation, not a second predicate. For
    each ticker, sort confirmed rows by (event_date,event_id) and call public
    `event_sequence(dates, warmup=4)` once. Retain zero-based ordinals; its admitted
    flag means only ordinal>=4, never holdout, value or forecast admission. Expose
@@ -121,8 +130,10 @@ Empty ticker requests refuse before repository access. A valid table with no
 fragments is a proven empty *dataset view*, not missing provenance. Every requested
 ticker receives an entry: `absent_in_snapshot` if it has no selected rows,
 `no_confirmed_events` if it has selected rows but none confirmed, otherwise
-`confirmed_events`. Empty entries have null first_confirmed_date and events=[];
-the latter two states also retain the selected/confirmed counts. None substitutes
+`confirmed_events`. Only absent_in_snapshot and no_confirmed_events have
+first_confirmed_date=null and events=[]; confirmed_events has a nonnull first
+date and nonempty events. All three statuses retain selected/confirmed counts.
+None substitutes
 for the later known-empty *qualified numerical prefix*. Missing table/ref,
 incomplete membership, unsupported metadata or scan failure returns no index.
 
@@ -134,7 +145,7 @@ The schema literal is `magnitude_confirmed_metadata.v1`; this does not change
 research_magnitude_panel.v1 or any existing dictionary/source closure.
 
 `policy` has exactly `confirmation="src_orats_and_session.v1"`, `warmup_events=4`,
-`conflicts="refuse_requested_view.v1"`, and
+`conflicts="global_requested_cluster_qualification.v1"`, and
 `coverage="complete_pinned_view_only.v1"`.
 `source` has exactly `snapshot`, `table="earnings_events"`, `contract_ref`,
 `dataset_manifest`, `fragment_records`, `columns` (the seven ordered names above).
@@ -149,9 +160,11 @@ entry has exactly `ticker`, `status`, `selected_rows`, `confirmed_rows`,
 `first_confirmed_date`, `events`. Each event has exactly the seven projected
 fields plus `ordinal` and `warmup_complete`; confirmed rows therefore retain
 src_orats=true and date_conflict=false, rather than dropping their evidence.
-`counts` has exactly `partitions`, `fragments`, `candidate_rows`, `selected_rows`,
-`confirmed_rows`. The first three describe the scanned native candidate inventory,
-the last two actual exhausted metadata rows, not label/quote contributions.
+`counts` has exactly `partitions`, `fragments`, `candidate_rows`, `scanned_rows`,
+`selected_rows`, `confirmed_rows`. The first three describe global scan inventory;
+scanned_rows counts all exhausted metadata rows, while the final two count only
+requested-ticker rows. No count denotes label/quote contributions. Output event
+sequences contain only requested tickers, never their unrequested cluster siblings.
 
 `index_id=content_hash(document without index_id)` over native canonical JSON.
 Ordering, membership and source bindings matter; request order and scan batch
@@ -175,9 +188,9 @@ integer values below sys.maxsize (booleans, defaults, nulls and coercion refuse)
 | max_scan_rows | Sum of native candidate row bounds across all partition scans. |
 | max_object_bytes | Each recorded object byte_size before scans; raw verified bytes and expanded Parquet bytes through Repository.scan. |
 | max_total_object_bytes | Sum of candidate object byte_size per fragment/open, not deduplicated by object ID. |
-| max_batch_rows | Effective ceiling min(this value, contract.maximum_batch_rows, positive partition candidate bound); for a zero bound retain a positive batch size. Never increase the caller's cap. |
-| max_retained_rows | Cumulative selected rows, including unconfirmed rows, before retaining. |
-| max_retained_metadata_bytes | Cumulative canonical UTF-8 bytes of normalized seven-field selected rows, including unconfirmed rows, before retaining. |
+| max_batch_rows | min(this value, contract.maximum_batch_rows, max(1, partition candidate bound)); zero-bound scans therefore use exactly 1. Never increase the caller's cap. |
+| max_retained_rows | All globally scanned rows, including unrequested/unconfirmed rows, before retaining for conflict qualification. |
+| max_retained_metadata_bytes | Cumulative canonical UTF-8 bytes of all normalized seven-field global rows, including unrequested/unconfirmed rows, before retaining. |
 | max_proof_bytes | Canonical UTF-8 bytes of the complete returned document, including all source metadata and index_id. |
 
 Check the complete manifest/preflight totals before any metadata payload scan,
@@ -210,20 +223,42 @@ values, paths, partial index, artifact/catalog writes or contributor claims.
 
 ## Acceptance and small implementation sequence
 
-1. This design-only checkpoint: <=300 added documentation lines, no runtime or
-   source reads. It is a proposal for review, not a completed SIZE experiment.
-2. Add the metadata index plus synthetic native-repository tests and owning
-   research README/ARCHITECTURE contract. Target 220–320 non-test code lines,
-   250–400 test lines and <=60 doc additions; architecture growth must obey its
-   current ceiling. Split add/admit further rather than exceed repository limits.
-3. Separately prove history/grouped-eligibility compatibility, forecast/label
-   bounds and source coverage; then design/wire v2 context and numerical reads.
-   No forecast/label producer declaration or metadata count replaces those proofs.
+STAGE2 section 5 remains the authoritative roadmap; these labels refine its
+rows 1, P and 2 (and section-1 parity P1/P2), not a replacement numbering.
+This design-only checkpoint adds no runtime or source reads. Each proposed code
+PR below targets <=400 combined added code/test/doc lines, stricter than the
+repository's separate category caps; re-estimate and split add/wire again if
+needed. Estimates are not waivers, completed work or real-data authorization.
+
+| Sub-slice / dependency and acceptance | Added code / tests / docs |
+| --- | --- |
+| 1.M0: native metadata facade / unchanged v1 closure, existing validator/predicate parity | 30–50 / 70–100 / 10–20 |
+| 1.M1: pure global conflict/sequence reducer / 1.M0; cross-ticker siblings and empty states, no admission claim | 100–140 / 150–190 / 20–30 |
+| 1.M2: native ref and full-inventory preflight / exact contract, complete membership, all-cap refusal before scans | 100–140 / 150–190 / 20–30 |
+| 1.M3: bounded global scan and index composition / 1.M1/1.M2; exhaust once per partition, detached output and poisoned payload tests | 100–140 / 150–190 / 20–30 |
+| P.M1: native history/grouped-policy compatibility proof / 1.M3; contaminated histories refuse, no post-aggregate filtering | 100–140 / 150–190 / 20–30 |
+| 1.C0: coverage/forecast/label qualification design / 1.M3; freeze available native evidence and source-specific bounds before code | 0 / 0 / 120–160 |
+| 1.C1: native coverage-reference admission / 1.C0; authenticate reviewed evidence or refuse, never infer coverage from metadata alone | 90–130 / 150–190 / 20–30 |
+| 1.C2: forecast/label-bound admission / 1.C0; prove clocks independently of producer declarations | 100–140 / 150–190 / 20–30 |
+| 1.C3: closed v2 context declaration / P.M1,1.C1,1.C2; source-free shape/identity, no admission claim | 100–140 / 150–190 / 20–30 |
+| 1.C4: native v2 context composition / 1.C3; bind independently qualified sources and exact history | 100–140 / 150–190 / 20–30 |
+| 2.M1: causal numerical query plan / 1.C4 and qualified sources; immutable ceilings and bounded read sets, no values | 90–130 / 140–180 / 20–30 |
+| 2.M2: stored historical-quote reader / 2.M1; protected/future poisoning and source anchors | 100–140 / 150–190 / 20–30 |
+| 2.M3: quote aggregate and absolute derivation / 2.M2; native math, zero/null semantics and no ordinal restart | 90–130 / 140–180 / 20–30 |
+| 2.M4: row/lineage materialization wiring / 2.M3; complete horizon rows, bounded output, no experiment execution | 100–140 / 150–190 / 20–30 |
+
+Only 1.M3 exposes build_index; earlier pieces do not assert authenticated index
+admission. Each public-interface slice updates owning README/ARCHITECTURE without
+growing an architecture doc already at its ceiling. 1.C0 may block or require a
+new reviewed source-proof design; 1.C1/1.C2 estimates do not invent available evidence.
+Other STAGE2 work remains separate. No metadata count replaces contributor proof.
 
 Acceptance fixtures cover the exact full contract hash and same-column impostors;
 changed snapshot/dataset/fragment/object identity; all manifest years including
 pre-history_start/protected metadata; absent/no-confirmed/zero-fragment cases;
-duplicates/conflicts across batches/partitions; strict dates/booleans/session;
+duplicates/conflicts across batches/partitions, including requested/unrequested
+cluster siblings in either encounter order and unconfirmed siblings;
+strict dates/booleans/session with the existing native facade as the oracle;
 ordinal warmup and deterministic detached replay; and every cap at/over boundary.
 Poison non-earnings payload scans/object reads and provider/writer/fit hooks;
 assert zero accesses, allowing native all-table catalog metadata resolution.

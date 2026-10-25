@@ -492,6 +492,8 @@ gain/promotion rule is a separate future decision; this run reports evidence onl
 The [confirmed-event metadata proof checkpoint](CONFIRMED_METADATA_DESIGN.md)
 proposes a metadata-first split of the historical-implied prefix work. It proves
 only complete pinned-view membership; coverage and numerical admission remain separate.
+Its 1.M*, P.M*, 1.C* and 2.M* labels refine rows 1, P and 2 below (parity P1/P2);
+this section remains the authoritative roadmap, not a second numbered sequence.
 
 This is the original core roadmap. The section-1 parity P1–P3 substeps refine
 its named slices; row 0's estimate describes the original checkpoint, not the
