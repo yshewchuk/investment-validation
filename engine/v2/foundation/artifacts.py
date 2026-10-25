@@ -38,6 +38,7 @@ from engine.v2.contracts import ArtifactRef
 from engine.v2.foundation.canonical import CONTENT_HASH_PREFIX, content_hash
 
 __all__ = [
+    "OPERATIONS_HEALTH_MAX_BYTES",
     "ArtifactError",
     "ArtifactStore",
     "artifact_reference",
@@ -45,6 +46,13 @@ __all__ = [
     "fsync_directory",
     "safe_relative_path",
 ]
+
+#: The single UTF-8 byte cap for a durable ``operations_health`` artifact,
+#: shared by both sides of the pipeline: the serving read refuses artifacts
+#: above it, so the ops writer must never publish bytes above it. Declared
+#: here (the low-level artifact layer) precisely so the two ends cannot
+#: drift, and so both reuse it without importing a new module.
+OPERATIONS_HEALTH_MAX_BYTES = 1024 * 1024
 
 _CHUNK = 1 << 20
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW

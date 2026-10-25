@@ -178,3 +178,98 @@ def test_native_stage_failures_oversized_non_problem_text_is_bounded_or_refused(
     assert row["error_code"] == "RESOURCE_LIMIT_EXCEEDED"
     assert row["problem_json"] == problem
     conn.close()
+
+
+def test_serving_read_and_ops_write_share_one_health_cap():
+    """The writer and the reader enforce the SAME byte cap from the low-level
+    foundation artifact layer -- a published artifact is always servable, by
+    construction."""
+    from engine.v2.foundation import OPERATIONS_HEALTH_MAX_BYTES
+    from engine.v2.ops import health as ops_health
+    from engine.v2.serving import operations as serving_operations
+
+    assert OPERATIONS_HEALTH_MAX_BYTES == 1024 * 1024
+    assert ops_health.OPERATIONS_HEALTH_MAX_BYTES == OPERATIONS_HEALTH_MAX_BYTES
+    assert serving_operations._HEALTH_ARTIFACT_MAX_BYTES == OPERATIONS_HEALTH_MAX_BYTES
+
+
+def _seed_jobs_with_large_queue_reasons(conn, count, reason_bytes):
+    reason = json.dumps({"reason": "waiting_for_feed", "detail": "x" * reason_bytes})
+    with transaction(conn):
+        for index in range(count):
+            stamp = f"2026-09-15T{index // 60 % 24:02d}:{index % 60:02d}:00Z"
+            conn.execute(
+                "INSERT INTO jobs (job_id,namespace,idempotency_key,request_digest,principal,"
+                "kind,spec_json,resource_class,checkpoint_contract_ref,retry_json,state,priority,"
+                "max_attempts,created_at,updated_at,queue_reason_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"job-{index:05d}", "test", f"ik-{index}", "digest", "test", "legacy_score",
+                 "{}", "standard", "contract-ref", "{}", "queued", 0, 1, stamp, stamp, reason))
+
+
+def test_write_health_trims_optional_content_and_preserves_native_failures(tmp_path):
+    from engine.v2.foundation import OPERATIONS_HEALTH_MAX_BYTES
+    from engine.v2.serving.operations import _read_health
+
+    conn, clock, _ = catalog(tmp_path)
+    seed_delivered_health_release(conn, release_id="r5", requested_session="2026-09-05",
+                                  resolved_session="2026-09-05")
+    problem = json.dumps({"code": "MODEL_NOT_READY"})
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO native_stage_failures "
+            "(occurrence,scope_hash,stage_id,status,error_code,problem_json,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("2026-09-15", "test-scope-hash", "native_score_batch", "FAILED",
+             "MODEL_NOT_READY", problem, "2026-09-15T00:00:00Z", "2026-09-15T00:00:00Z"))
+    _seed_jobs_with_large_queue_reasons(conn, 400, 40_000)
+
+    document = health(conn, clock=clock)
+    assert len(json.dumps(document).encode("utf-8")) > OPERATIONS_HEALTH_MAX_BYTES
+    artifact = tmp_path / "health.json"
+    write_health(artifact, document)
+
+    raw = artifact.read_bytes()
+    assert len(raw) <= OPERATIONS_HEALTH_MAX_BYTES
+    served = json.loads(raw)
+    assert served["schema_version"] == "operations_health.v1.2"
+    # every native failure row survives the trim, verbatim
+    assert served["native_stage_failures"] == document["native_stage_failures"]
+    # truncation is indicated, and it only ever touched optional content
+    truncation = served["health_truncated"]
+    assert truncation["dropped_jobs"] > 0
+    assert truncation["trimmed_text_fields"] > 0
+    assert len(served["jobs"]) == len(document["jobs"]) - truncation["dropped_jobs"]
+    # the newest job row is retained, with its oversized queue reason trimmed
+    assert served["jobs"][-1]["job_id"] == document["jobs"][-1]["job_id"]
+    assert served["jobs"][-1]["queue_reason_json"].endswith("…[truncated]")
+    # the artifact serving refuses above is exactly the one ops wrote: the
+    # serving read accepts it and canonicalizes the bytes it was handed
+    canonical = json.dumps(served, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    assert _read_health(artifact) == canonical
+    conn.close()
+
+
+def test_write_health_refuses_impossible_mandatory_rows_without_replacing(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    seed_delivered_health_release(conn, release_id="r5", requested_session="2026-09-05",
+                                  resolved_session="2026-09-05")
+    artifact = tmp_path / "health.json"
+    write_health(artifact, health(conn, clock=clock))
+    original = artifact.read_bytes()
+
+    document = health(conn, clock=clock)
+    document["native_stage_failures"] = [{
+        "occurrence": "2026-09-15", "scope_hash": "test-scope-hash",
+        "stage_id": "native_score_batch", "status": "FAILED",
+        "error_code": "RESOURCE_LIMIT_EXCEEDED",
+        "problem_json": "x" * (1024 * 1024 + 4096),
+        "created_at": "2026-09-15T00:00:00Z", "updated_at": "2026-09-15T00:00:00Z"}]
+    with pytest.raises(OpsError) as err:
+        write_health(artifact, document)
+    assert err.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    # the refusal happens BEFORE the old artifact is replaced: same bytes,
+    # and no orphaned temporary file was left behind
+    assert artifact.read_bytes() == original
+    assert not list(tmp_path.glob("health.json.*"))
+    conn.close()

@@ -8,7 +8,11 @@ import json
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from engine.v2.foundation import ArtifactError, safe_relative_path
+from engine.v2.foundation import (
+    OPERATIONS_HEALTH_MAX_BYTES,
+    ArtifactError,
+    safe_relative_path,
+)
 from engine.v2.models.deployment import (
     DeploymentError,
     ReleaseNotStaged,
@@ -81,7 +85,10 @@ _OPERATIONS_HEALTH_SCHEMA_VERSIONS = (
     "operations_health.v1.1",
     "operations_health.v1.2",
 )
-_HEALTH_ARTIFACT_MAX_BYTES = 1024 * 1024
+#: Alias to the shared contract cap: the ops writer (`write_health`)
+#: serializes within exactly this bound, so a published artifact is always
+#: servable. Never redefine this number here.
+_HEALTH_ARTIFACT_MAX_BYTES = OPERATIONS_HEALTH_MAX_BYTES
 _JS_HEALTH_SCHEMA_VERSIONS = "[" + ",".join(
     f"'{version}'" for version in _OPERATIONS_HEALTH_SCHEMA_VERSIONS
 ) + "]"

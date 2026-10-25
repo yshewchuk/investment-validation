@@ -8,7 +8,11 @@ import uuid
 from datetime import date, timedelta
 from pathlib import Path
 
-from engine.v2.foundation import format_timestamp, fsync_directory
+from engine.v2.foundation import (
+    OPERATIONS_HEALTH_MAX_BYTES,
+    format_timestamp,
+    fsync_directory,
+)
 from engine.v2.ops.catalog import dumps, transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.publication import current as release_current
@@ -449,10 +453,147 @@ def health(conn, *, clock, executor_mode="watchdog"):
             "native_stage_failures": native_stage_failures}
 
 
+#: Per-string-field byte budget used when :func:`write_health` deterministically
+#: trims long optional text (e.g. job queue reasons) to keep the artifact
+#: inside ``OPERATIONS_HEALTH_MAX_BYTES``.
+HEALTH_TEXT_FIELD_MAX_BYTES = 4096
+_HEALTH_TEXT_TRUNCATION_MARKER = "…[truncated]"
+
+
+def _trim_long_optional_text(row):
+    """Clamp every string field of one health row longer than
+    ``HEALTH_TEXT_FIELD_MAX_BYTES`` to that budget (UTF-8 safe prefix plus a
+    fixed marker). Mutates ``row``; returns the number of fields trimmed."""
+    trimmed = 0
+    for field, value in list(row.items()):
+        if not isinstance(value, str) or len(value.encode("utf-8")) <= HEALTH_TEXT_FIELD_MAX_BYTES:
+            continue
+        kept = value.encode("utf-8")[:HEALTH_TEXT_FIELD_MAX_BYTES].decode("utf-8", errors="ignore")
+        row[field] = kept + _HEALTH_TEXT_TRUNCATION_MARKER
+        trimmed += 1
+    return trimmed
+
+
+def _is_operations_health_document(document):
+    """True when ``schema_version`` names an ``operations_health`` document;
+    every other artifact ``write_health`` may be asked to publish is bound
+    untouched."""
+    schema_version = document.get("schema_version")
+    return (isinstance(schema_version, str)
+            and schema_version.startswith("operations_health."))
+
+
+def _health_bound_setup(document):
+    """Copy the document into a scratch ``working`` dict and detach the
+    optional ``jobs`` rows so trimming/dropping never mutates the caller's
+    document. Returns ``(working, has_jobs, jobs)``."""
+    working = dict(document)
+    has_jobs = isinstance(working.get("jobs"), list)
+    jobs = [dict(row) for row in (working.get("jobs") or [])]
+    return working, has_jobs, jobs
+
+
+def _serialize_working_health(working, jobs, has_jobs, trimmed_fields, dropped_jobs):
+    """Render the scratch state for one bounding iteration: reattach the
+    (possibly trimmed/dropped) jobs, disclose any trimming via
+    ``health_truncated``, and serialize to UTF-8 JSON."""
+    if has_jobs:
+        working["jobs"] = jobs
+    if trimmed_fields or dropped_jobs:
+        working["health_truncated"] = {"trimmed_text_fields": trimmed_fields,
+                                       "dropped_jobs": dropped_jobs}
+    return json.dumps(working).encode("utf-8")
+
+
+def _trim_jobs_text(jobs):
+    """Text-trim stage: clamp oversized string fields on every job row;
+    returns the total number of fields trimmed."""
+    return sum(_trim_long_optional_text(row) for row in jobs)
+
+
+def _drop_oldest_jobs(jobs, overshoot):
+    """Row-drop stage: remove the oldest job rows in bulk until the
+    deliberately conservative ``overshoot`` estimate is freed (the
+    truncation marker costs at most ~256 bytes more, and the caller's
+    re-dump is the exact check). Returns the number of rows dropped."""
+    freed = 0
+    drop_now = 0
+    while drop_now < len(jobs) and freed < overshoot:
+        freed += len(json.dumps(jobs[drop_now]).encode("utf-8")) + 1
+        drop_now += 1
+    del jobs[:drop_now]
+    return drop_now
+
+
+def _refuse_oversized_health(working, payload, trimmed_fields, dropped_jobs):
+    """Refusal stage: the mandatory skeleton plus the preserved native
+    failure rows still exceed the cap; raise BEFORE the old artifact is
+    replaced -- nothing is written, nothing is moved."""
+    raise fail("RESOURCE_LIMIT_EXCEEDED",
+               "operations health document exceeds the shared serving artifact cap even "
+               "after deterministic trimming of all optional content",
+               details={"max_bytes": OPERATIONS_HEALTH_MAX_BYTES,
+                        "measured_bytes": len(payload),
+                        "native_stage_failures": len(working.get("native_stage_failures") or []),
+                        "trimmed_text_fields": trimmed_fields,
+                        "dropped_jobs": dropped_jobs})
+
+
+def _bounded_health_payload(document):
+    """Serialize an ops artifact to UTF-8 JSON, enforcing the shared
+    ``OPERATIONS_HEALTH_MAX_BYTES`` cap ONLY on ``operations_health``
+    documents.
+
+    :func:`write_health` is reused to atomically write other artifacts -- the
+    ``operations_status.v1.0`` sidecar -- so any document whose
+    ``schema_version`` is not an ``operations_health`` one is serialized
+    UNCHANGED: no trimming, no injected ``health_truncated`` key and no size
+    refusal. An ``operations_health`` document already within the cap is
+    likewise returned unchanged.
+
+    For an ``operations_health`` document over the cap -- the SAME
+    ``OPERATIONS_HEALTH_MAX_BYTES`` the serving read enforces, so ops never
+    publishes an artifact serving will refuse to serve -- trimming is
+    deterministic and only ever touches optional content, in preference
+    order: long optional text fields (job queue reasons and any other
+    oversized row text) are clamped first by :func:`_trim_jobs_text`, then
+    the OLDEST optional job rows are dropped by :func:`_drop_oldest_jobs`
+    (``health()`` orders jobs by ``created_at, job_id``, so index 0 is the
+    oldest). Every ``native_stage_failures`` row is always preserved
+    verbatim, as are the mandatory top-level fields. Any trimming is
+    indicated by a ``health_truncated`` object counting what went. If the
+    mandatory skeleton plus the preserved native failure rows still exceed
+    the cap, :func:`_refuse_oversized_health` raises typed
+    ``RESOURCE_LIMIT_EXCEEDED`` BEFORE the old health artifact is replaced.
+    """
+    payload = json.dumps(document).encode("utf-8")
+    if (not _is_operations_health_document(document)
+            or len(payload) <= OPERATIONS_HEALTH_MAX_BYTES):
+        return payload
+    working, has_jobs, jobs = _health_bound_setup(document)
+    trimmed_fields = 0
+    dropped_jobs = 0
+    text_pass_done = False
+    while True:
+        payload = _serialize_working_health(working, jobs, has_jobs,
+                                            trimmed_fields, dropped_jobs)
+        if len(payload) <= OPERATIONS_HEALTH_MAX_BYTES:
+            return payload
+        if not text_pass_done:
+            text_pass_done = True
+            trimmed_fields = _trim_jobs_text(jobs)
+        elif jobs:
+            overshoot = len(payload) - OPERATIONS_HEALTH_MAX_BYTES + 256
+            dropped_jobs += _drop_oldest_jobs(jobs, overshoot)
+        else:
+            _refuse_oversized_health(working, payload, trimmed_fields, dropped_jobs)
+
+
 def write_health(path, document):
     path = Path(path)
+    payload = _bounded_health_payload(document)
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex)
-    temporary.write_text(json.dumps(document))
+    temporary.write_bytes(payload)
     with temporary.open("rb") as stream:
         os.fsync(stream.fileno())
     os.replace(temporary, path)

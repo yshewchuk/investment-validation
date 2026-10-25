@@ -12,6 +12,7 @@ content-addressed artifacts. See ``README.md`` for the public interface.
 from __future__ import annotations
 
 from engine.v2.foundation.artifacts import (
+    OPERATIONS_HEALTH_MAX_BYTES,
     ArtifactError,
     ArtifactStore,
     artifact_reference,
@@ -45,6 +46,7 @@ from engine.v2.foundation.typed import (
 __all__ = [
     "CONTENT_HASH_PREFIX",
     "NONFINITE_KEY",
+    "OPERATIONS_HEALTH_MAX_BYTES",
     "ArtifactError",
     "ArtifactStore",
     "Clock",
