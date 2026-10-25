@@ -720,13 +720,14 @@ Retention runs after a successful backup. Per scope it retains the newest N comp
 | Condition | Outcome |
 | --- | --- |
 | Invalid retention count limit (zero, negative, non-integer or malformed) | `INVALID_REQUEST`; no deletion. |
-| Unverifiable backup or malformed live-attempt evidence | `INTEGRITY_FAILED`; no deletion begins. |
+| Unverifiable backup or malformed live-attempt evidence (including when the materialization base is absent) | `INTEGRITY_FAILED`; no deletion begins. |
 | Manifest over 10 MiB, database or artifact over 4 GiB | `INTEGRITY_FAILED`; no deletion begins. |
 | Invalid backup root or scope entry | `INTEGRITY_FAILED`; no deletion begins. |
 | Invalid materialization root or entry | `INTEGRITY_FAILED`; no deletion begins. |
 | Unsafe backup or artifact name | `INTEGRITY_FAILED`; no deletion begins. |
 | Live attempt with a missing or duplicate request binding | `INPUT_CHANGED`; no deletion begins. |
 | Live-attempt scan exceeds 10,000 rows or a job spec exceeds 16 KiB | `INTEGRITY_FAILED`; no deletion begins. |
+| Backup verification opens a path that is replaced, is not a regular file, or cannot be verified through one stable descriptor | `INTEGRITY_FAILED`; no deletion begins. Manifest, database and artifact bytes are checked through no-follow, nonblocking regular-file descriptors; SQLite integrity checks use the same open database. |
 | Filesystem error during deletion | The `OSError` propagates; earlier deletions may persist. There is no journal replay; an incomplete remaining backup scope refuses with `INTEGRITY_FAILED` until manually repaired. |
 | Partial backup remains after an interrupted deletion | The incomplete scope fails preflight with `INTEGRITY_FAILED`; no further deletion starts until repaired. |
 | Any retention refusal | The current nightly backup attempt fails, even though backup/watermark may already be durable. |

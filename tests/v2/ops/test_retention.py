@@ -273,6 +273,18 @@ def test_live_attempt_without_single_request_binding_refuses_and_deletes_nothing
              keep=1, materialization_keep=1)
 
 
+def test_absent_materialization_base_still_refuses_invalid_live_binding(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "old", "2026-01-01T00:00:00+00:00")
+    _write_backup(scope, "new", "2026-01-02T00:00:00+00:00")
+    assert not default_materialization_base(ops).exists()
+    _live_attempt(catalog, bindings=())
+
+    _refusal(tmp_path, ops, catalog, "live_request_binding_invalid",
+             keep=1, materialization_keep=1)
+
+
 def test_live_job_spec_oversized_refuses_and_deletes_nothing(
         tmp_path, catalog, monkeypatch):
     ops = tmp_path / "ops"
@@ -421,3 +433,64 @@ def test_keepalive_callback_failure_propagates_before_deletion(tmp_path, catalog
                           keepalive=keepalive)
 
     assert _files(scope) == before
+
+
+def test_database_descriptor_stable_when_pathname_replaced_after_open(
+        tmp_path, monkeypatch):
+    database = tmp_path / "b1.sqlite"
+    _sqlite(database)
+    expected = file_hash(database)
+    replacement = b"invalid bytes swapped in at the pathname"
+    real_open = retention_module.os.open
+    swapped = False
+
+    def open_with_swap(target, flags, *args, **kwargs):
+        nonlocal swapped
+        fd = real_open(target, flags, *args, **kwargs)
+        if str(target) == str(database) and not swapped:
+            swapped = True
+            retained = database.with_name(database.name + ".retained")
+            os.rename(database, retained)
+            sink = real_open(database, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(sink, replacement)
+            finally:
+                os.close(sink)
+        return fd
+
+    monkeypatch.setattr(retention_module.os, "open", open_with_swap)
+
+    retention_module._database(database, expected)
+
+    assert database.read_bytes() == replacement
+
+
+def test_digest_keepalive_runs_once_per_chunk_and_matches_file_hash(tmp_path):
+    path = tmp_path / "chunked.bin"
+    path.write_bytes(b"a" * (2 * 1024 * 1024))
+    calls = []
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        digest = retention_module._digest(fd, lambda: calls.append(None))
+    finally:
+        os.close(fd)
+
+    assert digest == file_hash(path)
+    assert len(calls) == 2
+
+
+def test_live_ordinary_attempt_without_bindings_does_not_block_backup_pruning(
+        tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "old", "2026-01-01T00:00:00+00:00")
+    _write_backup(scope, "new", "2026-01-02T00:00:00+00:00")
+    _live_attempt(catalog, bindings=(), kind="ordinary")
+
+    deleted = enforce_retention(ops, conn=catalog, store=object(), keep=1)
+
+    assert deleted == ["old"]
+    assert not (scope / "old.sqlite").exists()
+    assert not (scope / "old.manifest.json").exists()
+    assert (scope / "new.sqlite").exists()
+    assert (scope / "new.manifest.json").exists()

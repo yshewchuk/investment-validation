@@ -34,7 +34,7 @@ from engine.v2.ops.submission import NamespacePolicy, submit
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import TEST_POLICY, catalog, run_until
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 
 

@@ -5,20 +5,19 @@ and a shared ``artifacts/`` directory. Everything is verified before deletion;
 any malformed, stray or incomplete file refuses the whole call. Roots beside ``ops_root`` are kept by mtime, plus every root a live attempt still binds."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-import resource
 import shutil
 import sqlite3
+import stat
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
 from engine.v2.foundation import safe_relative_path
 from engine.v2.ops.catalog import integrity_errors
 from engine.v2.ops.errors import fail
-from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.snapshot_roots import default_materialization_base, materialization_root
 from engine.v2.ops.snapshot_stages import request_from_artifact
 
@@ -33,41 +32,13 @@ _REQUEST_BINDING = "materialization_request.json"
 _LIVE_ATTEMPT_LIMIT = 10_000
 _LIVE_SPEC_LIMIT = 16 * 1024
 _PROTECTED_KINDS = frozenset({"legacy_materialize", "legacy_finality", "legacy_features"})
+_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 def _stderr(event, **fields):
     sys.stderr.write(json.dumps({"event": event, **fields}, sort_keys=True) + "\n")
 
 def _no_keepalive():
     pass
-
-def _rss_mb():
-    return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 1)
-
-def _stage(name, total):
-    _stderr("RETENTION_STAGE_START", stage=name, total=total, rss_mb=_rss_mb())
-    return time.monotonic()
-
-def _stage_end(name, started, done, total):
-    _stderr("RETENTION_STAGE_END", stage=name, done=done, total=total,
-            elapsed_s=round(time.monotonic() - started, 3), rss_mb=_rss_mb())
-
-class _Progress:
-    def __init__(self, stage, total, interval=60.0):
-        self.stage, self.total = stage, total
-        self.interval = interval
-        self.started = self.last = time.monotonic()
-
-    def tick(self, done):
-        now = time.monotonic()
-        if now - self.last < self.interval:
-            return
-        elapsed = now - self.started
-        rate = done / elapsed if elapsed > 0 else 0.0
-        eta = (self.total - done) / rate if rate > 0 and self.total > done else None
-        self.last = now
-        _stderr("RETENTION_PROGRESS", stage=self.stage, done=done, total=self.total,
-                rate_per_s=round(rate, 3),
-                eta_s=None if eta is None else round(eta, 1), rss_mb=_rss_mb())
 
 def _limit(keep, env, default, label):
     if keep is None:
@@ -94,34 +65,55 @@ def _safe_name(name, *, artifact=False):
                    details={"reason_key": reason})
     return name
 
-def _digest(path):
+def _digest(fd, keepalive):
     try:
-        return file_hash(path)
+        os.lseek(fd, 0, os.SEEK_SET)
+        hasher = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            keepalive()
+            hasher.update(chunk)
+        return f"sha256:{hasher.hexdigest()}"
     except OSError:
         raise fail("INTEGRITY_FAILED", "backup file could not be read",
                    details={"reason_key": "backup_file_unreadable"}) from None
 
 def _database(path, expected, keepalive=_no_keepalive):
-    if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= _FILE_LIMIT:
-        raise fail("INTEGRITY_FAILED", "backup database is missing, empty, oversized or not a regular file",
-                   details={"reason_key": "backup_database_invalid"})
-    keepalive()
-    if _digest(path) != expected:
-        raise fail("INTEGRITY_FAILED", "backup database hash does not match its manifest",
-                   details={"reason_key": "backup_database_hash_mismatch"})
-    keepalive()
     try:
-        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
+        fd = os.open(path, _OPEN_FLAGS)
+    except OSError:
+        raise fail("INTEGRITY_FAILED", "backup database is missing, empty, oversized or not a regular file",
+                   details={"reason_key": "backup_database_invalid"}) from None
+    try:
         try:
-            problems = integrity_errors(conn)
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        raise fail("INTEGRITY_FAILED", "backup database could not be verified",
-                   details={"reason_key": "backup_database_verify_failed"}) from None
-    if problems:
-        raise fail("INTEGRITY_FAILED", "backup database failed integrity or foreign-key checks",
-                   details={"reason_key": "backup_database_integrity_failed"})
+            info = os.fstat(fd)
+            valid = stat.S_ISREG(info.st_mode) and 0 < info.st_size <= _FILE_LIMIT
+        except OSError:
+            valid = False
+        if not valid:
+            raise fail("INTEGRITY_FAILED", "backup database is missing, empty, oversized or not a regular file",
+                       details={"reason_key": "backup_database_invalid"})
+        keepalive()
+        if _digest(fd, keepalive) != expected:
+            raise fail("INTEGRITY_FAILED", "backup database hash does not match its manifest",
+                       details={"reason_key": "backup_database_hash_mismatch"})
+        keepalive()
+        try:
+            conn = sqlite3.connect(f"file:/proc/self/fd/{fd}?mode=ro&immutable=1", uri=True)
+            try:
+                problems = integrity_errors(conn)
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            raise fail("INTEGRITY_FAILED", "backup database could not be verified",
+                       details={"reason_key": "backup_database_verify_failed"}) from None
+        if problems:
+            raise fail("INTEGRITY_FAILED", "backup database failed integrity or foreign-key checks",
+                       details={"reason_key": "backup_database_integrity_failed"})
+    finally:
+        os.close(fd)
 
 def _artifact(directory, name, info, keepalive=_no_keepalive):
     _safe_name(name, artifact=True)
@@ -133,26 +125,55 @@ def _artifact(directory, name, info, keepalive=_no_keepalive):
         raise fail("INTEGRITY_FAILED", "backup artifact metadata is invalid",
                    details={"reason_key": "backup_artifact_metadata_invalid"})
     path = directory / name
-    if path.is_symlink() or not path.is_file():
-        raise fail("INTEGRITY_FAILED", "backup artifact is invalid",
-                   details={"reason_key": "backup_artifact_invalid"})
-    if path.stat().st_size != size:
-        raise fail("INTEGRITY_FAILED", "backup artifact size does not match its manifest",
-                   details={"reason_key": "backup_artifact_size_mismatch"})
-    keepalive()
-    if _digest(path) != digest:
-        raise fail("INTEGRITY_FAILED", "backup artifact hash does not match its manifest",
-                   details={"reason_key": "backup_artifact_hash_mismatch"})
-
-def _manifest(key, path, database, artifacts_dir, keepalive=_no_keepalive):
     try:
-        if path.stat().st_size > _MANIFEST_LIMIT:
-            raise fail("INTEGRITY_FAILED", "backup manifest exceeds the 10 MiB limit",
-                       details={"reason_key": "backup_manifest_oversized"})
-        document = json.loads(path.read_text())
+        fd = os.open(path, _OPEN_FLAGS)
+    except OSError:
+        raise fail("INTEGRITY_FAILED", "backup artifact is invalid",
+                   details={"reason_key": "backup_artifact_invalid"}) from None
+    try:
+        try:
+            info_stat = os.fstat(fd)
+        except OSError:
+            info_stat = None
+        if info_stat is None or not stat.S_ISREG(info_stat.st_mode):
+            raise fail("INTEGRITY_FAILED", "backup artifact is invalid",
+                       details={"reason_key": "backup_artifact_invalid"})
+        if info_stat.st_size != size:
+            raise fail("INTEGRITY_FAILED", "backup artifact size does not match its manifest",
+                       details={"reason_key": "backup_artifact_size_mismatch"})
+        keepalive()
+        if _digest(fd, keepalive) != digest:
+            raise fail("INTEGRITY_FAILED", "backup artifact hash does not match its manifest",
+                       details={"reason_key": "backup_artifact_hash_mismatch"})
+    finally:
+        os.close(fd)
+
+def _manifest_document(path):
+    try:
+        fd = os.open(path, _OPEN_FLAGS)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError("backup manifest is not a regular file")
+            if info.st_size > _MANIFEST_LIMIT:
+                raise fail("INTEGRITY_FAILED", "backup manifest exceeds the 10 MiB limit",
+                           details={"reason_key": "backup_manifest_oversized"})
+            os.lseek(fd, 0, os.SEEK_SET)
+            pieces = []
+            while True:
+                piece = os.read(fd, 1 << 20)
+                if not piece:
+                    break
+                pieces.append(piece)
+            return json.loads(b"".join(pieces))
+        finally:
+            os.close(fd)
     except (OSError, ValueError):
         raise fail("INTEGRITY_FAILED", "backup manifest could not be read",
                    details={"reason_key": "backup_manifest_unreadable"}) from None
+
+def _manifest(key, path, database, artifacts_dir, keepalive=_no_keepalive):
+    document = _manifest_document(path)
     if not isinstance(document, dict) or set(document) != _MANIFEST_KEYS:
         raise fail("INTEGRITY_FAILED", "backup manifest has unexpected keys",
                    details={"reason_key": "backup_manifest_keys"})
@@ -247,92 +268,70 @@ def _live_roots(base, conn, store, keepalive=_no_keepalive):
         "JOIN jobs j ON j.job_id = a.job_id WHERE a.state IN (?,?,?,?) "
         "LIMIT ?",
         (_LIVE_SPEC_LIMIT, *_LIVE_STATES, _LIVE_ATTEMPT_LIMIT + 1)).fetchall()
-    total = len(rows)
-    started = _stage("resolve_live_roots", total)
-    progress = _Progress("resolve_live_roots", total)
-    done = 0
-    try:
-        if total > _LIVE_ATTEMPT_LIMIT:
-            raise fail("INTEGRITY_FAILED", "live attempt count exceeds the 10,000 limit",
-                       details={"reason_key": "live_attempt_count_exceeded"})
-        active = []
-        for attempt_id, kind, spec_json, spec_bytes in rows:
-            keepalive()
-            if spec_bytes is not None and spec_bytes > _LIVE_SPEC_LIMIT:
-                raise fail("INTEGRITY_FAILED", "live job spec exceeds the 16 KiB limit",
-                           details={"reason_key": "live_job_spec_oversized",
-                                    "attempt_id": attempt_id})
-            try:
-                spec = json.loads(spec_json)
-            except (TypeError, ValueError):
-                spec = None
-            if not isinstance(spec, dict):
-                raise fail("INTEGRITY_FAILED", "live job spec is malformed",
-                           details={"reason_key": "live_job_spec_malformed",
-                                    "attempt_id": attempt_id})
-            parameters = spec.get("parameters") or {}
-            if not isinstance(parameters, dict):
-                raise fail("INTEGRITY_FAILED", "live job parameters are malformed",
-                           details={"reason_key": "live_job_parameters_malformed",
-                                    "attempt_id": attempt_id})
-            if kind not in _PROTECTED_KINDS \
-                    and spec.get("kind") not in _PROTECTED_KINDS \
-                    and parameters.get("input_mode") != "snapshot":
-                done += 1
-                progress.tick(done)
-                continue
-            active.append(attempt_id)
-            done += 1
-            progress.tick(done)
-        if not active:
-            return set()
-        roots = set()
-        for attempt_id in active:
-            keepalive()
-            bound = conn.execute(
-                "SELECT artifact_id FROM attempt_input_bindings "
-                "WHERE attempt_id = ? AND name = ?",
-                (attempt_id, _REQUEST_BINDING)).fetchall()
-            if len(bound) != 1:
-                raise fail("INPUT_CHANGED",
-                           "live materialization attempt has no single request binding",
-                           details={"reason_key": "live_request_binding_invalid",
-                                    "attempt_id": attempt_id})
-            request = request_from_artifact(conn, store, bound[0][0])
-            roots.add(materialization_root(base, request.request_hash).name)
-        return roots
-    finally:
-        _stage_end("resolve_live_roots", started, done, total)
+    if len(rows) > _LIVE_ATTEMPT_LIMIT:
+        raise fail("INTEGRITY_FAILED", "live attempt count exceeds the 10,000 limit",
+                   details={"reason_key": "live_attempt_count_exceeded"})
+    active = []
+    for attempt_id, kind, spec_json, spec_bytes in rows:
+        keepalive()
+        if spec_bytes is not None and spec_bytes > _LIVE_SPEC_LIMIT:
+            raise fail("INTEGRITY_FAILED", "live job spec exceeds the 16 KiB limit",
+                       details={"reason_key": "live_job_spec_oversized",
+                                "attempt_id": attempt_id})
+        try:
+            spec = json.loads(spec_json)
+        except (TypeError, ValueError):
+            spec = None
+        if not isinstance(spec, dict):
+            raise fail("INTEGRITY_FAILED", "live job spec is malformed",
+                       details={"reason_key": "live_job_spec_malformed",
+                                "attempt_id": attempt_id})
+        parameters = spec.get("parameters") or {}
+        if not isinstance(parameters, dict):
+            raise fail("INTEGRITY_FAILED", "live job parameters are malformed",
+                       details={"reason_key": "live_job_parameters_malformed",
+                                "attempt_id": attempt_id})
+        if kind not in _PROTECTED_KINDS \
+                and spec.get("kind") not in _PROTECTED_KINDS \
+                and parameters.get("input_mode") != "snapshot":
+            continue
+        active.append(attempt_id)
+    if not active:
+        return set()
+    roots = set()
+    for attempt_id in active:
+        keepalive()
+        bound = conn.execute(
+            "SELECT artifact_id FROM attempt_input_bindings "
+            "WHERE attempt_id = ? AND name = ?",
+            (attempt_id, _REQUEST_BINDING)).fetchall()
+        if len(bound) != 1:
+            raise fail("INPUT_CHANGED",
+                       "live materialization attempt has no single request binding",
+                       details={"reason_key": "live_request_binding_invalid",
+                                "attempt_id": attempt_id})
+        request = request_from_artifact(conn, store, bound[0][0])
+        roots.add(materialization_root(base, request.request_hash).name)
+    return roots
 
 def _materialization_plan(ops_root, keep, conn, store, keepalive=_no_keepalive):
     base = default_materialization_base(ops_root)
     if base.is_symlink() or (base.exists() and not base.is_dir()):
         raise fail("INTEGRITY_FAILED", "materialization root is not a directory",
                    details={"reason_key": "materialization_root_invalid"})
+    live = _live_roots(base, conn, store, keepalive=keepalive)
     if not base.exists():
         return []
     _stderr("RETENTION_CURRENT_PUBLICATION_UNBOUND")
-    all_entries = list(base.iterdir())
-    started = _stage("verify_materialization", len(all_entries))
-    progress = _Progress("verify_materialization", len(all_entries))
-    done = 0
-    try:
-        entries = []
-        for item in all_entries:
-            if item.name.startswith("."):
-                done += 1
-                progress.tick(done)
-                continue
-            if item.is_symlink() or not item.is_dir():
-                raise fail("INTEGRITY_FAILED", "materialization entry is not a directory",
-                           details={"reason_key": "materialization_entry_invalid"})
-            entries.append(item)
-            done += 1
-            progress.tick(done)
-        ordered = sorted(entries, key=lambda item: item.stat().st_mtime_ns, reverse=True)
-    finally:
-        _stage_end("verify_materialization", started, done, len(all_entries))
-    live = _live_roots(base, conn, store, keepalive=keepalive)
+    entries = []
+    for item in base.iterdir():
+        if item.name.startswith("."):
+            continue
+        if item.is_symlink() or not item.is_dir():
+            raise fail("INTEGRITY_FAILED", "materialization entry is not a directory",
+                       details={"reason_key": "materialization_entry_invalid"})
+        entries.append(item)
+    ordered = sorted(entries, key=lambda item: item.stat().st_mtime_ns, reverse=True)
     retained = {item.name for item in ordered[:keep]} | live
     return [item for item in ordered if item.name not in retained]
 
@@ -362,50 +361,22 @@ def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=
         if any(scope.is_symlink() or not scope.is_dir() for scope in scopes):
             raise fail("INTEGRITY_FAILED", "backup scope is not a directory",
                        details={"reason_key": "backup_scope_not_directory"})
-        started = _stage("verify_backups", len(scopes))
-        progress = _Progress("verify_backups", len(scopes))
-        done = 0
-        try:
-            for scope in scopes:
-                plans.append(_plan(scope, keep, keepalive=keepalive))
-                done += 1
-                progress.tick(done)
-        finally:
-            _stage_end("verify_backups", started, done, len(scopes))
+        for scope in scopes:
+            plans.append(_plan(scope, keep, keepalive=keepalive))
     roots = _materialization_plan(ops_root, materialization_keep, conn, store,
                                   keepalive=keepalive)
     deleted = []
-    backup_total = sum(len(discarded) + len(artifact_names)
-                       for _, discarded, _, artifact_names in plans)
-    started = _stage("delete_backups", backup_total)
-    progress = _Progress("delete_backups", backup_total)
-    done = 0
-    try:
-        for scope, discarded, artifacts_dir, artifact_names in plans:
-            for record in discarded:
-                keepalive()
-                (scope / (record["key"] + _DB)).unlink()
-                keepalive()
-                (scope / (record["key"] + _MANIFEST)).unlink()
-                deleted.append(record["key"])
-                done += 1
-                progress.tick(done)
-            for name in sorted(artifact_names):
-                keepalive()
-                (artifacts_dir / name).unlink()
-                done += 1
-                progress.tick(done)
-    finally:
-        _stage_end("delete_backups", started, done, backup_total)
-    started = _stage("delete_materialization", len(roots))
-    progress = _Progress("delete_materialization", len(roots))
-    done = 0
-    try:
-        for path in roots:
+    for scope, discarded, artifacts_dir, artifact_names in plans:
+        for record in discarded:
             keepalive()
-            _remove_tree(path, keepalive=keepalive)
-            done += 1
-            progress.tick(done)
-    finally:
-        _stage_end("delete_materialization", started, done, len(roots))
+            (scope / (record["key"] + _DB)).unlink()
+            keepalive()
+            (scope / (record["key"] + _MANIFEST)).unlink()
+            deleted.append(record["key"])
+        for name in sorted(artifact_names):
+            keepalive()
+            (artifacts_dir / name).unlink()
+    for path in roots:
+        keepalive()
+        _remove_tree(path, keepalive=keepalive)
     return deleted
