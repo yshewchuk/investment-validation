@@ -833,7 +833,7 @@ def price_history_command(args, root, conn, clock):
     Needs the shared operations catalog (a Tier-2 table, SEND-BACK 2026-09-14),
     so this runs inside ``dispatch()``, not before it.
     """
-    from engine.v2.data.price_history_table import CALENDAR_TICKER, REGIME_TICKER
+    from engine.v2.data.price_history_table import REQUIRED_CAPTURE_TICKERS
     from engine.v2.ops.price_history_store import capture
 
     if not args.source_root.is_dir():
@@ -841,7 +841,7 @@ def price_history_command(args, root, conn, clock):
                   details={"source_root": str(args.source_root)})
     return capture(conn, ArtifactStore(root), args.source_root, scope=args.scope, root=root,
                    dry_run=args.dry_run, clock=clock,
-                   required_tickers=(CALENDAR_TICKER, REGIME_TICKER))
+                   required_tickers=REQUIRED_CAPTURE_TICKERS)
 
 
 def _computed_moves_capture_report(dry_run, targets, cache):

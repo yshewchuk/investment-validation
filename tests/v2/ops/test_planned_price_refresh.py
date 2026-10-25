@@ -8,6 +8,7 @@ Standalone compatibility cases replace legacy discovery with synthetic loaders.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -16,6 +17,7 @@ import pytest
 from engine import paths
 from engine.data import fetch
 from engine.data.pulls import price_refresh
+from engine.data.pulls.gspc_refresh import HEADER_LINES
 from engine.v2.contracts import PriceQuery
 from engine.v2.data import reference_catalog
 from engine.v2.data.reference_catalog import ReferenceInput
@@ -28,7 +30,6 @@ from engine.v2.ops.errors import OpsError
 from engine.v2.ops.legacy_adapter import invoke_price_refresh
 from tests.data_scan_support import commit_tables, publish_and_inspect
 from tests.ops_support import FakeClock
-from tests.v2.ops.test_regime_ticker_price_history import _write_gspc
 from tests.v2.ops.test_v2_ops_price_history import (
     _SEC,
     _SEC_REF,
@@ -40,6 +41,21 @@ from tests.v2.ops.test_v2_ops_price_history import (
 SESSION = "2026-09-11"
 FETCHED_AT = SESSION + "T21:00:00+00:00"  # after Friday's close + buffer
 PRICES = {"2026-09-10": 100.0, SESSION: 101.0}
+
+
+def _write_gspc(source_root):
+    """Seed the legacy ``gspc_daily.csv`` the price_history capture requires
+    for ``REGIME_TICKER`` (three-header positional layout; the price columns
+    are distinct so a wrong-column capture fails -- see
+    ``test_regime_ticker_price_history.py``)."""
+    directory = Path(source_root) / "earnings_predictions" / "data" / "raw" / "polygon"
+    directory.mkdir(parents=True, exist_ok=True)
+    lines = list(HEADER_LINES)
+    for day, close in (("2024-01-02", 4700.913), ("2024-01-03", 4742.83),
+                       ("2024-01-04", 4756.01)):
+        lines.append(f"{day},{close + 100.0},{close},{close + 5.0},{close - 3.0},"
+                     f"{close - 1.0},{close * 1e9:.0f}\n")
+    (directory / "gspc_daily.csv").write_text("".join(lines))
 
 
 def _unexpected_legacy_universe(*args, **kwargs):

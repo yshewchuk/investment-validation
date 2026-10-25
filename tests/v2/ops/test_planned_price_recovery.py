@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from engine.data.pulls.gspc_refresh import HEADER_LINES
 from engine.v2.data import catalog as data_catalog
 from engine.v2.data import manifests, reference_catalog
 from engine.v2.data.repository import Repository
@@ -14,7 +15,6 @@ from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.recovery import SupervisorLock
 from tests.data_scan_support import RECEIPT, fake_hash, publish_and_inspect
 from tests.v2.ops.test_v2_ops_price_history import _SEC, _SEC_REF, _securities_row
-from tests.v2.ops.test_regime_ticker_price_history import _write_gspc
 from tests.v2.ops.test_v2_ops_snapshot_stages import (
     SESSION as PLAN_SESSION,
 )
@@ -38,6 +38,19 @@ from tests.v2.ops.test_planned_price_refresh import (
 from tests.v2.ops.test_planned_price_refresh import (
     shadow_root as shadow_root,
 )
+
+
+def _write_gspc(source_root):
+    """Seed the legacy ``gspc_daily.csv`` the price_history capture requires
+    for ``REGIME_TICKER`` (see ``test_regime_ticker_price_history.py``)."""
+    directory = Path(source_root) / "earnings_predictions" / "data" / "raw" / "polygon"
+    directory.mkdir(parents=True, exist_ok=True)
+    lines = list(HEADER_LINES)
+    for day, close in (("2024-01-02", 4700.913), ("2024-01-03", 4742.83),
+                       ("2024-01-04", 4756.01)):
+        lines.append(f"{day},{close + 100.0},{close},{close + 5.0},{close - 3.0},"
+                     f"{close - 1.0},{close * 1e9:.0f}\n")
+    (directory / "gspc_daily.csv").write_text("".join(lines))
 
 
 def _new_import(state, label, *, ticker="OTHER"):

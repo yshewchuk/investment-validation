@@ -150,6 +150,8 @@ resolves through its own, unchanged ``price_history.v1`` dataset version.
 from __future__ import annotations
 
 import hashlib
+import io
+import os
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -218,6 +220,11 @@ def _scan_legacy_px_tree(source_root: Path) -> list[dict]:
 
 
 _GSPC_RELPATH = ("earnings_predictions", "data", "raw", "polygon", "gspc_daily.csv")
+
+#: Hard ceiling on the one ``gspc_daily.csv`` a capture will read: the file is
+#: history-appended nightly (~500 rows/year, tens of KB), so anything over
+#: 32 MiB is not the expected series and is refused before its bytes are read.
+_GSPC_MAX_BYTES = 32 * 1024 * 1024
 
 
 def _gspc_retrievals(source_root: Path) -> dict[str, dict]:
@@ -293,10 +300,32 @@ def _parse_gspc(entry: dict) -> tuple[pd.DataFrame, bytes, str]:
     (index closes are never adjusted), so ``close_adj`` and ``close_raw`` are
     both the file's Close -- the same series the legacy regime features read.
     A malformed file raises here and fails this ticker's capture exactly as a
-    malformed px csv does (see :func:`_parse_and_order_entries`);
-    hash/``retrieved_at`` handling mirrors :func:`_parse_px`."""
-    raw = entry["path"].read_bytes()
-    frame = pd.read_csv(entry["path"], skiprows=3, header=None,
+    malformed px csv does (see :func:`_parse_and_order_entries`); a file over
+    :data:`_GSPC_MAX_BYTES` refuses the same way, checked on ``fstat`` before
+    any byte is read.
+
+    The file is opened once (``O_NOFOLLOW``, on top of the discovery
+    symlink check), its size and mtime taken from that same fd's ``fstat``,
+    and its bytes read once: hash, ``retrieved_at`` and parsed rows all
+    describe exactly those bytes -- ``retrieved_at`` comes from this read's
+    mtime, never the discovery-time mtime the entry was listed with (the
+    file may have been refreshed between the two). A ``Close`` that is not
+    numeric coerces to NaN and its row is dropped, matching the legacy
+    ``_gspc_series`` tolerance for null closes; ``high_raw`` may stay NaN."""
+    fd = os.open(entry["path"], os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if info.st_size > _GSPC_MAX_BYTES:
+            raise ValueError(f"gspc_daily.csv is {info.st_size} bytes, over the "
+                             f"{_GSPC_MAX_BYTES}-byte capture cap")
+        handle = os.fdopen(fd, "rb")
+    except Exception:
+        os.close(fd)
+        raise
+    with handle:
+        raw = handle.read()
+    retrieved_at = _iso_from_epoch(info.st_mtime)
+    frame = pd.read_csv(io.BytesIO(raw), skiprows=3, header=None,
                         float_precision="round_trip")
     frame.columns = _GSPC_POSITIONAL_COLUMNS[: frame.shape[1]]
     close = pd.to_numeric(frame["close"], errors="coerce")
@@ -305,8 +334,7 @@ def _parse_gspc(entry: dict) -> tuple[pd.DataFrame, bytes, str]:
                         "close_adj": close,
                         "close_raw": close,
                         "high_raw": pd.to_numeric(frame["high"], errors="coerce")})
-    out = out.dropna(subset=["date"]).sort_values("date")
-    retrieved_at = _iso_from_epoch(entry["mtime"])
+    out = out.dropna(subset=["date", "close_raw"]).sort_values("date")
     return _stringify_dates(out), raw, retrieved_at
 
 

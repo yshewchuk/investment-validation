@@ -201,10 +201,11 @@ def _default_batches():
 def _gspc_rows(periods=20, *, end=_REGIME_SOURCE):
     """The ``REGIME_TICKER`` ``price_history`` fixture rows: the regime
     series' closes (``close_raw``, 500.0+i on consecutive days ending
-    ``end``)."""
+    ``end``). ``close_adj`` (900.0+i) and ``high_raw`` (550.0+i) are
+    deliberately distinct so a regime read picking the wrong column fails."""
     days = [str(d.date()) for d in pd.date_range(end=end, periods=periods, freq="D")]
-    return [{"date": day, "close_adj": 500.0 + i, "close_raw": 500.0 + i,
-             "high_raw": 500.0 + i, "retrieved_at": "2024-02-01T00:00:00Z",
+    return [{"date": day, "close_adj": 900.0 + i, "close_raw": 500.0 + i,
+             "high_raw": 550.0 + i, "retrieved_at": "2024-02-01T00:00:00Z",
              "deleted": False, "source_kind": "legacy_gspc_csv",
              "source_hash": fake_hash("gspc")}
             for i, day in enumerate(days)]
@@ -1403,3 +1404,21 @@ def test_44_implied_carry_ignores_a_late_availability_that_history_respects():
     # the prior history).
     assert panel["mean_prior_or_implied"] == pytest.approx(3.0)
     assert panel["n_prior"] == 0
+
+
+def test_45_gspc_rows_before_history_start_are_excluded_from_regime_inputs():
+    """A ^GSPC row older than ``history_start`` never reaches the regime
+    series: the panel equals the one over the same fixture without it (the
+    early rows' sentinel closes must not shift the anchor or any ``spy_*``
+    value)."""
+    early = [{"date": day, "close_adj": 1.0, "close_raw": 1.0, "high_raw": 2.0,
+              "retrieved_at": "2024-02-01T00:00:00Z", "deleted": False,
+              "source_kind": "legacy_gspc_csv", "source_hash": fake_hash("gspc-early")}
+             for day in ("2023-11-01", "2023-12-15")]
+    batches = _default_batches()
+    batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)] = (
+        early + batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)])
+    with_early = _scan(batches=batches)
+    baseline = _scan()
+    _rows_equal(with_early.panel_row, baseline.panel_row)
+    assert with_early.panel_anchor == baseline.panel_anchor

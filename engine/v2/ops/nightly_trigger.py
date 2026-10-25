@@ -745,7 +745,7 @@ def _refresh_plan_prices(root, as_of, tickers, clock, expected_snapshot_id):
     """Refresh the selected scoring universe, capture, and report absent names."""
     from engine.v2.data.errors import DataError
     from engine.v2.data.price_history_query import tickers_with_price_history
-    from engine.v2.data.price_history_table import CALENDAR_TICKER, REGIME_TICKER
+    from engine.v2.data.price_history_table import REQUIRED_CAPTURE_TICKERS
     from engine.v2.data.repository import Repository
     from engine.v2.foundation import ArtifactStore
     from engine.v2.ops.bootstrap import open_catalog
@@ -759,7 +759,7 @@ def _refresh_plan_prices(root, as_of, tickers, clock, expected_snapshot_id):
         result = invoke_price_refresh(as_of, planned_tickers=tickers, source_root=root)
         store = ArtifactStore(ops_root)
         captured = capture(conn, store, root, root=ops_root, scope="shadow", clock=clock,
-                           required_tickers=(CALENDAR_TICKER, REGIME_TICKER),
+                           required_tickers=REQUIRED_CAPTURE_TICKERS,
                            expected_snapshot_id=expected_snapshot_id)
         snapshot_id = captured["result_snapshot_id"]
         repository = Repository(conn, store)

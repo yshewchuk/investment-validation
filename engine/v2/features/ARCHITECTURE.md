@@ -221,9 +221,8 @@ The fixed market-context tickers named once, in
 nightly's per-ticker `daily_market` history backfill (see the dashboard
 doc; its legacy mirror constant is test-pinned to this one): such a ticker has
 no earnings event and would otherwise hold only the market-wide daily pull's
-short history. `regime` no longer reads them — its source is the
-`REGIME_TICKER` `price_history` close; the backfill stays until a follow-up
-retires it.
+short history. `regime` does not read them: its source is the
+`REGIME_TICKER` `price_history` close.
 
 The bounded `computed_moves` read for `key.ticker` keeps its explicit
 caller-side result limit, which expresses a real caller requirement, and the
@@ -244,6 +243,7 @@ Normal repository scan validation and failures propagate.
 | a non-null `computed_moves.available_as_of_date` is not a naive calendar day | `CONTRACT_MISMATCH`, refused before history arithmetic |
 | an eligible non-skipped `computed_moves` row has a null `realized_move_pct` (a repository-integrity violation — the contract allows that only when `skipped=true`) | `CONTRACT_MISMATCH`, refused before `panel_math.history_features` runs, never silently coerced |
 | `price_history` has no row at all for `REGIME_TICKER` (`"^GSPC"`) | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — the regime read has no empty-source fallback; a live `^GSPC` partition is required at capture |
+| a `REGIME_TICKER` row's `close_raw` cannot be converted to a float | `CONTRACT_MISMATCH` (`price_history value conversion failed`), refused rather than coerced; a NaN close cannot reach this read — capture drops null-close rows |
 | the `REGIME_TICKER` rows are all outside `[history_start, decision_session]` | `regime`'s own no-history behavior: its fields stay `NaN` (its own Inputs table), `regime_asof` `NaT`; `panel_math`'s keys are unaffected (independent read) |
 | `price_history` has no row for `key.ticker` | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
 | `get_price_series`'s `session_date > observation_ceiling` | `QUERY_NOT_BOUNDED`, propagated unchanged — never a silent future read |
