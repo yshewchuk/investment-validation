@@ -132,8 +132,6 @@ def stage_candidate(parameters, root: Path) -> dict:
 
     release_root = Path(parameters["release_root"])
     cutoff = parameters["cutoff"]
-    new = classify(Path(root), parameters["state_files"])
-    check_trailing_months(new, cutoff)
     if parameters.get("mode", "carry") == "bootstrap":
         prior_class = classify_prior(release_root, parameters["prior_release_id"])
         if prior_class.kind == PRIOR_DAMAGED:
@@ -141,9 +139,11 @@ def stage_candidate(parameters, root: Path) -> dict:
         if prior_class.kind == PRIOR_USABLE:
             raise StageRefused("prior release already has a pool catalog",
                                {"code": "PRIOR_USABLE"})
-        # NONE and NO_POOL_CATALOG: the bootstrap assembly lands in a later #1102 slice.
-        raise StageRefused("bootstrap assembly is not available yet",
-                           {"code": "BOOTSTRAP_NOT_BUILT"})
+        from tools.phase5_state_bootstrap import bootstrap_candidate
+
+        return bootstrap_candidate(parameters, Path(root), prior_class)
+    new = classify(Path(root), parameters["state_files"])
+    check_trailing_months(new, cutoff)
     try:
         _, carried = prior_carry_set(release_root, parameters["prior_release_id"])
     except ReleaseAssemblyRefusal as exc:

@@ -220,6 +220,52 @@ def recalibration_payloads(training_roots: Iterable[Path]) -> dict[str, dict[str
     return found
 
 
+def artifact_file_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]:
+    """Load payoff and recalibration artifact files, classified by JSON ``schema_version``."""
+    from engine.v2.models.payoff_artifact import (
+        PAYOFF_LINE_ARTIFACT_V1,
+        PAYOFF_SURFACE_ARTIFACT_V1,
+        PayoffArtifactLoader,
+        PayoffArtifactRef,
+    )
+    from engine.v2.models.recalibration_artifact import (
+        RECALIBRATION_MAP_ARTIFACT_V1,
+        RecalibrationArtifactLoader,
+        RecalibrationArtifactRef,
+    )
+    from tools.phase5_state_stage_job import StageRefused
+
+    found: dict[str, dict[str, bytes]] = {}
+    for path in map(Path, files):
+        data = path.read_bytes()
+        try:
+            document = json.loads(data)
+        except (ValueError, TypeError) as exc:
+            raise StageRefused("a bound state file could not be loaded") from exc
+        schema = document.get("schema_version") if isinstance(document, dict) else None
+        if not isinstance(schema, str):
+            raise StageRefused("a bound state file could not be loaded")
+        if schema in (PAYOFF_LINE_ARTIFACT_V1, PAYOFF_SURFACE_ARTIFACT_V1):
+            artifact = PayoffArtifactLoader(path.parent).load(
+                PayoffArtifactRef(path=path.name, content_hash=sha256_bytes(data)))
+            name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
+            member = _payoff_member_id(artifact)
+            if name in found.setdefault(member, {}):
+                raise StageRefused("a state object appears twice", {"member": member})
+            found[member][name] = data
+        elif schema == RECALIBRATION_MAP_ARTIFACT_V1:
+            artifact = RecalibrationArtifactLoader(path.parent).load(
+                RecalibrationArtifactRef(path=path.name, content_hash=sha256_bytes(data)))
+            name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
+            member = f"recalibration_map:{artifact.strategy}"
+            if name in found.setdefault(member, {}):
+                raise StageRefused("a state object appears twice", {"member": member})
+            found[member][name] = data
+        else:
+            raise StageRefused("a bound state file could not be loaded")
+    return found
+
+
 #: ``tools/phase5_training_job.py --state`` writes a ``<member>.summary.json``
 #: (counts, hash, status) beside each state file; it is not a state.
 SUMMARY_SUFFIX = ".summary.json"
@@ -520,7 +566,8 @@ def _object_entry(out: Path, build: StateBuild, name: str, data: bytes, validate
 def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInventory,
                   payloads: Mapping[str, bytes], states: list[StateBuild], *,
                   sources: Mapping[str, str] | None = None,
-                  incumbent: Path | None = None, pinned_panel: PinnedPanelContext | None = None) -> Path:
+                  incumbent: Path | None = None, pinned_panel: PinnedPanelContext | None = None,
+                  candidate_only: bool = False) -> Path:
     """Stage the model bindings, write the state objects, write the manifest."""
     if sources and any(str(key).startswith(COPY_PREFIX) for key in sources):
         raise PrepareRefused(f"{COPY_PREFIX}refused: caller-supplied pinned sources")
@@ -529,7 +576,7 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
     out = Path(out)
     root = deployment_root(out)
     root.mkdir(parents=True, exist_ok=True)
-    if incumbent is not None:
+    if incumbent is not None and not candidate_only:
         _copy_incumbent(incumbent, root)
     deployment.invalidate_staging_success(root, release.release_id)
     staged = deployment.stage_release(root, release, inventory, dict(payloads))
@@ -539,7 +586,7 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
                    for name, data in sorted(build.payloads.items())]
         rows.append(member_row(build.spec, build.status, objects, build.detail))
     body = manifest_body(release.release_id, release.deployment_id, rows, sources or {})
-    return write_manifest(out, body)
+    return write_manifest(out, body, candidate_only=candidate_only)
 
 
 def _plan(release: ModelRelease, states: list[StateBuild]) -> dict:

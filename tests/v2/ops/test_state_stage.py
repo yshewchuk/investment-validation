@@ -92,11 +92,21 @@ _STATES = {
 }
 
 
+_BOOTSTRAP = {
+    "tier4_dir": "/tmp/tier4",
+    "panel_catalog": "/tmp/panel",
+    "panel_snapshot_id": "snap",
+    "panel_artifact_root": "/tmp/artifact",
+}
+
+
 def _params(**changes):
     values = dict(expected_ids=("phase5_state_stage",), release_root="/r", prior_release_id="prior1",
                   release_id="cand1", cutoff="2026-10-01", state_files=tuple(sorted(_STATES)),
                   input_bindings={**{name: f"job_x#training/{name}" for name in _STATES},
                                   "legacy_manifest.json": "artifact_manifest"})
+    if changes.get("mode") == "bootstrap" and "bootstrap" not in changes:
+        values["bootstrap"] = dict(_BOOTSTRAP)
     values.update(changes)
     return StateStageParameters(**values)
 
@@ -247,6 +257,8 @@ def _wire(tmp_path, monkeypatch, states=None, drift=(), prior_names=None, mode=N
                                      "legacy_manifest.json": "artifact_manifest"}}
     if mode is not None:
         parameters["mode"] = mode
+        if mode == "bootstrap":
+            parameters["bootstrap"] = dict(_BOOTSTRAP)
     return parameters, staging
 
 
@@ -991,8 +1003,10 @@ def test_plan_passes_the_bootstrap_mode_through(tmp_path):
     plan = state_stage_plan(release_root=str(tmp_path), prior_release_id=None,
                             release_id="cand1", cutoff="2026-10-01",
                             state_refs={"a.json": "j#o"}, manifest_ref="artifact_manifest",
-                            source_root=REPO_ROOT, mode="bootstrap")
+                            source_root=REPO_ROOT, mode="bootstrap",
+                            bootstrap=dict(_BOOTSTRAP))
     assert plan["parameters"]["mode"] == "bootstrap"
+    assert plan["parameters"]["bootstrap"] == _BOOTSTRAP
 
 
 def _store_names(root):
@@ -1024,20 +1038,6 @@ def test_bootstrap_refuses_a_usable_prior(tmp_path, monkeypatch):
     parameters, staging = _wire(tmp_path, monkeypatch, mode="bootstrap")
     _assert_bootstrap_refusal(tmp_path, staging, parameters,
                               "prior release already has a pool catalog", "PRIOR_USABLE")
-
-
-def test_bootstrap_refuses_when_the_assembly_is_not_built(tmp_path, monkeypatch):
-    parameters, staging = _wire(tmp_path, monkeypatch, mode="bootstrap",
-                                prior_release_id=None)
-    _assert_bootstrap_refusal(tmp_path, staging, parameters,
-                              "bootstrap assembly is not available yet", "BOOTSTRAP_NOT_BUILT")
-
-
-def test_bootstrap_refuses_a_prior_without_a_catalog(tmp_path, monkeypatch):
-    parameters, staging = _wire(tmp_path, monkeypatch, mode="bootstrap")
-    phase5_release.catalog_path(tmp_path, "prior1").unlink()
-    _assert_bootstrap_refusal(tmp_path, staging, parameters,
-                              "bootstrap assembly is not available yet", "BOOTSTRAP_NOT_BUILT")
 
 
 def test_light_checks_accept_a_null_carried_from_in_bootstrap(tmp_path, monkeypatch):
