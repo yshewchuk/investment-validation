@@ -68,8 +68,10 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   the root doc §3's adapter note).
 - `nightly.py::history_backfill_tickers` — the per-ticker history backfill
   set: the tickers with an upcoming earnings event PLUS `nightly.CONTEXT_TICKERS`
-  (the market-context tickers the scoring path reads from `daily_market`, e.g.
-  `"SPY"`, which never has earnings). Legacy cannot import `engine.v2`, so this
+  (market-context tickers kept backfilled in `daily_market` for the legacy
+  market-wide read, e.g. `"SPY"`, which never has earnings; the v2 `spy_*` regime
+  features do NOT read it — they read the `^GSPC` `price_history` close).
+  Legacy cannot import `engine.v2`, so this
   constant mirrors the owner, `engine.v2.features.panel_row_inputs.CONTEXT_TICKERS`;
   a v2 test asserts they are equal. `refresh_calendar_data` backfills this set, so a
   context ticker's full history is fetched once and an already-cached one

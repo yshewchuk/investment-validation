@@ -1615,7 +1615,7 @@ class _CountingBatchRepository:
                               time_interval):
         return len(self.rows)
 
-    def scan(self, query, *, table_name):
+    def scan(self, query, *, table_name, max_object_bytes=None):
         self.prepared_max_batch_rows = query.max_batch_rows
         for start in range(0, len(self.rows), query.max_batch_rows):
             chunk = self.rows[start:start + query.max_batch_rows]

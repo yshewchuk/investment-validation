@@ -14,7 +14,9 @@ from engine.paths import ROOT
 from engine.v2.data import objects
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.data.errors import DataError
+from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT, PRICE_HISTORY_TABLE_NAME, REGIME_TICKER
 from engine.v2.data.repository import Repository
+from engine.v2.features import regime
 from engine.v2.foundation import content_hash, to_document
 from engine.v2.ops.fingerprints import environment_identity, source_closure
 from engine.v2.research import eligibility_policy, magnitude_panel_daily as daily, magnitude_panel_plan, magnitude_panel_table
@@ -83,6 +85,20 @@ def native(tmp_path_factory):
         hashes[table] = {key: objects.partition_logical_hash(store, [r.object_ref for r in group],
             contract, contract_ref_for(contract), key) for key, group in partitions.items() if len(group) > 1}
     snapshot = commit_tables(conn, clock, tables, contracts, partition_logical_hashes=hashes, store=store)
+    # The pinned ^GSPC price_history regime series: the spy block's only close
+    # source, distinct from the SPY daily_market spot so the two are never confused.
+    # ``close_adj`` is deliberately offset from ``close_raw`` (a wrong-column read
+    # of ``close_adj`` then fails the regime oracles), even though real ^GSPC
+    # capture rows store the two equal.
+    regime_rows = [{"date": day, "close": 4000.0 + index} for index, day in enumerate(days)]
+    ph_input = [dict(ticker=REGIME_TICKER, date=row["date"], close_adj=row["close"] + 1.0,
+                     close_raw=row["close"], high_raw=row["close"], retrieved_at="2025-01-01T00:00:00Z",
+                     deleted=False, source_kind="legacy_gspc_csv", source_hash="sha256:" + "ab" * 32,
+                     capture_id="synthetic-gspc") for row in regime_rows]
+    ph_record = publish_and_inspect(store, PRICE_HISTORY_CONTRACT, contract_ref_for(PRICE_HISTORY_CONTRACT),
+        sorted(ph_input, key=lambda r: (r["ticker"], r["date"], r["retrieved_at"])), REGIME_TICKER)
+    regime_snapshot = commit_tables(conn, clock, {PRICE_HISTORY_TABLE_NAME: [ph_record]},
+        {PRICE_HISTORY_TABLE_NAME: PRICE_HISTORY_CONTRACT}, scope="regime", receipt_id="regime-r1", store=store)
     source = SimpleNamespace(conn=conn, repository=PinnedRepository(conn, store), snapshot=snapshot)
     build, stored = build_history(source)
     parent = magnitude_panel_plan.build_context(source.repository, snapshot, stored,
@@ -103,14 +119,16 @@ def native(tmp_path_factory):
     producer = {"source_closure": source_closure(ROOT, ["engine/v2/research/magnitude_panel_daily.py"]),
                 "environment": environment_identity(1)}
     yield SimpleNamespace(**vars(source), stored=stored, parent=parent, policy=policy,
-                          metadata=metadata, events=events, days=days, producer=producer, market=market)
+                          metadata=metadata, events=events, days=days, producer=producer, market=market,
+                          regime=regime_snapshot, regime_rows=regime_rows, clock=clock, store=store)
     conn.close()
 
 
 def build(native, **changes):
     return daily.build_daily_blocks(native.repository, native.snapshot, native.stored, native.parent,
         **{"producer": native.producer, "policy": native.policy, "eligibility_metadata": native.metadata, "source_start": START,
-           "max_source_rows": 1000, "max_events": 10, "max_object_bytes": 2**20, **changes})
+           "price_history_snapshot": native.regime, "max_source_rows": 1000, "max_events": 10,
+           "max_object_bytes": 2**20, **changes})
 
 
 def test_vertical_native_sources_to_complete_partial_blocks(native, monkeypatch):
@@ -131,7 +149,9 @@ def test_vertical_native_sources_to_complete_partial_blocks(native, monkeypatch)
                for r in result["rows"])
     reads = [query for table, query in native.repository.scans if table == "daily_market" and "spot" in query.columns]
     counts = Counter((q.key_filter[0].values[0], q.key_filter[1].values[0]) for q in reads)
-    assert counts == Counter({(ticker, year): 1 for ticker in ("SPY", "SYNTH") for year in (2022, 2023, 2024)})
+    assert counts == Counter({(ticker, year): 1 for ticker in ("SYNTH",) for year in (2022, 2023, 2024)})
+    regime_reads = [(table, query) for table, query in native.repository.scans if table == PRICE_HISTORY_TABLE_NAME]
+    assert len(regime_reads) == 1 and regime_reads[0][1].key_filter[0].values[0] == REGIME_TICKER
     for row in result["rows"]:
         assert row["row_id"] == content_hash({k: v for k, v in row.items() if k != "row_id"})
         assert row["daily_market"]["anchor"]["source_date"] <= row["source_session_ceiling"]
@@ -175,11 +195,39 @@ def test_spy_independent_nine_value_oracle(native):
     rows = build(native)["rows"]
     assert rows
     for row in rows:
-        prefix = [r for r in native.market if r["ticker"] == "SPY"
-                  and r["date"].date().isoformat() <= row["source_session_ceiling"]]
-        expected = spy_oracle([r["spot"] for r in prefix])
+        prefix = [r for r in native.regime_rows if r["date"] <= row["source_session_ceiling"]]
+        expected = spy_oracle([r["close"] for r in prefix])
         assert row["spy"]["values"] == pytest.approx(expected, rel=1e-12, abs=1e-12)
-        assert row["spy"]["source_dates"] == [r["date"].date().isoformat() for r in prefix[-253:]]
+        assert row["spy"]["source_dates"] == [r["date"] for r in prefix][-253:]
+        assert row["spy"]["ticker"] == REGIME_TICKER
+
+
+def test_spy_block_reads_regime_history_not_spy_spot(native):
+    """The nine ``spy_*`` values equal ``regime.add_regime_features`` over the
+    ^GSPC ``price_history`` closes, and altering the SPY ``daily_market`` spot
+    (the old source) changes neither the block nor its match to the regime oracle."""
+    rows = build(native)["rows"]
+    group = {g["event_id"]: g for g in native.metadata["groups"]}
+    regime_market = pd.DataFrame({"date": pd.to_datetime([r["date"] for r in native.regime_rows]),
+        "close": [r["close"] for r in native.regime_rows]})
+    spot_rows = [r for r in native.market if r["ticker"] == "SPY"]
+    spot_market = pd.DataFrame({"date": pd.to_datetime([r["date"] for r in spot_rows]),
+        "close": [r["spot"] for r in spot_rows]})
+    for row in rows:
+        event_date = group[row["event_id"]]["event_date"]
+        decision = row["source_session_ceiling"]
+        events = pd.DataFrame({"date": [pd.Timestamp(event_date)], "decision": [pd.Timestamp(decision)]})
+        expected = regime.add_regime_features(events, regime_market, as_of_column="decision").iloc[0]
+        spot = regime.add_regime_features(events, spot_market, as_of_column="decision").iloc[0]
+        for name in SPY:
+            value = row["spy"]["values"][name]
+            oracle = expected[name]
+            assert (value is None if pd.isna(oracle)
+                    else value == pytest.approx(oracle, rel=1e-9, abs=1e-9))
+        # The regime and stale-spot sources genuinely diverge on at least one window.
+        assert any(not (row["spy"]["values"][name] is None or pd.isna(spot[name]))
+                   and row["spy"]["values"][name] != pytest.approx(spot[name], rel=1e-6, abs=1e-6)
+                   for name in ("spy_ret21", "spy_ret63", "spy_vol20"))
 
 
 def test_daily_values_use_each_forecasts_last_iv_surface(native):
@@ -218,7 +266,7 @@ def test_spy_oracle_at_history_boundaries(index):
     closes = [100.0 + i / 10 + (i * 7) % 17 for i in range(len(days))]
     closes[0] = 1000.0  # Excluded from the 252-price drawdown at index 252.
     closes[1] = 900.0  # Oldest included drawdown price at index 252 must survive.
-    rows = [{"date": day, "spot": close} for day, close in zip(days, closes)]
+    rows = [{"date": day, "close": close} for day, close in zip(days, closes)]
     events = [{"event_id": "synthetic", "event_date": days[-1], "forecasts": [
         {"horizon_sessions": 1, "source_session_ceiling": days[index]}]}]
     actual = daily._spy_blocks(events, rows)["synthetic", 1]
@@ -251,7 +299,13 @@ def test_changed_forecast_clock_refuses_before_value_reads(native, monkeypatch):
 
 
 def test_source_bound_refuses_without_partial_return(native):
-    with pytest.raises(DataError) as caught:
+    """A ``max_source_rows`` below the pinned history refuses before any block
+    is returned -- no partial result. The regime read shares the cap and runs
+    first, so since the regime read joined the build this is the refusal's
+    actual message (the dedicated daily-source bound message is asserted by
+    ``test_regime_series_row_bound_refuses``' sibling scans); the property
+    under test -- refuse whole, return nothing partial -- is unchanged."""
+    with pytest.raises(DataError, match="daily block regime row bound exceeded") as caught:
         build(native, max_source_rows=10)
     assert caught.value.code == "RESULT_LIMIT_EXCEEDED"
 
@@ -290,7 +344,7 @@ def test_partial_blocks_are_rejected_as_stored_panel_rows(native):
 
 def test_future_source_changes_cannot_change_earlier_spy_prefix():
     dates = pd.bdate_range("2020-01-01", periods=310)
-    rows = [{"date": day.date().isoformat(), "spot": 100.0 + i} for i, day in enumerate(dates)]
+    rows = [{"date": day.date().isoformat(), "close": 100.0 + i} for i, day in enumerate(dates)]
     events = [{"event_id": "early", "event_date": dates[270].date().isoformat(),
                "forecasts": [{"horizon_sessions": 1, "source_session_ceiling": dates[269].date().isoformat()}]},
               {"event_id": "late", "event_date": dates[-1].date().isoformat(),
@@ -298,7 +352,7 @@ def test_future_source_changes_cannot_change_earlier_spy_prefix():
     expected = daily._spy_blocks(events, rows)
     changed = deepcopy(rows)
     for row in changed[270:]:
-        row["spot"] *= 123
+        row["close"] *= 123
     actual = daily._spy_blocks(events, changed)
     assert actual["early", 1] == expected["early", 1]
     assert actual["late", 1]["values"] != expected["late", 1]["values"]
@@ -347,7 +401,7 @@ def test_snapshot_and_policy_drift_cannot_reuse_context(native):
     with pytest.raises(DataError) as caught:
         daily.build_daily_blocks(native.repository, replace(native.snapshot, calendar_version="changed"),
             native.stored, native.parent, producer=native.producer, policy=native.policy, eligibility_metadata=native.metadata,
-            source_start=START, max_source_rows=1000, max_events=10, max_object_bytes=2**20)
+            price_history_snapshot=native.regime, source_start=START, max_source_rows=1000, max_events=10, max_object_bytes=2**20)
     assert caught.value.code == "IDENTITY_CONFLICT"
     with pytest.raises(DataError, match="stage-two eligibility policy") as caught:
         build(native, policy=eligibility_policy.eligibility_policy(version="grouped_ticker_embargo.v1", embargo_days=0))
@@ -382,7 +436,7 @@ def test_unpinned_repository_refuses_before_access(native, monkeypatch):
     with pytest.raises(DataError, match="snapshot-pinned repository") as caught:
         daily.build_daily_blocks(repository, native.snapshot, native.stored, native.parent,
             producer=native.producer, policy=native.policy, eligibility_metadata=native.metadata,
-            source_start=START, max_source_rows=1000, max_events=10, max_object_bytes=2**20)
+            price_history_snapshot=native.regime, source_start=START, max_source_rows=1000, max_events=10, max_object_bytes=2**20)
     assert caught.value.code == "CONTRACT_MISMATCH"
 
 
@@ -395,6 +449,94 @@ def test_nonplain_producer_refuses_before_normalization_and_repository(native, m
     producer = deepcopy(native.producer)
     producer["environment"]["synthetic_probe"] = value
     monkeypatch.setattr(native.repository, "resolve", lambda *args: pytest.fail("unvalidated producer reached repository"))
-    with pytest.raises(DataError) as caught:
+    with pytest.raises(DataError, match="invalid research panel context") as caught:
         build(native, producer=producer)
     assert caught.value.code == "CONTRACT_MISMATCH"
+
+
+def test_regime_history_absent_refuses_before_values(native):
+    """The pinned snapshot carries no ^GSPC price_history: get_price_series's
+    CONTRACT_MISMATCH propagates unchanged -- no daily_market spot fallback."""
+    with pytest.raises(DataError, match="snapshot has no price_history table") as caught:
+        build(native, price_history_snapshot=native.snapshot)  # source snapshot has no price_history
+    assert caught.value.code == "CONTRACT_MISMATCH"
+
+
+def _commit_regime_snapshot(native, label, *, shift=0.0):
+    """A second committed ^GSPC ``price_history`` snapshot (distinct closes,
+    distinct dataset version) for identity-drift and rebinding tests."""
+    rows = [dict(ticker=REGIME_TICKER, date=row["date"], close_adj=row["close"] + shift,
+                 close_raw=row["close"] + shift, high_raw=row["close"] + shift,
+                 retrieved_at="2025-01-02T00:00:00Z", deleted=False,
+                 source_kind="legacy_gspc_csv", source_hash="sha256:" + "cd" * 32,
+                 capture_id=f"synthetic-gspc-{label}") for row in native.regime_rows]
+    record = publish_and_inspect(native.store, PRICE_HISTORY_CONTRACT,
+        contract_ref_for(PRICE_HISTORY_CONTRACT),
+        sorted(rows, key=lambda r: (r["ticker"], r["date"], r["retrieved_at"])), REGIME_TICKER)
+    return commit_tables(native.conn, native.clock,
+        {PRICE_HISTORY_TABLE_NAME: [record]}, {PRICE_HISTORY_TABLE_NAME: PRICE_HISTORY_CONTRACT},
+        scope=f"regime-{label}", receipt_id=f"regime-{label}-r1", store=native.store)
+
+
+@pytest.mark.parametrize("case,message", [
+    ("none", "an exact native snapshot reference is required"),
+    ("mapping", "an exact native snapshot reference is required"),
+    ("drift", "snapshot differs from its committed identity")])
+def test_price_history_snapshot_is_admitted_before_it_is_bound(native, case, message):
+    """The regime snapshot goes through the shared ``admit_snapshot`` helper
+    like this module's other snapshot inputs: a missing or non-native reference
+    and a reference that differs from its committed identity all refuse, and
+    nothing is bound into a materialization context."""
+    if case == "none":
+        rejected = None
+    elif case == "mapping":
+        rejected = to_document(native.regime)
+    else:
+        version = native.regime.table_versions[PRICE_HISTORY_TABLE_NAME]
+        rejected = replace(native.regime, table_versions={
+            **native.regime.table_versions,
+            PRICE_HISTORY_TABLE_NAME: replace(version, dataset_version_id="dsv-not-committed")})
+    with pytest.raises(DataError, match=message) as caught:
+        build(native, price_history_snapshot=rejected)
+    assert caught.value.code == "SNAPSHOT_UNRESOLVED"
+
+
+def test_context_binds_the_admitted_price_history_snapshot(native):
+    """The admitted reference is what the context binds: committing a different
+    ^GSPC version and rebuilding changes the bound identity and the
+    ``context_id``, never silently reusing the earlier context."""
+    original = build(native)
+    other = _commit_regime_snapshot(native, "v2", shift=1.0)
+    assert other.table_versions[PRICE_HISTORY_TABLE_NAME].dataset_version_id != \
+        native.regime.table_versions[PRICE_HISTORY_TABLE_NAME].dataset_version_id
+    changed = build(native, price_history_snapshot=other)
+    assert changed["context"]["price_history_snapshot"] != original["context"]["price_history_snapshot"]
+    assert changed["context"]["context_id"] != original["context"]["context_id"]
+
+
+def test_nonpositive_regime_close_refuses(native, monkeypatch):
+    """A non-positive ^GSPC close is refused by the existing 'must be positive'
+    CONTRACT_MISMATCH; the bad series never reaches add_regime_features."""
+    from dataclasses import replace as _replace
+    from engine.v2.data import price_history_query
+    good = price_history_query.get_price_series
+    def poisoned(repository, query, snapshot, **kwargs):
+        rows = good(repository, query, snapshot, **kwargs)
+        return tuple(_replace(row, close_raw=-1.0) if index == 30 else row
+                     for index, row in enumerate(rows))
+    monkeypatch.setattr(price_history_query, "get_price_series", poisoned)
+    with pytest.raises(DataError, match="must be positive") as caught:
+        build(native)
+    assert caught.value.code == "CONTRACT_MISMATCH"
+
+
+def test_regime_series_row_bound_refuses(native):
+    """Dedicated regime-series cap: a ``max_source_rows`` smaller than the
+    pinned ^GSPC series refuses ``RESULT_LIMIT_EXCEEDED`` from the regime
+    read's own row bound (its distinct message), before any daily source
+    scan of the tickers runs."""
+    native.repository.scans.clear()
+    with pytest.raises(DataError, match="regime row bound") as caught:
+        build(native, max_source_rows=100)
+    assert caught.value.code == "RESULT_LIMIT_EXCEEDED"
+    assert all(table != "daily_market" for table, _query in native.repository.scans)

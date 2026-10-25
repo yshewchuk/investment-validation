@@ -8,6 +8,7 @@ Standalone compatibility cases replace legacy discovery with synthetic loaders.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -16,6 +17,7 @@ import pytest
 from engine import paths
 from engine.data import fetch
 from engine.data.pulls import price_refresh
+from engine.data.pulls.gspc_refresh import HEADER_LINES
 from engine.v2.contracts import PriceQuery
 from engine.v2.data import reference_catalog
 from engine.v2.data.reference_catalog import ReferenceInput
@@ -41,6 +43,21 @@ FETCHED_AT = SESSION + "T21:00:00+00:00"  # after Friday's close + buffer
 PRICES = {"2026-09-10": 100.0, SESSION: 101.0}
 
 
+def _write_gspc(source_root):
+    """Seed the legacy ``gspc_daily.csv`` the price_history capture requires
+    for ``REGIME_TICKER`` (three-header positional layout; the price columns
+    are distinct so a wrong-column capture fails -- see
+    ``test_regime_ticker_price_history.py``)."""
+    directory = Path(source_root) / "earnings_predictions" / "data" / "raw" / "polygon"
+    directory.mkdir(parents=True, exist_ok=True)
+    lines = list(HEADER_LINES)
+    for day, close in (("2024-01-02", 4700.913), ("2024-01-03", 4742.83),
+                       ("2024-01-04", 4756.01)):
+        lines.append(f"{day},{close + 100.0},{close},{close + 5.0},{close - 3.0},"
+                     f"{close - 1.0},{close * 1e9:.0f}\n")
+    (directory / "gspc_daily.csv").write_text("".join(lines))
+
+
 def _unexpected_legacy_universe(*args, **kwargs):
     """Reject accidental reads of the legacy discovery universe."""
     pytest.fail("planned refresh must not consult the legacy events/inventory universe")
@@ -64,6 +81,9 @@ def shadow_root(tmp_path):
     root = tmp_path / "selected-source"
     ops_root = root / "data" / "operations"
     ops_root.mkdir(parents=True)
+    # The nightly price capture now requires REGIME_TICKER (^GSPC) alongside
+    # SPY: seed the legacy gspc_daily.csv it reads.
+    _write_gspc(root)
     clock = FakeClock()
     conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
     store = ArtifactStore(ops_root)
@@ -137,7 +157,11 @@ def test_never_fetched_planned_ticker_is_fetched_and_captured(shadow_root, insta
     state = shadow_root
     calls = install_fetcher(state.root)
     assert not (state.root / "data" / "raw").exists()
-    assert not (state.root / "earnings_predictions").exists()
+    # Only the fixture-seeded gspc_daily.csv exists under
+    # earnings_predictions: the yfinance fetch/px tree is still absent.
+    assert not (state.root / "earnings_predictions" / "data" / "raw" / "yfinance").exists()
+    assert (state.root / "earnings_predictions" / "data" / "raw" / "polygon"
+            / "gspc_daily.csv").is_file()
     assert "earnings_events" not in state.base.table_versions
 
     snapshot_id = nightly_trigger._refresh_plan_prices(

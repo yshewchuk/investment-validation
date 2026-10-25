@@ -30,7 +30,7 @@ import pytest
 
 from engine.v2.contracts import PriceQuery
 from engine.v2.data import price_download_sources as sources
-from engine.v2.data import price_history
+from engine.v2.data import price_history, price_history_query
 from engine.v2.data.errors import DataError
 from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT, PRICE_HISTORY_TABLE_NAME
 from engine.v2.data.repository import Repository
@@ -793,3 +793,30 @@ def test_get_close_returns_provenance(tmp_path):
     row = repository.get_close("AAPL", "2024-01-01", "2024-06-01T00:00:00Z", snapshot)
     assert row.close_adj == 1.0
     assert row.source_hash == "hx"
+
+
+def test_max_object_bytes_bounds_both_typed_reads_before_any_decode(tmp_path, monkeypatch):
+    """The optional ``max_object_bytes`` reaches ``Repository.scan`` from
+    ``_fetch_rows`` for BOTH typed reads: a cap under the pinned fragment's own
+    ``byte_size`` refuses the repository's own bound error
+    (``RESULT_LIMIT_EXCEEDED`` / ``object exceeds max_object_bytes``) before a
+    fragment is opened, while the default ``None`` keeps today's
+    byte-unbounded read intact."""
+    stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.0),
+                                         "2024-01-02": (2.0, 2.0, 2.0)},
+                       retrieved_at="2024-01-03T00:00:00Z")
+    conn, clock, store = catalog_and_store(tmp_path)
+    snapshot = _commit_price_history_snapshot(conn, clock, store, {"AAPL": stored})
+    repository = Repository(conn, store)
+    query = _price_query(session_date="2024-01-02", ceiling="2024-01-02T00:00:00Z")
+    assert [row.date for row in price_history_query.get_price_series(
+        repository, query, snapshot)] == ["2024-01-01", "2024-01-02"]
+    monkeypatch.setattr(repository, "_open_parquet",
+                        lambda *args, **kwargs: pytest.fail("bounded read decoded a fragment"))
+    with pytest.raises(DataError, match="object exceeds max_object_bytes") as caught:
+        price_history_query.get_price_series(repository, query, snapshot, max_object_bytes=1)
+    assert caught.value.code == "RESULT_LIMIT_EXCEEDED"
+    with pytest.raises(DataError, match="object exceeds max_object_bytes") as caught:
+        price_history_query.get_close(repository, "AAPL", "2024-01-02",
+                                      "2024-01-02T00:00:00Z", snapshot, max_object_bytes=1)
+    assert caught.value.code == "RESULT_LIMIT_EXCEEDED"
