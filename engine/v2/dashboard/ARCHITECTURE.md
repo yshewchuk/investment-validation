@@ -79,33 +79,21 @@ launcher option; its application presentation belongs to React.
 
 ### Operations shell freshness contract
 
-The legacy frame is pinned to one release for the browser session; the shell
-shows pin and published release separately -- when they differ it marks the
-board stale and offers a reload opt-in, never re-pointing the frame. A
-usable observation's stamp shows its `generated_at` age; a fetch/parse
-failure or unusable artifact gives the offline frozen-at line and an
-unknown banner; more than 24 hours old is stale. The shell shows health's
-`requested_session` and `resolved_session` (the resolved one is effective)
-as-is, ISO-date compared (producer `YYYY-MM-DD` or UI `eng-night-YYYY-MM-DD`)
-against the `X-Expected-Session` header `market_schedule` derives: 16:00
-America/New_York, 13:00 on
-the three modelled early-close days (a session July 3, Black Friday, a
-session Christmas Eve); other half-days keep 16:00 and the shell applies
-none. Once a later scheduled session is due, a snapshot of an earlier
-input session is stale even under 24 hours. `code_budgets` is trusted only
-as typed evidence: boolean `ok`, nonnegative integer `consecutive_nights`,
-array `unknown_occurrences`, object `latest` -- `null` only in the
-producers' fresh no-observation shape (`ok` false, zero streak, empty
-list), valid evidence read unknown, never malformed -- and optional
-`latest_occurrence` naming the newest row; `null` pairs only with the
-fresh shape above and names no unknown row; any other shape is unknown,
-never current. The outcome line: withheld publication qualifies a passing
-outcome to degraded; `unknown_occurrences` containing `latest_occurrence`
-makes the latest outcome unknown; with the optional field absent,
-conservatively any nonempty list does -- so an older gap behind a failed
-latest night keeps the latest-failed wording, gap and streak visible,
-banner unknown. Health is current only when every condition
-below passes; precedence **unknown >
+The legacy frame is pinned to one release for the browser session; a newer
+release never re-points it -- pin drift marks the board stale and offers a
+reload opt-in, and only an explicit reload opts into the newer published
+release. The shell shows a usable observation's `generated_at` age and
+health's `requested_session` and `resolved_session` (the resolved one is
+effective), ISO-date compared (producer `YYYY-MM-DD` or UI
+`eng-night-YYYY-MM-DD`) against the `X-Expected-Session` header
+`market_schedule` derives: 16:00 America/New_York, 13:00 on the three
+modelled early-close days (a session July 3, Black Friday, a session
+Christmas Eve); other half-days keep 16:00 and the shell applies none. The
+rows below are the full condition contract -- evidence failures (an
+unfetchable or unusable artifact keeps the offline frozen-at line), the
+24-hour and session staleness thresholds, typed `code_budgets` evidence and
+outcome wording, and the release-pin/published comparisons. Health is
+current only when every condition below passes; precedence **unknown >
 stale > degraded**; banner class `unknown`/`stale`/`degraded` or empty.
 
 | Condition | Visible outcome |
@@ -123,7 +111,7 @@ stale > degraded**; banner class `unknown`/`stale`/`degraded` or empty.
 | Engineering `ok` false with zero `consecutive_nights` (valid `latest`-null fresh no-observation shape; producers' unknown latest night) | unknown |
 | `unknown_occurrences` contains `latest_occurrence` (a field-less document conservatively reads any nonempty list this way) | unknown (latest outcome; streak evidence stays visible) |
 | `current_release.release_id` missing | unknown |
-| Health release differs from the frame pin or the published current | stale (pin unavailable or published not yet observed: unknown) |
+| Health release differs from the frame pin or the published current | stale (pin unavailable, published current not yet observed, or published current unavailable: unknown) |
 | Pin and published current differ | stale drift notice plus reload opt-in |
 | All evidence passes | current |
 

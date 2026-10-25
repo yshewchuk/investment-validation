@@ -96,7 +96,7 @@ Pure standard-library arithmetic with no upward-layer imports. `ops.nightly_cale
 
 ## External systems and libraries
 
-None. This module does not access repositories, providers, loaders, models, legs or prices.
+Standard-library `zoneinfo` only: `market_schedule` resolves its zone from system IANA data with the pinned `tzdata` package as the fallback. This module does not access repositories, providers, loaders, models, legs or prices.
 
 ## Failure semantics
 
