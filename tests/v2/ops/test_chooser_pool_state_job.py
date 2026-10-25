@@ -13,6 +13,8 @@ from engine import paths
 from engine.v2.foundation import to_document
 from engine.v2.models.chooser_analog_pool import CHOOSER_ANALOG_DIMS
 from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
+from engine.v2.models.lineage import DataDependency, Lineage
+from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
 from engine.v2.ops import training
 from engine.v2.ops.errors import OpsError
 from tools import phase5_prepare_release as release
@@ -27,6 +29,8 @@ _NO_CUTOFF = "chooser_analog_pool needs a cutoff"
 _BAD_CUTOFF = "chooser_analog_pool cutoff must be an ISO date (YYYY-MM-DD)"
 _MISSING_SOURCE = "chooser analog pool source is missing"
 _TOO_LARGE = "chooser analog pool source is too large"
+_LACKS_COLUMNS = "chooser analog pool source lacks required columns"
+_BUILDER_CUTOFF = "chooser analog pool cutoff must be YYYY-MM-DD"
 _AT_MOST_ONE = "at most one cutoff, only for paired_residual_pool or chooser_analog_pool"
 _EXACTLY_ONE = "chooser_analog_pool needs exactly one cutoff"
 _NOT_ISO = "cutoffs must be valid ISO dates (YYYY-MM-DD)"
@@ -141,6 +145,35 @@ def test_existing_output_of_other_size_refuses_resume_mismatch(tmp_path, monkeyp
         job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
 
 
+def test_existing_output_of_same_size_different_content_refuses_resume_mismatch(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _mixed_frame()))
+    out = tmp_path / "out"
+    job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+    path = out / "chooser_analog_pool.json"
+    tampered = bytearray(path.read_bytes())
+    tampered[0] ^= 0xFF  # same size, different content
+    path.write_bytes(bytes(tampered))
+
+    with pytest.raises(SystemExit, match="RESUME_MISMATCH"):
+        job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+    assert path.read_bytes() == bytes(tampered)
+
+
+def test_builder_refuses_non_iso_cutoff_and_takes_a_timestamp(tmp_path):
+    lineage = Lineage(data=(DataDependency(table=CHOOSER_POOL_ID, end_exclusive=CUTOFF),))
+    rows = [_row("CTR5", "2026-02-10", 1.0)]
+    for cutoff in ("20260213", "2026-W07-5", "nope"):
+        with pytest.raises(ValueError, match=_exact(_BUILDER_CUTOFF)):
+            build_chooser_analog_pool_artifact(rows, pool_id=CHOOSER_POOL_ID,
+                                               cutoff=cutoff, lineage=lineage)
+    # A timestamp/datetime whose first 10 chars ARE an ISO date stays accepted.
+    for cutoff in ("2026-02-13T12:00:00", pd.Timestamp("2026-02-13 08:00")):
+        artifact = build_chooser_analog_pool_artifact(rows, pool_id=CHOOSER_POOL_ID,
+                                                      cutoff=cutoff, lineage=lineage)
+        assert artifact.cutoff == CUTOFF
+
+
 def test_missing_cutoff_refuses(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _mixed_frame()))
     with pytest.raises(SystemExit, match=_exact(_NO_CUTOFF)):
@@ -172,6 +205,16 @@ def test_too_large_source_refuses(tmp_path, monkeypatch):
     monkeypatch.setattr(release, "CHOOSER_POOL_MAX_BYTES", 10)
     with pytest.raises(SystemExit, match=_exact(_TOO_LARGE)):
         job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=CUTOFF)
+
+
+@pytest.mark.parametrize("column", ["strategy", "exit_date", "pnl", *CHOOSER_ANALOG_DIMS])
+def test_source_missing_required_column_refuses(tmp_path, monkeypatch, column):
+    frame = _mixed_frame().drop(columns=[column])
+    monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, frame))
+    out = tmp_path / "out"
+    with pytest.raises(SystemExit, match=_exact(_LACKS_COLUMNS)):
+        job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+    assert not (out / "chooser_analog_pool.json").exists()
 
 
 def test_size_cap_boundary(tmp_path, monkeypatch):
@@ -247,3 +290,22 @@ def test_worker_maps_missing_source_to_typed_validation_failure(tmp_path, monkey
     assert err.value.problem.code == "VALIDATION_FAILED"
     assert err.value.problem.message == "training tool refused the job"
     assert not (tmp_path / "training_result.json").exists()
+
+
+def test_worker_refuses_two_cutoffs_before_dispatch(tmp_path):
+    with pytest.raises(OpsError) as err:
+        training.run_training_worker(
+            to_document(_params(cutoffs=(CUTOFF, "2026-02-14"))), tmp_path)
+    assert err.value.problem.code == "INVALID_REQUEST"
+    assert err.value.problem.details == {"problems": [_AT_MOST_ONE, _EXACTLY_ONE]}
+    assert not (tmp_path / "training_result.json").exists()
+    assert not (tmp_path / "training").exists()
+
+
+def test_worker_refuses_noncanonical_cutoff_before_dispatch(tmp_path):
+    with pytest.raises(OpsError) as err:
+        training.run_training_worker(to_document(_params(cutoffs=("20260213",))), tmp_path)
+    assert err.value.problem.code == "INVALID_REQUEST"
+    assert err.value.problem.details == {"problems": [_NOT_ISO]}
+    assert not (tmp_path / "training_result.json").exists()
+    assert not (tmp_path / "training").exists()

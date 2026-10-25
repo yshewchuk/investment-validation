@@ -160,6 +160,22 @@ def _trailing_cutoff_problems(params) -> list[str]:
     return problems
 
 
+def _iso_cutoff_problems(params) -> list[str]:
+    problems = []
+    for cutoff in params.cutoffs:
+        try:
+            # Canonical ``YYYY-MM-DD`` only: ``date.fromisoformat`` also takes
+            # the compact and week forms (20260213, 2026-W07-5) on 3.11+, and
+            # the week form is exactly 10 characters, so the round-trip
+            # equality is required next to the length.
+            if len(cutoff) != 10 or date.fromisoformat(cutoff).isoformat() != cutoff:
+                raise ValueError(cutoff)
+        except (TypeError, ValueError):
+            problems.append("cutoffs must be valid ISO dates (YYYY-MM-DD)")
+            break
+    return problems
+
+
 def _shape_problems(params) -> list[str]:
     """Checks independent of ``mode`` -- a plan built directly via
     :func:`training_plan` skips ``from_document``'s own type/finite/bool checks entirely (see
@@ -173,18 +189,7 @@ def _shape_problems(params) -> list[str]:
         if (isinstance(params.alpha, bool) or not isinstance(params.alpha, (int, float))
                 or not math.isfinite(params.alpha) or params.alpha < 0):
             problems.append("alpha must be a finite, non-negative number")
-    for cutoff in params.cutoffs:
-        try:
-            # Canonical ``YYYY-MM-DD`` only: ``date.fromisoformat`` also takes
-            # the compact and week forms (20260213, 2026-W07-5) on 3.11+, and
-            # the week form is exactly 10 characters, so the round-trip
-            # equality is required next to the length.
-            if len(cutoff) != 10 or date.fromisoformat(cutoff).isoformat() != cutoff:
-                raise ValueError(cutoff)
-        except (TypeError, ValueError):
-            problems.append("cutoffs must be valid ISO dates (YYYY-MM-DD)")
-            break
-    return problems
+    return problems + _iso_cutoff_problems(params)
 
 
 def native_training_pin_problems(
@@ -576,6 +581,16 @@ def run_training_worker(parameters, root) -> dict:
     problems = _native_input_problems(params)
     if params.input_mode == "native_d14":
         problems = training_parameter_problems(None, params)
+    elif params.mode == "state" and params.state == "chooser_analog_pool":
+        # Legacy chooser ``mode=state`` jobs reach here unvalidated (only
+        # ``native_d14`` ran the full validator); refuse a malformed request
+        # -- two cutoffs or a non-canonical one -- as typed INVALID_REQUEST
+        # before dispatch instead of letting the tool's ``SystemExit`` map to
+        # VALIDATION_FAILED. Restricted to the chooser state: other states'
+        # cutoffs are tool-normalized (``build_state``), were never
+        # format-gated here, and their worker tests stub the tool module
+        # without the attributes ``_state_problems`` reads.
+        problems = [*problems, *_state_problems(params), *_iso_cutoff_problems(params)]
     if problems:
         raise fail("INVALID_REQUEST", "training inputs are invalid", details={"problems": problems})
     root = Path(root)

@@ -237,11 +237,12 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         # legacy's tie-break. A missing cutoff or a missing source parquet
         # refuses (SystemExit -> VALIDATION_FAILED via ``_tool_failure``); an
         # existing output file with different bytes is the existing
-        # RESUME_MISMATCH; the ``.partial`` + replace write leaves no partial
-        # output; a rerun on identical inputs is byte-idempotent.
+        # RESUME_MISMATCH; the atomic write leaves no partial output; a rerun
+        # on identical inputs is byte-idempotent.
         import time
 
         from engine import paths
+        from engine.v2.models.chooser_analog_pool import CHOOSER_ANALOG_DIMS
         from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
         from tools.phase5_prepare_release import CHOOSER_POOL_ID, CHOOSER_POOL_MAX_BYTES
 
@@ -261,6 +262,11 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         read_s = time.perf_counter() - started
         print(f"[p5-3] chooser_analog_pool: read {len(frame)} rows in {read_s:.1f}s",
               file=sys.stderr, flush=True)
+        # Missing columns would silently drop EVERY row (``_kept`` reads via
+        # ``row.get``), freezing an empty pool; refuse instead.
+        if not all(name in frame.columns
+                   for name in ("strategy", "exit_date", "pnl", *CHOOSER_ANALOG_DIMS)):
+            raise SystemExit("chooser analog pool source lacks required columns")
         lineage = Lineage(data=(DataDependency(table=CHOOSER_POOL_ID, end_exclusive=bound),))
         artifact = build_chooser_analog_pool_artifact(
             frame.to_dict("records"), pool_id=CHOOSER_POOL_ID, cutoff=bound, lineage=lineage)
@@ -300,6 +306,7 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
     previewing it would build everything and discard it (use the two
     ``--state`` job kinds with their own cheap preview instead).
     """
+    from engine.v2.models.deployment import atomic_write_bytes
     from engine.v2.models.frozen_state import serialize_frozen_state
     from tools import phase5_datasets as data
 
@@ -327,12 +334,11 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
                 raise SystemExit(f"RESUME_MISMATCH: {path.name} exists with different content")
             summary["status"] = "resumed"
         else:
-            tmp = path.with_name(path.name + ".partial")
-            tmp.write_bytes(payload)
-            tmp.replace(path)
+            atomic_write_bytes(path, payload)
             summary["status"] = "written"
-    (out / (state_file_name(member)[:-5] + ".summary.json")).write_text(
-        json.dumps(summary, indent=1, sort_keys=True) + "\n")
+    atomic_write_bytes(
+        out / (state_file_name(member)[:-5] + ".summary.json"),
+        (json.dumps(summary, indent=1, sort_keys=True) + "\n").encode())
     return summary
 
 
