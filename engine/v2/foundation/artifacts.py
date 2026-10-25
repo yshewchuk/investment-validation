@@ -177,14 +177,12 @@ class ArtifactStore:
 
     # -- reading ------------------------------------------------------------
 
-    def verify(self, ref: ArtifactRef, *, max_bytes: int | None = None) -> Path:
-        """Re-hash a trusted object, optionally refusing bytes above a caller limit."""
-        if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
-            raise ValueError("max_bytes must be a nonnegative integer")
+    def verify(self, ref: ArtifactRef) -> Path:
+        """Re-hash an object before it is trusted; return its path if it matches."""
         parts = self._object_parts(ref)
         fd = _open_beneath(self.root, parts)
         try:
-            self._check_fd(fd, ref, max_bytes=max_bytes)
+            self._check_fd(fd, ref)
         finally:
             os.close(fd)
         return self.root.joinpath(*parts)
@@ -261,14 +259,12 @@ class ArtifactStore:
         return parts
 
     @staticmethod
-    def _check_fd(fd: int, ref: ArtifactRef, *, max_bytes: int | None = None) -> None:
+    def _check_fd(fd: int, ref: ArtifactRef) -> None:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise ArtifactError("INTEGRITY_FAILED", f"{ref.storage_key} is not a regular file")
-        if max_bytes is not None and info.st_size > max_bytes:
-            raise ArtifactError("SIZE_LIMIT", f"{ref.storage_key} exceeds {max_bytes} bytes")
         os.set_blocking(fd, True)
-        hexdigest, size = _hash_fd(fd, max_bytes=max_bytes)
+        hexdigest, size = _hash_fd(fd)
         if size != ref.byte_size or CONTENT_HASH_PREFIX + hexdigest != ref.content_hash:
             raise ArtifactError("INTEGRITY_FAILED", f"{ref.storage_key} does not match its reference")
 

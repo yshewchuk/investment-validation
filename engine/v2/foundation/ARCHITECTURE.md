@@ -6,8 +6,6 @@ Layer 0.5 in the root `/ARCHITECTURE.md`; owns pure session arithmetic ported fr
 
 ## Primary contracts and public interfaces
 
-`ArtifactStore.verify(ref, *, max_bytes=None)` verifies a content-addressed object; with a byte limit, it rejects files already over the limit before hashing and stops if a file grows beyond it. The caller owns the limit.
-
 `iter_canonical_json(value, *, fragments=None)` yields canonical text chunks;
 joining them gives `canonical_json` exactly, including its nonfinite normalization.
 It owns no output I/O or byte ceiling. `experiments.v2_magnitude_search_run`
