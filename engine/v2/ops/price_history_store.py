@@ -153,6 +153,7 @@ import hashlib
 import io
 import os
 import sqlite3
+import stat
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -299,22 +300,30 @@ def _parse_gspc(entry: dict) -> tuple[pd.DataFrame, bytes, str]:
     close_raw, high_raw)`` frame. ``^GSPC`` carries no dividend adjustment
     (index closes are never adjusted), so ``close_adj`` and ``close_raw`` are
     both the file's Close -- the same series the legacy regime features read.
-    A malformed file raises here and fails this ticker's capture exactly as a
-    malformed px csv does (see :func:`_parse_and_order_entries`); a file over
-    :data:`_GSPC_MAX_BYTES` refuses the same way, checked on ``fstat`` before
-    any byte is read.
+    A row whose Close OR High is not numeric coerces to NaN and is dropped:
+    price_history.v3 nulls ``high_raw``/``close_raw`` only on a tombstone, so
+    neither value may be stored null. A malformed file raises here and fails
+    this ticker's capture exactly as a malformed px csv does (see
+    :func:`_parse_and_order_entries`).
 
-    The file is opened once (``O_NOFOLLOW``, on top of the discovery
-    symlink check), its size and mtime taken from that same fd's ``fstat``,
-    and its bytes read once: hash, ``retrieved_at`` and parsed rows all
-    describe exactly those bytes -- ``retrieved_at`` comes from this read's
-    mtime, never the discovery-time mtime the entry was listed with (the
-    file may have been refreshed between the two). A ``Close`` that is not
-    numeric coerces to NaN and its row is dropped, matching the legacy
-    ``_gspc_series`` tolerance for null closes; ``high_raw`` may stay NaN."""
-    fd = os.open(entry["path"], os.O_RDONLY | os.O_NOFOLLOW)
+    The file is opened once (``O_RDONLY | O_NOFOLLOW | O_NONBLOCK`` -- the
+    ``NOFOLLOW``/``NONBLOCK`` flags refuse, respectively, a symlink swapped in
+    after the discovery check and a FIFO swapped in there, never blocking the
+    open), its type, size and mtime taken from that same fd's ``fstat``, and
+    its bytes read once: a non-regular file or a ``st_size`` over
+    :data:`_GSPC_MAX_BYTES` raises BEFORE any byte is read (the same error
+    path as a malformed csv), and the read itself is capped -- at most
+    ``_GSPC_MAX_BYTES + 1`` bytes are taken and more than the cap raises too
+    (the file grew between ``fstat`` and read). Hash, ``retrieved_at`` and
+    parsed rows all describe exactly those bytes -- ``retrieved_at`` comes
+    from this read's mtime, never the discovery-time mtime the entry was
+    listed with (the file may have been refreshed between the two)."""
+    fd = os.open(entry["path"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"gspc_daily.csv is not a regular file "
+                             f"(mode {oct(info.st_mode)})")
         if info.st_size > _GSPC_MAX_BYTES:
             raise ValueError(f"gspc_daily.csv is {info.st_size} bytes, over the "
                              f"{_GSPC_MAX_BYTES}-byte capture cap")
@@ -323,7 +332,10 @@ def _parse_gspc(entry: dict) -> tuple[pd.DataFrame, bytes, str]:
         os.close(fd)
         raise
     with handle:
-        raw = handle.read()
+        raw = handle.read(_GSPC_MAX_BYTES + 1)
+    if len(raw) > _GSPC_MAX_BYTES:
+        raise ValueError(f"gspc_daily.csv read back {len(raw)} bytes, over the "
+                         f"{_GSPC_MAX_BYTES}-byte capture cap")
     retrieved_at = _iso_from_epoch(info.st_mtime)
     frame = pd.read_csv(io.BytesIO(raw), skiprows=3, header=None,
                         float_precision="round_trip")
@@ -334,7 +346,7 @@ def _parse_gspc(entry: dict) -> tuple[pd.DataFrame, bytes, str]:
                         "close_adj": close,
                         "close_raw": close,
                         "high_raw": pd.to_numeric(frame["high"], errors="coerce")})
-    out = out.dropna(subset=["date", "close_raw"]).sort_values("date")
+    out = out.dropna(subset=["date", "close_raw", "high_raw"]).sort_values("date")
     return _stringify_dates(out), raw, retrieved_at
 
 

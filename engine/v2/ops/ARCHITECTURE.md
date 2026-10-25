@@ -563,9 +563,9 @@ Entry/exit/expiry, spot and calendar-observed-through are caller-staged; validat
   rows, leases, retry history, provider-account budgets.
 - The artifact store (`ArtifactStore`, filesystem-backed) for refresh plans
   and other bound inputs.
-- Legacy filesystem reads (px CSV tree, yfinance fetch cache) through the
-  declared adapter, for `price-history capture`, `price-refresh`, and
-  `computed-moves capture`.
+- Legacy filesystem reads (px CSV tree, yfinance fetch cache) through the declared adapter,
+  for `price-history capture`, `price-refresh`, and `computed-moves capture`;
+  `price_history_store` additionally reads `gspc_daily.csv` directly (read-only) from the source root.
 - `computed_moves_store.run_computed_moves_refresh(...)` reads `earnings_events` and `daily_market` (`date`,
   `implied_move`, `src_iv`) from the pinned parent and commits `computed_moves.v5` rows (data doc, "computed_moves.v5"): one event-isolated row per distinct `(ticker, event_date)` among the `earnings_events` rows dated before `as_of` (same-date rows collapse, a confirmed row winning), every omitted event carrying its `not_computed_reason`. Target selection is unchanged except that a ticker without `daily_market` rows is still a target (null implied move). A target whose close series is empty (`legitimate_empty`, or empty after the `as_of` truncation) emits `no_price_history` rows. A ticker with fewer than `MIN_SCOREABLE` past confirmed events is never fetched; the writer emits its rows with no prices loaded (`prices_known=False`, reason `ticker_too_few_events`) and logs the count to stderr. A capture-log row records each such ticker with outcome `below_bar`. Provider failures (transient/refused) still fail the job. `computed-moves capture` uses the newest successful Tier-1 yfinance `history(period=max)` entry; missing
   history is `legitimate_empty`, it never fetches live, and dry-run reports cache coverage without writing. The selected source root is authoritative: catalog unit receipts do not substitute for missing or changed Tier-1 entries. The worker binds `as_of` and the fetcher; target selection follows the legacy ORATS-confirmed-session rule in `target_tickers_from_snapshot`.
@@ -1076,7 +1076,7 @@ Native gate children consume public `stages.NativeGateParameters`, `executor.THR
 | System / library | Used for | Notes |
 |---|---|---|
 | `sqlite3` | the operations catalog | — |
-| Local filesystem | artifact store, snapshot roots, legacy px/fetch-cache trees | legacy trees are read only through `legacy_adapter.py` except its `price-refresh` writer and the legacy nightly's guarded `^GSPC` refresh of `gspc_daily.csv` (plus lock and staging siblings); `price-refresh` also appends to the Tier-1 fetch cache |
+| Local filesystem | artifact store, snapshot roots, legacy px/fetch-cache trees | legacy trees are read only through `legacy_adapter.py` except its `price-refresh` writer, the legacy nightly's guarded `^GSPC` refresh of `gspc_daily.csv` (plus lock and staging siblings), and `price_history_store`'s read-only direct `gspc_daily.csv` capture read from the source root; `price-refresh` also appends to the Tier-1 fetch cache |
 | `massive-stocks` provider account | [bounded Basic raw acquisition](stores/massive/ARCHITECTURE.md) | keyed; executor allowlist forwards only `MASSIVE_API_KEY`; always paced by its versioned policy |
 | `orats-daily-market` provider account | ORATS daily-market rows | keyed, reads `ORATS_API_KEY`; credentials are never held here, only remaining-call/reserve counts |
 | `nasdaq` provider account (`providers/nasdaq_calendar.py`) | forward-calendar rows via Nasdaq's public `api.nasdaq.com/api/calendar/earnings` endpoint, one date per call | unmetered, keyless (empty `PROVIDER_CREDENTIAL_VARIABLES`); still budget-tracked like a keyed account; needs a browser user-agent (the endpoint 403s the default client UA) |

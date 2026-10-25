@@ -852,9 +852,13 @@ Root doc §5 invariants this package is responsible for:
   feeding the panel's nine `spy_*` regime features (the names are historical;
   they are `^GSPC`-based), sourced from `gspc_daily.csv`
   (`source_kind="legacy_gspc_csv"`, parsed `close_adj = close_raw = Close`,
-  `high_raw = High` — an index close carries no dividend adjustment). Capture
-  requires it exactly as the calendar ticker: the nightly and
-  `ops price-history capture` refuse `SOURCE_NOT_FOUND` when it is absent.
+   `high_raw = High` — an index close carries no dividend adjustment). Capture
+   requires it exactly as the calendar ticker: the nightly and
+   `ops price-history capture` refuse `SOURCE_NOT_FOUND` when it is absent.
+   Outcome: ingestion is one bounded read of a regular, non-symlink file — an
+   over-cap, non-regular, symlinked or malformed file fails that ticker's
+   capture (the `SOURCE_NOT_FOUND` required check above when no prior history
+   is held); rows with a null Close or High are dropped.
 - **A `price_history` retrieval never drops stored history.** A full-history
   retrieval that omits any currently live stored date (truncated end,
   mid-history gap, or empty), or starts later than the live history, is refused

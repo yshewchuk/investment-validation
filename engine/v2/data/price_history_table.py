@@ -88,9 +88,7 @@ _COLUMNS = (
                    observation_time_semantics="the trading session this price row is for, "
                                               "YYYY-MM-DD, never a timestamp"),
     ColumnContract(name="close_adj", physical_type="float64", nullable=True,
-                   unit="price_per_share", adjustment_basis="legacy_px_csv/tier1_fetch as read; "
-                                                             "legacy_gspc_csv (^GSPC) equals Close "
-                                                             "(indexes are never adjusted)",
+                   unit="price_per_share", adjustment_basis="legacy_px_csv/tier1_fetch as read",
                    null_policy="null on a tombstone row (deleted=true)"),
     ColumnContract(name="close_raw", physical_type="float64", nullable=True,
                    unit="price_per_share", adjustment_basis="unadjusted (px: Close; Tier-1: the "

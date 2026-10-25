@@ -1422,3 +1422,18 @@ def test_45_gspc_rows_before_history_start_are_excluded_from_regime_inputs():
     baseline = _scan()
     _rows_equal(with_early.panel_row, baseline.panel_row)
     assert with_early.panel_anchor == baseline.panel_anchor
+
+
+def test_46_history_start_includes_the_exact_boundary_day_not_the_day_before():
+    """The regime read's ``history_start`` bound is inclusive at equality: a
+    ^GSPC row dated exactly ``history_start`` (2024-01-02) reaches the regime
+    series, the row dated the day before (2024-01-01) does not."""
+    gspc = _gspc_rows(periods=32)  # consecutive closes 2024-01-01 .. 2024-02-01
+    assert gspc[0]["date"] == "2024-01-01"
+    snapshot = _snapshot()
+    batches = _default_batches()
+    batches[(PRICE_HISTORY_TABLE_NAME, REGIME_TICKER)] = gspc
+    repo = _FakeRepository(snapshot, _contracts(), batches)
+    rows = panel_row_inputs._read_regime_prices(repo, snapshot, _HISTORY_START, _DECISION)
+    assert rows[0].date == "2024-01-02"
+    assert "2024-01-01" not in {row.date for row in rows}
