@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 import sqlite3
 
 import pytest
@@ -82,7 +83,7 @@ def test_backup_bad_copy_remains_retryable(tmp_path, monkeypatch, contents):
     state = conn.execute(
         "SELECT state FROM outbox WHERE kind='backup' AND logical_key='bad-copy'"
     ).fetchone()[0]
-    assert state != "delivered"
+    assert state == "running"
 
     monkeypatch.setattr(backup_module, "backup_to", real_backup_to)
     clock.advance(301)
@@ -93,6 +94,32 @@ def test_backup_bad_copy_remains_retryable(tmp_path, monkeypatch, contents):
     assert conn.execute(
         "SELECT state FROM outbox WHERE kind='backup' AND logical_key='bad-copy'"
     ).fetchone()[0] == "delivered"
+
+
+def test_backup_cleanup_failure_is_retryable(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "cleanup-failure", {}, clock=clock)
+    backup = tmp_path / "backup"
+
+    def invalid_backup_to(_conn, destination):
+        destination.write_bytes(b"not a sqlite database")
+
+    real_unlink = Path.unlink
+
+    def selective_unlink(self, *args, **kwargs):
+        if self.name == "cleanup-failure.sqlite":
+            raise OSError("simulated cleanup failure")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(backup_module, "backup_to", invalid_backup_to)
+    monkeypatch.setattr(Path, "unlink", selective_unlink)
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key="cleanup-failure", owner="worker", target=backup,
+                   clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.retryable is True
+    assert (backup / "cleanup-failure.sqlite").exists()
 
 
 def test_backup_rejects_existing_catalog_with_foreign_key_violation(tmp_path):
@@ -120,7 +147,21 @@ def test_backup_rejects_existing_catalog_with_foreign_key_violation(tmp_path):
     state = conn.execute(
         "SELECT state FROM outbox WHERE kind='backup' AND logical_key='fk-copy'"
     ).fetchone()[0]
-    assert state != "delivered"
+    assert state == "running"
+
+
+def test_backup_reject_oversized_manifest(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "oversized-manifest", {}, clock=clock)
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    (backup / "oversized-manifest.manifest.json").write_bytes(b"x" * (1024 * 1024 + 1))
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key="oversized-manifest", owner="worker", target=backup,
+                   clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.retryable is True
 
 
 def test_manifest_success_before_ack_is_idempotent_and_keys_are_safe(tmp_path):

@@ -18,6 +18,8 @@ from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.outbox import claim, complete, enqueue
 
+_MAX_MANIFEST_BYTES = 1024 * 1024
+
 
 def prepare_backup(conn, key, artifacts, *, clock):
     """Enqueue one ``backup`` effect for ``key``, idempotent across attempts.
@@ -70,7 +72,7 @@ def _delivered_or_stale(conn, kind, logical_key):
 
 
 def _verified_database_hash(database):
-    """Return the backup database hash after a read-only quick_check."""
+    """Return the hash after read-only quick_check and integrity checks."""
     try:
         if database.stat().st_size == 0:
             raise fail("BACKUP_FAILED", "backup database is empty")
@@ -132,8 +134,13 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
                 "cutoff": payload["cutoff"], "database": database_hash,
                 "artifacts": copied}
     manifest_path = target / (key + ".manifest.json")
-    if manifest_path.exists() and json.loads(manifest_path.read_text()) != manifest:
-        raise fail("INTEGRITY_FAILED", "backup manifest differs")
+    if manifest_path.exists():
+        with manifest_path.open("rb") as stream:
+            captured = stream.read(_MAX_MANIFEST_BYTES + 1)
+        if len(captured) > _MAX_MANIFEST_BYTES:
+            raise fail("BACKUP_FAILED", "backup manifest exceeds 1 MiB")
+        if json.loads(captured) != manifest:
+            raise fail("INTEGRITY_FAILED", "backup manifest differs")
     temporary = manifest_path.with_suffix(".pending")
     temporary.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
     with temporary.open("rb") as stream:
