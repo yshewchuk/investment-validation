@@ -56,12 +56,25 @@ from engine.v2.contracts.data import ColumnContract, TableContract
 
 from . import manifests
 
-__all__ = ["CALENDAR_TICKER", "PRICE_HISTORY_CONTRACT", "PRICE_HISTORY_TABLE_NAME"]
+__all__ = ["CALENDAR_TICKER", "PRICE_HISTORY_CONTRACT", "PRICE_HISTORY_TABLE_NAME",
+            "REGIME_TICKER", "REQUIRED_CAPTURE_TICKERS"]
 
 PRICE_HISTORY_TABLE_NAME = "price_history"
 
 # The trading-calendar series the native nightly reads; a declared dependency of every price_history source.
 CALENDAR_TICKER = "SPY"
+
+# The market-regime series the nine ``spy_*`` panel features read: a required
+# capture dependency, sourced from the legacy ``gspc_daily.csv``
+# (``source_kind="legacy_gspc_csv"``). By decision its ^GSPC close -- never a
+# SPY ``daily_market`` spot -- is the regime source; the ``spy_*`` names are
+# historical.
+REGIME_TICKER = "^GSPC"
+
+#: The tickers every full ``price_history`` capture (CLI and nightly trigger)
+#: requires: usable rows in the sources or the prior dataset version, else
+#: ``SOURCE_NOT_FOUND`` before any write.
+REQUIRED_CAPTURE_TICKERS = (CALENDAR_TICKER, REGIME_TICKER)
 
 _SCHEMA_EVOLUTION_POLICY = (
     "Never edit a registered definition under the same contract_id (phase-2 guide §5.1). "
