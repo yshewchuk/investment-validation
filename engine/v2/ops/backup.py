@@ -226,33 +226,6 @@ def _prior_database_matches(database, expected_hash, source_rows):
         return False
 
 
-def _verified_prior_backup(manifest_path, database, source_rows, key, payload):
-    """Return a verified prior manifest for this payload, or ``None``."""
-    try:
-        manifest = json.loads(_read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(manifest, dict):
-        return None
-    try:
-        _validate_backup_manifest(manifest)
-    except (ArtifactError, TypeError, ValueError):
-        return None
-    if (manifest.get("backup_key") != key
-            or manifest.get("schema_version") != payload["schema_version"]
-            or manifest.get("cutoff") != payload["cutoff"]):
-        return None
-    prior_rows = manifest.get("database_rows")
-    if prior_rows is not None and prior_rows != source_rows:
-        return None
-    if prior_rows is None:
-        return None
-    expected_hash = manifest.get("database")
-    if not isinstance(expected_hash, str) or not database.exists():
-        return None
-    return manifest if _prior_database_matches(database, expected_hash, source_rows) else None
-
-
 def _verify_staged(staged, source_rows):
     """Verify a staged copy's row counts against the source snapshot."""
     probe = sqlite3.connect(staged)
@@ -349,12 +322,8 @@ def _copy_artifacts(payload, store, target, fault, keepalive):
     return copied
 
 
-def _publish_manifest(manifest_path, manifest, prior):
-    """Match a prior manifest, or atomically write a new one with a directory fsync."""
-    if prior is not None:
-        if prior != manifest:
-            raise fail("INTEGRITY_FAILED", "backup manifest differs")
-        return
+def _publish_manifest(manifest_path, manifest):
+    """Atomically write the verified manifest with a directory fsync."""
     temporary = manifest_path.with_suffix(".pending")
     try:
         temporary.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
@@ -382,7 +351,6 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
         conn.execute("BEGIN")
         try:
             source_rows = _table_row_counts(conn)
-            prior = None
             _stage_database(conn, target, key, database, source_rows)
             conn.execute("COMMIT")
         except BaseException:
@@ -396,7 +364,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
                 "cutoff": payload["cutoff"],
                 "database": _checked_file_hash(database, stage="backup database"),
                 "database_rows": source_rows, "artifacts": copied}
-    _publish_manifest(manifest_path, manifest, prior)
+    _publish_manifest(manifest_path, manifest)
     if fault:
         fault("after_manifest_before_ack")
     complete(conn, effect["effect_id"], manifest, owner=owner,

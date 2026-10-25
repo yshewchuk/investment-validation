@@ -546,7 +546,7 @@ def test_backup_copy_failure_remains_retryable(tmp_path):
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "delivered"
 
 
-def test_oversized_prior_manifest_is_rebuilt(tmp_path):
+def test_backup_replaces_oversized_stale_manifest(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "large-prior", {}, clock=clock)
@@ -562,25 +562,6 @@ def test_oversized_prior_manifest_is_rebuilt(tmp_path):
     assert path.stat().st_size <= backup_module.MAX_MANIFEST_BYTES
     assert conn.execute(
         "SELECT state FROM outbox WHERE logical_key='large-prior'").fetchone()[0] == "delivered"
-
-
-def test_prior_backup_reuse_rejects_unknown_manifest_field(tmp_path):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    prepare_backup(conn, "bad-prior", {}, clock=clock)
-    backup = tmp_path / "backup"
-    manifest = run_backup(conn, key="bad-prior", owner="worker", target=backup,
-                          clock=clock, store=store)
-    manifest_path = backup / "bad-prior.manifest.json"
-    prior = json.loads(manifest_path.read_text())
-    prior["unknown_field"] = "unexpected"
-    manifest_path.write_text(json.dumps(prior))
-    payload = json.loads(conn.execute(
-        "SELECT payload_json FROM outbox WHERE logical_key='bad-prior'").fetchone()[0])
-
-    assert backup_module._verified_prior_backup(
-        manifest_path, backup / "bad-prior.sqlite", manifest["database_rows"],
-        "bad-prior", payload) is None
 
 
 @pytest.mark.parametrize("unsafe_prior", ["symlink", "oversized"])
@@ -692,15 +673,6 @@ def test_retry_rebuilds_when_source_rows_change(tmp_path):
     assert updated["database_rows"] != prior["database_rows"]
     assert updated["database"] != prior["database"]
     assert drill_module._manifest_is_consistent(updated, backup, "changed-source")
-
-
-def test_manifest_difference_is_refused(tmp_path):
-    path = tmp_path / "backup.manifest.json"
-    with pytest.raises(OpsError) as refused:
-        backup_module._publish_manifest(path, {"database": "new"}, {"database": "old"})
-
-    assert refused.value.code == "INTEGRITY_FAILED"
-    assert not path.exists()
 
 
 def test_manifest_success_before_ack_is_idempotent_and_keys_are_safe(tmp_path):
