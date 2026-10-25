@@ -456,7 +456,7 @@ snapshot or empty membership. New mappings never flatten scanner DataErrors.
 | Active scan: omitted/None or invalid max_object_bytes | QUERY_NOT_BOUNDED from objects.validate_max_object_bytes, nonretryable. |
 | Any explicit count or either byte counter exceeds cap | RESULT_LIMIT_EXCEEDED, nonretryable; no cap relaxation. |
 | Catalog SQLite primary BUSY/LOCKED/IOERR/CANTOPEN/FULL/NOMEM (including extended variants) | RESOURCE_UNAVAILABLE, retryable by registry only; no automatic retry. |
-| Catalog: broken join/type/JSON/Unicode/native identity; SQLite errors excluding the preceding resource codes, including code-less TEXT decode failure | MANIFEST_CORRUPT, nonretryable. |
+| Catalog: broken join/type/JSON/Unicode/native identity, including DocumentError from stored catalog decoding; SQLite errors excluding the preceding resource codes, including code-less TEXT decode failure | MANIFEST_CORRUPT, nonretryable. |
 | Native DataError from identity/query/object checks | Preserve code and retryability; do not blanket-wrap. |
 
 Synthetic acceptance must prove cap equality/one-over, huge unrelated payloads
