@@ -191,6 +191,30 @@ def test_backup_effect_preserves_safe_refusal_message(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_backup_effect_verifier_crash_records_generic_error(tmp_path, monkeypatch):
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        _seed_decisions(conn, clock, scope, SESSION, predictions=[_row("evt-1", "pred")])
+        claim = _submit_and_claim(
+            conn, clock, supervisor, kind="backup", key="backup-cause",
+            parameters=_params("backup", SESSION, scope))
+
+        def crash(_database, **_kwargs):
+            raise RuntimeError("simulated verifier crash")
+
+        monkeypatch.setattr(backup_module, "_verified_database_hash", crash)
+        with pytest.raises(RuntimeError, match="simulated verifier crash"):
+            backup_effect(conn, store, claim, root, clock=clock)
+        row = conn.execute(
+            "SELECT state, receipt_json FROM outbox WHERE kind='backup'"
+        ).fetchone()
+        assert row["state"] == "pending"
+        assert json.loads(row["receipt_json"]) == {"error": "backup_failed"}
+    finally:
+        conn.close()
+
+
 def test_backup_to_oserror_is_retryable_and_cleans_copy(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
