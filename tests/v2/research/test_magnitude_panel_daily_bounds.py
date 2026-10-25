@@ -25,10 +25,10 @@ def test_every_ticker_year_read_gets_context_bound_cap(native, monkeypatch):
         yield from original(query, table_name=table_name, **kwargs)
     monkeypatch.setattr(native.repository, "scan", scan)
     first = build(native, max_object_bytes=2**20)
-    assert calls == [2**20] * 6  # SPY and SYNTH, three years each, shared by every horizon.
+    assert calls == [2**20] * 3  # SYNTH, three years, shared by every horizon (SPY daily spot is no longer read).
     calls.clear()
     second = build(native, max_object_bytes=2**21)
-    assert calls == [2**21] * 6
+    assert calls == [2**21] * 3
     assert first["context"]["max_object_bytes"] == 2**20
     assert second["context"]["max_object_bytes"] == 2**21
     assert first["context"]["context_id"] != second["context"]["context_id"]

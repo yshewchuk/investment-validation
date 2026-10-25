@@ -509,7 +509,9 @@ def test_14_regime_features_read_price_history_closes_not_daily_market_spot():
         pd.DataFrame({"date": pd.to_datetime([row["date"] for row in spot_rows]),
                       "close": [float(row["spot"]) for row in spot_rows]}),
         as_of_column="decision").iloc[0]
-    for column in panel_row_inputs._REGIME_COLUMNS:
+    literal_regime_names = ("spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol5",
+                            "spy_vol20", "spy_vol60", "spy_vol252", "spy_vol20_rel252")
+    for column in literal_regime_names:
         value, other = panel[column], spot_based[column]
         if math.isnan(value):
             assert math.isnan(expected[column])
@@ -527,6 +529,7 @@ def test_15_null_regime_close_raises_contract_mismatch():
     with pytest.raises(DataError) as exc:
         _scan(batches=batches)
     assert exc.value.code == "CONTRACT_MISMATCH"
+    assert "price_history value conversion failed" in str(exc.value)
     assert exc.value.problem.details == {"table_name": PRICE_HISTORY_TABLE_NAME}
 
 

@@ -346,6 +346,14 @@ def test_malformed_required_regime_ticker_file_fails_like_a_malformed_px_csv(tmp
         [(REGIME_TICKER, "EmptyDataError")]
     assert report["failed_tickers"] == 1
     assert "result_snapshot_id" in report
+    # The other tickers still commit: SPY's px rows land in the snapshot while
+    # the malformed ^GSPC records no rows.
+    spy_rows = _scan_price_history(conn, store, report["result_snapshot_id"], ticker=CALENDAR_TICKER)
+    assert sorted(spy_rows["date"].tolist()) == sorted(_SPY_DATES)
+    gspc_partitions = [r.partition_key for r in Repository(conn, store).fragment_records(
+        Repository(conn, store).resolve(report["result_snapshot_id"]), PRICE_HISTORY_TABLE_NAME)
+        if r.partition_key == REGIME_TICKER]
+    assert gspc_partitions == []
 
 
 def test_missing_required_regime_ticker_refuses_source_not_found(tmp_path):
@@ -433,3 +441,72 @@ def test_nightly_trigger_capture_passes_the_shared_required_tickers(
         state.root, SESSION, ("ZZNEW",), state.clock, state.base.snapshot_id)
     assert recorded["required_tickers"] == REQUIRED_CAPTURE_TICKERS
     assert snapshot_id != state.base.snapshot_id  # the real delegated capture committed
+
+
+def test_gspc_read_back_growth_refuses(tmp_path, monkeypatch):
+    """A small regular gspc file whose bytes grow past the cap between the
+    fstat size check and the capped read still refuses: the fdopen handle's
+    read returns cap+1 bytes, so the read-back length branch fires (not fstat)."""
+    conn, clock, store, base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    _write_sources(source_root, with_spy=True)
+    _write_gspc(source_root)
+    path = _gspc_path(source_root)
+    stat_before = path.stat()
+    assert stat_before.st_size <= _GSPC_MAX_BYTES  # the fstat size check passes
+    seen: list[int] = []
+    real_fdopen = os.fdopen
+
+    def fake_fdopen(fd, mode, *args, **kwargs):
+        handle = real_fdopen(fd, mode, *args, **kwargs)
+        info = os.fstat(handle.fileno())
+        if (info.st_ino, info.st_dev) != (stat_before.st_ino, stat_before.st_dev):
+            return handle
+
+        class _Grown:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                handle.close()
+                return False
+
+            def read(self, n=-1):
+                seen.append(n)
+                return b"x" * (_GSPC_MAX_BYTES + 1)  # grew between fstat and read
+
+        return _Grown()
+
+    monkeypatch.setattr(price_history_store.os, "fdopen", fake_fdopen)
+    with pytest.raises(OpsError) as exc:
+        capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
+                required_tickers=(REGIME_TICKER,))
+    assert exc.value.problem.code == "SOURCE_NOT_FOUND"
+    assert _shadow_head(conn)["snapshot_id"] == base.snapshot_id
+    assert seen == [_GSPC_MAX_BYTES + 1]  # the refusal came from the read-back length, not fstat
+
+
+def test_gspc_retrieved_at_uses_parse_time_mtime_not_discovery(tmp_path, monkeypatch):
+    """The stored ``retrieved_at`` is the parse-time fstat mtime, never the
+    discovery-time mtime the entry was listed with: os.utime advances the file's
+    mtime after discovery but before parse."""
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    _write_sources(source_root, with_spy=False)
+    _write_gspc(source_root)
+    path = _gspc_path(source_root)
+    discovery_mtime = path.stat().st_mtime
+    later = discovery_mtime + 3600.0
+    real_retrievals = price_history_store._gspc_retrievals
+
+    def patched(root):
+        out = real_retrievals(root)  # records the discovery-time mtime in the entry
+        os.utime(path, (path.stat().st_atime, later))  # changed between discovery and parse
+        return out
+
+    monkeypatch.setattr(price_history_store, "_gspc_retrievals", patched)
+    report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    rows = _scan_price_history(conn, store, report["result_snapshot_id"], ticker=REGIME_TICKER)
+    expected = datetime.fromtimestamp(later, tz=timezone.utc).isoformat()
+    assert set(rows["retrieved_at"]) == {expected}
+    assert expected != datetime.fromtimestamp(discovery_mtime, tz=timezone.utc).isoformat()

@@ -78,19 +78,19 @@ No v2 dictionary/table/context, reader, model, compiler change or runtime activa
 ## Partial daily-market blocks
 
 `magnitude_panel_daily.build_daily_blocks` is an opt-in library-only reader; only synthetic tests call it.
-Inputs are pinned source/history snapshots, the unchanged metadata-only v1 plan,
+Inputs are pinned source/history/price_history snapshots, the unchanged metadata-only v1 plan,
 plain-JSON producer metadata, grouped eligibility declarations and explicit source/event/byte bounds.
-Output has a distinct versioned context and detached daily-market/SPY blocks, never stored-panel admission.
+Output has a distinct versioned context and detached daily-market/regime blocks, never stored-panel admission.
 The context binds the parent, bounds, policy, exclusions, snapshot fragment inventory and producer.
 Producer and label bounds are declarations, not installed-code attestation or verified outcome intervals.
 Protected evaluation membership confers no reads; grouped exclusions retain or remove all event horizons.
 
-The fixed thirteen daily fields and nine SPY regime values use each forecast's source ceiling.
-Daily anchors require an IV surface, as in existing daily-state lookup; SPY uses all admitted prices.
-The source has no publication/finality stamps: availability is unknown and values are reconstructed,
-never observed-PIT or fit-admissible. Source primary keys and snapshot fragment inventory remain
-separate; the latter is not an exact consumed-fragment receipt. Individual SPY source dates are retained.
-Read budget: one bounded ticker/year value scan shared across events/horizons, with SPY shared per call.
+The fixed thirteen daily fields and nine `spy_*` regime values use each forecast's source ceiling.
+Nine `spy_*` names are historical: their close is the pinned `price_history` `REGIME_TICKER` (`^GSPC`) series
+via `get_price_series`, never a `daily_market` SPY spot; its snapshot identity binds the context hash. Read budget:
+one bounded ticker/year scan per event ticker plus one regime-series read as of the latest ceiling, both row-capped.
+Daily anchors require an IV surface; the regime block uses all admitted closes. No publication/finality stamps
+(reconstructed, never observed-PIT/fit-admissible); fragment inventory stays separate, regime source dates retained.
 Row bounds apply across years per ticker; event bounds apply before exclusions. No cross-call cache/retry.
 A required context-bound `max_object_bytes` bounds new value scans through native byte/footer/expansion limits;
 it does not change inherited metadata-preflight scans.
@@ -100,7 +100,7 @@ No history/runup block or outcomes are read. Repeat calls revalidate and reread 
 | Condition | Outcome |
 | --- | --- |
 | Non-plain/malformed producer or detached parent, changed policy/clocks, unpinned repository, invalid limit/window or source contract | `CONTRACT_MISMATCH`; no partial result |
-| Duplicate/malformed source date or value, negative implied quote, nonpositive SPY close or infinite regime result | `CONTRACT_MISMATCH`; no partial result |
+| Duplicate/malformed source date or value, negative implied quote, nonpositive/non-convertible `^GSPC` regime close or infinite regime result | `CONTRACT_MISMATCH`; no partial result |
 | Invalid byte cap (including None/bool/nonpositive) | Native `QUERY_NOT_BOUNDED` before repository access |
 | Declared event, cumulative row, physical-object or expanded-object limit exceeded | `RESULT_LIMIT_EXCEEDED`; no partial result |
 | No events survive shared eligibility | `POPULATION_COLLAPSED`; no value reads |

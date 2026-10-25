@@ -8,8 +8,8 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from engine.v2.contracts.data import DataQuery, KeyPredicate, TimeInterval
-from engine.v2.data import errors, objects
+from engine.v2.contracts.data import DataQuery, KeyPredicate, PriceQuery, TimeInterval
+from engine.v2.data import errors, objects, price_history_query, price_history_table
 from engine.v2.features import panel_math, regime
 from engine.v2.foundation import canonical_json, content_hash, to_document
 from engine.v2.research import (
@@ -160,6 +160,35 @@ def _source_rows(repository, snapshot, ticker, start, end, limit, max_object_byt
     return sorted(rows, key=lambda row: row["date"])
 
 
+def _read_regime_series(repository, snapshot, start, end, max_source_rows):
+    """The pinned ``REGIME_TICKER`` (^GSPC) ``price_history`` closes on ``[start, end]``.
+
+    Read exactly like ``features.panel_row_inputs._read_regime_prices`` -- one
+    bounded ``price_history_query.get_price_series`` as of ``end``
+    (``lookback_sessions=0``), whose ``close_raw`` is the regime close (the
+    series carries no dividend adjustment). A missing ^GSPC partition propagates
+    ``get_price_series``'s ``CONTRACT_MISMATCH`` unchanged (no ``daily_market``
+    spot fallback); a non-convertible close refuses the same way the panel reader
+    does, and the bounded row cap reuses ``max_source_rows``.
+    """
+    request = PriceQuery(ticker=price_history_table.REGIME_TICKER, session_date=end,
+        observation_ceiling=end, lookback_sessions=0)
+    series = price_history_query.get_price_series(repository, request, snapshot)
+    rows = []
+    for row in series:
+        if row.date < start:
+            continue
+        try:
+            close = float(row.close_raw)
+        except (TypeError, ValueError, OverflowError):
+            raise errors.fail("CONTRACT_MISMATCH", "price_history value conversion failed",
+                details={"table_name": price_history_table.PRICE_HISTORY_TABLE_NAME}) from None
+        rows.append({"date": row.date, "close": close})
+        if len(rows) > max_source_rows:
+            raise errors.fail("RESULT_LIMIT_EXCEEDED", "daily block regime row bound exceeded")
+    return rows
+
+
 def _daily(rows, dates, ceiling):
     index = bisect_right(dates, ceiling) - 1
     values = dict.fromkeys(_DAILY)
@@ -189,21 +218,27 @@ def _spy_record(calculated, inputs):
     except ValueError:
         raise errors.fail("CONTRACT_MISMATCH", "nonfinite SPY block calculation") from None
     windows = {"spy_ret21": 21, "spy_ret63": 63, "spy_vol5": 5, "spy_vol20": 20, "spy_vol60": 60}
-    return {"values": values, "source_dates": inputs, "ticker": "SPY",
+    return {"values": values, "source_dates": inputs,
+        "ticker": price_history_table.REGIME_TICKER,
         "available_as_of": None, "knowledge_mode": "reconstructed",
         "missing": {name: "insufficient_history" if 0 < len(inputs) <= windows.get(name, 252) else "unavailable"
                     for name, value in values.items() if value is None}}
 
 
 def _spy_blocks(events, rows):
-    """Existing rolling arithmetic once for the full bounded event batch."""
+    """Existing rolling arithmetic once for the full bounded event batch.
+
+    ``rows`` are the pinned ^GSPC ``price_history`` closes (``date``/``close``)
+    produced by :func:`_read_regime_series`; the nine ``spy_*`` names are
+    historical and read this regime close, never a ``daily_market`` SPY spot.
+    """
     forecasts = [(event, cutoff) for event in events for cutoff in event["forecasts"]]
     frame = pd.DataFrame({"date": [pd.Timestamp(e["event_date"]) for e, _ in forecasts],
         "decision": [pd.Timestamp(c["source_session_ceiling"]) for _, c in forecasts]})
     market = pd.DataFrame({"date": pd.to_datetime([row["date"] for row in rows]),
-        "close": [float("nan") if row["spot"] is None else row["spot"] for row in rows]})
-    if any(row["spot"] is not None and row["spot"] <= 0 for row in rows):
-        raise errors.fail("CONTRACT_MISMATCH", "SPY source closes must be positive when present")
+        "close": [row["close"] for row in rows]})
+    if any(row["close"] <= 0 for row in rows):
+        raise errors.fail("CONTRACT_MISMATCH", "regime source closes must be positive")
     calculated = regime.add_regime_features(frame, market, as_of_column="decision")
     dates = [row["date"] for row in rows]
     result = {}
@@ -216,12 +251,16 @@ def _spy_blocks(events, rows):
 
 
 def build_daily_blocks(repository, source_snapshot, history_snapshot, panel_context, *,
-                       producer, policy, eligibility_metadata, source_start, max_source_rows, max_events, max_object_bytes):
+                       price_history_snapshot, producer, policy, eligibility_metadata, source_start,
+                       max_source_rows, max_events, max_object_bytes):
     """Produce detached partial blocks, not a fit/read capability or stored snapshot.
 
-    Label bounds are producer declarations, not verified outcome intervals. The
-    imported daily table has no publication stamps; source dates only establish
-    reconstructed prefixes. Never call this output observed-PIT or fit-admissible.
+    The ``spy`` block's nine regime values read the pinned ``price_history_snapshot``'s
+    ``REGIME_TICKER`` (^GSPC) ``price_history`` close -- one regime source, never a
+    ``daily_market`` SPY spot. Label bounds are producer declarations, not verified
+    outcome intervals. The imported daily table has no publication stamps; source
+    dates only establish reconstructed prefixes. Never call this output observed-PIT
+    or fit-admissible.
     """
     objects.validate_max_object_bytes(max_object_bytes)
     source_start = magnitude_panel_table.canonical_day(source_start)
@@ -235,12 +274,13 @@ def build_daily_blocks(repository, source_snapshot, history_snapshot, panel_cont
         by_ticker.setdefault(event["ticker"], []).append(event)
         end = max(c["source_session_ceiling"] for c in event["forecasts"])
         ends[event["ticker"]] = max(ends.get(event["ticker"], ""), end)
-    ends["SPY"] = max(ends.values())
+    regime_end = max(ends.values())
     fragments = [{"fragment_id": record.fragment_id, "object_id": record.object_ref.object_id,
                   "content_hash": record.object_ref.content_hash}
         for record in repository.fragment_records(source_snapshot, "daily_market")]
     identity = {"schema_version": "magnitude_panel_daily_materialization.v1", "status": _STATUS,
         "panel_context_id": panel_context["context_id"], "source_snapshot": to_document(source_snapshot),
+        "price_history_snapshot": to_document(price_history_snapshot),
         "producer": producer, "producer_identity": "caller_declared_not_installed_attestation",
         "eligibility_plan": eligibility, "label_bounds": "unverified_producer_declaration",
         "source_start": source_start, "max_source_rows": max_source_rows, "max_events": max_events,
@@ -249,14 +289,14 @@ def build_daily_blocks(repository, source_snapshot, history_snapshot, panel_cont
         "availability": "reconstructed_session_prefix_publication_unverified"}
     context = {**identity, "context_id": content_hash(identity)}
     with progress.stage("daily block sources", report_refusals=True):
-        spy_rows = _source_rows(repository, source_snapshot, "SPY", source_start, ends["SPY"],
-            max_source_rows, max_object_bytes)
-        spy = _spy_blocks(events, spy_rows)
+        regime_rows = _read_regime_series(repository, price_history_snapshot, source_start,
+            regime_end, max_source_rows)
+        spy = _spy_blocks(events, regime_rows)
     output = []
     meter = progress.Progress("daily block events", len(events))
     with progress.stage("daily block values", report_refusals=True):
         for ticker in sorted(by_ticker):
-            rows = spy_rows if ticker == "SPY" else _source_rows(
+            rows = _source_rows(
                 repository, source_snapshot, ticker, source_start, ends[ticker], max_source_rows, max_object_bytes)
             surface = [row for row in rows if pd.notna(row["src_iv"])]
             dates = [row["date"] for row in surface]
