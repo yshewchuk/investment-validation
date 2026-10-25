@@ -15,7 +15,12 @@ from engine.v2.foundation import (
 )
 from engine.v2.ops.errors import OpsError, fail
 from experiments import native_registration as native
-from tests.v2.ops.native_bounds_support import BoundedSqlRows, catalog_rows, object_bytes
+from tests.v2.ops.native_bounds_support import (
+    BoundedSqlRows,
+    catalog_rows,
+    object_bytes,
+    size_refusal,
+)
 from tests.v2.ops.test_native_evidence_bounds import evidence_catalog
 
 CAP = 16 * 1024 * 1024
@@ -36,18 +41,6 @@ def refuses(message, code="EXPERIMENT_IDENTITY_CONFLICT"):
     assert captured.value.code == code
     assert captured.value.problem.retryable is False
     assert captured.value.problem.message == message
-
-
-@contextmanager
-def size_refusal(size, limit):
-    with pytest.raises(OpsError) as captured:
-        yield
-    assert type(captured.value) is OpsError
-    assert to_document(captured.value.problem) == {
-        "schema_version": "problem.v1.0", "code": "RESOURCE_LIMIT_EXCEEDED", "category": "resource",
-        "retryable": False, "message": "native registration exceeds its UTF-8 byte budget",
-        "stage": None, "trace_id": None, "dependency_refs": [], "retry_after_seconds": None,
-        "diagnostic_ref": None, "details": {"registration_bytes": size, "max_registration_bytes": limit}}
 
 
 @contextmanager
@@ -189,7 +182,7 @@ def test_invalid_budget_refuses_before_any_catalog_or_object_access(budget):
 @pytest.mark.parametrize("budget", [None, True, False, 0, -1, 1.0, "1024", 2**62])
 def test_registrar_rejects_invalid_budget_before_preparation(monkeypatch, budget):
     monkeypatch.setattr(native, "prepare_native_registration", forbid)
-    with refuses("registration read requires a positive SQLite-safe byte budget", "INVALID_EXPERIMENT_SPEC"):
+    with refuses("registration requires a positive SQLite-safe byte budget", "INVALID_EXPERIMENT_SPEC"):
         native.register_native(None, None, None, None, code_root=None, as_of_month=None, max_evidence_bytes=budget)
 
 

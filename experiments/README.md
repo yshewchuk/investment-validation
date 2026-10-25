@@ -47,10 +47,10 @@ The owning modules expose these helpers to native experiment callers; no compati
 | `v2_gate_collect.main` | CLI argument list selects collect/run. Non-sweep purpose refuses `HOLDOUT_ACCESS_DENIED`; missing/conflicting mode refuses `INVALID_EXPERIMENT_SPEC`, before opening inputs/catalog. Prints sorted index or typed refusal JSON: returns 0 for complete success, 2 for incomplete results/handled refusals; unexpected programming errors propagate. Requires an existing migrated catalog; missing/nonregular catalog admission refuses `INVALID_EXPERIMENT_SPEC`, other stat errors and raw SQLite failures reaching the CLI remain `RESOURCE_UNAVAILABLE` (the stat check is not race-proof). Rejected roster path/access or bounded-JSON admission refuses non-retryable `INVALID_EXPERIMENT_SPEC`; I/O outside that admission policy remains retryable `RESOURCE_UNAVAILABLE`. Detailed error classifications are covered by the collection boundary tests. Artifact/data refusals retain their original code. |
 
 `v2_gate`, `v2_prediction`, `v2_magnitude_search` and `v2_magnitude_search_run` expose `--max-registration-bytes`
-(default 16777216) for this initial catalog/object load only. Larger magnitude
-populations may need an explicit larger finite budget; history registrations
-embed their temporal plan twice. The option neither changes saved identity nor
-changes subsequent admission/outcome APIs' separate read policies.
+(default 16777216) for initial catalog/object loading. Gate and prediction also
+apply it to prepared registration bytes before publication/reservation. Larger
+populations may need an explicit finite override; history binds its temporal plan twice.
+Saved identity and subsequent admission/outcome APIs' separate read policies do not change.
 
 ## Consumers and authority
 
@@ -238,7 +238,7 @@ python -m experiments.v2_magnitude_search_run run "${common[@]}" \
 python -m experiments.v2_magnitude_search_run collect "${common[@]}"
 ```
 
-All three actions accept `--max-registration-bytes` (default 16777216); use an explicit larger finite budget for a larger saved registration. The shared loader validator requires an integer from 1 through `2**62 - 1` before storage access; this option changes only initial registration loading, not saved identity or later read policies.
+These three serial-search actions accept `--max-registration-bytes` (default 16777216); use an explicit larger finite budget for a larger saved registration. The shared loader validator requires an integer from 1 through `2**62 - 1` before storage access; here the option affects initial registration loading, not saved identity or later read policies. Prediction/gate registration also applies it before reservation, as described above.
 
 `run_search(conn, store, repository, registration, request, plan_ref, *, limits)`
 is the same orchestration API. It traverses outer folds, candidates and inner

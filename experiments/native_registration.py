@@ -244,7 +244,7 @@ def register_native(conn, store, repository, spec, *, code_root, as_of_month,
     leave an unreferenced complete object, never a partially admitted binding.
     """
     if not valid_registration_read_budget(max_evidence_bytes):
-        raise fail("INVALID_EXPERIMENT_SPEC", "registration read requires a positive SQLite-safe byte budget")
+        raise fail("INVALID_EXPERIMENT_SPEC", "registration requires a positive SQLite-safe byte budget")
     registration, spec = prepare_native_registration(repository, spec, code_root=code_root, as_of_month=as_of_month,
                                   scope=scope, event_ids=event_ids, final_read=final_read,
                                   magnitude_training_start=magnitude_training_start,

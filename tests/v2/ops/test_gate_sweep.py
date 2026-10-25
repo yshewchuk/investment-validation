@@ -1347,9 +1347,17 @@ def test_seal_transaction_uses_bounded_reader_after_preparation(source, monkeypa
 
 
 def test_oversized_new_roster_cannot_create_unreplayable_seal(source, monkeypatch):
+    sealed, _, registrations = sweep._prepare(source.conn, source.repository, _request(),
+        code_root=REPO, as_of_month=MONTH, scope="shadow", event_ids=None)
+    payload = canonical_json(sealed).encode()
+    assert native_registration.MAX_GATE_SWEEP_BYTES == native_registration.MAX_NATIVE_EVIDENCE_BYTES == 16 * 1024 * 1024
+    assert all(registration.binding_json in payload for registration in registrations)
+    arm_size = max(len(registration.binding_json) for registration in registrations)
+    assert len(payload) > arm_size
     before = list(source.conn.iterdump())
     with monkeypatch.context() as patch:
-        patch.setattr(native_registration, "MAX_GATE_SWEEP_BYTES", 1)
+        patch.setattr(native_registration, "MAX_GATE_SWEEP_BYTES", arm_size - 1)
+        patch.setattr(native_registration, "reserve_native_registration", _forbid)
         patch.setattr(source.store, "publish_bytes", _forbid)
         with pytest.raises(OpsError) as caught:
             _call(source)
