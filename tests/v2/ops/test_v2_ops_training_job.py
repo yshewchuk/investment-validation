@@ -303,6 +303,14 @@ def _install_tiny_state_worker(monkeypatch):
         "from engine.v2.ops import worker\n"
         "tools = types.ModuleType('tools')\n"
         "job = types.ModuleType('tools.phase5_training_job')\n"
+        "# Worker admission re-runs the planner validator, which reads the\n"
+        "# tool module's state catalog; a stub without it is not a stub of the\n"
+        "# production admission path.\n"
+        "job.STATES = ('driver_residual_pool:size', 'driver_residual_pool:implied_t1',\n"
+        "              'driver_residual_pool:runup_move', 'paired_residual_pool',\n"
+        "              'chooser_analog_pool', 'board_analog_matcher', 'trailing_pnl_cutoff')\n"
+        "job.BOARD_ANALOG_STATE = 'board_analog_matcher'\n"
+        "job.TRAILING_CUTOFF_STATE = 'trailing_pnl_cutoff'\n"
         "def tiny_state(member, out, *, plan_only=False, **kwargs):\n"
         "    out.mkdir(parents=True, exist_ok=True)\n"
         "    (out / 'state.json').write_text('{\"state\": \"' + member + '\"}')\n"
@@ -470,7 +478,9 @@ def test_training_worker_never_reaches_promote(tmp_path, monkeypatch):
               "pairs_path": "", "ticker_chunk": 1000}
     with pytest.raises(OpsError) as excinfo:
         training.run_training_worker(params, tmp_path)
-    assert excinfo.value.code == "VALIDATION_FAILED"
+    # The worker admits with the planner's validator, so the unknown recipe
+    # key is a typed INVALID_REQUEST before dispatch, exactly as plan time.
+    assert excinfo.value.code == "INVALID_REQUEST"
 
 
 @pytest.mark.parametrize("error,code", [
@@ -560,6 +570,8 @@ def test_run_recipe_pinned_pairs_path_loads(tmp_path, monkeypatch):
 
 
 def test_run_recipe_pairs_path_refuses_absolute(tmp_path, monkeypatch):
+    """``_run_recipe``'s own pin check (bypassing worker admission) still
+    refuses an absolute pairs_path as ``INPUT_CHANGED``."""
     from tools import phase5_training_job as job
 
     key = _recipe_key(calibration=False)
@@ -568,9 +580,9 @@ def test_run_recipe_pairs_path_refuses_absolute(tmp_path, monkeypatch):
     monkeypatch.setattr(job, "build_dataset",
                         lambda *args, **kwargs: pytest.fail("build_dataset was reached"))
     with pytest.raises(OpsError) as excinfo:
-        training.run_training_worker(
-            _worker_params(mode="recipe", state="", recipe=key,
-                           pairs_path="/etc/passwd"), tmp_path)
+        training._run_recipe(
+            _worker_params(mode="recipe", state="", recipe=key, pairs_path="/etc/passwd"),
+            tmp_path / "training", tmp_path)
     assert excinfo.value.code == "INPUT_CHANGED"
 
 
@@ -583,10 +595,30 @@ def test_run_recipe_pairs_path_refuses_dotdot(tmp_path, monkeypatch):
     monkeypatch.setattr(job, "build_dataset",
                         lambda *args, **kwargs: pytest.fail("build_dataset was reached"))
     with pytest.raises(OpsError) as excinfo:
-        training.run_training_worker(
+        training._run_recipe(
             _worker_params(mode="recipe", state="", recipe=key,
-                           pairs_path="../secret.parquet"), tmp_path)
+                           pairs_path="../secret.parquet"),
+            tmp_path / "training", tmp_path)
     assert excinfo.value.code == "INPUT_CHANGED"
+
+
+@pytest.mark.parametrize("pairs_path", ["/etc/passwd", "../secret.parquet"])
+def test_worker_admission_refuses_unsafe_pairs_path(tmp_path, monkeypatch, pairs_path):
+    """The planner's ``pairs_path must be a plain relative path`` problem is
+    a worker-admission problem too: refused typed ``INVALID_REQUEST`` before
+    ``_run_recipe`` runs."""
+    from tools import phase5_training_job as job
+
+    key = _recipe_key(calibration=False)
+
+    monkeypatch.setattr(job, "_guard", lambda where: None)
+    monkeypatch.setattr(job, "build_dataset",
+                        lambda *args, **kwargs: pytest.fail("build_dataset was reached"))
+    with pytest.raises(OpsError) as excinfo:
+        training.run_training_worker(
+            _worker_params(mode="recipe", state="", recipe=key, pairs_path=pairs_path), tmp_path)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert "pairs_path must be a plain relative path" in excinfo.value.problem.details["problems"]
 
 
 def test_run_recipe_pairs_path_refuses_unpinned(tmp_path, monkeypatch):

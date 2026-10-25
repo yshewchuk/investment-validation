@@ -33,7 +33,8 @@ def test_command_tree_is_exactly_the_expected_set():
     assert _subparser_choices(p) == sorted({
         "init", "doctor", "health", "serve", "plan", "submit", "rescore",
         "capture-inputs", "reconcile", "reclaim", "provider-account", "snapshot", "ledger",
-        "decisions", "price-refresh", "price-history", "computed-moves", "get", "logs",
+        "decisions", "price-refresh", "price-history", "computed-moves", "headroom",
+        "get", "logs",
         "cancel", "resume", "explain"})
     for action in p._actions:
         if isinstance(action, argparse._SubParsersAction):
@@ -96,6 +97,15 @@ _CASES = [
       "tickers": "AAPL,MSFT", "training_mode": None, "year_end": 2021, "year_start": 2020}),
     ("submit", ["submit", "--plan", "p", "--idempotency-key", "k"],
      {"command": "submit", "idempotency_key": "k", "plan": "p",
+      "root": "data/operations"}),
+    ("headroom_defaults", ["headroom", "--plan", "p"],
+     {"command": "headroom", "max_rss_gb": None, "plan": "p",
+      "root": "data/operations"}),
+    ("headroom_explicit", ["--root", "R1", "headroom", "--plan", "p",
+                           "--max-rss-gb", "1.5"],
+     {"command": "headroom", "max_rss_gb": 1.5, "plan": "p", "root": "R1"}),
+    ("headroom_max_rss_gb_fraction", ["headroom", "--plan", "p", "--max-rss-gb", "0.25"],
+     {"command": "headroom", "max_rss_gb": 0.25, "plan": "p",
       "root": "data/operations"}),
     ("rescore", ["rescore", "--request", "r.json", "--native-inputs", "n.json"],
      {"command": "rescore", "native_inputs": Path("n.json"), "request": Path("r.json"),
@@ -294,6 +304,10 @@ _ERROR_CASES = [
     ("snapshot_promote_missing_expected_generation",
      ["snapshot", "promote", "--candidate-scope", "c", "--target-scope", "t",
       "--comparison-receipt", "r"]),
+    ("headroom_max_rss_gb_zero", ["headroom", "--plan", "p", "--max-rss-gb", "0"]),
+    ("headroom_max_rss_gb_negative", ["headroom", "--plan", "p", "--max-rss-gb", "-1"]),
+    ("headroom_max_rss_gb_nan", ["headroom", "--plan", "p", "--max-rss-gb", "nan"]),
+    ("headroom_max_rss_gb_inf", ["headroom", "--plan", "p", "--max-rss-gb", "inf"]),
 ]
 
 
@@ -303,3 +317,13 @@ def test_parser_refuses_bad_argv(argv, capsys):
         parser().parse_args(argv)
     assert excinfo.value.code == 2
     capsys.readouterr()
+
+
+def test_headroom_max_rss_gb_help_names_newest_epoch(capsys):
+    """The --max-rss-gb help states the newest-supervisor-epoch scope."""
+    with pytest.raises(SystemExit) as excinfo:
+        parser().parse_args(["headroom", "--help"])
+    assert excinfo.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert ("largest memory peak of the newest supervisor epoch's recent attempts "
+            "against this GiB cap") in help_text

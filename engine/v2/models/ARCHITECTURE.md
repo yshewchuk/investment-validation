@@ -81,10 +81,11 @@ The separate `magnitude_ridge_hgb_recipe` API constructs/validates source-free
 `magnitude_ridge_hgb_recipe.v1` metadata for the bounded stage-2 Ridge/HGB grid.
 It binds explicit ordered unique columns, a canonical dictionary hash, fixed
 preprocessing/estimator policy and derived width; no dictionary or source is read.
-The `history_ridge`/`history_hgb` family names reuse the same-package private
-estimator constructor unchanged; each numeric adapter owns its guards and fitting,
-not the constructor. This is not the fixed eleven-column v1 execution envelope. Dictionary membership and
-truthful matrix order remain caller-owned; a hash alone grants no admission.
+The `history_ridge`/`history_hgb` family names reuse the training-layer private
+estimator constructor (`training/_magnitude_estimators.build_estimator`,
+imported by the training fitters) unchanged; each numeric adapter owns its
+guards and fitting, not the constructor. This is not the fixed eleven-column
+v1 execution envelope. Dictionary membership and truthful matrix order remain caller-owned; a hash alone grants no admission.
 `training.magnitude_ridge_hgb.fit_ridge_hgb_predictions(..., columns=...)`
 checks both no-fit guards before inspecting metadata or numeric inputs, validates
 the closed recipe and exact declared column order, then copies numeric matrices.
@@ -375,7 +376,7 @@ of the newest nightly jobs, so a score older than that window is not found.
 
 ### 2.2.2 Bootstrap cycle (not implemented)
 
-Unimplemented; the design is in issue #1102. Today a missing pointer submits nothing. With a deployed pointer whose release has no usable pool catalog, it submits the three training jobs and then `phase5_state_stage`, which refuses `VALIDATION_FAILED` with `details.code` `PRIOR_MISMATCH` ("prior release could not be read").
+Unimplemented; the design is in issue #1102. The bootstrap's chooser input exists: the `training` job in `mode: "state"` accepts the state `chooser_analog_pool` with exactly one ISO cutoff and writes the `(features.chooser_analog_pool, cutoff)` `ChooserAnalogPoolArtifact`, built by `training/chooser_pool.py` from the stored `chooser_analog_pool.parquet` (the `tools/build_chooser_pool.py` output) with rows closed on/after the cutoff excluded. A missing, non-ISO or non-single cutoff, or a missing or oversize (256 MiB) source, refuses (`INVALID_REQUEST` / `VALIDATION_FAILED`); an existing output with different bytes is `CHECKPOINT_INCOMPATIBLE`; a rerun is byte-identical; no row left is an `empty` status with no file. Nothing submits it yet. Today a missing pointer submits nothing. With a deployed pointer whose release has no usable pool catalog, it submits the three training jobs and then `phase5_state_stage`, which refuses `VALIDATION_FAILED` with `details.code` `PRIOR_MISMATCH` ("prior release could not be read").
 
 ### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
 
@@ -431,9 +432,7 @@ the chooser producer artifacts below; this alone admits neither training sources
 nor a nightly chooser declaration.
 
 Selection uses the exact earlier of the event month and decision month,
-and the registered size model and feature order. The panel byte hash is the
-pinned snapshot's, compared by the batch caller, not the selector.
-It never chooses the newest available fold or substitutes a full-refit model.
+and the registered size model and feature order. It never chooses the newest available fold or substitutes a full-refit model.
 The panel hash comes from the already-pinned snapshot's single original
 `feature_panel` object; an unsupported multi-fragment layout is refused. The
 scoring selector (`gate_fold_selection.py`) applies the month rule and the

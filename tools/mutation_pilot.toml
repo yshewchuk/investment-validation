@@ -696,6 +696,7 @@ mutate = [
     "engine/v2/ops/__main__.py",
     "engine/v2/ops/diagnostics.py",
     "engine/v2/ops/health.py",
+    "engine/v2/ops/headroom.py",
     "engine/v2/ops/experiments.py",
 ]
 tests = [
@@ -711,6 +712,7 @@ tests = [
     "tests/v2/research/test_magnitude_search_driver*.py",
     "tests/v2/ops/test_gate_sweep.py",
     "tests/v2/ops/test_gate_sweep_collection.py",
+    "tests/v2/ops/test_headroom.py",
     "tests/v2/ops/test_native_evidence_bounds.py",
     "tests/v2/ops/test_sweep_native_bounds.py",
     "tests/v2/ops/test_sweep_report_bounds.py",
@@ -1180,7 +1182,7 @@ tests = [
     "tests/test_v2_ops_runtime.py",
     "tests/v2/ops/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_store_barrier.py",
-    "tests/v2/ops/test_training_job.py",
+    "tests/v2/ops/test_v2_ops_training_job.py",
     "tests/test_v2_ops_worker_typed_failures.py",
     # A glob, not a literal: the spec_ns_b shadow-seam test adds itself to the
     # pool from the commit that lands it, and the two native-refresh e2e files
@@ -1244,6 +1246,7 @@ tests = [
     "tests/v2/research/test_magnitude_history_store.py",
     "tests/v2/research/test_magnitude_history_projection.py",
     "tests/v2/research/test_magnitude_panel_contract.py",
+    "tests/v2/research/test_magnitude_panel_v2_policies.py",
     "tests/v2/research/test_magnitude_search_payload.py",
     "tests/v2/research/test_magnitude_folds.py",
     "tests/v2/research/test_magnitude_registration.py",

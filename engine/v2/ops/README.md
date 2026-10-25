@@ -42,10 +42,10 @@ underscore convention, and an import of a name absent from this list fails
 
 The operator interface is the versioned command protocol exposed by
 python3 -m engine.v2.ops. It supports immutable planning/submission, job and
-attempt inspection, cancellation, recovery planning, health and supervisor
-execution. Except for the narrow registration surface below, Python modules
-are internal to ops; production packages consume versioned artifacts instead
-of importing the supervisor.
+attempt inspection, cancellation, recovery planning, health, read-only nightly
+limit headroom (`headroom`) and supervisor execution. Except for the narrow
+registration surface below, Python modules are internal to ops; production
+packages consume versioned artifacts instead of importing the supervisor.
 
 Native experiment registration also exposes these submodule APIs:
 `submission.get_job` and `submit_graph` accept `max_failure_bytes=None` and `receipt_decode_failure_code=None`. An omitted/None budget means 8 MiB UTF-8; historical failures above that limit require an explicit larger finite budget. A positive exact-integer budget (at most `(2**63-1)//2`) caps failure text before SQL transfer/JSON decoding, with UTF-16 transfer allowance twice the UTF-8 budget and a UTF-8 recheck. Size refusal uses the explicit registered receipt code, otherwise `RESOURCE_LIMIT_EXCEEDED`; wrong-type, invalid-encoding or malformed failure JSON retains `INTEGRITY_FAILED`. The optional code also types only queue/resource/progress JSON decoder failures; other errors propagate. `validate_receipt_read_policy` rejects invalid code/budget with `INVALID_REQUEST` before reads, graph writes or sweep staging. Collection explicitly passes the fixed `MAX_JOB_FAILURE_BYTES` (1 MiB) and R6 throughout initial replay and observation.

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import time
 from pathlib import Path
@@ -27,6 +28,7 @@ from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.executor_watchdog import signal_owned
 from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
+from engine.v2.ops.headroom import headroom_command
 from engine.v2.ops.health import health, write_health
 from engine.v2.ops.lifecycle import attempt_receipts, request_cancel
 from engine.v2.ops.profiles import DEFAULT_POLICY
@@ -128,6 +130,28 @@ def _add_computed_moves_commands(commands):
     capture.add_argument("--as-of", required=True)
     capture.add_argument("--dry-run", action="store_true",
                          help="report target/cache coverage without writing")
+
+
+def _positive_gb(value):
+    """argparse type: a finite ``--max-rss-gb`` greater than zero."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from None
+    if not math.isfinite(number) or number <= 0.0:
+        raise argparse.ArgumentTypeError("--max-rss-gb must be a finite value greater than 0")
+    return number
+
+
+def _add_headroom_command(commands):
+    """The read-only ``ops headroom`` subparser (see ``engine.v2.ops.headroom``):
+    nightly limit usage against fixed repo limits, exit code 0 = OK, 1 = WARN or
+    UNMEASURED, 2 = FAIL."""
+    headroom = commands.add_parser("headroom")
+    headroom.add_argument("--plan", required=True, help="the plan_ref artifact id")
+    headroom.add_argument("--max-rss-gb", type=_positive_gb, default=None,
+                         help="also check the largest memory peak of the newest "
+                              "supervisor epoch's recent attempts against this GiB cap")
 
 
 def _add_snapshot_commands(commands):
@@ -378,6 +402,7 @@ def parser():
     _add_price_refresh_command(commands)
     _add_price_history_commands(commands)
     _add_computed_moves_commands(commands)
+    _add_headroom_command(commands)
     for name in ("get", "logs", "cancel", "resume", "explain"):
         sub = commands.add_parser(name)
         sub.add_argument("job_id")
@@ -501,7 +526,7 @@ def dispatch(args, root, conn, clock):
     handlers = {"reconcile": reconcile_command, "reclaim": reclaim_command,
                 "snapshot": snapshot_command, "ledger": ledger_command,
                 "decisions": decisions_command, "price-history": price_history_command,
-                "computed-moves": computed_moves_command}
+                "computed-moves": computed_moves_command, "headroom": headroom_command}
     if args.command in handlers:
         return handlers[args.command](args, root, conn, clock)
     if args.command == "provider-account":
@@ -1323,7 +1348,7 @@ def main(argv=None):
             finally:
                 conn.close()
         _print_result(args, document)
-        return 0
+        return document.get("exit_code", 0) if args.command == "headroom" else 0
     except OpsError as exc:
         print(json.dumps(to_document(exc.problem)))
         return 2

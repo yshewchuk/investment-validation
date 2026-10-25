@@ -55,7 +55,9 @@ Dataset builders and the legacy selection each mirrors:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -165,8 +167,30 @@ def build_dataset(recipe, *, pairs_path=None) -> pd.DataFrame:
 
 BOARD_ANALOG_STATE = "board_analog_matcher"
 TRAILING_CUTOFF_STATE = "trailing_pnl_cutoff"
+CHOOSER_POOL_STATE = "chooser_analog_pool"
 STATES = tuple(f"driver_residual_pool:{role}" for role in ("size", "implied_t1", "runup_move")) + (
-    "paired_residual_pool", BOARD_ANALOG_STATE, TRAILING_CUTOFF_STATE)
+    "paired_residual_pool", CHOOSER_POOL_STATE, BOARD_ANALOG_STATE, TRAILING_CUTOFF_STATE)
+
+#: ``engine.score.CHOOSER_ANALOG_POOL`` (the build_chooser_pool.py output),
+#: spelled out so this job stays off the heavy ``engine.score`` import.
+_CHOOSER_POOL_FILE = "chooser_analog_pool.parquet"
+
+
+def _iso_cutoff(value: str) -> str:
+    """The normalized ``YYYY-MM-DD`` cutoff string.
+
+    Raises ``TypeError``/``ValueError`` for anything that is not a canonical
+    ISO date; callers turn that into their own refusal (``SystemExit`` /
+    ``ap.error``). ``date.fromisoformat`` accepts the compact and week forms
+    (``20260213``, ``2026-W07-5``) on 3.11+, so the length and the
+    round-trip equality are both required.
+    """
+    if len(value) != 10:
+        raise ValueError(f"not a YYYY-MM-DD date: {value!r}")
+    bound = datetime.date.fromisoformat(value).isoformat()
+    if bound != value:
+        raise ValueError(f"not a canonical YYYY-MM-DD date: {value!r}")
+    return bound
 
 
 def _guard(where: str) -> None:
@@ -208,6 +232,58 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
                    "n_residuals": int(np.isfinite(pool["residuals"]).sum()),
                    "n_buckets": 0 if not pool["buckets"] else len(pool["buckets"]["pools"])}
         return artifact, summary
+    if member == CHOOSER_POOL_STATE:
+        # ``build_chooser_analog_pool_artifact`` drops rows closed on/after
+        # ``cutoff``; the parquet is read in stored order so the pool keeps
+        # legacy's tie-break. A missing cutoff or a missing source parquet
+        # refuses (SystemExit -> VALIDATION_FAILED via ``_tool_failure``), as
+        # does a non-regular or oversized source; an existing output file
+        # with different bytes is the existing RESUME_MISMATCH; the atomic
+        # write leaves no partial output; a rerun on identical inputs is
+        # byte-idempotent.
+        import time
+
+        from engine import paths
+        from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
+        from engine.v2.models.training.chooser_pool_source import (
+            CHOOSER_POOL_ID,
+            read_chooser_pool_frame,
+            require_chooser_pool_columns,
+        )
+
+        if cutoff is None:
+            raise SystemExit("chooser_analog_pool needs a cutoff")
+        try:
+            bound = _iso_cutoff(cutoff)
+        except (TypeError, ValueError):
+            raise SystemExit("chooser_analog_pool cutoff must be an ISO date (YYYY-MM-DD)")
+        source = paths.FEATURES / _CHOOSER_POOL_FILE
+        started = time.perf_counter()
+        try:
+            frame = read_chooser_pool_frame(source)
+        except FileNotFoundError:
+            raise SystemExit("chooser analog pool source is missing") from None
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        read_s = time.perf_counter() - started
+        print(f"[p5-3] chooser_analog_pool: read {len(frame)} rows in {read_s:.1f}s",
+              file=sys.stderr, flush=True)
+        # Missing columns would silently drop EVERY row (``_kept`` reads via
+        # ``row.get``), freezing an empty pool; refuse instead. The shared
+        # check raises ``ValueError``; a tool refusal is ``SystemExit``.
+        try:
+            require_chooser_pool_columns(frame.columns)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        lineage = Lineage(data=(DataDependency(table=CHOOSER_POOL_ID, end_exclusive=bound),))
+        artifact = build_chooser_analog_pool_artifact(
+            frame.to_dict("records"), pool_id=CHOOSER_POOL_ID, cutoff=bound, lineage=lineage)
+        n_rows = sum(len(rows) for _, rows in artifact.strategies)
+        print(f"[p5-3] chooser_analog_pool: built {n_rows} rows in "
+              f"{time.perf_counter() - started:.1f}s", file=sys.stderr, flush=True)
+        summary = {"cutoff": bound, "source_rows": int(len(frame)), "n_rows": n_rows,
+                   "n_strategies": len(artifact.strategies)}
+        return (None, summary) if n_rows == 0 else (artifact, summary)
     if member != "paired_residual_pool":
         raise SystemExit(f"unknown state {member!r}; known: {', '.join(STATES)}")
     inputs = paired_inputs if paired_inputs is not None else data.paired_pool_inputs(
@@ -238,7 +314,9 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
     previewing it would build everything and discard it (use the two
     ``--state`` job kinds with their own cheap preview instead).
     """
+    from engine.v2.models.deployment import atomic_write_bytes
     from engine.v2.models.frozen_state import serialize_frozen_state
+    from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
     from tools import phase5_datasets as data
 
     if plan_only:
@@ -254,22 +332,39 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
                               "tier3.panel": data.file_digest(paths.PANEL)}
     out.mkdir(parents=True, exist_ok=True)
     if artifact is None:
+        # An empty pool writes no state file, so a stale earlier output would
+        # survive the "empty" rerun unnoticed and get staged: refuse instead.
+        name = state_file_name(member)
+        # A dangling symlink has no content, so ``Path.exists()`` is false and
+        # it would pass as "no output": count it with ``lexists`` and refuse.
+        if os.path.lexists(out / name):
+            raise SystemExit(f"RESUME_MISMATCH: {name} exists but the pool is empty")
         summary["status"] = "empty"
     else:
         path = out / state_file_name(member)
         payload = serialize_frozen_state(artifact)
         summary.update(content_hash=artifact.content_hash, file=path.name, bytes=len(payload))
-        if path.exists():
-            if path.read_bytes() != payload:
+        # ``lexists`` so a dangling symlink (no content, ``exists()`` false)
+        # still counts as an existing output and reaches the no-follow read.
+        if os.path.lexists(path):
+            # Bounded single-handle read: one fd carries the ``O_NOFOLLOW``
+            # type check, the size bound and the content, so the resume
+            # comparison cannot straddle two objects. A symlinked, non-regular
+            # or oversize existing output is a mismatch, never a follow.
+            try:
+                existing = read_bounded_state(path, len(payload), no_follow=True)
+            except (BoundedStateReadError, OSError, ValueError):
+                raise SystemExit(
+                    f"RESUME_MISMATCH: {path.name} exists with different content") from None
+            if existing != payload:
                 raise SystemExit(f"RESUME_MISMATCH: {path.name} exists with different content")
             summary["status"] = "resumed"
         else:
-            tmp = path.with_name(path.name + ".partial")
-            tmp.write_bytes(payload)
-            tmp.replace(path)
+            atomic_write_bytes(path, payload)
             summary["status"] = "written"
-    (out / (state_file_name(member)[:-5] + ".summary.json")).write_text(
-        json.dumps(summary, indent=1, sort_keys=True) + "\n")
+    atomic_write_bytes(
+        out / (state_file_name(member)[:-5] + ".summary.json"),
+        (json.dumps(summary, indent=1, sort_keys=True) + "\n").encode())
     return summary
 
 
@@ -470,6 +565,7 @@ def main(argv=None) -> int:
     ap.add_argument("--cutoff", action="append", default=[],
                     help="evidence cutoff YYYY-MM-DD (calibration: repeatable, one fold each; "
                          "paired_residual_pool: optional exclusive event-date bound; "
+                         "chooser_analog_pool: required, exclusive exit-date bound; "
                          "trailing_pnl_cutoff: event dates, one artifact per month)")
     ap.add_argument("--pairs", help="recalibration pairs parquet (default: legacy PAIRS_PATH)")
     ap.add_argument("--strategy", action="append", default=[],
@@ -510,8 +606,18 @@ def main(argv=None) -> int:
     if args.strategy:
         ap.error(f"--strategy applies to {BOARD_ANALOG_STATE} only")
     if args.state:
-        if len(args.cutoff) > 1 or (args.cutoff and args.state != "paired_residual_pool"):
-            ap.error("--cutoff: at most one, and only for paired_residual_pool")
+        if len(args.cutoff) > 1 or (args.cutoff
+                and args.state not in ("paired_residual_pool", CHOOSER_POOL_STATE)):
+            ap.error("--cutoff: at most one, and only for paired_residual_pool/"
+                     f"{CHOOSER_POOL_STATE}")
+        if args.state == CHOOSER_POOL_STATE and len(args.cutoff) != 1:
+            ap.error(f"{CHOOSER_POOL_STATE} needs exactly one --cutoff")
+        if args.state == CHOOSER_POOL_STATE:
+            for value in args.cutoff:
+                try:
+                    _iso_cutoff(value)
+                except (TypeError, ValueError):
+                    ap.error("chooser_analog_pool cutoff must be an ISO date (YYYY-MM-DD)")
         summary = run_state_job(args.state, out, plan_only=args.plan_only,
                                 cutoff=args.cutoff[0] if args.cutoff else None,
                                 ticker_chunk=args.ticker_chunk)

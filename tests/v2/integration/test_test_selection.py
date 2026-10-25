@@ -181,11 +181,11 @@ _COVERAGE_RELOCATIONS = (
     ("tests/test_v2_data_reference_inputs.py", "tests/v2/data/test_v2_data_reference_inputs.py", (1, 2)),
     ("tests/test_checks_phase2_corpus_parity.py", "tests/v2/integration/test_checks_phase2_corpus_parity.py", (2,)),
     ("tests/test_v2_ops_legacy_workflows.py", "tests/v2/ops/test_v2_ops_legacy_workflows.py", (1,)),
-    ("tests/test_v2_ops_training_job.py", "tests/v2/ops/test_training_job.py", (1,)),
     ("tests/test_v2_ops_computed_moves_store.py",
      "tests/v2/ops/test_v2_ops_computed_moves_store.py", (1,)),
     ("tests/test_v2_ops_native_board_universe.py", "tests/v2/ops/test_v2_ops_native_board_universe.py", (1,)),
     ("tests/test_v2_data_tier4_coverage.py", "tests/v2/data/test_tier4_coverage.py", (1, 2)),
+    ("tests/test_v2_ops_training_job.py", "tests/v2/ops/test_v2_ops_training_job.py", (1,)),
 )
 
 
