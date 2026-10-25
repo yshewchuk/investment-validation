@@ -204,8 +204,10 @@ def _fetch_rows(repository, snapshot_ref: SnapshotRef, ticker: str, *,
         order_by=("ticker", "date", "retrieved_at"), max_batch_rows=max_batch_rows,
         max_result_rows=max_result_rows)
     rows: list[dict] = []
-    for batch in repository.scan(query, table_name=PRICE_HISTORY_TABLE_NAME,
-                                 max_object_bytes=max_object_bytes):
+    scan_kwargs = {"table_name": PRICE_HISTORY_TABLE_NAME}
+    if max_object_bytes is not None:
+        scan_kwargs["max_object_bytes"] = max_object_bytes
+    for batch in repository.scan(query, **scan_kwargs):
         rows.extend(batch.to_pylist())
     return pd.DataFrame(rows, columns=list(_COLUMNS))
 
