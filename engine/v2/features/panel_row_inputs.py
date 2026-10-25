@@ -23,10 +23,12 @@ The four always-made pinned-snapshot dependencies:
   non-skipped rows only (``skipped=true`` rows are excluded before that call,
   never treated as a zero move); it also supplies the stored
   ``mean_prior_or_implied`` (all rows, regardless of skipped/availability);
-* the bounded ``daily_market`` read for the fixed ticker ``"SPY"``, feeding
-  ``regime.add_regime_features`` (a different, raw chronological shape than the
-  derived/lagged ``scan_daily_state_inputs`` mapping, so not reused from it); a
-  caller may supply a build-scoped cache to share this raw series across rows;
+* ``price_history_query.get_price_series`` of the fixed ``REGIME_TICKER``
+  (``"^GSPC"``) as of ``decision_session``, whose ``close_raw`` feeds
+  ``regime.add_regime_features`` -- the single source for the nine ``spy_*``
+  regime features (the names are historical; a ``daily_market`` spot is never
+  a close, so it is never read here). A caller may supply a build-scoped
+  cache to share this raw series across rows;
 * ``price_history_query.get_price_series`` as of ``decision_session``, feeding
   ``runup_math.add_runup_features``.
 
@@ -48,32 +50,38 @@ from engine.v2.contracts.data import (
     DataQuery,
     KeyPredicate,
     PriceQuery,
+    PriceSeriesRow,
     SnapshotRef,
     TimeInterval,
 )
-from engine.v2.data import errors, price_history_query, repository
+from engine.v2.data import errors, price_history_query, price_history_table, repository
 from engine.v2.features import daily_state_inputs, panel_math, regime, runup_math
 
 __all__ = ["CONTEXT_TICKERS", "PanelRowInputs", "scan_panel_row"]
 
 _COMPUTED_MOVES_TABLE = "computed_moves"
-_DAILY_MARKET_TABLE = "daily_market"
-#: Fixed market-context tickers whose ``daily_market`` history the feature path
-#: reads. The nightly's per-ticker history backfill includes all of them (they
-#: have no earnings event, so nothing else would backfill them).
+#: The dashboard nightly's context-history backfill list and nothing else
+#: (these tickers have no earnings event, so nothing else would backfill
+#: them): ``"SPY"`` here only keeps its ``daily_market`` history populated for
+#: the legacy market-wide read. The ``spy_*`` regime features never read it --
+#: their source is the ``REGIME_TICKER`` ``price_history`` close.
 CONTEXT_TICKERS: tuple[str, ...] = ("SPY",)
-_SPY = CONTEXT_TICKERS[0]
 _BATCH_LIMIT = 1000
 _RESULT_LIMIT = 10000
 
 #: Generous margin over add_runup_features's 300-session minimum.
 _RUNUP_LOOKBACK_SESSIONS = 400
 
+#: Pre-decode byte cap for the one ^GSPC regime fragment read per scan: the
+#: regime partition holds the whole index history (tens of MB), so this caps a
+#: pathological rewrite before any value decodes while staying far above any
+#: real ^GSPC series.
+_REGIME_MAX_OBJECT_BYTES = 64 * 1024 * 1024
+
 _IMPLIED_COLUMNS = ("event_ordinal", "admitted", "implied_move_pct",
                     "mean_prior_or_implied", "n_prior_implied")
 _COMPUTED_COLUMNS = ("ticker", "event_date", "realized_move_pct", "skipped",
                      "available_as_of_date", *_IMPLIED_COLUMNS)
-_SPY_COLUMNS = ("ticker", "date", "spot")
 _REGIME_COLUMNS = (
     "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol5", "spy_vol20",
     "spy_vol60", "spy_vol252", "spy_vol20_rel252",
@@ -292,38 +300,32 @@ def _stored_implied_mean(rows: list[dict[str, object]]) -> float | None:
     return float((mean * n_prior + implied) / (n_prior + 1))
 
 
-def _read_spy_market(data_repository: repository.Repository, snapshot: SnapshotRef,
-                     history_start: pd.Timestamp, decision: pd.Timestamp
-                     ) -> list[dict[str, object]]:
-    """``"SPY"``'s raw chronological ``daily_market`` series through the decision."""
-    contract = data_repository.table_contract(snapshot, _DAILY_MARKET_TABLE)
-    version = _pinned_version(snapshot, _DAILY_MARKET_TABLE)
-    end = decision + pd.Timedelta(days=1)
-    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(_SPY,)),)
-    time_interval = TimeInterval(
-        column="date",
-        start_inclusive=history_start.date().isoformat(),
-        end_exclusive=end.date().isoformat(),
+def _read_regime_prices(data_repository: repository.Repository, snapshot: SnapshotRef,
+                        history_start: pd.Timestamp, decision: pd.Timestamp
+                        ) -> tuple[PriceSeriesRow, ...]:
+    """The ``REGIME_TICKER`` (^GSPC) ``price_history`` series through the
+    decision, in date order, dropping any row before ``history_start``.
+
+    Read exactly like :func:`_runup_from_prices` -- one pinned
+    ``get_price_series`` as of ``decision_session`` (whole pinned retrieval
+    history, ``lookback_sessions=0`` like the decision-calendar reader). The
+    series carries no dividend adjustment, so ``close_raw`` is the regime
+    ``close``; ``get_price_series`` refuses ``CONTRACT_MISMATCH`` when the
+    pinned snapshot has no rows for the ticker at all -- by decision there is
+    no empty-source fallback here (the nightly requires the ticker at capture).
+    The read is byte-bounded by :data:`_REGIME_MAX_OBJECT_BYTES`, so a
+    pathological ^GSPC fragment refuses before its values decode.
+    """
+    query = PriceQuery(
+        ticker=price_history_table.REGIME_TICKER,
+        session_date=decision.date().isoformat(),
+        observation_ceiling=decision.date().isoformat(),
+        lookback_sessions=0,
     )
-    bound = data_repository.scan_population_bound(
-        snapshot.snapshot_id, table_name=_DAILY_MARKET_TABLE,
-        table_contract_ref=version.table_contract_ref,
-        key_filter=key_filter, time_interval=time_interval)
-    max_result_rows = min(_RESULT_LIMIT, bound)
-    max_batch_rows = (min(contract.maximum_batch_rows, _BATCH_LIMIT, max_result_rows)
-                      if max_result_rows > 0
-                      else min(contract.maximum_batch_rows, _BATCH_LIMIT))
-    query = DataQuery(
-        snapshot_id=snapshot.snapshot_id,
-        table_contract_ref=version.table_contract_ref,
-        columns=_SPY_COLUMNS,
-        key_filter=key_filter,
-        time_interval=time_interval,
-        order_by=tuple(contract.primary_key),
-        max_batch_rows=max_batch_rows,
-        max_result_rows=max_result_rows,
-    )
-    return _consume(data_repository, query, _DAILY_MARKET_TABLE)
+    rows = price_history_query.get_price_series(data_repository, query, snapshot,
+                                                max_object_bytes=_REGIME_MAX_OBJECT_BYTES)
+    start = history_start.date().isoformat()
+    return tuple(row for row in rows if row.date >= start)
 
 
 def _kept_prior_moves(rows: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -346,24 +348,35 @@ def _history_from_kept_moves(kept: list[dict[str, object]]) -> dict[str, float |
     return panel_math.history_features(prior_moves, prior_abs)
 
 
-def _regime_from_spy(spy_rows: list[dict[str, object]], event_day: pd.Timestamp,
-                     decision: pd.Timestamp) -> tuple[dict[str, float], object]:
-    """The 9 legacy ``spy_*`` floats and the separate ``regime_asof`` anchor.
+def _regime_from_prices(regime_rows: tuple[PriceSeriesRow, ...], event_day: pd.Timestamp,
+                        decision: pd.Timestamp) -> tuple[dict[str, float], object]:
+    """The 9 legacy ``spy_*`` floats and the separate ``regime_asof`` anchor,
+    over the ^GSPC ``price_history`` closes.
 
     The event frame is built from the validated ``event_day`` (no other key
     field is needed): an unnormalized event timestamp would let ``_anchor_index``
-    select the event day's own SPY close.
+    select the event day's own close. A non-finite or non-positive close refuses
+    ``CONTRACT_MISMATCH`` (``regime source closes must be positive``) through the
+    shared ``regime.validated_regime_closes`` rule, so this panel path and the
+    research path accept exactly the same values.
     """
-    if spy_rows:
-        ordered = sorted(spy_rows, key=lambda row: pd.Timestamp(row["date"]))
+    if regime_rows:
+        ordered = sorted(regime_rows, key=lambda row: row.date)
         try:
-            market = pd.DataFrame(
-                {"date": pd.to_datetime([row["date"] for row in ordered]),
-                 "close": [float(row["spot"]) for row in ordered]},
-            )
+            closes = [float(row.close_raw) for row in ordered]
         except (TypeError, ValueError, OverflowError):
-            raise errors.fail("CONTRACT_MISMATCH", "daily_market value conversion failed",
-                              details={"table_name": _DAILY_MARKET_TABLE}) from None
+            raise errors.fail("CONTRACT_MISMATCH", "price_history value conversion failed",
+                              details={"table_name":
+                                       price_history_table.PRICE_HISTORY_TABLE_NAME}) from None
+        try:
+            closes = regime.validated_regime_closes(closes)
+        except ValueError:
+            raise errors.fail("CONTRACT_MISMATCH", "regime source closes must be positive",
+                              details={"table_name":
+                                       price_history_table.PRICE_HISTORY_TABLE_NAME}) from None
+        market = pd.DataFrame(
+            {"date": pd.to_datetime([row.date for row in ordered]), "close": closes},
+        )
     else:
         market = pd.DataFrame({"date": [], "close": []})
     events = pd.DataFrame({"date": [event_day], "decision": [decision]})
@@ -476,7 +489,7 @@ def scan_panel_row(
     *,
     decision_session: object,
     history_start: object,
-    spy_market_cache: dict[tuple[str, str, str, str], tuple[dict[str, object], ...]] | None = None,
+    spy_market_cache: dict[tuple[str, str, str, str], tuple[PriceSeriesRow, ...]] | None = None,
 ) -> PanelRowInputs:
     """One ``BoardRequest`` key's full-superset raw panel row and latest anchor.
 
@@ -503,23 +516,23 @@ def scan_panel_row(
     history = _history_from_kept_moves(kept_moves)
     history_asof = _anchor(*(row["available_as_of_date"] for row in kept_moves))
 
-    spy_rows: list[dict[str, object]] | None
+    spy_rows: tuple[PriceSeriesRow, ...]
     if spy_market_cache is None:
-        spy_rows = _read_spy_market(repository, snapshot, start, decision)
+        spy_rows = _read_regime_prices(repository, snapshot, start, decision)
     else:
         spy_key = (
             snapshot.snapshot_id,
-            _pinned_version(snapshot, _DAILY_MARKET_TABLE).dataset_version_id,
+            _pinned_version(snapshot, price_history_table.PRICE_HISTORY_TABLE_NAME).dataset_version_id,
             start.isoformat(),
             decision.isoformat(),
         )
         cached_spy_rows = spy_market_cache.get(spy_key)
         if cached_spy_rows is None:
-            spy_rows = _read_spy_market(repository, snapshot, start, decision)
-            spy_market_cache[spy_key] = tuple(dict(row) for row in spy_rows)
+            spy_rows = _read_regime_prices(repository, snapshot, start, decision)
+            spy_market_cache[spy_key] = spy_rows
         else:
-            spy_rows = [dict(row) for row in cached_spy_rows]
-    regime_features, regime_asof = _regime_from_spy(spy_rows, event_day, decision)
+            spy_rows = tuple(cached_spy_rows)
+    regime_features, regime_asof = _regime_from_prices(spy_rows, event_day, decision)
 
     runup_features, runup_asof = _runup_from_prices(
         repository, snapshot, key.ticker, decision, event_day, history, kept_moves,

@@ -102,8 +102,8 @@ explicit caller-side result limit, which expresses a real retained-scan
 caller requirement, and the shared pinned-manifest population bound of the
 exact selection validates the query; an empty selection may use a zero
 result limit while retaining a positive batch size. The separate
-`computed_moves` and `"SPY"` `daily_market` reads follow the same rule for
-their exact pinned selections. No head lookup, provider pull, training or
+`computed_moves` read follows the same rule for its exact pinned
+selections. No head lookup, provider pull, training or
 legacy path occurs.
 Rows outside that identity/date scope, duplicate dates, and invalid source
 dates refuse before arithmetic. Repository integrity, scan-validation and
@@ -199,11 +199,14 @@ as a zero move; the bounds are on data dates only, never on
 `computed_at`, the row's own calculation timestamp: a backfilled or
 corrected row remains eligible when its outcome was available by the decision,
 even if it was written later);
-the bounded `daily_market` history for fixed ticker `"SPY"` (feeding `regime`,
-not reused from `scan_daily_state_inputs` — a different, derived shape). A
+the pinned `price_history` close series of the fixed `REGIME_TICKER`
+(`"^GSPC"`), dated in `[history_start, decision_session]`, feeding `regime`;
+`close_raw` is the close — the nine `spy_*` features are `^GSPC`-based (the
+names are historical) and a `daily_market` spot, an intraday snapshot, is
+never read as a close. A
 direct `scan_panel_row` call without a cache reads this history for that call;
 the producer may pass a cache to reuse it across rows only when snapshot ID,
-pinned `daily_market` version, and scan window match. `_shared_panel_rows`
+pinned `price_history` version, and scan window match. `_shared_panel_rows`
 creates this cache for one producer build, retains only the bounded result, and
 releases it when the build returns;
 `price_history_query.get_price_series`, as of `decision_session` — its
@@ -214,18 +217,20 @@ construction and the
 `PriceSeriesRow`-to-DataFrame conversion are implementation detail, not
 contract — see the PR body.
 
-The fixed tickers read this way are named once, in
-`panel_row_inputs.CONTEXT_TICKERS` (currently `("SPY",)`). The nightly's
-per-ticker history backfill includes every context ticker (see the dashboard
-doc; its legacy mirror constant is test-pinned to this one), because such a ticker has no earnings event and would otherwise hold only
-the market-wide daily pull's short history, too short for `regime`.
+`panel_row_inputs.CONTEXT_TICKERS` (currently `("SPY",)`) is the dashboard
+nightly's context-history backfill list and nothing else (see the dashboard
+doc; its legacy mirror constant is test-pinned to this one): such a ticker has
+no earnings event and would otherwise hold only the market-wide daily pull's
+short history. `regime` does not read them: its source is the
+`REGIME_TICKER` `price_history` close.
 
-Both bounded reads (`computed_moves` for `key.ticker`, `"SPY"`
-`daily_market`) keep their explicit caller-side result limits, which express
-real caller requirements, and the shared pinned-manifest population bound of
-their exact selection validates each query; an empty selection may use a
-zero result limit while retaining a positive batch size. Normal repository
-scan validation and failures propagate.
+The bounded `computed_moves` read for `key.ticker` keeps its explicit
+caller-side result limit, which expresses a real caller requirement, and the
+shared pinned-manifest population bound of its exact selection validates the
+query; an empty selection may use a zero result limit while retaining a
+positive batch size. The two `get_price_series` reads (`REGIME_TICKER` for
+`regime`, `key.ticker` for `runup`) take their bound from the data layer.
+Normal repository scan validation and failures propagate.
 
 | Condition (R1-R6) | Outcome |
 |---|---|
@@ -237,13 +242,17 @@ scan validation and failures propagate.
 | the latest row's `admitted` is not a bool, `n_prior_implied` is not a non-negative int, `mean_prior_or_implied`/`implied_move_pct` is non-null but not a finite real, or mean/count disagree (`n=0` with a mean, `n>0` with a null mean) | `CONTRACT_MISMATCH`, refused rather than coerced |
 | a non-null `computed_moves.available_as_of_date` is not a naive calendar day | `CONTRACT_MISMATCH`, refused before history arithmetic |
 | an eligible non-skipped `computed_moves` row has a null `realized_move_pct` (a repository-integrity violation — the contract allows that only when `skipped=true`) | `CONTRACT_MISMATCH`, refused before `panel_math.history_features` runs, never silently coerced |
-| `daily_market` has no row for `"SPY"` | `regime`'s own no-history behavior: its fields stay `NaN` (its own Inputs table); `panel_math`'s keys are unaffected (independent read) |
-| `price_history` has no row for this ticker | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
+| `price_history` has no row at all for `REGIME_TICKER` (`"^GSPC"`) | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — the regime read has no empty-source fallback; a live `^GSPC` partition is required at capture |
+| a `REGIME_TICKER` row's `close_raw` cannot be converted to a float | `CONTRACT_MISMATCH` (`price_history value conversion failed`), refused rather than coerced; a NaN close cannot reach this read — the refresher's `gspc_daily.csv` carries no null/non-finite `Close` row and capture drops null Close/High and unparseable-date rows |
+| a converted `REGIME_TICKER` close is not positive or not finite (a stored-series integrity violation) | `CONTRACT_MISMATCH` (`regime source closes must be positive`), refused before `regime.add_regime_features` — mirrors the research path's positive-close check |
+| the `REGIME_TICKER` rows are all outside `[history_start, decision_session]` | `regime`'s own no-history behavior: its fields stay `NaN` (its own Inputs table), `regime_asof` `NaT`; `panel_math`'s keys are unaffected (independent read) |
+| `price_history` has no row for `key.ticker` | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
 | `get_price_series`'s `session_date > observation_ceiling` | `QUERY_NOT_BOUNDED`, propagated unchanged — never a silent future read |
 | `key.event_date` is on or before the decision day | the daily state is read at the last session strictly before `key.event_date` (the event day's own post-print state is never read) |
 | `key.event_date` is after the decision day | the daily state is read at the decision day (the decision-day ceiling), never a later row |
-| `key.event_date` is on or before `history_start` (an empty eligible daily window) | `CONTRACT_MISMATCH` from the daily-state window check (`history_start must be on or before decision_session`); unreachable from the nightly producer, which requires 253 observed sessions |
+| `key.event_date` is on or before `history_start` (an empty eligible daily window) | `CONTRACT_MISMATCH` from the daily-state window check (`history_start must be on or before decision_session`); unreachable from the nightly producer, whose universe admits only events on or after the decision day (`native_board_universe`), so `event_day - 1` is never before `history_start` |
 | retry with the same pinned snapshot/key/`decision_session`/`history_start` | identical result; optional SPY reuse is limited to a caller-supplied build-local cache with the same snapshot/version/window key; no write, nothing to roll back |
+| retry with the same pinned snapshot/key/`decision_session`/`history_start` | identical result; optional regime-series reuse is limited to a caller-supplied build-local cache keyed on the same snapshot, pinned `price_history` version and window; no write, nothing to roll back |
 
 `regime.add_regime_features(events, market, *, as_of_column="date")` is
 pure regime arithmetic over explicit DataFrames. `market` supplies normalized,

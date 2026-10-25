@@ -31,7 +31,7 @@ access. The index is not an alternative holdout/grouped-membership classifier.
 
 ## Public boundary and native compatibility
 
-**Blocking prerequisite (1.B0–1.B3):** current Repository.resolve/resolve_full
+**Blocking prerequisite (1.B0 plus B1a/B1b/B2/B3a/B3b):** current Repository.resolve/resolve_full
 materialize all-table membership before caps; they cannot admit this index.
 Before any admit_snapshot/resolve call, a separately reviewed data-owned bounded
 read session must cap all-snapshot table count, fragment memberships and catalog
@@ -43,7 +43,7 @@ check-then-unbounded-resolve race. Reuse that admitted view for all later native
 lookups/scans. Native manifest/snapshot reconstruction still proves exact identity.
 No research-side SQL, caller receipt/boolean or ordinary pinned Repository can
 substitute. 1.B0 must freeze/prove the public API and an additive implementation
-route preserving existing bytes; index implementation waits for all of 1.B0–1.B3.
+route preserving existing bytes; index implementation waits for B0 review and all five code slices.
 
 Proposed signatures below are design vocabulary, not installed/exported APIs:
 `engine.v2.research.magnitude_confirmed_metadata.build_index(repository, snapshot, *, tickers, limits)`.
@@ -225,7 +225,7 @@ elapsed/rate/ETA, refusals and stage RSS; no per-event logging or extra scans.
 
 | Failure | Registered nonretryable code unless native code says otherwise |
 | --- | --- |
-| Malformed request/row/cap shape, missing/noncanonical partition metadata or no supported bounded native session | CONTRACT_MISMATCH |
+| Malformed non-snapshot request/row/cap shape, missing/noncanonical partition metadata or no supported bounded native session | CONTRACT_MISMATCH |
 | Missing/unresolvable/nonexact SnapshotRef | SNAPSHOT_UNRESOLVED via admit_snapshot |
 | Absent earnings table | CONTRACT_MISMATCH |
 | Unsupported exact contract/ref | UNSUPPORTED_CONTRACT |
@@ -250,13 +250,15 @@ needed. Estimates are not waivers, completed work or real-data authorization.
 
 | Sub-slice / dependency and acceptance | Added code / tests / docs |
 | --- | --- |
-| 1.B0: bounded native-session design / pre-transfer guards, consistent view, public API and unchanged old source bytes proved before code | 0 / 0 / 120–160 |
-| 1.B1: bounded catalog probes/transfers / 1.B0; all-table counts/bytes refuse before materialization | 100–140 / 150–190 / 20–30 |
-| 1.B2: exact bounded identity reconstruction / 1.B1; native identity parity, oversized unrelated table poisoning | 100–140 / 150–190 / 20–30 |
-| 1.B3: admitted native read-session wiring / 1.B2; all later lookups/scans reuse bounded view, no unbounded fallback | 100–140 / 150–190 / 20–30 |
+| 1.B0: bounded native-session design / contract below; required review before B1a code | 0 / 0 / 190–210 |
+| 1.B1a: bounded catalog count/type/byte probes / 1.B0; all-table refusal before payload transfer | 100–140 / 150–190 / 20–30 |
+| 1.B1b: bounded catalog transfer/decode / 1.B1a; same read view and independent UTF-8 cap | 100–140 / 150–190 / 20–30 |
+| 1.B2: exact bounded identity reconstruction / 1.B1b; native identity parity and poisoned unrelated metadata | 100–140 / 150–190 / 20–30 |
+| 1.B3a: closed native metadata session / 1.B2; factory lifetime, detached getters and no SQL fallback | 80–110 / 120–160 / 20–30 |
+| 1.B3b: native scanner wiring / 1.B3a; same admitted view, mandatory object cap, iterator closure | 100–140 / 150–190 / 20–30 |
 | 1.M0: native metadata facade / unchanged v1 closure, existing validator/predicate parity | 30–50 / 70–100 / 10–20 |
 | 1.M1: ticker conflict/sequence reducer / 1.M0; same-ticker siblings and empty states, no admission claim | 100–140 / 150–190 / 20–30 |
-| 1.M2: native ref/inventory admission / 1.B3; exact contract and complete membership with pre-allocation caps | 100–140 / 150–190 / 20–30 |
+| 1.M2: native ref/inventory admission / 1.B3b; exact contract and complete membership with pre-allocation caps | 100–140 / 150–190 / 20–30 |
 | 1.M3: bounded ticker scan and index composition / 1.M1/1.M2; exhaust once per partition, detached output and poisoned payload tests | 100–140 / 150–190 / 20–30 |
 | P.M1: native history/grouped-policy compatibility proof / 1.M3; contaminated histories refuse, no post-aggregate filtering | 100–140 / 150–190 / 20–30 |
 | 1.C0: coverage/forecast/label qualification design / 1.M3; freeze available native evidence and source-specific bounds before code | 0 / 0 / 120–160 |
@@ -269,7 +271,7 @@ needed. Estimates are not waivers, completed work or real-data authorization.
 | 2.M3: quote aggregate and absolute derivation / 2.M2; native math, zero/null semantics and no ordinal restart | 90–130 / 140–180 / 20–30 |
 | 2.M4: row/lineage materialization wiring / 2.M3; complete horizon rows, bounded output, no experiment execution | 100–140 / 150–190 / 20–30 |
 
-Mapped totals (code/tests/docs): row 1 = 1020–1440/1570–2000/450–640;
+Mapped totals (code/tests/docs): row 1 = 1200–1690/1840–2350/560–750;
 P = 100–140/150–190/20–30; row 2 = 380–540/580–740/80–120. The original
 one-week target is not reaffirmed. Only 1.M3 exposes authenticated build_index.
 Each implementation slice updates its owning data/research README/ARCHITECTURE
@@ -290,3 +292,182 @@ orders; a late preflight overage must open no objects, and a late streaming
 integrity/retention failure must return no partial proof. Inspect source closures
 to prove all existing v1 identities unchanged. No fabricated source availability,
 historical coverage, protected numerical admission or real-data execution claim.
+
+## 1.B0 — bounded native catalog read-session contract (planned only)
+
+This prerequisite freezes the additive route for B1a–B3b; it implements nothing.
+The names below are proposed, not installed APIs. No runtime caller, schema,
+source read, source-identity amendment or numerical admission is added here.
+Data README/ARCHITECTURE interfaces change with their implementation, not now.
+Use stdlib sqlite3/contextlib/json and native document/manifest/query/scan code;
+an ORM, SQLite copy, custom JSON parser or second Parquet reader is unnecessary.
+The repository-specific snapshot membership proof has no generic library substitute.
+
+### Public boundary and lifetime
+
+Proposed data entry point: `bounded_snapshot.open_bounded_snapshot(repository,
+snapshot, *, table_name, limits)`, a context manager yielding a `BoundedSnapshot`.
+The exact existing `Repository` is only a borrowed connection/store holder, not
+admission evidence: ignore its pin flag and both caches; invoke no resolver on it.
+The data factory alone opens and admits the bounded view before yielding a session.
+Research `build_index` calls this factory with table_name="earnings_events" and
+the five catalog/selected-table limits below, then passes the yielded session to
+`snapshot_inputs.admit_snapshot`; a caller-created receipt/boolean cannot replace it.
+The factory rejects a missing/malformed SnapshotRef with SNAPSHOT_UNRESOLVED.
+Non-native holders, empty/non-string table names, unsupported connection
+configuration and an already-active transaction refuse CONTRACT_MISMATCH.
+An absent selected table refuses CONTRACT_MISMATCH before the factory yields.
+Support the native sqlite3.Connection with sqlite3.Row and str text factories;
+no supplied callbacks, connection adapters or subclass overrides are admission.
+The caller lends exclusive connection use during admission; use cursor-local row
+handling, never change the caller's factories/schema/pins or close its connection.
+
+The factory owns one BEGIN/read transaction through probes/transfers/reconstruction,
+then ROLLBACK before yielding, including on failure; never roll back a caller's
+preexisting transaction. Roll back only a transaction this factory began that
+is still active; cleanup never replaces a primary failure. A cleanup-only SQL
+failure uses the mapping below and yields no session.
+All later reads use the complete detached frozen view;
+this preserves that admitted view without holding a SQLite lock during scans.
+No later SQL/head lookups, parent traversal, re-resolution or implicit latest.
+No nested/concurrent use of a session. Close/cancel started iterators on exit;
+an unstarted iterator or further read after exit refuses before object access.
+Admission failure exposes no session or partial proof. Reopening performs fresh admission;
+no process-global cache, automatic retry, durable write or temporary catalog copy.
+
+The facade exposes only the following native-compatible operations; returned
+native dataclasses and every nested mapping/list are deep-detached from its state.
+Every method and iterator resume first checks lifetime: use after exit refuses
+CONTRACT_MISMATCH before any ID/ref check. The table applies only while active.
+
+| Method | Behavior while active |
+| --- | --- |
+| resolve(snapshot_id) | Exact admitted ID only; detached SnapshotRef, otherwise SNAPSHOT_NOT_FOUND. |
+| resolve_full(snapshot_id) | Same ID rule; detached native ResolvedSnapshot, complete all-table membership. |
+| table_contract(snapshot_ref, table_name) | Exact admitted ref and known table; detached full contract. |
+| fragment_records(snapshot_ref, table_name) | Same checks; complete native ordered tuple, including empty membership. |
+| scan_population_bound(snapshot_id, *, table_name, table_contract_ref, key_filter=(), time_interval=None) | Selected table only; native plan_scan_population candidate-row sum, never result-count estimation. |
+| scan(query, *, table_name, max_object_bytes=None) | Selected table only; mandatory native byte-cap validation below and unchanged DataQuery semantics; provisional Arrow batches until exhaustion. |
+
+For an active scan, call objects.validate_max_object_bytes before delegation,
+including the rejection-only None default: omitted/None, bool, noninteger or
+nonpositive caps raise QUERY_NOT_BOUNDED. Never take Repository.scan's None
+path fallback. Preserve other native DataQuery/query/object refusals unchanged.
+Provisional means a late stream failure can follow already-yielded batches;
+there is no retraction or mutation of those Arrow batches. The consumer must
+discard its accumulated result on error/cancellation, and the index publishes
+nothing until every required stream exhausts successfully (engine/v2/data/ARCHITECTURE.md:690–691).
+
+On the active facade, unknown tables, nonexact refs passed to table_contract/
+fragment_records, or scans outside the selected table refuse
+CONTRACT_MISMATCH. There are no exposed latest/head/get_event/get_chain/price
+helpers, write methods, raw connection, mutable caches or caller-supplied records.
+The facade is request-local, not a serializable provenance token. A missing store
+refuses scan with CONTRACT_MISMATCH; metadata-only admission need not open one.
+
+### Pre-transfer admission, including unrelated snapshot tables
+
+`limits` has exactly max_catalog_tables, max_catalog_fragments,
+max_catalog_bytes, max_fragments and max_partitions, with the positive built-in
+integer/below-sys.maxsize rule above. No defaults, cap raising or truncation.
+The latter two cover the selected table; all other caps cover the whole snapshot.
+Bounds cover catalog-to-Python payload transfer/retention, not construction of
+the caller's already-supplied request, SQLite internal memory/CPU or process RSS.
+
+Before transferring any catalog TEXT/BLOB payload, use parameterized SQL scalar
+probes: capped COUNT over LIMIT(cap+1) membership subqueries, typeof fields and
+length(CAST(field AS BLOB)); never length(text), SELECT * or payload fetchall.
+Count snapshot table memberships and fragment memberships per table binding,
+not distinct object/fragment IDs. Probe selected-table distinct partition count
+and fragment count too. Empty membership counts zero; every present fragment counts,
+even if its row_count is zero, and every distinct present partition counts.
+Drive LEFT JOINs from raw memberships: a missing dataset/contract/fragment/object
+must refuse, not disappear and make a count or byte total look smaller.
+Only bounded fixed-width scalar probe rows cross the boundary before admission;
+consume them incrementally. Accumulate integer lengths in Python with early
+cap checks, not overflowing SQLite SUM or floating TOTAL. Check every table,
+including unrequested tables, before transferring the first payload row.
+
+Use a fixed field projection: snapshot identity/policy/evidence; snapshot-table
+bindings; dataset identity/count/mode/parents/evidence/partition hashes; contract
+identity plus definition_json; membership ordinal/IDs; fragment identity, object
+and contract IDs, counts/bounds/hashes/receipt refs/import hash; ObjectRef fields.
+Do not transfer registered_at, commit_receipt_ref or storage_key, which this read
+does not consume. Parent IDs and evidence references are values, never followed.
+Charge every projected nonnull field's SQL BLOB length (including integer text)
+in a fixed schedule: snapshot once, binding/dataset/contract per table, and
+membership/fragment/object per fragment membership. Repeated IDs/objects are
+charged each occurrence, never discounted by a cache or later deduplication.
+Order tables by table_name and each table's membership by its stored ordinal.
+SQL types/nullability must match that projection before payload transfer.
+
+After all stored-byte/count probes pass, transfer one admitted row at a time
+in the same transaction. Verify types and independently accumulate decoded
+TEXT UTF-8 bytes before any JSON parse; this second counter also must fit
+max_catalog_bytes. SQL BLOB length uses database encoding, not assumed UTF-8;
+UTF-16 and embedded-NUL fixtures must exercise both checks. Invalid stored TEXT
+can raise sqlite3.OperationalError during str decoding without a SQLite code;
+that and Python decode/re-encode UnicodeError map to MANIFEST_CORRUPT below.
+Fixed-width scalars remain count-bounded; no BLOB field is expected.
+Use the native JSON duplicate-key hook and strict native document decoder;
+JSON syntax/depth/shape failures refuse rather than yielding an empty record.
+No re-query through ordinary Repository is allowed after these guards.
+
+### Native identity and additive scanner reuse
+
+Rebuild each FragmentRecord/DatasetManifest/SnapshotRef using the existing
+manifests builders/verifiers, not a new hash recipe. Decode the full contracts
+and require table_contract_hash to equal both stored and referenced hashes.
+Check all stored binding/count/logical-hash/knowledge-mode fields against the
+reconstruction, plus ordered membership, contract/table correspondence and
+each referenced object. Require complete equality to the supplied SnapshotRef.
+Zero-fragment tables still have contracts/manifests; no invented empty source.
+This authenticates catalog metadata only: no object bytes, receipt contents,
+coverage, observed-PIT guarantee or numerical-contributor evidence is proved.
+
+Add new data modules only; preserve repository.py, documents.py, manifests.py,
+objects.py, query.py and every existing v1 source-closure byte. A private data-
+package Repository subclass can override resolve and _table_records to use only
+the admitted state with pin_snapshots=False, retaining unchanged scan and
+scan_population_bound dispatch (repository.py:297–315,849–868). Its SQL route
+must be inaccessible/poisoned; never return this subclass itself to research.
+Facade resolve_full/table_contract/fragment_records use admitted state, not the
+inherited methods that reopen SQL (repository.py:717–756,829–847).
+This is same-package native reuse, not a research private import. Each facade
+call and iterator resume checks lifetime; only one active scan is permitted.
+No silent native fallback when construction or an override is unsupported.
+
+Factory snapshot-reference failures use SNAPSHOT_UNRESOLVED. Active facade
+resolve/resolve_full retain native SNAPSHOT_NOT_FOUND for a different ID;
+research admit_snapshot translates it to SNAPSHOT_UNRESOLVED (engine/v2/research/snapshot_inputs.py:14–25).
+The index's exact earnings-contract allowlist still refuses UNSUPPORTED_CONTRACT;
+the generic session authenticates catalog identity, not that research allowlist.
+
+Preserve an existing native DataError first. For new catalog sqlite3.Error,
+test a present numeric primary result code (extended code & 255) against the
+resource row first; absent codes use the remaining-error row, never message text.
+Missing required schema/join partners are malformed catalog, not an absent
+snapshot or empty membership. New mappings never flatten scanner DataErrors.
+
+| Failure boundary | Outcome (fixed redacted message; admission returns no partial session) |
+| --- | --- |
+| Factory invalid holder/table name/configuration/limits or active transaction; facade binding/lifetime guards above | CONTRACT_MISMATCH, nonretryable; excludes every factory snapshot-reference failure below and native DataQuery/scan-cap validation. |
+| Factory: missing/malformed SnapshotRef, missing requested snapshot or supplied ref differs | SNAPSHOT_UNRESOLVED, nonretryable. |
+| Active scan: omitted/None or invalid max_object_bytes | QUERY_NOT_BOUNDED from objects.validate_max_object_bytes, nonretryable. |
+| Any explicit count or either byte counter exceeds cap | RESULT_LIMIT_EXCEEDED, nonretryable; no cap relaxation. |
+| Catalog SQLite primary BUSY/LOCKED/IOERR/CANTOPEN/FULL/NOMEM (including extended variants) | RESOURCE_UNAVAILABLE, retryable by registry only; no automatic retry. |
+| Catalog: broken join/type/JSON/Unicode/native identity, including DocumentError from stored catalog decoding; SQLite errors excluding the preceding resource codes, including code-less TEXT decode failure | MANIFEST_CORRUPT, nonretryable. |
+| Native DataError from identity/query/object checks | Preserve code and retryability; do not blanket-wrap. |
+
+Synthetic acceptance must prove cap equality/one-over, huge unrelated payloads
+and IDs rejected before text transfer, repeated memberships charged, missing
+join partners, UTF-16/NUL/multibyte text, malformed JSON and identity mutations.
+Use native resolve_full as a small-valid-fixture identity/membership oracle,
+not an oracle for its unspecified cross-table tuple order;
+poison ordinary resolution, SQL after admission, all writer/provider hooks and
+nonselected object reads. Verify deep mutation isolation, fresh reopen, failure
+cleanup, early/never-started generator closure and exact bound/scan parity.
+A concurrent second-connection commit between probes and transfer must not
+change the admitted view; no fixture may stand in for private source coverage.
+B1a/B1b/B2/B3a/B3b estimates top out at 360 combined lines, within the <=400 ceiling;
+re-estimate/split if tests exceed them. Index work waits for all five slices.
