@@ -662,7 +662,7 @@ This bounds retained unmatched rows, not total process RSS.
 
 `engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `incremental_tables`,
 `catalog`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`,
-`iv_crush_table`, `price_history_query`, `price_history_table`, `snapshot_inputs`), `engine.v2.contracts` (`RevisionCandidate`, `CompletedCoverage`,
+`iv_crush_table`, `price_history_query`, `price_history_table`), `engine.v2.contracts` (`RevisionCandidate`, `CompletedCoverage`,
 `CoverageKey`, `CoverageOutcome`, `TimeInterval`), `engine.v2.contracts.data`
 (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`, `ObjectRef`,
 `TableContractRef`, `ColumnContract`, `TableContract`),

@@ -87,8 +87,11 @@ def native(tmp_path_factory):
     snapshot = commit_tables(conn, clock, tables, contracts, partition_logical_hashes=hashes, store=store)
     # The pinned ^GSPC price_history regime series: the spy block's only close
     # source, distinct from the SPY daily_market spot so the two are never confused.
+    # ``close_adj`` is deliberately offset from ``close_raw`` (a wrong-column read
+    # of ``close_adj`` then fails the regime oracles), even though real ^GSPC
+    # capture rows store the two equal.
     regime_rows = [{"date": day, "close": 4000.0 + index} for index, day in enumerate(days)]
-    ph_input = [dict(ticker=REGIME_TICKER, date=row["date"], close_adj=row["close"],
+    ph_input = [dict(ticker=REGIME_TICKER, date=row["date"], close_adj=row["close"] + 1.0,
                      close_raw=row["close"], high_raw=row["close"], retrieved_at="2025-01-01T00:00:00Z",
                      deleted=False, source_kind="legacy_gspc_csv", source_hash="sha256:" + "ab" * 32,
                      capture_id="synthetic-gspc") for row in regime_rows]

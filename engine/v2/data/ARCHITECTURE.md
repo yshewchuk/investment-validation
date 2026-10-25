@@ -862,7 +862,7 @@ Root doc §5 invariants this package is responsible for:
    | missing, non-regular or symlinked at discovery | not discovered (no retrieval entry) |
    | non-regular, over-cap or malformed at read | that ticker's capture fails — the same error path as a malformed px csv |
    | required with no live `^GSPC` rows (the run's state, or the prior version when the source lists nothing) | `SOURCE_NOT_FOUND` before any write |
-   | a row with a null Close or High | dropped |
+   | a row with a null Close or High or an unparseable date | dropped |
 
 - **A `price_history` retrieval never drops stored history.** A full-history
   retrieval that omits any currently live stored date (truncated end,

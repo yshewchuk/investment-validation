@@ -50,7 +50,7 @@ decision_session, history_start)` composes `daily_state_inputs`/`panel_math`/
 `nightly_raw_row_producer` calls it once per `(ticker, event_date, session)`
 (`engine/v2/ops/ARCHITECTURE.md` "Raw-row producer").
 
-<!-- public-interface: panel_math.DAILY_STATE_FIELDS, recipes, FeatureRegistry, default_feature_registry, runup_math, add_runup_features, regime.add_regime_features, daily_state_inputs.DailyStateInputs, daily_state_inputs.scan_daily_state_inputs, panel_row_inputs.PanelRowInputs, panel_row_inputs.scan_panel_row -->
+<!-- public-interface: panel_math.DAILY_STATE_FIELDS, recipes, FeatureRegistry, default_feature_registry, runup_math, add_runup_features, regime.add_regime_features, regime.validated_regime_closes, daily_state_inputs.DailyStateInputs, daily_state_inputs.scan_daily_state_inputs, panel_row_inputs.PanelRowInputs, panel_row_inputs.scan_panel_row -->
 
 ## Consumers
 
