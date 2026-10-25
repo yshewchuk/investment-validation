@@ -582,3 +582,49 @@ def test_manifest_document_refuses_in_place_growth_beyond_manifest_limit(
     with pytest.raises(OpsError) as caught:
         retention_module._manifest_document(path)
     assert caught.value.problem.details["reason_key"] == "backup_manifest_oversized"
+
+
+def test_oversized_live_ref_metadata_refuses_and_deletes_nothing(
+        tmp_path, catalog, monkeypatch):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "old", "2026-01-01T00:00:00+00:00")
+    _write_backup(scope, "new", "2026-01-02T00:00:00+00:00")
+    base = default_materialization_base(ops)
+    base.mkdir(parents=True)
+    _materialization_dir(base, "root-old", 1)
+    _materialization_dir(base, "root-new", 2)
+    _register_artifact(catalog, "art_live")
+    _live_attempt(catalog, [(REQUEST_BINDING, "art_live")])
+    catalog.execute(
+        "UPDATE artifacts SET ref_json = ? WHERE artifact_id = ?",
+        (json.dumps({"pad": "x" * (retention_module._LIVE_REQUEST_LIMIT + 1)}),
+         "art_live"))
+    monkeypatch.setattr(
+        retention_module, "request_from_artifact",
+        lambda *args: pytest.fail("oversized ref metadata was read"))
+    before = _files(ops)
+
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+
+    assert caught.value.code == "INTEGRITY_FAILED"
+    assert _files(ops) == before
+
+
+def test_backup_artifact_inventory_overflow_refuses_and_deletes_nothing(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "old", "2026-01-01T00:00:00+00:00")
+    _write_backup(scope, "new", "2026-01-02T00:00:00+00:00")
+    for index in range(10_001):
+        (scope / "artifacts" / f"synthetic-{index:05d}.bin").touch()
+    before = _files(ops)
+
+    with pytest.raises(OpsError) as caught:
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1)
+
+    assert caught.value.problem.details["reason_key"] == "backup_artifact_inventory_exceeded"
+    assert _files(ops) == before

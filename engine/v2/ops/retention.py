@@ -1,9 +1,3 @@
-"""Prune verified catalog backups and unreferenced materialization roots.
-
-A scope under ``ops_root/backups`` holds ``<key>.sqlite``, ``<key>.manifest.json``
-and a shared ``artifacts/`` directory. All candidates are verified and planned
-before deletion starts, though deletion itself is not atomic; any malformed,
-stray or incomplete file refuses the whole call. Roots beside ``ops_root`` are kept by mtime, plus every root a live attempt still binds."""
 from __future__ import annotations
 
 import hashlib
@@ -27,18 +21,15 @@ KEEP_ENV, DEFAULT_KEEP = "OPS_BACKUP_RETENTION_KEEP", 7
 MATERIALIZATION_KEEP_ENV, DEFAULT_MATERIALIZATION_KEEP = "OPS_MATERIALIZATION_RETENTION_KEEP", 11
 _SCHEMA, _DB, _MANIFEST = "catalog_backup.v1.0", ".sqlite", ".manifest.json"
 _MANIFEST_LIMIT, _FILE_LIMIT = 10 * 1024 * 1024, 4 * 1024**3
+_LIVE_ATTEMPT_LIMIT, _BACKUP_ARTIFACT_LIMIT = 10_000, 10_000
 _MANIFEST_KEYS = frozenset({"schema_version", "backup_key", "cutoff", "database", "artifacts"})
 _ARTIFACT_KEYS = frozenset({"content_hash", "byte_size"})
 _LIVE_STATES = ("starting", "running", "cancelling", "recovery_pending")
 _REQUEST_BINDING = "materialization_request.json"
-_LIVE_ATTEMPT_LIMIT = 10_000
 _LIVE_SPEC_LIMIT = 16 * 1024
 _LIVE_REQUEST_LIMIT = 16 * 1024
 _PROTECTED_KINDS = frozenset({"legacy_materialize", "legacy_finality", "legacy_features"})
 _OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-
-def _stderr(event, **fields):
-    sys.stderr.write(json.dumps({"event": event, **fields}, sort_keys=True) + "\n")
 
 def _no_keepalive():
     pass
@@ -223,11 +214,16 @@ def _scope_files(scope):
 
 def _present_artifacts(artifacts_dir):
     present = set()
+    count = 0
     if artifacts_dir.exists():
         for path in artifacts_dir.iterdir():
             if path.is_symlink() or not path.is_file():
                 raise fail("INTEGRITY_FAILED", "stray backup artifact",
                            details={"reason_key": "backup_artifact_stray"})
+            count += 1
+            if count > _BACKUP_ARTIFACT_LIMIT:
+                raise fail("INTEGRITY_FAILED", "backup artifact inventory exceeds the 10,000-entry limit",
+                           details={"reason_key": "backup_artifact_inventory_exceeded"})
             present.add(path.name)
     return present
 
@@ -323,7 +319,8 @@ def _live_request_root(base, conn, store, attempt_id):
                    "live materialization attempt has no single request binding",
                    details={"reason_key": "live_request_binding_invalid",
                             "attempt_id": attempt_id})
-    request_ref = registered_artifact(conn, bound[0][0])
+    request_ref = registered_artifact(conn, bound[0][0],
+                                      max_metadata_bytes=_LIVE_REQUEST_LIMIT)
     if request_ref.byte_size > _LIVE_REQUEST_LIMIT:
         raise fail("INTEGRITY_FAILED",
                    "live materialization request artifact exceeds the 16 KiB limit",
@@ -339,9 +336,9 @@ def _materialization_plan(ops_root, keep, conn, store, keepalive=_no_keepalive):
         raise fail("INTEGRITY_FAILED", "materialization root is not a directory",
                    details={"reason_key": "materialization_root_invalid"})
     live = _live_roots(base, conn, store, keepalive=keepalive)
+    print(json.dumps({"event": "RETENTION_CURRENT_PUBLICATION_UNBOUND"}), file=sys.stderr)
     if not base.exists():
         return []
-    _stderr("RETENTION_CURRENT_PUBLICATION_UNBOUND")
     entries = []
     for item in base.iterdir():
         if item.name.startswith("."):
@@ -363,9 +360,6 @@ def _remove_tree(path, keepalive=_no_keepalive):
 
 def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=None,
                       keepalive=None):
-    """Keep the newest verified backups and materialization roots; return pruned keys.
-
-    ``conn`` and ``store`` are the coordinator's already-open operations catalog and artifact store; live root resolution never guesses or re-opens them."""
     keepalive = keepalive or _no_keepalive
     keep = _limit(keep, KEEP_ENV, DEFAULT_KEEP, "backup")
     materialization_keep = _limit(materialization_keep, MATERIALIZATION_KEEP_ENV,
