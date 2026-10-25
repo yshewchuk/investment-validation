@@ -72,6 +72,24 @@ close on completion, errors or generator closure; existing row/integrity checks 
 
 ## Primary contracts and public interfaces
 
+**Confirmed-event metadata.** `confirmed_event_metadata.classify_metadata(events)`
+returns one tuple entry per supplied row, preserving order, duplicates and index
+independence. It shares computed_moves' native input guards and per-event reasons,
+without the public population classifier's collapse, price or ticker overrides.
+Only event_date/session/src_orats values are inspected; extra payload is ignored.
+Dates/null cells retain native guard semantics, including aware midnights;
+this is not strict Arrow source-type/clock admission. No coercion,
+ordinal, conflict check, source authentication or contributor admission occurs.
+Caller-owned bounds remain necessary: several linear passes over rows/labels and
+O(rows) result/temporaries, not an RSS guarantee. No I/O, cache, retry, transaction,
+partial result or input mutation; no production caller is wired.
+
+| Metadata condition | Outcome |
+|---|---|
+| DataFrame with unique column labels and event_date/session/src_orats | Native validation, then ordered tuple: false src_orats → `not_orats`; otherwise null session → `no_session`; otherwise `None`. |
+| Correctly typed empty frame | Empty tuple; required columns/types still validated. |
+| Bad frame/columns, native validation refusal or builtin shape/value failure | Nonretryable `CONTRACT_MISMATCH`; native DataErrors preserved, builtin failures normalized with a fixed redacted message. |
+
 **IV-crush target construction.** `iv_crush.build_rows` is a pure, bounded,
 single-ticker builder for `iv_crush_table.IV_CRUSH_CONTRACT`
 (`iv_crush_targets.v2`). It consumes caller-supplied event date/session and

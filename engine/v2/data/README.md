@@ -45,6 +45,7 @@ timestamp to a naive UTC datetime, refusing `CONTRACT_MISMATCH` on invalid input
 
 | Module | Names |
 |---|---|
+| `confirmed_event_metadata` | `classify_metadata` — pure tuple of native per-row confirmation reasons; validates supplied metadata without sorting, collapsing, prices, source admission or population eligibility. |
 | `iv_crush` | `build_rows`, `MAX_GAP_DAYS` — pure bounded single-ticker signed IV30 targets with pre/post anchors, next-day modeled availability, explicit skips and input hashes. No source verification, store access or experiment admission. |
 | `iv_crush_table` | `IV_CRUSH_CONTRACT`, `IV_CRUSH_TABLE_NAME` — native `iv_crush_targets.v2` definition; explicit skipped rows and caller-declared source identity, with no publication/finality claim. |
 | `massive_daily` | `CONTRACT`, `TABLE`, `NORMALIZER`, `normalize_rows`, `build_candidate` — strict explicit-basis daily OHLCV reconstruction from verified pinned pages; native immutable fragment/manifest construction, with atomic publication owned by ops. |
