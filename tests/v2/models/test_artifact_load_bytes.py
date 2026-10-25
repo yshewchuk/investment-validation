@@ -1,0 +1,85 @@
+"""``load_bytes`` verification for the payoff and recalibration loaders."""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from engine.v2.models.payoff_artifact import (
+    PayoffArtifactError,
+    PayoffArtifactLoader,
+    make_payoff_line_artifact,
+    serialize_payoff_artifact,
+)
+from engine.v2.models.recalibration_artifact import (
+    RecalibrationArtifactError,
+    RecalibrationArtifactLoader,
+    serialize_recalibration_artifact,
+)
+from engine.v2.models.training.recalibration import build_recalibration_map_artifact
+
+_LINE_FIT = {
+    "intercept": 0.05, "slope": 0.004, "resid_sd": 0.01, "n": 250,
+    "r": 0.42, "residuals": [0.01, -0.02, 0.03, -0.01],
+}
+
+CUTOFF = "2020-09-01"
+
+
+def _pairs(n=900, seed=5) -> pd.DataFrame:
+    """Mixed strategies/alphas, post-cutoff rows, NaNs and tied raw_win values."""
+    rng = np.random.default_rng(seed)
+    raw = np.round(rng.uniform(0.0, 1.0, n), 2)
+    frame = pd.DataFrame({
+        "strategy": np.where(rng.random(n) < 0.8, "STR-THRU", "STR-RUNUP"),
+        "fill_alpha": np.where(rng.random(n) < 0.8, 0.5, 0.25),
+        "event_id": [f"E{i}" for i in range(n)],
+        "ticker": "AAA",
+        "event_date": pd.Timestamp("2019-01-01"),
+        "exit_date": pd.Timestamp("2019-01-01") + pd.to_timedelta(rng.integers(0, 800, n), "D"),
+        "raw_win": raw,
+        "outcome": (rng.uniform(0, 1, n) < 0.2 + 0.5 * raw).astype(float),
+    })
+    frame.loc[:6, "raw_win"] = np.nan
+    frame.loc[7:9, "outcome"] = np.nan
+    return frame
+
+
+def test_loader_load_bytes_refuses_a_hash_mismatch(tmp_path):
+    artifact = make_payoff_line_artifact(
+        _LINE_FIT, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+    )
+    raw = serialize_payoff_artifact(artifact)
+    loader = PayoffArtifactLoader(tmp_path)
+    with pytest.raises(PayoffArtifactError, match="hash mismatch"):
+        loader.load_bytes(raw, "sha256:" + "0" * 64)
+
+
+def test_loader_load_bytes_loads_good_bytes(tmp_path):
+    artifact = make_payoff_line_artifact(
+        _LINE_FIT, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+    )
+    raw = serialize_payoff_artifact(artifact)
+    loader = PayoffArtifactLoader(tmp_path)
+    loaded = loader.load_bytes(raw, artifact.content_hash)
+    assert loaded == artifact
+    assert loader.cache_size == 1
+
+
+def test_recalibration_loader_load_bytes_refuses_a_hash_mismatch(tmp_path):
+    artifact = build_recalibration_map_artifact(_pairs(), strategy="STR-THRU", alpha=0.5,
+                                                before=CUTOFF)
+    raw = serialize_recalibration_artifact(artifact)
+    loader = RecalibrationArtifactLoader(tmp_path)
+    with pytest.raises(RecalibrationArtifactError, match="hash mismatch"):
+        loader.load_bytes(raw, "sha256:" + "0" * 64)
+
+
+def test_recalibration_loader_load_bytes_loads_good_bytes(tmp_path):
+    artifact = build_recalibration_map_artifact(_pairs(), strategy="STR-THRU", alpha=0.5,
+                                                before=CUTOFF)
+    raw = serialize_recalibration_artifact(artifact)
+    loader = RecalibrationArtifactLoader(tmp_path)
+    loaded = loader.load_bytes(raw, artifact.content_hash)
+    assert loaded == artifact
+    assert loader.cache_size == 1

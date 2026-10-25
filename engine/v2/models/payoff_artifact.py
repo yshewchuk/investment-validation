@@ -370,9 +370,17 @@ class PayoffArtifactLoader:
             raw = path.read_bytes()
         except OSError as exc:
             raise PayoffArtifactError(f"missing payoff artifact: {ref.path}") from exc
+        return self.load_bytes(raw, ref.content_hash, path=ref.path)
+
+    def load_bytes(self, raw: bytes, content_hash: str, *,
+                   path: str | None = None) -> PayoffLineArtifact | PayoffSurfaceArtifact:
+        cached = self._cache.get(content_hash)
+        if cached is not None:
+            return cached
+        suffix = f": {path}" if path else ""
         digest = CONTENT_HASH_PREFIX + hashlib.sha256(raw).hexdigest()
-        if digest != ref.content_hash:
-            raise PayoffArtifactError(f"payoff artifact hash mismatch: {ref.path}")
+        if digest != content_hash:
+            raise PayoffArtifactError(f"payoff artifact hash mismatch{suffix}")
         try:
             document = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -380,13 +388,13 @@ class PayoffArtifactLoader:
         if not isinstance(document, Mapping):
             raise PayoffArtifactError("payoff artifact document must be a JSON object")
         artifact = _artifact_from_document(document)
-        if artifact.content_hash != ref.content_hash:
+        if artifact.content_hash != content_hash:
             # Defense in depth: the bytes matched ``ref`` above, but a writer
             # bug (rounding, a field the payload builder forgot) could still
             # produce a document whose OWN recomputed identity disagrees with
             # what it was published under.
             raise PayoffArtifactError(
-                f"payoff artifact content disagrees with its own hash: {ref.path}"
+                f"payoff artifact content disagrees with its own hash{suffix}"
             )
-        self._cache[ref.content_hash] = artifact
+        self._cache[content_hash] = artifact
         return artifact

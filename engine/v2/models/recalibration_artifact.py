@@ -252,8 +252,16 @@ class RecalibrationArtifactLoader:
             raw = path.read_bytes()
         except OSError as exc:
             raise RecalibrationArtifactError(f"missing recalibration artifact: {ref.path}") from exc
-        if CONTENT_HASH_PREFIX + hashlib.sha256(raw).hexdigest() != ref.content_hash:
-            raise RecalibrationArtifactError(f"recalibration artifact hash mismatch: {ref.path}")
+        return self.load_bytes(raw, ref.content_hash, path=ref.path)
+
+    def load_bytes(self, raw: bytes, content_hash: str, *,
+                   path: str | None = None) -> RecalibrationMapArtifact:
+        cached = self._cache.get(content_hash)
+        if cached is not None:
+            return cached
+        suffix = f": {path}" if path else ""
+        if CONTENT_HASH_PREFIX + hashlib.sha256(raw).hexdigest() != content_hash:
+            raise RecalibrationArtifactError(f"recalibration artifact hash mismatch{suffix}")
         try:
             document = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -261,8 +269,8 @@ class RecalibrationArtifactLoader:
         if not isinstance(document, Mapping):
             raise RecalibrationArtifactError("recalibration artifact must be a JSON object")
         artifact = _artifact_from_document(document)
-        if artifact.content_hash != ref.content_hash:
+        if artifact.content_hash != content_hash:
             raise RecalibrationArtifactError(
-                f"recalibration artifact content disagrees with its own hash: {ref.path}")
-        self._cache[ref.content_hash] = artifact
+                f"recalibration artifact content disagrees with its own hash{suffix}")
+        self._cache[content_hash] = artifact
         return artifact

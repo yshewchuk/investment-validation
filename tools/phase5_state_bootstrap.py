@@ -12,6 +12,7 @@ import resource
 import sys
 import time
 from pathlib import Path
+from typing import Mapping
 
 MAX_STATE_BYTES = 512 * 1024 * 1024
 
@@ -25,7 +26,7 @@ def _log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
-def _classify_bound_files(root: Path, names):
+def classify_bound_files(root: Path, names):
     """Split bound files into frozen states and payoff/recalibration artifacts."""
     from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
     from engine.v2.models.payoff_artifact import (
@@ -67,6 +68,18 @@ def _binding_view(binding) -> tuple:
         tuple(binding.output_names),
         tuple(sorted((member.name, member.content_hash) for member in binding.members)),
     )
+
+
+def _merge_checked(found: dict[str, dict[str, bytes]],
+                   more: Mapping[str, Mapping[str, bytes]]) -> None:
+    from tools.phase5_state_stage_job import StageRefused
+
+    for member, objects in more.items():
+        for name in objects:
+            if name in found.get(member, {}):
+                raise StageRefused("a state object appears twice", {"member": member})
+    for member, objects in more.items():
+        found.setdefault(member, {}).update(objects)
 
 
 def _compare_incumbent_bindings(release_root: Path, prior_release_id, inventory, release):
@@ -160,10 +173,7 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
             _compare_incumbent_bindings(release_root, parameters["prior_release_id"],
                                         inventory, release)
 
-        try:
-            frozen_files, artifact_files = _classify_bound_files(root, parameters["state_files"])
-        except BoundedStateReadError as exc:
-            raise StageRefused("a bound state file could not be loaded") from exc
+        frozen_files, artifact_files = classify_bound_files(root, parameters["state_files"])
 
         found: dict[str, dict[str, bytes]] = {}
         try:
@@ -194,8 +204,8 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
             raise StageRefused("candidate release could not be published") from exc
 
         try:
-            merge_payloads(found, default_admissible_table())
-            merge_payloads(found, tier4_fold_payloads(
+            _merge_checked(found, default_admissible_table())
+            _merge_checked(found, tier4_fold_payloads(
                 Path(bootstrap["tier4_dir"]),
                 {binding.role: binding.artifact_id for binding in inventory.bindings
                  if binding.strategy_id == "*"},
@@ -239,9 +249,21 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
         if existing_catalog.exists():
             try:
                 body = read_catalog(existing_catalog, parameters["release_id"])
-                if body is not None and body.get("sources", {}).get("pool_cutoff") != cutoff:
-                    raise StageRefused("candidate release could not be published",
-                                       {"code": "ID_CONFLICT"})
+                if body is not None:
+                    existing_hashes = {
+                        obj["content_hash"]
+                        for row in body.get("members", [])
+                        for obj in row.get("objects", [])
+                    }
+                    candidate_hashes = {
+                        sha256_bytes(data)
+                        for build in states if build.status == "STAGED"
+                        for data in build.payloads.values()
+                    }
+                    if (body.get("sources", {}).get("pool_cutoff") != cutoff
+                            or existing_hashes != candidate_hashes):
+                        raise StageRefused("candidate release could not be published",
+                                           {"code": "ID_CONFLICT"})
             except StageRefused:
                 raise
             except ReleaseLayoutError as exc:
@@ -281,7 +303,8 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
                 "prior_release_id": parameters["prior_release_id"], "cutoff": cutoff,
                 "n_new": n_objects, "n_carried": 0}
 
-    except StageRefused:
+    except StageRefused as exc:
+        code = f" code={exc.details['code']}" if "code" in exc.details else ""
         _log(f"[bootstrap] stage failed elapsed={time.time() - start:.1f}s "
-             f"rss={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}")
+             f"rss={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}{code}")
         raise

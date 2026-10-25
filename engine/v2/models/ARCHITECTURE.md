@@ -327,10 +327,10 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
   manifest, as `training` jobs bind it): the kind declares a `legacy_store` read, so the job's read set
   carries the legacy tree the inventory reads the champion registry from. A plan without the manifest
   is refused `INVALID_REQUEST`.
-- The bound files must cover exactly the advancing members `paired_residual_pool`,
-  `board_analog_matcher`, `trailing_pnl_cutoff`. Paired and board objects carry `cutoff` as
+- In `carry` mode the bound files must cover exactly the advancing members `paired_residual_pool`,
+  `board_analog_matcher`, `trailing_pnl_cutoff` (`bootstrap` mode binds the full set, §2.2.2). Paired and board objects carry `cutoff` as
   the last name segment; trailing objects are stamped with `cutoff`.
-- Every other prior pool/chooser object, and every prior object of an advancing member not
+- In `carry` mode every other prior pool/chooser object, and every prior object of an advancing member not
   re-supplied, is carried (`prior_carry_set`), so older causal keys stay selectable and
   driver pools and the chooser keep their hash until a retrain (the planned monthly refresh, §2.3, is not built) re-supplies them.
 - Output: a re-verified candidate release (never `DEPLOYED`) and `stage_result.json`. The

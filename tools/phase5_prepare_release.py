@@ -204,8 +204,8 @@ def payoff_payloads(training_roots: Iterable[Path]) -> dict[str, dict[str, bytes
     for base in training_roots:
         for path in sorted(Path(base).rglob(PAYOFF_ARTIFACT_FILE)):
             data = read_bounded_state(path, MAX_STATE_BYTES, no_follow=True)
-            artifact = PayoffArtifactLoader(path.parent).load(
-                PayoffArtifactRef(path=path.name, content_hash=sha256_bytes(data)))
+            artifact = PayoffArtifactLoader(path.parent).load_bytes(
+                data, sha256_bytes(data))
             name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
             found.setdefault(payoff_member_id(artifact), {})[name] = data
     return found
@@ -223,8 +223,8 @@ def recalibration_payloads(training_roots: Iterable[Path]) -> dict[str, dict[str
     for base in training_roots:
         for path in sorted(Path(base).rglob(RECALIBRATION_ARTIFACT_FILE)):
             data = read_bounded_state(path, MAX_STATE_BYTES, no_follow=True)
-            artifact = RecalibrationArtifactLoader(path.parent).load(
-                RecalibrationArtifactRef(path=path.name, content_hash=sha256_bytes(data)))
+            artifact = RecalibrationArtifactLoader(path.parent).load_bytes(
+                data, sha256_bytes(data))
             name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
             found.setdefault(f"recalibration_map:{artifact.strategy}", {})[name] = data
     return found
@@ -263,16 +263,16 @@ def artifact_file_payloads(files: Iterable[Path | tuple[Path, bytes]]) -> dict[s
         if not isinstance(schema, str):
             raise StageRefused("a bound state file could not be loaded")
         if schema in (PAYOFF_LINE_ARTIFACT_V1, PAYOFF_SURFACE_ARTIFACT_V1):
-            artifact = PayoffArtifactLoader(path.parent).load(
-                PayoffArtifactRef(path=path.name, content_hash=sha256_bytes(data)))
+            artifact = PayoffArtifactLoader(path.parent).load_bytes(
+                data, sha256_bytes(data))
             name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
             member = payoff_member_id(artifact)
             if name in found.setdefault(member, {}):
                 raise StageRefused("a state object appears twice", {"member": member})
             found[member][name] = data
         elif schema == RECALIBRATION_MAP_ARTIFACT_V1:
-            artifact = RecalibrationArtifactLoader(path.parent).load(
-                RecalibrationArtifactRef(path=path.name, content_hash=sha256_bytes(data)))
+            artifact = RecalibrationArtifactLoader(path.parent).load_bytes(
+                data, sha256_bytes(data))
             name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
             member = f"recalibration_map:{artifact.strategy}"
             if name in found.setdefault(member, {}):
