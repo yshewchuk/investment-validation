@@ -111,7 +111,10 @@ stale > degraded**; banner class `unknown`/`stale`/`degraded` or empty.
 | Engineering `ok` false with zero `consecutive_nights` (valid `latest`-null fresh no-observation shape; producers' unknown latest night) | unknown |
 | `unknown_occurrences` contains `latest_occurrence` (a field-less document conservatively reads any nonempty list this way) | unknown (latest outcome; streak evidence stays visible) |
 | `current_release.release_id` missing | unknown |
-| Health release differs from the frame pin or the published current | stale (pin unavailable, published current not yet observed, or published current unavailable: unknown) |
+| Health release differs from an available frame pin | stale |
+| Health release differs from an available published current | stale |
+| Frame pin unavailable (health release cannot be compared to a pin) | unknown |
+| Published current unavailable, or not yet observed | unknown |
 | Pin and published current differ | stale drift notice plus reload opt-in |
 | All evidence passes | current |
 

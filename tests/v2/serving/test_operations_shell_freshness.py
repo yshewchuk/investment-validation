@@ -160,6 +160,14 @@ def test_latest_completed_session_does_not_read_a_naive_clock_as_utc():
         datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc)) == "2026-10-02"
 
 
+def test_latest_completed_session_refuses_the_datetime_minimum():
+    """A clock at the ``datetime`` minimum has no earlier session: stepping
+    backward underflows the calendar, and that arithmetic ``OverflowError`` is
+    converted to a clear ``ValueError`` rather than escaping."""
+    with pytest.raises(ValueError, match="clock is at the date minimum"):
+        latest_completed_session(datetime.min)
+
+
 def test_latest_completed_session_accepts_a_valid_frozen_snapshot_clock():
     assert latest_completed_session(frozen_at="2026-10-05T21:00:00Z") == "2026-10-05"
     assert latest_completed_session(frozen_at="2026-10-05T19:59:00Z") == "2026-10-02"
@@ -288,6 +296,7 @@ def test_health_route_serves_every_supported_schema_version(tmp_path, schema_ver
 
 
 _OVERSIZE_HEALTH_BYTES = 2 * 1024 * 1024  # comfortably past the readers' 1 MiB cap
+_HEALTH_CAP_BYTES = 1_048_576  # operations._HEALTH_MAX_BYTES: the exact cap
 
 
 def _write_padded_json(path: Path, document: dict, size: int) -> None:
@@ -299,23 +308,32 @@ def _write_padded_json(path: Path, document: dict, size: int) -> None:
     path.write_bytes((text + " " * (size - len(text))).encode("utf-8"))
 
 
-def test_health_route_refuses_an_oversize_health_artifact(tmp_path):
-    """A health artifact past the readers' size cap is refused as the route's
-    established 503, never buffered and parsed whole on the shell's 30s poll."""
+@pytest.mark.parametrize(("size", "refused"), [
+    (_HEALTH_CAP_BYTES, False),     # exactly at the cap is served, not refused
+    (_HEALTH_CAP_BYTES + 1, True),  # one byte past the cap is refused before parsing
+])
+def test_health_route_enforces_the_exact_one_mebibyte_cap(tmp_path, size, refused):
+    """The cap is a byte-count check that runs before parsing, so the boundary
+    is exact: a 1 MiB health artifact is served whole while 1 MiB + 1 is
+    refused as the route's established 503, never buffered and parsed whole on
+    the shell's 30s poll."""
     _write_bundle(tmp_path, "r1")
     (tmp_path / "CURRENT").write_text("r1\n")
     health = tmp_path / "health.json"
     _write_padded_json(health, {"schema_version": "operations_health.v1.2",
-                                "generated_at": "2026-10-05T17:00:00Z"},
-                       _OVERSIZE_HEALTH_BYTES)
+                                "generated_at": "2026-10-05T17:00:00Z"}, size)
     server, thread = _serve(tmp_path, health)
     try:
         request = Request(f"http://127.0.0.1:{server.server_port}/health.json")
         request.add_header("Authorization", "Bearer browser-secret")
-        with pytest.raises(HTTPError) as refused:
-            urlopen(request, timeout=5)
-        assert refused.value.code == 503
-        assert refused.value.read() == b"unknown\n"
+        if refused:
+            with pytest.raises(HTTPError) as raised:
+                urlopen(request, timeout=5)
+            assert raised.value.code == 503
+            assert raised.value.read() == b"unknown\n"
+        else:
+            response = urlopen(request, timeout=5)
+            assert json.loads(response.read())["schema_version"] == "operations_health.v1.2"
     finally:
         _stop(server, thread)
 
