@@ -40,8 +40,9 @@ bundle members only feed legacy pages.
 
 | Artifact (legacy name) | Native producer | Status |
 |---|---|---|
-| Board rows and per-event detail (`board`, `tickers/*`) | Serving release built by a new `serving_projection` job kind from persisted native score-batch records and refusals, snapshot-pinned | new (slice 3) |
-| Row-level flags (`flags`, panel lag, calendar conflict, execution clock) | Per-row `flags` already on the display row, plus `operations_status.json` session fields; no separate flags document | exists; legacy document dropped |
+| Board rows and per-event detail (`board`, `tickers/*`) | The `serving_projection` job already designed in [serving_projection_job.md](serving_projection_job.md) (#717: a leaf after `publication`, unchanged placement and failure table). This design changes only its row source: it reads persisted native score-batch records and refusals instead of `bundle.tar` | changed (slice 3) |
+| Row-level flags (`flags`, panel lag, calendar conflict, execution clock) | Per-row `flags` the native display row carries, plus `operations_status.json` session fields; no flags document. The legacy panel-lag and calendar-conflict flags have no native producer and are dropped at cutover (accepted loss; a native producer is post-cutover work) | exists; legacy document dropped |
+| Native parity (not a bundle member) | Catalog `native_parity` job report read by the API; unchanged | exists |
 | Health (`health.json`) | `operations_health.v1.1` (`ops/health.py`) and the ledger calibration `ledger_health.v1` file | exists |
 | Model identity and release (`meta` model block, `strategies`) | `/models/release` view over the deployed model release (`models.deployment`) | exists |
 | Book (`book`) | Ledger portfolio (`engine/v2/ledger/portfolio.py`); no bundle copy | exists; see question Q3 |
@@ -56,7 +57,9 @@ in the removal PR, not before.
 
 Projection input rule. `serving_projection` reads the persisted batch records
 (`native_score_batch_records.v2.0`) and projects them with `native_display_row`; it never calls
-`score_one`. Re-scoring belongs to the selfcheck only. If a display field needs stage
+`score_one`. Re-scoring belongs to the selfcheck only. The records are the scoring
+authority the same way the shadow batch is today (`ops/ARCHITECTURE.md` promotion rules);
+this design promotes nothing beyond what the wiring slice states. If a display field needs stage
 observations the batch does not persist (the analog fields behind #681 are the known case), the
 batch writer persists them in slice 3 and the schema version is bumped. No fallback fills a
 missing field from any other source.
@@ -65,41 +68,49 @@ missing field from any other source.
 
 Purpose. The legacy check re-scored sampled bundle rows through `engine.score.score` to prove
 "the bundle still equals what the engine produces now". The native equivalent keeps that
-question: does the projected release equal what the pinned code, snapshot and model release
-produce now, and has no row been altered after scoring?
+question: do the batch's records equal what the pinned code, snapshot and model release
+produce now, and has no record been altered after scoring? It runs before publication, as the
+legacy selfcheck did; the serving projection runs after publication (#717) and reads the same
+records, so the display rows are checked here by projecting both sides with `native_display_row`.
 
 Inputs (all bound job inputs, none discovered; the batch records carry a per-record input hash
-and `source_record_hash`, which slice 3 adds if absent): the `serving_projection` output (release rows and
-`projection_binding`), the native score-batch records, the pinned snapshot and the deployed model
-release identity.
+and `source_record_hash`, which slice 2 adds if absent): the native score-batch records, the
+pinned snapshot and the deployed model release identity.
 
 Procedure.
-1. Draw a sample of `N` projected rows (default 20, the legacy default) with a seed that is a
-   content hash of `release_id` and the plan identity. Never a clock or `random` default seed.
+1. Draw a sample of `N` batch records (default 20, the legacy default) with a seed that is a
+   content hash of the batch artifact id and the plan identity. Never a clock or `random` default seed.
    The sample is first the forced rows (one per strategy present, plus DYN-SV chooser rows up to
    a cap of 10), then random rows up to `N`. Forced rows count toward `N`; if they alone exceed
    `N`, the sample is the forced rows (size `max(N, forced)`), recorded in the output.
 2. For each sampled row, rebuild its `NativeScoreInputs` from the pinned snapshot (not from the
    batch's persisted copy) and compare the input hash with the batch's recorded input hash.
 3. Re-run `score_one` and compare (a) the record digest with the stored `source_record_hash`
-   and (b) every displayed field at display precision with the release row. The precision constant
+   and (b) every displayed field at display precision with the display row projected from the stored
+   record. The precision constant
    (today `BUNDLE_PRECISION` = 6, defined in the legacy renderer) moves to a serving-contract
    constant in slice 1; the selfcheck must not import the legacy renderer.
-4. A chooser row is verified against the structure it names: re-score `chosen_strategy`, restore
-   the chooser name, require the digest to agree; `detail` is compared by shape. Same rule as
-   today, now on native records.
-5. Write `native_selfcheck.v1.0`: `ok`, `n_checked`, `n_release_rows`, `seed`, `sample_keys`,
+4. A chooser row is verified against the structure it names: re-score `chosen_strategy` and
+   require the economic fields and the chosen structure's own record hash to agree with the
+   chooser record; `detail` is compared by shape. The exact field list is fixed in slice 1 with a
+   fixture, because a native chooser digest cannot be reproduced by renaming a record.
+5. Write `native_selfcheck.v1.0`: `ok`, `n_checked`, `n_batch_records`, `seed`, `sample_keys`,
    `mismatches` (scrubbed: field, stored and fresh value, no paths or exception text),
-   `snapshot_id`, `release_id`. Elapsed time goes to stderr only, so the artifact is byte-stable. `ok` is false on any mismatch or any unbuildable
-   input in the sample.
+   `snapshot_id`, `batch_artifact_id`. Elapsed time goes to stderr only, so the artifact is
+   byte-stable. `ok` is false on any mismatch and on any sampled input that cannot be built
+   (mismatch code `INPUT_UNBUILDABLE`). A missing or unreadable snapshot is a job failure instead.
 
 What it does not claim: it does not prove the model is good, the population is complete (the
 projection's own findings do that) or that parity holds. It proves reproducibility and absence
 of post-scoring edits for the sample.
 
-Publication gate. The manifest `gates` key stays `selfcheck`. `publication._gate_is_bound`
-binds it to a `native_selfcheck.v1.0` artifact whose `release_id` equals the staged release and
-whose `snapshot_id` equals the projection's pinned snapshot and whose `ok` is true. A `legacy_selfcheck` artifact no longer binds after the wiring PR.
+Publication gate. `publication.stage_release` requires the gate kinds `decision`, `projection`,
+`security` and `engineering`; `selfcheck` is not a gate kind. As today, `native_selfcheck` is a DAG
+predecessor of `publication`, and its pass is a precondition of the `projection` gate receipt
+(`kind` `projection`, `status` `passed`, `input_hash` equal to the release binding hash of
+release id, occurrence and files, per `_gate_is_bound`). The receipt must name the selfcheck
+artifact and the pinned snapshot; slice 2 confirms the receipt builder against `nightly.py` and
+the selfcheck failure produces `PUBLICATION_REFUSED` with `failed_gates: ["projection"]`.
 
 Cost. Work is bounded by `N` rows, not the universe: it loads only the snapshot slices for the
 sampled tickers. This is the property #505 needed, so the interim 3 GiB `projection` profile and
@@ -111,10 +122,10 @@ unmeasured full-universe fit stated as unknown in that PR, as the ops doc does t
 
 | Concern | `serving_projection` | `native_selfcheck` |
 |---|---|---|
-| Missing input (batch records, snapshot, release identity not bound) | `VALIDATION_FAILED`, no release row, no index write | `VALIDATION_FAILED`; no `selfcheck.json`; publication cannot bind the gate |
-| Score batch has refusals | Refused keys are kept as typed refusal rows; they are not dropped or rescored. Planned-population bridge findings still decide `PROJECTION_REFUSED` | Refused keys are not sampled |
+| Missing input (batch records, snapshot, release identity not bound) | Per the #717 failure table: fails, no release row, no index write | `VALIDATION_FAILED`; no selfcheck artifact; the `projection` gate receipt cannot be produced |
+| Score batch has refusals | Refused keys are kept as typed refusal rows; they are not dropped or rescored. A refusal that cannot be keyed to the population is a `PROJECTION_REFUSED` finding. Planned-population bridge findings decide `PROJECTION_REFUSED` as today | Refused keys are not sampled |
 | Findings not ok | `PROJECTION_REFUSED`, findings artifact kept, no release (unchanged serving rule) | n/a |
-| Mismatch | n/a | Artifact is written with `ok: false`; publication refuses with `PUBLICATION_REFUSED`, `failed_gates: ["selfcheck"]`; the previous `CURRENT` release stays |
+| Mismatch | n/a | Artifact is written with `ok: false`; no passing `projection` receipt, so publication refuses with `PUBLICATION_REFUSED`, `failed_gates: ["projection"]`; the previous `CURRENT` release stays |
 | Cannot run (OOM, snapshot unreadable, lease lost) | Job fails with the supervisor's typed failure; retry follows the existing attempt rules | Same. A failed check is never read as passed and there is no "unknown but publish" path |
 | Retry | Unchanged supervisor retry. No in-job retry | Same. Seed is derived, so a retry draws the same sample |
 | Idempotency | `release_id` is content-derived and index writes are `INSERT OR IGNORE`: a rerun on the same inputs writes nothing new | Output is a pure function of its bound inputs: byte-identical on rerun |
@@ -128,13 +139,14 @@ unmeasured full-universe fit stated as unknown in that PR, as the ops doc does t
 
 ```
 export ──────────────► score(native_score_batch, now a required stage)
-                          └─► serving_projection ─► native_selfcheck ─┐
-engineering_gate ─────────────────────────────────────────────────────┴► publication
+                          ├─► native_selfcheck ─┐
+engineering_gate ─────────┴─────────────────────┴► publication ─► serving_projection (leaf, #717)
 ```
 
-- `model_evidence` is removed from the DAG. `projection` no longer waits for it.
-- `native_score_batch` becomes a required stage that `serving_projection` binds as a hard
-  input. The tick-loop shadow sidecar is deleted with the wiring PR (it is the only caller that
+- `model_evidence` is removed from the DAG. The render stage `projection` is removed; its
+  gate receipt is now produced from the native selfcheck (section 4).
+- `native_score_batch` becomes a required stage that `native_selfcheck` and the post-publication
+  `serving_projection` bind as a hard input. The tick-loop shadow sidecar is deleted with the wiring PR (it is the only caller that
   today reaches the batch). This ties to #740; legacy decisions, settlement and the legacy
   `legacy_score` job are replaced by that work and are not redesigned here. This design
   states one dependency: the wiring PR cannot merge before the native batch is a required,
@@ -152,19 +164,24 @@ Each added symbol and its production caller:
 | Symbol | Production caller |
 |---|---|
 | `native_selfcheck` job kind | `nightly.GRAPH` and the supervisor job-kind registry; `publication` gate binding |
-| `serving_projection` job kind | same graph; `publication` stages its binding |
-| Row source `native` | `projections.build_candidate`, called by the job worker |
+| `serving_projection` native row source | #717's job (`_DAG_STAGES`, `plans.py`), via `tools/v2_dashboard_project.py::run_projection` and `projections.build_candidate` |
+| Production submission | the supervisor's nightly stage submission (`nightly.py` plan builder and the worker dispatch table), not a test-only graph walk; each of slices 2-4 shows its caller in that path |
 
-Timing: slices 1-4 add and wire the shadow path only; legacy authority stays until the P7-5
-switch. Removal slices (5-7) merge only after that switch, and the rollback window in the
-[Phase 7 plan](rearchitecture_phase7_cutover.md) decides whether deletion waits for it.
+Timing: slices 1-4 add and wire the v2 shadow nightly only; the legacy nightly
+(`engine.dashboard.nightly`) is untouched and legacy authority stays until the P7-5 switch.
+Removal slices (5-7) merge only after that switch and the 10-completed-session rollback
+retention window (#739, [Phase 7 plan](rearchitecture_phase7_cutover.md)), because rollback may
+need the legacy path. After removal the publication `security` gate scans the release files
+(it scanned the bundle through `run_security_scan`); slice 5 rebinds it and names the new input.
 The removal PRs delete, with their tests and docs: the actions `legacy_render`,
 `legacy_selfcheck`, `legacy_model_evidence` and their `ACTION_NAMES`/profile/effects-graph/read-plan
 entries (`legacy_nightly_read_plan.py`); `render_inputs` legacy parts; `legacy_bundle.py`;
 `LegacyBundleError`; the `bundle_format` and `legacy` options of the projection tool; the legacy
-branch of `tools/v2_dashboard_verified_input.py`; the operations listener's `/legacy/` bundle
+branch of `tools/v2_dashboard_verified_input.py`; the bundle reads in `tools/v2_dashboard_project.py`,
+`serving/score_projection.py` and `checks/rearchitecture_phase3_publish.py`; the UI's
+`ui/src/api/client.ts` row-source literal if it names one; the operations listener's `/legacy/` bundle
 hosting and the shell views fed by bundle members (`/book`, `/flags`, `/models`, `/explorer`, `/`
-shell) once Q3 is answered. Deleting the unbounded `load_legacy_bundle` reads closes the legacy
+shell) once Q3 is answered. Deleting the `load_legacy_bundle` reads (capped per member, but still a second read path) closes the legacy
 half of #818 and the legacy listener half of #799.
 
 `LegacyScoreBridge`, `LEGACY_DISPLAY_MAPPING_V1` and `bridge.py` are contract names that outlive
@@ -212,12 +229,12 @@ snapshot slices only.
 | # | Slice | Code | Test | Doc |
 |---|---|---|---|---|
 | 1 | Pure `native_selfcheck`, schema, precision constant | 250 | 250 | 20 |
-| 2 | Job kind, worker, gate binding, profile | 300 | 200 | 40 |
-| 3 | `serving_projection` job, batch hash fields | 380 | 250 | 40 |
+| 2 | Job kind, worker, batch hash fields, gate receipt, profile | 380 | 250 | 40 |
+| 3 | `serving_projection` native row source (#717 job, no bundle input) | 300 | 200 | 40 |
 | 4 | Wire graph, `native` row source, required batch stage | 300 | 250 | 80 |
 | 5 | Remove legacy actions, render_inputs, read plan | 60 | 80 | 40 |
 | 6 | Remove bundle loader, tool options, shell pages | 60 | 80 | 40 |
 | 7 | Rename bridge names | 120 | 120 | 40 |
 
-Removal slices are mostly deleted lines, which do not count toward size. Slice 3 is nearest the
-limit; if the batch change grows, it splits into batch fields, then projection.
+Removal slices are mostly deleted lines, which do not count toward size. Slice 2 is nearest the
+limit; if the batch change grows, it splits into batch hash fields, then the job.
