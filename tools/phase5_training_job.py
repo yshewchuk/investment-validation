@@ -174,18 +174,22 @@ STATES = tuple(f"driver_residual_pool:{role}" for role in ("size", "implied_t1",
 #: spelled out so this job stays off the heavy ``engine.score`` import.
 _CHOOSER_POOL_FILE = "chooser_analog_pool.parquet"
 
-#: Read bound: the real pool is ~2.5 MB; refuse a source grown past this
-#: instead of reading an unbounded frame into memory.
-_CHOOSER_POOL_MAX_BYTES = 256 * 1024 * 1024
-
 
 def _iso_cutoff(value: str) -> str:
     """The normalized ``YYYY-MM-DD`` cutoff string.
 
-    Raises ``TypeError``/``ValueError`` for anything that is not an ISO date;
-    callers turn that into their own refusal (``SystemExit`` / ``ap.error``).
+    Raises ``TypeError``/``ValueError`` for anything that is not a canonical
+    ISO date; callers turn that into their own refusal (``SystemExit`` /
+    ``ap.error``). ``date.fromisoformat`` accepts the compact and week forms
+    (``20260213``, ``2026-W07-5``) on 3.11+, so the length and the
+    round-trip equality are both required.
     """
-    return datetime.date.fromisoformat(value).isoformat()
+    if len(value) != 10:
+        raise ValueError(f"not a YYYY-MM-DD date: {value!r}")
+    bound = datetime.date.fromisoformat(value).isoformat()
+    if bound != value:
+        raise ValueError(f"not a canonical YYYY-MM-DD date: {value!r}")
+    return bound
 
 
 def _guard(where: str) -> None:
@@ -239,7 +243,7 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
 
         from engine import paths
         from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
-        from tools.phase5_prepare_release import CHOOSER_POOL_ID
+        from tools.phase5_prepare_release import CHOOSER_POOL_ID, CHOOSER_POOL_MAX_BYTES
 
         if cutoff is None:
             raise SystemExit("chooser_analog_pool needs a cutoff")
@@ -250,7 +254,7 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         source = paths.FEATURES / _CHOOSER_POOL_FILE
         if not source.is_file():
             raise SystemExit("chooser analog pool source is missing")
-        if source.stat().st_size > _CHOOSER_POOL_MAX_BYTES:
+        if source.stat().st_size > CHOOSER_POOL_MAX_BYTES:
             raise SystemExit("chooser analog pool source is too large")
         started = time.perf_counter()
         frame = pd.read_parquet(source)
@@ -318,7 +322,8 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
         payload = serialize_frozen_state(artifact)
         summary.update(content_hash=artifact.content_hash, file=path.name, bytes=len(payload))
         if path.exists():
-            if path.read_bytes() != payload:
+            # A different size is different content: refuse without reading.
+            if path.stat().st_size != len(payload) or path.read_bytes() != payload:
                 raise SystemExit(f"RESUME_MISMATCH: {path.name} exists with different content")
             summary["status"] = "resumed"
         else:

@@ -175,7 +175,12 @@ def _shape_problems(params) -> list[str]:
             problems.append("alpha must be a finite, non-negative number")
     for cutoff in params.cutoffs:
         try:
-            date.fromisoformat(cutoff)
+            # Canonical ``YYYY-MM-DD`` only: ``date.fromisoformat`` also takes
+            # the compact and week forms (20260213, 2026-W07-5) on 3.11+, and
+            # the week form is exactly 10 characters, so the round-trip
+            # equality is required next to the length.
+            if len(cutoff) != 10 or date.fromisoformat(cutoff).isoformat() != cutoff:
+                raise ValueError(cutoff)
         except (TypeError, ValueError):
             problems.append("cutoffs must be valid ISO dates (YYYY-MM-DD)")
             break

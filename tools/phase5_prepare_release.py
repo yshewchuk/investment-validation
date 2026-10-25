@@ -276,6 +276,10 @@ def default_admissible_table() -> dict[str, dict[str, bytes]]:
 #: The chooser analog pool's id in a release (its source file, by name).
 CHOOSER_POOL_ID = "features.chooser_analog_pool"
 
+#: Read bound: the real pool is ~2.5 MB; refuse a source grown past this
+#: instead of reading an unbounded frame into memory.
+CHOOSER_POOL_MAX_BYTES = 256 * 1024 * 1024
+
 
 def chooser_pool_payloads(path: Path) -> dict[str, dict[str, bytes]]:
     """The frozen chooser analog pool built from ``tools/build_chooser_pool.py``'s
@@ -289,6 +293,8 @@ def chooser_pool_payloads(path: Path) -> dict[str, dict[str, bytes]]:
 
     if not Path(path).is_file():
         return {}
+    if Path(path).stat().st_size > CHOOSER_POOL_MAX_BYTES:
+        raise ValueError("chooser analog pool source is too large")
     frame = pd.read_parquet(path)
     exits = pd.to_datetime(frame["exit_date"]).dropna()
     if exits.empty:

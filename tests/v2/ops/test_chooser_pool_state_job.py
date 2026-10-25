@@ -10,9 +10,12 @@ import pandas as pd
 import pytest
 
 from engine import paths
+from engine.v2.foundation import to_document
 from engine.v2.models.chooser_analog_pool import CHOOSER_ANALOG_DIMS
 from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
 from engine.v2.ops import training
+from engine.v2.ops.errors import OpsError
+from tools import phase5_prepare_release as release
 from tools import phase5_training_job as job
 from tools.phase5_prepare_release import CHOOSER_POOL_ID
 
@@ -26,18 +29,21 @@ _MISSING_SOURCE = "chooser analog pool source is missing"
 _TOO_LARGE = "chooser analog pool source is too large"
 _AT_MOST_ONE = "at most one cutoff, only for paired_residual_pool or chooser_analog_pool"
 _EXACTLY_ONE = "chooser_analog_pool needs exactly one cutoff"
+_NOT_ISO = "cutoffs must be valid ISO dates (YYYY-MM-DD)"
 
 
 def _exact(message):
     return "^" + re.escape(message) + "$"
 
 
-def _row(strategy, day, pnl):
-    return {"strategy": strategy, "exit_date": pd.Timestamp(day), "pnl": float(pnl), **_DIMS}
+def _row(strategy, day, pnl, **dims):
+    return {"strategy": strategy, "exit_date": pd.Timestamp(day), "pnl": float(pnl),
+            **{**_DIMS, **dims}}
 
 
-def _pool_row(day, pnl):
-    return (day, pnl, *[_DIMS[name] for name in CHOOSER_ANALOG_DIMS])
+def _pool_row(day, pnl, **dims):
+    values = {**_DIMS, **dims}
+    return (day, pnl, *[values[name] for name in CHOOSER_ANALOG_DIMS])
 
 
 def _pool_frame(rows):
@@ -53,11 +59,13 @@ def _write_source(tmp_path, frame):
 
 def _mixed_frame():
     # Two strategies; exits on/after the cutoff (02-13, 02-14) must be dropped.
+    # Input order is deliberately not date order and the rows carry DISTINCT
+    # dimension values: the pool must keep the given order, row for row.
     return _pool_frame([
-        _row("CTR5", "2026-02-10", 1.0),
-        _row("CTR7", "2026-02-11", 4.0),
-        _row("CTR5", "2026-02-12", 2.0),
+        _row("CTR7", "2026-02-11", 4.0, exp_pnl_sim=4.5),
+        _row("CTR5", "2026-02-12", 2.0, exp_pnl_sim=2.5, n_legs=6.0),
         _row("CTR5", "2026-02-13", 3.0),
+        _row("CTR5", "2026-02-10", 1.0, exp_pnl_sim=1.5),
         _row("CTR7", "2026-02-14", 5.0),
     ])
 
@@ -87,9 +95,15 @@ def test_writes_loadable_pool_excluding_post_cutoff_rows(tmp_path, monkeypatch):
     pool = FrozenStateLoader(out).load(
         FrozenStateRef(path=summary["file"], content_hash=summary["content_hash"]))
     assert pool.key == (CHOOSER_POOL_ID, CUTOFF)
-    assert pool.rows_for("CTR5") == (_pool_row("2026-02-10", 1.0), _pool_row("2026-02-12", 2.0))
-    assert pool.rows_for("CTR7") == (_pool_row("2026-02-11", 4.0),)
+    # Stored order is the INPUT order within a strategy (02-12 before 02-10),
+    # not date order, and the distinct dimension values survived.
+    assert pool.rows_for("CTR5") == (_pool_row("2026-02-12", 2.0, exp_pnl_sim=2.5, n_legs=6.0),
+                                     _pool_row("2026-02-10", 1.0, exp_pnl_sim=1.5))
+    assert pool.rows_for("CTR7") == (_pool_row("2026-02-11", 4.0, exp_pnl_sim=4.5),)
     assert pool.rows_for("CTR9") is None
+    assert len(pool.lineage.data) == 1
+    assert pool.lineage.data[0].table == CHOOSER_POOL_ID
+    assert pool.lineage.data[0].end_exclusive == CUTOFF
 
 
 def test_identical_rerun_resumes(tmp_path, monkeypatch):
@@ -97,9 +111,11 @@ def test_identical_rerun_resumes(tmp_path, monkeypatch):
     out = tmp_path / "out"
 
     job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+    written = (out / "chooser_analog_pool.json").read_bytes()
     again = job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
 
     assert again["status"] == "resumed"
+    assert (out / "chooser_analog_pool.json").read_bytes() == written
 
 
 def test_changed_source_refuses_resume_mismatch(tmp_path, monkeypatch):
@@ -114,17 +130,35 @@ def test_changed_source_refuses_resume_mismatch(tmp_path, monkeypatch):
         job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
 
 
+def test_existing_output_of_other_size_refuses_resume_mismatch(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _mixed_frame()))
+    out = tmp_path / "out"
+    job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+    path = out / "chooser_analog_pool.json"
+    path.write_bytes(path.read_bytes() + b"x")
+
+    with pytest.raises(SystemExit, match="RESUME_MISMATCH"):
+        job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+
+
 def test_missing_cutoff_refuses(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _mixed_frame()))
     with pytest.raises(SystemExit, match=_exact(_NO_CUTOFF)):
         job.run_state_job("chooser_analog_pool", tmp_path / "out")
 
 
-@pytest.mark.parametrize("cutoff", ["2026-02-13T12:00", "nope"])
+@pytest.mark.parametrize("cutoff", ["2026-02-13T12:00", "nope", "20260213", "2026-W07-5"])
 def test_non_iso_cutoff_refuses(tmp_path, monkeypatch, cutoff):
     monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _mixed_frame()))
     with pytest.raises(SystemExit, match=_exact(_BAD_CUTOFF)):
         job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=cutoff)
+
+
+def test_iso_cutoff_requires_canonical_date():
+    assert job._iso_cutoff(CUTOFF) == CUTOFF
+    for value in ("20260213", "2026-W07-5"):
+        with pytest.raises(ValueError):
+            job._iso_cutoff(value)
 
 
 def test_missing_source_refuses(tmp_path, monkeypatch):
@@ -135,9 +169,30 @@ def test_missing_source_refuses(tmp_path, monkeypatch):
 
 def test_too_large_source_refuses(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _mixed_frame()))
-    monkeypatch.setattr(job, "_CHOOSER_POOL_MAX_BYTES", 10)
+    monkeypatch.setattr(release, "CHOOSER_POOL_MAX_BYTES", 10)
     with pytest.raises(SystemExit, match=_exact(_TOO_LARGE)):
         job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=CUTOFF)
+
+
+def test_size_cap_boundary(tmp_path, monkeypatch):
+    source = _write_source(tmp_path, _mixed_frame())
+    size = (source / "chooser_analog_pool.parquet").stat().st_size
+    monkeypatch.setattr(paths, "FEATURES", source)
+
+    monkeypatch.setattr(release, "CHOOSER_POOL_MAX_BYTES", size)
+    assert job.run_state_job("chooser_analog_pool", tmp_path / "out",
+                             cutoff=CUTOFF)["status"] == "written"
+
+    monkeypatch.setattr(release, "CHOOSER_POOL_MAX_BYTES", size - 1)
+    with pytest.raises(SystemExit, match=_exact(_TOO_LARGE)):
+        job.run_state_job("chooser_analog_pool", tmp_path / "other", cutoff=CUTOFF)
+
+
+def test_prepare_release_reader_refuses_oversized_source(tmp_path, monkeypatch):
+    source = _write_source(tmp_path, _mixed_frame())
+    monkeypatch.setattr(release, "CHOOSER_POOL_MAX_BYTES", 10)
+    with pytest.raises(ValueError, match=_exact(_TOO_LARGE)):
+        release.chooser_pool_payloads(source / "chooser_analog_pool.parquet")
 
 
 def test_all_rows_after_cutoff_is_empty(tmp_path, monkeypatch):
@@ -160,13 +215,35 @@ def test_cli_refuses_non_iso_cutoff_before_running(tmp_path, capsys):
     assert _BAD_CUTOFF in capsys.readouterr().err
 
 
+def test_cli_refuses_two_cutoffs_for_chooser_state(tmp_path, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        job.main(["--state", "chooser_analog_pool", "--cutoff", CUTOFF,
+                  "--cutoff", "2026-02-14", "--out", str(tmp_path / "out")])
+    assert excinfo.value.code == 2
+    assert "--cutoff: at most one" in capsys.readouterr().err
+
+
 def test_state_problems_require_exactly_one_cutoff_for_chooser():
     assert _problems() == []
     assert _problems(cutoffs=()) == [_EXACTLY_ONE]
     assert _problems(cutoffs=(CUTOFF, "2026-02-14")) == [_AT_MOST_ONE, _EXACTLY_ONE]
 
 
+def test_state_problems_reject_noncanonical_cutoff():
+    assert _problems(cutoffs=("20260213",)) == [_NOT_ISO]
+    assert _problems(cutoffs=("2026-W07-5",)) == [_NOT_ISO]
+
+
 def test_state_problems_leave_other_states_unchanged():
     assert _problems(state="paired_residual_pool", cutoffs=(CUTOFF,)) == []
     assert _problems(state="paired_residual_pool", cutoffs=()) == []
     assert _problems(state="driver_residual_pool:size", cutoffs=(CUTOFF,)) == [_AT_MOST_ONE]
+
+
+def test_worker_maps_missing_source_to_typed_validation_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "FEATURES", tmp_path / "empty")
+    with pytest.raises(OpsError) as err:
+        training.run_training_worker(to_document(_params()), tmp_path)
+    assert err.value.problem.code == "VALIDATION_FAILED"
+    assert err.value.problem.message == "training tool refused the job"
+    assert not (tmp_path / "training_result.json").exists()
