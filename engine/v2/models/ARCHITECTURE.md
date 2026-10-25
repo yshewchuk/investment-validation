@@ -376,9 +376,9 @@ of the newest nightly jobs, so a score older than that window is not found.
 
 ### 2.2.2 Bootstrap cycle (#1102; stage job built, sidecar submission not)
 
-When the prior is `NONE` or `NO_POOL_CATALOG` (§2.2), the nightly stages a full release instead of refusing: no store repair, and the cutoff is the session's data date. Later nightlies carry forward (§2.2) from it. Inputs: the `training` state `chooser_analog_pool` (one ISO cutoff; writes the `(features.chooser_analog_pool, cutoff)` artifact from the stored parquet, rows closed on/after the cutoff excluded; a missing or oversize source refuses; other bytes at an existing output are `CHECKPOINT_INCOMPATIBLE`) and the `mode: "bootstrap"` assembly below. The sidecar submission of the training set and the promote guard are not built, so nothing submits `bootstrap` mode yet.
+When the prior is `NONE` or `NO_POOL_CATALOG` (§2.2), the stage job, once a sidecar submits it, stages a full release instead of refusing: no store repair, and the cutoff is the session's data date. Later nightlies carry forward (§2.2) from it. Inputs: the `training` state `chooser_analog_pool` (one ISO cutoff; writes the `(features.chooser_analog_pool, cutoff)` artifact from the stored parquet, rows closed on/after the cutoff excluded; a missing or oversize source refuses; other bytes at an existing output are `CHECKPOINT_INCOMPATIBLE`) and the `mode: "bootstrap"` assembly below. The sidecar submission of the training set and the promote guard are not built, so nothing submits `bootstrap` mode yet.
 
-**Standard tool check.** No third-party tool covers this (champion registry, content-addressed objects and catalog are repo-specific). The assembly reuses `tools/phase5_prepare_release.py` (`model_release`, `build_states`, `write_release`, the payload readers) from `tools/phase5_state_bootstrap.py`; there is no second implementation.
+**Standard tool check.** No third-party tool covers this (champion registry, content-addressed objects and catalog are repo-specific). The assembly reuses `tools/phase5_prepare_release.py` (`model_release`, `build_states`, `write_release`, the payload readers) from `tools/phase5_state_bootstrap.py`; only the bound-file classification by schema is new.
 
 **Parameters (bootstrap).** The §2.2 parameters plus `bootstrap`: `{tier4_dir, panel_catalog, panel_snapshot_id, panel_artifact_root}`, all non-empty strings, present exactly when `mode` is `bootstrap` (otherwise plan-time `INVALID_REQUEST`; a carry plan's parameters are unchanged). `state_files` are plain `.json` names of every bound input: frozen states (driver residual pools, paired, board, trailing, chooser; classified by their own schema as `frozen_state_payloads` does) and payoff-line, payoff-surface and recalibration-map artifacts (classified by `schema_version`). The panel identity is the pinned panel copy (`verify_panel_copy`), never `auto`; `tier4_dir` is read, never written, and only folds whose snapshot matches that identity are taken. The admissible table is the static `default_admissible_table()`. The legacy chooser parquet is never read.
 
@@ -396,7 +396,7 @@ When the prior is `NONE` or `NO_POOL_CATALOG` (§2.2), the nightly stages a full
 | Registry drift, inventory unreadable; every other refusal below marked "message only" | fixed message, `details` as §2.2 (`issues` for drift, `members`, `member`); nothing written unless stated |
 | Bindings differ from the incumbent's | `BINDINGS_DIFFER`; nothing written |
 | A catalog state not `STAGED` | `EMPTY_MEMBER`, `details.members`; nothing written |
-| A bound file unreadable, unclassifiable or duplicating an object; a pool object cutoff or trailing month off the session cutoff | message only; nothing written |
+| A bound file or model artifact unreadable, oversize, unclassifiable or duplicating an object; a pool object cutoff or trailing month off the session cutoff | message only; nothing written |
 | Pinned panel unverifiable, or a fold or policy or preflight disagrees with it (the `PrepareRefused` text is not echoed) | message only; no catalog written |
 | Candidate catalog present with different content | `ID_CONFLICT` |
 | Candidate does not read back `USABLE` | "candidate release failed the light checks" |
@@ -408,7 +408,7 @@ When the prior is `NONE` or `NO_POOL_CATALOG` (§2.2), the nightly stages a full
 | R3 retry | one attempt; a refusal is terminal for the cycle until an operator acts (#154) |
 | R4 transaction | objects and the staged manifest are content-addressed and idempotent; the candidate catalog is written last, atomically, under the pointer write lease; `DEPLOYED` is untouched |
 | R5 partial failure | orphan objects, a staged manifest without a catalog, or (after a failed read-back or staging-success write) a published candidate catalog may remain, never promoted; the incumbent stays deployed, so native analog and simulation fields stay null (#681) and STR-RUNUP stays `MODEL_NOT_READY` (#782) until a bootstrap promotes |
-| R6 idempotency | same inputs give the same catalog; a rerun is a no-op; a different catalog under the same id is `ID_CONFLICT` |
+| R6 idempotency | same inputs give the same catalog (a rerun republishes the staging-success record); a different catalog under the same id is `ID_CONFLICT` |
 
 **Progress logging.** Stage start and end with elapsed time, member and object counts and RSS go to stderr; the prior class and reason are logged once.
 

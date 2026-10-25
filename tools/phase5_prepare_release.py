@@ -313,10 +313,11 @@ def frozen_state_payloads(files: Iterable[Path],
     from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
     from engine.v2.models.frozen_state_io import read_bounded_state
 
+    limit = MAX_STATE_BYTES if max_bytes is None else max_bytes
     found: dict[str, dict[str, bytes]] = {}
     for path in frozen_state_files(files):
-        data = read_bounded_state(path, max_bytes, no_follow=True)
-        state = FrozenStateLoader(path.parent, max_bytes=max_bytes).load(
+        data = read_bounded_state(path, limit, no_follow=True)
+        state = FrozenStateLoader(path.parent, max_bytes=limit).load(
             FrozenStateRef(path=path.name, content_hash=sha256_bytes(data)))
         schema = state.schema_version
         if schema.startswith("driver_residual_pool"):

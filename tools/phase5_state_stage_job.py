@@ -12,9 +12,9 @@ import stat
 from datetime import date
 from pathlib import Path
 
-ADVANCING_MEMBERS = ("paired_residual_pool", "board_analog_matcher", "trailing_pnl_cutoff")
+from tools.phase5_prepare_release import MAX_STATE_BYTES
 
-MAX_STATE_BYTES = 512 * 1024 * 1024
+ADVANCING_MEMBERS = ("paired_residual_pool", "board_analog_matcher", "trailing_pnl_cutoff")
 
 
 class StageRefused(ValueError):

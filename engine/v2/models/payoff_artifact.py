@@ -375,6 +375,8 @@ class PayoffArtifactLoader:
     def load_bytes(self, raw: bytes, content_hash: str, *,
                    path: str | None = None) -> PayoffLineArtifact | PayoffSurfaceArtifact:
         suffix = f": {path}" if path else ""
+        if not isinstance(raw, bytes):
+            raise PayoffArtifactError("payoff artifact bytes must be bytes")
         digest = CONTENT_HASH_PREFIX + hashlib.sha256(raw).hexdigest()
         if digest != content_hash:
             raise PayoffArtifactError(f"payoff artifact hash mismatch{suffix}")

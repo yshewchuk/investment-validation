@@ -228,6 +228,9 @@ def test_bootstrap_plan_refuses_a_bad_mapping(tmp_path):
                          state_refs={"a.json": "j#o"}, manifest_ref="artifact_manifest",
                          source_root=REPO_ROOT, mode="bootstrap", bootstrap={"x": 1})
     assert err.value.code == "INVALID_REQUEST"
+    assert err.value.problem.details == {"problems": [
+        "bootstrap keys must be exactly tier4_dir, panel_catalog, "
+        "panel_snapshot_id and panel_artifact_root"]}
 
 
 def test_none_prior_stages_a_candidate_catalog_only(tmp_path, monkeypatch):
@@ -746,3 +749,103 @@ def test_readback_not_usable_refuses(tmp_path, monkeypatch):
         run_state_stage_worker(parameters, staging)
     assert str(err.value) == "VALIDATION_FAILED: candidate release failed the light checks"
     assert err.value.problem.details == {}
+
+
+def test_tier4_fold_payload_is_in_catalog(tmp_path, monkeypatch):
+    inventory, _body = _stage_prior(tmp_path, prior_names=None)
+    (tmp_path / phase5_release.MANIFEST_NAME).unlink(missing_ok=True)
+    parameters, staging = _mock_bootstrap_inputs(
+        monkeypatch, tmp_path, prior_release_id=None, inventory=inventory)
+    monkeypatch.setattr(
+        phase5_prepare_release, "tier4_fold_payloads",
+        lambda *a, **k: {"tier4_folds:size": {"fold-object.joblib": b"fold-bytes"}})
+    result = run_state_stage_worker(parameters, staging)
+    assert result["completed_ids"] == ["phase5_state_stage"]
+    body = json.loads(phase5_release.catalog_path(tmp_path, "cand1").read_bytes())
+    row = next(row for row in body["members"]
+               if row["member_id"] == "tier4_folds:size")
+    names = {obj["name"] for obj in row["objects"]}
+    assert "fold-object.joblib" in names
+
+
+def test_pinned_panel_identity_is_recorded_in_catalog(tmp_path, monkeypatch):
+    inventory, _body = _stage_prior(tmp_path, prior_names=None)
+    (tmp_path / phase5_release.MANIFEST_NAME).unlink(missing_ok=True)
+    identity = {"panel_copy_sha256": _SNAPSHOT}
+    parameters, staging = _mock_bootstrap_inputs(
+        monkeypatch, tmp_path, prior_release_id=None, inventory=inventory)
+    fake = types.SimpleNamespace(digest="dummy")
+    monkeypatch.setattr(
+        phase5_prepare_release, "_run_preflights",
+        lambda release, states, pinned_panel, sources: (
+            {**sources, **identity},
+            {name: fake for build in states for name in build.payloads},
+            {}))
+    result = run_state_stage_worker(parameters, staging)
+    assert result["completed_ids"] == ["phase5_state_stage"]
+    body = json.loads(phase5_release.catalog_path(tmp_path, "cand1").read_bytes())
+    assert body["sources"]["panel_copy_sha256"] == _SNAPSHOT
+
+
+def test_registry_drift_refuses_without_writing(tmp_path, monkeypatch):
+    inventory, _body = _stage_prior(tmp_path, prior_names=None)
+    (tmp_path / phase5_release.MANIFEST_NAME).unlink(missing_ok=True)
+    parameters, staging = _mock_bootstrap_inputs(
+        monkeypatch, tmp_path, prior_release_id=None, inventory=inventory,
+        drift=("MISSING_ARTIFACT_FILE",))
+    store = phase5_release.deployment_root(tmp_path) / "objects"
+    before = sorted(path.name for path in store.iterdir())
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: release inventory drifted"
+    assert err.value.problem.details == {"issues": 1}
+    assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
+    assert sorted(path.name for path in store.iterdir()) == before
+
+
+def test_artifact_payload_bytes_match_bound_file(tmp_path, monkeypatch):
+    inventory, _body = _stage_prior(tmp_path, prior_names=None)
+    (tmp_path / phase5_release.MANIFEST_NAME).unlink(missing_ok=True)
+    parameters, staging = _mock_bootstrap_inputs(
+        monkeypatch, tmp_path, prior_release_id=None, inventory=inventory)
+    artifact_name = "payoff_line_STR-THRU.json"
+    bound = (staging / artifact_name).read_bytes()
+
+    def classify(root, names):
+        frozen, artifacts = [], []
+        for name in names:
+            item = (Path(root) / name, f"state-{name}".encode())
+            (artifacts if name == artifact_name else frozen).append(item)
+        return frozen, artifacts
+
+    monkeypatch.setattr("tools.phase5_state_bootstrap.classify_bound_files", classify)
+    monkeypatch.setattr(phase5_prepare_release, "artifact_file_payloads",
+                        lambda files: {"payoff_line:STR-THRU": {"bound.bin": bound}})
+    result = run_state_stage_worker(parameters, staging)
+    assert result["completed_ids"] == ["phase5_state_stage"]
+    body = json.loads(phase5_release.catalog_path(tmp_path, "cand1").read_bytes())
+    row = next(row for row in body["members"]
+               if row["member_id"] == "payoff_line:STR-THRU")
+    entry = next(obj for obj in row["objects"] if obj["name"] == "bound.bin")
+    stored = (phase5_release.deployment_root(tmp_path) / entry["path"]).read_bytes()
+    assert stored == bound
+    assert phase5_release.sha256_bytes(stored) == entry["content_hash"]
+
+
+def test_frozen_state_replaced_between_classification_and_load(tmp_path, monkeypatch):
+    inventory, _body = _stage_prior(tmp_path, prior_names=None)
+    (tmp_path / phase5_release.MANIFEST_NAME).unlink(missing_ok=True)
+    parameters, staging = _mock_bootstrap_inputs(
+        monkeypatch, tmp_path, prior_release_id=None, inventory=inventory)
+    states = _bootstrap_states()
+
+    def replaced(paths, max_bytes=None):
+        name = Path(paths[0]).name
+        member, object_name = states[name]
+        return {member: {object_name: b"replaced-bytes"}}
+
+    monkeypatch.setattr(phase5_prepare_release, "frozen_state_payloads", replaced)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: a bound state file could not be loaded"
+    assert not phase5_release.catalog_path(tmp_path, "cand1").exists()

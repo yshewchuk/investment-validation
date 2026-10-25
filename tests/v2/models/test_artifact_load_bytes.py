@@ -109,3 +109,16 @@ def test_recalibration_loader_load_bytes_checks_hash_before_cache(tmp_path):
     assert loader.cache_size == 1
     with pytest.raises(RecalibrationArtifactError, match="hash mismatch"):
         loader.load_bytes(serialize_recalibration_artifact(other), good.content_hash)
+
+
+def test_loader_load_bytes_refuses_non_bytes(tmp_path):
+    loader = PayoffArtifactLoader(tmp_path)
+    with pytest.raises(PayoffArtifactError, match="payoff artifact bytes must be bytes"):
+        loader.load_bytes("not bytes", "sha256:" + "0" * 64)
+
+
+def test_recalibration_loader_load_bytes_refuses_non_bytes(tmp_path):
+    loader = RecalibrationArtifactLoader(tmp_path)
+    with pytest.raises(RecalibrationArtifactError,
+                       match="recalibration artifact bytes must be bytes"):
+        loader.load_bytes("not bytes", "sha256:" + "0" * 64)

@@ -257,6 +257,8 @@ class RecalibrationArtifactLoader:
     def load_bytes(self, raw: bytes, content_hash: str, *,
                    path: str | None = None) -> RecalibrationMapArtifact:
         suffix = f": {path}" if path else ""
+        if not isinstance(raw, bytes):
+            raise RecalibrationArtifactError("recalibration artifact bytes must be bytes")
         if CONTENT_HASH_PREFIX + hashlib.sha256(raw).hexdigest() != content_hash:
             raise RecalibrationArtifactError(f"recalibration artifact hash mismatch{suffix}")
         cached = self._cache.get(content_hash)

@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Mapping
 
-MAX_STATE_BYTES = 512 * 1024 * 1024
+from tools.phase5_prepare_release import MAX_STATE_BYTES
 
 _FROZEN_SCHEMA_PREFIXES = (
     "driver_residual_pool", "paired_residual_pool", "board_analog_pool",
@@ -46,7 +46,7 @@ def classify_bound_files(root: Path, names):
             raise StageRefused("a bound state file could not be loaded") from exc
         try:
             document = json.loads(data)
-        except (ValueError, TypeError) as exc:
+        except (ValueError, TypeError, RecursionError) as exc:
             raise StageRefused("a bound state file could not be loaded") from exc
         schema = document.get("schema_version") if isinstance(document, dict) else None
         if not isinstance(schema, str):
@@ -179,8 +179,13 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
         try:
             for path, _data in frozen_files:
                 require_regular(path, MAX_STATE_BYTES, "a bound state file")
-                for member, objects in frozen_state_payloads(
-                        [path], max_bytes=MAX_STATE_BYTES).items():
+                loaded = frozen_state_payloads([path], max_bytes=MAX_STATE_BYTES)
+                returned = [data for objects in loaded.values()
+                            for data in objects.values()]
+                if (len(returned) != 1
+                        or {sha256_bytes(data) for data in returned} != {sha256_bytes(_data)}):
+                    raise StageRefused("a bound state file could not be loaded")
+                for member, objects in loaded.items():
                     for object_name, data in objects.items():
                         if object_name in found.setdefault(member, {}):
                             raise StageRefused("a state object appears twice",
@@ -190,7 +195,7 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
         except StageRefused:
             raise
         except (FrozenStateError, BoundedStateReadError, OSError, ValueError, KeyError,
-                TypeError) as exc:
+                TypeError, ArtifactError, RecursionError) as exc:
             raise StageRefused("a bound state file could not be loaded") from exc
 
         _log(f"[bootstrap] stage inputs loaded members={len(found)} "
