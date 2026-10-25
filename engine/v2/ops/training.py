@@ -121,8 +121,12 @@ def _state_problems(params) -> list[str]:
     if (params.state not in job.STATES
             or params.state in (job.BOARD_ANALOG_STATE, job.TRAILING_CUTOFF_STATE)):
         problems.append("mode=state needs a frozen P5-4 state")
-    if len(params.cutoffs) > 1 or (params.cutoffs and params.state != "paired_residual_pool"):
-        problems.append("at most one cutoff, only for paired_residual_pool")
+    if len(params.cutoffs) > 1 or (
+            params.cutoffs and params.state not in ("paired_residual_pool", "chooser_analog_pool")):
+        problems.append("at most one cutoff, only for paired_residual_pool "
+                        "or chooser_analog_pool")
+    if params.state == "chooser_analog_pool" and len(params.cutoffs) != 1:
+        problems.append("chooser_analog_pool needs exactly one cutoff")
     if params.pairs_path:
         problems.append("mode=state does not take pairs_path")
     return problems
@@ -156,6 +160,22 @@ def _trailing_cutoff_problems(params) -> list[str]:
     return problems
 
 
+def _iso_cutoff_problems(params) -> list[str]:
+    problems = []
+    for cutoff in params.cutoffs:
+        try:
+            # Canonical ``YYYY-MM-DD`` only: ``date.fromisoformat`` also takes
+            # the compact and week forms (20260213, 2026-W07-5) on 3.11+, and
+            # the week form is exactly 10 characters, so the round-trip
+            # equality is required next to the length.
+            if len(cutoff) != 10 or date.fromisoformat(cutoff).isoformat() != cutoff:
+                raise ValueError(cutoff)
+        except (TypeError, ValueError):
+            problems.append("cutoffs must be valid ISO dates (YYYY-MM-DD)")
+            break
+    return problems
+
+
 def _shape_problems(params) -> list[str]:
     """Checks independent of ``mode`` -- a plan built directly via
     :func:`training_plan` skips ``from_document``'s own type/finite/bool checks entirely (see
@@ -169,13 +189,7 @@ def _shape_problems(params) -> list[str]:
         if (isinstance(params.alpha, bool) or not isinstance(params.alpha, (int, float))
                 or not math.isfinite(params.alpha) or params.alpha < 0):
             problems.append("alpha must be a finite, non-negative number")
-    for cutoff in params.cutoffs:
-        try:
-            date.fromisoformat(cutoff)
-        except (TypeError, ValueError):
-            problems.append("cutoffs must be valid ISO dates (YYYY-MM-DD)")
-            break
-    return problems
+    return problems + _iso_cutoff_problems(params)
 
 
 def native_training_pin_problems(
@@ -564,9 +578,14 @@ def run_training_worker(parameters, root) -> dict:
         params = from_document(TrainingParameters, parameters)
     except DocumentError as exc:
         raise fail("INVALID_REQUEST", "malformed training parameters") from exc
-    problems = _native_input_problems(params)
-    if params.input_mode == "native_d14":
-        problems = training_parameter_problems(None, params)
+    # Worker admission re-runs the PLANNER's validator for every mode and
+    # input_mode, so a submission that bypassed the plan cannot reach dispatch
+    # with parameters ``training_plan`` would have refused. ``expected_ids`` is
+    # not planner-only here: ``from_document`` above requires it on the
+    # worker's own parameters document, so the full
+    # ``training_parameter_problems`` call (shape + mode + cutoff problems)
+    # applies unchanged -- no pure-subset fallback is needed.
+    problems = training_parameter_problems(None, params)
     if problems:
         raise fail("INVALID_REQUEST", "training inputs are invalid", details={"problems": problems})
     root = Path(root)

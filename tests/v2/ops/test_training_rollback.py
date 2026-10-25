@@ -3,7 +3,7 @@
 These tests drive the real operator plan/submit/supervisor/worker path against
 a synthetic release store staged and promoted with the real ``deployment``
 APIs; nothing stubs ``deployment.rollback``, dispatch, submission or pointer
-storage. They mirror the promote e2e in ``tests/test_v2_ops_training_job.py``
+storage. They mirror the promote e2e in ``tests/v2/ops/test_v2_ops_training_job.py``
 and its ``_release_fixture``.
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 
 def _release_fixture(release_id, *, intercept, coefficient):
     """A one-binding synthetic ``ModelRelease`` plus its matching inventory,
-    the same shape ``tests/test_v2_ops_training_job.py`` and
+    the same shape ``tests/v2/ops/test_v2_ops_training_job.py`` and
     ``tests/v2/ops/test_training_promote_guard.py`` stage."""
     payload = json.dumps({
         "schema_version": "linear_estimator.v1.0",

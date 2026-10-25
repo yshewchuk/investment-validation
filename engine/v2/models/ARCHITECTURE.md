@@ -376,7 +376,7 @@ of the newest nightly jobs, so a score older than that window is not found.
 
 ### 2.2.2 Bootstrap cycle (not implemented)
 
-Unimplemented; the design is in issue #1102. Today a missing pointer submits nothing. With a deployed pointer whose release has no usable pool catalog, it submits the three training jobs and then `phase5_state_stage`, which refuses `VALIDATION_FAILED` with `details.code` `PRIOR_MISMATCH` ("prior release could not be read").
+Unimplemented; the design is in issue #1102. The bootstrap's chooser input exists: the `training` job in `mode: "state"` accepts the state `chooser_analog_pool` with exactly one ISO cutoff and writes the `(features.chooser_analog_pool, cutoff)` `ChooserAnalogPoolArtifact`, built by `training/chooser_pool.py` from the stored `chooser_analog_pool.parquet` (the `tools/build_chooser_pool.py` output) with rows closed on/after the cutoff excluded. A missing, non-ISO or non-single cutoff, or a missing or oversize (256 MiB) source, refuses (`INVALID_REQUEST` / `VALIDATION_FAILED`); an existing output with different bytes is `CHECKPOINT_INCOMPATIBLE`; a rerun is byte-identical; no row left is an `empty` status with no file. Nothing submits it yet. Today a missing pointer submits nothing. With a deployed pointer whose release has no usable pool catalog, it submits the three training jobs and then `phase5_state_stage`, which refuses `VALIDATION_FAILED` with `details.code` `PRIOR_MISMATCH` ("prior release could not be read").
 
 ### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
 

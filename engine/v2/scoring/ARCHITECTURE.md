@@ -708,8 +708,8 @@ Both errors travel together. `ResidualPool` (`engine/pnl_sim.py:102`)
 draws only earlier events; it uses the `pred_abs_move` bucket if large enough,
 otherwise the full pre-cutoff pool. Join and population use `(ticker,event_date)`.
 
-The existing `paired_residual_pool` job (`tools/phase5_training_job.py:211`) builds the paired
-artifact; `tools/phase5_prepare_release.py:215` stages its typed document.
+The existing `paired_residual_pool` job (`build_state` in `tools/phase5_training_job.py`) builds the paired
+artifact; `tools/phase5_prepare_release.py` stages its typed document.
 Use standard promotion. It records schema, model IDs, exclusive cutoff,
 lineage and hash; no request fallback, rebuild or invented residuals.
 
