@@ -386,8 +386,8 @@ class PayoffArtifactLoader:
         except ValueError as exc:
             raise PayoffArtifactError("artifact path escapes artifact root") from exc
         try:
-            raw = read_bounded_state(path, MAX_ARTIFACT_BYTES, no_follow=False)
-        except (BoundedStateReadError, OSError) as exc:
+            raw = read_artifact_bytes(path)
+        except OSError as exc:
             raise PayoffArtifactError(f"missing payoff artifact: {ref.path}") from exc
         return self.load_bytes(raw, ref.content_hash, path=ref.path)
 

@@ -96,8 +96,10 @@ __all__ = [
     "production_release_root",
     "promote",
     "read_manifest",
+    "read_staging_success_record",
     "resolve_release",
     "restage_semantic_hash",
+    "restore_staging_success_record",
     "rollback",
     "rollback_target",
     "semantic_release_hash",
@@ -750,6 +752,39 @@ def invalidate_staging_success(root: Path, release_id: str) -> None:
             code="STATUS_INVALIDATION_FAILED",
             detail="the previous staging success record could not be invalidated",
         ),)) from exc
+
+
+def read_staging_success_record(root: Path, release_id: str) -> bytes | None:
+    """The raw bytes of ``release_id``'s staging-completion record, or ``None``.
+
+    A read-only snapshot for callers that withdraw the record around a staging
+    attempt and must put it back when that attempt loses an id conflict. A
+    missing record is ``None``; an unreadable one raises its ``OSError`` so a
+    caller never silently loses a record it could not snapshot. The bytes are
+    the exact ``_encode`` document :func:`mark_staging_succeeded` writes, so
+    restoring them keeps the record byte-identical.
+    """
+    path = _staging_status_path(Path(root), release_id)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    try:
+        return read_bounded_state(path, MAX_MANIFEST_BYTES, no_follow=True)
+    except BoundedStateReadError as exc:
+        raise OSError(str(exc)) from exc
+
+
+def restore_staging_success_record(root: Path, release_id: str, data: bytes) -> None:
+    """Rewrite a snapshotted staging-completion record atomically.
+
+    The inverse of :func:`read_staging_success_record`: writes exactly ``data``
+    to ``releases/<release_id>/staging-status.json`` via the same
+    temp/fsync/rename/fsync-directory path as :func:`mark_staging_succeeded`,
+    so a crash leaves either the old record or the restored one, never a
+    partial file. The manifest and staged objects are not touched.
+    """
+    _atomic_write_bytes(_staging_status_path(Path(root), release_id), data)
 
 
 def resolve_release(root: Path, release_id: str) -> ModelRelease:

@@ -65,6 +65,7 @@ from engine.v2.models.release_layout import (  # noqa: E402
     PENDING,
     STAGED,
     STATE_SPECS,
+    CatalogConflict,
     ObjectVerificationError,
     StateSpec,
     deployment_root,
@@ -580,12 +581,29 @@ def _object_entry(out: Path, build: StateBuild, name: str, data: bytes, validate
     return entry
 
 
+def _staging_id_conflict(exc) -> bool:
+    """True when ``exc`` is a conflict with already-staged candidate content."""
+    if isinstance(exc, CatalogConflict):
+        return True
+    if isinstance(exc, deployment.StagingRefused):
+        codes = {issue.code for issue in exc.issues}
+        return bool(codes & {"RELEASE_ID_REUSED", "MANIFEST_UNREADABLE"})
+    return False
+
+
 def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInventory,
                   payloads: Mapping[str, bytes], states: list[StateBuild], *,
                   sources: Mapping[str, str] | None = None,
                   incumbent: Path | None = None, pinned_panel: PinnedPanelContext | None = None,
                   candidate_only: bool = False) -> Path:
-    """Stage the model bindings, write the state objects, write the manifest."""
+    """Stage the model bindings, write the state objects, write the manifest.
+
+    In ``candidate_only`` mode the existing candidate's staging-success record
+    is snapshotted before it is withdrawn and restored when this attempt loses
+    an id conflict with that candidate (``CatalogConflict`` or a
+    ``StagingRefused`` carrying ``RELEASE_ID_REUSED``/``MANIFEST_UNREADABLE``).
+    Any other failure leaves the record withdrawn as before.
+    """
     if sources and any(str(key).startswith(COPY_PREFIX) for key in sources):
         raise PrepareRefused(f"{COPY_PREFIX}refused: caller-supplied pinned sources")
     release, states = _rebase_member_paths(release, states, pinned_panel)
@@ -595,15 +613,25 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
     root.mkdir(parents=True, exist_ok=True)
     if incumbent is not None and not candidate_only:
         _copy_incumbent(incumbent, root)
-    deployment.invalidate_staging_success(root, release.release_id)
-    staged = deployment.stage_release(root, release, inventory, dict(payloads))
-    rows = []
-    for build in states:
-        objects = [_object_entry(out, build, name, data, validated, chooser_validated, staged, pinned_panel)
-                   for name, data in sorted(build.payloads.items())]
-        rows.append(member_row(build.spec, build.status, objects, build.detail))
-    body = manifest_body(release.release_id, release.deployment_id, rows, sources or {})
-    return write_manifest(out, body, candidate_only=candidate_only)
+    snapshot = (deployment.read_staging_success_record(root, release.release_id)
+                if candidate_only else None)
+    try:
+        deployment.invalidate_staging_success(root, release.release_id)
+        staged = deployment.stage_release(root, release, inventory, dict(payloads))
+        rows = []
+        for build in states:
+            objects = [_object_entry(out, build, name, data, validated, chooser_validated, staged, pinned_panel)
+                       for name, data in sorted(build.payloads.items())]
+            rows.append(member_row(build.spec, build.status, objects, build.detail))
+        body = manifest_body(release.release_id, release.deployment_id, rows, sources or {})
+        return write_manifest(out, body, candidate_only=candidate_only)
+    except (CatalogConflict, deployment.StagingRefused) as exc:
+        if candidate_only and snapshot is not None and _staging_id_conflict(exc):
+            try:
+                deployment.restore_staging_success_record(root, release.release_id, snapshot)
+            except OSError as restore_exc:
+                raise exc from restore_exc
+        raise
 
 
 def _plan(release: ModelRelease, states: list[StateBuild]) -> dict:
@@ -764,7 +792,8 @@ def main(argv=None) -> int:
             print(f"plan only: {args.out / 'plan.json'}")
             return 0
         print(f"staged: {manifest}")
-    except (PrepareRefused, deployment.DeploymentError, ValueError) as exc:
+    except (PrepareRefused, deployment.DeploymentError, BoundedStateReadError,
+            OSError, ValueError) as exc:
         print(f"refused: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     return 0

@@ -171,6 +171,8 @@ size check. Existing callers omitting the ceiling retain their read contract.
 | Object at/below the ceiling | Existing byte-hash, canonical-hash and typed validation apply |
 | Cache, retry, transaction, partial write | Existing per-loader content-hash cache; no retries or writes; failure returns no partial state |
 
+`PayoffArtifactLoader` and `RecalibrationArtifactLoader` read artifact files through `read_artifact_bytes` (regular file, at most `MAX_ARTIFACT_BYTES` = 512 MiB, else the loader's "missing artifact" error) and expose `load_bytes(raw, content_hash)`, which verifies `raw` against `content_hash` (hash mismatch refuses, also on a cache hit) and then applies the same parse and validation as `load`.
+
 ### Snapshot-pinned D14 monthly datasets
 
 `training.build_d14_dataset` builds only the `implied_t1` and `runup_move`
@@ -378,7 +380,7 @@ of the newest nightly jobs, so a score older than that window is not found.
 
 When the prior is `NONE` or `NO_POOL_CATALOG` (§2.2), the stage job, once a sidecar submits it, stages a full release instead of refusing: no store repair, and the cutoff is the session's data date. Later nightlies carry forward (§2.2) from it. Inputs: the `training` state `chooser_analog_pool` (one ISO cutoff; writes the `(features.chooser_analog_pool, cutoff)` artifact from the stored parquet, rows closed on/after the cutoff excluded; a missing or oversize source refuses; other bytes at an existing output are `CHECKPOINT_INCOMPATIBLE`) and the `mode: "bootstrap"` assembly below. The sidecar submission of the training set and the promote guard are not built, so nothing submits `bootstrap` mode yet.
 
-**Standard tool check.** No third-party tool covers this (champion registry, content-addressed objects and catalog are repo-specific). The assembly reuses `tools/phase5_prepare_release.py` (`model_release`, `build_states`, `write_release`, the payload readers) from `tools/phase5_state_bootstrap.py`; only the bound-file classification by schema is new.
+**Standard tool check.** No third-party tool covers this (champion registry, content-addressed objects and catalog are repo-specific). The assembly reuses `tools/phase5_prepare_release.py` (`model_release`, `build_states`, `write_release`, the payload readers) from `tools/phase5_state_bootstrap.py`; the bound-file classification by schema, the `candidate_only` publication and the artifact loaders' `load_bytes` are new.
 
 **Parameters (bootstrap).** The §2.2 parameters plus `bootstrap`: `{tier4_dir, panel_catalog, panel_snapshot_id, panel_artifact_root}`, all non-empty strings, present exactly when `mode` is `bootstrap` (otherwise plan-time `INVALID_REQUEST`; a carry plan's parameters are unchanged). `state_files` are plain `.json` names of every bound input: frozen states (driver residual pools, paired, board, trailing, chooser; classified by their own schema as `frozen_state_payloads` does) and payoff-line, payoff-surface and recalibration-map artifacts (classified by `schema_version`). The panel identity is the pinned panel copy (`verify_panel_copy`), never `auto`; `tier4_dir` is read, never written, and only folds whose snapshot matches that identity are taken. The admissible table is the static `default_admissible_table()`. The legacy chooser parquet is never read.
 
@@ -398,13 +400,13 @@ When the prior is `NONE` or `NO_POOL_CATALOG` (§2.2), the stage job, once a sid
 | A catalog state not `STAGED` | `EMPTY_MEMBER`, `details.members`; nothing written |
 | A bound file or model artifact unreadable, oversize, unclassifiable or duplicating an object; a pool object cutoff or trailing month off the session cutoff | message only; nothing written |
 | Pinned panel unverifiable, or a fold or policy or preflight disagrees with it (the `PrepareRefused` text is not echoed) | message only; no catalog written |
-| Candidate catalog present with different content | `ID_CONFLICT` |
+| Candidate catalog present with different content, or the candidate id already staged with different content (`RELEASE_ID_REUSED`, `MANIFEST_UNREADABLE`); the existing candidate and its staging-success record are preserved | `ID_CONFLICT` |
 | Candidate does not read back `USABLE` | "candidate release failed the light checks" |
 
 | Rule | Behaviour |
 |---|---|
 | R1 verified input | prior class re-derived in the job; registry inventory, panel copy, preflights and every bound file re-verified; the scoring manifest is pinned as in §2.2.1 |
-| R2 cache | none; pointer, catalog, panel and bound files are re-read each call |
+| R2 cache | no stage-level cache; pointer, catalog, panel and bound files are re-read each call (the artifact loaders keep their per-loader content-hash cache, and `load_bytes` verifies the caller's bytes before consulting it) |
 | R3 retry | one attempt; a refusal is terminal for the cycle until an operator acts (#154) |
 | R4 transaction | objects and the staged manifest are content-addressed and idempotent; the candidate catalog is written last, atomically, under the pointer write lease; `DEPLOYED` is untouched |
 | R5 partial failure | orphan objects, a staged manifest without a catalog, or (after a failed read-back or staging-success write) a published candidate catalog may remain, never promoted; the incumbent stays deployed, so native analog and simulation fields stay null (#681) and STR-RUNUP stays `MODEL_NOT_READY` (#782) until a bootstrap promotes |

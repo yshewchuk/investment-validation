@@ -244,6 +244,22 @@ def test_bootstrap_plan_passes_the_mapping(tmp_path):
     assert plan["spec_hash"] == content_hash(plan["parameters"])
 
 
+def test_bootstrap_plan_copies_the_caller_mapping(tmp_path):
+    bootstrap = {"tier4_dir": "/t", "panel_catalog": "/c",
+                 "panel_snapshot_id": "s", "panel_artifact_root": "/a"}
+    plan = state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
+                            release_id="cand1", cutoff="2026-10-01",
+                            state_refs={"a.json": "j#o"}, manifest_ref="artifact_manifest",
+                            source_root=REPO_ROOT, mode="bootstrap", bootstrap=bootstrap)
+    spec_hash = plan["spec_hash"]
+    bootstrap["tier4_dir"] = "/changed"
+    bootstrap["extra"] = "x"
+    assert plan["parameters"]["bootstrap"] == {
+        "tier4_dir": "/t", "panel_catalog": "/c",
+        "panel_snapshot_id": "s", "panel_artifact_root": "/a"}
+    assert plan["spec_hash"] == spec_hash == content_hash(plan["parameters"])
+
+
 def test_bootstrap_plan_refuses_a_bad_mapping(tmp_path):
     with pytest.raises(OpsError) as err:
         state_stage_plan(release_root=str(tmp_path), prior_release_id="prior1",
@@ -412,6 +428,36 @@ def test_rerun_is_idempotent(tmp_path, monkeypatch):
     first = phase5_release.catalog_path(tmp_path, "cand1").read_bytes()
     run_state_stage_worker(parameters, staging)
     assert phase5_release.catalog_path(tmp_path, "cand1").read_bytes() == first
+
+
+def test_bootstrap_conflict_restores_original_staging_success(tmp_path, monkeypatch):
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+    first = run_state_stage_worker(parameters, staging)
+    assert first["completed_ids"] == ["phase5_state_stage"]
+
+    store = phase5_release.deployment_root(tmp_path)
+    status_path = store / "releases" / "cand1" / "staging-status.json"
+    original_record = status_path.read_bytes()
+    original_manifest = phase5_release.staged_manifest_path(store, "cand1").read_bytes()
+
+    monkeypatch.setattr(
+        phase5_prepare_release, "_run_preflights",
+        lambda release, states, pinned_panel, sources: (
+            {**dict(sources or {}), "panel_copy_sha256": "b" * 64},
+            {name: types.SimpleNamespace(digest="dummy")
+             for build in states for name in build.payloads},
+            {}))
+
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: candidate release could not be published"
+    assert err.value.problem.details == {"code": "ID_CONFLICT"}
+
+    assert status_path.read_bytes() == original_record
+    assert phase5_release.staged_manifest_path(store, "cand1").read_bytes() == original_manifest
+    from checks.phase5_release_assembly import PRIOR_USABLE, classify_prior
+    assert classify_prior(tmp_path, "cand1").kind == PRIOR_USABLE
 
 
 def test_pinned_panel_failure_echoes_no_exception_text(tmp_path, monkeypatch):

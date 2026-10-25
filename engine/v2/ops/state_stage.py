@@ -161,7 +161,7 @@ def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, stat
         prior_release_id=prior_release_id, release_id=release_id, cutoff=cutoff,
         state_files=tuple(sorted(refs)),
         input_bindings={**refs, "legacy_manifest.json": manifest_ref}, mode=mode,
-        bootstrap=bootstrap)
+        bootstrap=dict(bootstrap) if bootstrap is not None else None)
     problems = state_stage_parameter_problems(None, params)
     if problems:
         raise fail("INVALID_REQUEST", "state stage plan is invalid",
