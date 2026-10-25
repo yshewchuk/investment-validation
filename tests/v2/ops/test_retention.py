@@ -106,6 +106,13 @@ def _refusal(snapshot_root, ops_root, conn, reason, **kwargs):
     with pytest.raises(OpsError) as caught:
         enforce_retention(ops_root, conn=conn, store=object(), **kwargs)
     assert caught.value.problem.details["reason_key"] == reason
+    if reason == "live_request_binding_invalid":
+        expected_code = "INPUT_CHANGED"
+    elif reason.endswith("_keep_invalid"):
+        expected_code = "INVALID_REQUEST"
+    else:
+        expected_code = "INTEGRITY_FAILED"
+    assert caught.value.code == expected_code
     assert _files(snapshot_root) == before
 
 
@@ -114,20 +121,21 @@ def _materialization_dir(base, name, mtime_ns):
     path.mkdir()
     (path / "sentinel.bin").write_bytes(b"kept")
     os.utime(path, ns=(mtime_ns, mtime_ns))
+    path.chmod(0o555)
     return path
 
 
 def test_verified_backups_prune_past_keep_and_rerun_is_noop(tmp_path, catalog):
     ops = tmp_path / "ops"
     scope = ops / "backups" / "shadow"
-    _write_backup(scope, "b1", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
-    _write_backup(scope, "b2", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    _write_backup(scope, "b2", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b1", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
 
     deleted = enforce_retention(ops, conn=catalog, store=object(),
                                 keep=1, materialization_keep=1)
-    assert deleted == ["b1"]
+    assert deleted == ["b2"]
     assert sorted(path.name for path in scope.iterdir() if path.is_file()) == [
-        "b2.manifest.json", "b2.sqlite"]
+        "b1.manifest.json", "b1.sqlite"]
     assert (scope / "artifacts" / "new.bin").read_bytes() == b"new"
     assert not (scope / "artifacts" / "old.bin").exists()
 
@@ -277,3 +285,48 @@ def test_unbound_current_publication_is_reported_and_only_older_roots_pruned(
     assert "RETENTION_CURRENT_PUBLICATION_UNBOUND" in events
     assert not oldest.exists() and not older.exists()
     assert newer.is_dir() and newest.is_dir()
+
+
+def test_oversized_manifest_refuses_before_any_backup_is_deleted(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "old", "2026-01-01T00:00:00+00:00")
+    _write_backup(scope, "new", "2026-01-02T00:00:00+00:00")
+    (scope / "old.manifest.json").write_bytes(
+        b"x" * (retention_module._MANIFEST_LIMIT + 1))
+
+    _refusal(ops, ops, catalog, "backup_manifest_oversized",
+             keep=1, materialization_keep=1)
+
+
+def test_backup_keep_defaults_to_seven(tmp_path, catalog, monkeypatch):
+    monkeypatch.delenv(retention_module.KEEP_ENV, raising=False)
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    for index in range(8):
+        _write_backup(scope, f"backup-{index:02d}",
+                      f"2026-01-{index + 1:02d}T00:00:00+00:00")
+
+    assert enforce_retention(ops, conn=catalog, store=object(),
+                             materialization_keep=1) == ["backup-00"]
+    assert (scope / "backup-07.sqlite").exists()
+
+
+@pytest.mark.parametrize(("damage", "reason"), [
+    ("keys", "backup_manifest_keys"),
+    ("cutoff", "backup_cutoff_invalid"),
+])
+def test_invalid_backup_manifest_shape_refuses_and_deletes_nothing(
+        tmp_path, catalog, damage, reason):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "old", "2026-01-01T00:00:00+00:00")
+    _write_backup(scope, "new", "2026-01-02T00:00:00+00:00")
+    manifest = _manifest(scope, "old")
+    if damage == "keys":
+        manifest["unexpected"] = True
+    else:
+        manifest["cutoff"] = "not-a-time"
+    _save_manifest(scope, "old", manifest)
+
+    _refusal(ops, ops, catalog, reason, keep=1, materialization_keep=1)

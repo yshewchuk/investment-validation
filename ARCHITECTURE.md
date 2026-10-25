@@ -715,17 +715,22 @@ and nothing on this diagram writes to the legacy board.
 
 #### Contract
 
-Retention runs after a successful backup. Per scope it retains the newest N complete backups; it also retains the newest K materialization roots and roots bound to live materialization attempts. N defaults to `OPS_BACKUP_RETENTION_KEEP=7`; K defaults to `OPS_MATERIALIZATION_RETENTION_KEEP=11`. A complete backup has the expected manifest keys, a non-empty database matching its manifest hash and passing SQLite integrity/foreign-key checks, and exactly the listed artifacts with matching sizes and hashes. Every backup scope and live request binding is checked before deletion. Current publication has no root binding, so the newest K roots are kept conservatively and `RETENTION_CURRENT_PUBLICATION_UNBOUND` is emitted. There is no deletion journal in this PR: a filesystem error can leave earlier unlinks in place; the error propagates, and a later run re-inventories state. An incomplete backup then refuses the whole retention pass until repaired. Journaled recovery and broader race-safe preflight are tracked in [#1251](https://github.com/yshewchuk/investment-validation/issues/1251).
+Retention runs after a successful backup. Per scope it retains the newest N complete backups; it also retains the newest K materialization roots and roots bound to live materialization attempts. N defaults to `OPS_BACKUP_RETENTION_KEEP=7`; K defaults to `OPS_MATERIALIZATION_RETENTION_KEEP=11`. A complete backup has the expected manifest keys, a non-empty database matching its manifest hash and passing SQLite integrity/foreign-key checks, and exactly the listed artifacts with matching sizes and hashes. Each manifest is at most 10 MiB; each database and artifact is at most 4 GiB. Every backup scope and live request binding is checked before deletion. Current publication has no root binding, so the newest K roots are kept conservatively and `RETENTION_CURRENT_PUBLICATION_UNBOUND` is emitted. Filesystem errors propagate and may leave earlier unlinks in place; a later run inventories state again. An incomplete backup then refuses the whole retention pass until repaired.
 
 | Condition | Outcome |
 | --- | --- |
 | Invalid retention count limit (zero, negative, non-integer or malformed) | `INVALID_REQUEST`; no deletion. |
 | Unverifiable backup or malformed live-attempt evidence | `INTEGRITY_FAILED`; no deletion begins. |
+| Manifest over 10 MiB, database or artifact over 4 GiB | `INTEGRITY_FAILED`; no deletion begins. |
+| Invalid backup root or scope entry | `INTEGRITY_FAILED`; no deletion begins. |
+| Invalid materialization root or entry | `INTEGRITY_FAILED`; no deletion begins. |
 | Unsafe backup or artifact name | `INTEGRITY_FAILED`; no deletion begins. |
 | Live attempt with a missing or duplicate request binding | `INPUT_CHANGED`; no deletion begins. |
 | Filesystem error during deletion | The `OSError` propagates; earlier deletions may persist. There is no journal replay; the next run re-inventories before considering more deletions. |
 | Partial backup remains after an interrupted deletion | The incomplete scope fails preflight with `INTEGRITY_FAILED`; no further deletion starts until repaired. |
 | Any retention refusal | The current nightly backup attempt fails, even though backup/watermark may already be durable. |
+
+Journal recovery and broader race-safe preflight are follow-up work in [#1251](https://github.com/yshewchuk/investment-validation/issues/1251).
 
 ## 5. Invariants
 

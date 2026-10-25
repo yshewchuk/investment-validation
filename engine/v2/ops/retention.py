@@ -27,6 +27,7 @@ from engine.v2.ops.snapshot_stages import request_from_artifact
 KEEP_ENV, DEFAULT_KEEP = "OPS_BACKUP_RETENTION_KEEP", 7
 MATERIALIZATION_KEEP_ENV, DEFAULT_MATERIALIZATION_KEEP = "OPS_MATERIALIZATION_RETENTION_KEEP", 11
 _SCHEMA, _DB, _MANIFEST = "catalog_backup.v1.0", ".sqlite", ".manifest.json"
+_MANIFEST_LIMIT, _FILE_LIMIT = 10 * 1024 * 1024, 4 * 1024**3
 _MANIFEST_KEYS = frozenset({"schema_version", "backup_key", "cutoff", "database", "artifacts"})
 _ARTIFACT_KEYS = frozenset({"content_hash", "byte_size"})
 _LIVE_STATES = ("starting", "running", "cancelling", "recovery_pending")
@@ -98,8 +99,8 @@ def _digest(path):
                    details={"reason_key": "backup_file_unreadable"}) from None
 
 def _database(path, expected):
-    if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
-        raise fail("INTEGRITY_FAILED", "backup database is missing, empty or not a regular file",
+    if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= _FILE_LIMIT:
+        raise fail("INTEGRITY_FAILED", "backup database is missing, empty, oversized or not a regular file",
                    details={"reason_key": "backup_database_invalid"})
     if _digest(path) != expected:
         raise fail("INTEGRITY_FAILED", "backup database hash does not match its manifest",
@@ -123,7 +124,7 @@ def _artifact(directory, name, info):
         raise fail("INTEGRITY_FAILED", "backup artifact metadata has unexpected keys",
                    details={"reason_key": "backup_artifact_metadata_keys"})
     digest, size = info["content_hash"], info["byte_size"]
-    if not isinstance(digest, str) or isinstance(size, bool) or not isinstance(size, int) or size < 0:
+    if not isinstance(digest, str) or isinstance(size, bool) or not isinstance(size, int) or size < 0 or size > _FILE_LIMIT:
         raise fail("INTEGRITY_FAILED", "backup artifact metadata is invalid",
                    details={"reason_key": "backup_artifact_metadata_invalid"})
     path = directory / name
@@ -139,6 +140,9 @@ def _artifact(directory, name, info):
 
 def _manifest(key, path, database, artifacts_dir):
     try:
+        if path.stat().st_size > _MANIFEST_LIMIT:
+            raise fail("INTEGRITY_FAILED", "backup manifest exceeds the 10 MiB limit",
+                       details={"reason_key": "backup_manifest_oversized"})
         document = json.loads(path.read_text())
     except (OSError, ValueError):
         raise fail("INTEGRITY_FAILED", "backup manifest could not be read",
@@ -385,6 +389,3 @@ def enforce_retention(ops_root, *, conn, store, keep=None, materialization_keep=
     finally:
         _stage_end("delete_materialization", started, done, len(roots))
     return deleted
-
-
-prune_backups = retain_backups = apply_retention = enforce_retention
