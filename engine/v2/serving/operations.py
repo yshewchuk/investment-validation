@@ -107,7 +107,8 @@ def _read_health(path: Path) -> bytes:
         raise ValueError("health artifact is indirect")
     document = json.loads(path.read_text())
     if not isinstance(document, dict) or document.get("schema_version") not in (
-            "operations_health.v1.0", "operations_health.v1.1"):
+            "operations_health.v1.0", "operations_health.v1.1",
+            "operations_health.v1.2"):
         raise ValueError("unsupported health artifact")
     return json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 

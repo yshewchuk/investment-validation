@@ -399,7 +399,7 @@ def health(conn, *, clock, executor_mode="watchdog"):
                                                                     expected_scope=current_scope)
     native_stage_failures = [dict(row) for row in conn.execute(
         "SELECT occurrence,scope_hash,stage_id,status,error_code,problem_json,created_at,updated_at "
-        "FROM native_stage_failures ORDER BY occurrence DESC, scope_hash, stage_id")]
+        "FROM native_stage_failures ORDER BY occurrence DESC, scope_hash, stage_id LIMIT 100")]
     return {"schema_version": "operations_health.v1.2", "generated_at": format_timestamp(clock.now()),
             "executor_mode": executor_mode, "containment": "best_effort" if executor_mode == "watchdog" else "kernel",
             "jobs": jobs, "watermarks": [dict(row) for row in conn.execute("SELECT * FROM watermarks ORDER BY pipeline, scope, stage")],

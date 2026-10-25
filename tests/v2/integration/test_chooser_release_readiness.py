@@ -74,6 +74,28 @@ def test_str_thru_release_readiness_and_worker_follow_declared_chooser_state(
             assert failure["status"] == "FAILED"
             assert failure["error_code"] == "MODEL_NOT_READY"
             assert json.loads(failure["problem_json"])["code"] == "MODEL_NOT_READY"
+            saved_problem = json.loads(failure["problem_json"])
+            assert saved_problem["category"] == "dependency"
+            assert saved_problem["retryable"] is False
+            assert saved_problem["message"] == (
+                "native score batch release binding is unavailable")
+            assert saved_problem["details"]["reason"] == "MODEL_NOT_READY"
+            assert service._native_release_root_or_none(
+                occurrence="2026-01-16", scope_hash="test-scope-hash") is None
+            all_failures = conn.execute(
+                "SELECT occurrence, updated_at FROM native_stage_failures "
+                "WHERE scope_hash = ? ORDER BY occurrence",
+                ("test-scope-hash",)).fetchall()
+            assert len(all_failures) == 2
+            assert all_failures[1]["occurrence"] == "2026-01-16"
+            second_updated_at = all_failures[1]["updated_at"]
+            assert service._native_release_root_or_none(
+                occurrence="2026-01-16", scope_hash="test-scope-hash") is None
+            assert conn.execute(
+                "SELECT updated_at FROM native_stage_failures "
+                "WHERE occurrence = ? AND scope_hash = ?",
+                ("2026-01-16", "test-scope-hash")).fetchone()["updated_at"] == (
+                    second_updated_at)
             monkeypatch.setattr(
                 health_module, "_current_delivered_release_with_scope",
                 lambda conn: (None, None))
@@ -89,6 +111,10 @@ def test_str_thru_release_readiness_and_worker_follow_declared_chooser_state(
                 and row["status"] == "FAILED"
                 and row["error_code"] == "MODEL_NOT_READY"
                 for row in document["native_stage_failures"])
+            health_failure = next(
+                row for row in document["native_stage_failures"]
+                if row["occurrence"] == "2026-01-15")
+            assert json.loads(health_failure["problem_json"]) == saved_problem
             with pytest.raises(ModelNotReady) as error:
                 run_native_score_batch_worker(parameters, work)
             assert error.value.member_id == member

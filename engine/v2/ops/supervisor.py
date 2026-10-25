@@ -769,16 +769,20 @@ class Service:
         from engine.v2.ops.catalog import transaction
         stamp = format_timestamp(self.clock.now())
         problem_json = json.dumps(to_document(problem), sort_keys=True, separators=(",", ":"))
-        with transaction(self.conn):
-            self.conn.execute(
-                """INSERT INTO native_stage_failures
-                   (occurrence, scope_hash, stage_id, status, error_code,
-                    problem_json, created_at, updated_at)
-                   VALUES (?, ?, 'native_score_batch', 'FAILED', ?, ?, ?, ?)
-                   ON CONFLICT(occurrence, scope_hash, stage_id) DO UPDATE SET
-                     status = excluded.status, error_code = excluded.error_code,
-                     problem_json = excluded.problem_json, updated_at = excluded.updated_at""",
-                (occurrence, scope_hash, problem.code, problem_json, stamp, stamp))
+        existing = self.conn.execute(
+            "SELECT 1 FROM native_stage_failures "
+            "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
+            (occurrence, scope_hash, "native_score_batch")).fetchone()
+        if existing is None:
+            with transaction(self.conn):
+                self.conn.execute(
+                    """INSERT INTO native_stage_failures
+                       (occurrence, scope_hash, stage_id, status, error_code,
+                        problem_json, created_at, updated_at)
+                       VALUES (?, ?, ?, 'FAILED', ?, ?, ?, ?)
+                       ON CONFLICT(occurrence, scope_hash, stage_id) DO NOTHING""",
+                    (occurrence, scope_hash, "native_score_batch", problem.code,
+                     problem_json, stamp, stamp))
         problem_key = (problem.code, problem.message)
         if problem_key == self._last_native_release_problem:
             return
@@ -834,20 +838,27 @@ class Service:
         memo = self._native_release_memo
         if (memo is not None and memo["root"] == str(root)
                 and memo["release_id"] == pointer.release_id):
-            self._last_native_release_problem = None
-            return str(root) if memo["ok"] else None
+            if memo["ok"]:
+                self._last_native_release_problem = None
+                return str(root)
+            self._report_native_release_problem(
+                memo.get("error_code", "MODEL_NOT_READY"),
+                "the release is unavailable",
+                occurrence=occurrence, scope_hash=scope_hash)
+            return None
         try:
             release_bindings.resolve_production_release_binding()
         except (release_bindings.ModelNotReady, release_bindings.NoCurrentRelease) as exc:
+            error_code = getattr(exc, "code", "MODEL_NOT_READY")
             self._native_release_memo = {"root": str(root), "release_id": pointer.release_id,
-                                         "ok": False}
+                                         "ok": False, "error_code": error_code}
             self._report_native_release_problem(
-                getattr(exc, "code", "MODEL_NOT_READY"), str(exc),
+                error_code, str(exc),
                 occurrence=occurrence, scope_hash=scope_hash)
             return None
         except Exception:
             self._native_release_memo = {"root": str(root), "release_id": pointer.release_id,
-                                         "ok": False}
+                                         "ok": False, "error_code": "MODEL_NOT_READY"}
             self._report_native_release_problem(
                 "MODEL_NOT_READY", "release verification failed",
                 occurrence=occurrence, scope_hash=scope_hash)
@@ -1088,12 +1099,11 @@ class Service:
         See nightly.submit_native_score_batch_shadow_if_ready and ARCHITECTURE.md
         "Outputs"/"Failure semantics" for the full account.
 
-        R2 (two independent memos): _native_release_root_or_none runs FIRST, every
-        tick, and a release-unavailable outcome NEVER touches
-        self._native_score_batch_memo's own attempt count;
-        _native_score_batch_identity_or_none runs next into its OWN
-        self._native_score_batch_lookup_memo, never conflated with a real
-        identity's build-attempt count. Only past both does this method reach the
+        identity lookup runs first and returns without a release check when no
+        eligible identity exists; then release binding is checked; a
+        release-unavailable result never consumes `_native_score_batch_memo`
+        attempts; identity lookup continues to use its separate
+        `_native_score_batch_lookup_memo`.
         SAME bounded backoff schedule _reconcile_computed_moves_refresh uses.
         Past the memo gate a snapshot-pinned identity submits the identity and
         producer parameters; raw-row production and its complete

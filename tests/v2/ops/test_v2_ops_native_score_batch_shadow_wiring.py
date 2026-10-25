@@ -420,7 +420,7 @@ def test_service_tick_submits_without_running_pinned_producer(tmp_path, monkeypa
     service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
                       code_source=ROOT, store_root=tmp_path)
     monkeypatch.setattr(service, "_native_release_root_or_none",
-                        lambda: str(tmp_path / "verified-release-root"))
+                        lambda **kwargs: str(tmp_path / "verified-release-root"))
 
     service.tick()
 
@@ -537,7 +537,7 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
     service.identity = supervisor
     monkeypatch.setattr(
         service, "_native_release_root_or_none",
-        lambda: str(tmp_path / "verified-release-root"))
+        lambda **kwargs: str(tmp_path / "verified-release-root"))
     claim = SimpleNamespace(
         job_id=other_job_id, attempt_id="other-attempt", fence=1)
     service.running[claim.attempt_id] = SimpleNamespace(
@@ -648,7 +648,7 @@ def test_service_submits_worker_producer_parameters_without_staging(tmp_path, mo
 
     service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
                       code_source=ROOT, store_root=tmp_path)
-    monkeypatch.setattr(service, "_native_release_root_or_none", lambda: release_root)
+    monkeypatch.setattr(service, "_native_release_root_or_none", lambda **kwargs: release_root)
 
     service._reconcile_native_score_batch_shadow()  # must not raise
 
@@ -833,7 +833,7 @@ def test_service_sidecar_keeps_legacy_unpinned_identity_as_noop(tmp_path, monkey
     _mark_score_succeeded(conn, clock, session="2026-01-01")
     service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
                       code_source=ROOT, store_root=tmp_path)
-    monkeypatch.setattr(service, "_native_release_root_or_none", lambda: "fake-release")
+    monkeypatch.setattr(service, "_native_release_root_or_none", lambda **kwargs: "fake-release")
 
     service._reconcile_native_score_batch_shadow()
 
@@ -864,7 +864,7 @@ def test_identity_lookup_failure_is_throttled_not_retried_every_tick(tmp_path, m
     conn, clock, _ = catalog(tmp_path)
     service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
                       code_source=ROOT, store_root=tmp_path)
-    monkeypatch.setattr(service, "_native_release_root_or_none", lambda: "fake-root")
+    monkeypatch.setattr(service, "_native_release_root_or_none", lambda **kwargs: "fake-root")
     calls = []
 
     def _boom(conn):
@@ -894,7 +894,7 @@ def test_identity_lookup_failure_never_spends_a_real_identitys_attempt_budget(tm
     conn, clock, _ = catalog(tmp_path)
     service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
                       code_source=ROOT, store_root=tmp_path)
-    monkeypatch.setattr(service, "_native_release_root_or_none", lambda: "fake-root")
+    monkeypatch.setattr(service, "_native_release_root_or_none", lambda **kwargs: "fake-root")
     real_identity = ("2026-01-01", "sha256:realhash", False)
     service._native_score_batch_memo = {"identity": real_identity, "attempts": 3,
                                         "not_before": 0.0}

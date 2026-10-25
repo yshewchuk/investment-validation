@@ -16,3 +16,4 @@ checksum; historical unflagged checksums remain unchanged.
 | R4 — rollback | Any statement, check, or version-record failure rolls back the whole migration; no schema or catalog-version change is left behind. SQLite errors otherwise propagate. |
 | R5 — restoration and concurrency | Foreign-key enforcement is restored to `ON` on every exit. The pragma is per connection; other connections retain their setting. `BEGIN IMMEDIATE` serializes catalog writers while readers may continue. |
 | R6 — retry | The same pending migration may be retried after correcting its cause; applied steps remain checksum-protected and are never edited. No internal retry occurs. |
+| R7 — additive schema | New durable tables are added in a new numbered migration; already-applied migration statements and checksums are immutable. |

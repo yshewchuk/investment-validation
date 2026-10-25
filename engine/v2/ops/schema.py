@@ -304,4 +304,12 @@ MIGRATIONS = (
         WHEN EXISTS (SELECT 1 FROM native_gate_sweeps WHERE experiment_id=NEW.experiment_id)
         BEGIN SELECT RAISE(ABORT, 'native gate rosters are immutable'); END""",
     )),
+    Migration(version=14, name="native_stage_failures", statements=(
+        """CREATE TABLE native_stage_failures (
+            occurrence TEXT NOT NULL, scope_hash TEXT NOT NULL, stage_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status = 'FAILED'), error_code TEXT NOT NULL,
+            problem_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            PRIMARY KEY(occurrence, scope_hash, stage_id)
+        ) STRICT""",
+    )),
 )
