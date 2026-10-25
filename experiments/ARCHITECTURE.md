@@ -273,6 +273,41 @@ The preview does not select a winner, fit or preprocess, reserve/register/publis
 write a ledger, enforce resource containment, or authorize execution/holdout reads.
 Existing v1 planning, fitting, journals and replay are unchanged.
 
+## Source-free candidate recipe and single-horizon fit
+
+`magnitude_candidate_recipe.candidate_recipe(family, parameters, *, columns,
+feature_dictionary_hash)` maps exact `ridge`/`elasticnet`/`hgb` names and closed
+parameter-key sets to the existing public model recipe constructors. Those
+constructors own all values, ordered-column/hash validation and fixed policies;
+this helper returns their detached family recipe, not a new wrapper schema.
+It imports no training, sklearn, dictionary or admission module.
+
+`magnitude_candidate_fit.fit_candidate(recipe, train_features, train_labels,
+prediction_features, *, columns)` checks both legacy/v2 no-fit guards before
+inspection, then lazily imports the public fitter for the exact recipe schema/model.
+Successful dispatch also loads the existing training package's transitive legacy
+training/data modules; importing those definitions is not a source read or admission.
+One call delegates one horizon's fit exactly once and returns its entire result,
+including ElasticNet's coefficient/convergence evidence, without retry or wrapping.
+The existing family APIs own closed-policy/order checks, train-only preprocessing,
+fresh one-thread fitting and finite nonnegative predictions. Native family errors
+propagate: ElasticNet's numeric conversion can raise TypeError/OverflowError;
+this helper does not silently normalize it to Ridge/HGB's conversion policy.
+
+| Condition | Outcome |
+| --- | --- |
+| Unknown family, non-dict parameters or missing/extra parameter keys | `ValueError` before recipe construction; family constructors own value refusals. |
+| Either no-fit guard active | Its `RuntimeFitForbidden` precedes recipe, columns and numeric inspection. |
+| Non-dict recipe or unsupported schema/model pair | `ValueError` before delegation or numeric inspection. |
+| Valid dispatch envelope with invalid policy/order/numeric inputs | Existing family refusal; no retry or partial result. |
+| Valid numeric call | Unmodified family result/schema/recipe ID; no new candidate seal or evidence of source qualification. |
+
+Only synthetic tests currently call these helpers. Columns/digests/arrays prove
+no dictionary membership, causal admission or permission to fit. No source reader,
+registration, artifact, journal, worker, resource containment, selection or CLI is
+added. Compiler specifications are not accepted as executable recipes; v1
+`SearchTrials` admission/selection and every existing execution closure stay intact.
+
 ## Recorded magnitude-search selection
 
 `magnitude_search_trials.SearchTrials` exposes the journal API composed by the serial CLI. `magnitude_search_records` owns journal tables, immutability triggers and reference binding over SQLite/foundation; `magnitude_search_errors` tags artifact failures. Direct dependencies include contracts, foundation, ops migrations/catalog/fingerprints/errors, research target reads, `magnitude_search_evidence` and the `magnitude_search_inputs` cohort loader. That shared helper owns native admission through `magnitude_history_inputs.history_binding` and research stored-history/target reads; `magnitude_search_plan.read_search_plan` owns plan admission. Both `engine.models.no_fit` and `engine.v2.models.no_fit` guard native fitting; `magnitude_search_execution` owns its fixed child and consumes `engine.v2.ops.executor.THREAD_VARIABLES`. Public `magnitude_report.magnitude_metrics` owns pooled RMSE/MAE. One `SearchTrials` instance admits each (plan, outer year, inner year) cohort once and shares the admitted inputs across that cohort's trials; `start` returns detached inputs (deep copies of the memoised ones). The in-memory memo holds one entry per cohort (bounded by the number of distinct (outer year, inner year) cohorts in the sealed plan), is never persisted and never holds a failed admission. Drift between instances is detected on re-admission by a fresh instance (see Input drift below); within one instance it is not re-read.
