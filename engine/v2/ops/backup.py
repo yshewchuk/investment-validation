@@ -1,9 +1,11 @@
 """Durable local backup effect; remote mirroring is deliberately out of scope."""
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import tempfile
@@ -20,7 +22,6 @@ from engine.v2.foundation import (
 from engine.v2.foundation.artifacts import ArtifactError
 from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
 from engine.v2.ops.errors import OpsError, fail
-from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.outbox import claim, complete, enqueue
 
 MAX_MANIFEST_BYTES = 1024 * 1024
@@ -33,14 +34,19 @@ def _read_bounded_bytes(path, max_bytes):
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
-        raise ValueError("file cannot be read safely") from exc
+        if exc.errno in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
+            raise ValueError("file cannot be read safely") from exc
+        raise fail("WORKER_FAILED", "manifest input could not be opened") from exc
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
             raise ValueError("file is not a bounded regular file")
         data = bytearray()
         while len(data) <= max_bytes:
-            chunk = os.read(fd, min(_COPY_CHUNK, max_bytes + 1 - len(data)))
+            try:
+                chunk = os.read(fd, min(_COPY_CHUNK, max_bytes + 1 - len(data)))
+            except OSError as exc:
+                raise fail("WORKER_FAILED", "manifest input could not be read") from exc
             if not chunk:
                 break
             data.extend(chunk)
@@ -55,7 +61,9 @@ def _open_checked_file(path, *, expected_size, stage):
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
-        raise fail("INTEGRITY_FAILED", f"{stage} is missing or unsafe") from exc
+        if exc.errno in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
+            raise fail("INTEGRITY_FAILED", f"{stage} is missing or unsafe") from exc
+        raise fail("WORKER_FAILED", f"{stage} could not be opened") from exc
     try:
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BACKUP_FILE_BYTES
@@ -76,7 +84,10 @@ def _checked_file_hash(path, *, stage, expected_size=None):
     copied = 0
     with stream:
         while copied <= size:
-            chunk = stream.read(min(_COPY_CHUNK, size + 1 - copied))
+            try:
+                chunk = stream.read(min(_COPY_CHUNK, size + 1 - copied))
+            except OSError as exc:
+                raise fail("WORKER_FAILED", f"{stage} could not be read") from exc
             if not chunk:
                 break
             copied += len(chunk)
@@ -100,7 +111,7 @@ def _copy_verified_file(source, destination, *, expected_size, expected_hash, st
                 try:
                     chunk = stream.read(_COPY_CHUNK)
                 except OSError as exc:
-                    raise fail("INTEGRITY_FAILED", f"{stage} could not be read") from exc
+                    raise fail("WORKER_FAILED", f"{stage} could not be read") from exc
                 if not chunk:
                     break
                 copied += len(chunk)
@@ -362,7 +373,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
     payload = json.loads(effect["payload_json"])
     _validate_backup_artifact_names(payload.get("artifacts", {}))
     target = Path(target)
-    if target.exists() and target.is_symlink():
+    if os.path.lexists(target) and target.is_symlink():
         raise fail("INVALID_REQUEST", "backup target is a symlink")
     target.mkdir(parents=True, exist_ok=True)
     database = target / (key + ".sqlite")
@@ -371,10 +382,8 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
         conn.execute("BEGIN")
         try:
             source_rows = _table_row_counts(conn)
-            prior = _verified_prior_backup(
-                manifest_path, database, source_rows, key, payload)
-            if prior is None:
-                _stage_database(conn, target, key, database, source_rows)
+            prior = None
+            _stage_database(conn, target, key, database, source_rows)
             conn.execute("COMMIT")
         except BaseException:
             if conn.in_transaction:
@@ -414,7 +423,8 @@ def _validate_backup_artifacts(artifacts):
         raise ValueError("backup artifacts are invalid")
     for name, info in artifacts.items():
         if (not isinstance(name, str) or len(safe_relative_path(name)) != 1
-                or not isinstance(info, dict)):
+                or not isinstance(info, dict)
+                or set(info) != {"content_hash", "byte_size"}):
             raise ValueError("artifact entry is invalid")
         size = info.get("byte_size")
         if (type(size) is not int or size < 0 or size > MAX_BACKUP_FILE_BYTES
@@ -434,6 +444,11 @@ def _valid_backup_cutoff(value):
 def _validate_backup_manifest(manifest):
     if not isinstance(manifest, dict):
         raise ValueError("manifest is not an object")
+    if set(manifest) != {
+        "schema_version", "backup_key", "cutoff", "database",
+        "database_rows", "artifacts",
+    }:
+        raise ValueError("manifest fields are invalid")
     backup_key = manifest.get("backup_key")
     database_hash = manifest.get("database")
     database_rows = manifest.get("database_rows")
@@ -460,8 +475,12 @@ def _verify_delivered_backup(conn, key, target):
         manifest = json.loads(_read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
         backup_key, database_hash, database_rows, artifacts = _validate_backup_manifest(
             manifest)
+    except OpsError as exc:
+        if exc.code == "WORKER_FAILED":
+            raise
+        raise fail("INTEGRITY_FAILED", "delivered backup manifest is missing or invalid") from exc
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, KeyError,
-            TypeError, AttributeError, OpsError, ArtifactError) as exc:
+            TypeError, AttributeError, ArtifactError) as exc:
         raise fail("INTEGRITY_FAILED", "delivered backup manifest is missing or invalid") from exc
     if backup_key != key or manifest != receipt:
         raise fail("INTEGRITY_FAILED", "delivered backup manifest differs from its receipt")
@@ -478,27 +497,62 @@ def _verify_delivered_backup(conn, key, target):
 
 
 def restore_backup(source, destination):
-    """Restore into a new isolated root and verify every database/artifact byte."""
+    """Restore verified no-follow inputs into a new isolated root."""
     source, destination = Path(source), Path(destination)
-    if destination.exists():
+    if os.path.lexists(destination):
         raise fail("INVALID_REQUEST", "restore destination already exists")
     manifests = list(source.glob("*.manifest.json"))
     if len(manifests) != 1:
         raise fail("INTEGRITY_FAILED", "backup manifest is missing or ambiguous")
-    manifest = json.loads(manifests[0].read_text())
-    destination.mkdir(parents=True)
-    database = destination / "ops.sqlite"
-    database.write_bytes((source / (manifest["backup_key"] + ".sqlite")).read_bytes())
-    probe = sqlite3.connect(database)
+    manifest_path = manifests[0]
     try:
-        if integrity_errors(probe) or file_hash(database) != manifest["database"]:
-            raise fail("INTEGRITY_FAILED", "restored catalog failed verification")
-    finally:
-        probe.close()
-    for name, info in manifest["artifacts"].items():
-        path = destination / "artifacts" / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes((source / "artifacts" / name).read_bytes())
-        if file_hash(path) != info["content_hash"]:
-            raise fail("INTEGRITY_FAILED", "restored artifact failed verification")
+        manifest = json.loads(_read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
+        backup_key, database_hash, database_rows, artifacts = _validate_backup_manifest(
+            manifest)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError,
+            ArtifactError, TypeError) as exc:
+        raise fail("INTEGRITY_FAILED", "backup manifest is missing or invalid") from exc
+    if manifest_path.name != f"{backup_key}.manifest.json":
+        raise fail("INTEGRITY_FAILED", "backup manifest key does not match its name")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+            dir=destination.parent, prefix=f".{destination.name}.restore-") as stage_dir:
+        stage = Path(stage_dir)
+        staged_database = stage / "ops.sqlite"
+        _copy_verified_file(
+            source / f"{backup_key}.sqlite", staged_database,
+            expected_size=None, expected_hash=database_hash, stage="restore database")
+        try:
+            probe = sqlite3.connect(staged_database)
+            try:
+                if integrity_errors(probe) or _table_row_counts(probe) != database_rows:
+                    raise fail("INTEGRITY_FAILED", "restored catalog failed verification")
+            finally:
+                probe.close()
+        except sqlite3.Error as exc:
+            raise fail("INTEGRITY_FAILED", "restored catalog is invalid") from exc
+
+        staged_artifacts = stage / "artifacts"
+        for name, info in artifacts.items():
+            staged_artifacts.mkdir(exist_ok=True)
+            _copy_verified_file(
+                source / "artifacts" / name, staged_artifacts / name,
+                expected_size=info["byte_size"], expected_hash=info["content_hash"],
+                stage="restore artifact")
+
+        try:
+            destination.mkdir()
+        except FileExistsError as exc:
+            raise fail("INVALID_REQUEST", "restore destination already exists") from exc
+        try:
+            os.replace(staged_database, destination / "ops.sqlite")
+            if staged_artifacts.exists():
+                os.replace(staged_artifacts, destination / "artifacts")
+            fsync_directory(destination)
+        except BaseException as exc:
+            shutil.rmtree(destination, ignore_errors=True)
+            if isinstance(exc, OSError):
+                raise fail("WORKER_FAILED", "restore destination publication failed") from exc
+            raise
     return destination
