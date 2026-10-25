@@ -255,7 +255,8 @@ three-outer fixture, plus 9 legacy logical / 18 component fits. Another schedule
 has different counts. Wider matrices and prefix work can change cost; none of
 these counts is a resource promise, real-data budget or performance claim.
 
-**Acceptance and bounded sequence.** This design precedes dictionary code.
+**Acceptance and bounded sequence.** The original design preceded dictionary code;
+v2 dictionary/recipe definitions have now landed in #1293. This amendment precedes P3a code.
 P1–P3 refine the original section-5 roadmap rather than replace it: P1 extends
 core slice 1; P2 completes the parity-dependent part of slices 2/6; P3a extends
 only the source-free slice 5a, while P3b wires versions through slices 3/4/5b/6.
@@ -271,6 +272,8 @@ Other core work and dependencies remain; P3a does not complete P3 or unblock a r
 | P3b3: planner/executor version wiring | P3a/P3b2 and core 5b admission; no bypass of selection/holdout rules | 70–110 / 160–230 / 20–35 |
 
 Split add/wire further at repository limits; these are estimates, not waivers.
+Unchanged P1/P2 rows are coarse workstreams, not single-PR budgets; their remaining
+work requires bounded sub-slices, as the metadata/materializer checkpoint specifies.
 P1 tests pin all 14 mappings, exact 11/28/42 order and HMO quote position,
 derivation-policy identity changes, unchanged v1 outputs and cross-version refusal.
 P2 uses independent numeric oracles for abs/nulls and prior means, zero/null quote
@@ -540,7 +543,7 @@ APIs, source closures, artifacts and identities remain unchanged.
 
 ### Boundary and reuse
 
-Proposed public API: `experiments.magnitude_search_request.compile_request(request)`.
+Landed public API (#1236): `experiments.magnitude_search_request.compile_request(request)`.
 Input is a detached plain-JSON document, not JSON text, a file or a repository.
 Only built-in dict/list/string/int/float/bool/null types are allowed; dictionary
 keys are strings, numbers finite, and cycles/non-JSON aliases refuse. Integer
@@ -693,7 +696,7 @@ That call must finish its existing plain-JSON, nested shape, grid, policy, year,
 cap and limit checks before any v2 candidate expansion. It supplies a detached
 normalized request and the existing schedule/counts. Restore the actual v2 hash
 in that normalized request, recompute `request_id=content_hash(request)`, replace
-each candidate's feature recipe via its declared subset, recompute every
+each candidate's feature recipe using its validated `feature_recipe["subset"]`, recompute every
 `candidate_spec_id=content_hash({request_id,family,feature_recipe,parameters})`,
 and re-sort candidates by the new IDs. Return a detached result; never retain a
 surrogate request ID, v1 recipe or surrogate candidate ID in the v2 output. Do not
