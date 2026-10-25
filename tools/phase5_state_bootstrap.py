@@ -151,7 +151,7 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
     cutoff = parameters["cutoff"]
     bootstrap = parameters["bootstrap"]
     _log(f"[bootstrap] stage start prior={prior_class.kind} reason={prior_class.reason} "
-         f"rss={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}")
+         f"rss_kb={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}")
 
     try:
         try:
@@ -298,7 +298,7 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
         n_objects = sum(len(build.payloads) for build in states)
         _log(f"[bootstrap] stage published elapsed={time.time() - start:.1f}s "
              f"members={len(states)} objects={n_objects} "
-             f"rss={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}")
+             f"rss_kb={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}")
         return {"release_id": parameters["release_id"],
                 "prior_release_id": parameters["prior_release_id"], "cutoff": cutoff,
                 "n_new": n_objects, "n_carried": 0}
@@ -306,5 +306,5 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
     except StageRefused as exc:
         code = f" code={exc.details['code']}" if "code" in exc.details else ""
         _log(f"[bootstrap] stage failed elapsed={time.time() - start:.1f}s "
-             f"rss={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}{code}")
+             f"rss_kb={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}{code}")
         raise

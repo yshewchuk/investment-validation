@@ -2,12 +2,24 @@
 from __future__ import annotations
 
 import json
+import types
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import pytest
 
-from engine.v2.models import release_layout as phase5_release
+from engine.v2.foundation import content_hash
+from engine.v2.models import deployment
 from engine.v2.models import inventory as inventory_module
+from engine.v2.models import release_layout as phase5_release
+from engine.v2.models.payoff_artifact import (
+    PAYOFF_LINE_ARTIFACT_V1,
+    make_payoff_line_artifact,
+    serialize_payoff_artifact,
+)
+from engine.v2.models.recalibration_artifact import serialize_recalibration_artifact
+from engine.v2.models.training.recalibration import build_recalibration_map_artifact
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.state_stage import (
     run_state_stage_worker,
@@ -16,13 +28,13 @@ from engine.v2.ops.state_stage import (
 )
 from tools import phase5_prepare_release
 
-from tests.v2.ops.test_state_stage import (
+from tests.v2.ops.state_stage_support import (
     REPO_ROOT,
-    _fixture,
-    _params,
-    _spec,
-    _stage_prior,
-    _STATES,
+    STATES as _STATES,
+    fixture as _fixture,
+    params as _params,
+    spec as _spec,
+    stage_prior as _stage_prior,
 )
 
 _SNAPSHOT = "a" * 64
@@ -44,6 +56,46 @@ def _bootstrap_states(cutoff="2026-10-01"):
             name = f"{member}|1"
         states[f"{member.replace(':', '_')}.json"] = (member, name)
     return states
+
+
+def _expected_bootstrap_objects(states):
+    """Member ids and object hashes the mocked bootstrap payloads must yield."""
+    hashes = {phase5_release.sha256_bytes(f"state-{name}".encode()) for name in states}
+    hashes.add(phase5_release.sha256_bytes(b"table"))
+    members = {member for member, _name in states.values()}
+    members.add("admissible_table:dyn_sv")
+    return members, hashes
+
+
+def _catalog_contents(root, release_id="cand1"):
+    body = json.loads(phase5_release.catalog_path(root, release_id).read_bytes())
+    members = {row["member_id"] for row in body["members"]}
+    hashes = {obj["content_hash"] for row in body["members"] for obj in row["objects"]}
+    return members, hashes
+
+
+_LINE_FIT = {
+    "intercept": 0.05, "slope": 0.004, "resid_sd": 0.01, "n": 250,
+    "r": 0.42, "residuals": [0.01, -0.02, 0.03, -0.01],
+}
+
+
+def _artifact_pairs(n=900, seed=5):
+    rng = np.random.default_rng(seed)
+    raw = np.round(rng.uniform(0.0, 1.0, n), 2)
+    frame = pd.DataFrame({
+        "strategy": np.where(rng.random(n) < 0.8, "STR-THRU", "STR-RUNUP"),
+        "fill_alpha": np.where(rng.random(n) < 0.8, 0.5, 0.25),
+        "event_id": [f"E{i}" for i in range(n)],
+        "ticker": "AAA",
+        "event_date": pd.Timestamp("2019-01-01"),
+        "exit_date": pd.Timestamp("2019-01-01") + pd.to_timedelta(rng.integers(0, 800, n), "D"),
+        "raw_win": raw,
+        "outcome": (rng.uniform(0, 1, n) < 0.2 + 0.5 * raw).astype(float),
+    })
+    frame.loc[:6, "raw_win"] = np.nan
+    frame.loc[7:9, "outcome"] = np.nan
+    return frame
 
 
 def _mock_bootstrap_inputs(monkeypatch, tmp_path, states=None, prior_names=None,
@@ -144,6 +196,7 @@ def test_carry_plan_omits_bootstrap_and_keeps_the_spec_hash(tmp_path):
                             source_root=REPO_ROOT)
     assert "bootstrap" not in plan["parameters"]
     spec_hash = plan["spec_hash"]
+    assert spec_hash == content_hash(plan["parameters"])
     for key in ("expected_ids", "release_root", "prior_release_id", "release_id",
                 "cutoff", "state_files", "input_bindings", "mode"):
         assert key in plan["parameters"]
@@ -165,6 +218,7 @@ def test_bootstrap_plan_passes_the_mapping(tmp_path):
     assert plan["parameters"]["bootstrap"] == {
         "tier4_dir": "/t", "panel_catalog": "/c",
         "panel_snapshot_id": "s", "panel_artifact_root": "/a"}
+    assert plan["spec_hash"] == content_hash(plan["parameters"])
 
 
 def test_bootstrap_plan_refuses_a_bad_mapping(tmp_path):
@@ -190,8 +244,11 @@ def test_none_prior_stages_a_candidate_catalog_only(tmp_path, monkeypatch):
     assert body["sources"]["pool_cutoff"] == "2026-10-01"
     assert body["sources"]["carried_from"] is None
     summary = json.loads((staging / "stage_result.json").read_text())
+    expected_members, expected_hashes = _expected_bootstrap_objects(_bootstrap_states())
+    assert summary["n_new"] == len(expected_hashes)
     assert summary["n_carried"] == 0
     assert summary["release_id"] == "cand1"
+    assert _catalog_contents(tmp_path) == (expected_members, expected_hashes)
 
 
 def test_no_pool_catalog_requires_matching_bindings(tmp_path, monkeypatch):
@@ -200,6 +257,10 @@ def test_no_pool_catalog_requires_matching_bindings(tmp_path, monkeypatch):
     result = run_state_stage_worker(parameters, staging)
     assert result["completed_ids"] == ["phase5_state_stage"]
     assert phase5_release.catalog_path(tmp_path, "cand1").exists()
+    summary = json.loads((staging / "stage_result.json").read_text())
+    expected_members, expected_hashes = _expected_bootstrap_objects(_bootstrap_states())
+    assert summary["n_new"] == len(expected_hashes)
+    assert _catalog_contents(tmp_path) == (expected_members, expected_hashes)
 
 
 def test_bindings_differ_refuses_without_writing(tmp_path, monkeypatch):
@@ -248,16 +309,30 @@ def test_empty_member_refuses_before_writing(tmp_path, monkeypatch):
         phase5_release.deployment_root(tmp_path), "cand1").exists()
 
 
-def test_cutoff_mismatch_of_a_paired_object_refuses(tmp_path, monkeypatch):
+@pytest.mark.parametrize("member", [
+    "paired_residual_pool", "board_analog_matcher", "chooser_analog_pool",
+])
+def test_pool_object_cutoff_mismatch_refuses(tmp_path, monkeypatch, member):
     states = _bootstrap_states()
-    states["paired_residual_pool.json"] = ("paired_residual_pool", "mv|cr|2026-10-02")
+    states[f"{member}.json"] = (member, "x|y|2026-10-02")
     parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path, states=states)
     phase5_release.catalog_path(tmp_path, "prior1").unlink()
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
     assert str(err.value) == ("VALIDATION_FAILED: a pool object cutoff differs "
                               "from the session cutoff")
-    assert err.value.problem.details == {"members": ["paired_residual_pool"]}
+    assert err.value.problem.details == {"members": [member]}
+
+
+def test_trailing_month_after_cutoff_refuses(tmp_path, monkeypatch):
+    states = _bootstrap_states()
+    states["trailing_pnl_cutoff.json"] = ("trailing_pnl_cutoff", "hist|2026-11")
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path, states=states)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: a trailing object month starts after cutoff"
+    assert err.value.problem.details == {"months": ["hist|2026-11"]}
 
 
 def test_damaged_prior_still_refuses(tmp_path, monkeypatch):
@@ -301,6 +376,10 @@ def test_rerun_is_idempotent(tmp_path, monkeypatch):
     phase5_release.catalog_path(tmp_path, "prior1").unlink()
     assert run_state_stage_worker(parameters, staging)["completed_ids"] == [
         "phase5_state_stage"]
+    expected_members, expected_hashes = _expected_bootstrap_objects(_bootstrap_states())
+    summary = json.loads((staging / "stage_result.json").read_text())
+    assert summary["n_new"] == len(expected_hashes)
+    assert _catalog_contents(tmp_path) == (expected_members, expected_hashes)
     first = phase5_release.catalog_path(tmp_path, "cand1").read_bytes()
     run_state_stage_worker(parameters, staging)
     assert phase5_release.catalog_path(tmp_path, "cand1").read_bytes() == first
@@ -454,10 +533,35 @@ def test_oversize_payoff_artifact_refused(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bootstrap_module, "MAX_STATE_BYTES", 10)
     path = tmp_path / "payoff.json"
-    path.write_bytes(b'{"schema_version": "payoff_line.v1", "extra": "x"}')
+    document = {"schema_version": PAYOFF_LINE_ARTIFACT_V1, "extra": "x"}
+    path.write_bytes(json.dumps(document).encode())
     with pytest.raises(StageRefused) as err:
         classify_bound_files(tmp_path, ["payoff.json"])
     assert str(err.value) == "a bound state file could not be loaded"
+
+
+def test_bound_artifacts_classify_and_load(tmp_path):
+    from tools.phase5_state_bootstrap import classify_bound_files
+
+    cutoff = "2020-09-01"
+    payoff = make_payoff_line_artifact(
+        _LINE_FIT, strategy="STR-THRU", driver="abs_move", alpha=0.5, cutoff=cutoff,
+    )
+    recalibration = build_recalibration_map_artifact(
+        _artifact_pairs(), strategy="STR-THRU", alpha=0.5, before=cutoff,
+    )
+    (tmp_path / "payoff.json").write_bytes(serialize_payoff_artifact(payoff))
+    (tmp_path / "recalibration.json").write_bytes(
+        serialize_recalibration_artifact(recalibration))
+    frozen, artifacts = classify_bound_files(
+        tmp_path, ["payoff.json", "recalibration.json"])
+    assert frozen == []
+    assert [path.name for path, _data in artifacts] == ["payoff.json", "recalibration.json"]
+    payloads = phase5_prepare_release.artifact_file_payloads(artifacts)
+    assert set(payloads) == {"payoff_line:STR-THRU", "recalibration_map:STR-THRU"}
+    expected = "STR-THRU|0.5|2020-09-01"
+    assert set(payloads["payoff_line:STR-THRU"]) == {expected}
+    assert set(payloads["recalibration_map:STR-THRU"]) == {expected}
 
 
 def test_admissible_depth_table_classified_frozen(tmp_path):
@@ -495,6 +599,10 @@ def test_matching_candidate_cutoff_does_not_conflict_in_pre_check(tmp_path, monk
     phase5_release.catalog_path(tmp_path, "prior1").unlink()
     first = run_state_stage_worker(parameters, staging)
     assert first["completed_ids"] == ["phase5_state_stage"]
+    expected_members, expected_hashes = _expected_bootstrap_objects(_bootstrap_states())
+    summary = json.loads((staging / "stage_result.json").read_text())
+    assert summary["n_new"] == len(expected_hashes)
+    assert _catalog_contents(tmp_path) == (expected_members, expected_hashes)
 
     calls = []
     original_write = phase5_prepare_release.write_release
@@ -569,3 +677,72 @@ def test_duplicate_admissible_object_refuses(tmp_path, monkeypatch):
         run_state_stage_worker(parameters, staging)
     assert str(err.value) == "VALIDATION_FAILED: a state object appears twice"
     assert err.value.problem.details == {"member": "admissible_table:dyn_sv"}
+
+
+def test_staging_success_failure_refuses(tmp_path, monkeypatch):
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+
+    def broken(*args, **kwargs):
+        raise deployment.DeploymentError("secret-internal-detail")
+
+    monkeypatch.setattr(deployment, "mark_staging_succeeded", broken)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: staging success could not be recorded"
+    assert err.value.problem.details == {}
+    assert "secret-internal-detail" not in str(err.value)
+
+
+@pytest.mark.parametrize("error", [
+    phase5_prepare_release.PrepareRefused("secret-internal-detail"),
+    OSError("secret-internal-detail"),
+])
+def test_write_release_failure_refuses(tmp_path, monkeypatch, error):
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+
+    def broken(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(phase5_prepare_release, "write_release", broken)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: candidate release could not be published"
+    assert err.value.problem.details == {}
+    assert "secret-internal-detail" not in str(err.value)
+
+
+def test_inventory_build_failure_refuses(tmp_path, monkeypatch):
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+
+    def broken(*args, **kwargs):
+        raise OSError("secret-internal-detail")
+
+    monkeypatch.setattr(inventory_module, "current_release_inventory", broken)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: release inventory could not be built"
+    assert err.value.problem.details == {}
+    assert "secret-internal-detail" not in str(err.value)
+
+
+def test_readback_not_usable_refuses(tmp_path, monkeypatch):
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+
+    import checks.phase5_release_assembly as assembly_module
+
+    real = assembly_module.classify_prior
+
+    def fake(root, release_id):
+        if release_id == "cand1":
+            return types.SimpleNamespace(kind="OTHER", reason="not usable")
+        return real(root, release_id)
+
+    monkeypatch.setattr(assembly_module, "classify_prior", fake)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: candidate release failed the light checks"
+    assert err.value.problem.details == {}

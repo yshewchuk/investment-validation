@@ -256,12 +256,12 @@ class RecalibrationArtifactLoader:
 
     def load_bytes(self, raw: bytes, content_hash: str, *,
                    path: str | None = None) -> RecalibrationMapArtifact:
-        cached = self._cache.get(content_hash)
-        if cached is not None:
-            return cached
         suffix = f": {path}" if path else ""
         if CONTENT_HASH_PREFIX + hashlib.sha256(raw).hexdigest() != content_hash:
             raise RecalibrationArtifactError(f"recalibration artifact hash mismatch{suffix}")
+        cached = self._cache.get(content_hash)
+        if cached is not None:
+            return cached
         try:
             document = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:

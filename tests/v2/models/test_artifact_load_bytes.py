@@ -83,3 +83,29 @@ def test_recalibration_loader_load_bytes_loads_good_bytes(tmp_path):
     loaded = loader.load_bytes(raw, artifact.content_hash)
     assert loaded == artifact
     assert loader.cache_size == 1
+
+
+def test_loader_load_bytes_checks_hash_before_cache(tmp_path):
+    good = make_payoff_line_artifact(
+        _LINE_FIT, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+    )
+    other = make_payoff_line_artifact(
+        _LINE_FIT, strategy="STR-THRU", driver="abs_move", alpha=0.25,
+    )
+    loader = PayoffArtifactLoader(tmp_path)
+    assert loader.load_bytes(serialize_payoff_artifact(good), good.content_hash) == good
+    assert loader.cache_size == 1
+    with pytest.raises(PayoffArtifactError, match="hash mismatch"):
+        loader.load_bytes(serialize_payoff_artifact(other), good.content_hash)
+
+
+def test_recalibration_loader_load_bytes_checks_hash_before_cache(tmp_path):
+    good = build_recalibration_map_artifact(_pairs(), strategy="STR-THRU", alpha=0.5,
+                                            before=CUTOFF)
+    other = build_recalibration_map_artifact(_pairs(), strategy="STR-THRU", alpha=0.25,
+                                             before=CUTOFF)
+    loader = RecalibrationArtifactLoader(tmp_path)
+    assert loader.load_bytes(serialize_recalibration_artifact(good), good.content_hash) == good
+    assert loader.cache_size == 1
+    with pytest.raises(RecalibrationArtifactError, match="hash mismatch"):
+        loader.load_bytes(serialize_recalibration_artifact(other), good.content_hash)
