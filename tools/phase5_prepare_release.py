@@ -47,6 +47,8 @@ from typing import Iterable, Mapping
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import pandas as pd  # noqa: E402
+
 from checks.phase5_modules import modules_available  # noqa: E402
 from engine.v2.foundation import CONTENT_HASH_PREFIX, to_document  # noqa: E402
 from engine.v2.models import deployment  # noqa: E402
@@ -86,6 +88,15 @@ from engine.v2.models.serving_folds import (  # noqa: E402
     ChooserFoldPolicy,
     SizeFoldPolicy,
     chooser_fold_outputs,
+)
+
+# The chooser pool source admission lives in the runtime training package (no
+# ``checks`` imports) so ``tools/phase5_training_job.py`` can read it directly;
+# these names stay importable from here for existing callers.
+from engine.v2.models.training.chooser_pool_source import (  # noqa: E402
+    CHOOSER_POOL_ID,
+    read_chooser_pool_frame,
+    require_chooser_pool_columns,
 )
 
 JOBLIB_ADAPTER = "joblib-estimator.v1"
@@ -273,23 +284,21 @@ def default_admissible_table() -> dict[str, dict[str, bytes]]:
         f"{table.table_id}|{table.version}": serialize_frozen_state(table)}}
 
 
-#: The chooser analog pool's id in a release (its source file, by name).
-CHOOSER_POOL_ID = "features.chooser_analog_pool"
-
-
 def chooser_pool_payloads(path: Path) -> dict[str, dict[str, bytes]]:
     """The frozen chooser analog pool built from ``tools/build_chooser_pool.py``'s
     parquet, in its stored order. The pool is static, so its causal cutoff is
-    the day after its last exit: every row it holds is inside the key."""
-    import pandas as pd
-
+    the day after its last exit: every row it holds is inside the key.
+    A plainly missing source is ``{}``; a symlink, non-regular or oversized
+    source refuses through ``read_chooser_pool_frame``."""
     from engine.v2.models.frozen_state import serialize_frozen_state
     from engine.v2.models.lineage import DataDependency, Lineage
     from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
 
-    if not Path(path).is_file():
+    try:
+        frame = read_chooser_pool_frame(path)
+    except FileNotFoundError:
         return {}
-    frame = pd.read_parquet(path)
+    require_chooser_pool_columns(frame.columns)
     exits = pd.to_datetime(frame["exit_date"]).dropna()
     if exits.empty:
         return {}

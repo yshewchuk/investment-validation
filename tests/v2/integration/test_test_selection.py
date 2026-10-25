@@ -185,6 +185,7 @@ _COVERAGE_RELOCATIONS = (
      "tests/v2/ops/test_v2_ops_computed_moves_store.py", (1,)),
     ("tests/test_v2_ops_native_board_universe.py", "tests/v2/ops/test_v2_ops_native_board_universe.py", (1,)),
     ("tests/test_v2_data_tier4_coverage.py", "tests/v2/data/test_tier4_coverage.py", (1, 2)),
+    ("tests/test_v2_ops_training_job.py", "tests/v2/ops/test_v2_ops_training_job.py", (1,)),
 )
 
 

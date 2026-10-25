@@ -110,16 +110,15 @@ follow their current documentation links into ``tests/v2/``. Their recorded
 paths change without changing coverage counts or source hashes. Phase 2
 also relocates the corpus-parity test and its historical node IDs.
 
-Bumped to v20 (PR #1312): the two root browser suites relocated —
-``tests/test_v2_ops_serving_browser.py`` to
-``tests/v2/serving/test_ops_serving_browser.py`` (renamed as well, hence its
-PHASE1_RENAMED entry) and ``tests/test_v2_dashboard_browser.py`` to
-``tests/v2/dashboard/test_v2_dashboard_browser.py`` (registered through
-PHASE1_RENAMED), so neither the flat ``test_v2_serving_*.py`` nor the
-``test_v2_dashboard_*.py`` root glob matches it and the resolved suite list
-carries the relocated paths. As with v11/v12 this changes the declared file
-list and the measurement identity it feeds; package counts remain
-historical, not a fresh coverage measurement.
+Bumped to v20: three relocations landed — ``tests/test_v2_ops_training_job.py``
+moved to ``tests/v2/ops/`` (test-layout ratchet), and the two root browser
+suites ``tests/test_v2_ops_serving_browser.py`` to
+``tests/v2/serving/test_ops_serving_browser.py`` (renamed as well) and
+``tests/test_v2_dashboard_browser.py`` to
+``tests/v2/dashboard/test_v2_dashboard_browser.py``; their recorded baseline
+paths follow via ``PHASE1_RENAMED`` and the resolved suite list carries the
+relocated paths. Counts and source hashes remain historical, not a fresh
+measurement.
 
 phase2 profile
 --------------
@@ -234,6 +233,7 @@ PHASE1_RENAMED = {
     "tests/test_v2_serving_bridge.py": "tests/v2/serving/test_v2_serving_bridge.py",
     "tests/test_v2_ops_serving_browser.py": "tests/v2/serving/test_ops_serving_browser.py",
     "tests/test_v2_dashboard_browser.py": "tests/v2/dashboard/test_v2_dashboard_browser.py",
+    "tests/test_v2_ops_training_job.py": "tests/v2/ops/test_v2_ops_training_job.py",
 }
 # Relocated tests kept explicitly in the suite, including moved baseline paths.
 PHASE1_EXTRA = (

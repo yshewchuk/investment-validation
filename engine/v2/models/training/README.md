@@ -35,8 +35,9 @@ selected-column matrices. It returns predictions, recipe ID, the full coefficien
 vector, selected source columns and convergence evidence after one guarded training-only fit. `columns` must match
 the recipe order. The caller owns causal membership, source identity, fit caps and
 inner-only choice of subset/alpha/l1_ratio; this API cannot certify those from arrays.
-No runtime caller, grid activation, validation-target selection, cache or persistence
-is added. Nonconvergence raises `ValueError` with no retry or partial result.
+The experiment dispatcher is a numeric caller, not a grid or production activation.
+No validation-target selection, cache or persistence is added.
+Nonconvergence raises `ValueError` with no retry or partial result.
 
 `magnitude_ridge_hgb.fit_ridge_hgb_predictions` separately accepts a closed
 variable-width recipe, caller-admitted numeric matrices and exact ordered
@@ -121,7 +122,16 @@ are not saved, so they cannot be re-bucketed). The real-data dataset
 builders for these and for the calibration recipes live in
 `tools/phase5_datasets.py` (legacy readers stay outside `engine/v2`).
 
-<!-- public-interface: fit_ridge_hgb_predictions, fit_elasticnet_predictions, build_d14_dataset, calculate_frame, input_rows, input_frame, decision_rows, daily_features, validate_role, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool -->
+P5-4 (`chooser_pool.py`) adds `build_chooser_analog_pool_artifact`, freezing the caller's stored-order rows up to an exclusive causal cutoff with a declared `Lineage`.
+
+`chooser_pool_source.py` holds the runtime admission of the frozen chooser
+pool's parquet source — `CHOOSER_POOL_ID`, `CHOOSER_POOL_MAX_BYTES`,
+`require_chooser_pool_columns` and `read_chooser_pool_frame` — imported by
+both `tools/phase5_prepare_release.py` (which re-exports the names) and
+`tools/phase5_training_job.py`; it imports no `checks` module so the training
+job's worker path can read it.
+
+<!-- public-interface: fit_ridge_hgb_predictions, fit_elasticnet_predictions, build_d14_dataset, calculate_frame, input_rows, input_frame, decision_rows, daily_features, validate_role, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool, CHOOSER_POOL_ID, CHOOSER_POOL_MAX_BYTES, require_chooser_pool_columns, read_chooser_pool_frame -->
 
 ## Consumers
 
@@ -136,6 +146,8 @@ and none below layer 6 may. Standalone real-data entry points are
 `tools/phase5_training_job.py` and `tools/phase5_d14_inputs.py`, outside v2 packages.
 
 `experiments/magnitude_fitted.py` consumes `fit_magnitude_predictions` after native admission.
+`experiments/magnitude_candidate_fit.py` dispatches one numeric call to the public
+ElasticNet/Ridge/HGB fitters; its synthetic-only callers grant no source admission.
 
 <!-- consumers: engine.v2.ops -->
 

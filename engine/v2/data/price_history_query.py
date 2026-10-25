@@ -13,14 +13,16 @@ in the pinned snapshot; ``retrieved_at`` remains provenance.
 ``get_price_series`` then keeps only bars dated on or before
 ``query.session_date``. No
 ``QUERY_NOT_BOUNDED``/``RESULT_LIMIT_EXCEEDED`` escape hatch beyond what
-``Repository.scan`` itself already enforces: the scan's result limit is
-exactly the selected pinned membership bound ``Repository.scan_population_bound``
-reports for the SAME ticker predicate (no fixed cap; a ticker's history grows
-as new, revised or revived bars are appended) -- ``scan`` refuses any limit
-above that bound before opening a fragment -- and ``_BATCH_CAP`` follows that
-limit down, staying positive when the bound is zero (the query contract
-requires a positive batch limit; a zero bound is a zero-row membership, not
-an unbounded query).
+``Repository.scan`` itself already enforces: ``_fetch_rows`` chooses the
+scan's result limit exactly -- it passes the selected pinned membership
+bound ``Repository.scan_population_bound`` reports for the SAME ticker
+predicate as ``max_result_rows`` (no fixed cap; a ticker's history grows
+as new, revised or revived bars are appended) -- and ``Repository.scan``
+only enforces an upper bound there, refusing any limit above that bound
+before opening a fragment. ``_BATCH_CAP`` follows that limit down, staying
+positive when the bound is zero (the query contract requires a positive
+batch limit; a zero bound is a zero-row membership, not an unbounded
+query).
 """
 from __future__ import annotations
 

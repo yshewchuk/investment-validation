@@ -155,7 +155,8 @@ Champion registry artifacts keep their separate `compress=3` behavior.
 recipe metadata from explicit ordered columns, dictionary hash, alpha and l1_ratio.
 `validate_elasticnet_recipe` returns a detached canonical recipe or raises
 `ValueError`; neither imports sklearn/training or reads sources. The training
-adapter consumes these helpers; no experiment or registration currently does.
+adapter and `experiments/magnitude_candidate_recipe.py` consume these helpers;
+no production registration currently does.
 
 ## Consumers
 
@@ -174,6 +175,9 @@ from causal source rows, and closed ElasticNet and Ridge/HGB recipe validation f
 consume `no_fit.forbid_fitting` before native trial claims and fixed-child fitting.
 `experiments/magnitude_search_outer.py` consumes the legacy/v2 no-fit guards
 before selected outer refit claims; completed evidence replay never fits.
+`experiments/magnitude_candidate_recipe.py` consumes the closed family recipe
+constructors; `magnitude_candidate_fit.py` checks both legacy/v2 no-fit guards
+before recipe, column or array inspection, then delegates to the public fitter.
 `serving_fold_preflight.py` consumes the chooser policy/descriptor types
 and `semantic_release_hash`, plus `engine.v2.foundation` typed-document conversion,
 for offline fold metadata; its helper `serving_fold_checks.py` imports
