@@ -102,7 +102,24 @@ def _copy_verified_database(conn, database):
             database.unlink(missing_ok=True)
         except OSError as unlink_error:
             raise fail("BACKUP_FAILED", "backup database cleanup failed") from unlink_error
-        raise fail("BACKUP_FAILED", "backup database copy or verification failed") from error
+        message = (error.problem.message if isinstance(error, OpsError)
+                   else "backup database copy or verification failed")
+        raise fail("BACKUP_FAILED", message) from error
+
+
+def _verify_existing_manifest(manifest_path, manifest):
+    if not manifest_path.exists():
+        return
+    with manifest_path.open("rb") as stream:
+        captured = stream.read(_MAX_MANIFEST_BYTES + 1)
+    if len(captured) > _MAX_MANIFEST_BYTES:
+        raise fail("BACKUP_FAILED", "backup manifest exceeds 1 MiB")
+    try:
+        existing = json.loads(captured)
+    except json.JSONDecodeError as error:
+        raise fail("INTEGRITY_FAILED", "backup manifest is invalid") from error
+    if existing != manifest:
+        raise fail("INTEGRITY_FAILED", "backup manifest differs")
 
 
 def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=_no_keepalive):
@@ -135,13 +152,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
                 "cutoff": payload["cutoff"], "database": database_hash,
                 "artifacts": copied}
     manifest_path = target / (key + ".manifest.json")
-    if manifest_path.exists():
-        with manifest_path.open("rb") as stream:
-            captured = stream.read(_MAX_MANIFEST_BYTES + 1)
-        if len(captured) > _MAX_MANIFEST_BYTES:
-            raise fail("BACKUP_FAILED", "backup manifest exceeds 1 MiB")
-        if json.loads(captured) != manifest:
-            raise fail("INTEGRITY_FAILED", "backup manifest differs")
+    _verify_existing_manifest(manifest_path, manifest)
     temporary = manifest_path.with_suffix(".pending")
     temporary.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
     with temporary.open("rb") as stream:

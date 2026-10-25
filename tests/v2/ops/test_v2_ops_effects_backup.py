@@ -67,6 +67,26 @@ def test_backup_copy_failure_remains_retryable(tmp_path):
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "delivered"
 
 
+def test_backup_reject_fresh_catalog_integrity_violation(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.executescript(
+        "CREATE TABLE backup_parent(id INTEGER PRIMARY KEY);"
+        "CREATE TABLE backup_child(parent_id INTEGER REFERENCES backup_parent(id));"
+        "INSERT INTO backup_child(parent_id) VALUES (42);"
+    )
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "bad-source-integrity", {}, clock=clock)
+    backup = tmp_path / "backup"
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key="bad-source-integrity", owner="worker", target=backup,
+                   clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.message == "catalog backup failed its integrity check"
+    assert error.value.problem.retryable is True
+    assert not (backup / "bad-source-integrity.sqlite").exists()
+
+
 def test_backup_rejects_non_ok_quick_check(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
@@ -100,13 +120,16 @@ def test_backup_rejects_non_ok_quick_check(tmp_path, monkeypatch):
         run_backup(conn, key="bad-quick-check", owner="worker", target=tmp_path / "backup",
                    clock=clock, store=store)
     assert error.value.code == "BACKUP_FAILED"
-    assert error.value.problem.message == "backup database copy or verification failed"
+    assert error.value.problem.message == "backup database verification failed"
     assert error.value.problem.retryable is True
     assert not (tmp_path / "backup" / "bad-quick-check.sqlite").exists()
 
 
-@pytest.mark.parametrize("contents", [b"", b"not a sqlite database"])
-def test_backup_bad_copy_remains_retryable(tmp_path, monkeypatch, contents):
+@pytest.mark.parametrize(("contents", "message"), [
+    (b"", "backup database is empty"),
+    (b"not a sqlite database", "backup database verification failed"),
+])
+def test_backup_bad_copy_remains_retryable(tmp_path, monkeypatch, contents, message):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "bad-copy", {}, clock=clock)
@@ -121,7 +144,7 @@ def test_backup_bad_copy_remains_retryable(tmp_path, monkeypatch, contents):
         run_backup(conn, key="bad-copy", owner="worker", target=backup,
                    clock=clock, store=store)
     assert error.value.code == "BACKUP_FAILED"
-    assert error.value.problem.message == "backup database copy or verification failed"
+    assert error.value.problem.message == message
     assert error.value.problem.retryable is True
     assert not (backup / "bad-copy.sqlite").exists()
     state = conn.execute(
@@ -138,6 +161,50 @@ def test_backup_bad_copy_remains_retryable(tmp_path, monkeypatch, contents):
     assert conn.execute(
         "SELECT state FROM outbox WHERE kind='backup' AND logical_key='bad-copy'"
     ).fetchone()[0] == "delivered"
+
+
+def test_backup_effect_preserves_safe_refusal_message(tmp_path, monkeypatch):
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        _seed_decisions(conn, clock, scope, SESSION, predictions=[_row("evt-1", "pred")])
+        claim = _submit_and_claim(
+            conn, clock, supervisor, kind="backup", key="backup-cause",
+            parameters=_params("backup", SESSION, scope))
+
+        def reject_copy(_database, **_kwargs):
+            raise fail("BACKUP_FAILED", "backup database is empty")
+
+        monkeypatch.setattr(backup_module, "_verified_database_hash", reject_copy)
+        with pytest.raises(OpsError):
+            backup_effect(conn, store, claim, root, clock=clock)
+        row = conn.execute(
+            "SELECT state, receipt_json FROM outbox WHERE kind='backup'"
+        ).fetchone()
+        assert row["state"] == "pending"
+        assert "backup database is empty" in row["receipt_json"]
+    finally:
+        conn.close()
+
+
+def test_backup_to_oserror_is_retryable_and_cleans_copy(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "copy-oserror", {}, clock=clock)
+    backup = tmp_path / "backup"
+
+    def interrupted_copy(_conn, destination):
+        destination.write_bytes(b"partial")
+        raise OSError("private detail")
+
+    monkeypatch.setattr(backup_module, "backup_to", interrupted_copy)
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key="copy-oserror", owner="worker", target=backup,
+                   clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.message == "backup database copy or verification failed"
+    assert error.value.problem.retryable is True
+    assert not (backup / "copy-oserror.sqlite").exists()
 
 
 def test_backup_cleanup_failure_is_retryable(tmp_path, monkeypatch):
@@ -190,7 +257,7 @@ def test_backup_rejects_existing_catalog_with_foreign_key_violation(tmp_path):
     with pytest.raises(OpsError) as error:
         run_backup(conn, key="fk-copy", owner="worker", target=backup, clock=clock, store=store)
     assert error.value.code == "BACKUP_FAILED"
-    assert error.value.problem.message == "backup database copy or verification failed"
+    assert error.value.problem.message == "backup database verification failed"
     assert error.value.problem.retryable is True
     assert not destination.exists()
     state = conn.execute(
@@ -240,6 +307,51 @@ def test_backup_rejects_oversized_manifest(tmp_path, monkeypatch):
     assert error.value.problem.message == "backup manifest exceeds 1 MiB"
     assert error.value.problem.retryable is True
     assert read_sizes == [1024 * 1024 + 1]
+
+
+@pytest.mark.parametrize(("contents", "message"), [
+    (b"{", "backup manifest is invalid"),
+    (b"{}", "backup manifest differs"),
+])
+def test_backup_rejects_invalid_existing_manifest(tmp_path, contents, message):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "bad-manifest", {}, clock=clock)
+    backup = tmp_path / "backup"
+
+    def crash(point):
+        if point == "after_manifest_before_ack":
+            raise RuntimeError("ack lost")
+
+    with pytest.raises(RuntimeError):
+        run_backup(conn, key="bad-manifest", owner="worker", target=backup,
+                   clock=clock, store=store, fault=crash)
+    (backup / "bad-manifest.manifest.json").write_bytes(contents)
+    clock.advance(301)
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key="bad-manifest", owner="retry", target=backup,
+                   clock=clock, store=store)
+    assert error.value.code == "INTEGRITY_FAILED"
+    assert error.value.problem.message == message
+
+
+def test_backup_fsyncs_database_copy(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "fsync-copy", {}, clock=clock)
+    backup = tmp_path / "backup"
+    fsynced_database_paths = []
+    real_fsync = backup_module.os.fsync
+
+    def recording_fsync(fd):
+        if Path(f"/proc/self/fd/{fd}").resolve().name == "fsync-copy.sqlite":
+            fsynced_database_paths.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(backup_module.os, "fsync", recording_fsync)
+    run_backup(conn, key="fsync-copy", owner="worker", target=backup,
+               clock=clock, store=store)
+    assert len(fsynced_database_paths) == 1
 
 
 def test_backup_accept_manifest_at_size_cap(tmp_path):
