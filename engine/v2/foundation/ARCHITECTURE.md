@@ -13,6 +13,15 @@ consumes it to stage and byte-bound a complete report before stdout emission.
 
 `market_calendar.build_calendar_sessions` projects sessions from observed source dates; `planned_exit_date` applies native strategy anchors. `CalendarEventKey` is structural so ops requests satisfy it without a foundation dependency on ops.
 
+`market_calendar.is_scheduled_session(day)` is the one public weekday/non-holiday
+predicate for a session day. Projection, calendar validation and
+`market_schedule.latest_completed_session` call it instead of re-deriving
+holiday membership. `latest_completed_session(now=None, frozen_at=None)`
+returns the latest completed NYSE session at `now`, or at the snapshot
+`frozen_at` when `now` is omitted. `frozen_at=None` and the exact string
+`"unknown"` mean live; every other empty, malformed or non-string value raises
+`ValueError` rather than silently switching to live time.
+
 `market_horizon.trading_days_before_print(calendar, *, entry_date, event_date,
 session)` returns the signed session-index distance from entry (previous listed
 session for an unlisted day) to the last pre-print close: AMC includes the
@@ -65,7 +74,7 @@ None. This module does not access repositories, providers, loaders, models, legs
 
 ## Failure semantics
 
-Invalid/empty sessions, malformed/missing dates (`None`, `NaT`), unknown strategy/session, or insufficient pre-print or post-print anchor coverage raise `CalendarInputError(code="INVALID_REQUEST")`. The bounded search for the first future session stops at Python's maximum representable date: if a session remains in range it is returned, and if none remains the function raises the same typed refusal rather than leaking date-arithmetic overflow. R1–R6: source failures propagate at the adapter; no external-source or request-result cache or retries; deterministic for the same inputs; read-only; no partial result or writes; stable output for the same request.
+Invalid/empty sessions, malformed/missing dates (`None`, `NaT`), unknown strategy/session, or insufficient pre-print or post-print anchor coverage raise `CalendarInputError(code="INVALID_REQUEST")`. A malformed, empty or non-string `frozen_at` other than `None`/`"unknown"` raises `ValueError`; it never falls back to live time. The bounded search for the first future session stops at Python's maximum representable date: if a session remains in range it is returned, and if none remains the function raises the same typed refusal rather than leaking date-arithmetic overflow. R1–R6: source failures propagate at the adapter; no external-source or request-result cache or retries; deterministic for the same inputs; read-only; no partial result or writes; stable output for the same request.
 
 Only pure annual holiday calculations use a process-local stdlib LRU (128 years),
 returning immutable sets that include one-off closure dates. Observed sessions,

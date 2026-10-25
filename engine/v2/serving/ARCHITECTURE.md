@@ -10,7 +10,9 @@ Application rendering belongs in the [React app](../../../ui/ARCHITECTURE.md).
 
 **Operations health currency.** Serving accepts `operations_health.v1.0` and
 `operations_health.v1.1`. Older v1.0 documents remain valid; either absent or
-malformed session field leaves currency `unknown` without a default.
+malformed session field leaves currency `unknown` without a default. The
+producer's `withheld_release` is `null` or a non-array object; missing or any
+other type is unknown, never "no withholding".
 The [README](README.md) lists the checked exports (the only names other packages may import). By module:
 - `operations.create_server` (authenticated HTTP listener).
 - `api`: `create_app` (authenticated read-only JSON API), `ApiError`; run as
@@ -130,6 +132,14 @@ Current-release discovery is an authenticated read. An unavailable or
 unrecognized publication identity is unknown to clients; failed reads do not
 change a release pin. Serving never retries. Reads have no write or partial
 artifact.
+
+`GET /release/current.json` also sends `X-Expected-Session`, the latest
+completed NYSE session at the configured `frozen_at` snapshot clock. Only an
+absent `frozen_at` or the exact string `"unknown"` means live; a malformed,
+empty or non-string configured clock is refused and the route omits the header
+instead of substituting live time, so clients show expected session unknown.
+The shell compares that expected session with health's `resolved_session` and
+uses `requested_session` for the later-than-requested refusal.
 
 `GET /api/v1/native_parity` exposes report identity and the existing aggregate,
 plus `native_refused_tickers`, the saved refusal entries from both refusal

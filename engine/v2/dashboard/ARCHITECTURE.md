@@ -93,10 +93,28 @@ if it is under 24 hours old. Missing or malformed session or schedule evidence
 is unknown, never current. The latest outcome exposed by health evidence is
 shown explicitly: withheld publication, failed engineering observations, and
 unknown scheduled observations remain visible, and absent evidence is unknown.
-Health is current only when its timestamp and input session are fresh, its
-release identity matches both the frame pin and latest published release, and
-its available outcome and schedule evidence pass. Stale, degraded, and unknown
-are distinct visible states.
+Health is current only when every condition below passes. Precedence is
+**unknown > stale > degraded**: any unknown condition wins over stale, stale
+wins over degraded, and current appears only when no condition fails. The
+banner class is exactly `unknown`, `stale`, `degraded`, or empty for current.
+
+| Condition | Visible outcome |
+|---|---|
+| Health fetch/parse failure, unsupported schema, or missing/malformed/future `generated_at` | unknown |
+| `withheld_release` missing, or present as anything other than `null` or a non-array object (empty string, `false`, `0`, arrays) | unknown |
+| `withheld_release` is a non-array object | degraded (release withheld) |
+| `generated_at` older than 24 hours | stale |
+| `requested_session` or `resolved_session` missing or malformed | unknown |
+| Expected session not yet observed, missing, or malformed | unknown |
+| Resolved session later than the expected or requested session | unknown |
+| Resolved session older than the expected session | stale |
+| `code_budgets` missing or malformed | unknown |
+| Engineering `ok` is false, or `consecutive_nights` is nonzero | degraded |
+| `unknown_occurrences` is nonempty | unknown |
+| `current_release.release_id` missing | unknown |
+| Health release differs from the frame pin or the published current | stale (pin unavailable or published not yet observed: unknown) |
+| Pin and published current differ | stale drift notice plus reload opt-in |
+| All evidence passes | current |
 
 ## Dependencies
 

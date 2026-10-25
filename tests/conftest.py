@@ -208,7 +208,7 @@ def pytest_runtest_teardown(item, nextitem):
 #   thread count of a real child process it just launched -- exactly the
 #   "bounded jobs pin from core 0" collision a concurrent sibling could
 #   step on. The file's other tests never touch a real subprocess.
-# - tests/test_v2_ops_serving_browser.py (whole file): drives a real
+# - tests/v2/serving/test_ops_serving_browser.py (whole file): drives a real
 #   Playwright browser.
 # - tests/test_v2_ops_coordinator_lease.py (whole file): lost-lease tests settle through
 #   the real `prove_ownership_gone` /proc scan; in parallel it quarantined the attempt.

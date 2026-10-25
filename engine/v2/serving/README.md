@@ -27,7 +27,10 @@ extending them does not deliver the React application.
 - Resolve-once release identity: `GET /release/current.json` returns
   `{"release_id": ...}` for a client (the shell, the launcher) to pin and
   reuse, instead of re-following `/release/current`'s redirect on every
-  navigation. `/release/current/...` keeps working for direct requests.
+  navigation. It also sends `X-Expected-Session`, the latest completed NYSE
+  session at the configured snapshot clock; only absent/`"unknown"` means
+  live, and a malformed configured clock omits the header rather than using
+  live time. `/release/current/...` keeps working for direct requests.
 - The read-only v2 dashboard API (`api.py`, P3-2): authenticated, paginated,
   ETag'd JSON over `projections`' route-specific read helpers — `/api/v1/releases/
   current`, `/api/v1/releases/{id}`, `/api/v1/events`, `/api/v1/events/{id}/
