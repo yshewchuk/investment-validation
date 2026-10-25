@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 
 import pytest
 
@@ -17,13 +18,23 @@ from tests.v2.ops.test_v2_ops_effects_graph import (
 )
 
 
-def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
+def test_backup_copies_artifacts_and_restores_new_root(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
     prepare_backup(conn, "b1", {"evidence.bin": ref}, clock=clock)
     backup = tmp_path / "backup"
+    recorded_uris = []
+    real_connect = backup_module.sqlite3.connect
+
+    def recording_connect(database, *args, **kwargs):
+        if kwargs.get("uri"):
+            recorded_uris.append(database)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(backup_module.sqlite3, "connect", recording_connect)
     manifest = run_backup(conn, key="b1", owner="worker", target=backup, clock=clock, store=store)
+    assert recorded_uris == [(backup / "b1.sqlite").resolve().as_uri() + "?mode=ro"]
     assert manifest["artifacts"]["evidence.bin"]["content_hash"] == ref.content_hash
     assert manifest["database"] == "sha256:" + hashlib.sha256(
         (backup / "b1.sqlite").read_bytes()).hexdigest()
@@ -55,18 +66,59 @@ def test_backup_bad_copy_remains_retryable(tmp_path, monkeypatch, contents):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "bad-copy", {}, clock=clock)
+    backup = tmp_path / "backup"
+    real_backup_to = backup_module.backup_to
 
     def bad_copy(_conn, destination):
         destination.write_bytes(contents)
 
     monkeypatch.setattr(backup_module, "backup_to", bad_copy)
     with pytest.raises(OpsError) as error:
-        run_backup(conn, key="bad-copy", owner="worker", target=tmp_path / "backup",
+        run_backup(conn, key="bad-copy", owner="worker", target=backup,
                    clock=clock, store=store)
     assert error.value.code == "BACKUP_FAILED"
     assert error.value.problem.retryable is True
+    assert not (backup / "bad-copy.sqlite").exists()
     state = conn.execute(
         "SELECT state FROM outbox WHERE kind='backup' AND logical_key='bad-copy'"
+    ).fetchone()[0]
+    assert state != "delivered"
+
+    monkeypatch.setattr(backup_module, "backup_to", real_backup_to)
+    clock.advance(301)
+    manifest = run_backup(conn, key="bad-copy", owner="retry", target=backup,
+                          clock=clock, store=store)
+    assert manifest["database"] == "sha256:" + hashlib.sha256(
+        (backup / "bad-copy.sqlite").read_bytes()).hexdigest()
+    assert conn.execute(
+        "SELECT state FROM outbox WHERE kind='backup' AND logical_key='bad-copy'"
+    ).fetchone()[0] == "delivered"
+
+
+def test_backup_rejects_existing_catalog_with_foreign_key_violation(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "fk-copy", {}, clock=clock)
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    destination = backup / "fk-copy.sqlite"
+    invalid = sqlite3.connect(destination)
+    try:
+        invalid.executescript(
+            "PRAGMA foreign_keys=OFF;\n"
+            "CREATE TABLE parent(id INTEGER PRIMARY KEY);\n"
+            "CREATE TABLE child(parent_id INTEGER REFERENCES parent(id));\n"
+            "INSERT INTO child(parent_id) VALUES (42);\n"
+        )
+    finally:
+        invalid.close()
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key="fk-copy", owner="worker", target=backup, clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.retryable is True
+    assert not destination.exists()
+    state = conn.execute(
+        "SELECT state FROM outbox WHERE kind='backup' AND logical_key='fk-copy'"
     ).fetchone()[0]
     assert state != "delivered"
 

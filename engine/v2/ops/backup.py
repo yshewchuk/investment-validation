@@ -14,7 +14,7 @@ from engine.v2.foundation import (
     safe_relative_path,
 )
 from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.outbox import claim, complete, enqueue
 
@@ -78,11 +78,28 @@ def _verified_database_hash(database):
         try:
             if probe.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
                 raise fail("BACKUP_FAILED", "backup database verification failed")
+            if integrity_errors(probe):
+                raise fail("BACKUP_FAILED", "backup database verification failed")
         finally:
             probe.close()
+        with database.open("rb") as stream:
+            os.fsync(stream.fileno())
         return file_hash(database)
     except (OSError, sqlite3.Error) as error:
         raise fail("BACKUP_FAILED", "backup database verification failed") from error
+
+
+def _copy_verified_database(conn, database):
+    try:
+        if not database.exists():
+            backup_to(conn, database)
+        return _verified_database_hash(database)
+    except (OpsError, OSError, sqlite3.Error) as error:
+        try:
+            database.unlink(missing_ok=True)
+        except OSError as unlink_error:
+            raise fail("BACKUP_FAILED", "backup database cleanup failed") from unlink_error
+        raise fail("BACKUP_FAILED", "backup database copy or verification failed") from error
 
 
 def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=_no_keepalive):
@@ -95,9 +112,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
         raise fail("INVALID_REQUEST", "backup target is a symlink")
     target.mkdir(parents=True, exist_ok=True)
     database = target / (key + ".sqlite")
-    if not database.exists():
-        backup_to(conn, database)
-    database_hash = _verified_database_hash(database)
+    database_hash = _copy_verified_database(conn, database)
     copied = {}
     for name, document in payload.get("artifacts", {}).items():
         keepalive()
