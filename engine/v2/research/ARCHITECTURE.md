@@ -48,17 +48,17 @@ materializer, CLI, model or registration integration.
 
 Panel boundaries require plain JSON (nested history before normalization); detached refusals use `CONTRACT_MISMATCH`, native refusals propagate.
 
-`magnitude_panel_v2_policies.policy_definitions()` returns detached `source_policies`,
-`derivation_policies`, `quote_indicator` and `missing_indicators` metadata from the
-[parity design](https://github.com/yshewchuk/investment-validation/blob/26b5958d868afc5189611aa77ec1774a9e246d71/experiments/SUPER_SIZE/STAGE2_DESIGN.md#incumbent-parity-amendment-october-24-design-only).
-It uses standard JSON copying and public `eligibility_policy` declarations, not a registry/parser.
-These closed policies declare logical inputs and arithmetic requirements; they do not bind a selected subset,
-compute features or qualify source snapshots. Only synthetic tests call this metadata factory.
-No v2 dictionary/table/context, reader, model, compiler change or runtime activation exists in this module.
+`magnitude_panel_v2_policies.policy_definitions()` supplies detached source/derivation/quote/missing policies to `magnitude_panel_v2_table`.
+The [parity design](https://github.com/yshewchuk/investment-validation/blob/26b5958d868afc5189611aa77ec1774a9e246d71/experiments/SUPER_SIZE/STAGE2_DESIGN.md#incumbent-parity-amendment-october-24-design-only) policies use JSON copying and public eligibility declarations, not a registry/parser or computations.
+The additive v2 table exports `CONTRACT`, `feature_dictionary(subset)` and `recipe(subset)`; explicit H/HM/HMO have 11/28/42 ordered numeric descriptors.
+Uniform inline source/derivation policies change all dictionary hashes (including H); v1 APIs, contracts, hashes and eleven H numeric values/order remain unchanged.
+Recipes own 11/28/43 raw model columns: HMO alone appends `has_implied_quote`, outside the numeric table; learned missing indicators remain family-owned.
+Native contract hashing and dictionary hashing are distinct; neither qualifies sources/snapshots or admits rows. No v2 context, reader, model, compiler change or runtime activation exists.
 
 | Condition | Outcome |
 | --- | --- |
 | `policy_definitions()` | No arguments; detached metadata only, no I/O/fits/verification or retry/cache. Shared declaration exceptions propagate unchanged. |
+| Invalid v2 subset (not a plain H/HM/HMO string); omitted argument | `CONTRACT_MISMATCH`; omitted argument raises Python `TypeError`. Detached metadata only; no I/O/fits/admission or retry/cache. |
 | Invalid detached panel identity/schema, nested digest/folds, snapshot, calendar, cutoff or row | `CONTRACT_MISMATCH` |
 | Malformed or forged direct calendar snapshot | `SNAPSHOT_UNRESOLVED` |
 | Empty native observed session calendar | `CALENDAR_UNAVAILABLE` |
@@ -127,7 +127,7 @@ These CLI files sit outside `checks/import_layers.py`'s hook (it only parses
 `engine*` importers), so no `engine` package is recorded as importing this
 one; the library entrypoints below are this package's real public interface:
 
-`magnitude_panel_v2_policies.policy_definitions`, `eligibility_policy.eligibility_policy`, `eligibility_policy.plan_eligibility`,
+`magnitude_panel_v2_table.CONTRACT`, `magnitude_panel_v2_table.feature_dictionary`, `magnitude_panel_v2_table.recipe`, `magnitude_panel_v2_policies.policy_definitions`, `eligibility_policy.eligibility_policy`, `eligibility_policy.plan_eligibility`,
 `experiment_population.canonical_events`, `experiment_trades.classify_events`,
 `snapshot_inputs.snapshot_reference`, `snapshot_inputs.admit_snapshot`,
 `signal_screen.run`, `fill_quality.run`, `polygon_fills.run`, `replay.replay`,
