@@ -46,8 +46,9 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path, monkeypatch):
     restored = restore_backup(backup, tmp_path / "restored")
     assert (restored / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "delivered"
-    with pytest.raises(Exception):
+    with pytest.raises(OpsError) as error:
         restore_backup(backup, tmp_path / "restored")
+    assert error.value.code == "INVALID_REQUEST"
 
 
 def test_backup_copy_failure_remains_retryable(tmp_path):
@@ -66,6 +67,44 @@ def test_backup_copy_failure_remains_retryable(tmp_path):
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "delivered"
 
 
+def test_backup_rejects_non_ok_quick_check(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "bad-quick-check", {}, clock=clock)
+    real_connect = backup_module.sqlite3.connect
+
+    class _BadResult:
+        def fetchall(self):
+            return [("not ok",)]
+
+    class _ReadOnlyProbe:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, statement):
+            if statement.upper() == "PRAGMA QUICK_CHECK":
+                return _BadResult()
+            return self.connection.execute(statement)
+
+        def close(self):
+            self.connection.close()
+
+    def bad_quick_check(database, *args, **kwargs):
+        connection = real_connect(database, *args, **kwargs)
+        if kwargs.get("uri"):
+            return _ReadOnlyProbe(connection)
+        return connection
+
+    monkeypatch.setattr(backup_module.sqlite3, "connect", bad_quick_check)
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key="bad-quick-check", owner="worker", target=tmp_path / "backup",
+                   clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.message == "backup database copy or verification failed"
+    assert error.value.problem.retryable is True
+    assert not (tmp_path / "backup" / "bad-quick-check.sqlite").exists()
+
+
 @pytest.mark.parametrize("contents", [b"", b"not a sqlite database"])
 def test_backup_bad_copy_remains_retryable(tmp_path, monkeypatch, contents):
     conn, clock, _ = catalog(tmp_path)
@@ -82,6 +121,7 @@ def test_backup_bad_copy_remains_retryable(tmp_path, monkeypatch, contents):
         run_backup(conn, key="bad-copy", owner="worker", target=backup,
                    clock=clock, store=store)
     assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.message == "backup database copy or verification failed"
     assert error.value.problem.retryable is True
     assert not (backup / "bad-copy.sqlite").exists()
     state = conn.execute(
@@ -124,6 +164,7 @@ def test_backup_cleanup_failure_is_retryable(tmp_path, monkeypatch):
         run_backup(conn, key="cleanup-failure", owner="worker", target=backup,
                    clock=clock, store=store)
     assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.message == "backup database cleanup failed"
     assert error.value.problem.retryable is True
     assert (backup / "cleanup-failure.sqlite").exists()
     assert cleanup_attempts == [backup / "cleanup-failure.sqlite"]
@@ -149,6 +190,7 @@ def test_backup_rejects_existing_catalog_with_foreign_key_violation(tmp_path):
     with pytest.raises(OpsError) as error:
         run_backup(conn, key="fk-copy", owner="worker", target=backup, clock=clock, store=store)
     assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.message == "backup database copy or verification failed"
     assert error.value.problem.retryable is True
     assert not destination.exists()
     state = conn.execute(
@@ -195,8 +237,9 @@ def test_backup_rejects_oversized_manifest(tmp_path, monkeypatch):
         run_backup(conn, key="oversized-manifest", owner="worker", target=backup,
                    clock=clock, store=store)
     assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.message == "backup manifest exceeds 1 MiB"
     assert error.value.problem.retryable is True
-    assert read_sizes == [backup_module._MAX_MANIFEST_BYTES + 1]
+    assert read_sizes == [1024 * 1024 + 1]
 
 
 def test_backup_accept_manifest_at_size_cap(tmp_path):
@@ -215,7 +258,7 @@ def test_backup_accept_manifest_at_size_cap(tmp_path):
     manifest_path = backup / "cap-manifest.manifest.json"
     manifest = manifest_path.read_bytes()
     manifest_path.write_bytes(
-        manifest + b" " * (backup_module._MAX_MANIFEST_BYTES - len(manifest)))
+        manifest + b" " * (1024 * 1024 - len(manifest)))
     clock.advance(301)
     run_backup(conn, key="cap-manifest", owner="retry", target=backup,
                clock=clock, store=store)

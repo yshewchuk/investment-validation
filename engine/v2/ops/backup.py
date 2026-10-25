@@ -71,7 +71,7 @@ def _delivered_or_stale(conn, kind, logical_key):
     return delivered
 
 
-def _verified_database_hash(database):
+def _verified_database_hash(database, *, check_integrity=True):
     """Return the hash after read-only quick_check and integrity checks."""
     try:
         if database.stat().st_size == 0:
@@ -80,11 +80,11 @@ def _verified_database_hash(database):
         try:
             if probe.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
                 raise fail("BACKUP_FAILED", "backup database verification failed")
-            if integrity_errors(probe):
+            if check_integrity and integrity_errors(probe):
                 raise fail("BACKUP_FAILED", "backup database verification failed")
         finally:
             probe.close()
-        with database.open("rb") as stream:
+        with database.open("rb+") as stream:
             os.fsync(stream.fileno())
         return file_hash(database)
     except (OSError, sqlite3.Error) as error:
@@ -93,9 +93,10 @@ def _verified_database_hash(database):
 
 def _copy_verified_database(conn, database):
     try:
-        if not database.exists():
+        is_new = not database.exists()
+        if is_new:
             backup_to(conn, database)
-        return _verified_database_hash(database)
+        return _verified_database_hash(database, check_integrity=not is_new)
     except (OpsError, OSError, sqlite3.Error) as error:
         try:
             database.unlink(missing_ok=True)
