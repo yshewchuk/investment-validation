@@ -274,7 +274,9 @@ dictionary or raises `DocumentError` with `DUPLICATE_KEY`, with no I/O or retry.
    full, and a requested limit above the bound is refused with
    `QUERY_NOT_BOUNDED` before any fragment opens, so the read cannot
    exceed it (`RESULT_LIMIT_EXCEEDED` applies only to streamed rows past
-   an accepted limit). The reader exposes only bars dated
+   an accepted limit). Both readers take an optional `max_object_bytes` keyword
+   forwarded to `Repository.scan`, bounding each fragment's bytes before its
+   values decode (`None` leaves the read byte-unbounded). The reader exposes only bars dated
   on or before the decision session. This permits a session close fetched
   after midnight to be used for that session, while a later-dated bar remains
   unavailable. A vendor may revise historical values in a later retrieval,
@@ -863,6 +865,27 @@ Root doc §5 invariants this package is responsible for:
   but fully tombstoned ticker refuses); for a ticker the source does not list,
   in the prior dataset version. The gap surfaces at capture rather than as a failed native calendar scan
   (`CONTRACT_MISMATCH`, no `price_history` for the ticker) in the nightly.
+- **The regime ticker is a declared `price_history` dependency; `daily_market.spot`
+  is never a close.** `daily_market.spot` is the ORATS `stockPrice` intraday
+  snapshot, not an official close.
+  `price_history_table.REGIME_TICKER` (`^GSPC`) is the declared dependency
+  feeding the panel's nine `spy_*` regime features (the names are historical;
+  they are `^GSPC`-based), sourced from `gspc_daily.csv`
+  (`source_kind="legacy_gspc_csv"`, parsed `close_adj = close_raw = Close`,
+  `high_raw = High` — an index close carries no dividend adjustment). Capture
+  requires it exactly as the calendar ticker. The refresher caches its own
+  `period=max` fetch as a Tier-1 `^GSPC` retrieval: it supersedes the CSV
+  (the same fetch, a superset of its 2006+ truncation); with none, live
+  stored rows predating the CSV's first date are carried into its frame —
+  never a refused partial retrieval. The `gspc_daily.csv` outcomes:
+
+   | Condition | Outcome |
+   | --- | --- |
+   | missing, non-regular or symlinked at discovery | not discovered (no retrieval entry) |
+   | non-regular, over-cap or an unparseable file at read | that ticker's capture fails — the same error path as a malformed px csv |
+   | required with no live `^GSPC` rows (the run's state, or the prior version when the source lists nothing) | `SOURCE_NOT_FOUND` before any write |
+   | a row with a null Close or High or an unparseable date | dropped |
+
 - **A `price_history` retrieval never drops stored history.** A full-history
   retrieval that omits any currently live stored date (truncated end,
   mid-history gap, or empty), or starts later than the live history, is refused

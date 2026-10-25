@@ -5,6 +5,7 @@ import pytest
 
 from engine.v2.data import objects
 from engine.v2.data.errors import DataError
+from engine.v2.data.price_history_table import PRICE_HISTORY_TABLE_NAME
 from engine.v2.research import magnitude_panel_daily as daily
 from tests.v2.research.test_magnitude_panel_daily import DAILY, START, build, native  # noqa: F401
 
@@ -25,15 +26,41 @@ def test_every_ticker_year_read_gets_context_bound_cap(native, monkeypatch):
         yield from original(query, table_name=table_name, **kwargs)
     monkeypatch.setattr(native.repository, "scan", scan)
     first = build(native, max_object_bytes=2**20)
-    assert calls == [2**20] * 6  # SPY and SYNTH, three years each, shared by every horizon.
+    assert calls == [2**20] * 3  # SYNTH, three years, shared by every horizon (SPY daily spot is no longer read).
     calls.clear()
     second = build(native, max_object_bytes=2**21)
-    assert calls == [2**21] * 6
+    assert calls == [2**21] * 3
     assert first["context"]["max_object_bytes"] == 2**20
     assert second["context"]["max_object_bytes"] == 2**21
     assert first["context"]["context_id"] != second["context"]["context_id"]
     assert [(r["daily_market"], r["spy"]) for r in first["rows"]] == [
         (r["daily_market"], r["spy"]) for r in second["rows"]]
+
+
+def test_regime_read_forwards_the_context_byte_cap(native, monkeypatch):
+    """``_read_regime_series`` bounds its ^GSPC scan with the materialization's
+    own ``max_object_bytes``, exactly like the daily-market source reads."""
+    calls, original = [], native.repository.scan
+    def scan(query, *, table_name, **kwargs):
+        if table_name == PRICE_HISTORY_TABLE_NAME:
+            calls.append(kwargs["max_object_bytes"])
+        yield from original(query, table_name=table_name, **kwargs)
+    monkeypatch.setattr(native.repository, "scan", scan)
+    build(native, max_object_bytes=2**20)
+    build(native, max_object_bytes=2**21)
+    assert calls == [2**20, 2**21]
+
+
+def test_regime_object_cap_refuses_before_value_decode(native, monkeypatch):
+    """A tiny cap refuses the regime read with the repository's own bound error
+    before any fragment object is read or decoded."""
+    monkeypatch.setattr(objects, "read_verified_bytes",
+        lambda *a, **k: pytest.fail("oversized regime object read"))
+    monkeypatch.setattr(native.repository, "_open_parquet",
+        lambda *a, **k: pytest.fail("oversized regime object opened"))
+    with pytest.raises(DataError, match="object exceeds max_object_bytes") as caught:
+        daily._read_regime_series(native.repository, native.regime, START, "2024-08-19", 1000, 1)
+    assert caught.value.code == "RESULT_LIMIT_EXCEEDED"
 
 
 @pytest.mark.parametrize("ticker", ["SPY", "SYNTH"])

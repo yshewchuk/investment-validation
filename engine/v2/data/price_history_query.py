@@ -56,7 +56,8 @@ _EXISTENCE_CACHE: "OrderedDict[str, frozenset[str]]" = OrderedDict()
 _EXISTENCE_CACHE_MAXSIZE = 64
 
 
-def get_price_series(repository, query: PriceQuery, snapshot_ref: SnapshotRef
+def get_price_series(repository, query: PriceQuery, snapshot_ref: SnapshotRef, *,
+                     max_object_bytes: int | None = None
                      ) -> tuple[PriceSeriesRow, ...]:
     """The as-of series for ``query.ticker`` under ``snapshot_ref``, in date
     order, each row carrying the ``retrieved_at``/``source_hash`` it came from.
@@ -66,6 +67,12 @@ def get_price_series(repository, query: PriceQuery, snapshot_ref: SnapshotRef
     no ``price_history`` table, or the scan returns no rows for this ticker at
     all -- mirroring ``chains.get_chain``'s "snapshot has no option_chains
     table."
+
+    ``max_object_bytes`` is the optional pre-decode byte cap forwarded to
+    ``Repository.scan`` exactly as every other bounded reader passes it:
+    a fragment whose object (or uncompressed parquet) exceeds it refuses
+    ``RESULT_LIMIT_EXCEEDED`` before any value is decoded; ``None`` keeps
+    today's unbounded-bytes behaviour.
     """
     ceiling_date = query.observation_ceiling[:10]
     # The ceiling bounds the requested data session; retrieval time is provenance.
@@ -73,7 +80,8 @@ def get_price_series(repository, query: PriceQuery, snapshot_ref: SnapshotRef
         raise errors.fail("QUERY_NOT_BOUNDED", "session_date is after the observation ceiling")
     if PRICE_HISTORY_TABLE_NAME not in snapshot_ref.table_versions:
         raise errors.fail("CONTRACT_MISMATCH", "snapshot has no price_history table")
-    stored_rows = _fetch_rows(repository, snapshot_ref, query.ticker)
+    stored_rows = _fetch_rows(repository, snapshot_ref, query.ticker,
+                              max_object_bytes=max_object_bytes)
     if stored_rows.empty:
         raise errors.fail("CONTRACT_MISMATCH", "no price_history for this ticker",
                           details={"ticker": query.ticker})
@@ -181,7 +189,8 @@ def tickers_with_price_history(repository, snapshot_ref: SnapshotRef, tickers=No
     return frozenset(ticker for ticker in tickers if ticker in cached)
 
 
-def _fetch_rows(repository, snapshot_ref: SnapshotRef, ticker: str) -> pd.DataFrame:
+def _fetch_rows(repository, snapshot_ref: SnapshotRef, ticker: str, *,
+                max_object_bytes: int | None = None) -> pd.DataFrame:
     dvr = snapshot_ref.table_versions[PRICE_HISTORY_TABLE_NAME]
     key_filter = (KeyPredicate(column="ticker", operator="eq", values=(ticker,)),)
     population_bound = repository.scan_population_bound(
@@ -195,7 +204,10 @@ def _fetch_rows(repository, snapshot_ref: SnapshotRef, ticker: str) -> pd.DataFr
         order_by=("ticker", "date", "retrieved_at"), max_batch_rows=max_batch_rows,
         max_result_rows=max_result_rows)
     rows: list[dict] = []
-    for batch in repository.scan(query, table_name=PRICE_HISTORY_TABLE_NAME):
+    scan_kwargs = {"table_name": PRICE_HISTORY_TABLE_NAME}
+    if max_object_bytes is not None:
+        scan_kwargs["max_object_bytes"] = max_object_bytes
+    for batch in repository.scan(query, **scan_kwargs):
         rows.extend(batch.to_pylist())
     return pd.DataFrame(rows, columns=list(_COLUMNS))
 
@@ -208,13 +220,17 @@ def _provenance_by_date(stored_rows: pd.DataFrame) -> dict[str, tuple[str, str]]
 
 
 def get_close(repository, ticker: str, date: str, observation_ceiling: str,
-             snapshot_ref: SnapshotRef) -> PriceSeriesRow:
+              snapshot_ref: SnapshotRef, *,
+              max_object_bytes: int | None = None) -> PriceSeriesRow:
     """One closing date's value and its provenance -- a convenience wrapper
-    over :func:`get_price_series` with ``lookback_sessions=1``.
+    over :func:`get_price_series` with ``lookback_sessions=1``. The optional
+    ``max_object_bytes`` pre-decode byte cap forwards to that read exactly as
+    there; ``None`` keeps today's behaviour.
     """
     query = PriceQuery(ticker=ticker, session_date=date, observation_ceiling=observation_ceiling,
                        lookback_sessions=1)
-    series = get_price_series(repository, query, snapshot_ref)
+    series = get_price_series(repository, query, snapshot_ref,
+                              max_object_bytes=max_object_bytes)
     if not series or series[-1].date != date:
         raise errors.fail("CONTRACT_MISMATCH", "no price_history version covers this date",
                           details={"ticker": ticker, "date": date})

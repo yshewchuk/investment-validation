@@ -85,7 +85,7 @@ class _FakeRepository:
                    if stored_table == table_name
                    for row in rows if _bound_row_selected(row, key_filter, time_interval))
 
-    def scan(self, query, *, table_name):
+    def scan(self, query, *, table_name, max_object_bytes=None):
         ticker = query.key_filter[0].values[0]
         rows = self._batches.get((table_name, ticker), [])
         selected = [row for row in rows if _bound_row_selected(
@@ -162,10 +162,12 @@ def _price_rows(n=320, *, end="2024-01-20"):
             for i, stamp in enumerate(dates)]
 
 
-def _spy_rows(periods=22):
+def _gspc_rows(periods=22):
     days = [str(d.date()) for d in pd.date_range(end="2024-02-01", periods=periods, freq="D")]
-    return [{"ticker": "SPY", "date": pd.Timestamp(day), "spot": 500.0 + i,
-             "src_iv": "orats", "implied_move": 1.0}
+    return [{"date": day, "close_adj": 500.0 + i, "close_raw": 500.0 + i,
+             "high_raw": 500.0 + i, "retrieved_at": "2024-02-01T00:00:00Z",
+             "deleted": False, "source_kind": "legacy_gspc_csv",
+             "source_hash": fake_hash("gspc")}
             for i, day in enumerate(days)]
 
 
@@ -173,7 +175,7 @@ def _batches():
     return {
         ("daily_market", "AAA"): _dm_rows("AAA", ["2024-02-04", "2024-02-05"],
                                           implied_move=2.0, rvol30=1.5),
-        ("daily_market", "SPY"): _spy_rows(),
+        (PRICE_HISTORY_TABLE_NAME, "^GSPC"): _gspc_rows(),
         (COMPUTED_MOVES_TABLE_NAME, "AAA"): _computed_rows([
             ("2024-01-10", 1.0, False, 4.0),
             ("2024-01-11", 1.0, False, 6.0),
