@@ -10,13 +10,13 @@ _COLUMNS = ("event_id", "ticker", "event_date", "session", "date_conflict",
             "event_cluster_id", "src_orats")
 
 
-def _text(value):
+def _text(value, field="metadata text"):
     if type(value) is not str or not value:
-        raise fail("CONTRACT_MISMATCH", "metadata text must be a nonempty string")
+        raise fail("CONTRACT_MISMATCH", f"{field} must be a nonempty string")
     try:
         value.encode("utf-8")
     except UnicodeError:
-        raise fail("CONTRACT_MISMATCH", "metadata text must be valid Unicode") from None
+        raise fail("CONTRACT_MISMATCH", f"{field} must be valid Unicode") from None
     return value
 
 
@@ -24,7 +24,7 @@ def _tickers(tickers):
     if type(tickers) is not list or not tickers:
         raise fail("CONTRACT_MISMATCH", "tickers must be a nonempty plain list")
     for ticker in tickers:
-        _text(ticker)
+        _text(ticker, "ticker")
         if ticker != ticker.strip() or "\0" in ticker:
             raise fail("CONTRACT_MISMATCH", "ticker names must be canonical")
     if len(set(tickers)) != len(tickers):

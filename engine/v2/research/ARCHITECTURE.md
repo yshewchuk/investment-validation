@@ -20,7 +20,7 @@ published, never the legacy mutable store. Completed experiments need not remain
 ## Stage-2 magnitude panel foundation
 
 `_confirmed_metadata.reduce_sequences` is internal/synthetic-only: a pure seven-column DataFrame reducer of a complete caller-supplied view, not evidence of completeness.
-Strict naive `datetime64[ns]` types precede public `confirmed_event_metadata.classify_metadata`; public `event_sequence(warmup=4)` counts only confirmed rows from zero, including pre-history metadata.
+Strict naive `datetime64[ns]` types precede public `confirmed_event_metadata.classify_metadata`; public `event_sequence(warmup=4)` counts all supplied confirmed rows from zero; no date cutoff applies.
 All rows participate in duplicate ID, ticker/day, date-conflict and ticker/cluster refusal, including unconfirmed siblings; equal clusters across tickers are independent.
 Detached sequences retain exact empty states/counts/seven-field evidence. Work is O(n log n + t log t), state O(n + t) for n rows/t tickers; no hard cap or RSS bound exists here.
 No partial output, I/O, cache, retry, transaction, index identity, source admission, coverage, holdout/value eligibility or runtime integration exists.

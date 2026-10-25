@@ -49,6 +49,15 @@ def test_exact_states_evidence_warmup_order_and_detachment():
     assert result[3] == {"ticker": "Z", "status": "absent_in_snapshot", "selected_rows": 0,
         "confirmed_rows": 0, "first_confirmed_date": None, "events": []}
     assert result == json.loads(json.dumps(result, allow_nan=False))
+    for sequence in result:
+        assert all(type(sequence[key]) is int for key in ("selected_rows", "confirmed_rows"))
+        assert all(type(sequence[key]) is str for key in ("ticker", "status"))
+        assert sequence["first_confirmed_date"] is None or type(sequence["first_confirmed_date"]) is str
+        for event in sequence["events"]:
+            assert type(event["ordinal"]) is int
+            assert all(type(event[key]) is bool for key in ("src_orats", "date_conflict", "warmup_complete"))
+            assert all(type(event[key]) is str for key in ("event_id", "ticker", "event_date", "session"))
+            assert event["event_cluster_id"] is None or type(event["event_cluster_id"]) is str
     assert result == reducer.reduce_sequences(events, tickers=["A", "B", "C", "Z"])
     pd.testing.assert_frame_equal(events, before)
     result_before = json.loads(json.dumps(result))
@@ -56,6 +65,16 @@ def test_exact_states_evidence_warmup_order_and_detachment():
     assert result == result_before
     result[0]["events"][0]["event_id"] = "changed"
     assert events.iloc[0, 0] == "different"
+
+
+def test_older_confirmed_rows_count_without_a_date_cutoff():
+    events = pd.concat([frame(), frame([("older", "A", "1980-01-01", "AMC", False, None, True)])])
+    result = reducer.reduce_sequences(events, tickers=["A"])[0]
+    assert result["first_confirmed_date"] == "1980-01-01"
+    assert result["selected_rows"] == result["confirmed_rows"] == 7
+    assert [row["event_id"] for row in result["events"]] == ["older", *(f"opaque/{i}" for i in range(6))]
+    assert [row["ordinal"] for row in result["events"]] == list(range(7))
+    assert [row["warmup_complete"] for row in result["events"]] == [False] * 4 + [True] * 3
 
 
 def test_public_primitives_once_per_call_and_ticker(monkeypatch):
@@ -104,7 +123,7 @@ def test_exact_repeats_refuse_and_cross_ticker_clusters_are_independent():
     assert [s["confirmed_rows"] for s in reducer.reduce_sequences(events, tickers=["B", "A"])] == [1, 1]
 
 
-@pytest.mark.parametrize("tickers", [[], (), "A", {"A"}, iter(["A"]), ["A", "A"],
+@pytest.mark.parametrize("tickers", [[], (), ("A",), "A", {"A"}, iter(["A"]), ["A", "A"],
     [None], [1], [""], [" A"], ["A "], ["A\0"], ["\ud800"], [np.str_("A")]])
 def test_bad_requests_refuse_before_frame_access(tickers, monkeypatch):
     monkeypatch.setattr(reducer, "_rows", lambda *args: pytest.fail("invalid request reached metadata"))
@@ -180,6 +199,29 @@ def test_complete_refusal_envelopes(events, code, message):
         reducer.reduce_sequences(events, tickers=["A"])
     assert caught.value.problem == Problem(code=code, category="validation", retryable=False,
                                           message=message, stage=None, details={})
+
+
+@pytest.mark.parametrize("tickers,change,message", [
+    ([], {}, "tickers must be a nonempty plain list"),
+    ([None], {}, "ticker must be a nonempty string"),
+    (["\ud800"], {}, "ticker must be valid Unicode"),
+    (["private "], {}, "ticker names must be canonical"),
+    (["A", "A"], {}, "ticker names must be distinct"),
+    (["A"], {"extra": 1}, "metadata requires exactly seven unique columns"),
+    (["A"], {"event_date": "private"}, "metadata dates require naive datetime64[ns]"),
+    (["A"], {"session": ["private"]}, "metadata session must be scalar text or null"),
+    (["A"], {"event_id": 1}, "metadata text must be a nonempty string"),
+    (["A"], {"event_id": "\ud800"}, "metadata text must be valid Unicode"),
+    (["A"], {"date_conflict": "private"}, "metadata date_conflict must be a bool"),
+])
+def test_remaining_local_refusal_envelopes(tickers, change, message):
+    events = frame().iloc[:1].copy()
+    for column, value in change.items():
+        events[column] = pd.Series([value], dtype=object)
+    with pytest.raises(DataError) as caught:
+        reducer.reduce_sequences(events, tickers=tickers)
+    assert caught.value.problem == Problem(code="CONTRACT_MISMATCH", category="validation",
+        retryable=False, message=message, stage=None, details={})
 
 
 def test_no_price_population_or_io_hooks(monkeypatch):
