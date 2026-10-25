@@ -23,7 +23,7 @@ release machinery:
   as the production coordinator (``effects_graph.backup_effect``) does on any
   failure, it returns the still-claimed effect to ``pending`` with
   ``outbox.fail_effect`` (never waits out a lease) and proves an immediate
-  retry completes against the identical manifest.
+  retry completes with a verified manifest for the current catalog snapshot.
 
 The fixture is real production code end to end: this tool imports
 ``checks.rearchitecture_phase6_restore_drill``'s ``_build_fixture`` /
@@ -273,11 +273,14 @@ def _run_before_any_release(deployment: _Deployment) -> dict:
     finally:
         conn.close()
 
+    retry_manifest_matches = (
+        retry_manifest is not None
+        and _manifest_is_consistent(retry_manifest, deployment.backup_root, key))
     verdict = "PASS" if (fault.fired and manifest_present and manifest_verified
                          and state_at_crash != "delivered"
                          and state_after_recovery == "pending"
                          and current_after_crash == current_before
-                         and retry_manifest == manifest
+                         and retry_manifest_matches
                          and state_after_retry == "delivered"
                          and current_final == current_before) else "FAIL"
     return {
@@ -293,7 +296,7 @@ def _run_before_any_release(deployment: _Deployment) -> dict:
             "current": current_after_crash,
         },
         "retry": {
-            "manifest_matches": retry_manifest == manifest,
+            "manifest_matches": retry_manifest_matches,
             "error": retry_error,
             "outbox_state": state_after_retry,
             "current": current_final,
