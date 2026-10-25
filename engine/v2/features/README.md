@@ -50,7 +50,7 @@ decision_session, history_start)` composes `daily_state_inputs`/`panel_math`/
 `nightly_raw_row_producer` calls it once per `(ticker, event_date, session)`
 (`engine/v2/ops/ARCHITECTURE.md` "Raw-row producer").
 
-<!-- public-interface: panel_math.DAILY_STATE_FIELDS, recipes, FeatureRegistry, default_feature_registry, runup_math, add_runup_features, regime.add_regime_features, daily_state_inputs.DailyStateInputs, daily_state_inputs.scan_daily_state_inputs, panel_row_inputs.PanelRowInputs, panel_row_inputs.scan_panel_row -->
+<!-- public-interface: panel_math.DAILY_STATE_FIELDS, recipes, FeatureRegistry, default_feature_registry, runup_math, add_runup_features, regime.add_regime_features, regime.validated_regime_closes, daily_state_inputs.DailyStateInputs, daily_state_inputs.scan_daily_state_inputs, panel_row_inputs.PanelRowInputs, panel_row_inputs.scan_panel_row -->
 
 ## Consumers
 
@@ -60,7 +60,8 @@ failure rather than a stale sentence.
 
 `engine/v2/scoring` resolves feature scopes and recipe identities before scoring;
 `engine/v2/ops` composes the panel row/anchor into native nightly raw-row events.
-`engine/v2/research` uses pure history and daily/SPY arithmetic after its own input admission.
+`engine/v2/research` uses pure history and daily/SPY arithmetic after its own
+input admission; its regime (`spy_*`) input is the `^GSPC` `price_history` close.
 
 `engine/v2/models/training` uses pure daily-state arithmetic for monthly D14 inputs.
 

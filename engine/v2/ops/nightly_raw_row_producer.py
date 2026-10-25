@@ -28,7 +28,7 @@ from typing import Any
 
 import pandas as pd
 
-from engine.v2.contracts import SnapshotRef
+from engine.v2.contracts import PriceSeriesRow, SnapshotRef
 from engine.v2.data.errors import DataError, fail
 from engine.v2.data.price_history_query import tickers_with_price_history
 from engine.v2.data.price_history_table import PRICE_HISTORY_TABLE_NAME
@@ -157,7 +157,7 @@ def _shared_panel_rows(repository: Repository, snapshot: SnapshotRef,
                        history_start: Any) -> dict[tuple[str, str, str], PanelRowInputs]:
     """One ``scan_panel_row`` read per distinct ``(ticker, event day, session)``."""
     panels: dict[tuple[str, str, str], PanelRowInputs] = {}
-    spy_market_cache: dict[tuple[str, str, str, str], tuple[dict[str, object], ...]] = {}
+    spy_market_cache: dict[tuple[str, str, str, str], tuple[PriceSeriesRow, ...]] = {}
     for key in keys:
         marker = _panel_marker(key)
         if marker not in panels:
@@ -168,7 +168,8 @@ def _shared_panel_rows(repository: Repository, snapshot: SnapshotRef,
 
 
 def _regime_history_available(panel: PanelRowInputs) -> bool:
-    """Whether the shared panel row carries a usable pinned SPY ``daily_market`` regime value."""
+    """Whether the shared panel row carries a usable pinned ^GSPC
+    ``price_history`` regime value."""
     try:
         return math.isfinite(float(panel.panel_row.get("spy_ret252")))
     except (TypeError, ValueError, OverflowError):

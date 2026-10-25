@@ -199,9 +199,10 @@ class _ProjectedBatch:
 def _stage_projected_chain_rows(monkeypatch, repository, rows: list[dict]):
     original = repository.scan
 
-    def staged(query, *, table_name):
+    def staged(query, *, table_name, max_object_bytes=None):
         if table_name != _CHAINS_NAME:
-            yield from original(query, table_name=table_name)
+            yield from original(query, table_name=table_name,
+                                max_object_bytes=max_object_bytes)
             return
         yield _ProjectedBatch(rows)
 
@@ -482,10 +483,10 @@ def test_calendar_row_inputs_option_scan_failure_propagates(tmp_path, monkeypatc
     problem = data_fail("RESULT_LIMIT_EXCEEDED", "synthetic option scan failure")
     original = repository.scan
 
-    def broken(query, *, table_name):
+    def broken(query, *, table_name, **kwargs):
         if table_name == _CHAINS_NAME:
             raise problem
-        return original(query, table_name=table_name)
+        return original(query, table_name=table_name, **kwargs)
 
     monkeypatch.setattr(repository, "scan", broken)
     with pytest.raises(DataError) as exc:

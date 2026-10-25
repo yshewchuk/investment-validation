@@ -268,7 +268,9 @@ pid plus start time only.
 
 Capturing a `price_history` generation (task brief 2026-09-14; SEND-BACK
 2026-09-14: a real Tier-2 catalog table, `engine.v2.ops.price_history_store`)
-from the two legacy yfinance sources under a read-only checkout, advancing
+from the legacy yfinance sources plus the legacy `gspc_daily.csv` regime file
+under a read-only checkout (the capture requires `CALENDAR_TICKER` and
+`REGIME_TICKER` -- SPY and the ^GSPC `price_history` close), advancing
 `--scope`'s head to a new snapshot that carries every other table's dataset
 version forward unchanged alongside price_history's fresh one:
 
