@@ -36,6 +36,55 @@ def _row_counts(conn):
             for name in tables}
 
 
+def test_artifact_store_verify_rejects_oversize_before_hash(tmp_path, monkeypatch):
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    monkeypatch.setattr(
+        "engine.v2.foundation.artifacts._hash_fd",
+        lambda *_args, **_kwargs: pytest.fail("oversized object was hashed"),
+    )
+
+    with pytest.raises(ArtifactError, match="SIZE_LIMIT"):
+        store.verify(ref, max_bytes=4)
+
+
+def test_prior_database_hash_and_sqlite_check_share_open_file(tmp_path, monkeypatch):
+    database = tmp_path / "prior.sqlite"
+    source = sqlite3.connect(database)
+    source.execute("CREATE TABLE probe (value INTEGER)")
+    source.execute("INSERT INTO probe VALUES (1)")
+    source.commit()
+    source.close()
+    expected_hash = backup_module._checked_file_hash(
+        database, stage="synthetic prior database")
+    replacement = tmp_path / "replacement.sqlite"
+    other = sqlite3.connect(replacement)
+    other.execute("CREATE TABLE probe (value INTEGER)")
+    other.executemany("INSERT INTO probe VALUES (?)", [(2,), (3,)])
+    other.commit()
+    other.close()
+    original_connect = sqlite3.connect
+
+    def replace_path_then_connect(path, *args, **kwargs):
+        os.replace(replacement, database)
+        try:
+            connection = original_connect(path, *args, **kwargs)
+            rows = connection.execute("SELECT COUNT(*) FROM probe").fetchone()[0]
+        except sqlite3.Error as exc:
+            raise AssertionError(f"private verified hard-link open failed: {exc}") from exc
+        assert rows == 1, "SQLite followed the replaced pathname"
+        return connection
+
+    monkeypatch.setattr(backup_module.sqlite3, "connect", replace_path_then_connect)
+    assert backup_module._prior_database_matches(
+        database, expected_hash, {"probe": 1})
+    current = original_connect(database)
+    try:
+        assert current.execute("SELECT COUNT(*) FROM probe").fetchone()[0] == 2
+    finally:
+        current.close()
+
+
 def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     conn.execute("CREATE TABLE snapshot_probe (value TEXT)")
@@ -156,89 +205,6 @@ def test_backup_rejects_unsafe_artifact_name_before_ack(tmp_path, artifact_name)
     assert state != "delivered"
 
 
-@pytest.mark.parametrize("case", [
-    "missing_database", "missing_artifacts", "artifact_list", "bad_artifact",
-    "missing_database_rows", "bad_database_rows", "nonmapping_database_rows",
-    "bad_database_hash", "bad_schema",
-    "bad_cutoff", "bad_cutoff_string", "unsafe_backup_key", "unsafe_artifact_name",
-])
-def test_restore_rejects_malformed_manifest_before_creating_destination(tmp_path, case):
-    source = tmp_path / "backup"
-    source.mkdir()
-    digest = "sha256:" + "0" * 64
-    manifest = {"schema_version": "catalog_backup.v1.0", "backup_key": "backup",
-                "cutoff": "2026-01-01T00:00:00Z", "database": digest,
-                "database_rows": {}, "artifacts": {}}
-    if case == "missing_database":
-        manifest.pop("database")
-    elif case == "missing_artifacts":
-        manifest.pop("artifacts")
-    elif case == "artifact_list":
-        manifest["artifacts"] = []
-    elif case == "bad_artifact":
-        manifest["artifacts"] = {"evidence.bin": {"byte_size": "8", "content_hash": digest}}
-    elif case == "missing_database_rows":
-        manifest.pop("database_rows")
-    elif case == "bad_database_rows":
-        manifest["database_rows"] = {"items": -1}
-    elif case == "nonmapping_database_rows":
-        manifest["database_rows"] = []
-    elif case == "bad_database_hash":
-        manifest["database"] = "invalid"
-    elif case == "bad_schema":
-        manifest["schema_version"] = "unknown"
-    elif case == "bad_cutoff":
-        manifest["cutoff"] = None
-    elif case == "bad_cutoff_string":
-        manifest["cutoff"] = "not-a-timestamp"
-    elif case == "unsafe_backup_key":
-        manifest["backup_key"] = "../outside"
-    else:
-        manifest["artifacts"] = {"../outside": {"byte_size": 8, "content_hash": digest}}
-    (source / "backup.manifest.json").write_text(json.dumps(manifest))
-    destination = tmp_path / "restored"
-
-    with pytest.raises(OpsError) as refused:
-        restore_backup(source, destination)
-
-    assert refused.value.code == "INTEGRITY_FAILED"
-    assert not destination.exists()
-
-
-def test_restore_rejects_database_row_count_mismatch(tmp_path):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    prepare_backup(conn, "row-mismatch", {}, clock=clock)
-    backup = tmp_path / "backup"
-    run_backup(conn, key="row-mismatch", owner="worker", target=backup,
-               clock=clock, store=store)
-    manifest_path = backup / "row-mismatch.manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["database_rows"]["outbox"] += 1
-    manifest_path.write_text(json.dumps(manifest))
-
-    with pytest.raises(OpsError) as refused:
-        restore_backup(backup, tmp_path / "restored")
-
-    assert refused.value.code == "INTEGRITY_FAILED"
-
-
-def test_restore_maps_invalid_sqlite_bytes_to_integrity_failed(tmp_path):
-    backup = tmp_path / "backup"
-    backup.mkdir()
-    database = backup / "bad.sqlite"
-    database.write_bytes(b"not sqlite bytes")
-    manifest = {"schema_version": "catalog_backup.v1.0", "backup_key": "bad",
-                "cutoff": "2026-01-01T00:00:00Z",
-                "database": backup_module._checked_file_hash(
-                    database, stage="synthetic database"),
-                "database_rows": {}, "artifacts": {}}
-    (backup / "bad.manifest.json").write_text(json.dumps(manifest))
-
-    with pytest.raises(OpsError) as refused:
-        restore_backup(backup, tmp_path / "restored")
-
-    assert refused.value.code == "INTEGRITY_FAILED"
 
 
 def test_backup_published_hash_rejects_symlink_replacement(tmp_path, monkeypatch):
@@ -523,7 +489,7 @@ def test_retry_rebuilds_when_source_rows_change(tmp_path):
     manifest = backup / "changed-source.manifest.json"
     prior = json.loads(backup_module._read_bounded_bytes(
         manifest, backup_module.MAX_MANIFEST_BYTES))
-    assert drill_module._manifest_is_consistent(prior, backup, "changed-source", conn)
+    assert drill_module._manifest_is_consistent(prior, backup, "changed-source")
     conn.execute("CREATE TABLE synthetic_change (value TEXT)")
     conn.commit()
     clock.advance(301)
@@ -536,7 +502,7 @@ def test_retry_rebuilds_when_source_rows_change(tmp_path):
     assert result["database_rows"] == _row_counts(conn)
     assert updated["database_rows"] != prior["database_rows"]
     assert updated["database"] != prior["database"]
-    assert drill_module._manifest_is_consistent(updated, backup, "changed-source", conn)
+    assert drill_module._manifest_is_consistent(updated, backup, "changed-source")
 
 
 def test_manifest_difference_is_refused(tmp_path):

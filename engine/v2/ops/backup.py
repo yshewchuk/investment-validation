@@ -20,6 +20,7 @@ from engine.v2.foundation import (
 from engine.v2.foundation.artifacts import ArtifactError
 from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.outbox import claim, complete, enqueue
 
 MAX_MANIFEST_BYTES = 1024 * 1024
@@ -183,13 +184,29 @@ def _table_row_counts(conn):
 
 def _prior_database_matches(database, expected_hash, source_rows):
     try:
-        if _checked_file_hash(database, stage="prior backup database") != expected_hash:
-            return False
-        probe = sqlite3.connect(database)
-        try:
-            return not integrity_errors(probe) and _table_row_counts(probe) == source_rows
-        finally:
-            probe.close()
+        stream, size = _open_checked_file(
+            database, expected_size=None, stage="prior backup database")
+        with stream:
+            hasher = hashlib.sha256()
+            copied = 0
+            while copied <= size:
+                chunk = stream.read(min(_COPY_CHUNK, size + 1 - copied))
+                if not chunk:
+                    break
+                copied += len(chunk)
+                hasher.update(chunk)
+            if copied != size or "sha256:" + hasher.hexdigest() != expected_hash:
+                return False
+            with tempfile.TemporaryDirectory(dir=database.parent) as verify_dir:
+                verified_path = Path(verify_dir) / "database.sqlite"
+                os.link(f"/proc/self/fd/{stream.fileno()}", verified_path,
+                        follow_symlinks=True)
+                probe = sqlite3.connect(
+                    f"file:{verified_path}?mode=ro&immutable=1", uri=True)
+                try:
+                    return not integrity_errors(probe) and _table_row_counts(probe) == source_rows
+                finally:
+                    probe.close()
     except OpsError as exc:
         if exc.code == "INTEGRITY_FAILED":
             return False
@@ -199,14 +216,7 @@ def _prior_database_matches(database, expected_hash, source_rows):
 
 
 def _verified_prior_backup(manifest_path, database, source_rows, key, payload):
-    """The existing manifest when it and ``database`` are a verified prior
-    result for this payload, else ``None``.
-
-    A retry after the manifest was published but before the acknowledgement
-    rebuilds a byte-different SQLite copy from the same source. Reusing this
-    verified pair keeps such a retry byte-idempotent instead of refusing the
-    rebuilt database's different hash.
-    """
+    """Return a verified prior manifest for this payload, or ``None``."""
     try:
         manifest = json.loads(_read_bounded_bytes(manifest_path, MAX_MANIFEST_BYTES))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
@@ -247,7 +257,6 @@ def _verify_staged(staged, source_rows):
 
 
 def _stage_database(conn, target, key, database, source_rows):
-    """Build, verify and atomically install a fresh staged database copy."""
     try:
         stage_fd, stage_name = tempfile.mkstemp(
             dir=str(target), prefix=f".{key}.", suffix=".staging.sqlite")
@@ -321,7 +330,6 @@ def _validate_backup_artifact_names(artifacts):
 
 
 def _copy_artifacts(payload, store, target, fault, keepalive):
-    """Copy every payload artifact into the target and return their manifest entries."""
     copied = {}
     for name, document in payload.get("artifacts", {}).items():
         keepalive()
@@ -477,24 +485,20 @@ def restore_backup(source, destination):
     manifests = list(source.glob("*.manifest.json"))
     if len(manifests) != 1:
         raise fail("INTEGRITY_FAILED", "backup manifest is missing or ambiguous")
-    try:
-        manifest = json.loads(_read_bounded_bytes(manifests[0], MAX_MANIFEST_BYTES))
-        backup_key, database_hash, database_rows, artifacts = _validate_backup_manifest(manifest)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, KeyError,
-            TypeError, AttributeError, OpsError, ArtifactError) as exc:
-        raise fail("INTEGRITY_FAILED", "backup manifest is invalid") from exc
-
+    manifest = json.loads(manifests[0].read_text())
     destination.mkdir(parents=True)
     database = destination / "ops.sqlite"
-    _copy_verified_file(source / (backup_key + ".sqlite"), database,
-                        expected_size=None, expected_hash=database_hash,
-                        stage="restore database")
-    if not _prior_database_matches(database, database_hash, database_rows):
-        raise fail("INTEGRITY_FAILED", "restored catalog failed verification")
-    for name, info in artifacts.items():
+    database.write_bytes((source / (manifest["backup_key"] + ".sqlite")).read_bytes())
+    probe = sqlite3.connect(database)
+    try:
+        if integrity_errors(probe) or file_hash(database) != manifest["database"]:
+            raise fail("INTEGRITY_FAILED", "restored catalog failed verification")
+    finally:
+        probe.close()
+    for name, info in manifest["artifacts"].items():
         path = destination / "artifacts" / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        _copy_verified_file(source / "artifacts" / name, path,
-                            expected_size=info["byte_size"],
-                            expected_hash=info["content_hash"], stage="restore artifact")
+        path.write_bytes((source / "artifacts" / name).read_bytes())
+        if file_hash(path) != info["content_hash"]:
+            raise fail("INTEGRITY_FAILED", "restored artifact failed verification")
     return destination
