@@ -49,8 +49,10 @@ bundle members only feed legacy pages.
 | Per-input model evidence (`models`, `model_evidence.json`) | None at cutover. `model_evidence_ref` stays `None`, which the release contract already allows | deferred (Q2) |
 | Publication selfcheck (`selfcheck.json`) | New `native_selfcheck` job kind, section 4 | new (slices 1-2) |
 
-Row source. The release's `row_sources` becomes exactly `("native",)`. The `native_shadow` name
-says "shadow" after the pointer is no longer shadow, so it is renamed in the wiring PR (Q1).
+Row source. The release's `row_sources` becomes exactly one native value, pending Q1: `("native",)`
+if the rename happens in the wiring PR (slice 4, which edits the v2 shadow nightly), or
+`("native_shadow",)` until the P7-5 pointer switch. Slice 4 and P7-5 are different changes. The
+`native_shadow` name says "shadow" after the pointer is no longer shadow, which is why Q1 recommends (b).
 It is part of the release-id derivation, so releases are rebuilt, not migrated, which the serving
 doc already requires for any row-source change. `legacy_bundle` is removed from the accepted set
 in the removal PR, not before.
@@ -63,6 +65,13 @@ this design promotes nothing beyond what the wiring slice states. If a display f
 observations the batch does not persist (the analog fields behind #681 are the known case), the
 batch writer persists them in slice 3 and the schema version is bumped. No fallback fills a
 missing field from any other source.
+
+Key contract (existing, not redesigned). Batch records and refusals are keyed by
+`ticker|event_date_identity|strategy|session` (`native_score_batch_records.v2.0`). Serving rows
+use the three-part population key `ticker|strategy|event_date` that `native_row_key` derives.
+The projection normalizes the batch key to the population key, keeps refusal keys in the same
+form, and relies on `build_candidate`/`build_bridges` for collision and coverage findings
+(`PLANNED_ROW_MISSING`, `SCORED_ROW_UNPLANNED`). No new mapping table or duplicate guard is added.
 
 ## 4. Native selfcheck (`native_selfcheck`)
 
@@ -166,6 +175,10 @@ Each added symbol and its production caller:
 | `native_selfcheck` job kind | `nightly.GRAPH` and the supervisor job-kind registry; `publication` gate binding |
 | `serving_projection` native row source | #717's job (`_DAG_STAGES`, `plans.py`), via `tools/v2_dashboard_project.py::run_projection` and `projections.build_candidate` |
 | Production submission | the supervisor's nightly stage submission (`nightly.py` plan builder and the worker dispatch table), not a test-only graph walk; each of slices 2-4 shows its caller in that path |
+
+Wiring acceptance: slices 2-4 must document and test the concrete path from the v2 nightly
+production entrypoint through `_DAG_STAGES`, supervisor stage submission and worker dispatch to
+the worker implementation. A registry or graph-walk test alone does not establish reachability.
 
 Timing: slices 1-4 add and wire the v2 shadow nightly only; the legacy nightly
 (`engine.dashboard.nightly`) is untouched and legacy authority stays until the P7-5 switch.
