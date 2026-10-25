@@ -13,6 +13,41 @@ consumes it to stage and byte-bound a complete report before stdout emission.
 
 `market_calendar.build_calendar_sessions` projects sessions from observed source dates; `planned_exit_date` applies native strategy anchors. `CalendarEventKey` is structural so ops requests satisfy it without a foundation dependency on ops.
 
+`market_calendar.is_scheduled_session(day)` is the foundation package's one
+public weekday/non-holiday predicate for a session day: projection, calendar
+validation and `market_schedule.latest_completed_session` call it instead of
+re-deriving holiday membership. It is not the repository's only session
+predicate — `data.computed_moves` and `research._pricing` retain their own
+pandas-rule projections bound to their listed-session data and
+`ops.nightly_trigger` retains its private `_is_trading_day` weekend/holiday
+skip rule, all outside this package's contract. The scheduled America/New_York close hour is a private
+`market_schedule._scheduled_close_hour` rule, not a `market_calendar` public
+API: 13 on the three modelled early-close days (July 3 when it is a scheduled
+session — an observed July 4 landing on July 3 makes it a full holiday, not a
+session; the Friday after Thanksgiving; Christmas Eve when it is a scheduled
+session) and 16 otherwise. Exceptional exchange-announced half-days beyond
+these three modelled rules are not covered — on those the serving clock keeps
+the regular 16:00 boundary, a bounded conservative lag, never authoritative
+early-close coverage. `latest_completed_session(now=None, frozen_at=None)`
+returns the latest completed NYSE session at `now`, or at the snapshot
+`frozen_at` when `now` is omitted: today once its modelled close hour has
+passed and it is a scheduled session, else the most recent earlier session
+day. `frozen_at=None` and the exact string `"unknown"` mean live; every other
+empty, malformed or non-string value raises `ValueError` rather than silently
+switching to live time. That validation of a supplied `frozen_at` runs even
+when `now` is given explicitly: `now` selects the clock, it never excuses a
+malformed `frozen_at`.
+
+| Serving-clock condition | Outcome |
+|---|---|
+| `now` supplied, or `frozen_at` a parseable ISO timestamp | Session at that moment (naive treated Eastern) |
+| `frozen_at` absent or exactly `"unknown"`, `now` omitted | Live wall clock |
+| `frozen_at` empty, malformed or non-string -- even when `now` is supplied | `ValueError`; never live time |
+| `is_scheduled_session` given a `datetime`, text or other non-`date` | `CalendarInputError` (`INVALID_REQUEST`); never an implied answer |
+| Scheduled session day, clock at or after its modelled close-hour boundary | That day |
+| Before the close hour, weekend or holiday | Most recent earlier session day |
+| July 3 session / Black Friday / session Christmas Eve at 12:59 vs 13:00 | Prior session / that day |
+
 `market_horizon.trading_days_before_print(calendar, *, entry_date, event_date,
 session)` returns the signed session-index distance from entry (previous listed
 session for an unlisted day) to the last pre-print close: AMC includes the
@@ -61,11 +96,11 @@ Pure standard-library arithmetic with no upward-layer imports. `ops.nightly_cale
 
 ## External systems and libraries
 
-None. This module does not access repositories, providers, loaders, models, legs or prices.
+Standard-library `zoneinfo` only: `market_schedule` resolves its zone from system IANA data with the pinned `tzdata` package as the fallback. This module does not access repositories, providers, loaders, models, legs or prices.
 
 ## Failure semantics
 
-Invalid/empty sessions, malformed/missing dates (`None`, `NaT`), unknown strategy/session, or insufficient pre-print or post-print anchor coverage raise `CalendarInputError(code="INVALID_REQUEST")`. The bounded search for the first future session stops at Python's maximum representable date: if a session remains in range it is returned, and if none remains the function raises the same typed refusal rather than leaking date-arithmetic overflow. R1–R6: source failures propagate at the adapter; no external-source or request-result cache or retries; deterministic for the same inputs; read-only; no partial result or writes; stable output for the same request.
+Invalid/empty sessions, malformed/missing dates (`None`, `NaT`), unknown strategy/session, or insufficient pre-print or post-print anchor coverage raise `CalendarInputError(code="INVALID_REQUEST")`. A malformed, empty or non-string `frozen_at` other than `None`/`"unknown"` raises `ValueError`; it never falls back to live time. The bounded search for the first future session stops at Python's maximum representable date: if a session remains in range it is returned, and if none remains the function raises the same typed refusal rather than leaking date-arithmetic overflow. R1–R6: source failures propagate at the adapter; no external-source or request-result cache or retries; deterministic for the same inputs -- reproducibility qualifies to the supplied `now`/`frozen_at` instants, the live wall-clock branch reading the clock at call time; read-only; no partial result or writes; stable output for the same request.
 
 Only pure annual holiday calculations use a process-local stdlib LRU (128 years),
 returning immutable sets that include one-off closure dates. Observed sessions,

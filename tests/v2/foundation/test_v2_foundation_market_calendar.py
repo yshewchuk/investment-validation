@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from engine.v2.foundation.market_calendar import (  # noqa: E402
     CalendarInputError,
     CalendarSessions,
     build_calendar_sessions,
+    is_scheduled_session,
     planned_exit_date,
 )
 
@@ -530,3 +532,29 @@ def test_warm_holiday_cache_never_bypasses_supplied_calendar_validation(days: tu
 def test_planned_exit_does_not_validate_observed_through(event, session, expected) -> None:
     calendar = CalendarSessions(OBS_MAR, "bad")
     assert planned_exit_date(_key("STR-THRU", event, session), calendar) == expected
+
+
+@pytest.mark.parametrize(("day", "expected"), [
+    (date(2024, 3, 12), True),
+    (date(2024, 3, 15), True),
+    (date(2024, 3, 16), False),
+    (date(2024, 3, 17), False),
+    (date(2024, 1, 1), False),
+    (date(2024, 7, 4), False),
+])
+def test_is_scheduled_session_answers_weekday_and_holiday_rules(day, expected) -> None:
+    assert is_scheduled_session(day) is expected
+
+
+@pytest.mark.parametrize("wrong", [
+    datetime(2024, 3, 12, 9, 30),
+    datetime(2024, 3, 12),
+    datetime(2024, 1, 1, 9, 30),
+    "2024-03-12",
+    None,
+])
+def test_is_scheduled_session_refuses_a_datetime_and_non_date(wrong) -> None:
+    with pytest.raises(CalendarInputError,
+                       match=rf"session day must be a date: {re.escape(repr(wrong))}") as excinfo:
+        is_scheduled_session(wrong)
+    assert excinfo.value.code == "INVALID_REQUEST"
