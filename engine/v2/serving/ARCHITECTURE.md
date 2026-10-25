@@ -8,8 +8,9 @@ Application rendering belongs in the [React app](../../../ui/ARCHITECTURE.md).
 
 ## Primary contracts and public interfaces
 
-**Operations health currency.** Serving accepts `operations_health.v1.0` and
-`operations_health.v1.1`; older v1.0 documents remain valid. Currency is
+**Operations health currency.** Serving accepts `operations_health.v1.0`,
+`operations_health.v1.1` and `operations_health.v1.2`; older v1.0/v1.1
+documents remain valid. Currency is
 `unknown`, without a default, when a session field is absent or malformed,
 when `withheld_release` is missing or any type other than `null` or a
 non-array object (never "no withholding"), or when `code_budgets` schedule

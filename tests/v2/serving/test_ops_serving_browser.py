@@ -413,7 +413,7 @@ def test_shell_treats_cli_produced_missing_or_mismatched_sessions_as_unknown(tmp
     health_path = root / "health.json"
     assert cli.main(["--root", str(root), "health", "--out", str(health_path)]) == 0
     health_document = json.loads(health_path.read_text())
-    assert health_document["schema_version"] == "operations_health.v1.1"
+    assert health_document["schema_version"] == "operations_health.v1.2"
     assert health_document["requested_session"] == requested_session
     assert health_document["resolved_session"] == resolved_session
     assert health_document["current_release"]["release_id"] == "r1"

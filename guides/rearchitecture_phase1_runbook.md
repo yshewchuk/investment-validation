@@ -13,7 +13,7 @@ fenced cancellation; immutable planning and submission; a resource policy
 (`ops_resources.2026-09-12.v1`, `engine/v2/ops/profiles.py`); a watchdog
 executor (D7: `executor_mode=watchdog`, `containment=best_effort` — cgroup2 is
 mounted read-only on this host, so kernel containment is unavailable); the
-operator CLI `python3 -m engine.v2.ops`; the `operations_health.v1.1` document
+operator CLI `python3 -m engine.v2.ops`; the `operations_health.v1.2` document
 (`engine/v2/ops/health.py`); the authenticated serving shell
 (`engine/v2/serving/operations.py`); and a catalog-backed decision authority
 **built and rehearsed against copies only** (D4).
@@ -62,7 +62,7 @@ manifest.
 |---|---|---|
 | `init` | Create the root (0700) and open the catalog. Installs no timer, starts nothing. | `python3 -m engine.v2.ops --root data/operations init` |
 | `doctor` | Read-only host + catalog inspection: capacity sample, catalog existence, diagnostics (hook state, `unmanaged_processes`, environment, executor probe, profiles), `integrity_errors`, `schema_versions`, `activation`. Opens the catalog `mode=ro`; never starts jobs or changes quotas. | `python3 -m engine.v2.ops doctor --json` |
-| `health` | Print the `operations_health.v1.1` document (§3). | `python3 -m engine.v2.ops health --json` |
+| `health` | Print the `operations_health.v1.2` document (§3). | `python3 -m engine.v2.ops health --json` |
 | `serve` | Run the supervisor claim/execute loop; `--once` drains and exits when nothing is active. `--store-root PATH` points a snapshot-backed launch at the legacy checkout, when it is not the code checkout `serve` runs from (see above). | `python3 -m engine.v2.ops serve --once --store-root /path/to/legacy/checkout` |
 | `snapshot plan-import` / `snapshot submit` | Import the rebuilt legacy tree into a shadow snapshot. Pass the current head snapshot ID and generation to `plan-import`; wait for the trades replay to finish first. Full rebuild order and heavy-run rules: [`native board rebuild runbook`](native_board_rebuild_runbook.md). | `python3 -m engine.v2.ops snapshot plan-import --source-root /path/to/legacy --scope shadow --expected-head-snapshot-id <id> --expected-head-generation <generation>` |
 | `capture-inputs` | The supported capture for `plan nightly --input-manifest` (2026-09-14). Enumerates and hashes, read-only, every file the seven nightly barrier kinds (`legacy_finality`, `legacy_decisions`, `legacy_settlement`, `legacy_model_evidence`, `legacy_render`, `legacy_selfcheck`, `legacy_features`) actually read — see `engine/v2/data/legacy_nightly_read_plan.py` for the declared, cited families — and writes a `LegacyInputManifest` with `capture_implementation_ref="legacy_nightly_capture.v1"`. `--as-of`, `--tickers`, `--context-tickers` (defaults to `--tickers`), `--year-start/--year-end`, `--source-root` (the legacy checkout to scan), `--output` (where to write the manifest JSON) are all required except `--tickers`/`--context-tickers`. Refuses with a typed problem (`SOURCE_EMPTY`/`INPUT_CHANGED`) when a required family has no files, e.g. no cached ORATS market-wide files for any of the 15 finality lookback sessions. | `python3 -m engine.v2.ops capture-inputs --as-of 2026-09-12 --tickers AAA,BBB --year-start 2024 --year-end 2026 --source-root /path/to/legacy/checkout --output manifest.json` |
@@ -120,7 +120,8 @@ requires `--idempotency-key`, but what it MEANS depends on the plan kind:
 
 ## 3. Health surface
 
-`health(conn, clock=...)` returns `operations_health.v1.1`:
+`health(conn, clock=...)` returns `operations_health.v1.2` (v1.2 adds
+`latest_occurrence`; older v1.0/v1.1 documents remain valid):
 `generated_at`, `executor_mode` (`watchdog`), `containment` (`best_effort`),
 `jobs` (everything not succeeded/cancelled, with queue reasons), `watermarks`,
 `current_release` (latest delivered), `withheld_release` (latest `eligible=0`),
@@ -149,7 +150,7 @@ its `generated_at` age rather than hiding it.
 ```python
 from engine.v2.serving.operations import create_server
 server = create_server(("127.0.0.1", 8790), token=os.environ["OPS_TOKEN"],
-                       health_path="data/operations/health.json", release_root="data/operations/release", frozen_at="2026-09-14T21:00:00Z")
+                       health_path="data/operations/health.json", release_root="data/operations/release", frozen_at=None)
 server.serve_forever()
 ```
 

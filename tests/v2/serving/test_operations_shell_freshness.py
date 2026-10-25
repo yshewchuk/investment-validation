@@ -244,6 +244,25 @@ def test_current_json_refuses_an_extreme_year_one_frozen_clock_without_live_time
         _stop(server, thread)
 
 
+@pytest.mark.parametrize("schema_version", [
+    "operations_health.v1.0", "operations_health.v1.1", "operations_health.v1.2",
+])
+def test_health_route_serves_every_supported_schema_version(tmp_path, schema_version):
+    _write_bundle(tmp_path, "r1")
+    (tmp_path / "CURRENT").write_text("r1\n")
+    health = tmp_path / "health.json"
+    health.write_text(json.dumps({"schema_version": schema_version,
+                                  "generated_at": "2026-10-05T17:00:00Z"}))
+    server, thread = _serve(tmp_path, health)
+    try:
+        request = Request(f"http://127.0.0.1:{server.server_port}/health.json")
+        request.add_header("Authorization", "Bearer browser-secret")
+        response = urlopen(request, timeout=5)
+        assert json.loads(response.read())["schema_version"] == schema_version
+    finally:
+        _stop(server, thread)
+
+
 def test_current_json_live_clock_before_close_resolves_the_exact_previous_session(tmp_path,
                                                                                    monkeypatch):
     """``frozen_at="unknown"`` routes through the live wall clock, and a live
@@ -905,6 +924,12 @@ def test_shell_reports_stale_banner_for_old_but_valid_evidence(tmp_path):
 def test_shell_document_renders_a_safe_unknown_stamp_for_malformed_frozen_at(tmp_path, frozen_at):
     result = _stamp_for(frozen_at)
     assert result["stamp"] == "offline frozen at unknown"
+
+
+@_needs_node
+def test_shell_document_renders_a_valid_frozen_stamp(tmp_path):
+    result = _stamp_for("2026-10-05T21:00:00Z")
+    assert result["stamp"] == "offline frozen at 2026-10-05T21:00:00Z"
 
 
 @_needs_node

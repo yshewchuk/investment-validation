@@ -111,7 +111,7 @@ def _read_health(path: Path) -> bytes:
         raise ValueError("health artifact is indirect")
     document = json.loads(path.read_text())
     if not isinstance(document, dict) or document.get("schema_version") not in (
-            "operations_health.v1.0", "operations_health.v1.1"):
+            "operations_health.v1.0", "operations_health.v1.1", "operations_health.v1.2"):
         raise ValueError("unsupported health artifact")
     return json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
@@ -124,8 +124,9 @@ def _read_calibration_health(path: Path) -> bytes:
     (``engine.v2.ledger.calibration.export_health_file``). That document --
     like the legacy ``health.json`` it mirrors -- carries no
     ``schema_version``, so it is recognized by ``generated_at`` and canonicalized
-    exactly as ``/health.json`` does. An ``operations_health.v1.0`` or
-    ``operations_health.v1.1`` document is accepted too (the same reader then
+    exactly as ``/health.json`` does. An ``operations_health.v1.0``,
+    ``operations_health.v1.1`` or ``operations_health.v1.2`` document is
+    accepted too (the same reader then
     serves either exported health file); anything else is refused, never served
     as empty JSON.
     """
@@ -134,7 +135,8 @@ def _read_calibration_health(path: Path) -> bytes:
     document = json.loads(path.read_text())
     if not isinstance(document, dict):
         raise ValueError("unsupported health artifact")
-    if document.get("schema_version") in ("operations_health.v1.0", "operations_health.v1.1"):
+    if document.get("schema_version") in ("operations_health.v1.0", "operations_health.v1.1",
+                                           "operations_health.v1.2"):
         return _read_health(path)
     if "generated_at" not in document or "n_scored" not in document:
         raise ValueError("unsupported health artifact")
@@ -180,7 +182,8 @@ def _shell_script(frozen: str) -> str:
     shows the health observation's age, and offers a reload button to opt
     into current -- the frame is never re-pointed automatically.
     ``/health.json`` polls every 30s and is usable only as an
-    ``operations_health.v1.0`` or ``operations_health.v1.1`` object with a
+    ``operations_health.v1.0``, ``operations_health.v1.1`` or
+    ``operations_health.v1.2`` object with a
     parseable, non-future ``generated_at``; age shows in whole days/hours
     (minimum one hour when nonzero, more than 24h stale). The shell shows the
     requested/resolved/expected sessions (session ids date-parse as
@@ -207,8 +210,7 @@ def _shell_script(frozen: str) -> str:
 const FROZEN='{frozen}',DAY=86400000;
 const state=document.querySelector('#state'),stamp=document.querySelector('#stamp'),banner=document.querySelector('#ops'),releaseEl=document.querySelector('#release'),publishedEl=document.querySelector('#published'),requestedEl=document.querySelector('#requested'),resolvedEl=document.querySelector('#resolved'),expectedEl=document.querySelector('#expected'),outcomeEl=document.querySelector('#outcome'),driftEl=document.querySelector('#drift'),optin=document.querySelector('#optin'),frame=document.querySelector('#legacy');
 let pinned=null,published,expected,health=null,healthNote='health not fetched yet',currentSeq=0,healthSeq=0;
-function age(ms){{let h=Math.floor(ms/3600000);if(ms>0&&h<1)h=1;const d=Math.floor(h/24);return d?d+'d '+(h%24)+'h':h+'h';}}
-function usable(j){{if(!j||typeof j!=='object'||Array.isArray(j)||!['operations_health.v1.0','operations_health.v1.1'].includes(j.schema_version))return false;const at=Date.parse(j.generated_at);return !Number.isNaN(at)&&at<=Date.now();}}
+function age(ms){{let h=Math.floor(ms/3600000);if(ms>0&&h<1)h=1;const d=Math.floor(h/24);return d?d+'d '+(h%24)+'h':h+'h';}}function usable(j){{if(!j||typeof j!=='object'||Array.isArray(j)||!['operations_health.v1.0','operations_health.v1.1','operations_health.v1.2'].includes(j.schema_version))return false;const at=Date.parse(j.generated_at);return !Number.isNaN(at)&&at<=Date.now();}}
 async function pollHealth(){{const seq=++healthSeq;try{{const r=await fetch('/health.json',{{credentials:'same-origin'}});if(seq!==healthSeq)return;if(!r.ok)throw Error('http');const j=await r.json();if(seq!==healthSeq)return;if(usable(j)){{health=j;healthNote='';}}else{{health=null;healthNote='health artifact unusable: schema or generated_at';}}}}catch(e){{if(seq!==healthSeq)return;health=null;healthNote='health fetch failed: unavailable';}}if(seq!==healthSeq)return;render();}}
 {_SHELL_EVIDENCE_JS}function evaluate(){{const ms=Date.now()-Date.parse(health.generated_at),text=age(ms),reasons=[];let unknown=false,stale=false;
 function add(reason,kind){{reasons.push(reason);if(kind==='unknown')unknown=true;else if(kind==='stale')stale=true;}}

@@ -1,10 +1,10 @@
 {
   "schema_version": "phase1_coverage.v1.0",
-  "suite_version": "phase1_coverage_suite.v20",
+  "suite_version": "phase1_coverage_suite.v21",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_dashboard_board_filters_ops_root.py",
-    "tests/test_v2_dashboard_browser.py",
+    "tests/v2/dashboard/test_v2_dashboard_browser.py",
     "tests/test_v2_dashboard_offline_file.py",
     "tests/test_v2_dashboard_preview.py",
     "tests/test_v2_dashboard_preview_analogs.py",
@@ -98,7 +98,7 @@
     "tests/test_v2_ops_runtime.py",
     "tests/test_v2_ops_security_gate.py",
     "tests/test_v2_ops_serving.py",
-    "tests/test_v2_ops_serving_browser.py",
+    "tests/v2/serving/test_ops_serving_browser.py",
     "tests/test_v2_ops_serving_model_release.py",
     "tests/test_v2_ops_source_availability.py",
     "tests/test_v2_ops_store_barrier.py",
