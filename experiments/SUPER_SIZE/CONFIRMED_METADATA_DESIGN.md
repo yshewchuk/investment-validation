@@ -225,7 +225,7 @@ elapsed/rate/ETA, refusals and stage RSS; no per-event logging or extra scans.
 
 | Failure | Registered nonretryable code unless native code says otherwise |
 | --- | --- |
-| Malformed request/row/cap shape or no supported bounded native session | CONTRACT_MISMATCH |
+| Malformed request/row/cap shape, missing/noncanonical partition metadata or no supported bounded native session | CONTRACT_MISMATCH |
 | Missing/unresolvable/nonexact SnapshotRef | SNAPSHOT_UNRESOLVED via admit_snapshot |
 | Absent earnings table | CONTRACT_MISMATCH |
 | Unsupported exact contract/ref | UNSUPPORTED_CONTRACT |
