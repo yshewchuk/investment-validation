@@ -726,11 +726,9 @@ Retention runs after a successful backup. Per scope it retains the newest N comp
 | Invalid materialization root or entry | `INTEGRITY_FAILED`; no deletion begins. |
 | Unsafe backup or artifact name | `INTEGRITY_FAILED`; no deletion begins. |
 | Live attempt with a missing or duplicate request binding | `INPUT_CHANGED`; no deletion begins. |
-| Filesystem error during deletion | The `OSError` propagates; earlier deletions may persist. There is no journal replay; the next run re-inventories before considering more deletions. |
+| Filesystem error during deletion | The `OSError` propagates; earlier deletions may persist. There is no journal replay; an incomplete remaining backup scope refuses with `INTEGRITY_FAILED` until manually repaired. |
 | Partial backup remains after an interrupted deletion | The incomplete scope fails preflight with `INTEGRITY_FAILED`; no further deletion starts until repaired. |
 | Any retention refusal | The current nightly backup attempt fails, even though backup/watermark may already be durable. |
-
-Journal recovery and broader race-safe preflight are follow-up work in [#1251](https://github.com/yshewchuk/investment-validation/issues/1251).
 
 ## 5. Invariants
 

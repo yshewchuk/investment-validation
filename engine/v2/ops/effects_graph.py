@@ -858,7 +858,7 @@ def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=
     # refusal propagates as a typed OpsError with the backup effect already
     # delivered. Filesystem errors can leave earlier deletes in place, and
     # there is no journal replay.
-    enforce_retention(ops_root, conn=conn, store=store)
+    enforce_retention(ops_root, conn=conn, store=store, keepalive=keepalive)
     return None, ()
 
 

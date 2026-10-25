@@ -260,6 +260,9 @@ def test_backup_effect_propagates_retention_sentinel_after_successful_backup(tmp
                         details={"reason_key": "synthetic_retention_failed"})
         calls = []
 
+        def lease_renew():
+            pass
+
         def boom(*args, **kwargs):
             state = conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0]
             calls.append((args, kwargs, state))
@@ -268,11 +271,13 @@ def test_backup_effect_propagates_retention_sentinel_after_successful_backup(tmp
         monkeypatch.setattr("engine.v2.ops.retention.enforce_retention", boom)
         monkeypatch.setattr("engine.v2.ops.effects_graph.enforce_retention", boom)
         with pytest.raises(OpsError) as raised:
-            backup_effect(conn, store, claim, root, clock=clock)
+            backup_effect(conn, store, claim, root, clock=clock, keepalive=lease_renew)
 
         assert len(calls) == 1
         assert calls[0][2] == "delivered"
-        assert calls[0][1] == {"conn": conn, "store": store}
+        assert calls[0][1]["conn"] is conn
+        assert calls[0][1]["store"] is store
+        assert calls[0][1]["keepalive"] is lease_renew
         assert raised.value is sentinel
         assert raised.value.code == sentinel.code == "INTEGRITY_FAILED"
         assert raised.value.problem.details["reason_key"] == "synthetic_retention_failed"

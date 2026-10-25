@@ -330,3 +330,57 @@ def test_invalid_backup_manifest_shape_refuses_and_deletes_nothing(
     _save_manifest(scope, "old", manifest)
 
     _refusal(ops, ops, catalog, reason, keep=1, materialization_keep=1)
+
+
+def test_naive_manifest_cutoff_refuses_and_preserves_backup_scope(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "old", "2026-01-01T00:00:00+00:00")
+    _write_backup(scope, "new", "2026-01-02T00:00:00+00:00")
+    manifest = _manifest(scope, "old")
+    manifest["cutoff"] = "2026-01-01T00:00:00"
+    _save_manifest(scope, "old", manifest)
+
+    _refusal(ops, ops, catalog, "backup_cutoff_invalid", keep=1, materialization_keep=1)
+
+
+def test_keepalive_callback_covers_verification_and_deletion(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b2", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b1", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    calls = []
+
+    def keepalive():
+        calls.append(None)
+
+    deleted = enforce_retention(ops, conn=catalog, store=object(),
+                                keep=1, materialization_keep=1,
+                                keepalive=keepalive)
+
+    assert deleted == ["b2"]
+    assert len(calls) >= 5
+    assert not (scope / "b2.sqlite").exists()
+    assert not (scope / "b2.manifest.json").exists()
+    assert not (scope / "artifacts" / "old.bin").exists()
+    assert (scope / "b1.sqlite").exists()
+    assert (scope / "b1.manifest.json").exists()
+    assert (scope / "artifacts" / "new.bin").exists()
+
+
+def test_keepalive_callback_failure_propagates_before_deletion(tmp_path, catalog):
+    ops = tmp_path / "ops"
+    scope = ops / "backups" / "shadow"
+    _write_backup(scope, "b2", "2026-01-01T00:00:00+00:00", {"old.bin": b"old"})
+    _write_backup(scope, "b1", "2026-01-02T00:00:00+00:00", {"new.bin": b"new"})
+    before = _files(scope)
+
+    def keepalive():
+        raise RuntimeError("distinctive keepalive failure")
+
+    with pytest.raises(RuntimeError, match="distinctive keepalive failure"):
+        enforce_retention(ops, conn=catalog, store=object(),
+                          keep=1, materialization_keep=1,
+                          keepalive=keepalive)
+
+    assert _files(scope) == before
