@@ -242,9 +242,12 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         import time
 
         from engine import paths
-        from engine.v2.models.chooser_analog_pool import CHOOSER_ANALOG_DIMS
         from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
-        from tools.phase5_prepare_release import CHOOSER_POOL_ID, CHOOSER_POOL_MAX_BYTES
+        from tools.phase5_prepare_release import (
+            CHOOSER_POOL_ID,
+            CHOOSER_POOL_MAX_BYTES,
+            require_chooser_pool_columns,
+        )
 
         if cutoff is None:
             raise SystemExit("chooser_analog_pool needs a cutoff")
@@ -263,10 +266,12 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         print(f"[p5-3] chooser_analog_pool: read {len(frame)} rows in {read_s:.1f}s",
               file=sys.stderr, flush=True)
         # Missing columns would silently drop EVERY row (``_kept`` reads via
-        # ``row.get``), freezing an empty pool; refuse instead.
-        if not all(name in frame.columns
-                   for name in ("strategy", "exit_date", "pnl", *CHOOSER_ANALOG_DIMS)):
-            raise SystemExit("chooser analog pool source lacks required columns")
+        # ``row.get``), freezing an empty pool; refuse instead. The shared
+        # check raises ``ValueError``; a tool refusal is ``SystemExit``.
+        try:
+            require_chooser_pool_columns(frame.columns)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         lineage = Lineage(data=(DataDependency(table=CHOOSER_POOL_ID, end_exclusive=bound),))
         artifact = build_chooser_analog_pool_artifact(
             frame.to_dict("records"), pool_id=CHOOSER_POOL_ID, cutoff=bound, lineage=lineage)

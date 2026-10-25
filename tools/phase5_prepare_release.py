@@ -50,6 +50,7 @@ sys.path.insert(0, str(ROOT))
 from checks.phase5_modules import modules_available  # noqa: E402
 from engine.v2.foundation import CONTENT_HASH_PREFIX, to_document  # noqa: E402
 from engine.v2.models import deployment  # noqa: E402
+from engine.v2.models.chooser_analog_pool import CHOOSER_ANALOG_DIMS  # noqa: E402
 from engine.v2.models.contracts import ArtifactMember, ModelBinding, ModelRelease  # noqa: E402
 from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state  # noqa: E402
 from engine.v2.models.pinned_panel import (  # noqa: E402
@@ -281,6 +282,18 @@ CHOOSER_POOL_ID = "features.chooser_analog_pool"
 CHOOSER_POOL_MAX_BYTES = 256 * 1024 * 1024
 
 
+def require_chooser_pool_columns(columns: Iterable[str]) -> None:
+    """Refuse a pool source missing any column the artifact builder reads.
+
+    ``build_chooser_analog_pool_artifact`` filters via ``row.get``, so a
+    missing column would silently drop EVERY row and freeze an empty pool.
+    """
+    names = set(columns)
+    if not all(name in names for name in ("strategy", "exit_date", "pnl",
+                                          *CHOOSER_ANALOG_DIMS)):
+        raise ValueError("chooser analog pool source lacks required columns")
+
+
 def chooser_pool_payloads(path: Path) -> dict[str, dict[str, bytes]]:
     """The frozen chooser analog pool built from ``tools/build_chooser_pool.py``'s
     parquet, in its stored order. The pool is static, so its causal cutoff is
@@ -296,6 +309,7 @@ def chooser_pool_payloads(path: Path) -> dict[str, dict[str, bytes]]:
     if Path(path).stat().st_size > CHOOSER_POOL_MAX_BYTES:
         raise ValueError("chooser analog pool source is too large")
     frame = pd.read_parquet(path)
+    require_chooser_pool_columns(frame.columns)
     exits = pd.to_datetime(frame["exit_date"]).dropna()
     if exits.empty:
         return {}

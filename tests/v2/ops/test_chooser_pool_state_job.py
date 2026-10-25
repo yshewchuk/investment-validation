@@ -4,6 +4,7 @@ Fast, no real data: a tiny parquet stands in for ``tools/build_chooser_pool.py``
 output, ``engine.paths.FEATURES`` is monkeypatched to a tmp dir, and the frozen
 state round-trips through the real ``FrozenStateLoader``.
 """
+import json
 import re
 
 import pandas as pd
@@ -93,6 +94,10 @@ def test_writes_loadable_pool_excluding_post_cutoff_rows(tmp_path, monkeypatch):
 
     assert summary["status"] == "written"
     assert (out / "chooser_analog_pool.json").is_file()
+    persisted = json.loads((out / "chooser_analog_pool.summary.json").read_text())
+    assert persisted["status"] == "written"
+    assert not [p.name for p in out.iterdir()
+                if ".tmp-" in p.name or p.name.endswith(".partial")]
     assert summary["cutoff"] == CUTOFF
     assert summary["source_rows"] == 5 and summary["n_rows"] == 3
     assert summary["n_strategies"] == 2
@@ -309,3 +314,15 @@ def test_worker_refuses_noncanonical_cutoff_before_dispatch(tmp_path):
     assert err.value.problem.details == {"problems": [_NOT_ISO]}
     assert not (tmp_path / "training_result.json").exists()
     assert not (tmp_path / "training").exists()
+
+
+def test_worker_maps_resume_mismatch_to_checkpoint_incompatible(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _mixed_frame()))
+    training.run_training_worker(to_document(_params()), tmp_path)
+
+    changed = _pool_frame([_row("CTR5", "2026-02-10", 99.0)])
+    monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, changed))
+    with pytest.raises(OpsError) as err:
+        training.run_training_worker(to_document(_params()), tmp_path)
+    assert err.value.problem.code == "CHECKPOINT_INCOMPATIBLE"
+    assert err.value.problem.message == "training output already exists with different content"

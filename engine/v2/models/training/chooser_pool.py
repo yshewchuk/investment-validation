@@ -24,7 +24,7 @@ timestamp with a time of day is refused here rather than silently truncated.
 """
 from __future__ import annotations
 
-import re
+from datetime import date
 from math import isfinite
 from typing import Any, Iterable, Mapping
 
@@ -96,8 +96,16 @@ def build_chooser_analog_pool_artifact(
     if not isinstance(lineage, Lineage) or not lineage.declared:
         raise ValueError("a frozen chooser analog pool must declare its lineage")
     bound = None if cutoff is None else str(cutoff)[:10]
-    if bound is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", bound):
-        raise ValueError("chooser analog pool cutoff must be YYYY-MM-DD")
+    if bound is not None:
+        # ``date.fromisoformat`` is lenient on 3.11+ (it parses the basic and
+        # week formats), so require the canonical 10-char round trip the
+        # frozen key demands.
+        try:
+            canonical = len(bound) == 10 and date.fromisoformat(bound).isoformat() == bound
+        except ValueError:
+            canonical = False
+        if not canonical:
+            raise ValueError("chooser analog pool cutoff must be YYYY-MM-DD")
     grouped: dict[str, list[tuple]] = {}
     for row in rows:
         kept = _kept(row, bound)

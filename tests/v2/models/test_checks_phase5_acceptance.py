@@ -696,6 +696,17 @@ def test_preparer_builds_the_chooser_pool_from_its_parquet(tmp_path):
     assert prep.chooser_pool_payloads(tmp_path / "absent.parquet") == {}
 
 
+def test_preparer_refuses_chooser_parquet_missing_pnl(tmp_path):
+    import pandas as pd
+
+    frame = pd.DataFrame([{"strategy": "CTR5", "exit_date": pd.Timestamp("2026-02-10"),
+                           "exp_pnl_sim": 0.5, "width_over_forecast": 1.0, "n_legs": 5.0,
+                           "anchor_over_spot": 1.0, "rel_spread": 0.2}])
+    frame.to_parquet(tmp_path / "chooser_analog_pool.parquet", index=False)
+    with pytest.raises(ValueError, match="chooser analog pool source lacks required columns"):
+        prep.chooser_pool_payloads(tmp_path / "chooser_analog_pool.parquet")
+
+
 def test_acceptance_main_marks_release_only_after_release_pass(tmp_path, monkeypatch):
     root = _release(tmp_path)
     sidecar = (layout.deployment_root(root) / "releases" / "rel-candidate"
