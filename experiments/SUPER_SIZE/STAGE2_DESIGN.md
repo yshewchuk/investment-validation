@@ -232,8 +232,8 @@ inside each training fold, never stored globally or used to preselect features.
 v1 dictionary, helpers, row admission and identities. V2 dictionary entries bind
 ordered names, units, missing policy, source dependencies, the regime-source policy
 and the two derivation policies above; dictionary_hash remains content_hash of that ordered dictionary.
-H's eleven values/order remain unchanged; an unchanged H dictionary hash alone
-does not make the new versioned recipe/context identical. HM/HMO hashes change.
+H's eleven values/order remain unchanged, but its dictionary hash changes because
+v2 descriptors bind source dependencies and derivation policy. HM/HMO hashes also change.
 New producers bind v2 schema/policies, full HMO dictionary hash, source/history
 snapshots, eligibility, prefix lineage and environment. Never relabel v1 or
 partial daily blocks as v2 rows, overwrite old snapshots, or reuse a success
@@ -242,8 +242,8 @@ exact existing context and eligibility compatibility checks; never rebuild it
 implicitly or reinterpret its membership to make a join succeed.
 
 The source-free compiler landed in [#1236](https://github.com/yshewchuk/investment-validation/pull/1236)
-with v1-only dictionary-hash support. A separate P3 wiring slice may admit the
-two exact dictionary versions by hash, with no latest/default substitution.
+with v1-only dictionary-hash support. P3a below separates source-free support for
+the two exact dictionary versions from P3b execution wiring; no latest/default substitution.
 Old request outputs must replay identically; the new hash/recipe yields new
 request/candidate IDs. Keep the request schema v2 and closed H/HM/HMO grids;
 dictionary version is explicit in the resolved recipe, not an extra search axis.
@@ -255,18 +255,25 @@ three-outer fixture, plus 9 legacy logical / 18 component fits. Another schedule
 has different counts. Wider matrices and prefix work can change cost; none of
 these counts is a resource promise, real-data budget or performance claim.
 
-**Acceptance and bounded sequence.** This design precedes dictionary code.
+**Acceptance and bounded sequence.** The original design preceded dictionary code;
+v2 dictionary/recipe definitions have now landed in #1293. This amendment precedes P3a code.
 P1–P3 refine the original section-5 roadmap rather than replace it: P1 extends
-core slice 1; P2 completes the parity-dependent part of slices 2/6; P3 wires
-these versions through slices 3/4/5/6. Other core work and dependencies remain.
+core slice 1; P2 completes the parity-dependent part of slices 2/6; P3a extends
+only the source-free slice 5a, while P3b wires versions through slices 3/4/5b/6.
+Other core work and dependencies remain; P3a does not complete P3 or unblock a run.
 
 | Slice | Dependency / acceptance | Estimated added code / tests / docs |
 | --- | --- | --- |
-| P1: add-only v2 dictionary/context contract | This reviewed design; explicit versions, closed lineage, no source reader | 180–300 / 250–400 / 35–60 |
+| P1 workstream: v2 dictionary/context contract | Dictionary/recipe definitions landed in #1293; remaining context/lineage admission follows the metadata checkpoint, with no source reader implied | 180–300 / 250–400 / 35–60 (original coarse workstream) |
 | P2: protected implied-history and absolute derivation | P1 and remaining causal materializer; reuse pinned/batched sources, no per-candidate builds | 250–380 / 300–500 / 40–70 |
-| P3: reader/compiler/recipe version wiring | P1/P2, complete stored reader and landed v1-only compiler; preserve old replay and v1 closures | 180–300 / 250–400 / 35–60 |
+| P3a: source-free dictionary dispatch | Landed v2 definitions (#1293), compiler (#1236), and reviewed section 6.1; preserve old replay/closures | 50–80 / 180–240 / 20–35 |
+| P3b1: stored reader/version admission wiring | P1/P2, complete qualified stored reader; no source rebuild | 70–110 / 140–220 / 20–35 |
+| P3b2: full recipe/source binding | P3b1, qualified comparison and fitted-family recipes; bind all fixed knobs | 60–100 / 140–220 / 20–35 |
+| P3b3: planner/executor version wiring | P3a/P3b2 and core 5b admission; no bypass of selection/holdout rules | 70–110 / 160–230 / 20–35 |
 
 Split add/wire further at repository limits; these are estimates, not waivers.
+Unchanged P1/P2 rows are coarse workstreams, not single-PR budgets; their remaining
+work requires bounded sub-slices, as the metadata/materializer checkpoint specifies.
 P1 tests pin all 14 mappings, exact 11/28/42 order and HMO quote position,
 derivation-policy identity changes, unchanged v1 outputs and cross-version refusal.
 P2 uses independent numeric oracles for abs/nulls and prior means, zero/null quote
@@ -275,10 +282,13 @@ last-prior inclusion, protected/embargo holes without renumbering, skipped
 realized outcomes with valid quotes, future/known-late poison and each 5/3/1 clock.
 Include normalized-null versus preserved-zero fixtures and arm-specific mask boundaries.
 It proves no protected payload read and bounded source scans/batch invariance.
-P3 requires the qualified ^GSPC-close reader and pins its source-policy/snapshot
-identities, testing causal ceilings and refusal of mismatched source bindings.
-It proves old request replay, new identities, unchanged 33/603 fixture counts,
-no partial-row admission and no global preprocessing or outer-outcome selection.
+P3a proves old request replay, new declaration identities and unchanged 33/603
+fixture counts without qualifying a source. P3b requires the qualified ^GSPC-close
+reader and pins its source-policy/snapshot identities, testing causal ceilings,
+mismatched bindings, no partial-row admission and no global preprocessing or
+outer-outcome selection. P3b estimates cover wiring only, not missing prerequisites;
+freeze each concrete API in a reviewed design before implementation and split again
+if its code/tests/docs would exceed 400 combined added lines.
 No real source coverage, holdout opening, provider job, fit or registration is
 authorized or established here. The parallel numeric adapters remain
 column/hash-driven, with no panel dependency or hard-coded width.
@@ -513,7 +523,7 @@ Re-estimate before each PR and split at repository limits; these estimates grant
 | 2 | Batched causal feature materializer / 1,P | Horizon/availability, poisoned future/protected rows, batch invariance, read-count tests | 300–400 / 350–550 / 40–70 | 1 day |
 | 3 | Stored reader + snapshot join / 2 | Missingness/coverage and mismatch refusal; no runtime build | 200–320 / 250–400 / 30–60 | 0.5 day |
 | 4 | ElasticNet recipe + subset identity / 3 | Train-only preprocessing, convergence/failure, sparse selection tests | 160–280 / 200–350 / 25–50 | 0.5 day |
-| 5a | Pure request/schedule compiler / 0C,1,P | Closed specifications/counts, identity, no source reads or execution | 180–280 / 250–400 / 30–60 | 0.5 day |
+| 5a | Pure request/schedule compiler / 0C; v2 extension uses #1293 and section 6.1, not 1/P admission | V1 compiler landed #1236; P3a adds source-free dictionary dispatch only, no source reads or execution | 180–280 / 250–400 / 30–60 (original estimate) | 0.5 day |
 | 5b | v2 bounded planner/executor wiring / 5a,4,P | Fixture-specific 33/603 counts, temporal rejection, immutable replay | 280–400 / 300–500 / 40–80 | 0.5–1 day |
 | 6 | Causal legacy comparison adapter / 3 | Pinned recipe parity, same clocks, protected implied history | 250–380 / 300–500 / 35–70 | 0.5–1 day |
 | 7 | Matched report + request fixture / 5b,6 | Paired membership/weights, bootstrap determinism, coverage, receipt checks | 220–350 / 250–400 / 40–80 | 0.5 day |
@@ -533,7 +543,7 @@ APIs, source closures, artifacts and identities remain unchanged.
 
 ### Boundary and reuse
 
-Proposed public API: `experiments.magnitude_search_request.compile_request(request)`.
+Landed public API (#1236): `experiments.magnitude_search_request.compile_request(request)`.
 Input is a detached plain-JSON document, not JSON text, a file or a repository.
 Only built-in dict/list/string/int/float/bool/null types are allowed; dictionary
 keys are strings, numbers finite, and cycles/non-JSON aliases refuse. Integer
@@ -561,7 +571,7 @@ The schema literal is `magnitude_search_request.v2`. No defaults or extra keys.
 | --- | --- |
 | Snapshot IDs | Strings matching native `snap_` plus 32 lowercase hex characters; no `latest`, path or resolver call. Full committed-reference comparison belongs to later admission. |
 | Hashes | `sha256:` plus 64 lowercase hex characters. |
-| `feature_dictionary_hash` | Equals the current full HMO dictionary hash returned by the owning panel recipe. This is dictionary-version compatibility, not snapshot membership. |
+| `feature_dictionary_hash` | Existing compiler: exact full HMO v1 recipe hash. Proposed P3a wrapper (6.1): exact full HMO v1 or v2 recipe hash. Dictionary compatibility is not snapshot membership. |
 | `eligibility_policy_ref` | Exactly `{"schema_ref":"group_eligibility_plan.v1","plan_id":<hash>,"policy_id":<hash>}`. Policy ID must equal the shared `grouped_ticker_embargo.v1` policy with 30 calendar days. This identity-only plan reference is not an ArtifactRef or read capability. |
 | `feature_sets` | Exactly `["H","HM","HMO"]`, in that order; no arbitrary subsets/columns. The owning panel helper supplies each ordered dictionary and quote/missing policy. |
 | `space` | Exactly the three grids below. Integer/float aliases for numerical grid values normalize to the shown numeric types. Object-key order (families and axes) is irrelevant; changed/missing/extra axes and reordered/duplicate/changed/missing values refuse, as do booleans. |
@@ -646,3 +656,86 @@ Native stored-panel admission/publication, fitted Ridge/HGB column generalizatio
 ElasticNet recipe dispatch, journaling/selection and resource-contained execution
 remain later slices. No dummy runtime wiring, quantitative model recommendation,
 actual registration, protected read or real-data job is authorized here.
+
+### 6.1 P3a: additive dictionary-version compatibility checkpoint
+
+This amendment changes dependency staging, not the search or its scientific rules.
+The v2 dictionary/recipe definitions landed in #1293; the metadata prerequisites
+in #1327/#1331 neither implement a stored panel reader nor qualify numerical inputs.
+P3a needs only the definitions and existing pure compiler. P1/P2 and the qualified
+reader remain prerequisites for P3b/execution, not for declaration-only dispatch.
+The broader core/add/drop preview in draft #1290 is not the accepted initial search;
+replace that scope rather than importing its ten-subset/110-candidate axis.
+
+**Planned public boundary, not an implemented architecture contract:**
+`experiments.magnitude_search_request_versions.compile_request(request)`.
+Keep `magnitude_search_request.compile_request`, both owning panel definition
+modules and existing v1 runtime source closures byte-for-byte unchanged. The new
+module has synthetic callers only; its implementation PR must add its real owning
+ARCHITECTURE/README contract. No CLI, native caller or registration wiring here.
+
+Input/output schemas and all fields remain exactly section 6. The dispatch key is
+only `feature_dictionary_hash`, compared with the full HMO hashes from public
+`magnitude_panel_table.recipe("HMO")` and `magnitude_panel_v2_table.recipe("HMO")`.
+No version field, default, `latest`, subset hash, opaque model ID or arbitrary
+column list may substitute. A dictionary version is not another search axis.
+Use the corresponding public `recipe(subset)` for every H/HM/HMO specification;
+even H's unchanged values do not make a v2 recipe identical to v1. Preserve v2
+dictionary widths of 11/28/42 and recipe `model_columns` widths of 11/28/43.
+HMO's final `has_implied_quote` column is outside the numeric dictionary/table,
+as supplied by the public recipe.
+
+**Reuse without mutating the old compiler.** Standard-library JSON and foundation
+canonical hashing already cover normalization and identities; no new dependency.
+The wrapper recognizes the exact v2 hash only in a built-in dict with a built-in
+string hash. All other inputs delegate unchanged to the public v1 compiler,
+preserving its valid outputs and complete typed refusals. For a recognized v2
+declaration, make a private shallow dict copy and substitute only the known v1
+HMO hash for one call to that public compiler. This is a validation/normalization
+adapter, not a source identity or admitted request; it must not escape.
+This relies on dictionary-independent validation/scheduling apart from the hash gate,
+with all dictionary-bearing outputs replaced as recipes or recomputed identities below.
+
+That call must finish its existing plain-JSON, nested shape, grid, policy, year,
+cap and limit checks before any v2 candidate expansion. It supplies a detached
+normalized request and the existing schedule/counts. Restore the actual v2 hash
+in that normalized request, recompute `request_id=content_hash(request)`, replace
+each candidate's feature recipe using its validated `feature_recipe["subset"]`, recompute every
+`candidate_spec_id=content_hash({request_id,family,feature_recipe,parameters})`,
+and re-sort candidates by the new IDs. Return a detached result; never retain a
+surrogate request ID, v1 recipe or surrogate candidate ID in the v2 output. Do not
+reach into private compiler helpers, monkeypatch recipe globals or duplicate the
+closed-grid validator. Invalid input produces no partial preview or mutation.
+
+| Condition | Required outcome |
+| --- | --- |
+| Valid full-HMO v1 hash | Exactly the existing compiler's canonical bytes, counts and IDs. |
+| Valid full-HMO v2 hash | Same closed 33 candidates and fixture-specific 603 search fits; actual v2 recipes/request determine every ID. |
+| Unknown/malformed/subset hash, malformed JSON shape, changed subsets/grid, invalid policy/years or insufficient caps | Existing nonretryable `INVALID_EXPERIMENT_SPEC` from public validation; no enumeration beyond that validator's ordering. |
+| Numerically equivalent permitted grid aliases or object-key reordering | Same normalized version-specific result; list order remains contractual. |
+| Valid snapshot/policy-reference syntax | Intent only: no source resolution, existence, membership, coverage, provenance, forecast or holdout qualification. |
+
+The private normalized intermediate and final preview coexist: work/space scale
+with the supplied declaration plus the fixed 33 metadata specifications. Existing
+candidate/fit caps bound enumeration, not input bytes, construction memory, RSS,
+CPU feasibility or real-data cost. No source I/O, estimator construction, fitting,
+preprocessing, selection, artifact writes, registration or worker launch occurs.
+Inner-fold selection and outer reporting are unchanged later execution rules.
+
+**Independent acceptance oracles.** Pin the complete existing v1 canonical output
+and source-file hashes; compare all valid v1 fixtures and complete refusal Problems
+through both public APIs. For v2, assert literal H/HM/HMO descriptor/column order,
+quote placement, the 33/603 and 9/18 comparison counts, and a smaller valid schedule.
+Recompute every returned identity from the actual declarations independently and
+assert known v1/surrogate IDs do not survive. Cover changed references, numeric
+aliases, dictionary-key order, unsupported/subset hashes, malformed/cyclic/non-JSON
+inputs, closed-grid/subset refusal, cap boundaries before expansion, detached
+mutation tests, and poisoned source/store/fit hooks. No real data is needed.
+
+P3a implementation estimate: 50–80 runtime / 180–240 tests / 20–35 docs, at most
+355 combined added lines; split before exceeding 400, never weaken the oracles.
+Publish this design amendment before implementation. A clean replacement for
+#1290 preserves its old head/history and is preferable to rewriting unrelated
+work. Actual execution still needs P3b, the admitted causal context/materializer,
+protected-history and qualified ^GSPC-close evidence, full recipe/source/fold
+bindings, matched comparison and separately approved real-data budgets/registration.
