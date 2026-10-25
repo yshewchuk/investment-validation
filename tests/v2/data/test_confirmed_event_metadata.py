@@ -147,6 +147,17 @@ def test_nonscalar_session_builtin_failure_is_closed_and_redacted():
     assert caught.value.__suppress_context__ and caught.value.__cause__ is None
 
 
+@pytest.mark.parametrize("helper", ["_validate_inputs", "_event_reasons"])
+def test_native_overflow_is_normalized_without_leaking_values(monkeypatch, helper):
+    def overflow(*args, **kwargs):
+        raise OverflowError("private input value")
+    monkeypatch.setattr(computed_moves, helper, overflow)
+    with pytest.raises(DataError) as caught:
+        classify_metadata(frame())
+    assert_refusal(caught.value.problem, "event metadata has unsupported shape or values")
+    assert caught.value.__suppress_context__ and caught.value.__cause__ is None
+
+
 def test_native_null_like_acceptance_is_not_stricter_source_admission():
     events = frame().iloc[:1].copy()
     events["session"] = [[None]]
