@@ -264,7 +264,7 @@ Other core work and dependencies remain; P3a does not complete P3 or unblock a r
 
 | Slice | Dependency / acceptance | Estimated added code / tests / docs |
 | --- | --- | --- |
-| P1: add-only v2 dictionary/context contract | This reviewed design; explicit versions, closed lineage, no source reader | 180–300 / 250–400 / 35–60 |
+| P1 workstream: v2 dictionary/context contract | Dictionary/recipe definitions landed in #1293; remaining context/lineage admission follows the metadata checkpoint, with no source reader implied | 180–300 / 250–400 / 35–60 (original coarse workstream) |
 | P2: protected implied-history and absolute derivation | P1 and remaining causal materializer; reuse pinned/batched sources, no per-candidate builds | 250–380 / 300–500 / 40–70 |
 | P3a: source-free dictionary dispatch | Landed v2 definitions (#1293), compiler (#1236), and reviewed section 6.1; preserve old replay/closures | 50–80 / 180–240 / 20–35 |
 | P3b1: stored reader/version admission wiring | P1/P2, complete qualified stored reader; no source rebuild | 70–110 / 140–220 / 20–35 |
@@ -523,7 +523,7 @@ Re-estimate before each PR and split at repository limits; these estimates grant
 | 2 | Batched causal feature materializer / 1,P | Horizon/availability, poisoned future/protected rows, batch invariance, read-count tests | 300–400 / 350–550 / 40–70 | 1 day |
 | 3 | Stored reader + snapshot join / 2 | Missingness/coverage and mismatch refusal; no runtime build | 200–320 / 250–400 / 30–60 | 0.5 day |
 | 4 | ElasticNet recipe + subset identity / 3 | Train-only preprocessing, convergence/failure, sparse selection tests | 160–280 / 200–350 / 25–50 | 0.5 day |
-| 5a | Pure request/schedule compiler / 0C,1,P | Closed specifications/counts, identity, no source reads or execution | 180–280 / 250–400 / 30–60 | 0.5 day |
+| 5a | Pure request/schedule compiler / 0C; v2 extension uses #1293 and section 6.1, not 1/P admission | V1 compiler landed #1236; P3a adds source-free dictionary dispatch only, no source reads or execution | 180–280 / 250–400 / 30–60 (original estimate) | 0.5 day |
 | 5b | v2 bounded planner/executor wiring / 5a,4,P | Fixture-specific 33/603 counts, temporal rejection, immutable replay | 280–400 / 300–500 / 40–80 | 0.5–1 day |
 | 6 | Causal legacy comparison adapter / 3 | Pinned recipe parity, same clocks, protected implied history | 250–380 / 300–500 / 35–70 | 0.5–1 day |
 | 7 | Matched report + request fixture / 5b,6 | Paired membership/weights, bootstrap determinism, coverage, receipt checks | 220–350 / 250–400 / 40–80 | 0.5 day |
@@ -693,6 +693,8 @@ preserving its valid outputs and complete typed refusals. For a recognized v2
 declaration, make a private shallow dict copy and substitute only the known v1
 HMO hash for one call to that public compiler. This is a validation/normalization
 adapter, not a source identity or admitted request; it must not escape.
+This relies on dictionary-independent validation/scheduling apart from the hash gate,
+with all dictionary-bearing outputs replaced as recipes or recomputed identities below.
 
 That call must finish its existing plain-JSON, nested shape, grid, policy, year,
 cap and limit checks before any v2 candidate expansion. It supplies a detached
