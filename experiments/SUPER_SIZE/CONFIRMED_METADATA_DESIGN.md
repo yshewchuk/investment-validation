@@ -45,10 +45,10 @@ No research-side SQL, caller receipt/boolean or ordinary pinned Repository can
 substitute. 1.B0 must freeze/prove the public API and an additive implementation
 route preserving existing bytes; index implementation waits for all of 1.B0–1.B3.
 
-Proposed additive API:
-`magnitude_confirmed_metadata.build_index(repository, snapshot, *, tickers, limits)`.
-Only synthetic native repositories consume the initial implementation. No CLI,
-stored artifact reader, caching service or runtime caller is added in this slice.
+Proposed signatures below are design vocabulary, not installed/exported APIs:
+`engine.v2.research.magnitude_confirmed_metadata.build_index(repository, snapshot, *, tickers, limits)`.
+Initial implementation is synthetic-only. No CLI, stored artifact reader, cache
+or runtime caller is added by this checkpoint.
 Use the bounded native session/DataQuery, strict native ref decoding, standard
 Python sorting, public event_sequence and foundation canonical hashing. A new
 schema framework, registry, custom Parquet reader or legacy adapter is unnecessary.
@@ -56,10 +56,12 @@ First add `engine.v2.data.confirmed_event_metadata.classify_metadata(events)` ov
 `computed_moves._validate_inputs` and `_event_reasons`, then consume that facade
 from research. It validates with empty price sequences and min_scoreable=0 and
 returns a tuple of native per-row reasons, without collapse/order/build/price access.
+The facade requires a pandas DataFrame with unique column labels and required
+event_date/session/src_orats; shape failures raise CONTRACT_MISMATCH before native guards.
 Do not copy their date/bool/session checks or confirmation predicate. The facade
 is additive; existing computed_moves and all v1 source-closure files stay unchanged.
 These are internal calls within engine.v2.data, not research private imports
-(`checks/package_readmes.py:128–130`); declare only the facade in data's README.
+(`checks/package_readmes.py:131–132`); declare only the facade in data's README.
 
 `snapshot` is an exact native SnapshotRef, admitted through
 `snapshot_inputs.admit_snapshot` through the required bounded session, never an
@@ -128,8 +130,8 @@ Sort ticker names lexicographically for canonical output; input order is immater
    duplicate (ticker,event_date), true date_conflict or nonnull
    (ticker,event_cluster_id) associated with another event ID/date, including
    unconfirmed siblings in either encounter order. Native cluster identity is
-   ticker-scoped (events.py:132–154; event_revisions.py:75–87); producers prefix
-   ticker (calendar.py:707,728; forward_calendar_store.py:626). Equal opaque
+   ticker-scoped (engine/v2/data/events.py:132–154; engine/v2/data/event_revisions.py:75–87); producers
+   prefix ticker (engine/calendar.py:707,728; engine/v2/ops/forward_calendar_store.py:626). Equal opaque
    cluster strings across tickers are not siblings; do not parse their prefixes.
    Null clusters remain allowed. No global cross-ticker qualification is needed.
    Do not import computed-move deduplication or prefer one session/source/date.
@@ -270,15 +272,15 @@ needed. Estimates are not waivers, completed work or real-data authorization.
 Mapped totals (code/tests/docs): row 1 = 1020–1440/1570–2000/450–640;
 P = 100–140/150–190/20–30; row 2 = 380–540/580–740/80–120. The original
 one-week target is not reaffirmed. Only 1.M3 exposes authenticated build_index.
-Public slices update owning README/ARCHITECTURE without exceeding its ceiling.
-1.C0 may block evidence-dependent work; estimates never invent available evidence.
+Each implementation slice updates its owning data/research README/ARCHITECTURE
+under existing ceilings. 1.C0 may block; estimates never invent source evidence.
 
 Acceptance fixtures cover the exact full contract hash and same-column impostors;
 changed snapshot/dataset/fragment/object identity; all manifest years including
 pre-history_start/protected metadata; absent/no-confirmed/zero-fragment cases;
 same-ticker duplicates/conflicts across batches/partitions in either order,
 unconfirmed siblings and cross-ticker equal opaque clusters that are not siblings;
-strict dates/booleans/session with the existing native facade as the oracle;
+strict dates/booleans/session with shared native guards/predicate as the oracle;
 ordinal warmup and deterministic detached replay; and every cap at/over boundary.
 Poison non-earnings payload scans/object reads and provider/writer/fit hooks;
 assert zero accesses; poison oversized unrelated catalog membership/text and
