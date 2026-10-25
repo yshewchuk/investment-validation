@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +42,50 @@ def _script_for(frozen_at: str) -> str:
     """The shell's inline script, reached only through the public document."""
     document = shell_document(frozen_at=frozen_at).decode()
     return document[document.index("<script>"):]
+
+
+
+
+def _stamp_for(frozen_at: str):
+    """Run the shell script under node and return its initial stamp text."""
+    wrapper = _script_for(frozen_at)
+    assert wrapper.startswith("<script>") and wrapper.endswith("</script>")
+    source = wrapper[len("<script>"):-len("</script>")]
+    source += "\n" + "\n".join([
+        "health = null;",
+        "pinned = null;",
+        "published = null;",
+        "expected = null;",
+        "render();",
+        "JSON.stringify({stamp: stamp.textContent, state: state.textContent});",
+    ])
+    with tempfile.TemporaryDirectory() as d:
+        harness = Path(d) / "stamp.js"
+        harness.write_text(
+            "const vm = require('vm');\n"
+            f"const source = {json.dumps(source)};\n"
+            "const elements = {};\n"
+            "function element() { return {textContent: '', className: '', hidden: true, "
+            "addEventListener() {}}; }\n"
+            "const context = {\n"
+            "  console,\n"
+            "  document: {querySelector(selector) { return elements[selector] || "
+            "(elements[selector] = element()); }},\n"
+            "  window: {addEventListener() {}},\n"
+            "  location: {hash: ''},\n"
+            "  fetch: function () { return new Promise(function () {}); },\n"
+            "  setInterval: function () { return 0; },\n"
+            "  Date: Date,\n"
+            "};\n"
+            "vm.createContext(context);\n"
+            "process.stdout.write(vm.runInContext(source, context, "
+            "{filename: 'shell.js'}));\n",
+            encoding="utf-8",
+        )
+        node = shutil.which("node")
+        result = subprocess.run([node, str(harness)], check=True,
+                                capture_output=True, text=True, timeout=20)
+        return json.loads(result.stdout)
 
 
 def _serve(root: Path, health_path: Path, *, frozen_at="2026-10-05T21:00:00Z"):
@@ -168,6 +213,25 @@ def test_current_json_refuses_a_malformed_frozen_clock_without_live_time(tmp_pat
     health.write_text(json.dumps({"schema_version": "operations_health.v1.0",
                                   "generated_at": "2026-10-05T17:00:00Z"}))
     server, thread = _serve(tmp_path, health, frozen_at="not-a-timestamp")
+    try:
+        request = Request(
+            f"http://127.0.0.1:{server.server_port}/release/current.json")
+        request.add_header("Authorization", "Bearer browser-secret")
+        response = urlopen(request, timeout=5)
+        assert json.loads(response.read()) == {"release_id": "r1"}
+        assert "X-Expected-Session" not in response.headers
+        assert response.headers["Cache-Control"] == "no-store"
+    finally:
+        _stop(server, thread)
+
+
+def test_current_json_refuses_an_extreme_year_one_frozen_clock_without_live_time(tmp_path):
+    _write_bundle(tmp_path, "r1")
+    (tmp_path / "CURRENT").write_text("r1\n")
+    health = tmp_path / "health.json"
+    health.write_text(json.dumps({"schema_version": "operations_health.v1.0",
+                                  "generated_at": "2026-10-05T17:00:00Z"}))
+    server, thread = _serve(tmp_path, health, frozen_at="0001-01-01T12:00:00+00:00")
     try:
         request = Request(
             f"http://127.0.0.1:{server.server_port}/release/current.json")
@@ -567,6 +631,27 @@ def test_shell_treats_older_failures_behind_an_unknown_latest_night_as_unknown(t
 
 
 @_needs_node
+def test_shell_latest_failed_outcome_with_only_older_unknown_occurrence(tmp_path):
+    health = _health_document()
+    health["code_budgets"] = {
+        "ok": False,
+        "latest": {"occurrence": "2026-10-05"},
+        "consecutive_nights": 1,
+        "unknown_occurrences": ["2026-10-02"],
+        "latest_occurrence": "2026-10-05",
+    }
+    result = _shell_status(tmp_path, health)
+    assert result["outcome"].startswith("latest outcome: fail:")
+    assert "latest engineering outcome failed" in result["outcome"]
+    assert "unknown (not observed)" not in result["outcome"]
+    assert "scheduled observations missing: 2026-10-02" in result["outcome"]
+    assert result["state"].startswith("unknown:")
+    assert "latest engineering outcome failed" in result["state"]
+    assert "scheduled observations missing: 2026-10-02" in result["state"]
+    assert result["banner"] == "unknown"
+
+
+@_needs_node
 def test_shell_banner_precedence_is_unknown_over_stale_over_degraded(tmp_path):
     health = _health_document()
     health["generated_at"] = "2026-10-03T20:00:00Z"
@@ -810,3 +895,38 @@ def test_shell_reports_stale_banner_for_old_but_valid_evidence(tmp_path):
     assert result["state"].startswith("stale:")
     assert "observation older than 24 hours" in result["state"]
     assert result["banner"] == "stale"
+
+
+@_needs_node
+@pytest.mark.parametrize("frozen_at", [
+    "", "not-a-timestamp", "2026-10-05", "';alert(1)//", "a\\b", "</script>",
+    '2026-10-05"00:00:00Z', 0, False, None, [], {},
+])
+def test_shell_document_renders_a_safe_unknown_stamp_for_malformed_frozen_at(tmp_path, frozen_at):
+    result = _stamp_for(frozen_at)
+    assert result["stamp"] == "offline frozen at unknown"
+
+
+@_needs_node
+def test_shell_exact_24h_observation_boundary_is_fresh(tmp_path):
+    health = _health_document()
+    health["generated_at"] = "2026-10-04T21:00:00Z"
+    result = _shell_status(tmp_path, health)
+    assert result["state"] == "current"
+    assert result["banner"] == ""
+
+
+@_needs_node
+def test_shell_exact_24h_plus_1ms_observation_boundary_is_stale(tmp_path):
+    health = _health_document()
+    health["generated_at"] = "2026-10-04T20:59:59.999Z"
+    result = _shell_status(tmp_path, health)
+    assert result["state"].startswith("stale:")
+    assert "observation older than 24 hours" in result["state"]
+    assert result["banner"] == "stale"
+
+
+def test_latest_completed_session_now_overrides_valid_frozen_at():
+    assert latest_completed_session(
+        datetime(2026, 10, 5, 21, tzinfo=timezone.utc),
+        frozen_at="2026-10-02T21:00:00Z") == "2026-10-05"

@@ -46,9 +46,16 @@ def _snapshot_clock(frozen_at: str | None) -> datetime | None:
         raise ValueError("frozen_at must be a parseable ISO timestamp or 'unknown'")
     if frozen_at == "unknown":
         return None
+    allowed = set("0123456789-+:.TZ")
+    if any(ch not in allowed for ch in frozen_at):
+        raise ValueError(f"frozen_at {frozen_at!r} is not a parseable ISO timestamp")
     try:
         parsed = datetime.fromisoformat(frozen_at.replace("Z", "+00:00"))
-    except ValueError as err:
+    except (ValueError, OverflowError) as err:
+        raise ValueError(f"frozen_at {frozen_at!r} is not a parseable ISO timestamp") from err
+    try:
+        parsed.astimezone(_EASTERN)
+    except OverflowError as err:
         raise ValueError(f"frozen_at {frozen_at!r} is not a parseable ISO timestamp") from err
     if len(frozen_at) <= 10:
         raise ValueError(f"frozen_at {frozen_at!r} is a date, not an ISO timestamp")
@@ -77,7 +84,10 @@ def latest_completed_session(now: datetime | None = None,
     moment = datetime.now(_EASTERN) if now is None else now
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=_EASTERN)
-    moment = moment.astimezone(_EASTERN)
+    try:
+        moment = moment.astimezone(_EASTERN)
+    except OverflowError as err:
+        raise ValueError(f"frozen_at {frozen_at!r} is not a parseable ISO timestamp") from err
     day = moment.date()
     closed_at = datetime.combine(day, time(_scheduled_close_hour(day)), tzinfo=_EASTERN)
     if moment < closed_at or not is_scheduled_session(day):

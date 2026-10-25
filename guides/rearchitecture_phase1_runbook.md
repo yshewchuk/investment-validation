@@ -120,7 +120,7 @@ requires `--idempotency-key`, but what it MEANS depends on the plan kind:
 
 ## 3. Health surface
 
-`health(conn, clock=...)` returns `operations_health.v1.0`:
+`health(conn, clock=...)` returns `operations_health.v1.1`:
 `generated_at`, `executor_mode` (`watchdog`), `containment` (`best_effort`),
 `jobs` (everything not succeeded/cancelled, with queue reasons), `watermarks`,
 `current_release` (latest delivered), `withheld_release` (latest `eligible=0`),
@@ -149,7 +149,7 @@ its `generated_at` age rather than hiding it.
 ```python
 from engine.v2.serving.operations import create_server
 server = create_server(("127.0.0.1", 8790), token=os.environ["OPS_TOKEN"],
-                       health_path="data/operations/health.json", release_root="data/operations/release", frozen_at="2026-09-13T00:00:00Z")
+                       health_path="data/operations/health.json", release_root="data/operations/release", frozen_at="2026-09-14T21:00:00Z")
 server.serve_forever()
 ```
 
@@ -162,10 +162,14 @@ server.serve_forever()
   `/release/<id>/<path>` (auth; `current` resolves through the pointer).
   `release_root` must contain `CURRENT` (a single path component) and
   `releases/<id>/...`; symlinks anywhere in the path are refused.
-- Banner states, polled every 30s: **withheld** when `withheld_release` is
-  set; **degraded** when `code_budgets.consecutive_nights > 0`; **current**
-  otherwise. On any health-fetch failure the banner shows **unknown / stale**
-  with the `frozen_at` stamp — it must never fall back to green (§10.4).
+- Banner states, polled every 30s: **unknown** on fetch/parse failure or
+  missing/malformed identity, session or schedule evidence or a missing
+  scheduled observation; **stale** when the observation is older than 24
+  hours or `resolved_session` is older than expected; **degraded** for a
+  failed latest night or withheld release; **current** only when all
+  evidence passes (precedence unknown > stale > degraded). On any
+  health-fetch failure the banner shows **unknown / stale** with the
+  `frozen_at` stamp — it must never fall back to green (§10.4).
 
 ## 4. Resource policy
 

@@ -251,6 +251,25 @@ init();pollHealth();setInterval(pollHealth,30000);setInterval(pollCurrent,30000)
 </script>'''
 
 
+def _safe_frozen_stamp(frozen_at: object) -> str:
+    """Normalize ``frozen_at`` to a value that is safe to embed.
+
+    Only a parseable ISO timestamp (or the exact ``"unknown"`` sentinel) is
+    ever spliced into the shell's HTML or JavaScript; anything malformed,
+    empty or non-string collapses to ``"unknown"`` so a quote, backslash or
+    script terminator in the configured clock can never break the document.
+    """
+    if not isinstance(frozen_at, str) or not frozen_at:
+        return "unknown"
+    if frozen_at == "unknown":
+        return "unknown"
+    try:
+        latest_completed_session(frozen_at=frozen_at)
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+    return frozen_at
+
+
 def shell_document(*, frozen_at: str | None = None) -> bytes:
     """Small outer shell; legacy bytes are loaded inside its immutable frame.
 
@@ -262,7 +281,7 @@ def shell_document(*, frozen_at: str | None = None) -> bytes:
     different release. The status rules live in ``_shell_script``; any fetch
     or parse failure shows unknown/unavailable without erasing the pin.
     """
-    frozen = frozen_at or "unknown"
+    frozen = _safe_frozen_stamp(frozen_at)
     return (_shell_markup(frozen) + "\n" + _shell_script(frozen)).encode()
 
 
@@ -624,7 +643,7 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             try:
                 headers["X-Expected-Session"] = latest_completed_session(
                     frozen_at=config.frozen_at)
-            except ValueError:
+            except (ValueError, OverflowError):
                 # A malformed configured snapshot clock is refused, never
                 # replaced by live time: the route serves the release id
                 # without expected-session evidence and the shell shows it
