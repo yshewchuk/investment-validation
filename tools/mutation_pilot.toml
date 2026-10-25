@@ -1178,7 +1178,7 @@ tests = [
     "tests/test_v2_ops_runtime.py",
     "tests/v2/ops/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_store_barrier.py",
-    "tests/test_v2_ops_training_job.py",
+    "tests/v2/ops/test_v2_ops_training_job.py",
     "tests/test_v2_ops_worker_typed_failures.py",
     # A glob, not a literal: the spec_ns_b shadow-seam test adds itself to the
     # pool from the commit that lands it, and the two native-refresh e2e files

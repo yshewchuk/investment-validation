@@ -16,6 +16,7 @@ from engine.v2.foundation import to_document
 from engine.v2.models.chooser_analog_pool import CHOOSER_ANALOG_DIMS
 from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
 from engine.v2.models.lineage import DataDependency, Lineage
+from engine.v2.models.training import chooser_pool_source as pool_source
 from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
 from engine.v2.ops import training
 from engine.v2.ops.errors import OpsError
@@ -167,6 +168,34 @@ def test_existing_output_of_same_size_different_content_refuses_resume_mismatch(
     assert path.read_bytes() == bytes(tampered)
 
 
+def test_existing_output_symlink_refuses_resume_mismatch(tmp_path, monkeypatch):
+    """A symlinked output is refused even when it links to byte-identical
+    content: the bounded resume read is no-follow, so the comparison and the
+    file the job would keep can never be two different objects."""
+    monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _mixed_frame()))
+    out = tmp_path / "out"
+    job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+    path = out / "chooser_analog_pool.json"
+    stored = tmp_path / "stored.json"
+    path.rename(stored)
+    path.symlink_to(stored)
+
+    stored_content = path.read_bytes()
+    with pytest.raises(SystemExit, match=_exact(
+            "RESUME_MISMATCH: chooser_analog_pool.json exists with different content")):
+        job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+    assert path.is_symlink() and stored.is_file()
+    assert stored.read_bytes() == stored_content
+
+
+def test_prepare_release_reexports_the_runtime_admission():
+    """The names stay importable from the preparer while the admission itself
+    lives in the no-``checks`` runtime module the job reads."""
+    assert release.CHOOSER_POOL_ID is pool_source.CHOOSER_POOL_ID
+    assert release.read_chooser_pool_frame is pool_source.read_chooser_pool_frame
+    assert release.require_chooser_pool_columns is pool_source.require_chooser_pool_columns
+
+
 def test_builder_refuses_non_iso_cutoff_and_takes_a_timestamp(tmp_path):
     lineage = Lineage(data=(DataDependency(table=CHOOSER_POOL_ID, end_exclusive=CUTOFF),))
     rows = [_row("CTR5", "2026-02-10", 1.0)]
@@ -209,7 +238,7 @@ def test_missing_source_refuses(tmp_path, monkeypatch):
 
 def test_too_large_source_refuses(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _mixed_frame()))
-    monkeypatch.setattr(release, "CHOOSER_POOL_MAX_BYTES", 10)
+    monkeypatch.setattr(pool_source, "CHOOSER_POOL_MAX_BYTES", 10)
     with pytest.raises(SystemExit, match=_exact(_TOO_LARGE)):
         job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=CUTOFF)
 
@@ -229,18 +258,18 @@ def test_size_cap_boundary(tmp_path, monkeypatch):
     size = (source / "chooser_analog_pool.parquet").stat().st_size
     monkeypatch.setattr(paths, "FEATURES", source)
 
-    monkeypatch.setattr(release, "CHOOSER_POOL_MAX_BYTES", size)
+    monkeypatch.setattr(pool_source, "CHOOSER_POOL_MAX_BYTES", size)
     assert job.run_state_job("chooser_analog_pool", tmp_path / "out",
                              cutoff=CUTOFF)["status"] == "written"
 
-    monkeypatch.setattr(release, "CHOOSER_POOL_MAX_BYTES", size - 1)
+    monkeypatch.setattr(pool_source, "CHOOSER_POOL_MAX_BYTES", size - 1)
     with pytest.raises(SystemExit, match=_exact(_TOO_LARGE)):
         job.run_state_job("chooser_analog_pool", tmp_path / "other", cutoff=CUTOFF)
 
 
 def test_prepare_release_reader_refuses_oversized_source(tmp_path, monkeypatch):
     source = _write_source(tmp_path, _mixed_frame())
-    monkeypatch.setattr(release, "CHOOSER_POOL_MAX_BYTES", 10)
+    monkeypatch.setattr(pool_source, "CHOOSER_POOL_MAX_BYTES", 10)
     with pytest.raises(ValueError, match=_exact(_TOO_LARGE)):
         release.chooser_pool_payloads(source / "chooser_analog_pool.parquet")
 
@@ -252,9 +281,9 @@ def test_reader_missing_source_raises_file_not_found(tmp_path):
 
 def test_reader_reads_regular_source_within_cap(tmp_path, monkeypatch):
     path = _write_source(tmp_path, _mixed_frame()) / "chooser_analog_pool.parquet"
-    monkeypatch.setattr(release, "CHOOSER_POOL_MAX_BYTES", path.stat().st_size)
+    monkeypatch.setattr(pool_source, "CHOOSER_POOL_MAX_BYTES", path.stat().st_size)
     assert len(release.read_chooser_pool_frame(path)) == 5
-    monkeypatch.setattr(release, "CHOOSER_POOL_MAX_BYTES", path.stat().st_size - 1)
+    monkeypatch.setattr(pool_source, "CHOOSER_POOL_MAX_BYTES", path.stat().st_size - 1)
     with pytest.raises(ValueError, match=_exact(_TOO_LARGE)):
         release.read_chooser_pool_frame(path)
 
@@ -378,6 +407,19 @@ def test_worker_refuses_two_cutoffs_before_dispatch(tmp_path):
 def test_worker_refuses_noncanonical_cutoff_before_dispatch(tmp_path):
     with pytest.raises(OpsError) as err:
         training.run_training_worker(to_document(_params(cutoffs=("20260213",))), tmp_path)
+    assert err.value.problem.code == "INVALID_REQUEST"
+    assert err.value.problem.details == {"problems": [_NOT_ISO]}
+    assert not (tmp_path / "training_result.json").exists()
+    assert not (tmp_path / "training").exists()
+
+
+def test_worker_refuses_paired_pool_noncanonical_cutoff_before_dispatch(tmp_path):
+    """The worker admits with the planner's validator for EVERY state, so the
+    paired pool's tool-normalized cutoffs are format-gated here exactly as
+    ``training_plan`` gates them: no dispatch, no data reads."""
+    with pytest.raises(OpsError) as err:
+        training.run_training_worker(
+            to_document(_params(state="paired_residual_pool", cutoffs=("20260213",))), tmp_path)
     assert err.value.problem.code == "INVALID_REQUEST"
     assert err.value.problem.details == {"problems": [_NOT_ISO]}
     assert not (tmp_path / "training_result.json").exists()

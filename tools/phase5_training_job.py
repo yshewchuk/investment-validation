@@ -244,7 +244,7 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
 
         from engine import paths
         from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
-        from tools.phase5_prepare_release import (
+        from engine.v2.models.training.chooser_pool_source import (
             CHOOSER_POOL_ID,
             read_chooser_pool_frame,
             require_chooser_pool_columns,
@@ -315,6 +315,7 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
     """
     from engine.v2.models.deployment import atomic_write_bytes
     from engine.v2.models.frozen_state import serialize_frozen_state
+    from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
     from tools import phase5_datasets as data
 
     if plan_only:
@@ -341,8 +342,16 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
         payload = serialize_frozen_state(artifact)
         summary.update(content_hash=artifact.content_hash, file=path.name, bytes=len(payload))
         if path.exists():
-            # A different size is different content: refuse without reading.
-            if path.stat().st_size != len(payload) or path.read_bytes() != payload:
+            # Bounded single-handle read: one fd carries the ``O_NOFOLLOW``
+            # type check, the size bound and the content, so the resume
+            # comparison cannot straddle two objects. A symlinked, non-regular
+            # or oversize existing output is a mismatch, never a follow.
+            try:
+                existing = read_bounded_state(path, len(payload), no_follow=True)
+            except (BoundedStateReadError, OSError, ValueError):
+                raise SystemExit(
+                    f"RESUME_MISMATCH: {path.name} exists with different content") from None
+            if existing != payload:
                 raise SystemExit(f"RESUME_MISMATCH: {path.name} exists with different content")
             summary["status"] = "resumed"
         else:

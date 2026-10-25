@@ -731,12 +731,16 @@ def test_preparer_refuses_chooser_symlink_and_directory_sources(tmp_path):
 def test_preparer_chooser_size_cap_is_read_at_call_time(tmp_path, monkeypatch):
     import pandas as pd
 
+    from engine.v2.models.training import chooser_pool_source
+
     frame = pd.DataFrame([{"strategy": "CTR5", "exit_date": pd.Timestamp("2026-02-10"),
                            "pnl": 1.0, "exp_pnl_sim": 0.5, "width_over_forecast": 1.0,
                            "n_legs": 5.0, "anchor_over_spot": 1.0, "rel_spread": 0.2}])
     path = tmp_path / "chooser_analog_pool.parquet"
     frame.to_parquet(path, index=False)
-    monkeypatch.setattr(prep, "CHOOSER_POOL_MAX_BYTES", path.stat().st_size - 1)
+    # The cap lives on the runtime admission module the re-exported reader
+    # reads at call time; patching the preparer's alias would not move it.
+    monkeypatch.setattr(chooser_pool_source, "CHOOSER_POOL_MAX_BYTES", path.stat().st_size - 1)
     with pytest.raises(ValueError, match="chooser analog pool source is too large"):
         prep.chooser_pool_payloads(path)
 

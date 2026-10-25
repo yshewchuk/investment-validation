@@ -578,21 +578,14 @@ def run_training_worker(parameters, root) -> dict:
         params = from_document(TrainingParameters, parameters)
     except DocumentError as exc:
         raise fail("INVALID_REQUEST", "malformed training parameters") from exc
-    problems = _native_input_problems(params)
-    if params.input_mode == "native_d14":
-        problems = training_parameter_problems(None, params)
-    elif params.mode == "state" and params.state == "chooser_analog_pool":
-        # The legacy-input worker path runs only ``_native_input_problems``,
-        # skipping the planner-time validator for submissions that bypass
-        # the plan; re-validate the chooser state here -- refuse a malformed
-        # request (two cutoffs or a non-canonical one) as typed
-        # INVALID_REQUEST before dispatch instead of letting the tool's
-        # ``SystemExit`` map to VALIDATION_FAILED. Restricted to the chooser
-        # state: other states' cutoffs are tool-normalized
-        # (``build_state``), were never format-gated here, and their worker
-        # tests stub the tool module without the attributes
-        # ``_state_problems`` reads.
-        problems = [*problems, *_state_problems(params), *_iso_cutoff_problems(params)]
+    # Worker admission re-runs the PLANNER's validator for every mode and
+    # input_mode, so a submission that bypassed the plan cannot reach dispatch
+    # with parameters ``training_plan`` would have refused. ``expected_ids`` is
+    # not planner-only here: ``from_document`` above requires it on the
+    # worker's own parameters document, so the full
+    # ``training_parameter_problems`` call (shape + mode + cutoff problems)
+    # applies unchanged -- no pure-subset fallback is needed.
+    problems = training_parameter_problems(None, params)
     if problems:
         raise fail("INVALID_REQUEST", "training inputs are invalid", details={"problems": problems})
     root = Path(root)
