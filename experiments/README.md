@@ -9,6 +9,8 @@ The owning modules expose these helpers to native experiment callers; no compati
 
 | Owner and public function | Inputs, result and effects |
 | --- | --- |
+| `magnitude_candidate_recipe.candidate_recipe` | Exact family/parameter keys plus ordered columns and dictionary hash yield the existing closed family recipe; no training, source reads or admission proof. |
+| `magnitude_candidate_fit.fit_candidate` | Both no-fit guards precede inspection; exact schema/model dispatch delegates one horizon to the existing numeric fitter and preserves its complete result and native errors. No source qualification, selection, retry or I/O. |
 | `magnitude_report.magnitude_metrics` | Complete scored rows yield stable pooled RMSE, MAE and count; empty rows or nonfinite metrics refuse `EXPERIMENT_VARIANT_FAILED`. Fixed and history reporters, the search recorder and the outer evaluator (fold and aggregate metrics) share this scorer. |
 | `magnitude_search_evidence.admit_fold_inputs` | Repository, registered binding and fold yield protected preflight, full stored-input identity, projected participant identity/numeric feature rows and qualified training targets without writes. Every call revalidates all stored rows; unselected corruption still refuses. Slim cohorts get new content hashes and source-bound seals; old seals are not migrated. History drift raises the caller's `history_failure`; native admission errors propagate. |
 | `magnitude_search_evidence.fit_evidence` | Admitted inputs, fold, horizons and execution columns yield ordered per-horizon event/matrix identities without fitting or I/O. |
@@ -60,6 +62,10 @@ Its CLI also consumes `native_registration.read_native_registration`/`valid_regi
 `magnitude_search_request.compile_request` separately returns source-free stage-2
 request specifications and year/count previews. It has synthetic-test callers only;
 no registration, executable recipe, input admission or search activation is implied.
+
+`magnitude_candidate_recipe` and `magnitude_candidate_fit` compose the public
+model recipe/fitter APIs; their only callers are synthetic tests. They do not bind
+compiler candidate specifications or activate the existing search worker/recorder.
 
 `v2_gate_sweep` uses registration preparation/lookup/reservation, the bounded reader and `gate_report.validate_gate_spec`.
 `native_sweep_collection` consumes `v2_gate_sweep.submit_sweep`, sealed registration, `native_outcomes`, `gate_report.render_gate_report`, ops transactions/bounded SQL-text helpers/registered artifacts/spec parsing/source closure/bounded native evidence readers and writers/job reads/`MAX_JOB_FAILURE_BYTES`/errors, contracts and foundation. `v2_gate_collect` consumes that collector, staged-input reading, ops catalog/job reads/errors, data `Repository`/errors and foundation artifacts.
