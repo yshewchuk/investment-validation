@@ -1,11 +1,29 @@
 """Public fixtures and preservation oracles for bounded native evidence tests."""
 import json
+from contextlib import contextmanager
+
+import pytest
 
 from engine.v2.contracts import ArtifactRef
-from engine.v2.foundation import from_document
+from engine.v2.foundation import from_document, to_document
+from engine.v2.ops.errors import OpsError
 from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments import native_registration as native
 from tests.v2.research.test_prediction_inputs import MONTH
+
+
+@contextmanager
+def size_refusal(size, limit):
+    with pytest.raises(OpsError) as captured:
+        yield
+    assert type(captured.value) is OpsError
+    assert captured.value.problem.retryable is False
+    assert all(type(value) is int for value in captured.value.problem.details.values())
+    assert to_document(captured.value.problem) == {
+        "schema_version": "problem.v1.0", "code": "RESOURCE_LIMIT_EXCEEDED", "category": "resource",
+        "retryable": False, "message": "native registration exceeds its UTF-8 byte budget",
+        "stage": None, "trace_id": None, "dependency_refs": [], "retry_after_seconds": None,
+        "diagnostic_ref": None, "details": {"registration_bytes": size, "max_registration_bytes": limit}}
 
 
 class BoundedSqlRows:

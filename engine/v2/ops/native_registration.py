@@ -75,9 +75,11 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_e
         if (ref.schema_ref not in ("native_experiment_registration.v1.0", "native_experiment_registration.v1.1",
                                   "native_experiment_registration.v1.2", "native_experiment_registration.v1.3",
                                   "native_experiment_registration.v1.4", "native_experiment_registration.v1.5")
-                or (max_evidence_bytes is not None and ref.byte_size > max_evidence_bytes)
                 or (expected_ref is not None and ref != expected_ref)):
             raise ValueError
+        if max_evidence_bytes is not None and ref.byte_size > max_evidence_bytes:
+            raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration exceeds its UTF-8 byte budget",
+                       details={"registration_bytes": ref.byte_size, "max_registration_bytes": max_evidence_bytes})
         binding = store.read_verified(ref)
         document = json.loads(binding)
         valid = _matches(row, evidence, ref, binding, document)
