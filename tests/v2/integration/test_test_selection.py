@@ -190,11 +190,12 @@ _COVERAGE_RELOCATIONS = (
      "tests/v2/dashboard/test_v2_dashboard_browser.py", (1,)),
     ("tests/test_v2_ops_serving_browser.py",
      "tests/v2/serving/test_ops_serving_browser.py", (1,)),
+    ("tests/test_v2_ops_health.py", "tests/v2/ops/test_v2_ops_health.py", (1,)),
 )
 
 
 @pytest.mark.parametrize("phase, expected_version", [
-    (1, "phase1_coverage_suite.v21"),
+    (1, "phase1_coverage_suite.v22"),
     (2, "phase2_coverage_suite:7ae743b96f5398e1a4cfbb1f88d6bf811af0ca4aaf785f3ece4b2f1d8431fd4d"),
 ])
 def test_test_layout_moves_refresh_both_coverage_inventories(phase, expected_version):

@@ -106,10 +106,25 @@ def _resolve_current_id(config) -> str:
     return name
 
 
+#: Maximum bytes a health artifact may hold. Both readers take this many
+#: bytes plus one, so an oversize artifact is refused as a ValueError instead
+#: of being streamed whole into memory on the shell's 30s poll path.
+_HEALTH_MAX_BYTES = 1_048_576
+
+
+def _read_health_document_bytes(path: Path) -> bytes:
+    """Bounded raw health read shared by both readers: cap plus one byte."""
+    with path.open("rb") as handle:
+        raw = handle.read(_HEALTH_MAX_BYTES + 1)
+    if len(raw) > _HEALTH_MAX_BYTES:
+        raise ValueError("health artifact exceeds the size limit")
+    return raw
+
+
 def _read_health(path: Path) -> bytes:
     if path.is_symlink() or not path.is_file():
         raise ValueError("health artifact is indirect")
-    document = json.loads(path.read_text())
+    document = json.loads(_read_health_document_bytes(path))
     if not isinstance(document, dict) or document.get("schema_version") not in (
             "operations_health.v1.0", "operations_health.v1.1", "operations_health.v1.2"):
         raise ValueError("unsupported health artifact")
@@ -132,7 +147,7 @@ def _read_calibration_health(path: Path) -> bytes:
     """
     if path.is_symlink() or not path.is_file():
         raise ValueError("health artifact is indirect")
-    document = json.loads(path.read_text())
+    document = json.loads(_read_health_document_bytes(path))
     if not isinstance(document, dict):
         raise ValueError("unsupported health artifact")
     if document.get("schema_version") in ("operations_health.v1.0", "operations_health.v1.1",

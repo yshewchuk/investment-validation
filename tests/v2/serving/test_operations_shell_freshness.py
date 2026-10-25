@@ -136,6 +136,30 @@ def test_latest_completed_session_uses_the_scheduled_close_and_holidays(now, exp
     assert latest_completed_session(now) == expected
 
 
+@pytest.mark.parametrize(("now", "expected"), [
+    # A naive ``now`` is deliberately read as America/New_York wall-clock
+    # time -- the module attaches the Eastern zone when tzinfo is absent --
+    # so the boundary is the Eastern close, never a UTC reading.
+    (datetime(2026, 10, 5, 15, 59), "2026-10-02"),  # minute before the 16:00 ET close
+    (datetime(2026, 10, 5, 16, 0), "2026-10-05"),   # exactly at the 16:00 ET close
+    # The early-close rule applies to the naive wall time too: Black Friday
+    # 2026 completes at 13:00 EST.
+    (datetime(2026, 11, 27, 12, 59), "2026-11-25"),
+    (datetime(2026, 11, 27, 13, 0), "2026-11-27"),
+])
+def test_latest_completed_session_reads_a_naive_clock_as_eastern(now, expected):
+    assert latest_completed_session(now) == expected
+
+
+def test_latest_completed_session_does_not_read_a_naive_clock_as_utc():
+    """Same wall digits, two readings: naive 16:00 is the Eastern close (the
+    session completes), while 16:00 UTC is 12:00 EDT mid-session (it does
+    not), pinning that the naive interpretation is the Eastern one."""
+    assert latest_completed_session(datetime(2026, 10, 5, 16, 0)) == "2026-10-05"
+    assert latest_completed_session(
+        datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc)) == "2026-10-02"
+
+
 def test_latest_completed_session_accepts_a_valid_frozen_snapshot_clock():
     assert latest_completed_session(frozen_at="2026-10-05T21:00:00Z") == "2026-10-05"
     assert latest_completed_session(frozen_at="2026-10-05T19:59:00Z") == "2026-10-02"
@@ -259,6 +283,74 @@ def test_health_route_serves_every_supported_schema_version(tmp_path, schema_ver
         request.add_header("Authorization", "Bearer browser-secret")
         response = urlopen(request, timeout=5)
         assert json.loads(response.read())["schema_version"] == schema_version
+    finally:
+        _stop(server, thread)
+
+
+_OVERSIZE_HEALTH_BYTES = 2 * 1024 * 1024  # comfortably past the readers' 1 MiB cap
+
+
+def _write_padded_json(path: Path, document: dict, size: int) -> None:
+    """Serialize ``document`` and pad with trailing spaces to exactly ``size``
+    bytes; the readers parse JSON whitespace-tolerantly, so padding does not
+    change the document -- only the artifact's on-disk size."""
+    text = json.dumps(document)
+    assert size > len(text)
+    path.write_bytes((text + " " * (size - len(text))).encode("utf-8"))
+
+
+def test_health_route_refuses_an_oversize_health_artifact(tmp_path):
+    """A health artifact past the readers' size cap is refused as the route's
+    established 503, never buffered and parsed whole on the shell's 30s poll."""
+    _write_bundle(tmp_path, "r1")
+    (tmp_path / "CURRENT").write_text("r1\n")
+    health = tmp_path / "health.json"
+    _write_padded_json(health, {"schema_version": "operations_health.v1.2",
+                                "generated_at": "2026-10-05T17:00:00Z"},
+                       _OVERSIZE_HEALTH_BYTES)
+    server, thread = _serve(tmp_path, health)
+    try:
+        request = Request(f"http://127.0.0.1:{server.server_port}/health.json")
+        request.add_header("Authorization", "Bearer browser-secret")
+        with pytest.raises(HTTPError) as refused:
+            urlopen(request, timeout=5)
+        assert refused.value.code == 503
+        assert refused.value.read() == b"unknown\n"
+    finally:
+        _stop(server, thread)
+
+
+@pytest.mark.parametrize("document", [
+    # Legacy ledger calibration export shape: no schema_version, recognized
+    # by generated_at + n_scored -- the refusal must not change that behavior.
+    {"generated_at": "2026-10-05T17:00:00Z", "n_scored": 12},
+    # Operations health document served through the calibration route.
+    {"schema_version": "operations_health.v1.2", "generated_at": "2026-10-05T17:00:00Z"},
+])
+def test_calibration_health_route_refuses_an_oversize_artifact(tmp_path, document):
+    """Both calibration artifact shapes are refused at the shared cap as the
+    route's established 503, before any parsing of an unbounded file."""
+    _write_bundle(tmp_path, "r1")
+    (tmp_path / "CURRENT").write_text("r1\n")
+    health = tmp_path / "health.json"
+    health.write_text(json.dumps({"schema_version": "operations_health.v1.0",
+                                  "generated_at": "2026-10-05T17:00:00Z"}))
+    calibration = tmp_path / "calibration-health.json"
+    _write_padded_json(calibration, document, _OVERSIZE_HEALTH_BYTES)
+    server = create_server(("127.0.0.1", 0), token="browser-secret",
+                           health_path=health, release_root=tmp_path,
+                           frozen_at="2026-10-05T21:00:00Z",
+                           calibration_health_path=calibration)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = Request(
+            f"http://127.0.0.1:{server.server_port}/calibration-health.json")
+        request.add_header("Authorization", "Bearer browser-secret")
+        with pytest.raises(HTTPError) as refused:
+            urlopen(request, timeout=5)
+        assert refused.value.code == 503
+        assert refused.value.read() == b"unknown\n"
     finally:
         _stop(server, thread)
 

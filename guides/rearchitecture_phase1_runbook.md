@@ -120,8 +120,7 @@ requires `--idempotency-key`, but what it MEANS depends on the plan kind:
 
 ## 3. Health surface
 
-`health(conn, clock=...)` returns `operations_health.v1.2` (v1.2 adds
-`latest_occurrence`; older v1.0/v1.1 documents remain valid):
+`health(conn, clock=...)` returns `operations_health.v1.2`:
 `generated_at`, `executor_mode` (`watchdog`), `containment` (`best_effort`),
 `jobs` (everything not succeeded/cancelled, with queue reasons), `watermarks`,
 `current_release` (latest delivered), `withheld_release` (latest `eligible=0`),
@@ -150,7 +149,7 @@ its `generated_at` age rather than hiding it.
 ```python
 from engine.v2.serving.operations import create_server
 server = create_server(("127.0.0.1", 8790), token=os.environ["OPS_TOKEN"],
-                       health_path="data/operations/health.json", release_root="data/operations/release", frozen_at=None)
+                       health_path="data/operations/health.json", release_root="data/operations/release", frozen_at="unknown")
 server.serve_forever()
 ```
 

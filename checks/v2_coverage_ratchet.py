@@ -124,6 +124,11 @@ paths now follow the relocation; ``PHASE1_RENAMED`` keeps older v20 baselines
 resolvable. Counts and source hashes remain historical, not a fresh
 measurement.
 
+Bumped to v22: ``tests/test_v2_ops_health.py`` moved to ``tests/v2/ops/``
+(test-layout ratchet); its recorded baseline path follows the move and
+``PHASE1_RENAMED`` registers the relocation. Counts and source hashes
+remain historical, not a fresh measurement.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
@@ -220,7 +225,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v21"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v22"
 
 
 # Baseline tests whose file was renamed (not just moved) after the baseline was written.
@@ -238,6 +243,7 @@ PHASE1_RENAMED = {
     "tests/test_v2_ops_serving_browser.py": "tests/v2/serving/test_ops_serving_browser.py",
     "tests/test_v2_dashboard_browser.py": "tests/v2/dashboard/test_v2_dashboard_browser.py",
     "tests/test_v2_ops_training_job.py": "tests/v2/ops/test_v2_ops_training_job.py",
+    "tests/test_v2_ops_health.py": "tests/v2/ops/test_v2_ops_health.py",
 }
 # Relocated tests kept explicitly in the suite, including moved baseline paths.
 PHASE1_EXTRA = (

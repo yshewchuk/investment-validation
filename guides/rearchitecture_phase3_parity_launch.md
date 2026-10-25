@@ -523,7 +523,14 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
    still holds) and returns a typed `OPERATIONS_UNAVAILABLE` Problem when it
    is missing or malformed; missing engineering history renders as
    `unknown`, never green. `/health.json` (`engine/v2/serving/operations.py`)
-   is untouched and keeps its existing `operations_health.v1.2` fields. See
+   still serves the health document bytes, and the operations shell around it
+   changed: the reader accepts `operations_health.v1.2` alongside v1.0/v1.1,
+   the shell's banner evaluates the document's `requested_session`/
+   `resolved_session` and `code_budgets` evidence (missing or malformed
+   evidence renders unknown, never a default), and `/release/current.json`
+   answers `Cache-Control: no-store` plus `X-Expected-Session` — the latest
+   completed NYSE session at the configured snapshot clock, omitted when that
+   clock is malformed. See
    `tests/v2/ops/test_v2_ops_engineering_history.py` (conflicts/degraded evidence/
    selfcheck carried; requested vs. resolved session; failed update keeps the
    old release and shows the reason; an unobserved window renders as
