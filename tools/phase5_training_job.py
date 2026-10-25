@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -334,14 +335,18 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
         # An empty pool writes no state file, so a stale earlier output would
         # survive the "empty" rerun unnoticed and get staged: refuse instead.
         name = state_file_name(member)
-        if (out / name).exists():
+        # A dangling symlink has no content, so ``Path.exists()`` is false and
+        # it would pass as "no output": count it with ``lexists`` and refuse.
+        if os.path.lexists(out / name):
             raise SystemExit(f"RESUME_MISMATCH: {name} exists but the pool is empty")
         summary["status"] = "empty"
     else:
         path = out / state_file_name(member)
         payload = serialize_frozen_state(artifact)
         summary.update(content_hash=artifact.content_hash, file=path.name, bytes=len(payload))
-        if path.exists():
+        # ``lexists`` so a dangling symlink (no content, ``exists()`` false)
+        # still counts as an existing output and reaches the no-follow read.
+        if os.path.lexists(path):
             # Bounded single-handle read: one fd carries the ``O_NOFOLLOW``
             # type check, the size bound and the content, so the resume
             # comparison cannot straddle two objects. A symlinked, non-regular

@@ -188,6 +188,24 @@ def test_existing_output_symlink_refuses_resume_mismatch(tmp_path, monkeypatch):
     assert stored.read_bytes() == stored_content
 
 
+def test_dangling_symlink_output_refuses_resume_mismatch(tmp_path, monkeypatch):
+    """A DANGLING symlink at the output path counts as existing (``lexists``):
+    the non-empty branch routes it to the bounded no-follow read, which
+    refuses; the job never replaces the link with a fresh state file."""
+    monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _mixed_frame()))
+    out = tmp_path / "out"
+    out.mkdir()
+    path = out / "chooser_analog_pool.json"
+    target = tmp_path / "absent.json"
+    path.symlink_to(target)
+
+    with pytest.raises(SystemExit, match=_exact(
+            "RESUME_MISMATCH: chooser_analog_pool.json exists with different content")):
+        job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+    assert path.is_symlink() and not path.exists()
+    assert not target.exists()
+
+
 def test_prepare_release_reexports_the_runtime_admission():
     """The names stay importable from the preparer while the admission itself
     lives in the no-``checks`` runtime module the job reads."""
@@ -338,6 +356,22 @@ def test_empty_rerun_refuses_existing_output(tmp_path, monkeypatch):
             "RESUME_MISMATCH: chooser_analog_pool.json exists but the pool is empty")):
         job.run_state_job("chooser_analog_pool", out, cutoff="2026-01-01")
     assert (out / "chooser_analog_pool.json").is_file()
+
+
+def test_empty_pool_refuses_dangling_symlink_output(tmp_path, monkeypatch):
+    """The empty-pool refusal fires on a dangling symlink too (``lexists``):
+    the cutoff precedes every row, and the dangling link at the output path
+    must not pass as "no output" and get staged beside an empty result."""
+    monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _mixed_frame()))
+    out = tmp_path / "out"
+    out.mkdir()
+    path = out / "chooser_analog_pool.json"
+    path.symlink_to(tmp_path / "absent.json")
+
+    with pytest.raises(SystemExit, match=_exact(
+            "RESUME_MISMATCH: chooser_analog_pool.json exists but the pool is empty")):
+        job.run_state_job("chooser_analog_pool", out, cutoff="2026-01-01")
+    assert path.is_symlink() and not path.exists()
 
 
 def test_all_rows_after_cutoff_is_empty(tmp_path, monkeypatch):
