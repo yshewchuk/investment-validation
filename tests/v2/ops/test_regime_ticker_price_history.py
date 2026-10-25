@@ -10,7 +10,9 @@ closes must equal Close exactly (^GSPC is never dividend-adjusted). Synthetic
 px trees and a synthetic three-header gspc csv only -- no network, no real
 market data. The shared fixture builders (``_base_snapshot``,
 ``_scan_price_history``, px writes) are local copies here rather than
-cross-module imports of another test file's private helpers.
+cross-module imports of another test file's private helpers; the Tier-1
+fetch-cache fixture is imported from ``test_v2_ops_price_history``, as
+``test_planned_price_refresh`` already does.
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ import pytest
 from engine.data.pulls.gspc_refresh import HEADER_LINES
 from engine.v2.contracts import DataQuery, KeyPredicate
 from engine.v2.data import reference_catalog
+from engine.v2.data.price_history import latest_state
 from engine.v2.data.price_history_table import (
     CALENDAR_TICKER,
     PRICE_HISTORY_TABLE_NAME,
@@ -51,6 +54,7 @@ from tests.v2.ops.test_planned_price_refresh import (
     isolated_legacy_sources,
     shadow_root,
 )
+from tests.v2.ops.test_v2_ops_price_history import _write_tier1
 
 _GSPC_DATES = ("2024-01-02", "2024-01-03", "2024-01-04")
 _GSPC_CLOSES = (4700.913, 4742.83, 4756.01)  # round_trip-sensitive on purpose
@@ -158,6 +162,9 @@ def _shadow_head(conn):
 
 
 def test_capture_ingests_gspc_daily_csv_as_the_regime_ticker(tmp_path):
+    """First-ever capture with CSV only and no Tier-1 retrieval: the
+    reconciliation's left-extend branch is a no-op on the empty prior store
+    and the CSV alone commits the whole series (#1333 round 7, case (c))."""
     conn, clock, store, _base = _base_snapshot(tmp_path)
     source_root = tmp_path / "legacy"
     _write_sources(source_root, with_spy=False)
@@ -218,6 +225,105 @@ def test_gspc_null_close_or_high_row_is_dropped(tmp_path):
     kept = rows.iloc[0]
     assert kept["close_raw"] == 4756.01 and kept["close_adj"] == 4756.01
     assert kept["high_raw"] == 4761.01
+
+
+def test_gspc_unparseable_date_row_is_dropped_others_kept(tmp_path):
+    """Regression on ``_parse_gspc``'s ``pd.to_datetime(..., errors=
+    "coerce")``: a row whose date cannot be parsed coerces to ``NaT`` and is
+    dropped while its valid siblings are still captured -- a single garbage
+    date never fails the ticker, exactly like a null Close or High."""
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    _write_sources(source_root, with_spy=False)
+    _write_gspc_rows(source_root, [
+        "2024-01-02,4800.913,4700.913,4705.913,4697.913,4699.913,4700913000000",
+        "not-a-date,4842.83,4742.83,4747.83,4739.83,4741.83,4742830000000",
+        "2024-01-04,4856.01,4756.01,4761.01,4753.01,4755.01,4756010000000",
+    ])
+    report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert report["failed_tickers"] == 0
+    rows = _scan_price_history(conn, store, report["result_snapshot_id"], ticker=REGIME_TICKER)
+    assert sorted(rows["date"]) == ["2024-01-02", "2024-01-04"]
+    assert not rows["deleted"].any()
+
+
+def test_tier1_regime_retrieval_supersedes_the_truncated_csv(tmp_path):
+    """Nightly reality (#1333): the ``gspc_refresh`` refetch caches its full
+    ``period=max`` body as a Tier-1 ``^GSPC`` retrieval and writes the CSV as
+    that same fetch truncated to 2006. When a Tier-1 retrieval is discovered
+    the CSV is never added as a retrieval -- before the reconciliation the
+    longer Tier-1 history captured first, and the CSV (written seconds
+    later, so a strictly later ``retrieved_at``) was then refused as a
+    partial retrieval, reporting the healthy refresh as a failed ticker."""
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    _write_sources(source_root, with_spy=True)
+    _write_gspc(source_root)  # the 2006+-truncated CSV, written after the fetch
+    full_history = {"1990-01-02": 350.0, "2005-12-30": 1200.0,
+                    "2024-01-02": 4700.913, "2024-01-03": 4742.83,
+                    "2024-01-04": 4756.01}
+    _write_tier1(source_root, REGIME_TICKER, full_history, key="gspc-max",
+                 fetched_at="2024-02-01T00:00:00+00:00")
+    report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
+                     required_tickers=REQUIRED_CAPTURE_TICKERS)
+    assert report["failed_tickers"] == 0
+    assert report["failures"] == []
+    assert "error" not in report["by_outcome"]
+    rows = _scan_price_history(conn, store, report["result_snapshot_id"], ticker=REGIME_TICKER)
+    assert sorted(rows["date"]) == sorted(full_history)
+    assert set(rows["source_kind"]) == {"tier1_fetch"}
+    csv_hash = hashlib.sha256(_gspc_path(source_root).read_bytes()).hexdigest()
+    assert csv_hash not in set(rows["source_hash"])  # the CSV was never a retrieval
+
+
+def test_gspc_csv_without_tier1_left_extends_the_prior_stored_history(tmp_path):
+    """No Tier-1 retrieval but the prior stored version carries pre-CSV rows
+    (they can only come from an earlier full-history capture whose cache
+    entry is now gone; the first run here seeds the same shape from a CSV
+    that still reached back to 1990): the CSV's parsed frame is left-extended
+    with those live prior rows, so the healthy refresh is not a partial
+    retrieval, the pre-CSV rows keep their own ``retrieved_at``/hash
+    (carried rows equal the prior state -> zero new version rows), and only
+    the CSV's new last day is added -- under the CSV bytes' own hash and
+    ``retrieved_at``."""
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    _write_sources(source_root, with_spy=True)
+    early = {"1990-01-02": 350.0, "1990-01-03": 352.0, "2006-01-03": 1300.0,
+             "2024-01-02": 4700.913, "2024-01-03": 4742.83, "2024-01-04": 4756.01}
+    _write_gspc_rows(source_root, [
+        f"{day},{close + 100.0},{close},{close + 5.0},{close - 3.0},"
+        f"{close - 1.0},{close * 1e9:.0f}" for day, close in sorted(early.items())])
+    first_mtime = _gspc_path(source_root).stat().st_mtime
+    first = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert first["failed_tickers"] == 0
+    before = _scan_price_history(conn, store, first["result_snapshot_id"], ticker=REGIME_TICKER)
+
+    # The nightly refresh rewrites the CSV from 2006 with one new last day.
+    refreshed = {day: close for day, close in early.items() if day >= "2006-01-03"}
+    refreshed["2024-01-05"] = 4760.2
+    _write_gspc_rows(source_root, [
+        f"{day},{close + 100.0},{close},{close + 5.0},{close - 3.0},"
+        f"{close - 1.0},{close * 1e9:.0f}" for day, close in sorted(refreshed.items())])
+    later = first_mtime + 3600.0
+    os.utime(_gspc_path(source_root), (later, later))  # strictly later retrieval
+    second = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock,
+                     required_tickers=REQUIRED_CAPTURE_TICKERS)
+    assert second["failed_tickers"] == 0
+    assert second["failures"] == []
+    assert second["rows_added"] == 1  # only the new last day; carried rows are no-ops
+
+    after = _scan_price_history(conn, store, second["result_snapshot_id"], ticker=REGIME_TICKER)
+    assert sorted(latest_state(after)["date"]) == sorted(early) + ["2024-01-05"]
+    for day in ("1990-01-02", "1990-01-03", "2006-01-03", "2024-01-02", "2024-01-04"):
+        old, new = before[before["date"] == day], after[after["date"] == day]
+        assert len(old) == 1 and len(new) == 1  # carried rows added no new version
+        assert new.iloc[0]["retrieved_at"] == old.iloc[0]["retrieved_at"]
+        assert new.iloc[0]["source_hash"] == old.iloc[0]["source_hash"]
+    added = after[after["date"] == "2024-01-05"].iloc[0]
+    assert added["retrieved_at"] == datetime.fromtimestamp(later, tz=timezone.utc).isoformat()
+    assert added["source_hash"] == hashlib.sha256(
+        _gspc_path(source_root).read_bytes()).hexdigest()  # the CSV's own bytes
 
 
 def test_oversize_gspc_file_refuses_before_any_byte_is_read(tmp_path, monkeypatch):

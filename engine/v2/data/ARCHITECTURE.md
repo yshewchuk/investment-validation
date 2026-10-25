@@ -849,18 +849,22 @@ Root doc §5 invariants this package is responsible for:
   (`CONTRACT_MISMATCH`, no `price_history` for the ticker) in the nightly.
 - **The regime ticker is a declared `price_history` dependency; `daily_market.spot`
   is never a close.** `daily_market.spot` is the ORATS `stockPrice` intraday
-  snapshot, not an official close — never use it as a close series.
+  snapshot, not an official close.
   `price_history_table.REGIME_TICKER` (`^GSPC`) is the declared dependency
   feeding the panel's nine `spy_*` regime features (the names are historical;
   they are `^GSPC`-based), sourced from `gspc_daily.csv`
   (`source_kind="legacy_gspc_csv"`, parsed `close_adj = close_raw = Close`,
   `high_raw = High` — an index close carries no dividend adjustment). Capture
-   requires it exactly as the calendar ticker; the `gspc_daily.csv` outcomes:
+  requires it exactly as the calendar ticker. The refresher caches its own
+  `period=max` fetch as a Tier-1 `^GSPC` retrieval: it supersedes the CSV
+  (the same fetch, a superset of its 2006+ truncation); with none, live
+  stored rows predating the CSV's first date are carried into its frame —
+  never a refused partial retrieval. The `gspc_daily.csv` outcomes:
 
    | Condition | Outcome |
    | --- | --- |
    | missing, non-regular or symlinked at discovery | not discovered (no retrieval entry) |
-   | non-regular, over-cap or malformed at read | that ticker's capture fails — the same error path as a malformed px csv |
+   | non-regular, over-cap or an unparseable file at read | that ticker's capture fails — the same error path as a malformed px csv |
    | required with no live `^GSPC` rows (the run's state, or the prior version when the source lists nothing) | `SOURCE_NOT_FOUND` before any write |
    | a row with a null Close or High or an unparseable date | dropped |
 

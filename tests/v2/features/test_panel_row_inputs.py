@@ -291,7 +291,7 @@ def test_2_missing_daily_market_or_computed_moves_propagates_contract_mismatch()
 
 
 def test_3_missing_price_history_propagates_contract_mismatch():
-    with pytest.raises(DataError) as exc:
+    with pytest.raises(DataError, match="snapshot has no price_history table") as exc:
         _scan(snapshot=_snapshot(with_price=False))
     assert exc.value.code == "CONTRACT_MISMATCH"
 
@@ -1204,7 +1204,7 @@ def test_33_zero_selected_bound_uses_zero_result_limit_and_positive_batch():
         repo, snapshot, "AAA", _HISTORY_START, _DECISION, _EVENT)
     # A zero-row pinned membership is still a bounded query; the read then
     # propagates get_price_series' missing-ticker CONTRACT_MISMATCH as-is.
-    with pytest.raises(DataError) as exc:
+    with pytest.raises(DataError, match="no price_history for this ticker") as exc:
         panel_row_inputs._read_regime_prices(repo, snapshot, _HISTORY_START, _DECISION)
     assert exc.value.code == "CONTRACT_MISMATCH"
     (_cm, cm_query), (_reg, reg_query) = repo.scans

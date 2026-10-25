@@ -244,6 +244,22 @@ def _gspc_retrievals(source_root: Path) -> dict[str, dict]:
                             "byte_size": info.st_size, "mtime": info.st_mtime}}
 
 
+_GSPC_FRAME_COLUMNS = ("date", "close_adj", "close_raw", "high_raw")
+
+
+def _live_prior_rows(stored: pd.DataFrame) -> pd.DataFrame | None:
+    """The prior stored version's LIVE (non-tombstoned) latest-state rows in
+    the retrieval columns, or None when nothing usable is stored -- the
+    ``prior_live`` left-extension input of a ``legacy_gspc_csv`` entry (see
+    :func:`_parse_gspc`'s reconciliation note and :func:`_capture_outcome`).
+    """
+    if not len(stored):
+        return None
+    current = price_history.latest_state(stored)
+    live = current[~current["deleted"].astype(bool)]
+    return live[list(_GSPC_FRAME_COLUMNS)] if len(live) else None
+
+
 def _iso_from_epoch(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
 
@@ -348,7 +364,23 @@ def _parse_gspc(entry: dict) -> tuple[pd.DataFrame, bytes, str]:
                         "close_raw": close,
                         "high_raw": pd.to_numeric(frame["high"], errors="coerce")})
     out = out.dropna(subset=["date", "close_raw", "high_raw"]).sort_values("date")
-    return _stringify_dates(out), raw, retrieved_at
+    frame = _stringify_dates(out)
+    # Reconciliation (gate round 7 #1333): ``entry["prior_live"]`` carries
+    # the live prior-stored rows (see :func:`_live_prior_rows`). The nightly
+    # refresher cuts the CSV at 2006 while an earlier full-history capture
+    # may have stored pre-CSV rows the current Tier-1 cache no longer
+    # covers, and ``diff_retrieval`` would refuse the shorter CSV as a
+    # partial retrieval of them -- so rows strictly predating the CSV's
+    # first date are carried into its frame. They equal the prior state by
+    # construction, so they produce no new version rows and the CSV's own
+    # dates keep describing the CSV bytes (hash, ``retrieved_at``). An
+    # empty parsed frame extends nothing and still refuses as partial.
+    prior = entry.get("prior_live")
+    if prior is not None and len(frame):
+        earlier = prior[prior["date"] < frame["date"].min()]
+        if len(earlier):
+            frame = pd.concat([earlier, frame], ignore_index=True)
+    return frame, raw, retrieved_at
 
 
 def _tier1_meta_bytes(entry) -> bytes:
@@ -756,8 +788,11 @@ def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *
            required_tickers: Iterable[str] = (), expected_snapshot_id: str | None = None) -> dict:
     """Read the legacy sources (read-only), capture EVERY not-yet-captured
     retrieval per ticker as its own row-version event -- the px file (if any),
-    the ``gspc_daily.csv`` regime file for ``REGIME_TICKER`` (if present)
-    AND every dated/undated Tier-1 ``history`` entry, merged into one
+    the ``gspc_daily.csv`` regime file for ``REGIME_TICKER`` (if present; a
+    discovered ``^GSPC`` Tier-1 retrieval supersedes it; with none the CSV
+    frame is left-extended from the prior stored history, see
+    :func:`_capture_outcome`) AND every dated/undated Tier-1 ``history``
+    entry, merged into one
     ascending-``retrieved_at`` order (px precedence is a read-time policy,
     never a capture-time exclusion -- see the module docstring) -- and,
     unless ``dry_run``, commit one new snapshot generation under ``scope``
@@ -838,13 +873,22 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
     disagreements: dict[str, dict] = {}
 
     def _capture_outcome(ticker: str) -> _TickerOutcome:
+        # gspc/Tier-1 reconciliation (gate round 7 #1333, see _parse_gspc):
+        # the refresher caches its own full ``period=max`` fetch, which
+        # ``_tier1_retrievals`` discovers for ``^GSPC``. A Tier-1 entry
+        # supersedes the CSV (the same fetch, a superset of its 2006+ cut),
+        # so the CSV is not added as a retrieval; with none the CSV is the
+        # only source and carries ``prior_live`` to left-extend it out of
+        # the prior stored history, so a healthy refresh is never refused
+        # as a partial retrieval.
+        stored = _read_fragment_rows(store, prior_by_ticker.get(ticker))
         entries: list[tuple[str, dict]] = []
         if ticker in px:
             entries.append(("legacy_px_csv", px[ticker]))
-        if ticker in gspc:
-            entries.append(("legacy_gspc_csv", gspc[ticker]))
+        if ticker in gspc and not tier1.get(ticker):
+            entries.append(("legacy_gspc_csv",
+                            {**gspc[ticker], "prior_live": _live_prior_rows(stored)}))
         entries.extend(("tier1_fetch", e) for e in tier1.get(ticker, []))
-        stored = _read_fragment_rows(store, prior_by_ticker.get(ticker))
         return _capture_ticker(conn, ticker, entries, stored=stored, created_at=created_at)
 
     precomputed = {t: _capture_outcome(t) for t in tickers if t in required}

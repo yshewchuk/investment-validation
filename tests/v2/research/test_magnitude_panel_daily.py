@@ -299,7 +299,13 @@ def test_changed_forecast_clock_refuses_before_value_reads(native, monkeypatch):
 
 
 def test_source_bound_refuses_without_partial_return(native):
-    with pytest.raises(DataError) as caught:
+    """A ``max_source_rows`` below the pinned history refuses before any block
+    is returned -- no partial result. The regime read shares the cap and runs
+    first, so since the regime read joined the build this is the refusal's
+    actual message (the dedicated daily-source bound message is asserted by
+    ``test_regime_series_row_bound_refuses``' sibling scans); the property
+    under test -- refuse whole, return nothing partial -- is unchanged."""
+    with pytest.raises(DataError, match="daily block regime row bound exceeded") as caught:
         build(native, max_source_rows=10)
     assert caught.value.code == "RESULT_LIMIT_EXCEEDED"
 
@@ -443,7 +449,7 @@ def test_nonplain_producer_refuses_before_normalization_and_repository(native, m
     producer = deepcopy(native.producer)
     producer["environment"]["synthetic_probe"] = value
     monkeypatch.setattr(native.repository, "resolve", lambda *args: pytest.fail("unvalidated producer reached repository"))
-    with pytest.raises(DataError) as caught:
+    with pytest.raises(DataError, match="invalid research panel context") as caught:
         build(native, producer=producer)
     assert caught.value.code == "CONTRACT_MISMATCH"
 
@@ -451,7 +457,7 @@ def test_nonplain_producer_refuses_before_normalization_and_repository(native, m
 def test_regime_history_absent_refuses_before_values(native):
     """The pinned snapshot carries no ^GSPC price_history: get_price_series's
     CONTRACT_MISMATCH propagates unchanged -- no daily_market spot fallback."""
-    with pytest.raises(DataError) as caught:
+    with pytest.raises(DataError, match="snapshot has no price_history table") as caught:
         build(native, price_history_snapshot=native.snapshot)  # source snapshot has no price_history
     assert caught.value.code == "CONTRACT_MISMATCH"
 
