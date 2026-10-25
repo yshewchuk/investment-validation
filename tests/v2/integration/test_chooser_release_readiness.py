@@ -7,8 +7,8 @@ import pytest
 
 from engine.v2.models import deployment
 from engine.v2.models.frozen_state import serialize_frozen_state
-from engine.v2.ops import catalog as ops_catalog
 from engine.v2.ops import health as health_module
+from engine.v2.ops import supervisor as supervisor_module
 from engine.v2.ops.health import health
 from engine.v2.ops.native_score_batch import run_native_score_batch_worker
 from engine.v2.ops.supervisor import Service
@@ -177,7 +177,7 @@ def test_native_release_persistence_failure_is_caught_and_logged(
     def _raise_catalog_error(conn):
         raise sqlite3.OperationalError("catalog transaction unavailable")
 
-    monkeypatch.setattr(ops_catalog, "transaction", _raise_catalog_error)
+    monkeypatch.setattr(supervisor_module, "transaction", _raise_catalog_error)
     try:
         result = service._native_release_root_or_none(
             occurrence="2026-01-15", scope_hash="test-scope-hash")
