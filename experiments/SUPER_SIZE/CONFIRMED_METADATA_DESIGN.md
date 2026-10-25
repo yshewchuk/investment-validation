@@ -324,7 +324,10 @@ handling, never change the caller's factories/schema/pins or close its connectio
 
 The factory owns one BEGIN/read transaction through probes/transfers/reconstruction,
 then ROLLBACK before yielding, including on failure; never roll back a caller's
-preexisting transaction. All later reads use the complete detached frozen view;
+preexisting transaction. Roll back only a transaction this factory began that
+is still active; cleanup never replaces a primary failure. A cleanup-only SQL
+failure uses the mapping below and yields no session.
+All later reads use the complete detached frozen view;
 this preserves that admitted view without holding a SQLite lock during scans.
 No later SQL/head lookups, parent traversal, re-resolution or implicit latest.
 No nested/concurrent use of a session. Close/cancel started iterators on exit;
@@ -344,7 +347,16 @@ CONTRACT_MISMATCH before any ID/ref check. The table applies only while active.
 | table_contract(snapshot_ref, table_name) | Exact admitted ref and known table; detached full contract. |
 | fragment_records(snapshot_ref, table_name) | Same checks; complete native ordered tuple, including empty membership. |
 | scan_population_bound(snapshot_id, *, table_name, table_contract_ref, key_filter=(), time_interval=None) | Selected table only; native plan_scan_population candidate-row sum, never result-count estimation. |
-| scan(query, *, table_name, max_object_bytes) | Selected table only; required positive native byte cap and unchanged DataQuery semantics; provisional Arrow batches until exhaustion. |
+| scan(query, *, table_name, max_object_bytes=None) | Selected table only; mandatory native byte-cap validation below and unchanged DataQuery semantics; provisional Arrow batches until exhaustion. |
+
+For an active scan, call objects.validate_max_object_bytes before delegation,
+including the rejection-only None default: omitted/None, bool, noninteger or
+nonpositive caps raise QUERY_NOT_BOUNDED. Never take Repository.scan's None
+path fallback. Preserve other native DataQuery/query/object refusals unchanged.
+Provisional means a late stream failure can follow already-yielded batches;
+there is no retraction or mutation of those Arrow batches. The consumer must
+discard its accumulated result on error/cancellation, and the index publishes
+nothing until every required stream exhausts successfully (engine/v2/data/ARCHITECTURE.md:690–691).
 
 On the active facade, unknown tables, nonexact refs passed to table_contract/
 fragment_records, or scans outside the selected table refuse
@@ -393,8 +405,9 @@ After all stored-byte/count probes pass, transfer one admitted row at a time
 in the same transaction. Verify types and independently accumulate decoded
 TEXT UTF-8 bytes before any JSON parse; this second counter also must fit
 max_catalog_bytes. SQL BLOB length uses database encoding, not assumed UTF-8;
-UTF-16 and embedded-NUL fixtures must exercise both checks. Catalog text decode/
-re-encode UnicodeError refuses MANIFEST_CORRUPT, never leaks a builtin exception.
+UTF-16 and embedded-NUL fixtures must exercise both checks. Invalid stored TEXT
+can raise sqlite3.OperationalError during str decoding without a SQLite code;
+that and Python decode/re-encode UnicodeError map to MANIFEST_CORRUPT below.
 Fixed-width scalars remain count-bounded; no BLOB field is expected.
 Use the native JSON duplicate-key hook and strict native document decoder;
 JSON syntax/depth/shape failures refuse rather than yielding an empty record.
@@ -430,13 +443,20 @@ research admit_snapshot translates it to SNAPSHOT_UNRESOLVED (engine/v2/research
 The index's exact earnings-contract allowlist still refuses UNSUPPORTED_CONTRACT;
 the generic session authenticates catalog identity, not that research allowlist.
 
+Preserve an existing native DataError first. For new catalog sqlite3.Error,
+test a present numeric primary result code (extended code & 255) against the
+resource row first; absent codes use the remaining-error row, never message text.
+Missing required schema/join partners are malformed catalog, not an absent
+snapshot or empty membership. New mappings never flatten scanner DataErrors.
+
 | Failure boundary | Outcome (fixed redacted message; admission returns no partial session) |
 | --- | --- |
-| Bad request/holder/configuration, nested use or use after exit | CONTRACT_MISMATCH, nonretryable. |
+| Factory non-ref request/holder/configuration; facade binding/lifetime guards above | CONTRACT_MISMATCH, nonretryable; not native DataQuery/scan-cap validation. |
 | Factory: missing/malformed SnapshotRef, missing requested snapshot or supplied ref differs | SNAPSHOT_UNRESOLVED, nonretryable. |
+| Active scan: omitted/None or invalid max_object_bytes | QUERY_NOT_BOUNDED from objects.validate_max_object_bytes, nonretryable. |
 | Any explicit count or either byte counter exceeds cap | RESULT_LIMIT_EXCEEDED, nonretryable; no cap relaxation. |
-| Catalog: broken join/type/JSON/Unicode/native identity or other SQLite catalog error | MANIFEST_CORRUPT, nonretryable. |
-| SQLite BUSY/LOCKED/IOERR | RESOURCE_UNAVAILABLE, retryable by registry only; no automatic retry. |
+| Catalog SQLite primary BUSY/LOCKED/IOERR/CANTOPEN/FULL/NOMEM (including extended variants) | RESOURCE_UNAVAILABLE, retryable by registry only; no automatic retry. |
+| Catalog: broken join/type/JSON/Unicode/native identity; SQLite errors excluding the preceding resource codes, including code-less TEXT decode failure | MANIFEST_CORRUPT, nonretryable. |
 | Native DataError from identity/query/object checks | Preserve code and retryability; do not blanket-wrap. |
 
 Synthetic acceptance must prove cap equality/one-over, huge unrelated payloads
