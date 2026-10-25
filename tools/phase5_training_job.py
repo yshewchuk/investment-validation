@@ -165,8 +165,13 @@ def build_dataset(recipe, *, pairs_path=None) -> pd.DataFrame:
 
 BOARD_ANALOG_STATE = "board_analog_matcher"
 TRAILING_CUTOFF_STATE = "trailing_pnl_cutoff"
+CHOOSER_POOL_STATE = "chooser_analog_pool"
 STATES = tuple(f"driver_residual_pool:{role}" for role in ("size", "implied_t1", "runup_move")) + (
-    "paired_residual_pool", BOARD_ANALOG_STATE, TRAILING_CUTOFF_STATE)
+    "paired_residual_pool", CHOOSER_POOL_STATE, BOARD_ANALOG_STATE, TRAILING_CUTOFF_STATE)
+
+#: ``engine.score.CHOOSER_ANALOG_POOL`` (the build_chooser_pool.py output),
+#: spelled out so this job stays off the heavy ``engine.score`` import.
+_CHOOSER_POOL_FILE = "chooser_analog_pool.parquet"
 
 
 def _guard(where: str) -> None:
@@ -208,6 +213,40 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
                    "n_residuals": int(np.isfinite(pool["residuals"]).sum()),
                    "n_buckets": 0 if not pool["buckets"] else len(pool["buckets"]["pools"])}
         return artifact, summary
+    if member == CHOOSER_POOL_STATE:
+        # ``build_chooser_analog_pool_artifact`` drops rows closed on/after
+        # ``cutoff``; the parquet is read in stored order so the pool keeps
+        # legacy's tie-break. A missing cutoff or a missing source parquet
+        # refuses (SystemExit -> VALIDATION_FAILED via ``_tool_failure``); an
+        # existing output file with different bytes is the existing
+        # RESUME_MISMATCH; the ``.partial`` + replace write leaves no partial
+        # output; a rerun on identical inputs is byte-idempotent.
+        import time
+
+        from engine import paths
+        from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
+        from tools.phase5_prepare_release import CHOOSER_POOL_ID
+
+        if cutoff is None:
+            raise SystemExit("chooser_analog_pool needs a cutoff")
+        bound = str(pd.Timestamp(cutoff).date())
+        source = paths.FEATURES / _CHOOSER_POOL_FILE
+        if not source.is_file():
+            raise SystemExit("chooser analog pool source is missing")
+        started = time.perf_counter()
+        frame = pd.read_parquet(source)
+        read_s = time.perf_counter() - started
+        print(f"[p5-3] chooser_analog_pool: read {len(frame)} rows in {read_s:.1f}s",
+              file=sys.stderr, flush=True)
+        lineage = Lineage(data=(DataDependency(table=CHOOSER_POOL_ID, end_exclusive=bound),))
+        artifact = build_chooser_analog_pool_artifact(
+            frame.to_dict("records"), pool_id=CHOOSER_POOL_ID, cutoff=bound, lineage=lineage)
+        n_rows = sum(len(rows) for _, rows in artifact.strategies)
+        print(f"[p5-3] chooser_analog_pool: built {n_rows} rows in "
+              f"{time.perf_counter() - started:.1f}s", file=sys.stderr, flush=True)
+        summary = {"cutoff": bound, "source_rows": int(len(frame)), "n_rows": n_rows,
+                   "n_strategies": len(artifact.strategies)}
+        return (None, summary) if n_rows == 0 else (artifact, summary)
     if member != "paired_residual_pool":
         raise SystemExit(f"unknown state {member!r}; known: {', '.join(STATES)}")
     inputs = paired_inputs if paired_inputs is not None else data.paired_pool_inputs(
@@ -510,8 +549,12 @@ def main(argv=None) -> int:
     if args.strategy:
         ap.error(f"--strategy applies to {BOARD_ANALOG_STATE} only")
     if args.state:
-        if len(args.cutoff) > 1 or (args.cutoff and args.state != "paired_residual_pool"):
-            ap.error("--cutoff: at most one, and only for paired_residual_pool")
+        if len(args.cutoff) > 1 or (args.cutoff
+                and args.state not in ("paired_residual_pool", CHOOSER_POOL_STATE)):
+            ap.error("--cutoff: at most one, and only for paired_residual_pool/"
+                     f"{CHOOSER_POOL_STATE}")
+        if args.state == CHOOSER_POOL_STATE and len(args.cutoff) != 1:
+            ap.error(f"{CHOOSER_POOL_STATE} needs exactly one --cutoff")
         summary = run_state_job(args.state, out, plan_only=args.plan_only,
                                 cutoff=args.cutoff[0] if args.cutoff else None,
                                 ticker_chunk=args.ticker_chunk)
