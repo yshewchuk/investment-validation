@@ -290,10 +290,27 @@ def test_default_and_native_plan_fields_still_pass(catalog):
 
 
 def test_not_covered_lists_the_static_names(catalog):
+    listed = [
+        "max-registration-bytes (run-script flag, not in repo)",
+        "chains._RESULT_CAP (2_000_000)",
+        "nightly_chain_batch._RESULT_CAP (2_000_000)",
+        "nightly_quote_rows._RESULT_CAP (2_000_000)",
+        "nightly_calendar_inputs._RESULT_CAP (2_000_000)",
+        "legacy_bundle.MAX_ARTIFACT_BYTES",
+        "release_layout.MAX_CATALOG_BYTES",
+        "deployment.MAX_MANIFEST_BYTES",
+        "serving_fold MAX_FOLD_BYTES",
+        "d14_inputs.MAX_CALENDAR_BYTES",
+        "serving.projections._LOOKUP_RESULT_CAP",
+        "models.inventory MAX_ARTIFACT_BYTES/MAX_REGISTRY_BYTES",
+        "iv_crush_inputs.MAX_TARGET_OBJECT_BYTES",
+        "event_history.MAX_OUTCOME_OBJECT_BYTES",
+    ]
+    assert headroom._NOT_COVERED == tuple(listed)
     document = report_for(catalog, nightly_plan_document())
-    assert document["not_covered"] == list(headroom._NOT_COVERED)
-    assert len(document["not_covered"]) == len(headroom._NOT_COVERED)
-    for name in headroom._NOT_COVERED:
+    assert document["not_covered"] == listed
+    assert len(document["not_covered"]) == len(listed)
+    for name in listed:
         assert name in document["not_covered"]
 
 

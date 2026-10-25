@@ -9,8 +9,9 @@ Statuses: ``OK`` at or below 80%, ``WARN`` above 80%, ``FAIL`` above 95%; a
 limit the check could not measure is ``UNMEASURED`` rather than ``OK`` and
 drives exit 1 so a skipped check is never mistaken for a clean one. The
 document's overall status is the worst limit's and the CLI exits 0/1/2 to
-match (``UNMEASURED`` ranks with ``WARN``). Anything else the check does not
-measure appears in ``not_covered``.
+match (``UNMEASURED`` exits 1 like ``WARN`` but ranks below a measured
+``WARN``). Anything else the check does not measure appears in
+``not_covered``.
 
 The scratch check reuses the same helpers as ``nightly.plan_scratch_problems``
 -- the ``store_barrier.domains_of`` read-domain test, the ``_legacy_resource``
@@ -65,6 +66,9 @@ _MAX_METADATA_BYTES = 1024 * 1024
 _NOT_COVERED = (
     "max-registration-bytes (run-script flag, not in repo)",
     "chains._RESULT_CAP (2_000_000)",
+    "nightly_chain_batch._RESULT_CAP (2_000_000)",
+    "nightly_quote_rows._RESULT_CAP (2_000_000)",
+    "nightly_calendar_inputs._RESULT_CAP (2_000_000)",
     "legacy_bundle.MAX_ARTIFACT_BYTES",
     "release_layout.MAX_CATALOG_BYTES",
     "deployment.MAX_MANIFEST_BYTES",
