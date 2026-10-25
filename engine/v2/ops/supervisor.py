@@ -769,35 +769,43 @@ class Service:
         from engine.v2.ops.catalog import transaction
         stamp = format_timestamp(self.clock.now())
         problem_json = json.dumps(to_document(problem), sort_keys=True, separators=(",", ":"))
-        existing = self.conn.execute(
-            "SELECT 1 FROM native_stage_failures "
-            "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
-            (occurrence, scope_hash, "native_score_batch")).fetchone()
-        if existing is None:
-            with transaction(self.conn):
-                self.conn.execute(
-                    """INSERT INTO native_stage_failures
-                       (occurrence, scope_hash, stage_id, status, error_code,
-                        problem_json, created_at, updated_at)
-                       VALUES (?, ?, ?, 'FAILED', ?, ?, ?, ?)
-                       ON CONFLICT(occurrence, scope_hash, stage_id) DO NOTHING""",
-                    (occurrence, scope_hash, "native_score_batch", problem.code,
-                     problem_json, stamp, stamp))
-        problem_key = (problem.code, problem.message)
+        try:
+            existing = self.conn.execute(
+                "SELECT 1 FROM native_stage_failures "
+                "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
+                (occurrence, scope_hash, "native_score_batch")).fetchone()
+            if existing is None:
+                with transaction(self.conn):
+                    self.conn.execute(
+                        """INSERT INTO native_stage_failures
+                           (occurrence, scope_hash, stage_id, status, error_code,
+                            problem_json, created_at, updated_at)
+                           VALUES (?, ?, ?, 'FAILED', ?, ?, ?, ?)
+                           ON CONFLICT(occurrence, scope_hash, stage_id) DO NOTHING""",
+                        (occurrence, scope_hash, "native_score_batch", problem.code,
+                         problem_json, stamp, stamp))
+        except Exception as exc:
+            print(json.dumps({"event": "native_stage_failure_persistence_failed",
+                              "occurrence": occurrence,
+                              "stage_id": "native_score_batch",
+                              "problem_code": problem.code,
+                              "exception_type": type(exc).__name__}))
+        problem_key = (problem.code, problem.message, occurrence)
         if problem_key == self._last_native_release_problem:
             return
         self._last_native_release_problem = problem_key
         print(json.dumps({"event": "native_score_batch_release_unavailable",
+                          "reason": detail_code,
                           "problem": {field: to_document(problem)[field]
                                       for field in ("code", "category", "retryable", "message")}}))
 
     def _native_release_root_or_none(self, *, occurrence, scope_hash):
         """Cutover PR-7a: the cheap release-identity gate -- see
-        ARCHITECTURE.md "Inputs"/"Cutover PR-7a's input sourcing". Runs on
-        EVERY tick, unconditionally, ahead of and independent of
-        self._native_score_batch_memo's own backoff -- a release-unavailable
-        outcome here NEVER touches that memo (R2: it must not count as one
-        of ITS spent attempts).
+        ARCHITECTURE.md "Inputs"/"Cutover PR-7a's input sourcing". Called only
+        after an eligible identity has been selected, not on every tick; it runs
+        ahead of and independent of self._native_score_batch_memo's own backoff --
+        a release-unavailable outcome here NEVER touches that memo (R2: it must
+        not count as one of ITS spent attempts).
 
         Three calls, gated in two stages: deployment.production_release_root()
         (one os.environ read) and deployment.current_pointer() against this
@@ -1103,10 +1111,11 @@ class Service:
         eligible identity exists; then release binding is checked; a
         release-unavailable result never consumes `_native_score_batch_memo`
         attempts; identity lookup continues to use its separate
-        `_native_score_batch_lookup_memo`.
-        SAME bounded backoff schedule _reconcile_computed_moves_refresh uses.
-        Past the memo gate a snapshot-pinned identity submits the identity and
-        producer parameters; raw-row production and its complete
+        `_native_score_batch_lookup_memo`. After release binding succeeds, the
+        worker submission uses the SAME bounded backoff schedule
+        _reconcile_computed_moves_refresh uses; release checks are not backed
+        off. Past the memo gate a snapshot-pinned identity submits the identity
+        and producer parameters; raw-row production and its complete
         event/refusal documents run in the native worker; every exception is
         caught and reported the same redacted way _reconcile_publication_status
         reports its own, never crashing the tick."""

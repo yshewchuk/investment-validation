@@ -26,7 +26,8 @@ are consumed today by `engine.v2.ops.native_score_batch.py`'s
 submits a `native_score_batch` job when an eligible pinned-snapshot identity
 has staged producer inputs (cutover PR-6, `engine/v2/ops/ARCHITECTURE.md`).
 Separately, the same tick loop's
-cheap release-identity gate runs every tick, and calls
+cheap release-identity gate runs for each eligible native score batch identity,
+and calls
 `release_bindings.resolve_production_release_binding()` — which
 hash-verifies every model file — whenever the release root/id it sees has
 changed since the last tick (memo-gated: skipped on repeat ticks once that
@@ -394,8 +395,8 @@ machine-checked consumers allowlist by design. `engine.v2.ops.native_score_batch
 and calls `resolve_release_binding` from its `native_score_batch` job
 worker, and `engine.v2.ops.supervisor.py`'s tick loop (Cutover PR-7a) submits
 that job for eligible pinned-snapshot identities (`engine/v2/ops/
-ARCHITECTURE.md`'s "Cutover PR-7a"). Separately, the same tick loop runs a
-cheap release-identity check every tick and calls
+ARCHITECTURE.md`'s "Cutover PR-7a"). Separately, for each eligible identity
+the same tick loop runs a cheap release-identity check and calls
 `release_bindings.resolve_production_release_binding()` live whenever that
 identity changes (memo-gated: skipped on repeat ticks once the current
 release root/id has already been resolved, success or refusal) — a

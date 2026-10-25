@@ -1,4 +1,7 @@
 """D3: the withheld-release banner must clear once delivery catches up (§5)."""
+import json
+from datetime import date, timedelta
+
 import pytest
 
 from engine.v2.ops.catalog import transaction
@@ -80,3 +83,29 @@ def test_write_health_is_byte_identical_across_repeated_calls(tmp_path):
     write_health(first, health(conn, clock=clock))
     write_health(second, health(conn, clock=clock))
     assert first.read_bytes() == second.read_bytes()
+
+
+def test_native_stage_failures_health_bounds_and_ordering(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    seed_delivered_health_release(conn, release_id="r5", requested_session="2026-09-05",
+                                  resolved_session="2026-09-05")
+    scope_hash = "test-scope-hash"
+    stage_id = "native_score_batch"
+    problem = json.dumps({"code": "MODEL_NOT_READY"})
+    occurrences = [(date(2026, 1, 1) + timedelta(days=i)).isoformat() for i in range(105)]
+    with transaction(conn):
+        for occurrence in occurrences:
+            conn.execute(
+                "INSERT INTO native_stage_failures "
+                "(occurrence,scope_hash,stage_id,status,error_code,problem_json,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (occurrence, scope_hash, stage_id, "FAILED", "MODEL_NOT_READY", problem,
+                 "2026-09-15T00:00:00Z", "2026-09-15T00:00:00Z"))
+    document = health(conn, clock=clock)
+    failures = document["native_stage_failures"]
+    returned = [row["occurrence"] for row in failures]
+    assert len(failures) == 100
+    assert returned == list(reversed(occurrences[5:]))
+    assert set(occurrences[:5]).isdisjoint(returned)
+    assert returned[0] == occurrences[-1]
+    conn.close()

@@ -648,12 +648,12 @@ area = "operations"
 capability = "Health: ops liveness document, selfcheck result, job and publication health"
 old = ["route:legacy-app GET /api/health", "view:legacy #/models/health"]
 new = ["cli:ops health", "cli:ops doctor", "cli:ops headroom", "cli:ops init", "route:v2-ops GET /health.json", "route:v2-api GET /api/v1/operations", "route:v2-ops GET /flags"]
-producer = "ops health document (operations_health.v1.0)"
+producer = "ops health document (operations_health.v1.2)"
 identity = "health generated_at + release_id; scope-current, not release-pinned"
-tests = ["tests/test_v2_ops_health.py", "tests/test_v2_ops_serving.py"]
+tests = ["tests/v2/ops/test_v2_ops_health.py", "tests/test_v2_ops_serving.py"]
 disposition = "native"
 owner = "P6-4"
-notes = "Ops liveness (`GET /health.json`, operations_health.v1.0, built by engine/v2/ops/health.py) is native on the operations server; the model/calibration half of the legacy /api/health view is split out to operations-model-calibration-health."
+notes = "Ops liveness (`GET /health.json`, operations_health.v1.2, built by engine/v2/ops/health.py) is native on the operations server; the model/calibration half of the legacy /api/health view is split out to operations-model-calibration-health."
 
 [[row]]
 id = "operations-model-calibration-health"

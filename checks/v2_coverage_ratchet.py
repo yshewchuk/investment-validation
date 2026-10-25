@@ -208,7 +208,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v20"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v21"
 
 
 # Baseline tests whose file was renamed (not just moved) after the baseline was written.

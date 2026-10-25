@@ -11,7 +11,9 @@ Application rendering belongs in the [React app](../../../ui/ARCHITECTURE.md).
 **Operations health currency.** Serving accepts `operations_health.v1.0`,
 `operations_health.v1.1` and `operations_health.v1.2`. Older documents may omit
 the additive `native_stage_failures` list; either absent or malformed session
-field leaves currency `unknown` without a default.
+field leaves currency `unknown` without a default. The operations shell renders
+each listed native-stage failure in its health banner as a degraded reason,
+using only the occurrence, stage, status and problem code.
 The [README](README.md) lists the checked exports (the only names other packages may import). By module:
 - `operations.create_server` (authenticated HTTP listener).
 - `api`: `create_app` (authenticated read-only JSON API), `ApiError`; run as

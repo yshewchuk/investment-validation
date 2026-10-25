@@ -66,7 +66,7 @@ worker calls `resolve_release_binding` and, when `gate_policy` is absent or empt
 `resolve_gate_policy` (the gate thresholds staged in the release), and the supervisor's tick loop submits that job for eligible
 pinned-snapshot identities; it also separately calls
 `resolve_production_release_binding()` live whenever its cheap
-release-identity check (run every tick) sees a changed root/id — a
+release-identity check for an eligible native score batch sees a changed root/id — a
 memo-gated release-readiness gate, not a per-tick call — see
 `ARCHITECTURE.md` for what runs in production today versus only in tests.
 
