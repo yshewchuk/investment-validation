@@ -5,6 +5,7 @@ import errno
 import json
 import os
 import sqlite3
+import threading
 
 import pytest
 
@@ -103,6 +104,129 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
         restore_backup(backup, tmp_path / "restored")
     assert refused.value.code == "INVALID_REQUEST"
     assert (tmp_path / "restored" / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
+
+
+@pytest.mark.parametrize("path_field", ["backup_key", "artifact_name"])
+def test_restore_rejects_unsafe_manifest_paths_before_writing(tmp_path, path_field):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "safe-key", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key="safe-key", owner="worker", target=backup,
+               clock=clock, store=store)
+    manifest_path = backup / "safe-key.manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if path_field == "backup_key":
+        manifest["backup_key"] = "../../escape"
+    else:
+        manifest["artifacts"]["../../escape"] = manifest["artifacts"].pop("evidence.bin")
+    manifest_path.write_text(json.dumps(manifest))
+    destination = tmp_path / "restored"
+
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, destination)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+    assert not destination.exists()
+    assert not (tmp_path / "escape").exists()
+
+
+def test_delivered_retry_rejects_changed_database(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "delivered-recheck", {}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key="delivered-recheck", owner="worker", target=backup,
+               clock=clock, store=store)
+    (backup / "delivered-recheck.sqlite").write_bytes(b"partial")
+
+    with pytest.raises(OpsError) as refused:
+        run_backup(conn, key="delivered-recheck", owner="retry", target=backup,
+                   clock=clock, store=store)
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+
+
+@pytest.mark.parametrize("component", ["manifest", "database", "artifact"])
+def test_restore_rejects_oversized_manifest_and_symlink_inputs(tmp_path, component):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "checked-input", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key="checked-input", owner="worker", target=backup,
+               clock=clock, store=store)
+    if component == "manifest":
+        (backup / "checked-input.manifest.json").write_bytes(
+            b"x" * (backup_module.MAX_MANIFEST_BYTES + 1))
+    else:
+        path = (backup / "checked-input.sqlite" if component == "database"
+                else backup / "artifacts" / "evidence.bin")
+        external = tmp_path / f"{component}-outside"
+        external.write_bytes(path.read_bytes())
+        path.unlink()
+        path.symlink_to(external)
+
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, tmp_path / "restored")
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+
+
+@pytest.mark.parametrize("component", ["database", "artifact"])
+def test_restore_rejects_tampered_backup_components(tmp_path, component):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "tampered-restore", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key="tampered-restore", owner="worker", target=backup,
+               clock=clock, store=store)
+    path = (backup / "tampered-restore.sqlite" if component == "database"
+            else backup / "artifacts" / "evidence.bin")
+    path.write_bytes(path.read_bytes() + b"tampered")
+
+    with pytest.raises(OpsError) as refused:
+        restore_backup(backup, tmp_path / "restored")
+
+    assert refused.value.code == "INTEGRITY_FAILED"
+
+
+def test_backup_publication_lock_serializes_same_key(tmp_path):
+    target = tmp_path / "backup"
+    target.mkdir()
+    first_entered = threading.Event()
+    second_attempted = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+
+    def first_operation():
+        first_entered.set()
+        assert release_first.wait(timeout=2)
+
+    def first_attempt():
+        backup_module._with_backup_lock(target, "same-key", first_operation)
+
+    def second_attempt():
+        second_attempted.set()
+        backup_module._with_backup_lock(
+            target, "same-key", second_entered.set)
+
+    first = threading.Thread(target=first_attempt)
+    second = threading.Thread(target=second_attempt)
+    first.start()
+    assert first_entered.wait(timeout=2)
+    second.start()
+    try:
+        assert second_attempted.wait(timeout=2)
+        assert not second_entered.wait(timeout=0.05)
+    finally:
+        release_first.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+
+    assert second_entered.is_set()
 
 
 def test_backup_counts_and_copies_one_read_snapshot(tmp_path, monkeypatch):
