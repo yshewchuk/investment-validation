@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import sqlite3
 
@@ -185,7 +186,7 @@ def test_backup_effect_preserves_safe_refusal_message(tmp_path, monkeypatch):
             "SELECT state, receipt_json FROM outbox WHERE kind='backup'"
         ).fetchone()
         assert row["state"] == "pending"
-        assert "backup database is empty" in row["receipt_json"]
+        assert json.loads(row["receipt_json"]) == {"error": "backup database is empty"}
     finally:
         conn.close()
 
