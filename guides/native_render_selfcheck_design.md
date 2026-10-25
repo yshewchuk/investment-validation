@@ -30,7 +30,7 @@ Graph today (`ops/nightly.py`): `export, model_evidence -> projection(render) ->
 `native_score_batch` is only a tick-loop sidecar, so nightly never builds a native projection (#717).
 
 Who reads what. The React client reads only `/api/v1/releases`, `/events`, score detail and
-`/operations`; all come from the serving index and the publisher, not from the bundle. The bundle
+`/operations` and the native-parity routes (`/native_parity*`); all come from the serving index and the publisher, not from the bundle. The bundle
 is read by (a) `load_legacy_bundle` for rows, (b) the operations listener's legacy shell
 (`/legacy/`, `/board`, `/book`, `/models`, `/flags`, `/health.json` mirror), (c)
 `tools/v2_dashboard_verified_input.py`. So the artifact the board needs is the release; the other
@@ -68,25 +68,29 @@ Purpose. The legacy check re-scored sampled bundle rows through `engine.score.sc
 question: does the projected release equal what the pinned code, snapshot and model release
 produce now, and has no row been altered after scoring?
 
-Inputs (all bound job inputs, none discovered): the `serving_projection` output (release rows and
+Inputs (all bound job inputs, none discovered; the batch records carry a per-record input hash
+and `source_record_hash`, which slice 3 adds if absent): the `serving_projection` output (release rows and
 `projection_binding`), the native score-batch records, the pinned snapshot and the deployed model
 release identity.
 
 Procedure.
 1. Draw a sample of `N` projected rows (default 20, the legacy default) with a seed that is a
    content hash of `release_id` and the plan identity. Never a clock or `random` default seed.
-   The sample always includes every strategy present, and every DYN-SV chooser row up to a
-   cap of 10 (cap and `N` recorded in the output).
+   The sample is first the forced rows (one per strategy present, plus DYN-SV chooser rows up to
+   a cap of 10), then random rows up to `N`. Forced rows count toward `N`; if they alone exceed
+   `N`, the sample is the forced rows (size `max(N, forced)`), recorded in the output.
 2. For each sampled row, rebuild its `NativeScoreInputs` from the pinned snapshot (not from the
    batch's persisted copy) and compare the input hash with the batch's recorded input hash.
 3. Re-run `score_one` and compare (a) the record digest with the stored `source_record_hash`
-   and (b) every displayed field at display precision (`BUNDLE_PRECISION`) with the release row.
+   and (b) every displayed field at display precision with the release row. The precision constant
+   (today `BUNDLE_PRECISION` = 6, defined in the legacy renderer) moves to a serving-contract
+   constant in slice 1; the selfcheck must not import the legacy renderer.
 4. A chooser row is verified against the structure it names: re-score `chosen_strategy`, restore
    the chooser name, require the digest to agree; `detail` is compared by shape. Same rule as
    today, now on native records.
 5. Write `native_selfcheck.v1.0`: `ok`, `n_checked`, `n_release_rows`, `seed`, `sample_keys`,
    `mismatches` (scrubbed: field, stored and fresh value, no paths or exception text),
-   `snapshot_id`, `release_id`, `elapsed_s`. `ok` is false on any mismatch or any unbuildable
+   `snapshot_id`, `release_id`. Elapsed time goes to stderr only, so the artifact is byte-stable. `ok` is false on any mismatch or any unbuildable
    input in the sample.
 
 What it does not claim: it does not prove the model is good, the population is complete (the
@@ -95,7 +99,7 @@ of post-scoring edits for the sample.
 
 Publication gate. The manifest `gates` key stays `selfcheck`. `publication._gate_is_bound`
 binds it to a `native_selfcheck.v1.0` artifact whose `release_id` equals the staged release and
-whose `ok` is true. A `legacy_selfcheck` artifact no longer binds after the wiring PR.
+whose `snapshot_id` equals the projection's pinned snapshot and whose `ok` is true. A `legacy_selfcheck` artifact no longer binds after the wiring PR.
 
 Cost. Work is bounded by `N` rows, not the universe: it loads only the snapshot slices for the
 sampled tickers. This is the property #505 needed, so the interim 3 GiB `projection` profile and
@@ -151,6 +155,9 @@ Each added symbol and its production caller:
 | `serving_projection` job kind | same graph; `publication` stages its binding |
 | Row source `native` | `projections.build_candidate`, called by the job worker |
 
+Timing: slices 1-4 add and wire the shadow path only; legacy authority stays until the P7-5
+switch. Removal slices (5-7) merge only after that switch, and the rollback window in the
+[Phase 7 plan](rearchitecture_phase7_cutover.md) decides whether deletion waits for it.
 The removal PRs delete, with their tests and docs: the actions `legacy_render`,
 `legacy_selfcheck`, `legacy_model_evidence` and their `ACTION_NAMES`/profile/effects-graph/read-plan
 entries (`legacy_nightly_read_plan.py`); `render_inputs` legacy parts; `legacy_bundle.py`;
@@ -198,4 +205,19 @@ snapshot slices only.
 `engine/v2/serving/ARCHITECTURE.md` (row sources, legacy bundle exception, dependencies),
 `engine/v2/ops/ARCHITECTURE.md` (graph, job kinds, `legacy_render` memory paragraph),
 `engine/v2/dashboard/ARCHITECTURE.md` (legacy-companion sentence), root `ARCHITECTURE.md`
-(consumer/legacy lists), `checks/legacy_adapters.json` count, `engine/v2/serving/README.md`.
+(consumer/legacy lists), `checks/legacy_adapters.json` count, `engine/v2/serving/README.md`, `engine/v2/ops/README.md`.
+
+## 10. Slice size estimates (non-test code / test / doc lines)
+
+| # | Slice | Code | Test | Doc |
+|---|---|---|---|---|
+| 1 | Pure `native_selfcheck`, schema, precision constant | 250 | 250 | 20 |
+| 2 | Job kind, worker, gate binding, profile | 300 | 200 | 40 |
+| 3 | `serving_projection` job, batch hash fields | 380 | 250 | 40 |
+| 4 | Wire graph, `native` row source, required batch stage | 300 | 250 | 80 |
+| 5 | Remove legacy actions, render_inputs, read plan | 60 | 80 | 40 |
+| 6 | Remove bundle loader, tool options, shell pages | 60 | 80 | 40 |
+| 7 | Rename bridge names | 120 | 120 | 40 |
+
+Removal slices are mostly deleted lines, which do not count toward size. Slice 3 is nearest the
+limit; if the batch change grows, it splits into batch fields, then projection.
