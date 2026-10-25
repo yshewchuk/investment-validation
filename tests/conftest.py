@@ -250,7 +250,7 @@ def pytest_runtest_teardown(item, nextitem):
 
 # -- ui/ build fixtures -------------------------------------------------------
 #
-# tests/test_v2_dashboard_browser.py and tests/test_v2_dashboard_integration.py
+# tests/v2/dashboard/test_v2_dashboard_browser.py and tests/test_v2_dashboard_integration.py
 # both drive a real Playwright browser against a real `npm --prefix ui run
 # build` output. A fresh worktree has no `ui/node_modules` at all (it is
 # `.gitignore`d, per ui/README.md's "Allowlist" section), so the bare `npm

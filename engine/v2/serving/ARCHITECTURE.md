@@ -134,12 +134,29 @@ change a release pin. Serving never retries. Reads have no write or partial
 artifact.
 
 `GET /release/current.json` also sends `X-Expected-Session`, the latest
-completed NYSE session at the configured `frozen_at` snapshot clock. Only an
+completed NYSE session at the configured `frozen_at` snapshot clock, from
+`market_schedule.latest_completed_session`. That close boundary is regular
+16:00 America/New_York except on the three early-close days `market_schedule`
+models privately (a session July 3, the Friday after Thanksgiving, and a
+session Christmas Eve), each closing 13:00; exceptional exchange-announced
+half-days beyond these modeled rules are not covered and keep the 16:00
+boundary. Only an
 absent `frozen_at` or the exact string `"unknown"` means live; a malformed,
 empty or non-string configured clock is refused and the route omits the header
 instead of substituting live time, so clients show expected session unknown.
 The shell compares that expected session with health's `resolved_session` and
-uses `requested_session` for the later-than-requested refusal.
+uses `requested_session` for the later-than-requested refusal. Every 200
+response carries `Cache-Control: no-store`: the release pointer and the
+scheduled-session clock can change between the shell's 30-second polls, and a
+cached header would silently freeze the freshness evaluation at an old
+session.
+
+| `GET /release/current.json` condition | Outcome |
+|---|---|
+| Authenticated, safe pointer, clock live or parseable | 200 JSON + `Cache-Control: no-store` + `X-Expected-Session` |
+| Authenticated, safe pointer, `frozen_at` malformed/empty/non-string | 200 JSON + `no-store`; header omitted, never live time |
+| Pointer unsafe, indirect or unreadable | 404 `unknown release` |
+| Unauthenticated | 401; no release identity leaked |
 
 `GET /api/v1/native_parity` exposes report identity and the existing aggregate,
 plus `native_refused_tickers`, the saved refusal entries from both refusal

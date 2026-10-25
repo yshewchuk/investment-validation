@@ -16,7 +16,10 @@ Replaces (§4.4): `paths.py`, `env.py`, `jsonio.py`, `audit.py`, `session arithm
 - Path and environment resolution.
 - Session arithmetic: BMO/AMC anchoring, trading-day offsets.
 - The latest completed NYSE session at a serving clock's moment, including the
-  16:00 America/New_York close and scheduled holiday observations.
+  scheduled close (16:00 America/New_York, 13:00 on the three modelled
+  early-close days -- a session July 3, Black Friday and a session Christmas
+  Eve; exceptional exchange-announced half-days beyond these rules are not
+  covered and keep the 16:00 boundary) and scheduled holiday observations.
 - The shared `is_scheduled_session(date)` weekday/non-holiday predicate used by
   projection, calendar validation and the serving clock.
 - Pure holiday-year sets are immutable and LRU-bounded to 128 years; supplied
@@ -51,7 +54,7 @@ underscore convention, and an import of a name absent from this list fails
 | `artifact_reference` | The identity `ArtifactStore.publish_bytes` would give some bytes, computed without touching storage — so a worker or coordinator that already holds the exact bytes of a published artifact can recompute its `ArtifactRef` and agree with the store by construction. |
 | `safe_relative_path`, `ensure_directory`, `fsync_directory` | The path and durability primitives the store is built from. |
 | `score_population.population_key`, `score_population.population_difference` | Shared legacy score population identity and planned-versus-observed rule for ops and serving. |
-| `latest_completed_session` | The latest completed NYSE session at `now` (or a parseable snapshot `frozen_at`; `None`/`"unknown"` mean live), using `market_calendar.is_scheduled_session` and the 16:00 America/New_York close. Any other empty, malformed or non-string `frozen_at` raises `ValueError` rather than using live time. |
+| `latest_completed_session` | The latest completed NYSE session at `now` (or a parseable snapshot `frozen_at`; `None`/`"unknown"` mean live), using `market_calendar.is_scheduled_session` and a private `market_schedule` close-hour rule (16:00 America/New_York, 13:00 on the three modelled early-close days -- a session July 3, Black Friday and a session Christmas Eve; the coverage limitation is documented in `ARCHITECTURE.md`). Any other empty, malformed or non-string `frozen_at` raises `ValueError` rather than using live time. |
 | `market_calendar.is_scheduled_session` | Public weekday/non-holiday session-day predicate shared by projection, calendar validation and the serving clock; pure and bounded by the holiday-year LRU. |
 | `market_horizon.trading_days_before_print`, `market_horizon.CalendarCoverageError` | Pure pre-print session distance and its distinct insufficient-coverage refusal; no calendar fetch or gap filling. |
 | `experiment_holdouts.ExperimentHoldouts`, `experiment_holdouts.calendar_date` | Canonical day validation and shared deterministic, versioned random/rolling membership; no final-read authority. |

@@ -762,7 +762,7 @@ Exit: `/usr/bin/python3 -m pytest -q tests/v2/serving/test_v2_serving_api.py`
    surface and remain Phase 6 work.
 
 Exit commands: `npm --prefix ui run typecheck`, `npm --prefix ui run build`,
-and `/usr/bin/python3 -m pytest -q tests/test_v2_dashboard_browser.py`.
+and `/usr/bin/python3 -m pytest -q tests/v2/dashboard/test_v2_dashboard_browser.py`.
 Define these npm scripts when scaffolding; these are required new commands,
 not claims about existing tools. Use existing Python Playwright for browser
 tests rather than adding a second test framework solely for this slice.

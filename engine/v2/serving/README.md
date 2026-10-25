@@ -63,7 +63,10 @@ underscore convention, and an import of a name absent from this list fails
 `checks/package_readmes.py`.
 
 operations.create_server starts the authenticated read-only health/release
-surface. It reads operations_health.v1.0 documents and immutable legacy bundles,
+surface. It reads `operations_health.v1.0` and `operations_health.v1.1`
+documents (v1.1 adds the `requested_session`/`resolved_session` evidence the
+shell's freshness evaluation consumes; either field absent or malformed
+leaves the shell unknown, never a default) and immutable legacy bundles,
 and embeds the existing views beneath the current health banner.
 
 bridge (P3-1a): offline mapping of a verified `score.json` and a verified

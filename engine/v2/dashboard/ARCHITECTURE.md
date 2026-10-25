@@ -82,17 +82,27 @@ launcher option; its application presentation belongs to React.
 The legacy frame is pinned to one release for the browser session. The shell
 shows that pin and the latest published release separately; when they differ,
 it marks the displayed board stale and offers a reload to opt into the new
-release. It never moves the frame automatically. The health observation's
-`generated_at` age is always shown. An observation more than 24 hours old is
-stale; a future or malformed timestamp is unknown. The shell shows both
-`requested_session` and `resolved_session` (the effective quote/input
-session), and evaluates session lag against scheduled NYSE sessions using the
-existing market-calendar rules. Once a later scheduled session is due, a
+release. It never moves the frame automatically. While a usable health
+observation exists the stamp shows its `generated_at` age; a fetch/parse
+failure or an unusable artifact replaces it with the offline frozen-at line
+and an unknown banner. An observation more than 24 hours old is stale. The
+shell displays health's `requested_session` and `resolved_session` (the
+effective quote/input session is the resolved one) as-is, and compares them
+by plain ISO date against the `X-Expected-Session` header: the server
+derives that scheduled session from `market_schedule`, whose close boundary is
+16:00 America/New_York except the three early-close days it models privately
+(a session July 3, the Friday after Thanksgiving, a session Christmas Eve) at
+13:00; exceptional exchange-announced half-days beyond these rules are not
+covered and keep 16:00. The shell itself applies none. Once a later scheduled
+session is due, a
 health snapshot that still describes an earlier input session is stale, even
 if it is under 24 hours old. Missing or malformed session or schedule evidence
 is unknown, never current. The latest outcome exposed by health evidence is
-shown explicitly: withheld publication, failed engineering observations, and
-unknown scheduled observations remain visible, and absent evidence is unknown.
+shown explicitly: withheld publication, failed engineering nights (a nonzero
+consecutive-failure streak) and unknown scheduled observations remain
+visible; an ``ok``-false summary with no failed streak is the producers'
+unknown/unobserved latest night and reads unknown, never failed; absent
+evidence is unknown.
 Health is current only when every condition below passes. Precedence is
 **unknown > stale > degraded**: any unknown condition wins over stale, stale
 wins over degraded, and current appears only when no condition fails. The
@@ -109,7 +119,8 @@ banner class is exactly `unknown`, `stale`, `degraded`, or empty for current.
 | Resolved session later than the expected or requested session | unknown |
 | Resolved session older than the expected session | stale |
 | `code_budgets` missing or malformed | unknown |
-| Engineering `ok` is false, or `consecutive_nights` is nonzero | degraded |
+| Engineering `ok` false with a nonzero `consecutive_nights` | degraded |
+| Engineering `ok` false with zero `consecutive_nights` (producers' unknown latest night) | unknown |
 | `unknown_occurrences` is nonempty | unknown |
 | `current_release.release_id` missing | unknown |
 | Health release differs from the frame pin or the published current | stale (pin unavailable or published not yet observed: unknown) |

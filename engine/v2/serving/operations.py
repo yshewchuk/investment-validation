@@ -172,8 +172,9 @@ def _shell_script(frozen: str) -> str:
     matching BOTH the pin and the latest published id, no withheld release,
     zero consecutive failed nights and no missing scheduled observations --
     each failed gate names its own explicit reason (missing/malformed
-    identity, session or schedule evidence is unknown, never current). Any
-    fetch/parse failure shows unknown/unavailable without erasing the pin or
+    identity, session or schedule evidence is unknown, never current; ok
+    false without a failed streak reads unknown, not failed). Any fetch or
+    parse failure shows unknown/unavailable without erasing the pin or
     throwing out of the shell.
     """
     return f'''<script>
@@ -191,7 +192,7 @@ function withheldEvidence(h){{if(!Object.prototype.hasOwnProperty.call(h,'withhe
 function withheldReason(w){{return w.missing?'withheld release evidence missing':'withheld release evidence missing or malformed';}}
 function withheldDetail(){{return 'release withheld: (details omitted)';}}
 function scheduleEvidence(h){{const cb=h&&h.code_budgets;if(!cb||typeof cb!=='object'||Array.isArray(cb)||typeof cb.ok!=='boolean'||!cb.latest||typeof cb.latest!=='object'||Array.isArray(cb.latest)||typeof cb.consecutive_nights!=='number'||!Array.isArray(cb.unknown_occurrences))return null;return cb;}}
-function outcome(){{if(!health)return 'latest outcome: unknown (health unavailable)';const parts=[],w=withheldEvidence(health),cb=scheduleEvidence(health);if(w.malformed){{parts.push(withheldReason(w));return 'latest outcome: unknown: '+parts.join('; ');}}if(w.value)parts.push(withheldDetail());if(!cb){{parts.push('engineering schedule evidence missing or malformed');return 'latest outcome: unknown: '+parts.join('; ');}}let verdict=cb.ok?'pass':'fail';if(cb.ok===false)parts.push('latest engineering outcome failed');if(cb.consecutive_nights!==0){{verdict='fail';parts.push(cb.consecutive_nights+' consecutive failed engineering night(s)');}}if(cb.unknown_occurrences.length>0){{verdict='unknown';parts.push('scheduled observations missing: '+cb.unknown_occurrences.join(', '));}}if(w.value)verdict=verdict==='unknown'?'unknown':'fail';if(verdict==='pass')parts.push('no failures recorded');return 'latest outcome: '+verdict+': '+parts.join('; ');}}
+function outcome(){{if(!health)return 'latest outcome: unknown (health unavailable)';const parts=[],w=withheldEvidence(health),cb=scheduleEvidence(health);if(w.malformed){{parts.push(withheldReason(w));return 'latest outcome: unknown: '+parts.join('; ');}}if(w.value)parts.push(withheldDetail());if(!cb){{parts.push('engineering schedule evidence missing or malformed');return 'latest outcome: unknown: '+parts.join('; ');}}let verdict=cb.ok?'pass':(cb.consecutive_nights!==0?'fail':'unknown');if(!cb.ok){{if(cb.consecutive_nights!==0)parts.push('latest engineering outcome failed');else parts.push('latest engineering outcome unknown (not observed)');}}if(cb.consecutive_nights!==0){{verdict='fail';parts.push(cb.consecutive_nights+' consecutive failed engineering night(s)');}}if(cb.unknown_occurrences.length>0){{verdict='unknown';parts.push('scheduled observations missing: '+cb.unknown_occurrences.join(', '));}}if(w.value)verdict=verdict==='unknown'?'unknown':'fail';if(verdict==='pass')parts.push('no failures recorded');return 'latest outcome: '+verdict+': '+parts.join('; ');}}
 function evaluate(){{const ms=Date.now()-Date.parse(health.generated_at),text=age(ms),reasons=[];let unknown=false,stale=false;
 function add(reason,kind){{reasons.push(reason);if(kind==='unknown')unknown=true;else if(kind==='stale')stale=true;}}
 if(ms>DAY)add('observation older than 24 hours','stale');
@@ -210,7 +211,7 @@ else if(rs>rq)add('resolved session is later than requested session','unknown');
 else if(rs<ex)add('resolved session is older than expected session','stale');
 const cb=scheduleEvidence(health);
 if(!cb)add('engineering schedule evidence missing or malformed','unknown');
-else{{if(cb.ok===false)add('latest engineering outcome failed','degraded');if(cb.consecutive_nights!==0)add('failed engineering nights: '+cb.consecutive_nights+' consecutive','degraded');if(cb.unknown_occurrences.length>0)add('scheduled observations missing: '+cb.unknown_occurrences.join(', '),'unknown');}}
+else{{if(cb.ok===false){{if(cb.consecutive_nights!==0)add('latest engineering outcome failed','degraded');else add('latest engineering outcome unknown (not observed)','unknown');}}if(cb.consecutive_nights!==0)add('failed engineering nights: '+cb.consecutive_nights+' consecutive','degraded');if(cb.unknown_occurrences.length>0)add('scheduled observations missing: '+cb.unknown_occurrences.join(', '),'unknown');}}
 stamp.textContent='updated '+text+' ago';
 if(reasons.length===0){{state.textContent='current';banner.className='';return;}}
 state.textContent=(unknown?'unknown: ':stale?'stale: ':'degraded: ')+reasons.join('; ')+' (observation '+text+' old)';

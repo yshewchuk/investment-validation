@@ -1,5 +1,5 @@
 """Mock §6 read API plus static ``ui/dist`` serving, for the browser tests in
-``tests/test_v2_dashboard_browser.py``.
+``tests/v2/dashboard/test_v2_dashboard_browser.py``.
 
 The real FastAPI read API is P3-2 (guide §8), still in progress alongside
 this file (see ``engine/v2/serving/projections.py``'s ``list_events``/

@@ -110,6 +110,17 @@ follow their current documentation links into ``tests/v2/``. Their recorded
 paths change without changing coverage counts or source hashes. Phase 2
 also relocates the corpus-parity test and its historical node IDs.
 
+Bumped to v20 (PR #1312): the two root browser suites relocated —
+``tests/test_v2_ops_serving_browser.py`` to
+``tests/v2/serving/test_ops_serving_browser.py`` (renamed as well, hence its
+PHASE1_RENAMED entry) and ``tests/test_v2_dashboard_browser.py`` to
+``tests/v2/dashboard/test_v2_dashboard_browser.py`` (registered through
+PHASE1_RENAMED), so neither the flat ``test_v2_serving_*.py`` nor the
+``test_v2_dashboard_*.py`` root glob matches it and the resolved suite list
+carries the relocated paths. As with v11/v12 this changes the declared file
+list and the measurement identity it feeds; package counts remain
+historical, not a fresh coverage measurement.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
@@ -137,6 +148,9 @@ produce the ``coverage_receipt_ref`` evidence document and
 ratchet it, reusing this module's ``package_counts`` rather than
 reimplementing it. The baseline schema was bumped to v1.1 when two
 fixed-suite paths relocated under tests/v2/serving/; counts remain
+historical. Bumped again to v1.2 (PR #1312) when
+``tests/test_v2_dashboard_browser.py`` relocated to
+``tests/v2/dashboard/test_v2_dashboard_browser.py``; counts remain
 historical.
 """
 from __future__ import annotations
@@ -203,7 +217,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v19"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v20"
 
 
 # Baseline tests whose file was renamed (not just moved) after the baseline was written.
@@ -219,6 +233,7 @@ PHASE1_RENAMED = {
     "tests/test_v2_data_computed_moves_table.py": "tests/v2/data/test_computed_moves_table.py",
     "tests/test_v2_serving_bridge.py": "tests/v2/serving/test_v2_serving_bridge.py",
     "tests/test_v2_ops_serving_browser.py": "tests/v2/serving/test_ops_serving_browser.py",
+    "tests/test_v2_dashboard_browser.py": "tests/v2/dashboard/test_v2_dashboard_browser.py",
 }
 # Relocated tests kept explicitly in the suite, including moved baseline paths.
 PHASE1_EXTRA = (
@@ -609,7 +624,7 @@ def phase2_validate_measurement(measured, root=ROOT, registry=None):
 
 PHASE3_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase3_baseline.json"
 PHASE3_COVERAGE_SCHEMA = "phase3_coverage.v1.0"
-PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.1"
+PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.2"
 
 #: A scope choice (no phase3_acceptance.json "tests" registry exists to
 #: derive this from, unlike phase1/phase2) -- every real test file that
@@ -623,7 +638,7 @@ PHASE3_FIXED_SUITE = (
     "tests/test_v2_serving_projections.py",
     "tests/v2/serving/test_v2_serving_publication_binding.py",
     "tests/test_v2_dashboard_preview.py",
-    "tests/test_v2_dashboard_browser.py",
+    "tests/v2/dashboard/test_v2_dashboard_browser.py",
     "tests/v2/dashboard/test_v2_dashboard_integration.py",
     "tests/v2/serving/test_checks_phase3_gate.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",
