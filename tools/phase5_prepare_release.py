@@ -99,6 +99,9 @@ from engine.v2.models.training.chooser_pool_source import (  # noqa: E402
     require_chooser_pool_columns,
 )
 
+MAX_MODEL_BYTES = 512 * 1024 * 1024
+MAX_STATE_BYTES = 512 * 1024 * 1024
+
 JOBLIB_ADAPTER = "joblib-estimator.v1"
 #: Output name per role for the frozen binding, following the Phase 4 native
 #: field names where one exists. ``runup_move`` is the one role whose native
@@ -138,7 +141,14 @@ class StateBuild:
 # --------------------------------------------------------------------------
 
 
-def model_release(inventory: ModelReleaseInventory, *, read=lambda p: Path(p).read_bytes(),
+def _bounded_model_read(path: Path) -> bytes:
+    try:
+        return read_bounded_state(path, MAX_MODEL_BYTES, no_follow=True)
+    except (BoundedStateReadError, OSError) as exc:
+        raise PrepareRefused("model artifact cannot be read") from exc
+
+
+def model_release(inventory: ModelReleaseInventory, *, read=_bounded_model_read,
                   resolve=lambda ref: Path(ref)) -> tuple[ModelRelease, dict[str, bytes]]:
     """One joblib binding per inventory binding, members named by required kind.
 
@@ -178,7 +188,7 @@ def model_release(inventory: ModelReleaseInventory, *, read=lambda p: Path(p).re
 # --------------------------------------------------------------------------
 
 
-def _payoff_member_id(artifact) -> str:
+def payoff_member_id(artifact) -> str:
     from engine.v2.models.payoff_artifact import PayoffLineArtifact
 
     kind = "payoff_line" if isinstance(artifact, PayoffLineArtifact) else "payoff_surface"
@@ -193,11 +203,11 @@ def payoff_payloads(training_roots: Iterable[Path]) -> dict[str, dict[str, bytes
     found: dict[str, dict[str, bytes]] = {}
     for base in training_roots:
         for path in sorted(Path(base).rglob(PAYOFF_ARTIFACT_FILE)):
-            data = path.read_bytes()
+            data = read_bounded_state(path, MAX_STATE_BYTES, no_follow=True)
             artifact = PayoffArtifactLoader(path.parent).load(
                 PayoffArtifactRef(path=path.name, content_hash=sha256_bytes(data)))
             name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
-            found.setdefault(_payoff_member_id(artifact), {})[name] = data
+            found.setdefault(payoff_member_id(artifact), {})[name] = data
     return found
 
 
@@ -212,7 +222,7 @@ def recalibration_payloads(training_roots: Iterable[Path]) -> dict[str, dict[str
     found: dict[str, dict[str, bytes]] = {}
     for base in training_roots:
         for path in sorted(Path(base).rglob(RECALIBRATION_ARTIFACT_FILE)):
-            data = path.read_bytes()
+            data = read_bounded_state(path, MAX_STATE_BYTES, no_follow=True)
             artifact = RecalibrationArtifactLoader(path.parent).load(
                 RecalibrationArtifactRef(path=path.name, content_hash=sha256_bytes(data)))
             name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
@@ -220,7 +230,7 @@ def recalibration_payloads(training_roots: Iterable[Path]) -> dict[str, dict[str
     return found
 
 
-def artifact_file_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]:
+def artifact_file_payloads(files: Iterable[Path | tuple[Path, bytes]]) -> dict[str, dict[str, bytes]]:
     """Load payoff and recalibration artifact files, classified by JSON ``schema_version``."""
     from engine.v2.models.payoff_artifact import (
         PAYOFF_LINE_ARTIFACT_V1,
@@ -236,8 +246,15 @@ def artifact_file_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]
     from tools.phase5_state_stage_job import StageRefused
 
     found: dict[str, dict[str, bytes]] = {}
-    for path in map(Path, files):
-        data = path.read_bytes()
+    for item in files:
+        if isinstance(item, tuple):
+            path, data = item
+        else:
+            path = Path(item)
+            try:
+                data = read_bounded_state(path, MAX_STATE_BYTES, no_follow=True)
+            except BoundedStateReadError as exc:
+                raise StageRefused("a bound state file could not be loaded") from exc
         try:
             document = json.loads(data)
         except (ValueError, TypeError) as exc:
@@ -249,7 +266,7 @@ def artifact_file_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]
             artifact = PayoffArtifactLoader(path.parent).load(
                 PayoffArtifactRef(path=path.name, content_hash=sha256_bytes(data)))
             name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
-            member = _payoff_member_id(artifact)
+            member = payoff_member_id(artifact)
             if name in found.setdefault(member, {}):
                 raise StageRefused("a state object appears twice", {"member": member})
             found[member][name] = data
@@ -282,7 +299,7 @@ def frozen_state_files(paths: Iterable[Path]) -> list[Path]:
 
 
 def frozen_state_payloads(files: Iterable[Path],
-                          max_bytes: int | None = None) -> dict[str, dict[str, bytes]]:
+                          max_bytes: int | None = MAX_STATE_BYTES) -> dict[str, dict[str, bytes]]:
     """Pre-built P5-4 frozen states (residual pools, tables), by member.
 
     The training job's ``--state`` outputs
@@ -298,8 +315,7 @@ def frozen_state_payloads(files: Iterable[Path],
 
     found: dict[str, dict[str, bytes]] = {}
     for path in frozen_state_files(files):
-        data = path.read_bytes() if max_bytes is None else read_bounded_state(
-            path, max_bytes, no_follow=True)
+        data = read_bounded_state(path, max_bytes, no_follow=True)
         state = FrozenStateLoader(path.parent, max_bytes=max_bytes).load(
             FrozenStateRef(path=path.name, content_hash=sha256_bytes(data)))
         schema = state.schema_version
@@ -601,7 +617,7 @@ def _plan(release: ModelRelease, states: list[StateBuild]) -> dict:
     }
 
 
-def _merge(found: dict[str, dict[str, bytes]], more: Mapping[str, Mapping[str, bytes]]) -> None:
+def merge_payloads(found: dict[str, dict[str, bytes]], more: Mapping[str, Mapping[str, bytes]]) -> None:
     """Add objects per member; a later source adds to, never drops, a member."""
     for member_id, objects in more.items():
         found.setdefault(member_id, {}).update(objects)
@@ -643,21 +659,21 @@ def _collect_payloads(args, snapshot: str, feature_ids: Mapping[str, str]) -> di
     from engine.data.features import tier4
 
     found: dict[str, dict[str, bytes]] = {}
-    _merge(found, tier4_fold_payloads(Path(args.tier4_dir or tier4.SERVING_DIR),
+    merge_payloads(found, tier4_fold_payloads(Path(args.tier4_dir or tier4.SERVING_DIR),
                                      feature_ids, snapshot, args.fold_month))
     if modules_available(("engine.v2.models.payoff_artifact",))[0]:
-        _merge(found, payoff_payloads(args.training_root or ()))
+        merge_payloads(found, payoff_payloads(args.training_root or ()))
     if modules_available(("engine.v2.models.recalibration_artifact",))[0]:
-        _merge(found, recalibration_payloads(args.training_root or ()))
+        merge_payloads(found, recalibration_payloads(args.training_root or ()))
     if modules_available(("engine.v2.models.frozen_state",))[0]:
-        _merge(found, default_admissible_table())
-        _merge(found, frozen_state_payloads(args.frozen_state or ()))
+        merge_payloads(found, default_admissible_table())
+        merge_payloads(found, frozen_state_payloads(args.frozen_state or ()))
     if modules_available(("engine.v2.models.chooser_analog_pool",))[0]:
-        _merge(found, chooser_pool_payloads(paths.FEATURES / "chooser_analog_pool.parquet"))
+        merge_payloads(found, chooser_pool_payloads(paths.FEATURES / "chooser_analog_pool.parquet"))
     return found
 
 
-def _fold_policies(found: Mapping[str, Mapping[str, bytes]], snapshot: str):
+def fold_policies(found: Mapping[str, Mapping[str, bytes]], snapshot: str):
     from engine.data.features import tier4
 
     producer = tier4.size_feature_model()
@@ -695,7 +711,7 @@ def _real_inputs(args, pinned_panel: PinnedPanelContext | None = None
     snapshot = _resolve_snapshot(args, pinned_panel)
     feature_ids = {b.role: b.artifact_id for b in inventory.bindings if b.strategy_id == "*"}
     found = _collect_payloads(args, snapshot, feature_ids)
-    policy, chooser_policies = _fold_policies(found, snapshot)
+    policy, chooser_policies = fold_policies(found, snapshot)
     return release, inventory, payloads, build_states(
         found, size_fold_policy=policy, chooser_fold_policies=chooser_policies)
 

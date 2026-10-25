@@ -25,7 +25,7 @@ class StageRefused(ValueError):
         self.details = details or {}
 
 
-def _require_regular(path: Path, limit: int, what: str) -> None:
+def require_regular(path: Path, limit: int, what: str) -> None:
     """Refuse a missing, symlinked, non-regular or oversize file before it is read."""
     try:
         info = path.lstat()
@@ -49,7 +49,7 @@ def classify(root: Path, names) -> dict[str, dict[str, bytes]]:
     new: dict[str, dict[str, bytes]] = {}
     try:
         for name in names:
-            _require_regular(root / name, MAX_STATE_BYTES, "a bound state file")
+            require_regular(root / name, MAX_STATE_BYTES, "a bound state file")
             for member, objects in frozen_state_payloads(
                     [root / name], max_bytes=MAX_STATE_BYTES).items():
                 for object_name, data in objects.items():
@@ -90,7 +90,7 @@ def light_checks(release_root: Path, parameters, new_hashes: set[str]) -> None:
 
     release_id = parameters["release_id"]
     try:
-        _require_regular(rel.catalog_path(release_root, release_id), rel.MAX_CATALOG_BYTES,
+        require_regular(rel.catalog_path(release_root, release_id), rel.MAX_CATALOG_BYTES,
                          "the candidate catalog")
         body = rel.read_catalog(rel.catalog_path(release_root, release_id), release_id)
         if body is None:

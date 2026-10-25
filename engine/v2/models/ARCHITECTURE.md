@@ -366,7 +366,7 @@ of the newest nightly jobs, so a score older than that window is not found.
 
 | Rule | Behaviour |
 |---|---|
-| R1 verified input | session and manifest id from the latest succeeded `finality`/`features` job (its `legacy_manifest.json` binding); prior release from the live pointer; a missing pointer or a prior without a pool catalog would start a bootstrap cycle (design in #1102, see §2.2.2; not built: today a missing pointer submits nothing, and a catalog-less prior submits the training jobs and the stage refuses `VALIDATION_FAILED`, `details.code` `PRIOR_MISMATCH`) |
+| R1 verified input | session and manifest id from the latest succeeded `finality`/`features` job (its `legacy_manifest.json` binding); prior release from the live pointer; a missing pointer or a prior without a pool catalog would start a bootstrap cycle (§2.2.2: the stage job's bootstrap mode is built, the sidecar submission is not; today a missing pointer submits nothing, and a catalog-less prior submits the carry-mode jobs and the stage refuses `VALIDATION_FAILED`, `details.code` `PRIOR_MISMATCH`) |
 | R7 serve lifetime | the scheduled serve (not the snapshot-import serve) also stays up while the latest session's pool cycle is pending: a candidate release for it is not yet deployed, or a phase job (including the promote) is still running, and no phase job has failed; a missing release root or a failed phase ends the wait, and the serve deadline still bounds it |
 | R2 cache | durable job and pointer state is re-read each tick; no memo (reads are cheap indexed selects) |
 | R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); an incumbent changed before staging starts a new cycle under new keys; once a candidate is staged, the staged id or the guarded promote refuses and the cycle stalls |
@@ -393,7 +393,7 @@ User decision 2026-10-21: when the prior is `NONE` or `NO_POOL_CATALOG` (§2.2),
 | Condition | Outcome (`VALIDATION_FAILED`, fixed message) |
 |---|---|
 | Prior `DAMAGED` / `USABLE` | `details.code` `PRIOR_MISMATCH` / `PRIOR_USABLE` |
-| Registry drift, inventory unreadable | message only (§2.2); nothing written |
+| Registry drift, inventory unreadable; every other refusal below marked "message only" | fixed message, `details` as §2.2 (`issues` for drift, `members`, `member`); nothing written unless stated |
 | Bindings differ from the incumbent's | `BINDINGS_DIFFER`; nothing written |
 | A catalog state not `STAGED` | `EMPTY_MEMBER`, `details.members`; nothing written |
 | A bound file unreadable, unclassifiable or duplicating an object; a pool object cutoff or trailing month off the session cutoff | message only; nothing written |
@@ -407,12 +407,12 @@ User decision 2026-10-21: when the prior is `NONE` or `NO_POOL_CATALOG` (§2.2),
 | R2 cache | none; pointer, catalog, panel and bound files are re-read each call |
 | R3 retry | one attempt; a refusal is terminal for the cycle until an operator acts (#154) |
 | R4 transaction | objects and the staged manifest are content-addressed and idempotent; the candidate catalog is written last, atomically, under the pointer write lease; `DEPLOYED` is untouched |
-| R5 partial failure | orphan objects or a staged manifest without a catalog may remain, never promoted; the incumbent stays deployed, so native analog and simulation fields stay null (#681) and STR-RUNUP stays `MODEL_NOT_READY` (#782) until a bootstrap promotes |
+| R5 partial failure | orphan objects, a staged manifest without a catalog, or (after a failed read-back or staging-success write) a published candidate catalog may remain, never promoted; the incumbent stays deployed, so native analog and simulation fields stay null (#681) and STR-RUNUP stays `MODEL_NOT_READY` (#782) until a bootstrap promotes |
 | R6 idempotency | same inputs give the same catalog; a rerun is a no-op; a different catalog under the same id is `ID_CONFLICT` |
 
 **Progress logging.** Stage start and end with elapsed time, member and object counts and RSS go to stderr; the prior class and reason are logged once.
 
-**Cost.** Unmeasured. The job writes the objects and verifies the pinned panel copy once per process (it hashes the whole panel object), so it is not yet classified light or heavy; the supervisor runs the first live one.
+**Cost.** Unmeasured. The job writes the objects and verifies the pinned panel copy (it hashes the whole panel object) and reads every model artifact and Tier-4 fold, so it is not yet classified light or heavy; the supervisor runs the first live one.
 
 ### 2.3 Monthly retrain refresh (design, cutover PR-13b, #805; not implemented)
 
@@ -710,6 +710,8 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   serve `/models/release.json`; never promotes.
 - `tools/phase5_state_stage_job.py` — publishes the staging-success record
   (`mark_staging_succeeded`) for a nightly pool candidate (§2.2).
+- `tools/phase5_state_bootstrap.py` — the stage job's `bootstrap` mode (§2.2.2) stages a full candidate
+  through `write_release(candidate_only=True)`; `release_layout.CatalogConflict` is its `ID_CONFLICT`.
 - `tools/phase5_prepare_release.py` and `tools/phase5_inventory.py` — release preparation and
   inventory; the former imports `serving_fold_preflight`, `serving_fold_checks` (fold metadata and
   its policy/header checks) and `pinned_panel` (the pinned panel check), which live in this package.
