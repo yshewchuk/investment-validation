@@ -28,6 +28,13 @@ import sys
 import time
 
 from engine.v2.foundation import ArtifactError, ArtifactStore
+
+# The private nightly members used below (_SNAPSHOT_REQUIRED, _stage_sequence,
+# _action_for, _legacy_resource, SNAPSHOT_STAGES) are deliberately reused
+# rather than copied so this scratch check and the plan validation cannot
+# drift from nightly.plan_scratch_problems / _submit_nightly; making them
+# public is a nightly.py API change touching its other callers, out of scope
+# for this read-only PR and tracked in issue #1306.
 from engine.v2.ops import nightly
 from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import OpsError, fail
