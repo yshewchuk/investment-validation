@@ -317,3 +317,13 @@ def test_parser_refuses_bad_argv(argv, capsys):
         parser().parse_args(argv)
     assert excinfo.value.code == 2
     capsys.readouterr()
+
+
+def test_headroom_max_rss_gb_help_names_newest_epoch(capsys):
+    """The --max-rss-gb help states the newest-supervisor-epoch scope."""
+    with pytest.raises(SystemExit) as excinfo:
+        parser().parse_args(["headroom", "--help"])
+    assert excinfo.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert ("largest memory peak of the newest supervisor epoch's recent attempts "
+            "against this GiB cap") in help_text
