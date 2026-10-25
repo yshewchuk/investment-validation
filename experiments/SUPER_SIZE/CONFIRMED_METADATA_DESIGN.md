@@ -225,7 +225,7 @@ elapsed/rate/ETA, refusals and stage RSS; no per-event logging or extra scans.
 
 | Failure | Registered nonretryable code unless native code says otherwise |
 | --- | --- |
-| Malformed request/row/cap shape, missing/noncanonical partition metadata or no supported bounded native session | CONTRACT_MISMATCH |
+| Malformed non-snapshot request/row/cap shape, missing/noncanonical partition metadata or no supported bounded native session | CONTRACT_MISMATCH |
 | Missing/unresolvable/nonexact SnapshotRef | SNAPSHOT_UNRESOLVED via admit_snapshot |
 | Absent earnings table | CONTRACT_MISMATCH |
 | Unsupported exact contract/ref | UNSUPPORTED_CONTRACT |
@@ -250,7 +250,7 @@ needed. Estimates are not waivers, completed work or real-data authorization.
 
 | Sub-slice / dependency and acceptance | Added code / tests / docs |
 | --- | --- |
-| 1.B0: bounded native-session design / contract below; required review before B1a code | 0 / 0 / 120–160 |
+| 1.B0: bounded native-session design / contract below; required review before B1a code | 0 / 0 / 190–210 |
 | 1.B1a: bounded catalog count/type/byte probes / 1.B0; all-table refusal before payload transfer | 100–140 / 150–190 / 20–30 |
 | 1.B1b: bounded catalog transfer/decode / 1.B1a; same read view and independent UTF-8 cap | 100–140 / 150–190 / 20–30 |
 | 1.B2: exact bounded identity reconstruction / 1.B1b; native identity parity and poisoned unrelated metadata | 100–140 / 150–190 / 20–30 |
@@ -271,7 +271,7 @@ needed. Estimates are not waivers, completed work or real-data authorization.
 | 2.M3: quote aggregate and absolute derivation / 2.M2; native math, zero/null semantics and no ordinal restart | 90–130 / 140–180 / 20–30 |
 | 2.M4: row/lineage materialization wiring / 2.M3; complete horizon rows, bounded output, no experiment execution | 100–140 / 150–190 / 20–30 |
 
-Mapped totals (code/tests/docs): row 1 = 1200–1690/1840–2350/490–700;
+Mapped totals (code/tests/docs): row 1 = 1200–1690/1840–2350/560–750;
 P = 100–140/150–190/20–30; row 2 = 380–540/580–740/80–120. The original
 one-week target is not reaffirmed. Only 1.M3 exposes authenticated build_index.
 Each implementation slice updates its owning data/research README/ARCHITECTURE
@@ -451,7 +451,7 @@ snapshot or empty membership. New mappings never flatten scanner DataErrors.
 
 | Failure boundary | Outcome (fixed redacted message; admission returns no partial session) |
 | --- | --- |
-| Factory non-ref request/holder/configuration; facade binding/lifetime guards above | CONTRACT_MISMATCH, nonretryable; not native DataQuery/scan-cap validation. |
+| Factory invalid holder/table name/configuration/limits or active transaction; facade binding/lifetime guards above | CONTRACT_MISMATCH, nonretryable; excludes every factory snapshot-reference failure below and native DataQuery/scan-cap validation. |
 | Factory: missing/malformed SnapshotRef, missing requested snapshot or supplied ref differs | SNAPSHOT_UNRESOLVED, nonretryable. |
 | Active scan: omitted/None or invalid max_object_bytes | QUERY_NOT_BOUNDED from objects.validate_max_object_bytes, nonretryable. |
 | Any explicit count or either byte counter exceeds cap | RESULT_LIMIT_EXCEEDED, nonretryable; no cap relaxation. |
