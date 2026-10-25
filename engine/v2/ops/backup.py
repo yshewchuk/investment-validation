@@ -12,10 +12,8 @@ import stat
 import tempfile
 from pathlib import Path
 
-from engine.v2.contracts import ArtifactRef
 from engine.v2.foundation import (
     format_timestamp,
-    from_document,
     fsync_directory,
     safe_relative_path,
 )
@@ -155,7 +153,8 @@ def prepare_backup(conn, key, artifacts, *, clock):
     """
     if len(safe_relative_path(key)) != 1:
         raise fail("INVALID_REQUEST", "unsafe backup key")
-    _validate_backup_artifact_names(artifacts)
+    if not isinstance(artifacts, dict) or artifacts:
+        raise fail("INVALID_REQUEST", "artifact-backed backups are deferred to #1259")
     with transaction(conn):
         existing = conn.execute("SELECT effect_id FROM outbox WHERE kind='backup' AND logical_key=?",
                                 (key,)).fetchone()
@@ -251,65 +250,6 @@ def _stage_database(conn, target, key, database, source_rows):
                 pass
 
 
-def _copy_artifact(store, target, name, ref, fault):
-    """Atomically publish one verified artifact and run its fault hook."""
-    try:
-        source = store.verify(ref)
-        destination = target / "artifacts" / name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        stage_fd, stage_name = tempfile.mkstemp(
-            dir=str(destination.parent), prefix=f".{name}.", suffix=".staging")
-        os.close(stage_fd)
-        os.unlink(stage_name)
-    except ArtifactError as exc:
-        raise fail("INTEGRITY_FAILED", "backup artifact is invalid or oversized") from exc
-    except OSError as exc:
-        raise fail("WORKER_FAILED", "backup artifact staging failed") from exc
-    staged = Path(stage_name)
-    try:
-        _copy_verified_file(source, staged, expected_size=ref.byte_size,
-                            expected_hash=ref.content_hash, stage="backup artifact")
-        os.replace(staged, destination)
-        staged = None
-        fsync_directory(destination.parent)
-    except OSError as exc:
-        raise fail("WORKER_FAILED", "backup artifact publication failed") from exc
-    finally:
-        if staged is not None:
-            try:
-                staged.unlink()
-            except FileNotFoundError:
-                pass
-    if fault:
-        fault(name)
-    return {"content_hash": ref.content_hash, "byte_size": ref.byte_size}
-
-
-def _validate_backup_artifact_names(artifacts):
-    if not isinstance(artifacts, dict):
-        raise fail("INVALID_REQUEST", "backup artifacts must be a mapping")
-    for name, reference in artifacts.items():
-        try:
-            if len(safe_relative_path(name)) != 1:
-                raise ValueError("unsafe backup artifact name")
-        except (ArtifactError, ValueError) as exc:
-            raise fail("INVALID_REQUEST", "unsafe backup artifact name") from exc
-        if not isinstance(reference, ArtifactRef):
-            try:
-                from_document(ArtifactRef, reference)
-            except (ArtifactError, KeyError, TypeError, ValueError) as exc:
-                raise fail("INVALID_REQUEST", "backup artifact reference is invalid") from exc
-
-
-def _copy_artifacts(payload, store, target, fault, keepalive):
-    copied = {}
-    for name, document in payload.get("artifacts", {}).items():
-        keepalive()
-        ref = from_document(ArtifactRef, document)
-        copied[name] = _copy_artifact(store, target, name, ref, fault)
-    return copied
-
-
 def _publish_manifest(manifest_path, manifest):
     """Atomically write the verified manifest with a directory fsync."""
     temporary = manifest_path.with_suffix(".pending")
@@ -379,6 +319,9 @@ def _read_backup_manifest(path, *, stage, expected_key=None, receipt=None):
         raise fail("INTEGRITY_FAILED", "backup manifest is invalid") from exc
     if not isinstance(manifest, dict):
         raise fail("INTEGRITY_FAILED", "backup manifest is invalid")
+    if any(not isinstance(manifest.get(field), str) or not manifest[field]
+           for field in ("schema_version", "cutoff")):
+        raise fail("INTEGRITY_FAILED", "backup manifest metadata is invalid")
     _validate_manifest_identity(path, manifest, expected_key, receipt)
     rows = manifest.get("database_rows")
     _validate_manifest_rows(rows)
@@ -388,72 +331,14 @@ def _read_backup_manifest(path, *, stage, expected_key=None, receipt=None):
     return manifest
 
 
-def _verify_delivered_backup(conn, key, target, keepalive=None):
-    receipt = _delivered_or_stale(conn, "backup", key)
-    target = Path(target)
-    manifest_path = target / f"{key}.manifest.json"
-    manifest = _read_backup_manifest(
-        manifest_path, stage="delivered backup manifest", expected_key=key,
-        receipt=receipt)
-    database_hash = manifest["database"]
-    artifacts = manifest["artifacts"]
-    database_rows = manifest.get("database_rows")
-
-    database = target / f"{key}.sqlite"
-    with tempfile.TemporaryDirectory(dir=target) as verify_dir:
-        checked_database = Path(verify_dir) / "database.sqlite"
-        _copy_verified_file(
-            database, checked_database, expected_size=None,
-            expected_hash=database_hash, stage="delivered backup database",
-            keepalive=keepalive)
-        try:
-            probe = sqlite3.connect(checked_database)
-            try:
-                callback_errors = []
-
-                def renew_lease():
-                    if keepalive is None:
-                        return 0
-                    try:
-                        keepalive()
-                    except Exception as exc:
-                        callback_errors.append(exc)
-                        return 1
-                    return 0
-
-                probe.set_progress_handler(renew_lease, 10000)
-                try:
-                    problems = integrity_errors(probe)
-                    actual_rows = (_table_row_counts(probe, keepalive=keepalive)
-                                   if database_rows is not None else database_rows)
-                except sqlite3.Error:
-                    if callback_errors:
-                        raise callback_errors[0]
-                    raise
-                finally:
-                    probe.set_progress_handler(None, 0)
-                if problems or (database_rows is not None and actual_rows != database_rows):
-                    raise fail("INTEGRITY_FAILED", "delivered backup database is invalid")
-            finally:
-                probe.close()
-        except sqlite3.Error as exc:
-            raise fail("INTEGRITY_FAILED", "delivered backup database is invalid") from exc
-
-    for name, info in artifacts.items():
-        actual_hash = _checked_file_hash(
-            target / "artifacts" / name, stage="delivered backup artifact",
-            expected_size=info.get("byte_size"), keepalive=keepalive)
-        if actual_hash != info.get("content_hash"):
-            raise fail("INTEGRITY_FAILED", "delivered backup artifact hash differs")
-    return receipt
-
-
 def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=_no_keepalive):
     effect = claim(conn, "backup", owner=owner, clock=clock, logical_key=key)
     if effect is None:
-        return _verify_delivered_backup(conn, key, target, keepalive=keepalive)
+        return _delivered_or_stale(conn, "backup", key)
     payload = json.loads(effect["payload_json"])
-    _validate_backup_artifact_names(payload.get("artifacts", {}))
+    artifacts = payload.get("artifacts", {})
+    if not isinstance(artifacts, dict) or artifacts:
+        raise fail("INVALID_REQUEST", "artifact-backed backups are deferred to #1259")
     target = Path(target)
     if os.path.lexists(target) and target.is_symlink():
         raise fail("INVALID_REQUEST", "backup target is a symlink")
@@ -474,7 +359,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
                 raise
         except sqlite3.Error as exc:
             raise fail("WORKER_FAILED", "backup source snapshot failed") from exc
-        copied = _copy_artifacts(payload, store, target, fault, keepalive)
+        copied = {}
         manifest = {"schema_version": payload["schema_version"], "backup_key": key,
                     "cutoff": payload["cutoff"],
                     "database": _checked_file_hash(database, stage="backup database"),

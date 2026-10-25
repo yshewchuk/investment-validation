@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import errno
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -51,17 +52,14 @@ def test_verified_artifact_copy_rejects_hash_mismatch(tmp_path):
     assert destination.read_bytes() == b"evidence"
 
 
-@pytest.mark.parametrize("stage", ["database", "artifact"])
-def test_transient_backup_input_open_error_is_retryable(tmp_path, monkeypatch, stage):
+def test_transient_backup_database_open_error_is_retryable(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "transient-read", {"evidence.bin": ref}, clock=clock)
+    prepare_backup(conn, "transient-read", {}, clock=clock)
     backup = tmp_path / "backup"
     run_backup(conn, key="transient-read", owner="worker", target=backup,
                clock=clock, store=store)
-    source = (backup / "transient-read.sqlite" if stage == "database"
-              else backup / "artifacts" / "evidence.bin")
+    source = backup / "transient-read.sqlite"
     original_open = backup_module.os.open
 
     def fail_source_open(path, *args, **kwargs):
@@ -71,57 +69,48 @@ def test_transient_backup_input_open_error_is_retryable(tmp_path, monkeypatch, s
 
     monkeypatch.setattr(backup_module.os, "open", fail_source_open)
     with pytest.raises(OpsError) as refused:
-        if stage == "database":
-            backup_module._checked_file_hash(source, stage="synthetic database")
-        else:
-            backup_module._copy_verified_file(
-                source, tmp_path / "copy.bin", expected_size=ref.byte_size,
-                expected_hash=ref.content_hash, stage="synthetic artifact")
+        backup_module._checked_file_hash(source, stage="synthetic database")
 
     assert refused.value.code == "WORKER_FAILED"
     assert refused.value.problem.retryable is True
 
 
-def test_backup_copies_artifacts_and_restores_new_root(tmp_path):
+def test_backup_verifies_database_and_restore_never_overwrites(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     conn.execute("CREATE TABLE snapshot_probe (value TEXT)")
     conn.execute("INSERT INTO snapshot_probe VALUES ('captured')")
     conn.commit()
     store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "b1", {"evidence.bin": ref}, clock=clock)
+    prepare_backup(conn, "b1", {}, clock=clock)
     backup = tmp_path / "backup"
-    manifest = run_backup(conn, key="b1", owner="worker", target=backup, clock=clock, store=store)
-    assert manifest["artifacts"]["evidence.bin"]["content_hash"] == ref.content_hash
-    snapshot = sqlite3.connect(backup / "b1.sqlite")
+    manifest = run_backup(conn, key="b1", owner="worker", target=backup,
+                          clock=clock, store=store)
+    assert manifest["database_rows"] == _row_counts(conn)
+    database_path = backup / "b1.sqlite"
+    assert manifest["database"] == "sha256:" + hashlib.sha256(database_path.read_bytes()).hexdigest()
+    snapshot = sqlite3.connect(database_path)
     try:
         assert snapshot.execute("SELECT value FROM snapshot_probe").fetchone()[0] == "captured"
     finally:
         snapshot.close()
     restored = restore_backup(backup, tmp_path / "restored")
-    assert (restored / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "delivered"
     with pytest.raises(OpsError) as refused:
         restore_backup(backup, tmp_path / "restored")
     assert refused.value.code == "INVALID_REQUEST"
-    assert (tmp_path / "restored" / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
+    assert (restored / "ops.sqlite").is_file()
 
 
-@pytest.mark.parametrize("path_field", ["backup_key", "artifact_name"])
-def test_restore_rejects_unsafe_manifest_paths_before_writing(tmp_path, path_field):
+def test_restore_rejects_unsafe_manifest_key_before_writing(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "safe-key", {"evidence.bin": ref}, clock=clock)
+    prepare_backup(conn, "safe-key", {}, clock=clock)
     backup = tmp_path / "backup"
     run_backup(conn, key="safe-key", owner="worker", target=backup,
                clock=clock, store=store)
     manifest_path = backup / "safe-key.manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    if path_field == "backup_key":
-        manifest["backup_key"] = "../../escape"
-    else:
-        manifest["artifacts"]["../../escape"] = manifest["artifacts"].pop("evidence.bin")
+    manifest["backup_key"] = "../../escape"
     manifest_path.write_text(json.dumps(manifest))
     destination = tmp_path / "restored"
 
@@ -133,71 +122,26 @@ def test_restore_rejects_unsafe_manifest_paths_before_writing(tmp_path, path_fie
     assert not (tmp_path / "escape").exists()
 
 
-def test_delivered_retry_rejects_same_count_database_hash_change(tmp_path):
+def test_delivered_retry_returns_stored_receipt_without_rereading_files(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    key = "delivered-recheck"
+    key = "delivered-receipt"
     prepare_backup(conn, key, {}, clock=clock)
     backup = tmp_path / "backup"
-    run_backup(conn, key=key, owner="worker", target=backup,
-               clock=clock, store=store)
-    manifest = json.loads((backup / f"{key}.manifest.json").read_text())
-    database = sqlite3.connect(backup / f"{key}.sqlite")
-    try:
-        database.execute(
-            "UPDATE outbox SET state='pending' WHERE kind='backup' AND logical_key=?", (key,))
-        database.commit()
-        assert _row_counts(database) == manifest["database_rows"]
-    finally:
-        database.close()
+    original = run_backup(conn, key=key, owner="worker", target=backup,
+                          clock=clock, store=store)
+    database = backup / f"{key}.sqlite"
+    database.write_bytes(b"damaged after delivery")
 
-    with pytest.raises(OpsError) as refused:
-        run_backup(conn, key=key, owner="retry", target=backup, clock=clock, store=store)
-
-    assert refused.value.code == "INTEGRITY_FAILED"
+    assert run_backup(conn, key=key, owner="retry", target=backup,
+                      clock=clock, store=store) == original
 
 
-def test_delivered_retry_renews_lease_during_file_checks(tmp_path, monkeypatch):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    prepare_backup(conn, "leased-retry", {}, clock=clock)
-    backup = tmp_path / "backup"
-    run_backup(conn, key="leased-retry", owner="worker", target=backup,
-               clock=clock, store=store)
-    monkeypatch.setattr(backup_module, "_COPY_CHUNK", 8)
-    renewals = []
-
-    run_backup(conn, key="leased-retry", owner="retry", target=backup,
-               clock=clock, store=store, keepalive=lambda: renewals.append(True))
-
-    assert len(renewals) > 4
-
-
-def test_delivered_retry_rejects_manifest_different_from_receipt(tmp_path):
-    conn, clock, _ = catalog(tmp_path)
-    store = ArtifactStore(tmp_path / "objects")
-    key = "receipt-recheck"
-    prepare_backup(conn, key, {}, clock=clock)
-    backup = tmp_path / "backup"
-    run_backup(conn, key=key, owner="worker", target=backup,
-               clock=clock, store=store)
-    manifest_path = backup / f"{key}.manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["cutoff"] = "2000-01-01T00:00:00Z"
-    manifest_path.write_text(json.dumps(manifest))
-
-    with pytest.raises(OpsError) as refused:
-        run_backup(conn, key=key, owner="retry", target=backup, clock=clock, store=store)
-
-    assert refused.value.code == "INTEGRITY_FAILED"
-
-
-@pytest.mark.parametrize("component", ["manifest", "database", "artifact"])
+@pytest.mark.parametrize("component", ["manifest", "database"])
 def test_restore_rejects_oversized_manifest_and_symlink_inputs(tmp_path, component):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "checked-input", {"evidence.bin": ref}, clock=clock)
+    prepare_backup(conn, "checked-input", {}, clock=clock)
     backup = tmp_path / "backup"
     run_backup(conn, key="checked-input", owner="worker", target=backup,
                clock=clock, store=store)
@@ -207,9 +151,8 @@ def test_restore_rejects_oversized_manifest_and_symlink_inputs(tmp_path, compone
         manifest_path.write_bytes(
             manifest_bytes + b" " * (backup_module.MAX_MANIFEST_BYTES + 1 - len(manifest_bytes)))
     else:
-        path = (backup / "checked-input.sqlite" if component == "database"
-                else backup / "artifacts" / "evidence.bin")
-        external = tmp_path / f"{component}-outside"
+        path = backup / "checked-input.sqlite"
+        external = tmp_path / "database-outside"
         external.write_bytes(path.read_bytes())
         path.unlink()
         path.symlink_to(external)
@@ -220,17 +163,14 @@ def test_restore_rejects_oversized_manifest_and_symlink_inputs(tmp_path, compone
     assert refused.value.code == "INTEGRITY_FAILED"
 
 
-@pytest.mark.parametrize("component", ["database", "artifact"])
-def test_restore_rejects_tampered_backup_without_blocking_retry(tmp_path, component):
+def test_restore_rejects_tampered_backup_without_blocking_retry(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "tampered-restore", {"evidence.bin": ref}, clock=clock)
+    prepare_backup(conn, "tampered-restore", {}, clock=clock)
     backup = tmp_path / "backup"
     run_backup(conn, key="tampered-restore", owner="worker", target=backup,
                clock=clock, store=store)
-    path = (backup / "tampered-restore.sqlite" if component == "database"
-            else backup / "artifacts" / "evidence.bin")
+    path = backup / "tampered-restore.sqlite"
     original = path.read_bytes()
     path.write_bytes(original + b"tampered")
     destination = tmp_path / "restored"
@@ -265,21 +205,17 @@ def test_restore_checks_current_manifest_row_counts(tmp_path):
     assert not destination.exists()
 
 
-@pytest.mark.parametrize("field", ["database", "content_hash", "byte_size"])
+@pytest.mark.parametrize("field", ["database", "schema_version", "cutoff"])
 def test_restore_rejects_missing_required_manifest_fields_before_writing(tmp_path, field):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "missing-field", {"evidence.bin": ref}, clock=clock)
+    prepare_backup(conn, "missing-field", {}, clock=clock)
     backup = tmp_path / "backup"
     run_backup(conn, key="missing-field", owner="worker", target=backup,
                clock=clock, store=store)
     manifest_path = backup / "missing-field.manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    if field == "database":
-        manifest.pop(field)
-    else:
-        manifest["artifacts"]["evidence.bin"].pop(field)
+    manifest.pop(field)
     manifest_path.write_text(json.dumps(manifest))
     destination = tmp_path / "restored"
 
@@ -396,12 +332,19 @@ def test_backup_rejects_unsafe_artifact_name_before_claim(tmp_path, artifact_nam
     assert not backup.exists()
 
 
-@pytest.mark.parametrize("artifacts", [[], {"evidence.bin": {}}])
-def test_prepare_backup_rejects_malformed_artifact_payload_before_enqueue(tmp_path, artifacts):
+def test_prepare_backup_refuses_artifact_maps_before_enqueue(tmp_path):
     conn, clock, _ = catalog(tmp_path)
-    with pytest.raises(OpsError) as refused:
-        prepare_backup(conn, "malformed-payload", artifacts, clock=clock)
-    assert refused.value.code == "INVALID_REQUEST"
+    store = ArtifactStore(tmp_path / "objects")
+    reference = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    malformed = replace(reference, byte_size=True)
+    requests = [[], {"evidence.bin": {}}, {"evidence.bin": malformed},
+                {"same-name.bin": reference}, {"same-name.bin": reference}]
+
+    for index, artifacts in enumerate(requests):
+        with pytest.raises(OpsError) as refused:
+            prepare_backup(conn, f"artifact-request-{index}", artifacts, clock=clock)
+        assert refused.value.code == "INVALID_REQUEST"
+
     assert conn.execute("SELECT effect_id FROM outbox WHERE kind='backup'").fetchone() is None
 
 
@@ -426,14 +369,16 @@ def test_backup_published_hash_rejects_symlink_replacement(tmp_path, monkeypatch
     target = tmp_path / "backup"
     external = tmp_path / "external.sqlite"
     external.write_bytes(b"outside")
+    original_hash = backup_module._checked_file_hash
 
-    def replace_database(_payload, _store, _target, _fault, _keepalive):
-        database = target / "hash-race.sqlite"
-        database.unlink()
-        database.symlink_to(external)
-        return {}
+    def replace_database(path, *, stage, expected_size=None, keepalive=None):
+        if stage == "backup database":
+            path.unlink()
+            path.symlink_to(external)
+        return original_hash(path, stage=stage, expected_size=expected_size,
+                             keepalive=keepalive)
 
-    monkeypatch.setattr(backup_module, "_copy_artifacts", replace_database)
+    monkeypatch.setattr(backup_module, "_checked_file_hash", replace_database)
     with pytest.raises(OpsError) as refused:
         run_backup(conn, key="hash-race", owner="worker", target=target,
                    clock=clock, store=store)
@@ -539,13 +484,12 @@ def test_backup_replaces_stale_final_database_only_with_verified_copy(tmp_path, 
         "SELECT state FROM outbox WHERE logical_key='b7'").fetchone()[0] == "delivered"
 
 
-def test_backup_copy_failure_remains_retryable(tmp_path):
+def test_backup_failure_before_ack_remains_retryable(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "b2", {"evidence.bin": ref}, clock=clock)
+    prepare_backup(conn, "b2", {}, clock=clock)
     def crash(_name):
-        raise RuntimeError("copy interrupted")
+        raise RuntimeError("publication interrupted")
     with pytest.raises(RuntimeError):
         run_backup(conn, key="b2", owner="worker", target=tmp_path / "backup", clock=clock,
                    store=store, fault=crash)
@@ -638,10 +582,9 @@ def test_retry_rebuilds_when_same_count_source_contents_change(tmp_path):
 def test_manifest_success_before_ack_is_idempotent_and_keys_are_safe(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
     with pytest.raises(ArtifactError, match="UNSAFE_PATH"):
-        prepare_backup(conn, "../escape", {"evidence.bin": ref}, clock=clock)
-    prepare_backup(conn, "b3", {"evidence.bin": ref}, clock=clock)
+        prepare_backup(conn, "../escape", {}, clock=clock)
+    prepare_backup(conn, "b3", {}, clock=clock)
     backup = tmp_path / "backup"
     def crash(point):
         if point == "after_manifest_before_ack":
@@ -667,12 +610,11 @@ def test_prepare_backup_retry_returns_same_effect_without_rebuilding_payload(tmp
     logical key would make ``outbox.enqueue`` raise ``IDEMPOTENCY_CONFLICT``."""
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    first_id = prepare_backup(conn, "b6", {"evidence.bin": ref}, clock=clock)
+    first_id = prepare_backup(conn, "b6", {}, clock=clock)
     original = conn.execute("SELECT payload_json FROM outbox WHERE effect_id=?", (first_id,)).fetchone()[0]
 
     clock.advance(3600)
-    second_id = prepare_backup(conn, "b6", {"evidence.bin": ref}, clock=clock)
+    second_id = prepare_backup(conn, "b6", {}, clock=clock)
     assert second_id == first_id
     assert conn.execute("SELECT payload_json FROM outbox WHERE effect_id=?",
                         (first_id,)).fetchone()[0] == original
@@ -683,8 +625,7 @@ def test_prepare_backup_retry_returns_same_effect_without_rebuilding_payload(tmp
 def test_backup_rejects_symlink_target_before_writing(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "b4", {"evidence.bin": ref}, clock=clock)
+    prepare_backup(conn, "b4", {}, clock=clock)
     outside = tmp_path / "outside"
     outside.mkdir()
     target = tmp_path / "backup"
@@ -701,8 +642,7 @@ def test_run_backup_retry_after_the_effect_already_delivered_succeeds(tmp_path):
     replay, not fail permanently with STALE_EXPECTATION."""
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
-    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    prepare_backup(conn, "b4", {"evidence.bin": ref}, clock=clock)
+    prepare_backup(conn, "b4", {}, clock=clock)
     backup = tmp_path / "backup"
     first = run_backup(conn, key="b4", owner="worker", target=backup, clock=clock, store=store)
     assert conn.execute("SELECT state FROM outbox WHERE logical_key='b4'").fetchone()[0] == "delivered"
