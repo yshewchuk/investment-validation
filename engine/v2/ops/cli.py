@@ -145,12 +145,13 @@ def _positive_gb(value):
 
 def _add_headroom_command(commands):
     """The read-only ``ops headroom`` subparser (see ``engine.v2.ops.headroom``):
-    nightly limit usage against fixed repo limits, exit code 0/1/2 = OK/WARN/FAIL."""
+    nightly limit usage against fixed repo limits, exit code 0 = OK, 1 = WARN or
+    UNMEASURED, 2 = FAIL."""
     headroom = commands.add_parser("headroom")
     headroom.add_argument("--plan", required=True, help="the plan_ref artifact id")
     headroom.add_argument("--max-rss-gb", type=_positive_gb, default=None,
-                         help="also check the largest recent attempt memory peak "
-                              "against this GiB cap")
+                         help="also check the largest memory peak of the newest "
+                              "supervisor epoch's recent attempts against this GiB cap")
 
 
 def _add_snapshot_commands(commands):
