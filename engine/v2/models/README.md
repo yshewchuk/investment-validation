@@ -186,13 +186,14 @@ for offline fold metadata; its helper `serving_fold_checks.py` imports
 consumes `ChooserFoldPolicy` and `chooser_fold_outputs`, obtains registered
 policies, and invokes `serving_fold_preflight.preflight_chooser_fold`
 before publication.
-`release_layout.py` reads catalogs via `release_objects.read_regular_file`, a bounded final-component no-follow open. `tools/phase5_prepare_release.py` bounds its serving-fold reads (`read_bounded_state`, `MAX_FOLD_BYTES`) and frozen-state reads when a cap is passed; its other release-file reads (`path.read_bytes()`/`read_text()` near lines 185-204) and `checks/phase5_acceptance.py`'s staged-member and report reads are uncapped (tracked in #819).
+`release_layout.py` reads catalogs via `release_objects.read_regular_file`, a bounded final-component no-follow open. `tools/phase5_prepare_release.py` bounds its serving-fold reads (`read_bounded_state`, `MAX_FOLD_BYTES`) and frozen-state reads (`MAX_STATE_BYTES` by default); its model-artifact reads (`MAX_MODEL_BYTES`) are bounded no-follow, and the bootstrap reads each payoff/recalibration artifact once the same way and validates those bytes with the loaders' `load_bytes` (no second read); its training-root payload readers are bounded no-follow reads too; `checks/phase5_acceptance.py`'s staged-member and report reads are uncapped (tracked in #819).
 `checks/phase5_acceptance.py` publishes staging success after acceptance.
 `tools/phase5_prepare_release.py` invalidates prior success before re-preparation.
 `checks/phase5_release_assembly.py` re-stages a prior release under a new id
 (`deployment.stage_release`, `resolve_release`, `StagingRefused`, `DeploymentError`,
 `MAX_MANIFEST_BYTES`, and `releases.ModelReleaseRefusal`) when carrying pool objects forward;
 `release_layout.py` (which re-exports the `release_objects.py` names `write_object`, `ReleaseLayoutError`, `ObjectVerificationError`, `deployment_root` and `object_relpath`, alongside `STATE_SPECS` and `read_catalog`) is imported by `checks/phase5_*.py` and `tools/phase5_*.py`; `release_layout.py` reaches the public `manifest_path`, `read_manifest`, `manifest_hash_matches` and `atomic_write_bytes` for catalog layout checks.
+`tools/phase5_state_bootstrap.py` (called by the stage job in `bootstrap` mode, §2.2.2) calls `write_release` with `candidate_only`, `classify_prior`, `deployment.resolve_release`, `read_bounded_state` and `current_release_inventory`, and publishes the candidate catalog through `release_layout.write_manifest(candidate_only=True)`, which raises `CatalogConflict`.
 `tools/phase5_state_stage_job.py` (behind the `phase5_state_stage` ops job) calls `carry_forward_release`,
 `classify_prior` (bootstrap mode) and `prior_carry_set` and the same bounded reader, and takes its inventory from `current_release_inventory`; it then calls `deployment.mark_staging_succeeded`.
 `engine/v2/ops/pool_refresh.py` (the nightly pool sidecar, `Service._reconcile_pool_nightly_refresh`) reads the `DEPLOYED` pointer through the bounded state reader
