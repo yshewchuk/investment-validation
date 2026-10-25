@@ -866,6 +866,34 @@ def test_duplicate_admissible_object_refuses(tmp_path, monkeypatch):
     assert err.value.problem.details == {"member": "admissible_table:dyn_sv"}
 
 
+def test_duplicate_artifact_object_refuses(tmp_path, monkeypatch):
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+
+    def duplicate(files):
+        raise phase5_prepare_release.PrepareRefused(
+            "a state object appears twice", {"member": "m"})
+
+    monkeypatch.setattr(phase5_prepare_release, "artifact_file_payloads", duplicate)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: a state object appears twice"
+    assert err.value.problem.details == {"member": "m"}
+
+
+def test_other_prepare_refused_results_in_unloaded(tmp_path, monkeypatch):
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+
+    def other(files):
+        raise phase5_prepare_release.PrepareRefused("other")
+
+    monkeypatch.setattr(phase5_prepare_release, "artifact_file_payloads", other)
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == "VALIDATION_FAILED: a bound state file could not be loaded"
+
+
 def test_staging_success_failure_refuses(tmp_path, monkeypatch):
     parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path)
     phase5_release.catalog_path(tmp_path, "prior1").unlink()

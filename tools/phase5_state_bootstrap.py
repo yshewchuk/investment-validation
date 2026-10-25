@@ -208,7 +208,14 @@ def bootstrap_candidate(parameters, root: Path, prior_class) -> dict:
             merge_payloads(found, artifact_file_payloads(artifact_files))
         except StageRefused:
             raise
-        except (FrozenStateError, BoundedStateReadError, PrepareRefused, OSError, ValueError,
+        except PrepareRefused as exc:
+            if (len(exc.args) > 1 and exc.args[0] == "a state object appears twice"
+                    and isinstance(exc.args[1], dict)
+                    and isinstance(exc.args[1].get("member"), str)):
+                raise StageRefused("a state object appears twice",
+                                   {"member": exc.args[1]["member"]}) from exc
+            raise StageRefused("a bound state file could not be loaded") from exc
+        except (FrozenStateError, BoundedStateReadError, OSError, ValueError,
                 KeyError, TypeError, ArtifactError, RecursionError) as exc:
             raise StageRefused("a bound state file could not be loaded") from exc
 
