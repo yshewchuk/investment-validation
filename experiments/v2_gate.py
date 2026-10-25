@@ -13,10 +13,9 @@ from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments import gate_report as gate
-from experiments import lib
+from experiments import lib, record_export
 from experiments import native_outcomes as outcomes
 from experiments import native_registration as native
-from experiments import record_export
 
 
 def main(argv=None):
@@ -51,7 +50,8 @@ def main(argv=None):
         binding = dict(code_root=Path(__file__).resolve().parents[1], as_of_month=args.as_of_month,
                        scope=args.scope, event_ids=args.event_id)
         if args.action == "register":
-            registration = native.register_native(conn, store, repository, spec, **binding)
+            registration = native.register_native(conn, store, repository, spec, **binding,
+                                                  max_evidence_bytes=args.max_registration_bytes)
             print(json.dumps({"registered": registration.variant_id}))
             return 0
         registration = native.read_native_registration(conn, store, spec,
@@ -131,7 +131,8 @@ def main(argv=None):
         except OpsError as failure:
             if not (problem.code == "HOLDOUT_ACCESS_DENIED" and failure.code == "EXPERIMENT_IDENTITY_CONFLICT"):
                 problem, ref = failure.problem, None
-        print(json.dumps({"refused": problem.code, "refusal_ref":
+        print(json.dumps({"refused": problem.code,
+                          **({"details": problem.details} if problem.code == "RESOURCE_LIMIT_EXCEEDED" else {}), "refusal_ref":
                           foundation.to_document(ref) if ref else problem.details.get("refusal_ref")}))
         return 2
     finally:

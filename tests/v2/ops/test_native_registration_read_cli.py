@@ -24,9 +24,9 @@ def arguments(cli, tmp_path):
     return args
 
 
-@pytest.mark.parametrize("cli", CLIS, ids=lambda cli: cli.__name__.rsplit(".", 1)[-1])
+@pytest.mark.parametrize("cli,register", [(cli, False) for cli in CLIS] + [(v2_gate, True), (v2_prediction, True)])
 @pytest.mark.parametrize("budget", [None, 1, CAP + 1, 2**62 - 1])
-def test_cli_forwards_default_or_explicit_finite_budget_and_closes(tmp_path, monkeypatch, capsys, cli, budget):
+def test_cli_forwards_default_or_explicit_finite_budget_and_closes(tmp_path, monkeypatch, capsys, cli, register, budget):
     conn, store, spec = object(), object(), object()
     closed, calls = [], []
     connection = SimpleNamespace(close=lambda: closed.append(conn))
@@ -42,19 +42,27 @@ def test_cli_forwards_default_or_explicit_finite_budget_and_closes(tmp_path, mon
         monkeypatch.setattr(owner, name, lambda value: None)
         monkeypatch.setattr(cli.outcomes, "publish_native_refusal", lambda *args, **kwargs: None)
 
-    def read_registration(actual_conn, actual_store, actual_spec, *, max_evidence_bytes):
+    def registration_boundary(actual_conn, actual_store, *positional, max_evidence_bytes, **kwargs):
+        actual_spec = positional[-1]
         assert (actual_conn, actual_store, actual_spec) == (connection, store, spec)
         calls.append(max_evidence_bytes)
-        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stop after exercising the read boundary")
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration exceeds its UTF-8 byte budget",
+                   details={"registration_bytes": max_evidence_bytes + 1, "max_registration_bytes": max_evidence_bytes})
 
-    monkeypatch.setattr(cli if cli is v2_magnitude_search else native, "read_native_registration", read_registration)
+    monkeypatch.setattr(cli if cli is v2_magnitude_search else native,
+                        "register_native" if register else "read_native_registration", registration_boundary)
     args = arguments(cli, tmp_path)
+    if register:
+        args[0] = "register"
     if budget is not None:
         args += ["--max-registration-bytes", str(budget)]
     assert cli.main(args) == 2
     output = json.loads(capsys.readouterr().out)
     problem = output["refused"]
-    assert (problem["code"] if isinstance(problem, dict) else problem) == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert (problem["code"] if isinstance(problem, dict) else problem) == "RESOURCE_LIMIT_EXCEEDED"
+    limit = CAP if budget is None else budget
+    assert (problem if isinstance(problem, dict) else output)["details"] == {
+        "registration_bytes": limit + 1, "max_registration_bytes": limit}
     assert calls == [CAP if budget is None else budget] and closed == [conn]
 
 

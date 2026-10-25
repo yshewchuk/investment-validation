@@ -12,7 +12,7 @@ from engine.v2.ops.native_registration import MAX_NATIVE_EVIDENCE_BYTES
 from engine.v2.research.magnitude_folds import annual_fold
 from experiments import native_registration as native
 from tests.v2.ops.native_bounds_support import object_bytes
-from tests.v2.ops.test_native_registration_read_bounds import refuses
+from tests.v2.ops.test_native_registration_read_bounds import size_refusal
 from tests.v2.research import magnitude_trial_support as support
 
 
@@ -47,9 +47,21 @@ def test_large_history_binding_requires_finite_override_and_loads_unchanged(tmp_
         assert count == 7000 and size > MAX_NATIVE_EVIDENCE_BYTES
         record_property("synthetic_event_count", count)
         record_property("registration_bytes", size)
+        before_rows, before_objects = support.catalog_rows(source.conn), object_bytes(source.store)
+        # Reuse the real prepared shape, not a claimed executable expanded population.
+        with monkeypatch.context() as patch:
+            patch.setattr(native, "prepare_native_registration", lambda *a, **k: (registration, spec))
+            with size_refusal(size, MAX_NATIVE_EVIDENCE_BYTES):
+                native.register_native(source.conn, source.store, source.repository, spec,
+                                       code_root=support.ROOT, as_of_month=support.MONTH)
+        assert support.catalog_rows(source.conn) == before_rows
+        assert object_bytes(source.store) == before_objects
         # Persist a stored-shape fixture through the existing reservation writer.
         # This does not claim the expanded metadata passed fresh preparation.
-        native.reserve_native_registration(source.conn, source.store, registration, spec)
+        with monkeypatch.context() as patch:
+            patch.setattr(native, "prepare_native_registration", lambda *a, **k: (registration, spec))
+            assert native.register_native(source.conn, source.store, source.repository, spec,
+                code_root=support.ROOT, as_of_month=support.MONTH, max_evidence_bytes=size) == registration
         before_rows = support.catalog_rows(source.conn)
         before_objects = object_bytes(source.store)
         source.conn.execute("PRAGMA query_only=ON")
@@ -64,10 +76,10 @@ def test_large_history_binding_requires_finite_override_and_loads_unchanged(tmp_
             return read_verified(ref)
 
         monkeypatch.setattr(source.store, "read_verified", read_once)
-        with refuses("native registration differs from its immutable binding"):
+        with size_refusal(size, MAX_NATIVE_EVIDENCE_BYTES):
             native.read_native_registration(source.conn, source.store, spec)
         assert reads == []
-        with refuses("native registration differs from its immutable binding"):
+        with size_refusal(size, size - 1):
             native.read_native_registration(source.conn, source.store, spec, max_evidence_bytes=size - 1)
         assert reads == []
         loaded = native.read_native_registration(source.conn, source.store, spec, max_evidence_bytes=size)

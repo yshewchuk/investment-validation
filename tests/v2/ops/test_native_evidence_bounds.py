@@ -285,7 +285,7 @@ def test_registration_artifact_bound_is_opt_in_and_precedes_store_read():
         with pytest.raises(OpsError) as error:
             native.verified_registration_bytes(conn, SimpleNamespace(read_verified=forbid_decode), "native-test",
                                                max_evidence_bytes=CAP)
-        assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not error.value.problem.retryable
+        assert error.value.code == "RESOURCE_LIMIT_EXCEEDED" and not error.value.problem.retryable
 
 
 @pytest.mark.parametrize("extra", [0, 1])
@@ -296,7 +296,7 @@ def test_registration_opt_in_artifact_metadata_honors_exact_custom_bound(extra):
         if extra:
             evidence["native_registration"] = to_document(replace(ref, byte_size=limit + extra))
             conn.execute("UPDATE experiment_runs SET evidence_json=?", (canonical_json(evidence),))
-            with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+            with pytest.raises(OpsError, match="RESOURCE_LIMIT_EXCEEDED"):
                 native.verified_registration_bytes(conn, SimpleNamespace(read_verified=forbid_decode), "native-test",
                                                    max_evidence_bytes=limit)
         else:
