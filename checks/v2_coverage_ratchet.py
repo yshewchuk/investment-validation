@@ -224,6 +224,7 @@ PHASE1_RENAMED = {
     "tests/test_v2_data_computed_moves_table.py": "tests/v2/data/test_computed_moves_table.py",
     "tests/test_v2_serving_bridge.py": "tests/v2/serving/test_v2_serving_bridge.py",
     "tests/test_v2_ops_training_job.py": "tests/v2/ops/test_v2_ops_training_job.py",
+    "tests/test_v2_ops_health.py": "tests/v2/ops/test_v2_ops_health.py",
 }
 # Relocated tests kept explicitly in the suite, including moved baseline paths.
 PHASE1_EXTRA = (
