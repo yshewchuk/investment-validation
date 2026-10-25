@@ -293,19 +293,22 @@ def _remember_unknown_symbol(ticker: str) -> None:
         pass
 
 
-#: Market-context tickers the v2 feature path reads from ``daily_market``. Legacy
-#: code must not import engine.v2 (layer rule), so this mirrors
+#: Market-context tickers the nightly's per-ticker history backfill keeps
+#: populated: SPY here only retains its ``daily_market`` history for the
+#: legacy market-wide read -- the v2 regime features never read it (they read
+#: the ``REGIME_TICKER`` ``price_history`` close). Legacy code must not import
+#: engine.v2 (layer rule), so this mirrors
 #: ``engine.v2.features.panel_row_inputs.CONTEXT_TICKERS``, the owner; a v2 test
 #: asserts the two are equal.
 CONTEXT_TICKERS: tuple[str, ...] = ("SPY",)
 
 
 def history_backfill_tickers(tickers) -> list[str]:
-    """``tickers`` plus the market-context tickers the feature path reads.
+    """``tickers`` plus the market-context tickers whose history is backfilled.
 
     Context tickers (SPY) never have an earnings event, so the calendar-driven
     ``tickers`` never include them; without this they keep only the market-wide
-    daily pull's short history and the regime feature has too few sessions.
+    daily pull's short history.
     """
     return sorted({str(t) for t in tickers} | set(CONTEXT_TICKERS))
 

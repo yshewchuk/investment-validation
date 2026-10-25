@@ -115,6 +115,12 @@ Bumped to v20: ``tests/test_v2_ops_training_job.py`` moved to
 the move and ``PHASE1_RENAMED`` registers the relocation. Counts and source
 hashes remain historical, not a fresh measurement.
 
+Bumped to v21: ``tests/test_v2_ops_partition_consumer.py`` moved and renamed
+to ``tests/v2/ops/test_partition_consumer.py`` (test-layout ratchet); the
+baseline records the new path directly, so the declared file list and the
+measurement identity it feeds refresh. Counts and source hashes remain
+historical, not a fresh measurement.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``

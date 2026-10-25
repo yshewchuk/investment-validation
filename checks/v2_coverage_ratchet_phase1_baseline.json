@@ -83,7 +83,7 @@
     "tests/test_v2_ops_nightly_quote_rows.py",
     "tests/test_v2_ops_nightly_raw_rows.py",
     "tests/test_v2_ops_outcome_session_backfill_wiring.py",
-    "tests/test_v2_ops_partition_consumer.py",
+    "tests/v2/ops/test_partition_consumer.py",
     "tests/test_v2_ops_price_history.py",
     "tests/test_v2_ops_provider_admission.py",
     "tests/test_v2_ops_provider_credentials.py",

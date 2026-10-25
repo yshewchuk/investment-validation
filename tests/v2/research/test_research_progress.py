@@ -149,7 +149,7 @@ def test_shared_scan_counts_decoded_rows_against_bound_and_preserves_results(mon
         def scan_population_bound(self, *args, **kwargs):
             calls.append("bound")
             return 6  # Candidate fragments can contain rows the scan predicate excludes.
-        def scan(self, query, *, table_name):
+        def scan(self, query, *, table_name, max_object_bytes=None):
             calls.append("scan")
             assert query.max_result_rows == 6 and query.max_batch_rows == 2
             assert query.columns == ("ticker", "obs_date", "expiry", "dte", "strike", "right",
