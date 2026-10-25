@@ -1,32 +1,32 @@
 # `engine/v2/research` — architecture
 
-Layer 7.0 in both `checks/layer_map.py` and the root `/ARCHITECTURE.md`
-layer table. Native snapshot-reading counterparts to `tools/signal_screen.py`,
-`tools/fill_quality.py`, `engine/data/pulls/polygon_fills.py`'s read path,
-`engine/replay.py` (over a committed snapshot) and `engine/build_trades.py`'s
-v2 write path. The legacy modules themselves are untouched and keep
-publishing exactly as before; this package adds parallel `tools/v2_*` CLIs
-that read a pinned v2 snapshot instead.
+Layer 7.0 in both `checks/layer_map.py` and the root `/ARCHITECTURE.md` layer table.
+Native snapshot-reading counterparts to `tools/signal_screen.py`, `tools/fill_quality.py`,
+`engine/data/pulls/polygon_fills.py`'s read path, `engine/replay.py` (over a committed snapshot)
+and `engine/build_trades.py`'s v2 write path. The legacy modules themselves are untouched and keep
+publishing exactly as before; this package adds parallel `tools/v2_*` CLIs that read a pinned v2 snapshot instead.
 
 `tools/log_diagnostics.py` is deliberately **not** moved here: it reads only
 a local transactions-log CSV (plus an optional sibling `metrics_*.json`), never the Tier-2 store, so it needs no snapshot-pinned counterpart.
 
 ## Purpose
 
-Offline research analysis CLIs — real-fill quality, a cross-sectional signal
-screen, the real-trade pull's universe plan, deterministic as-of replay, and
-the trade table that replay publishes — reading exactly one resolved,
-named snapshot per run instead of the legacy mutable Tier-2 store. It
-produces measured tables and reports for a person to read; it never decides
-a research conclusion, never fetches from a network provider, and never
-mutates the legacy trades ledger. `experiment_trades.load_trades` extends
-this same one-snapshot-per-read contract to the v2 experiment platform:
-read the committed `trades` version
-`tools/v2_build_trades.py` published, never the legacy mutable store.
-Completed experiments need not remain runnable;
-their historical wrappers are not a supported experiment execution boundary.
+Offline research analysis CLIs — real-fill quality, a cross-sectional signal screen, the real-trade pull's universe plan,
+deterministic as-of replay, and the trade table that replay publishes — reading exactly one resolved, named snapshot per run
+instead of the legacy mutable Tier-2 store. It produces measured tables and reports for a person to read; it never decides a
+research conclusion, never fetches from a network provider, and never mutates the legacy trades ledger. `experiment_trades.load_trades`
+extends this same one-snapshot-per-read contract to the v2 experiment platform: read the committed `trades` version `tools/v2_build_trades.py`
+published, never the legacy mutable store. Completed experiments need not remain runnable; their historical wrappers are not a supported experiment execution boundary.
 
 ## Stage-2 magnitude panel foundation
+
+`_confirmed_metadata.reduce_sequences` is internal/synthetic-only: a pure seven-column DataFrame reducer of a complete caller-supplied view, not evidence of completeness.
+Strict naive `datetime64[ns]` types precede public `confirmed_event_metadata.classify_metadata`; public `event_sequence(warmup=4)` supplies ordinals.
+All rows participate in duplicate ID, ticker/day, date-conflict and ticker/cluster refusal, including unconfirmed siblings; equal clusters across tickers are independent.
+Detached sequences retain exact empty states/counts/seven-field evidence. Malformed requests/rows (including unrequested tickers): `CONTRACT_MISMATCH`;
+semantic conflicts: `IDENTITY_CONFLICT`; native `DataError` unchanged. Work is O(n log n + t log t), state O(n + t) for n rows/t tickers; caller allocation is not an RSS bound.
+Later bounded composition owns retention/proof caps. No partial output, I/O, cache, retry, transaction, index identity,
+source admission, coverage, holdout/value eligibility or runtime integration exists.
 
 `magnitude_panel_table` uses native `TableContract`/`ColumnContract`, JSON and canonical hashing.
 Its immutable v1 event/context/horizon key has ordered H/HM/HMO dictionaries, excluding learned Tier4 outputs/current-event outcomes.
