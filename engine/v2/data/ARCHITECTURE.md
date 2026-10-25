@@ -951,3 +951,17 @@ Root doc §5 invariants this package is responsible for:
   already loaded in this build, never by scanning further back; deliberate,
   not a defect (cross-year carry tracked as issue
   [#195](https://github.com/yshewchuk/investment-validation/issues/195)).
+
+### Scalar-only bounded catalog prerequisite
+
+`_bounded_catalog.probe_catalog` borrows the caller's read transaction, returning
+only counts/stored-byte totals for the future [session](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md), not a public factory.
+Stdlib SQLite capped COUNT/LIMIT,
+typeof and BLOB-length probes enforce all five explicit caps before transfer. Charge
+snapshot once, binding/dataset/contract per table, membership/fragment/object
+per occurrence, including unselected tables, repeated IDs and zero-row fragments.
+Missing joins/types refuse; only integer/NULL scalars cross into Python one row
+at a time. No connection settings or transaction ownership change. Limits bound
+transfer, not SQLite CPU/RSS. Payload/UTF-8 checks, native identity and lifetime-safe
+facade/scanner wiring remain separate prerequisites. This proves no source,
+coverage, confirmation, PIT or execution property; existing readers stay intact.

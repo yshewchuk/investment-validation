@@ -23,6 +23,9 @@ Replaces (§4.4): `data/sources/`, `data/normalize/`, `data/pulls/`, `store.py`,
 - **Compute a trading verdict** — `engine/v2/scoring` does it instead.
 - **Change a champion** — `engine/v2/models/training` does it instead.
 
+`_bounded_catalog` is an internal scalar-only pre-transfer prerequisite, not a
+public factory or snapshot verifier.
+
 ## Public interface
 
 The names other packages may import. Everything else is internal regardless of
