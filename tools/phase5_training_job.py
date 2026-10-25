@@ -55,6 +55,7 @@ Dataset builders and the legacy selection each mirrors:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import sys
 from pathlib import Path
@@ -173,6 +174,19 @@ STATES = tuple(f"driver_residual_pool:{role}" for role in ("size", "implied_t1",
 #: spelled out so this job stays off the heavy ``engine.score`` import.
 _CHOOSER_POOL_FILE = "chooser_analog_pool.parquet"
 
+#: Read bound: the real pool is ~2.5 MB; refuse a source grown past this
+#: instead of reading an unbounded frame into memory.
+_CHOOSER_POOL_MAX_BYTES = 256 * 1024 * 1024
+
+
+def _iso_cutoff(value: str) -> str:
+    """The normalized ``YYYY-MM-DD`` cutoff string.
+
+    Raises ``TypeError``/``ValueError`` for anything that is not an ISO date;
+    callers turn that into their own refusal (``SystemExit`` / ``ap.error``).
+    """
+    return datetime.date.fromisoformat(value).isoformat()
+
 
 def _guard(where: str) -> None:
     """Both no-fit switches, before any row is read (as ``run_training_job``)."""
@@ -229,10 +243,15 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
 
         if cutoff is None:
             raise SystemExit("chooser_analog_pool needs a cutoff")
-        bound = str(pd.Timestamp(cutoff).date())
+        try:
+            bound = _iso_cutoff(cutoff)
+        except (TypeError, ValueError):
+            raise SystemExit("chooser_analog_pool cutoff must be an ISO date (YYYY-MM-DD)")
         source = paths.FEATURES / _CHOOSER_POOL_FILE
         if not source.is_file():
             raise SystemExit("chooser analog pool source is missing")
+        if source.stat().st_size > _CHOOSER_POOL_MAX_BYTES:
+            raise SystemExit("chooser analog pool source is too large")
         started = time.perf_counter()
         frame = pd.read_parquet(source)
         read_s = time.perf_counter() - started
@@ -509,6 +528,7 @@ def main(argv=None) -> int:
     ap.add_argument("--cutoff", action="append", default=[],
                     help="evidence cutoff YYYY-MM-DD (calibration: repeatable, one fold each; "
                          "paired_residual_pool: optional exclusive event-date bound; "
+                         "chooser_analog_pool: required, exclusive exit-date bound; "
                          "trailing_pnl_cutoff: event dates, one artifact per month)")
     ap.add_argument("--pairs", help="recalibration pairs parquet (default: legacy PAIRS_PATH)")
     ap.add_argument("--strategy", action="append", default=[],
@@ -555,6 +575,12 @@ def main(argv=None) -> int:
                      f"{CHOOSER_POOL_STATE}")
         if args.state == CHOOSER_POOL_STATE and len(args.cutoff) != 1:
             ap.error(f"{CHOOSER_POOL_STATE} needs exactly one --cutoff")
+        if args.state == CHOOSER_POOL_STATE:
+            for value in args.cutoff:
+                try:
+                    _iso_cutoff(value)
+                except (TypeError, ValueError):
+                    ap.error("chooser_analog_pool cutoff must be an ISO date (YYYY-MM-DD)")
         summary = run_state_job(args.state, out, plan_only=args.plan_only,
                                 cutoff=args.cutoff[0] if args.cutoff else None,
                                 ticker_chunk=args.ticker_chunk)

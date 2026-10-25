@@ -123,7 +123,8 @@ def _state_problems(params) -> list[str]:
         problems.append("mode=state needs a frozen P5-4 state")
     if len(params.cutoffs) > 1 or (
             params.cutoffs and params.state not in ("paired_residual_pool", "chooser_analog_pool")):
-        problems.append("at most one cutoff, only for paired_residual_pool")
+        problems.append("at most one cutoff, only for paired_residual_pool "
+                        "or chooser_analog_pool")
     if params.state == "chooser_analog_pool" and len(params.cutoffs) != 1:
         problems.append("chooser_analog_pool needs exactly one cutoff")
     if params.pairs_path:
