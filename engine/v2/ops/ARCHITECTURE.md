@@ -441,9 +441,9 @@ cheap catalog-only identity check parsing the paired `"score"` job's own
 idempotency key to recover `(session, scope_hash, snapshot_pinned)`, or
 `None`). `nightly.GRAPH` gains a `"native_score_batch": ("score",)` node
 (topological documentation only — no submission path reads it) and
-`OPTIONAL` gains `"native_score_batch"`. A `legacy`-input-mode plan built
-directly via `ops plan` (not the scheduled trigger) still gets a silent
-no-op (see "Failure semantics" below).
+`OPTIONAL` gains `"native_score_batch"`. A legacy-input-mode plan created
+directly with `ops plan` has no pinned native identity; therefore the sidecar
+does not classify it as a release binding failure (see "Failure semantics").
 
 **Cutover PR-7b (implemented, #145/#150): the shadow nightly plan pins a snapshot before scoring.** `nightly_trigger._default_plan` runs in `input_mode="snapshot"`, `snapshot_scope="shadow"`: legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/`"model_evidence"` read through that pinned snapshot. `pin_snapshot_inputs` binds the scheduled plan to the exact `snapshot_id` produced by its price-history capture; its three required bindings are `core/snapshot_contracts.py::SNAPSHOT_BINDINGS`. The native batch worker resolves that pinned snapshot and enumerates its forward board. This never starts the real legacy nightly: `nightly_trigger.py` runs on its own systemd timer (`ops/systemd/native-nightly-trigger.timer`, every 30 minutes), separate from whatever schedules the legacy nightly.
 
@@ -1222,7 +1222,7 @@ job.
 
 | Sidecar | Missing-input case | Idempotency key scope |
 |---|---|---|
-| `native_score_batch` shadow | no succeeded legacy score — reported, not submitted; a release binding that cannot be resolved or verified (no production root, no current pointer, or an unusable model member) is durably recorded per eligible occurrence/scope as stage `FAILED` with typed `MODEL_NOT_READY` in `native_stage_failures` and `ops health` v1.2, never only an event; unchanged retries do not rewrite it, and cached failures still record new occurrences; this stage failure does not block legacy publication or change required-stage outcomes, and no fallback release or empty success hides it; an eligible pinned-snapshot tick submits producer parameters and the worker produces both documents (R1–R6 above) | the specific succeeded score job read, not session alone |
+| `native_score_batch` shadow | no succeeded legacy score — reported, not submitted; a release binding that cannot be resolved or verified (no production root, no current pointer, or an unusable model member) is durably recorded per eligible occurrence/scope as stage `FAILED` with typed `MODEL_NOT_READY` in `native_stage_failures` and `ops health` v1.2, never only an event; unchanged retries do not rewrite it, and cached failures still record new occurrences; if catalog persistence fails, the error is logged but no durable row is claimed; this stage failure does not block legacy publication or change required-stage outcomes, and no fallback release or empty success hides it; an eligible pinned-snapshot tick submits producer parameters and the worker produces both documents (R1–R6 above) | the specific succeeded score job read, not session alone |
 | `native_parity` | no paired, succeeded `native_score_batch`/`score` identity yet, including a failed release-binding stage — returns without submitting; a CONFIRMED schema mismatch parks that `native_score_batch_job_id`, skipping the artifact read and attempt spend on every later tick carrying it (the identity/existing-job lookup itself still runs on eligible ticks) | the specific `native_score_batch` identity read |
 | `_ensure_shadow_snapshot` | the legacy store has not caught up to `as_of` yet — `"not_yet"`/`"snapshot_not_yet"`, resumable, no attempt consumed | `(as_of, attempt)`; a genuine retry after a terminal failure mints a fresh `attempt`, never reusing a dead key |
 | pool-nightly refresh | no succeeded `finality`/`features` job, no deployed pointer, or no `legacy_manifest.json` binding on that job — returns without submitting; a pointer that is not a bounded regular file is reported | one key per phase, scoped by session, scoring manifest and prior release id (`Service._reconcile_pool_nightly_refresh`; contract in models doc §2.2.1) |

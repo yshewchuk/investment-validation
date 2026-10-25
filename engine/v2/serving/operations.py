@@ -76,6 +76,16 @@ MODEL_RELEASE_NOT_DEPLOYED = "MODEL_RELEASE_NOT_DEPLOYED"
 MODEL_RELEASE_POINTER_UNRESOLVED = "MODEL_RELEASE_POINTER_UNRESOLVED"
 MODEL_RELEASE_NOT_BOUND = "MODEL_RELEASE_NOT_BOUND"
 
+_OPERATIONS_HEALTH_SCHEMA_VERSIONS = (
+    "operations_health.v1.0",
+    "operations_health.v1.1",
+    "operations_health.v1.2",
+)
+_HEALTH_ARTIFACT_MAX_BYTES = 1024 * 1024
+_JS_HEALTH_SCHEMA_VERSIONS = "[" + ",".join(
+    f"'{version}'" for version in _OPERATIONS_HEALTH_SCHEMA_VERSIONS
+) + "]"
+
 
 def _safe_file(root: Path, relative: str) -> Path:
     parts = safe_relative_path(relative)
@@ -102,13 +112,19 @@ def _resolve_current_id(config) -> str:
     return name
 
 
+def _load_health_document(path: Path) -> object:
+    with path.open("rb") as handle:
+        raw = handle.read(_HEALTH_ARTIFACT_MAX_BYTES + 1)
+    if len(raw) > _HEALTH_ARTIFACT_MAX_BYTES:
+        raise ValueError("unsupported health artifact")
+    return json.loads(raw)
+
+
 def _read_health(path: Path) -> bytes:
     if path.is_symlink() or not path.is_file():
         raise ValueError("health artifact is indirect")
-    document = json.loads(path.read_text())
-    if not isinstance(document, dict) or document.get("schema_version") not in (
-            "operations_health.v1.0", "operations_health.v1.1",
-            "operations_health.v1.2"):
+    document = _load_health_document(path)
+    if not isinstance(document, dict) or document.get("schema_version") not in _OPERATIONS_HEALTH_SCHEMA_VERSIONS:
         raise ValueError("unsupported health artifact")
     return json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
@@ -128,12 +144,10 @@ def _read_calibration_health(path: Path) -> bytes:
     """
     if path.is_symlink() or not path.is_file():
         raise ValueError("health artifact is indirect")
-    document = json.loads(path.read_text())
+    document = _load_health_document(path)
     if not isinstance(document, dict):
         raise ValueError("unsupported health artifact")
-    if document.get("schema_version") in (
-            "operations_health.v1.0", "operations_health.v1.1",
-            "operations_health.v1.2"):
+    if document.get("schema_version") in _OPERATIONS_HEALTH_SCHEMA_VERSIONS:
         return _read_health(path)
     if "generated_at" not in document or "n_scored" not in document:
         raise ValueError("unsupported health artifact")
@@ -168,8 +182,8 @@ def shell_document(*, frozen_at: str | None = None) -> bytes:
     its own explicit reason (missing/malformed identity or schedule evidence
     is unknown, never current). A non-empty ``native_stage_failures`` list
     also names each failed native stage as its own degraded reason (safe
-    fields only). Any fetch/parse failure shows unknown/unavailable without
-    erasing the pin or throwing out of the shell.
+    fields only); v1.2 requires that field to be an array, so a missing or non-array value is an explicit unknown reason rather than a silent
+    omission (v1.0/v1.1 may omit it); any fetch/parse failure shows unknown/unavailable without erasing the pin or throwing out of the shell.
     """
     frozen = frozen_at or "unknown"
     routes = ("/#/trades/board", "/#/trades/explorer", "/#/trades/book", "/#/models/modelx",
@@ -184,7 +198,7 @@ const FROZEN='{frozen}',DAY=86400000;
 const state=document.querySelector('#state'),stamp=document.querySelector('#stamp'),banner=document.querySelector('#ops'),releaseEl=document.querySelector('#release'),publishedEl=document.querySelector('#published'),driftEl=document.querySelector('#drift'),optin=document.querySelector('#optin'),frame=document.querySelector('#legacy');
 let pinned=null,published,health=null,healthNote='health not fetched yet',currentSeq=0,healthSeq=0;
 function age(ms){{let h=Math.floor(ms/3600000);if(ms>0&&h<1)h=1;const d=Math.floor(h/24);return d?d+'d '+(h%24)+'h':h+'h';}}
-function usable(j){{if(!j||typeof j!=='object'||Array.isArray(j)||!['operations_health.v1.0','operations_health.v1.1','operations_health.v1.2'].includes(j.schema_version))return false;const at=Date.parse(j.generated_at);return !Number.isNaN(at)&&at<=Date.now();}}
+function usable(j){{if(!j||typeof j!=='object'||Array.isArray(j)||!{_JS_HEALTH_SCHEMA_VERSIONS}.includes(j.schema_version))return false;const at=Date.parse(j.generated_at);return !Number.isNaN(at)&&at<=Date.now();}}
 async function pollHealth(){{const seq=++healthSeq;try{{const r=await fetch('/health.json',{{credentials:'same-origin'}});if(seq!==healthSeq)return;if(!r.ok)throw Error('http');const j=await r.json();if(seq!==healthSeq)return;if(usable(j)){{health=j;healthNote='';}}else{{health=null;healthNote='health artifact unusable: schema or generated_at';}}}}catch(e){{if(seq!==healthSeq)return;health=null;healthNote='health fetch failed: unavailable';}}if(seq!==healthSeq)return;render();}}
 async function pollCurrent(){{const seq=++currentSeq;let ok=false,id=null;try{{const r=await fetch('/release/current.json',{{credentials:'same-origin'}});if(!r.ok)throw Error('http');const j=await r.json();id=(j&&typeof j.release_id==='string'&&j.release_id)?j.release_id:null;ok=true;}}catch(e){{}}if(seq!==currentSeq)return;published=ok?id:null;render();}}
 function sessionDate(s){{if(typeof s!=='string'||!s)return null;const m=/^(?:eng-night-)?([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})$/.exec(s);if(!m)return null;const tail=m[1];const at=Date.parse(tail);if(Number.isNaN(at))return null;return new Date(at).toISOString().slice(0,10)===tail?at:null;}}
@@ -201,6 +215,7 @@ if(!cb||typeof cb!=='object'||typeof cb.consecutive_nights!=='number'||!Array.is
 else{{if(cb.consecutive_nights!==0)reasons.push('failed engineering nights: '+cb.consecutive_nights+' consecutive');if(cb.unknown_occurrences.length>0)reasons.push('scheduled observations missing: '+cb.unknown_occurrences.join(', '));}}
 const nsf=health.native_stage_failures;
 if(Array.isArray(nsf)){{for(const f of nsf){{if(!f||typeof f!=='object'){{unknown=true;reasons.push('native stage failure evidence malformed');continue;}}const occ=typeof f.occurrence==='string'&&f.occurrence?f.occurrence:'(occurrence omitted)';const sid=typeof f.stage_id==='string'&&f.stage_id?f.stage_id:'(stage omitted)';const ec=typeof f.error_code==='string'&&f.error_code?f.error_code:'(error omitted)';const st=typeof f.status==='string'&&f.status?f.status:'(status omitted)';reasons.push('native stage failure: occurrence '+occ+', stage '+sid+', error '+ec+', status '+st);}}}}
+else if(health.schema_version==='operations_health.v1.2'){{unknown=true;reasons.push('native stage failure evidence missing or malformed: expected an array');}}
 if(ms>DAY)reasons.push('observation older than 24 hours');
 stamp.textContent='updated '+text+' ago';
 if(reasons.length===0){{state.textContent='current';banner.className='';return;}}

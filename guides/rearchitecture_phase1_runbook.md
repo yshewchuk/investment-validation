@@ -120,13 +120,15 @@ requires `--idempotency-key`, but what it MEANS depends on the plan kind:
 
 ## 3. Health surface
 
-`health(conn, clock=...)` returns `operations_health.v1.0`:
+`health(conn, clock=...)` returns `operations_health.v1.2`:
 `generated_at`, `executor_mode` (`watchdog`), `containment` (`best_effort`),
 `jobs` (everything not succeeded/cancelled, with queue reasons), `watermarks`,
 `current_release` (latest delivered), `withheld_release` (latest `eligible=0`),
 `code_budgets` (`ok`, `first_failed_on`, `consecutive_nights`,
-`unknown_occurrences`, `latest`, `override` — always `null` while D5 stands)
-and `activation: shadow_only`. The streak counts scheduled nightly
+`unknown_occurrences`, `latest`, `override` — always `null` while D5 stands),
+`activation: shadow_only`, and `native_stage_failures` (up to 100 newest
+durable native-stage failures, including `FAILED`, `error_code` and
+`problem_json`; the catalog retains all records). The streak counts scheduled nightly
 *occurrences*, not attempts (§10.4); missing checks land in
 `unknown_occurrences`, never as green.
 
