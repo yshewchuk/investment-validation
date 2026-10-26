@@ -69,6 +69,29 @@ def test_experiments_cannot_import_each_live_release_symbol():
     assert len(findings) == 5
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"import engine.v2.models as m\nm.current_release()\n",
+        b"from engine.v2.models import *\n",
+        b"from engine.v2 import models as m\nm.current_release()\n",
+    ],
+)
+def test_experiments_cannot_reach_live_release_module_by_any_import_form(body):
+    findings = isolation.check_files({"experiments/imports.py": body})
+    assert _rules(findings) == {"forbidden-import"}
+    assert len(findings) == 1
+
+
+def test_experiments_cannot_alias_the_live_ledger_path():
+    findings = isolation.check_files({
+        "experiments/ledger_path.py":
+            b"import engine.paths as paths\nLEDGER_PATH = paths.LEDGER\n",
+    })
+    assert _rules(findings) == {"forbidden-live-root"}
+    assert len(findings) == 1
+
+
 def test_experiments_cannot_name_live_roots_but_may_name_own_ledger():
     files = {
         "experiments/run.py": (
@@ -170,6 +193,18 @@ def test_oversized_tracked_source_refuses(monkeypatch, tmp_path):
     (tmp_path / "source.py").write_bytes(b"12345")
     _listed_source(monkeypatch, "source.py")
     with pytest.raises(isolation.IsolationCheckError, match="exceeds 4 bytes"):
+        isolation.scan_repository(tmp_path)
+
+
+def test_aggregate_source_size_refuses(monkeypatch, tmp_path):
+    monkeypatch.setattr(isolation, "MAX_TOTAL_SOURCE_BYTES", 4)
+    (tmp_path / "a.py").write_bytes(b"abc")
+    (tmp_path / "b.py").write_bytes(b"de")
+    monkeypatch.setattr(isolation, "_git_catalog", lambda root: b"a.py\0b.py\0")
+    with pytest.raises(
+        isolation.IsolationCheckError,
+        match="aggregate Python source exceeds 4 bytes",
+    ):
         isolation.scan_repository(tmp_path)
 
 

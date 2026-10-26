@@ -90,7 +90,7 @@ check defines missing-input and failure outcomes:
 | `.env` missing/empty (`check_files`) | CLI warns unless `--quiet` is set; current-value matching inactive; credential-pattern checks remain active; other checks continue |
 | No secret needles (`check_bundle`) | Record `no-secrets-loaded`; still check bundle files |
 | `repo_hygiene.py` scan | Clean: exit 0; violations: exit 1 |
-| `live_experiment_isolation.py` | Static import or path-root violations, unreadable/unsafe/oversized source, or invalid Python refuse CI with exit 1; the PR selector always includes its test, and push/workflow-dispatch runs the full suite; no partial scan or fallback is clean |
+| `live_experiment_isolation.py` | Its always-run PR integration test executes the tracked-source scan and CLI; forbidden imports/root callers, invalid Python, unsafe/oversized source or source corpus, and Git listing failure/timeout/oversized catalog refuse with exit 1; no partial scan or fallback is clean |
 | Staged hygiene read failure | Default returns empty bytes; `strict=True` raises `CalledProcessError` |
 | Worktree hygiene read failure | Default returns empty bytes; `strict=True` raises `OSError`; missing non-symlink paths return empty bytes in either mode |
 | The pre-commit hook finds no `npx` | One-line install hint on stderr; commit blocked (fails closed) |

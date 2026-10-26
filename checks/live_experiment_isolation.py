@@ -24,6 +24,7 @@ PRODUCTION_PATHS = (
 )
 EXPERIMENT_PATHS = ("engine/v2/research/", "experiments/")
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
+MAX_TOTAL_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_CATALOG_BYTES = 16 * 1024 * 1024
 MAX_CATALOG_STDERR_BYTES = 4 * 1024
 GIT_TIMEOUT_SECONDS = 30
@@ -163,23 +164,31 @@ def check_files(files: dict[str, bytes]) -> list[Finding]:
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 for target in _imports(node, path):
                     key = (path, node.lineno, "forbidden-import")
-                    if _under(target, denied) and key not in finding_keys:
+                    refused = _under(target, denied) or (
+                        experiment and target == "engine.v2.models")
+                    if refused and key not in finding_keys:
                         findings.append(Finding(
                             path, node.lineno, "forbidden-import",
                             f"{target} crosses the D7 isolation boundary",
                         ))
                         finding_keys.add(key)
             if experiment and isinstance(node, (ast.Name, ast.Attribute, ast.Constant)):
-                value = (node.id if isinstance(node, ast.Name) else
-                         node.attr if isinstance(node, ast.Attribute) else node.value)
-                if isinstance(value, str):
-                    normalized = value.lower().replace("\\", "/")
-                    if (value == "DEPLOYED" or
-                            any(token in normalized for token in EXPERIMENT_FORBIDDEN_TOKENS)):
-                        findings.append(Finding(
-                            path, getattr(node, "lineno", 1), "forbidden-live-root",
-                            f"experiment source names isolated live root/token {value!r}",
-                        ))
+                if isinstance(node, ast.Attribute) and node.attr == "LEDGER":
+                    findings.append(Finding(
+                        path, getattr(node, "lineno", 1), "forbidden-live-root",
+                        "experiment source accesses isolated live root 'LEDGER'",
+                    ))
+                else:
+                    value = (node.id if isinstance(node, ast.Name) else
+                             node.attr if isinstance(node, ast.Attribute) else node.value)
+                    if isinstance(value, str):
+                        normalized = value.lower().replace("\\", "/")
+                        if (value == "DEPLOYED" or
+                                any(token in normalized for token in EXPERIMENT_FORBIDDEN_TOKENS)):
+                            findings.append(Finding(
+                                path, getattr(node, "lineno", 1), "forbidden-live-root",
+                                f"experiment source names isolated live root/token {value!r}",
+                            ))
             if isinstance(node, ast.Call) and not path.startswith("tests/"):
                 function = node.func
                 name = function.id if isinstance(function, ast.Name) else (
@@ -343,7 +352,17 @@ def scan_repository(root: Path = ROOT) -> list[Finding]:
                 raise IsolationCheckError(
                     f"complete tracked-source scan refused: invalid UTF-8 path: {exc}"
                 ) from exc
-        files = {path: _read_source(root / path) for path in paths}
+        files: dict[str, bytes] = {}
+        total_source_bytes = 0
+        for path in paths:
+            content = _read_source(root / path)
+            total_source_bytes += len(content)
+            if total_source_bytes > MAX_TOTAL_SOURCE_BYTES:
+                raise IsolationCheckError(
+                    "complete tracked-source scan refused: aggregate Python source "
+                    f"exceeds {MAX_TOTAL_SOURCE_BYTES} bytes"
+                )
+            files[path] = content
     except (OSError, UnicodeDecodeError, subprocess.SubprocessError) as exc:
         raise IsolationCheckError(f"complete tracked-source scan refused: {exc}") from exc
     return check_files(files)
