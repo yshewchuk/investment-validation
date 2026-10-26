@@ -261,14 +261,14 @@ and positional-lag behavior. Nonpositive prices produce missing move labels.
 
 **Prior classification (#1102).** The `phase5_state_stage` job classifies the prior with one read-only helper, `classify_prior(release_root, prior_release_id)`; it never writes:
 
-| Prior state | Class | Outcome (the `NONE`/`NO_POOL_CATALOG` bootstrap rows: the job is built, §2.2.2; nothing submits it yet) |
+| Prior state | Class | Outcome (the `NONE`/`NO_POOL_CATALOG` bootstrap rows: the job and its sidecar submission are built, §2.2.2) |
 |---|---|---|
 | Pointer absent (nothing ever promoted) | `NONE` | bootstrap; `none` stands for the prior id in phase keys and `expected_previous_release_id` is null |
 | Catalog file absent at `catalog_path` for an id that does not start with `pools-` (a release this cycle stages always has a catalog, so an absent one under a `pools-*` id is `DAMAGED`), or a valid catalog whose `sources` has no `pool_cutoff` (legacy-bootstrapped) | `NO_POOL_CATALOG` | bootstrap against that pointer id |
 | Catalog valid with `pool_cutoff` | `USABLE` | nightly carry-forward (§2.2), unchanged |
 | Catalog present but a symlink, not a regular file, oversize, unparseable, wrong `release_id`/`deployment_id` (also against the staged release), malformed rows or objects, an object whose hash or size does not verify, or a non-ISO `pool_cutoff` | `DAMAGED` | no bootstrap: refuses `VALIDATION_FAILED` (`details.code` `PRIOR_MISMATCH`); a damaged store is operator recovery (#154), never silently replaced |
 
-In `bootstrap` mode the job classifies the prior (`classify_prior`, §2.1) before any object is written, with the refusals in the table below, and the light checks expect `sources.carried_from` null. Nothing submits `bootstrap` mode yet.
+In `bootstrap` mode the job classifies the prior (`classify_prior`, §2.1) before any object is written, with the refusals in the table below, and the light checks expect `sources.carried_from` null. The §2.2.2 sidecar submits `bootstrap` mode.
 
 | Condition | Outcome |
 |---|---|
@@ -368,7 +368,7 @@ of the newest nightly jobs, so a score older than that window is not found.
 
 | Rule | Behaviour |
 |---|---|
-| R1 verified input | session and manifest id from the latest succeeded `finality`/`features` job (its `legacy_manifest.json` binding); prior release from the live pointer; a missing pointer or a prior without a pool catalog would start a bootstrap cycle (§2.2.2: the stage job's bootstrap mode is built, the sidecar submission is not; today a missing pointer submits nothing, and a catalog-less prior submits the carry-mode jobs and the stage refuses `VALIDATION_FAILED`, `details.code` `PRIOR_MISMATCH`) |
+| R1 verified input | session and manifest id from the latest succeeded `finality`/`features` job (its `legacy_manifest.json` binding); prior release from the live pointer, classified with `classify_prior`: `USABLE` runs this carry cycle, `NONE`/`NO_POOL_CATALOG` start the bootstrap cycle (§2.2.2), `DAMAGED` submits nothing and reports `VALIDATION_FAILED` `PRIOR_MISMATCH` (deduped) |
 | R7 serve lifetime | the scheduled serve (not the snapshot-import serve) also stays up while the latest session's pool cycle is pending: a candidate release for it is not yet deployed, or a phase job (including the promote) is still running, and no phase job has failed; a missing release root or a failed phase ends the wait, and the serve deadline still bounds it |
 | R2 cache | durable job and pointer state is re-read each tick; no memo (reads are cheap indexed selects) |
 | R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); an incumbent changed before staging starts a new cycle under new keys; once a candidate is staged, the staged id or the guarded promote refuses and the cycle stalls |
@@ -376,9 +376,27 @@ of the newest nightly jobs, so a score older than that window is not found.
 | R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; before the pointer swap the prior release stays deployed, and a failure after the swap follows the §7.2 history rules |
 | R6 idempotency | phase keys are stable per session, scoring manifest and prior release, so a rerun scored from a new manifest retrains; the candidate release id is `pools-{session}-{tag}` and does not include the prior release (the stage refusal carries `ID_CONFLICT` in `details` when the same candidate id is reused with different content; promotion separately checks `expected_previous_release_id`, R3); a deployed release already named so ends the cycle |
 
-### 2.2.2 Bootstrap cycle (#1102; stage job built, sidecar submission not)
+### 2.2.2 Bootstrap cycle (#1102; stage job, sidecar submission and promote guard built)
 
-When the prior is `NONE` or `NO_POOL_CATALOG` (§2.2), the stage job, once a sidecar submits it, stages a full release instead of refusing: no store repair, and the cutoff is the session's data date. Later nightlies carry forward (§2.2) from it. Inputs: the `training` state `chooser_analog_pool` (one ISO cutoff; writes the `(features.chooser_analog_pool, cutoff)` artifact from the stored parquet, rows closed on/after the cutoff excluded; a missing or oversize source refuses; other bytes at an existing output are `CHECKPOINT_INCOMPATIBLE`) and the `mode: "bootstrap"` assembly below. The sidecar submission of the training set and the promote guard are not built, so nothing submits `bootstrap` mode yet.
+When the prior is `NONE` or `NO_POOL_CATALOG` (§2.2), the sidecar (§2.2.1) runs a bootstrap cycle and the stage job stages a full release instead of refusing: no store repair, and the cutoff is the session's data date. Later nightlies carry forward (§2.2) from it. Inputs: the `training` state `chooser_analog_pool` (one ISO cutoff; writes the `(features.chooser_analog_pool, cutoff)` artifact from the stored parquet, rows closed on/after the cutoff excluded; a missing or oversize source refuses; other bytes at an existing output are `CHECKPOINT_INCOMPATIBLE`) and the `mode: "bootstrap"` assembly below.
+
+**Sidecar submission (slice C).** `submit_pool_nightly_refresh_if_ready` classifies the pointer's release with `classify_prior` each tick (a missing pointer is `NONE`; the prior id in phase keys is `none`). Phases, each only after every job of the previous one succeeded, keys `phase_key(session, phase, prior, tag)`:
+
+1. `train-*` jobs, all bound to the session's scoring manifest, cutoff = session: `paired`, `board`, `trailing` (as §2.2.1); `driver-size`, `driver-implied_t1`, `driver-runup_move` (`driver_residual_pool:<role>` states; they take no cutoff); `chooser` (`chooser_analog_pool`); `payoff_line:STR-THRU` and `recalibration_map:STR-THRU` (the `:calibration` recipes, alpha `FILL_ALPHA`); `payoff_surface:STR-RUNUP`, `payoff_line:STR-RUNUP` and `recalibration_map:STR-RUNUP` at the STR-RUNUP key cutoff, which is the session's date 14 US trading days earlier (`min(entry, session)` as in `tools/phase5_calibration_keys.py`; my judgement call, one fold, the one the session's own board needs; older entry dates need the monthly path, §2.3).
+2. One `phase5_state_stage` with `mode: "bootstrap"`, `prior_release_id` the pointer id (`None` for `NONE`), `state_files` = every training output of phase 1 (plain `training/*.json`, none duplicated), and `bootstrap` = `{tier4_dir, panel_catalog, panel_snapshot_id, panel_artifact_root}` read from the environment variables `BOOTSTRAP_TIER4_DIR`, `BOOTSTRAP_PANEL_CATALOG`, `BOOTSTRAP_PANEL_SNAPSHOT_ID` and `BOOTSTRAP_PANEL_ARTIFACT_ROOT`. If any is unset or blank the cycle submits nothing and reports `VALIDATION_FAILED` ("bootstrap panel/tier4 inputs are not configured"), deduped, before phase 1 (no training is spent on a cycle that cannot stage).
+3. One `models_promote`: `expected_previous_release_id` = the pointer id for `NO_POOL_CATALOG`; for `NONE` the plan sets `require_empty_store` true (new `PromoteParameters` field, default false; `deployment.promote(..., require_empty_store=False)`), and `ConcurrentPromote` is raised when the pointer exists, unless it already names the release (the same no-op rule as the expected-incumbent guard). The guard is rejected in a plan that also sets `expected_previous_release_id`.
+
+| Sidecar condition | Outcome |
+|---|---|
+| Prior `DAMAGED`; pointer unreadable | nothing submitted; `VALIDATION_FAILED` reported (deduped), backoff as §2.2.1 |
+| A phase-1 job fails or is cancelled/blocked | later phases never submitted; the cycle stalls for operator recovery (#154, R3) |
+| Stage refuses (`BINDINGS_DIFFER`, `EMPTY_MEMBER`, registry drift, ...) | promote never submitted; stalls |
+| Promote refuses `ConcurrentPromote` (incumbent changed, or the store was no longer empty) | cycle stalls; the next session starts new keys against the new prior |
+| Phase-1 submit partly done when the tick fails | the next tick submits only the missing keys (keys are never resubmitted) |
+
+The sidecar adds no cache and no retry beyond §2.2.1 R2/R3; it logs the prior class and reason once per cycle and each phase submit with counts to stderr. Cost: phase 1 trains every pool-type member, so it is expected to be heavy and runs through the scheduler's normal `experiment_heavy` admission (the supervisor runs no extra job); unmeasured until the first live cycle.
+
+The pointer is re-read before each phase submit; if its class or id changed since the cycle's earlier jobs were keyed, the keys no longer match and a new cycle starts under the new prior id (an old cycle's jobs are never resubmitted; `pool_cycle_pending` counts the bootstrap cycle's jobs the same way).
 
 **Standard tool check.** No third-party tool covers this (champion registry, content-addressed objects and catalog are repo-specific). The assembly reuses `tools/phase5_prepare_release.py` (`model_release`, `build_states`, `write_release`, the payload readers) from `tools/phase5_state_bootstrap.py`; the bound-file classification by schema, the `candidate_only` publication and the artifact loaders' `load_bytes` are new.
 

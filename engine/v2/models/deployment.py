@@ -198,27 +198,36 @@ class StagingNotSuccessful(DeploymentError):
 
 
 class ConcurrentPromote(DeploymentError):
-    """A promote's optional expected-incumbent guard refused.
+    """A promote's optional pre-write pointer guard refused.
 
-    Raised only when ``promote`` is given ``expected_previous_release_id``
-    and the live pointer read for that swap is absent or names a different
-    release -- another promotion already moved ``DEPLOYED`` (or nothing was
-    ever promoted). Typed and non-retryable until the operator re-reads the
-    pointer and re-issues with the observed incumbent; the refusal itself
-    never retries, never picks another target, and never writes the pointer
-    or ``history/``. The same-target no-op still wins over this guard.
+    Raised when ``promote`` is given ``expected_previous_release_id`` and the
+    live pointer read for that swap is absent or names a different release --
+    another promotion already moved ``DEPLOYED`` (or nothing was ever
+    promoted) -- or when it is given ``require_empty_store`` and that pointer
+    read exists and names a different release (an absent pointer -- a truly
+    empty store -- satisfies the bootstrap guard). Typed and non-retryable
+    until the operator re-reads the pointer and re-issues with the observed
+    incumbent; the refusal itself never retries, never picks another target,
+    and never writes the pointer or ``history/``. The same-target no-op still
+    wins over either guard.
     """
 
     code = "CONCURRENT_PROMOTE"
     retryable = False
 
-    def __init__(self, release_id: str, expected_previous_release_id: str) -> None:
-        """Build the CONCURRENT_PROMOTE refusal, naming both ids."""
+    def __init__(self, release_id: str, expected_previous_release_id: str | None) -> None:
+        """Build the CONCURRENT_PROMOTE refusal, naming the target and the
+        guard that fired -- ``expected_previous_release_id=None`` means the
+        empty-store guard."""
         self.release_id = release_id
         self.expected_previous_release_id = expected_previous_release_id
-        super().__init__(f"{self.code}: {release_id} expected incumbent "
-                          f"{expected_previous_release_id!r} deployed, but the "
-                          f"deployment pointer is absent or names another release")
+        if expected_previous_release_id is None:
+            super().__init__(f"{self.code}: {release_id} expected an empty store "
+                              f"but a release is deployed")
+        else:
+            super().__init__(f"{self.code}: {release_id} expected incumbent "
+                              f"{expected_previous_release_id!r} deployed, but the "
+                              f"deployment pointer is absent or names another release")
 
 
 # --------------------------------------------------------------------------
@@ -933,6 +942,7 @@ def _swap_pointer(
     root: Path, release_id: str, action: str, clock: Clock,
     *, validated_manifest: StagedManifest | None = None,
     expected_previous_release_id: str | None = None,
+    require_empty_store: bool = False,
 ) -> PointerState:
     """Validate a staged release, then move ``DEPLOYED`` to it.
 
@@ -953,11 +963,23 @@ def _swap_pointer(
     :class:`ConcurrentPromote` -- no retry, no alternate target, and no
     pointer/history change, so the refusal cannot heal a crash window.
 
+    ``require_empty_store`` is promote's bootstrap guard: the swap may only
+    land on a store with nothing deployed. It shares the same single pointer
+    read and the same refuse-before-any-write position as the incumbent
+    guard: an already-live target keeps the no-op, an absent pointer passes
+    the guard, and a pointer naming another release refuses
+    :class:`ConcurrentPromote` with ``expected_previous_release_id=None``.
+    The two guards are mutually exclusive -- supplying both is a caller
+    defect raised as :class:`ValueError` before anything else runs.
+
     ``validated_manifest`` lets a caller that already ran
     :func:`_validate_staged_target` on this exact target (rollback validates
     before repairing history) supply the verified result and skip only the
     re-validation; the repair/no-op/write order is unchanged either way.
     """
+    if require_empty_store and expected_previous_release_id is not None:
+        raise ValueError("require_empty_store and expected_previous_release_id are "
+                         "mutually exclusive guards; pass at most one")
     if validated_manifest is None:
         _validate_staged_target(root, release_id)
     observed = current_pointer(root)
@@ -966,6 +988,8 @@ def _swap_pointer(
             and (observed is None
                  or observed.release_id != expected_previous_release_id)):
         raise ConcurrentPromote(release_id, expected_previous_release_id)
+    if require_empty_store and not already_live and observed is not None:
+        raise ConcurrentPromote(release_id, None)
     _repair_history(root)
     previous = current_pointer(root)
     if previous is not None and previous.release_id == release_id:
@@ -988,6 +1012,7 @@ def _swap_pointer(
 def promote(
     root: Path, release_id: str, *, clock: Clock = SystemClock(),
     expected_previous_release_id: str | None = None,
+    require_empty_store: bool = False,
 ) -> PointerState:
     """Atomically point ``DEPLOYED`` at ``release_id``.
 
@@ -1004,9 +1029,17 @@ def promote(
     guard keeps the existing behavior exactly; a request for the already
     live ``release_id`` stays the existing no-op even with a stale expected
     id). This is an optimistic check on one read, not a cross-process lock.
+
+    ``require_empty_store`` is the bootstrap guard for a first promote onto
+    a store that must still be empty: when true, a pointer read that exists
+    and names another release refuses :class:`ConcurrentPromote` before any
+    write (an absent pointer passes; an already-live target stays the
+    no-op). The two guards are mutually exclusive -- supplying both raises
+    :class:`ValueError`.
     """
     return _swap_pointer(Path(root), release_id, "promote", clock,
-                         expected_previous_release_id=expected_previous_release_id)
+                         expected_previous_release_id=expected_previous_release_id,
+                         require_empty_store=require_empty_store)
 
 
 def _rollback_target(root: Path) -> str:
