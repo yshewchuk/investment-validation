@@ -330,6 +330,7 @@ mutate = [
     "engine/v2/data/__init__.py",
     "engine/v2/data/catalog.py",
     "engine/v2/data/_bounded_catalog.py",
+    "engine/v2/data/_bounded_catalog_transfer.py",
     "engine/v2/data/repository.py",
     "engine/v2/data/read_counters.py",
     "engine/v2/data/objects.py",
@@ -341,6 +342,7 @@ mutate = [
 tests = [
     "tests/test_v2_data_atomicity.py",
     "tests/v2/data/test_bounded_catalog_probes.py",
+    "tests/v2/data/test_bounded_catalog_transfer.py",
     "tests/test_v2_data_commit.py",
     "tests/test_v2_data_events_chains.py",
     "tests/test_v2_data_generic_incremental.py",
