@@ -70,11 +70,11 @@ class _SyntheticSizeEstimator:
         raise AssertionError("runtime fitting is forbidden")
 
 
-def _size_cache():
+def _size_cache(*, fold_start="2026-01-01"):
     cache = copy.deepcopy(HEADER)
     cache.pop("capture")
     cache.update(estimator=_SyntheticSizeEstimator(), pool_pred=np.array([0.1, 0.2]),
-                 pool_res=np.array([-0.01, 0.02]), fold_start="2026-01-01")
+                 pool_res=np.array([-0.01, 0.02]), fold_start=fold_start)
     return cache
 
 
@@ -91,7 +91,8 @@ def _write_empty_catalog(root, release_id: str, fold_object=None) -> None:
 
 
 def _stage_release(tmp_path, *, roles=("driver", "gate"),
-                   clock_ids=None, release_id="r1", include_size_fold=True):
+                   clock_ids=None, release_id="r1", include_size_fold=True,
+                   size_fold_start="2026-01-01"):
     """Stage STR-THRU roles and a causal synthetic size fold when available."""
     clock_ids = clock_ids or {}
     bindings = []
@@ -137,7 +138,7 @@ def _stage_release(tmp_path, *, roles=("driver", "gate"),
         evidence_refs=("evidence://r",))
     cache = None
     if include_size_fold and "driver" in roles and "gate" in roles:
-        cache = _size_cache()
+        cache = _size_cache(fold_start=size_fold_start)
         size_release, size_inventory, size_payloads = release_inputs(
             "size", cache, clock=clock_ids.get("gate", "entry-close"),
             release_id=release_id)

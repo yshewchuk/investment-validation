@@ -288,7 +288,7 @@ def test_missing_ticker_history_is_refused_while_other_tickers_compose(
         json.dumps(refusals_document))
     release_root = tmp_path / "release"
     release_root.mkdir()
-    _stage_release(release_root)
+    _stage_release(release_root, size_fold_start="2024-01-01")
     parameters = {
         "expected_ids": (f"{_AS_OF}|scope",),
         "release_root": str(release_root),
@@ -455,7 +455,7 @@ def test_missing_exact_session_spot_is_refused_and_other_ticker_scores(
     (job_root / "producer_refusals.json").write_text(json.dumps(producer_refusals))
     release_root = tmp_path / "release"
     release_root.mkdir()
-    _stage_release(release_root)
+    _stage_release(release_root, size_fold_start="2024-01-01")
     parameters = {
         "expected_ids": (f"{_AS_OF}|scope",),
         "release_root": str(release_root), "as_of": _AS_OF,

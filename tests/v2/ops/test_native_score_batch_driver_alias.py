@@ -6,7 +6,7 @@ import json
 import pandas as pd
 import pytest
 
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import content_hash, to_document
 from engine.v2.models import (
     ArtifactInventoryMember,
     ArtifactMember,
@@ -18,6 +18,10 @@ from engine.v2.models import (
     ReleaseRequirement,
     deployment,
 )
+from engine.v2.models.serving_fold_preflight import describe_size_fold
+from engine.v2.models.serving_folds import SizeFoldPolicy
+from tests.v2.models.serving_fold_support import fold_bytes, fold_name, release_inputs
+from tests.v2.ops.test_native_score_batch import _size_cache
 from engine.v2.ops import native_score_batch
 from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.ops.native_score_batch import (
@@ -68,11 +72,14 @@ def _linear_payload(feature_order) -> bytes:
     }, sort_keys=True).encode()
 
 
-def _write_empty_catalog(root, release_id: str) -> None:
+def _write_empty_catalog(root, release_id: str, fold_object=None) -> None:
     """A members-empty ``phase5_release.json``: resolve_release_binding
     requires the catalog to exist even when it declares no state objects."""
+    members = ([] if fold_object is None else [{
+        "member_id": "tier4_folds:size", "status": "STAGED", "objects": [fold_object],
+    }])
     body = {"schema_version": "phase5_staged_release.v1.0", "release_id": release_id,
-            "deployment_id": "d1", "members": [], "sources": {}}
+            "deployment_id": "d1", "members": members, "sources": {}}
     body["manifest_hash"] = content_hash(
         {k: v for k, v in body.items() if k != "manifest_hash"})
     root.mkdir(parents=True, exist_ok=True)
@@ -124,14 +131,70 @@ def _stage(tmp_path, specs, release_id="r1", rows=None):
         artifacts=tuple(artifacts), bindings=tuple(release_bindings),
         requirements=tuple(requirements), artifact_manifest_ref="manifest://r",
         evidence_refs=("evidence://r",))
+    size_spec = next((item for item in specs if item[0] == "size"), None)
+    strategies = {(role, strategy_id) for role, strategy_id, _ in specs}
+    fold_cache = None
+    if (("driver", "STR-THRU") in strategies
+            and ("gate", "STR-THRU") in strategies):
+        fold_cache = _size_cache()
+        if size_spec is not None:
+            fold_cache["model_id"] = f"m-size-{size_spec[1]}"
+            fold_cache["features"] = list(size_spec[2])
+            release = dataclasses.replace(
+                release,
+                bindings=tuple(
+                    dataclasses.replace(binding, output_names=("forecast_abs_move",))
+                    if binding.role == "size" and binding.strategy_id == size_spec[1]
+                    else binding
+                    for binding in release.bindings))
+        else:
+            size_release, size_inventory, size_payloads = release_inputs(
+                "size", fold_cache, clock="entry-close", release_id=release_id)
+            release = dataclasses.replace(
+                release, bindings=release.bindings + size_release.bindings)
+            inventory = dataclasses.replace(
+                inventory,
+                known_clock_ids=tuple(sorted(set(inventory.known_clock_ids)
+                                             | set(size_inventory.known_clock_ids))),
+                artifacts=inventory.artifacts + size_inventory.artifacts,
+                bindings=inventory.bindings + size_inventory.bindings,
+                requirements=inventory.requirements + size_inventory.requirements)
+            payloads.update(size_payloads)
     dep_root = tmp_path / "deployment"
-    deployment.stage_release(dep_root, release, inventory, payloads)
+    manifest = deployment.stage_release(dep_root, release, inventory, payloads)
     deployment.mark_staging_succeeded(dep_root, release_id)
     deployment.promote(dep_root, release_id)
+    fold_object = None
+    if fold_cache is not None:
+        raw = fold_bytes(fold_cache)
+        policy = SizeFoldPolicy(
+            model_id=fold_cache["model_id"],
+            feature_order=tuple(fold_cache["features"]),
+            panel_sha256=fold_cache["tier3_snapshot"], interval_floor=0.0)
+        descriptor = describe_size_fold(
+            raw, fold_name(fold_cache), policy, manifest)
+        path = dep_root / descriptor.estimator.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        fold_object = {
+            "path": descriptor.estimator.path,
+            "content_hash": descriptor.estimator.content_hash,
+            "name": fold_name(fold_cache), "bytes": len(raw),
+            "serving_fold": to_document(descriptor),
+        }
     if rows is None:
-        _write_empty_catalog(tmp_path, release_id)
+        _write_empty_catalog(tmp_path, release_id, fold_object)
     else:
         _write_catalog(tmp_path, release_id=release_id, rows=rows)
+        if fold_object is not None:
+            catalog_path = tmp_path / "phase5_release.json"
+            body = json.loads(catalog_path.read_text())
+            body["members"].append({
+                "member_id": "tier4_folds:size", "status": "STAGED",
+                "objects": [fold_object]})
+            body["manifest_hash"] = content_hash(
+                {k: v for k, v in body.items() if k != "manifest_hash"})
+            catalog_path.write_text(json.dumps(body, sort_keys=True))
     return resolve_release_binding(tmp_path)
 
 
