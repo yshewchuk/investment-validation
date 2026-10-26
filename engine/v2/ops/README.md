@@ -149,7 +149,7 @@ The internal `native_score_batch._STRATEGY_REGISTRY` declares each admitted
 row's ordered forecast outputs and exact/alias driver roles, gate, policy key,
 source-bundle strategy and optional driver-name override. All resolved drivers
 contribute features, recipes, identities and request artifact references.
-STR-THRU and STR-RUNUP are registered. RUNUP requires both verified champion
+STR-THRU, STR-RUNUP, TWIN-P and TWIN-P5 are registered (TWIN is gate-less: entry-rule gate over a frozen paired pool and trailing cutoff). RUNUP requires both verified champion
 residual pools and a unique exact-key payoff surface; its model gate does not
 request separate simulation. Missing/unusable model artifacts refuse its row.
 There is no runtime registration API or chooser execution contract.
