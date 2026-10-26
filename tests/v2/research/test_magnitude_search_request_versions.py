@@ -90,7 +90,10 @@ class TestV2Refusals:
     test_cycles = staticmethod(legacy.test_container_subclasses_and_cycles_refuse)
 
 
-def test_pinned_complete_v1_output_and_unchanged_source_bytes():
+def test_pinned_complete_v1_output_and_unchanged_source_bytes(monkeypatch):
+    def no_whole_file_read(*_, **__):
+        pytest.fail("source digest must not materialize a whole file")
+    monkeypatch.setattr(Path, "read_bytes", no_whole_file_read)
     expected = "sha256:31b7f493b3f2742e4a948767a352f3fa2bbe408b01898fcb9e0371c4b598fac0"
     assert _hash(V1_COMPILE(V1_REQUEST())) == expected
     assert _hash(versions.compile_request(V1_REQUEST())) == expected
@@ -99,7 +102,8 @@ def test_pinned_complete_v1_output_and_unchanged_source_bytes():
         ("experiments/magnitude_search_request.py", "ad845dea949b3de4200f005695c09ecf4a9b0bc84b5328fce106081556029117"),
         ("engine/v2/research/magnitude_panel_table.py", "687d4d5341dd4e43879aee9d122507b8289150d7e73f1ccc527299182fe5aad4"),
         ("engine/v2/research/magnitude_panel_v2_table.py", "c753255acba0af3872f6a7bf1cbbdc59eb3b1097a2a06d89f6517d4c34111ce4")):
-        assert hashlib.sha256((root / path).read_bytes()).hexdigest() == digest
+        with (root / path).open("rb") as source:
+            assert hashlib.file_digest(source, "sha256").hexdigest() == digest
 
 
 def test_v2_golden_recipes_columns_counts_and_every_identity():
