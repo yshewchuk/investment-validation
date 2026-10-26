@@ -248,7 +248,8 @@ both flag states publish/verify the same plan and never write a ledger.
 
 `magnitude_search_request.compile_request(request)` consumes a plain-JSON
 `magnitude_search_request.v2` declaration and returns a detached
-`magnitude_search_schedule.v2` preview. Its only callers are synthetic tests;
+`magnitude_search_schedule.v2` preview. Its callers are synthetic tests and the
+additive `magnitude_search_request_versions.compile_request(request)` adapter;
 there is no CLI or runtime activation. Standard JSON/product and foundation
 canonical hashing implement normalization/enumeration. The owning research
 panel `recipe` supplies ordered subset dictionaries; shared `eligibility_policy`
@@ -274,7 +275,23 @@ defines the closed nested fields. Scope is request compatibility, not native adm
 
 The preview does not select a winner, fit or preprocess, reserve/register/publish,
 write a ledger, enforce resource containment, or authorize execution/holdout reads.
-Existing v1 planning, fitting, journals and replay are unchanged.
+The additive version adapter has the same closed request and schedule schemas.
+Its shared validation/refusal boundary is the public v1 compiler; public v2 panel
+recipes and foundation hashing own the version-specific metadata and identities.
+
+| Adapter input | Outcome |
+| --- | --- |
+| Built-in dict with a built-in string equal to the full-HMO v2 dictionary hash | Shared validation completes before expansion; detached v2 recipes and actual declaration identities, with sorted specifications and no surrogate identity. |
+| Any other input, including v1/unsupported/subset hashes or nonplain shapes | Delegate unchanged to the public v1 compiler; identical valid outputs and complete refusal envelopes. |
+
+V2 dictionary widths are 11/28/42; model columns are 11/28/43, with
+`has_implied_quote` last only for HMO, outside the numeric dictionary.
+Both versions retain 33 candidates and schedule-specific counts (603 search,
+9 logical/18 component comparison fits for the three-outer/six-inner fixture).
+The adapter has synthetic callers only, no CLI/native caller or fitting path.
+Work/space scale with the declaration plus fixed metadata specifications; caps
+bound enumeration, not input bytes, memory or real-data resource feasibility.
+Existing compiler/panel definitions and v1 runtime source closures are unchanged.
 
 ## Source-free candidate recipe and single-horizon fit
 

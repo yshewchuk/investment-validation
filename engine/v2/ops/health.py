@@ -12,6 +12,16 @@ from engine.v2.foundation import format_timestamp, fsync_directory
 from engine.v2.ops.catalog import dumps, transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.publication import current as release_current
+from engine.v2.ops.schema import NATIVE_STAGE_FAILURE_TEXT_BYTES
+
+OPERATIONS_HEALTH_MAX_BYTES = 1_048_576
+NATIVE_STAGE_FAILURE_DIAGNOSTIC = json.dumps({
+    "schema_version": "problem.v1.0", "code": "RESOURCE_LIMIT_EXCEEDED",
+    "category": "resource", "retryable": False,
+    "message": "native stage failure text exceeded health read bound",
+    "stage": None, "trace_id": None, "dependency_refs": [],
+    "retry_after_seconds": None, "diagnostic_ref": None, "details": {},
+}, sort_keys=True, separators=(",", ":"))
 
 
 def _record_check(conn, occurrence, kind, ok, receipt):
@@ -398,6 +408,34 @@ def health(conn, *, clock, executor_mode="watchdog"):
         "AND generation_ref IS NULL").fetchone()[0]
     requested_session, resolved_session = _release_session_evidence(conn, current,
                                                                     expected_scope=current_scope)
+    limits = NATIVE_STAGE_FAILURE_TEXT_BYTES
+    fields = ("occurrence", "scope_hash", "stage_id", "status", "error_code",
+              "problem_json", "created_at", "updated_at")
+    oversized = " OR ".join(
+        f"length(CAST({name} AS BLOB)) > {limits[name]}" for name in fields)
+    native_stage_failures = [dict(row) for row in conn.execute(
+        "SELECT "
+        f"CASE WHEN length(CAST(o AS BLOB)) > {limits['occurrence']} "
+        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE o END AS occurrence, "
+        f"CASE WHEN length(CAST(s AS BLOB)) > {limits['scope_hash']} "
+        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE s END AS scope_hash, "
+        f"CASE WHEN length(CAST(g AS BLOB)) > {limits['stage_id']} "
+        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE g END AS stage_id, "
+        "'FAILED' AS status, "
+        "CASE WHEN bad THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE e END AS error_code, "
+        f"CASE WHEN length(CAST(p AS BLOB)) > {limits['problem_json']} "
+        "THEN ? ELSE p END AS problem_json, "
+        f"CASE WHEN length(CAST(c AS BLOB)) > {limits['created_at']} "
+        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE c END AS created_at, "
+        f"CASE WHEN length(CAST(u AS BLOB)) > {limits['updated_at']} "
+        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE u END AS updated_at "
+        "FROM (SELECT occurrence AS o, scope_hash AS s, stage_id AS g, "
+        "status AS status, error_code AS e, problem_json AS p, "
+        "created_at AS c, updated_at AS u, "
+        f"CASE WHEN {oversized} THEN 1 ELSE 0 END AS bad "
+        "FROM native_stage_failures WHERE resolved_at IS NULL "
+        "ORDER BY occurrence DESC, scope_hash, stage_id LIMIT 100) "
+        "ORDER BY o DESC, s, g", (NATIVE_STAGE_FAILURE_DIAGNOSTIC,))]
     return {"schema_version": "operations_health.v1.2", "generated_at": format_timestamp(clock.now()),
             "executor_mode": executor_mode, "containment": "best_effort" if executor_mode == "watchdog" else "kernel",
             "jobs": jobs, "watermarks": [dict(row) for row in conn.execute("SELECT * FROM watermarks ORDER BY pipeline, scope, stage")],
@@ -406,13 +444,68 @@ def health(conn, *, clock, executor_mode="watchdog"):
             "withheld_release": withheld_release,
             "code_budgets": budget_streak(conn), "activation": "shadow_only",
             "decision_divergences": divergences,
-            "undetermined_outcome_sessions": undetermined_outcome_sessions}
+            "undetermined_outcome_sessions": undetermined_outcome_sessions,
+            "native_stage_failures": native_stage_failures}
+
+
+def _trim_health_job_text(jobs):
+    marker = "…[truncated]"
+    marker_bytes = len(marker.encode("utf-8"))
+    trimmed = 0
+    for row in jobs:
+        for key, value in list(row.items()):
+            if isinstance(value, str) and len(value.encode("utf-8")) > 4096:
+                prefix = value.encode("utf-8")[:4096 - marker_bytes].decode("utf-8", "ignore")
+                row[key] = prefix + marker
+                trimmed += 1
+    return trimmed
+
+
+def _drop_oldest_health_jobs(jobs, overshoot):
+    freed = 0
+    count = 0
+    while count < len(jobs) and freed < overshoot:
+        freed += len(json.dumps(jobs[count]).encode("utf-8")) + 1
+        count += 1
+    del jobs[:count]
+    return count
+
+
+def _bounded_health_payload(document):
+    """Bound operations health to the serving reader cap without mutating input."""
+    payload = json.dumps(document).encode("utf-8")
+    if (not isinstance(document, dict)
+            or not str(document.get("schema_version", "")).startswith("operations_health.")
+            or len(payload) <= OPERATIONS_HEALTH_MAX_BYTES):
+        return payload
+    working = dict(document)
+    has_jobs = isinstance(working.get("jobs"), list)
+    jobs = [dict(row) for row in working.get("jobs", [])] if has_jobs else []
+    trimmed = _trim_health_job_text(jobs)
+    dropped = 0
+    while True:
+        if has_jobs:
+            working["jobs"] = jobs
+        if trimmed or dropped:
+            working["health_truncated"] = {"trimmed_text_fields": trimmed,
+                                            "dropped_jobs": dropped}
+        payload = json.dumps(working).encode("utf-8")
+        if len(payload) <= OPERATIONS_HEALTH_MAX_BYTES:
+            return payload
+        if jobs:
+            dropped += _drop_oldest_health_jobs(jobs, len(payload) - OPERATIONS_HEALTH_MAX_BYTES + 256)
+        else:
+            raise fail("RESOURCE_LIMIT_EXCEEDED",
+                       "operations health document exceeds the serving artifact cap",
+                       details={"max_bytes": OPERATIONS_HEALTH_MAX_BYTES,
+                                "native_stage_failures": len(working.get("native_stage_failures") or []),
+                                "trimmed_text_fields": trimmed, "dropped_jobs": dropped})
 
 
 def write_health(path, document):
     path = Path(path)
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex)
-    temporary.write_text(json.dumps(document))
+    temporary.write_bytes(_bounded_health_payload(document))
     with temporary.open("rb") as stream:
         os.fsync(stream.fileno())
     os.replace(temporary, path)

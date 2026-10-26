@@ -50,7 +50,7 @@ The [parity design](https://github.com/yshewchuk/investment-validation/blob/26b5
 The additive v2 table exports `CONTRACT`, `feature_dictionary(subset)` and `recipe(subset)`; explicit H/HM/HMO have 11/28/42 ordered numeric descriptors.
 Uniform inline source/derivation policies change all dictionary hashes (including H); v1 APIs, contracts, hashes and eleven H numeric values/order remain unchanged.
 Recipes own 11/28/43 raw model columns: HMO alone appends `has_implied_quote`, outside the numeric table; learned missing indicators remain family-owned.
-Native contract hashing and dictionary hashing are distinct; neither qualifies sources/snapshots or admits rows. No v2 context, reader, model, compiler change or runtime activation exists.
+Native contract and dictionary hashes are distinct; neither admits sources/snapshots/rows. The source-free versioned compiler consumes recipes; no v2 context, reader, model or runtime activation exists.
 
 | Condition | Outcome |
 | --- | --- |
@@ -707,8 +707,8 @@ chain index, the entry-selection seams above and exit walking for read-only comp
 `experiments/native_registration.py` consumes
 `experiment_population.load_population` and `magnitude_folds`' window/planner.
 `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`.
-`experiments/magnitude_search_request.py` consumes `magnitude_panel_table.recipe`
-and `eligibility_policy.eligibility_policy` for source-free dictionary/policy declarations only.
+`experiments/magnitude_search_request.py` consumes `magnitude_panel_table.recipe` and `eligibility_policy.eligibility_policy` for declarations only.
+`experiments/magnitude_search_request_versions.py` consumes both v1/v2 panel `recipe` APIs for source-free dictionary dispatch, not admission.
 `experiments/magnitude_search_evidence.py` consumes `read_stored_for_events`, `preflight_magnitude_targets`,
 `qualify_magnitude_training_targets` and `magnitude_recipe` for shared inner/outer admission.
 `experiments/magnitude_search_trials.py` directly consumes `load_magnitude_targets`,

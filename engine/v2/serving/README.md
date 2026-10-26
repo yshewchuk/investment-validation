@@ -67,8 +67,9 @@ surface. It reads the three supported health schema versions —
 `operations_health.v1.0`, `operations_health.v1.1` and
 `operations_health.v1.2` — and immutable legacy bundles, and embeds the
 existing views beneath the current health banner. The shell's freshness
-evaluation consumes the `requested_session`/`resolved_session` evidence and
-`code_budgets.latest_occurrence` (the newest observed night); older health
+evaluation consumes the `requested_session`/`resolved_session` evidence,
+`code_budgets.latest_occurrence` (the newest observed night), and each
+unresolved v1.2 native stage failure as a degraded reason; older health
 documents may omit `latest_occurrence`, and absent or malformed evidence
 leaves the shell unknown, never a default. The ops
 shell it serves is a compatibility exception (see Responsibilities), not

@@ -514,39 +514,17 @@ Binding user decisions D1-D10 (2026-10-25, recorded in #805). Once per calendar 
 
 ## 3. Inputs
 
-**Forward serving-fold contract.** Offline descriptor authoring is described
-below; verified loading is defined below. Size-fold selection is implemented in
-`engine/v2/scoring/gate_fold_selection.py`; no batch caller exists yet.
-Monthly folds
-are separate from the full-refit champion bindings. A `ServingFoldRef`
-identifies one release-owned `tier4_folds:size` estimator object, its model,
-feature order, output, month start, full Tier-3 panel byte hash and declared
-interval policy. Its held-out prediction/residual arrays belong to that same
-object. Offline release preparation records this metadata in the hashed state
-catalog; a read-only loader verifies it against bounded, hash-checked bytes.
-Existing catalogs without this declaration require offline restaging, not a
-nightly fit or a guessed interval policy. Verified loading covers size folds and
-the chooser producer artifacts below; this alone admits neither training sources
-nor a nightly chooser declaration.
+**Forward serving-fold contract.** Offline descriptor authoring is described below; verified loading is defined below. Size-fold selection is implemented in `engine/v2/scoring/gate_fold_selection.py`; `engine.v2.ops.native_score_batch` selects the exact causal fold for each STR-THRU row and supplies it to the gate. A missing exact fold or selected-fold verification/load failure refuses that row with `MODEL_NOT_READY`; a malformed release catalog or descriptor fails release resolution before row assembly. Selection never falls back to another month or the champion. Monthly folds are separate from the full-refit champion bindings. A `ServingFoldRef` identifies one release-owned `tier4_folds:size` estimator object, its model, feature order, output, month start, full Tier-3 panel byte hash and declared interval policy.
+Its held-out prediction/residual arrays belong to that same object. Offline release preparation records this metadata in the hashed state catalog; a read-only loader verifies it against bounded, hash-checked bytes. Existing catalogs without this declaration require offline restaging, not a nightly fit or a guessed interval policy. Verified loading covers size folds and the chooser producer artifacts below; this alone admits neither training sources nor a nightly chooser declaration.
 
-Selection uses the exact earlier of the event month and decision month,
-and the registered size model and feature order. It never chooses the newest available fold or substitutes a full-refit model.
-The panel hash comes from the already-pinned snapshot's single original
-`feature_panel` object; an unsupported multi-fragment layout is refused. The
-scoring selector (`gate_fold_selection.py`) applies the month rule and the
-release-staged descriptor checks only; comparing the descriptor's panel hash
-with the pinned snapshot is not done by the selector.
-Snapshot ID, dataset version and panel byte hash remain distinct identities.
-Selection returns a separate content-addressed, single-binding inference view
-linked to its parent release and descriptor; it does not mutate or promote the
-champion `ModelRelease`. The existing `tier4-serving-fold.v1` adapter executes
-that binding through `FrozenInference`; no second prediction engine is added.
+Selection uses the exact earlier of the event month and decision month, and the registered size model and feature order. It never chooses the newest available fold or substitutes a full-refit model. The panel hash comes from the already-pinned snapshot's single original `feature_panel` object; an unsupported multi-fragment layout is refused. The scoring selector (`gate_fold_selection.py`) applies the month rule and the release-staged descriptor checks only; comparing the descriptor's panel hash with the pinned snapshot is not done by the selector.
+Snapshot ID, dataset version and panel byte hash remain distinct identities. Selection returns a separate content-addressed, single-binding inference view linked to its parent release and descriptor; it does not mutate or promote the champion `ModelRelease`. The existing `tier4-serving-fold.v1` adapter executes that binding through `FrozenInference`; no second prediction engine is added.
 
 | Forward fold condition | Outcome |
 |---|---|
 | Exact model/month match, verified metadata and pool | Return immutable selected fold and provenance |
-| Missing, duplicate, future or incompatible fold | `MODEL_NOT_READY`; no older-model or training fallback |
-| Corrupt, oversized, escaped-path or header/descriptor mismatch | `MODEL_NOT_READY` before inference; redact filesystem details |
+| Missing, future or incompatible exact fold | Per-row `MODEL_NOT_READY`; no older-model or training fallback |
+| Selected fold bytes are corrupt, oversized, escaped-path or fail the loader's header/descriptor checks | Per-row `MODEL_NOT_READY` before inference; redact filesystem details |
 | Old cache lacks held-out pool or declared interval policy | Refuse; never rebuild the pool during scoring |
 
 **Offline descriptor authoring.** Immutable `serving_folds.ServingFoldDescriptor`

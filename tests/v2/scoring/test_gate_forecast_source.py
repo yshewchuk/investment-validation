@@ -52,6 +52,7 @@ def _source(tmp_path, **overrides) -> GateForecastSource:
         binding_id="b-size-fold", release=_release(),
         inference=FrozenInference(tmp_path),
         pool_pred=list(PRED), pool_res=list(RES), interval_floor=0.0,
+        artifact_hash="a" * 64,
     )
     values.update(overrides)
     return GateForecastSource(**values)
