@@ -196,7 +196,7 @@ _COVERAGE_RELOCATIONS = (
 
 
 @pytest.mark.parametrize("phase, expected_version", [
-    (1, "phase1_coverage_suite.v23"),
+    (1, "phase1_coverage_suite.v24"),
     (2, "phase2_coverage_suite:7ae743b96f5398e1a4cfbb1f88d6bf811af0ca4aaf785f3ece4b2f1d8431fd4d"),
 ])
 def test_test_layout_moves_refresh_both_coverage_inventories(phase, expected_version):
