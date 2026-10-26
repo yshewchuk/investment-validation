@@ -974,3 +974,28 @@ Root doc §5 invariants this package is responsible for:
   already loaded in this build, never by scanning further back; deliberate,
   not a defect (cross-year carry tracked as issue
   [#195](https://github.com/yshewchuk/investment-validation/issues/195)).
+
+### Scalar-only bounded catalog prerequisite
+
+`_bounded_catalog.probe_catalog` is internal and has no production caller. It
+borrows an active caller transaction and emits only SELECTs, returning counts and
+SQL BLOB-length totals, not payloads, native identities or admission capabilities.
+Stdlib SQLite capped COUNT/LIMIT, typeof and BLOB-length probes enforce five caps.
+Charge snapshot once, binding/dataset/contract per table, membership/fragment/object
+per occurrence, including unrelated tables, repeated IDs and zero-row fragments.
+Integer fields count their BLOB-cast decimal text, not SQLite on-disk cell sizes.
+Only integer/NULL scalars cross into Python incrementally. The caller guarantees
+read-transaction provenance; no settings or transaction lifecycle are changed.
+Limits bound transfer, not SQLite CPU/RSS. No source, coverage, confirmation, PIT
+or execution property is established; existing readers stay intact. See the
+[bounded-session design](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md) for the surrounding contract.
+
+| Probe condition | Refusal (fixed redacted message; no partial result) | Retryable |
+|---|---|---|
+| Wrong holder/string types, empty or non-UTF-8-encodable IDs/table, malformed limits, no active transaction or missing selected table | `CONTRACT_MISMATCH` | no |
+| Requested snapshot absent | `SNAPSHOT_UNRESOLVED` | no |
+| Any explicit count or SQL BLOB byte cap exceeded | `RESULT_LIMIT_EXCEEDED` | no |
+| Missing joins, wrong SQL types or inconsistent membership | `MANIFEST_CORRUPT` | no |
+| SQLite primary BUSY/LOCKED/IOERR/CANTOPEN/FULL/NOMEM, including extended codes | `RESOURCE_UNAVAILABLE` | yes; caller owns retries |
+| Other SQLite errors, including code-less or closed-connection errors | `MANIFEST_CORRUPT` | no |
+| Existing native `DataError` | Unchanged code, message and retryability | unchanged |
