@@ -39,7 +39,7 @@ does not count as native Phase 5 completion until P5-3/P5-4 finish.
 | P5-3 Current dataset/training recipes | Extract existing recipe membership, targets, masks, transforms, folds, seeds and upstream OOS dependencies into supervised jobs. | Training membership and label-availability receipts; planted future label/upstream in-sample leakage fails; interrupted fold resumes without losing completed artifacts. |
 | P5-4 Residuals and correction propagation | Persist marginal and paired residual/calibration state and all uncertainty inputs; integrate 3B changesets. | Request context cannot change frozen state; historical correction invalidates every dependent later fold/state; equivalent rebuild agrees. |
 | P5-5 Evidence and atomic deployment | Evidence built from exact dataset recipe and artifact fingerprints; stage complete deployments, promote/rollback via one pointer. | Partial/incompatible set cannot promote; prior scores remain replayable; Models evidence changes with the actual artifact/dataset, not feature-list guesses. |
-| P5-6 Integrated acceptance | Current recipes, native inference and Phase 4 scoring on frozen real inputs; tested preparation and rollback runbook. | All roles and score consumers covered; exact pointer rollback; no runtime fitting or model-cache writes; private report. |
+| P5-6 Integrated acceptance | Current recipes, native inference and Phase 4 scoring on frozen real inputs; tested preparation and promotion runbook. | All roles and score consumers covered; promote rehearsed on a scratch copy (no rollback rehearsal, #805 D3); no runtime fitting or model-cache writes; private report. |
 
 ## Parity rules
 

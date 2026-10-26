@@ -448,36 +448,47 @@ def test_model_cache_write_under_scoring_fails(tmp_path):
     assert any(d.endswith("side-channel.bin") for d in details)
 
 
-def test_rollback_is_exact(tmp_path):
+def test_promote_rehearsal_resolves_candidate(tmp_path):
     evidence = _run(tmp_path, _release(tmp_path))
-    rollback = evidence["rollback"]
+    rehearsal = evidence["promote"]
 
-    assert rollback["status"] == "ok" and rollback["incumbent"] == "rel-incumbent"
-    assert rollback["checks"] == {
-        "promoted_resolves_candidate": True, "pointer_release_id_restored": True,
-        "target_release_byte_exact": True, "manifests_and_history_prefix_byte_exact": True,
-        "history_appended_two": True,
-    }
+    assert rehearsal["status"] == "ok" and rehearsal["incumbent"] == "rel-incumbent"
+    assert rehearsal["checks"] == {"promoted_resolves_candidate": True}
 
 
-def test_rollback_that_lands_elsewhere_is_caught(tmp_path, monkeypatch):
-    def wrong_rollback(root, **_):
-        return gate.deployment.promote(root, "rel-candidate")
+def test_promote_that_lands_elsewhere_is_caught(tmp_path, monkeypatch):
+    real_promote = gate.deployment.promote
 
-    monkeypatch.setattr(gate.deployment, "rollback", wrong_rollback)
+    def wrong_promote(root, release_id, **kwargs):
+        return dataclasses.replace(real_promote(root, release_id, **kwargs),
+                                   release_id="rel-other")
+
+    monkeypatch.setattr(gate.deployment, "promote", wrong_promote)
     evidence = _run(tmp_path, _release(tmp_path))
 
-    assert "P5_ROLLBACK_NOT_EXACT" in evidence["finding_codes"]
-    assert evidence["rollback"]["checks"]["pointer_release_id_restored"] is False
+    assert "P5_PROMOTE_NOT_EXACT" in evidence["finding_codes"]
+    assert evidence["promote"]["status"] == gate.PROMOTE_NOT_EXACT
+    assert evidence["promote"]["checks"]["promoted_resolves_candidate"] is False
 
 
-def test_no_incumbent_is_red_unless_first_deployment(tmp_path):
+def test_promote_refusal_is_a_finding(tmp_path, monkeypatch):
+    def refused(root, release_id, **kwargs):
+        raise gate.deployment.ReleaseNotStaged(f"{release_id} is not staged")
+
+    monkeypatch.setattr(gate.deployment, "promote", refused)
+    evidence = _run(tmp_path, _release(tmp_path))
+
+    assert "P5_PROMOTE_REFUSED" in evidence["finding_codes"]
+    assert evidence["promote"] == {"status": gate.PROMOTE_REFUSED}
+
+
+def test_no_incumbent_passes_promote_rehearsal(tmp_path):
     root = _release(tmp_path, incumbent=False)
-    assert "P5_ROLLBACK_NO_INCUMBENT" in _run(tmp_path, root)["finding_codes"]
+    evidence = _run(tmp_path, root)
 
-    first = _run(tmp_path, root, first_deployment=True)
-    assert first["release_ok"] is True
-    assert first["rollback"]["checks"]["first_deployment_rollback_refused"] is True
+    assert evidence["release_ok"] is True
+    assert evidence["promote"]["status"] == "ok"
+    assert evidence["promote"]["incumbent"] is None
     assert current_pointer(layout.deployment_root(root)) is None  # scratch copy only
 
 
@@ -782,13 +793,14 @@ def test_acceptance_main_does_not_mark_release_when_gate_fails(tmp_path, monkeyp
                 / "staging-status.json").exists()
 
 
-def test_acceptance_refuses_legacy_incumbent_without_status(tmp_path, monkeypatch):
-    """A live incumbent staged before status records existed fails closed.
+def test_acceptance_accepts_legacy_incumbent_without_status(tmp_path, monkeypatch):
+    """A live incumbent staged before status records existed is never read.
 
-    The rehearsal copies the incumbent's durable record with the pointer
-    state and invents none, so a missing record makes rollback refuse
-    (P5_ROLLBACK_REFUSED) and the gate leaves the candidate unmarked and
-    the real DEPLOYED pointer and history untouched."""
+    The rehearsal binds only the candidate's temporary record in a scratch
+    copy and does not rehearse rollback (#805 D3), so the incumbent's missing
+    record changes nothing: the gate passes, marks the candidate, and leaves
+    the real DEPLOYED pointer, history and the incumbent's absent record
+    untouched."""
     root = _release(tmp_path)
     store = layout.deployment_root(root)
     incumbent_sidecar = store / "releases" / "rel-incumbent" / "staging-status.json"
@@ -802,14 +814,14 @@ def test_acceptance_refuses_legacy_incumbent_without_status(tmp_path, monkeypatc
     artifacts = tmp_path / "artifacts"
 
     assert gate.main(["--release-root", str(root),
-                      "--artifact-root", str(artifacts)]) == 1
+                      "--artifact-root", str(artifacts)]) == 0
 
     evidence = json.loads((artifacts / "evidence.json").read_text())
-    assert evidence["release_ok"] is False
-    assert evidence["status"] == "FAIL"
-    assert evidence["rollback"]["status"] == gate.ROLLBACK_REFUSED
-    assert not (store / "releases" / "rel-candidate" / "staging-status.json").exists()
-    assert not incumbent_sidecar.exists()  # the refusal invents no record for it either
+    assert evidence["release_ok"] is True
+    assert evidence["status"] == "RELEASE_PASS"
+    assert evidence["promote"]["status"] == "ok"
+    assert (store / "releases" / "rel-candidate" / "staging-status.json").is_file()
+    assert not incumbent_sidecar.exists()  # the rehearsal invents no record for it
     assert deployed.read_bytes() == pointer_before
     assert {p.name: p.read_bytes() for p in sorted((store / "history").glob("*.json"))} \
         == history_before

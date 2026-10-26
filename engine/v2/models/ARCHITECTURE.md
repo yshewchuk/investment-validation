@@ -842,7 +842,7 @@ promotion and rollback refuse without matching staging success.
 | Valid manifest and atomic status write succeeds | Writes exactly `release_id`, `release_hash`, and `state: succeeded` to `staging-status.json` beside that manifest |
 | Same manifest marked again | Idempotent: writes the same record |
 | Manifest hash changes after marking, including `restage_semantic_hash` | Existing record is stale; complete acceptance again and record the new hash before promotion or rollback |
-| Live incumbent staged before status records existed | Rollback refuses `P5_ROLLBACK_REFUSED`; acceptance leaves the candidate unmarked and deployment pointer/history unchanged |
+| Live incumbent staged before status records existed | Acceptance rehearses the candidate's promote on a scratch copy and does not rehearse rollback (#805 D3) |
 | Release staged before status records existed, or incumbent with an existing invalid/failed/stale record | Remains ineligible; no automatic backfill or overwrite from a pointer/history entry or manifest hash alone, because neither proves successful staging |
 
 ### 7.3 `resolve_release` / `current_release` (read-only)
