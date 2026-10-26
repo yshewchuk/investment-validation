@@ -470,7 +470,7 @@ The report is replaced atomically after capture; a report-write failure leaves t
 
 ### Current nightly orchestration boundary
 
-`nightly_trigger` coordinates import, planned-price refresh/capture, plan, submit and serve; Tier-4 rebuild, computed-moves capture and history bootstrap remain separate commands. It has no complete-chain step journal or explicit same-session rerun interface. The proposed replacement contract, failure table and implementation slices are in [PR #564](https://github.com/yshewchuk/investment-validation/pull/564), not implemented here.
+`nightly_trigger` coordinates import, planned-price refresh/capture, plan, submit and serve; Tier-4 rebuild, computed-moves capture and history bootstrap remain separate commands. It has no complete-chain step journal or explicit same-session rerun interface. The proposed replacement contract, failure table and implementation slices are in [PR #564](https://github.com/yshewchuk/investment-validation/pull/564), not implemented here. Designed (#805, not built; contract in models doc §2.3): the plan gains an always-planned `restage` job and, when a month is due, a retrain chain (train, stage, accept, check, promote) between `refresh` and `score`; `score` depends on the chain's last job, so any failed or unbuilt step (`RETRAIN_UNAVAILABLE`) fails the nightly with no time limit and nothing scores on the incumbent. This is plan-built jobs, not a sidecar and not yet a `GRAPH` node.
 
 | Current condition | Outcome |
 |---|---|
@@ -1220,7 +1220,7 @@ job.
 | catalog persistence fails while recording the failure | logs `native_stage_failure_persistence_failed` (no raw exception text) and returns without submitting; no row is durably recorded | n/a |
 | `native_parity` | no paired, succeeded `native_score_batch`/`score` identity yet, including a failed release-binding stage — returns without submitting; a CONFIRMED schema mismatch parks that `native_score_batch_job_id`, skipping the artifact read and attempt spend on every later tick carrying it (the identity/existing-job lookup itself still runs on eligible ticks) | the specific `native_score_batch` identity read |
 | `_ensure_shadow_snapshot` | the legacy store has not caught up to `as_of` yet — `"not_yet"`/`"snapshot_not_yet"`, resumable, no attempt consumed | `(as_of, attempt)`; a genuine retry after a terminal failure mints a fresh `attempt`, never reusing a dead key |
-| pool-nightly refresh | no succeeded `finality`/`features` job, no deployed pointer, or no `legacy_manifest.json` binding on that job — returns without submitting; a pointer that is not a bounded regular file is reported | one key per phase, scoped by session, scoring manifest and prior release id (`Service._reconcile_pool_nightly_refresh`; contract in models doc §2.2.1) |
+| pool-nightly refresh | no succeeded `finality`/`features` job, no deployed pointer, or no `legacy_manifest.json` binding on that job — returns without submitting; a pointer that is not a bounded regular file is reported; designed (#805): also nothing while that session's `restage` or retrain job is nonterminal or failed | one key per phase, scoped by session, scoring manifest and prior release id (`Service._reconcile_pool_nightly_refresh`; contract in models doc §2.2.1) |
 
 ### `supervisor.py`: leases during a long single-attempt effect
 
