@@ -9,14 +9,15 @@ them, so that its slices can be built one at a time after they land.
 
 - `engine/score.py` `DYNAMIC_MENU` (line 5105): TWIN-P, TWIN-P5, CND-PS, BFLY-P,
   BFLY-P5, RAMP7, CTR5. `DYNAMIC_STRATEGY = "DYN-SV"` (line 5110).
-- `Scorer.score` (line 2187) scores every menu member as an ordinary strategy and,
-  after the gate, calls `_score_chooser` (line 4262), which fills `chooser_score`
+- `Scorer.score` (def line 1784; chooser call at 2187) scores every menu member as an
+  ordinary strategy and, after the gate, calls `_score_chooser` (line 4261), which fills `chooser_score`
   from the frozen champion `dyn_sv_chooser_v1_1` over a 67-feature frame
   (`_chooser_frame`, ~line 4440).
-- `score_calendar` (line 5080) appends `dynamic_short_vol(frame)` (line 5161): one
+- `score_calendar` (def line 4954; append at 5080) appends `dynamic_short_vol(frame)` (line 5161): one
   extra row per (ticker, event_date) that relabels the winning member's own row as
   `DYN-SV` and adds `chosen_strategy`, `chosen_margin`, `menu_size`, `detail`.
-- Ranking: highest `chooser_score` among members with a finite `exp_pnl_sim`. If no
+- Ranking runs over ATM rows only (`strike_offset` null; ladder rows never compete):
+  highest `chooser_score` among members with a finite `exp_pnl_sim`. If no
   member has a chooser score, rank on `exp_pnl_sim`. A mixed event ranks on the
   scores that exist. Nothing finite: no DYN-SV row ("no opinion").
 - The winner keeps its own entry-rule/gate verdict; the chooser does not re-gate.
@@ -34,7 +35,7 @@ over seven independently scored member rows.
 | Chooser block from a bundle (`chooser_recipe`, fold pools, analog pool, admissible table) | `scoring/chooser_inputs.py` (`chooser_block`, line ~85) |
 | Frozen state: `admissible_table:dyn_sv`, `chooser_analog_pool` | `scoring/release_bindings.py:75-76,164-165` (resolved, not consumed by the nightly) |
 | Menu accounting: one outcome per member, record or typed refusal, `INVALID_CHOOSER_MENU` / `CHOOSER_MENU_INCOMPLETE` | `scoring/dynamic_outcomes.py` |
-| Selection over scored records (`_choose_dynamic`: chooser_score else exp_pnl_sim, margin, tie, `NO_CHOOSER_CANDIDATE`) | `scoring/application.py:1456-1505`, used only by `score_event` |
+| Selection over scored records (`_choose_dynamic`: chooser_score else exp_pnl_sim, margin, tie, `NO_CHOOSER_CANDIDATE`) | `scoring/application.py:1439`; called by `score_event` and, as a private import, `tools/phase4_targeted_replay.py:661` |
 | Geometry, size tables, entry-rule gate for the members | steps 1-5 |
 
 ## 3. What is missing
@@ -49,11 +50,11 @@ over seven independently scored member rows.
    position (`_native_score_batch_documents`). DYN-SV is a fan-in over seven other
    rows of the same event, so it cannot be a registry entry or a per-row pair.
 3. **A public, record-level selector.** `_choose_dynamic` is private to
-   `application.py` and returns a re-labelled `ScoreRecord`; the batch worker needs
+   `application.py` (slice 2 migrates the replay tool's private import) and returns a re-labelled `ScoreRecord`; the batch worker needs
    it (and the menu accounting) over records and refusals it already holds.
-4. **Documents.** `records.json` / `refusals.json` carry no DYN-SV selection fields
-   (`chooser_candidates`, `chooser_selection`) in their schema and the parity pairing
-   does not know them.
+4. **Output and pairing.** `ScoreRecord` already declares `chooser_candidates` and
+   `chooser_selection`, and `to_document` serialises them, so slice 2 populates
+   existing fields. The parity pairing does not read the selection.
 
 Depends on #1424: yes, for the spec shape (gate-less member, chooser field on the
 same dataclass) and, more strongly, on steps 4-5: a menu with members unregistered
@@ -62,15 +63,17 @@ NOT a first slice that can ride on #1424 alone.
 
 ## 4. Design
 
-**Members are scored once; DYN-SV selects.** The nightly already requests all seven
-members as board rows. DYN-SV reuses those exact records instead of re-scoring them
+**Members are scored once; DYN-SV selects.** The nightly universe lists all
+seven members as board rows; today the batch worker refuses them as
+`UNSUPPORTED_STRATEGY` until steps 2-5 register them. DYN-SV reuses those exact records instead of re-scoring them
 (no second compute, no divergent copies). The post-pass runs in the worker after
 `score_batch`, per event, over `records_by_key` and the member refusals.
 
 **Failure semantics (R1-R6).**
 
-- R1 inputs: the seven member outcomes of the event, as `DynamicCandidateOutcome`s
-  (record summary or the member's own typed refusal), under one
+- R1 inputs: the seven member results of the event: each member's `ScoreRecord`
+  (it carries `exp_pnl_sim`, `chooser_score`, status) or its typed refusal, plus
+  `DynamicCandidateOutcome`s built from them (accounting only), under one
   `DynamicMenuIdentity` built from the event context. No other input.
 - R2 completeness: `validate_dynamic_menu` must pass (all seven accounted, any may
   be refused). A violation is a worker bug and aborts the batch, never a row refusal.
@@ -81,8 +84,10 @@ members as board rows. DYN-SV reuses those exact records instead of re-scoring t
 - R4 nothing eligible: DYN-SV gets a typed refusal `NO_CHOOSER_CANDIDATE` carrying the
   per-member codes. Legacy emits no row; native emits a refusal so the parity report
   can classify it. This is a documented difference in representation, not behaviour.
-- R5 ties: broken by `DYNAMIC_MENU` order (the existing stable sort); the selection
-  says `status: tie`. Slice 2 confirms legacy's frame order is the same, with a test.
+- R5 ties: broken by `DYNAMIC_MENU` order (stable sort); the selection says
+  `status: tie`. Legacy is stable only on the `chooser_score` branch; its
+  `exp_pnl_sim` fallback (`score.py:5223`) uses default quicksort, so fallback ties
+  are unspecified there. Slice 2 measures real ties and records the result.
 - R6 determinism and no state: pure function of the seven outcomes; DYN-SV never
   mutates a member record, never writes, never retries. The winner's gate verdict is
   copied verbatim.
@@ -97,14 +102,16 @@ because the champion contract defines it, not to match a report.
 1. **Chooser state on member rows** (wire): chooser field in the strategy spec,
    release-binding selector for chooser state by cutoff, `chooser_recipe` declaration
    in `_assemble_one_event`. Typed `MODEL_NOT_READY` when state is missing. ~150
-   code, ~40 doc. Member rows gain `chooser_score`; no DYN-SV row yet.
+   code, ~120 test, ~40 doc. Member rows gain `chooser_score` and may now refuse
+   `MODEL_NOT_READY`; no DYN-SV row yet.
 2. **Selection post-pass** (add + wire): public record-level selector extracted from
    `_choose_dynamic`, worker fan-in using `validate_dynamic_menu`, DYN-SV record or
-   `NO_CHOOSER_CANDIDATE` refusal in the output documents. ~200 code, ~50 doc.
+   `NO_CHOOSER_CANDIDATE` refusal in the output documents. ~200 code, ~180 test, ~50 doc.
 3. **Parity pairing and report** (wire): pair DYN-SV by key, surface
-   `chosen_strategy` and margin in the comparison. ~80 code, ~20 doc.
+   `chosen_strategy` and margin in the comparison. ~80 code, ~70 test, ~20 doc.
 
-Each slice is behaviour-neutral on the board until the next lands; slice 2 is what
+Slice 1 changes member rows (new field, possible refusals); slices 2-3 only add
+rows. Slice 2 is what
 removes the DYN-SV `UNSUPPORTED_STRATEGY` refusals.
 
 ## 6. Open questions (for slice 1/2 authors, not blockers for this note)
