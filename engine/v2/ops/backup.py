@@ -14,6 +14,7 @@ from engine.v2.foundation import (
     format_timestamp,
     from_document,
     fsync_directory,
+    parse_timestamp,
     safe_relative_path,
 )
 from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
@@ -159,17 +160,25 @@ def _verify_existing_manifest(manifest_path, manifest):
         raise fail("INTEGRITY_FAILED", "backup manifest differs")
 
 
+def _manifest_required_fields(manifest):
+    """The manifest shape both restore and retention admission require."""
+    return (isinstance(manifest, dict)
+            and isinstance(manifest.get("backup_key"), str)
+            and isinstance(manifest.get("database"), str)
+            and isinstance(manifest.get("artifacts"), dict))
+
+
 def _verified_backup_pairs(target):
     """Collect backup pairs that verifiably belong to retention, newest first.
 
     A pair is a candidate only when its name matches the backup-key pattern
-    exactly and its manifest parses bounded JSON into a dict carrying the
-    fields ``_read_restore_manifest`` requires (``backup_key`` equal to the
-    name, a string ``database``, a dict ``artifacts`` and a string ``cutoff``)
-    plus a ``database_byte_size``, and the database copy verifies against that
-    receipt. Legacy v1 manifests without ``database_byte_size`` and anything
-    else unverifiable (unreadable, oversized, mismatched, corrupt) are
-    explicitly out of retention: skipped and left untouched.
+    exactly and its manifest parses bounded JSON into a dict with the shared
+    required fields, whose ``backup_key`` equals the name, whose ``cutoff`` is
+    a canonical timestamp (unchanged under ``parse_timestamp``/
+    ``format_timestamp``) and which carries a ``database_byte_size`` — legacy
+    v1 manifests are explicitly out of retention, like the unreadable,
+    oversized, mismatched or corrupt pairs. Every candidate's database copy
+    verifies against its receipt. Skipped pairs are left untouched.
     """
     candidates = []
     for database in target.glob("bkp*.sqlite"):
@@ -179,14 +188,13 @@ def _verified_backup_pairs(target):
             continue
         try:
             manifest = read_bounded_json(manifest_path, _MAX_MANIFEST_BYTES)
-            if (not isinstance(manifest, dict) or manifest.get("backup_key") != key
-                    or not isinstance(manifest.get("database"), str)
-                    or not isinstance(manifest.get("artifacts"), dict)
-                    or not isinstance(manifest.get("cutoff"), str)
-                    or "database_byte_size" not in manifest):
+            cutoff = manifest.get("cutoff") if _manifest_required_fields(manifest) else None
+            if (not isinstance(cutoff, str) or manifest.get("backup_key") != key
+                    or "database_byte_size" not in manifest
+                    or format_timestamp(parse_timestamp(cutoff)) != cutoff):
                 continue
             _verify_delivered_copy(database, manifest)
-            candidates.append((manifest["cutoff"], key, database, manifest_path))
+            candidates.append((cutoff, key, database, manifest_path))
         except (OSError, ValueError, TypeError, RecursionError, OpsError):
             continue
     candidates.sort(key=lambda candidate: (candidate[0], candidate[1]), reverse=True)
@@ -196,7 +204,12 @@ def _verified_backup_pairs(target):
 def _prune_backups(target, current_key):
     """Keep the current pair plus the newest ``BACKUP_RETENTION`` - 1 other
     verified pairs; skip anything ``_verified_backup_pairs`` left out."""
-    candidates = _verified_backup_pairs(target)
+    try:
+        candidates = _verified_backup_pairs(target)
+    except OSError as error:
+        print(f"[backup-retention] BACKUP_FAILED: backup pair scan failed: {error}",
+              file=sys.stderr)
+        return
     allowed = BACKUP_RETENTION - (1 if current_key in {key for _c, key, _d, _m in candidates} else 0)
     survivors = 0
     for _cutoff, key, database, manifest_path in candidates:
@@ -300,10 +313,7 @@ def _read_restore_manifest(source):
         manifest = read_bounded_json(manifests[0], _MAX_MANIFEST_BYTES)
     except (OSError, ValueError, RecursionError) as error:
         raise fail("INTEGRITY_FAILED", "backup manifest is invalid") from error
-    if (not isinstance(manifest, dict)
-            or not isinstance(manifest.get("backup_key"), str)
-            or not isinstance(manifest.get("database"), str)
-            or not isinstance(manifest.get("artifacts"), dict)):
+    if not _manifest_required_fields(manifest):
         raise fail("INTEGRITY_FAILED", "backup manifest is invalid")
     return manifest
 

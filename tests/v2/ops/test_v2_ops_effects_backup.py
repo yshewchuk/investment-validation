@@ -966,6 +966,26 @@ def test_backup_prune_leaves_unrelated_files_untouched(tmp_path):
     assert (backup / (keys[3] + ".sqlite")).exists()
 
 
+def test_backup_replay_of_verified_key_prunes_excess_pair(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    backup = tmp_path / "backup"
+    keys = [_bkp_key(index) for index in range(1, 5)]
+    monkeypatch.setattr(backup_module, "_prune_backups", lambda *_args: None)
+    for key in keys:
+        _make_backup(conn, clock, store, backup, key)
+    monkeypatch.undo()
+    assert sorted(path.name for path in backup.glob("bkp*.sqlite")) == sorted(
+        key + ".sqlite" for key in keys)
+    receipt = run_backup(conn, key=keys[3], owner="worker", target=backup,
+                         clock=clock, store=store)
+    assert receipt["backup_key"] == keys[3]
+    assert sorted(path.name for path in backup.glob("bkp*.sqlite")) == sorted(
+        key + ".sqlite" for key in keys[1:])
+    assert not (backup / (keys[0] + ".sqlite")).exists()
+    assert not (backup / (keys[0] + ".manifest.json")).exists()
+
+
 def test_backup_prune_replay_of_pruned_key_returns_receipt_and_keeps_three(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
