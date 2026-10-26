@@ -297,7 +297,7 @@ def test_monthly_retrain_cutoff_equal_to_the_prior_is_refused(tmp_path):
                                   "2026-11-01", len(b"new"))
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
         assembly.derive_catalog(body, release_id="cand2", expected_prior_release_id="prior1",
-                                outputs=drivers, chooser=[chooser], cutoff="2026-11-02",
+                                outputs=drivers, chooser=[chooser], cutoff="2026-11-03",
                                 monthly=True, retrain_cutoff="2026-11-01")
     assert err.value.code == "CUTOFF_NOT_ADVANCED"
 

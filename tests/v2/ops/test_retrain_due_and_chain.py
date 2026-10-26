@@ -108,6 +108,28 @@ def test_read_base_retrain_cutoff_handles_current_and_legacy_catalogs(tmp_path):
     assert read_base_retrain_cutoff(legacy_root, "rel-legacy") is None
 
 
+def test_validate_catalog_rejects_invalid_retrain_cutoffs():
+    from engine.v2.models.release_layout import (
+        ReleaseLayoutError,
+        manifest_body,
+        validate_catalog,
+    )
+
+    malformed = manifest_body(
+        "rel-malformed", "dep-1", [],
+        {"pool_cutoff": "2026-11-02", "retrain_cutoff": "2026-11-1"},
+    )
+    with pytest.raises(ReleaseLayoutError):
+        validate_catalog(malformed)
+
+    later_than_pool = manifest_body(
+        "rel-later-than-pool", "dep-1", [],
+        {"pool_cutoff": "2026-11-02", "retrain_cutoff": "2026-11-03"},
+    )
+    with pytest.raises(ReleaseLayoutError):
+        validate_catalog(later_than_pool)
+
+
 def test_read_recorded_and_chain(tmp_path):
     conn = _conn()
     conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-11-02:2026-10:rel1:abc123abc123', 'succeeded', '2026-11-02T00:00:00Z')")
