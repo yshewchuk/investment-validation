@@ -263,11 +263,14 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
         receipt = _delivered_or_stale(conn, "backup", key)
         replay_target = Path(target)
         replay_database = replay_target / (key + ".sqlite")
-        if (_BACKUP_KEY_PATTERN.fullmatch(key) is not None
-                and not replay_database.exists()
-                and not (replay_target / (key + ".manifest.json")).exists()):
-            _prune_backups(replay_target, key)
-            return receipt
+        replay_manifest = replay_target / (key + ".manifest.json")
+        if _BACKUP_KEY_PATTERN.fullmatch(key) is not None:
+            present = (replay_database.exists(), replay_manifest.exists())
+            if present == (False, False):
+                _prune_backups(replay_target, key)
+                return receipt
+            if present != (True, True):
+                raise fail("BACKUP_FAILED", "backup replay pair is incomplete")
         _verify_delivered_copy(replay_database, receipt)
         _prune_backups(replay_target, key)
         return receipt

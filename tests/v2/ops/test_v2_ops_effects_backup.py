@@ -914,13 +914,13 @@ def test_backup_prune_keeps_three_newest_pairs(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     backup = tmp_path / "backup"
-    keys = [_bkp_key(index) for index in range(1, 6)]
+    keys = [_bkp_key(index) for index in range(5, 0, -1)]
     for key in keys:
         _make_backup(conn, clock, store, backup, key)
     remaining_databases = sorted(path.name for path in backup.glob("bkp*.sqlite"))
     remaining_manifests = sorted(path.name for path in backup.glob("bkp*.manifest.json"))
-    assert remaining_databases == sorted(key + ".sqlite" for key in keys[2:])
-    assert remaining_manifests == sorted(key + ".manifest.json" for key in keys[2:])
+    assert remaining_databases == sorted(key + ".sqlite" for key in keys[-3:])
+    assert remaining_manifests == sorted(key + ".manifest.json" for key in keys[-3:])
     assert not (backup / (keys[0] + ".sqlite")).exists()
     assert not (backup / (keys[1] + ".manifest.json")).exists()
 
@@ -1009,6 +1009,22 @@ def test_backup_prune_replay_of_pruned_key_returns_receipt_and_keeps_three(tmp_p
         key + ".manifest.json" for key in keys[1:])
 
 
+@pytest.mark.parametrize("missing", ["database", "manifest"])
+def test_backup_replay_of_exact_key_with_one_file_missing_fails(tmp_path, missing):
+    """Backup-pair contract: replay requires both files when either is present."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    backup = tmp_path / "backup"
+    key = _bkp_key(1)
+    _make_backup(conn, clock, store, backup, key)
+    (backup / (key + (".sqlite" if missing == "database" else ".manifest.json"))).unlink()
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key=key, owner="worker", target=backup, clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.message == "backup replay pair is incomplete"
+    assert error.value.problem.retryable is True
+
+
 def test_backup_prune_retains_oldest_current_with_two_newest(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
@@ -1054,6 +1070,95 @@ def test_backup_prune_database_unlink_failure_keeps_manifest_and_delivers(tmp_pa
     assert "simulated database unlink failure" in captured.err
     assert (backup / (doomed + ".sqlite")).exists()
     assert (backup / (doomed + ".manifest.json")).exists()
+    assert (backup / (current + ".sqlite")).exists()
+    assert conn.execute(
+        "SELECT state FROM outbox WHERE kind='backup' AND logical_key=?", (current,)
+    ).fetchone()[0] == "delivered"
+
+
+@pytest.mark.parametrize("malform", ["artifacts_type", "cutoff"])
+def test_backup_prune_admission_skips_malformed_otherwise_valid_pair(tmp_path, malform):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    backup = tmp_path / "backup"
+    keys = [_bkp_key(index) for index in range(1, 5)]
+    for key in keys:
+        _make_backup(conn, clock, store, backup, key)
+    bad_key = _bkp_key(9)
+    _make_backup(conn, clock, store, backup, bad_key)
+    manifest_path = backup / (bad_key + ".manifest.json")
+    manifest = json.loads(manifest_path.read_bytes())
+    if malform == "artifacts_type":
+        manifest["artifacts"] = [manifest["artifacts"]]
+    else:
+        manifest["cutoff"] = manifest["cutoff"].replace(".000000", "")
+    malformed = json.dumps(manifest, sort_keys=True).encode()
+    manifest_path.write_bytes(malformed)
+    current = _bkp_key(10)
+    _make_backup(conn, clock, store, backup, current)
+    assert manifest_path.read_bytes() == malformed
+    assert (backup / (bad_key + ".sqlite")).exists()
+    remaining = sorted(path.name for path in backup.glob("bkp*.sqlite"))
+    assert remaining == sorted(
+        key + ".sqlite" for key in (keys[2:4] + [bad_key, current]))
+
+
+def test_backup_prune_scan_oserror_is_logged_and_fresh_run_delivers(tmp_path, monkeypatch,
+                                                                     capsys):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    backup = tmp_path / "backup"
+    _make_backup(conn, clock, store, backup, _bkp_key(1))
+
+    real_glob = Path.glob
+
+    def failing_glob(self, pattern):
+        if pattern == "bkp*.sqlite":
+            raise OSError("simulated pair scan failure")
+        return real_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", failing_glob)
+    _make_backup(conn, clock, store, backup, _bkp_key(2))
+    captured = capsys.readouterr()
+    assert "[backup-retention] BACKUP_FAILED: backup pair scan failed" in captured.err
+    assert "simulated pair scan failure" in captured.err
+    for key in (_bkp_key(1), _bkp_key(2)):
+        assert (backup / (key + ".sqlite")).exists()
+        assert (backup / (key + ".manifest.json")).exists()
+        assert conn.execute(
+            "SELECT state FROM outbox WHERE kind='backup' AND logical_key=?", (key,)
+        ).fetchone()[0] == "delivered"
+
+
+def test_backup_prune_manifest_unlink_failure_is_logged_after_database_removal(tmp_path,
+                                                                               monkeypatch,
+                                                                               capsys):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    backup = tmp_path / "backup"
+    keys = [_bkp_key(index) for index in range(1, 4)]
+    for key in keys:
+        _make_backup(conn, clock, store, backup, key)
+    doomed = keys[0]
+    real_unlink = Path.unlink
+    unlinked = []
+
+    def failing_unlink(self, *args, **kwargs):
+        if self.name == doomed + ".manifest.json":
+            raise OSError("simulated manifest unlink failure")
+        unlinked.append(self.name)
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    current = _bkp_key(4)
+    _make_backup(conn, clock, store, backup, current)
+    captured = capsys.readouterr()
+    assert unlinked == [doomed + ".sqlite"]
+    assert not (backup / (doomed + ".sqlite")).exists()
+    assert (backup / (doomed + ".manifest.json")).exists()
+    assert "[backup-retention] BACKUP_FAILED" in captured.err
+    assert doomed + ".manifest.json" in captured.err
+    assert "simulated manifest unlink failure" in captured.err
     assert (backup / (current + ".sqlite")).exists()
     assert conn.execute(
         "SELECT state FROM outbox WHERE kind='backup' AND logical_key=?", (current,)
