@@ -61,9 +61,13 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 `v2_magnitude_search_run` consumes `magnitude_search_plan.read_search_plan`, `magnitude_search_records.MIGRATIONS`/`OWNER`/`append_record`/`read_record`, `magnitude_search_trials.SearchTrials`, `magnitude_search_execution.validate_execution_limits`, and `magnitude_search_outer.execute_outer_fold`/`collect_outer_results` for source-sealed serial orchestration.
 Its CLI also consumes `native_registration.read_native_registration`/`valid_registration_read_budget`/`MAX_NATIVE_EVIDENCE_BYTES` and `native_gate_worker.read_native_staged_input`; direct engine dependencies are contracts, data, foundation and ops. The [driver section](#serial-magnitude-search-driver) defines the public seal/run helpers and each CLI action's authority.
 
-`magnitude_search_request.compile_request` separately returns source-free stage-2
-request specifications and year/count previews. It has synthetic-test callers only;
-no registration, executable recipe, input admission or search activation is implied.
+`magnitude_search_request.compile_request` returns source-free stage-2 request
+specifications and year/count previews for the full-HMO v1 dictionary.
+`magnitude_search_request_versions.compile_request` adds exact full-HMO v2 hash
+dispatch via public compiler validation and public panel recipes, preserving v1
+outputs/refusals and the closed H/HM/HMO 33-candidate grid. Only synthetic tests
+consume the adapter; no registration, executable recipe, input admission, source
+qualification or search activation is implied.
 
 `magnitude_candidate_recipe` and `magnitude_candidate_fit` compose the public
 model recipe/fitter APIs; their only callers are synthetic tests. They do not bind
