@@ -3,8 +3,8 @@
 ## Native preregistration
 
 `native_registration.register_native` explicitly registers one resolved arm
-before evaluation; `require_native_registration` is its read-only admission
-check. Both pin the current scope head once and read canonical event metadata
+before evaluation; `require_native_registration` is its read-only admission check.
+Both pin the current scope head once and read canonical event metadata
 through the shared holdout population reader, never outcomes or prior results.
 The stable registration key is experiment ID plus primary arm. Its immutable
 binding includes the full resolved plan, detached spec hash, exact snapshot,
@@ -16,18 +16,19 @@ The caller supplies the checkout root used for source fingerprinting.
 16 MiB UTF-8 default evidence/object budget: one SQL snapshot caps evidence transfer
 (twice the budget for UTF-16, followed by UTF-8 admission), then validates the registration
 reference size before the verified object read. Missing registration remains R1;
-malformed, oversized or conflicting catalog/object evidence remains R6. Raw
+malformed/conflicting evidence and oversized catalog evidence remain R6. Raw
 storage exceptions propagate. This bounds transferred/serialized bytes, not
 SQLite internals or decoded-object overhead. It loads v1.0–v1.5 without rewriting
 saved bindings; current-source admission still requires a matching closure.
 Larger legitimate registrations can supply `max_evidence_bytes`, also exposed as
 `--max-registration-bytes` by the gate, prediction, search-plan and serial-search CLIs; magnitude
-history binds its temporal plan twice, so 16 MiB is not a universal population bound.
+history binds its temporal plan twice, so 16 MiB is not a universal population bound (nor a feature-matrix cap).
 The pure `valid_registration_read_budget` predicate admits only built-in integer
 budgets in `[1, 2**62 - 1]`, leaving SQLite headroom for UTF-16. The loader and all
-five CLI parsers (including RUNUP's evidence-budget flag) share it; None never disables this loader's bounds. Later
-admission/outcome APIs keep their existing policies. Execution under changed
-bound sources requires fresh preregistration; old seals are never migrated.
+five CLI parsers (including RUNUP's evidence-budget flag) and `register_native` share it; None cannot disable either public boundary.
+`register_native` defaults to 16 MiB; prediction/gate register forward their flag to the same bounded reservation used by RUNUP.
+The cap is serialized UTF-8 bytes checked after preparation but before binding publication/catalog reservation, not construction memory/RSS.
+Public require/magnitude admission forward finite bounds through both rechecks; low-level optional admission/outcome APIs retain their policies. Changed source fingerprints require fresh preregistration, never seal migration.
 
 Registration publishes canonical bytes through `ArtifactStore`, then reserves
 the existing primary `hypotheses`/`experiment_runs` records in one catalog
@@ -79,7 +80,8 @@ fold training candidates and evaluation IDs. It calls the research physical
 preflight on exactly that union before any label read, returning the original
 registration and detached preflight evidence. Unused selected-window events
 are excluded. Admission/metadata/isolation refusals propagate with no writes,
-retry or partial return. The magnitude CLI uses this admission before replay.
+retry or partial return. The magnitude CLI uses this admission before replay;
+its finite `max_evidence_bytes` (default 16 MiB, None invalid) reaches both registration rechecks before label preflight.
 
 ### Fixed magnitude baseline
 
@@ -201,9 +203,10 @@ Registration/replay never fit. Native smoke/recorded publication remains unchang
 | Current scope head cannot be resolved | `SNAPSHOT_UNRESOLVED`; no fallback. |
 | Invalid context or explicitly excluded/unknown event | Shared `HOLDOUT_ACCESS_DENIED`; no outcome read. |
 | Admission has no native registration | `INVALID_EXPERIMENT_SPEC`; no implicit registration. |
-| Loader budget is not a built-in integer in `[1, 2**62 - 1]` | `INVALID_EXPERIMENT_SPEC` before catalog/store access; booleans and None are invalid. |
-| Any registration-reading CLI receives an invalid `--max-registration-bytes` | Argument-parser error exits 2 before catalog/store access; noninteger text uses argparse's integer-conversion diagnostic, out-of-range integers use the positive SQLite-safe budget diagnostic. |
-| Stored loader evidence exceeds its UTF-8/canonical budget, has malformed text/JSON, or references an oversized/invalid registration object | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; SQL transfer and reference-size admission precede decoding/object reads, respectively. No writes. |
+| Loader/register/require budget is not a built-in integer in `[1, 2**62 - 1]` | `INVALID_EXPERIMENT_SPEC` before preparation or catalog/store access; booleans and None are invalid. Magnitude admission delegates this finite bound after pure clock validation, before labels. |
+| Any CLI action accepting `--max-registration-bytes`, including gate/prediction register, receives an invalid value | Argument-parser error exits 2 before catalog/store access; noninteger text uses argparse's integer-conversion diagnostic, out-of-range integers use the positive SQLite-safe budget diagnostic. |
+| Prepared registration bytes or a schema/expected-ref-valid stored registration reference exceed the explicit cap | Non-retryable `RESOURCE_LIMIT_EXCEEDED`, fixed message and integer `registration_bytes`/`max_registration_bytes` details; before publication/reservation or object read. Existing oversized bindings need a consistent explicit larger finite cap, not repair. Prediction/gate CLI expose details and may publish their existing refusal receipt, never a reservation/outcome. |
+| Catalog evidence exceeds its UTF-8/canonical budget, has malformed text/JSON, or registration evidence fails integrity | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; SQL transfer and reference-size admission precede decoding/object reads, respectively. No writes. |
 | Loader encounters raw `OSError` or `sqlite3.Error` | Original exception propagates unchanged; no rewrite, implicit registration or retry. |
 | Existing key has changed code, environment, plan, snapshot, population or context, or corrupt stored evidence | Non-retryable `EXPERIMENT_IDENTITY_CONFLICT`; existing catalog and artifact bytes stay unchanged. |
 | Publication or catalog commit fails | No partial registration is admitted; a complete unreferenced artifact may remain. No automatic retry. |
@@ -689,7 +692,7 @@ This manual CLI is separate from the admitted smoke worker; neither authorizes p
 | Interrupted publication | Collector/observer storage interruptions are retryable `RESOURCE_UNAVAILABLE`; catalog constraint violations and malformed stored collection evidence refuse R6. Collection opts into R6 for queue/resource/progress receipt corruption, including initial submission replay; malformed stored failure JSON retains `INTEGRITY_FAILED`. Unexpected programming errors propagate, and delegated APIs retain their documented refusal policies. Changed sealed context remains R6. Intent and per-arm native intents resume ledger/report reconciliation; no final index exists until every terminal arm's applicable publication finishes. |
 | Invalid collection input or active caller transaction | `INVALID_EXPERIMENT_SPEC` for rejected mode, path or roster admission, or a non-idle catalog connection; other input-admission filesystem I/O remains retryable `RESOURCE_UNAVAILABLE`. Ledger admission rejects non-directory or looping parents and overlong paths, permits absent destinations/parents, and requires any existing leaf to be regular without following symlinks; this preflight does not prevent later replacement races. |
 | Pending, attempted or failed arms | Each admitted/dispatched variant counts once, regardless of success, refusal or failure; queued/cancelled jobs without an attempt count zero. Pending states, including `retry_wait`, have no native recording or frozen index and cannot complete a run. Once all children are terminal, the index is immutable with `complete=false` if any arm failed/refused, retaining successful siblings. |
-| Native evidence byte admission | Collection's 16 MiB UTF-8 budget bounds native registration/outcome/completion/result JSON, registered-reference metadata and canonical evidence writes, including intent/index. Oversized or malformed native evidence refuses R6 before artifact reads. Registered-reference metadata admission instead retains `INTEGRITY_FAILED` for oversized, non-text or invalid-encoding values; admitted metadata that cannot be decoded as a reference refuses R6. Existing intent/index references must match the reference derived from bounded expected bytes; verified reads remain no-follow and bounded by registered size. `max_evidence_bytes` covers submission, registration verification and native outcome/replay/export; default None preserves existing callers. Persistence remains owned by SQLite transactions, foundation identity/artifact verification and native publication; filesystem work stays outside catalog write transactions. |
+| Native evidence byte admission | Collection's 16 MiB UTF-8 budget bounds native registration/outcome/completion/result JSON, registered-reference metadata and canonical evidence writes, including intent/index. An admitted registration reference over cap propagates nonretryable `RESOURCE_LIMIT_EXCEEDED` with byte details before object reads; native outcome APIs do not publish a conflict-refusal receipt for it. Other oversized or malformed native evidence retains R6. Registered-reference metadata admission instead retains `INTEGRITY_FAILED` for oversized, non-text or invalid-encoding values; admitted metadata that cannot be decoded as a reference refuses R6. Existing intent/index references must match the reference derived from bounded expected bytes; verified reads remain no-follow and bounded by registered size. `max_evidence_bytes` covers submission, registration verification and native outcome/replay/export; default None preserves existing callers. Persistence remains owned by SQLite transactions, foundation identity/artifact verification and native publication; filesystem work stays outside catalog write transactions. |
 | Existing report comparison | Collection accepts only an exact byte match through a bounded, no-follow regular-file read; oversize, growth or differing bytes refuse R6. This comparison bound follows expected report size, not a report-wide JSON ceiling; callers that do not opt in retain existing limits. |
 | Stored job/attempt failures and authority | Collection explicitly opts into a 1 MiB UTF-8 ceiling for job-failure reads through initial submission replay and observation; its attempt-failure reads use the same ceiling. Oversized failures refuse R6 before decoding, without truncation. Wrong-type, invalid-encoding or malformed job failures retain `INTEGRITY_FAILED`; malformed attempt failures refuse R6. The shared default is 8 MiB, with explicit larger finite budgets for historical recovery. Future oversized supervisor failures preserve the full original `problem.v1.0` artifact and persist a bounded summary/ref. SQLite internals and other receipt fields are outside this failure-field bound. Collection grants no final-read, promotion or winner authority; reconstructed-history/holdout limitations remain unchanged. |
 
@@ -899,7 +902,7 @@ Whole-cohort coverage and daily-mark units remain the exploratory comparison con
 | Registration population/holdout refusal | Native typed failure; no reservation or attempted variant. |
 | Admitted comparison emits a supported scientific failure | Immutable failed/refused terminal, attempted count one, no report or partial cohort. Other typed failures propagate without a terminal. |
 | Resource/publication interruption | Later snapshot/artifact/repository filesystem or SQLite failures remain `RESOURCE_UNAVAILABLE`; no synthesized scientific failure. A durable intent resumes without market reads; before intent exists, an exact retry may repeat the deterministic comparison. |
-| Malformed/oversized stored evidence or conflicting terminal | Existing native integrity refusal; no evidence replacement. Both register/run enforce the 16 MiB default or explicit JSON budget. Reservation preflights binding/catalog bytes before publication and bounds both stored-evidence checks; report/market bytes retain their own policies. |
+| Malformed/oversized stored evidence or conflicting terminal | Catalog/terminal integrity failures retain the native integrity refusal; admitted registration-reference or prepared-binding overflow instead gives nonretryable `RESOURCE_LIMIT_EXCEEDED` with `registration_bytes`/`max_registration_bytes`. No evidence replacement. Both register/run enforce the 16 MiB default or explicit JSON budget. Reservation preflights binding/catalog bytes before publication and bounds both stored-evidence checks; report/market bytes retain their own policies. |
 
 ## Selected-candidate outer evaluation
 

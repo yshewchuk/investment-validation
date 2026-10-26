@@ -10,7 +10,7 @@ import pytest
 from engine.v2.foundation import artifact_reference, canonical_json, content_hash, to_document
 from engine.v2.ops import native_registration as native
 from engine.v2.ops.errors import OpsError
-from tests.v2.ops.native_bounds_support import BoundedSqlRows
+from tests.v2.ops.native_bounds_support import BoundedSqlRows, size_refusal
 
 CAP = 16 * 1024 * 1024
 
@@ -282,10 +282,9 @@ def test_registration_artifact_bound_is_opt_in_and_precedes_store_read():
         binding, ref, _ = registered_binding(conn, padding=CAP)
         assert ref.byte_size > CAP
         assert native.verified_registration_bytes(conn, registration_store(binding, ref), "native-test") == binding
-        with pytest.raises(OpsError) as error:
+        with size_refusal(ref.byte_size, CAP):
             native.verified_registration_bytes(conn, SimpleNamespace(read_verified=forbid_decode), "native-test",
                                                max_evidence_bytes=CAP)
-        assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT" and not error.value.problem.retryable
 
 
 @pytest.mark.parametrize("extra", [0, 1])
@@ -296,12 +295,34 @@ def test_registration_opt_in_artifact_metadata_honors_exact_custom_bound(extra):
         if extra:
             evidence["native_registration"] = to_document(replace(ref, byte_size=limit + extra))
             conn.execute("UPDATE experiment_runs SET evidence_json=?", (canonical_json(evidence),))
-            with pytest.raises(OpsError, match="EXPERIMENT_IDENTITY_CONFLICT"):
+            with size_refusal(limit + extra, limit):
                 native.verified_registration_bytes(conn, SimpleNamespace(read_verified=forbid_decode), "native-test",
                                                    max_evidence_bytes=limit)
         else:
             assert native.verified_registration_bytes(conn, registration_store(binding, ref), "native-test",
                                                       max_evidence_bytes=limit) == binding
+
+
+@pytest.mark.parametrize("conflict", ["schema", "expected-ref"])
+def test_identity_conflict_precedes_oversized_reference_without_object_read(conflict):
+    with evidence_catalog() as conn:
+        binding, ref, evidence = registered_binding(conn, padding=1024)
+        oversized = replace(ref, byte_size=len(binding) + 1,
+                            schema_ref="unsupported.v1" if conflict == "schema" else ref.schema_ref)
+        evidence["native_registration"] = to_document(oversized)
+        conn.execute("UPDATE experiment_runs SET evidence_json=?", (canonical_json(evidence),))
+        before = list(conn.iterdump())
+        with pytest.raises(OpsError) as caught:
+            native.verified_registration_bytes(conn, SimpleNamespace(read_verified=forbid_decode), "native-test",
+                max_evidence_bytes=len(binding), expected_ref=ref if conflict == "expected-ref" else None)
+        assert type(caught.value) is OpsError
+        assert caught.value.problem.retryable is False
+        assert to_document(caught.value.problem) == {
+            "schema_version": "problem.v1.0", "code": "EXPERIMENT_IDENTITY_CONFLICT", "category": "validation",
+            "retryable": False, "message": "native registration differs from its immutable binding",
+            "stage": None, "trace_id": None, "dependency_refs": [], "retry_after_seconds": None,
+            "diagnostic_ref": None, "details": {}}
+        assert list(conn.iterdump()) == before
 
 
 @pytest.mark.parametrize("binding", [b"{", b"[]", b"null", b"[" * 2000 + b"0" + b"]" * 2000],

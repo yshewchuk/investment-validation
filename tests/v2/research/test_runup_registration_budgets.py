@@ -11,7 +11,13 @@ from experiments import registered_runup as study
 from experiments import v2_runup_study as cli
 from tests.data_scan_support import catalog_and_store
 from tests.v2.ops.native_bounds_support import BoundedSqlRows, catalog_rows, object_bytes
-from tests.v2.ops.test_native_registration_read_bounds import SPEC, pad, refuses, registered_catalog
+from tests.v2.ops.test_native_registration_read_bounds import (
+    SPEC,
+    pad,
+    refuses,
+    registered_catalog,
+    size_refusal,
+)
 from tests.v2.research import test_registered_runup as support
 from tests.v2.research.magnitude_trial_support import TrackingRepository
 from tests.v2.research.test_runup_exit_report import EVENT_ID, commit
@@ -67,7 +73,7 @@ def test_new_binding_exact_utf8_limit_and_minus_one_before_effects(source, monke
     before_rows, before_objects = catalog_rows(source[0]), object_bytes(source[2])
     with monkeypatch.context() as patch:
         patch.setattr(source[2], "publish_bytes", support.forbid)
-        with refuses("native registration exceeds its UTF-8 byte budget"):
+        with size_refusal(size, size - 1):
             support.invoke(source, study.register_runup, scope=scope, max_evidence_bytes=size - 1)
     assert catalog_rows(source[0]) == before_rows
     assert object_bytes(source[2]) == before_objects
@@ -76,7 +82,7 @@ def test_new_binding_exact_utf8_limit_and_minus_one_before_effects(source, monke
     monkeypatch.setattr(source[2], "publish_bytes", support.forbid)
     assert support.invoke(source, study.register_runup, scope=scope, max_evidence_bytes=size) == registration
     monkeypatch.setattr(source[2], "read_verified", support.forbid)
-    with refuses("native registration exceeds its UTF-8 byte budget"):
+    with size_refusal(size, size - 1):
         support.invoke(source, study.register_runup, scope=scope, max_evidence_bytes=size - 1)
     assert catalog_rows(source[0]) == before_rows
     assert object_bytes(source[2]) == before_objects
@@ -87,7 +93,7 @@ def test_binding_and_catalog_preflight_precede_all_io():
         @property
         def document(self):
             pytest.fail("oversized prepared bytes were decoded")
-    with refuses("native registration exceeds its UTF-8 byte budget"):
+    with size_refusal(2, 1):
         native.reserve_native_registration(None, None, NoDecode("x", b"x" * 2), None, max_evidence_bytes=1)
     binding = canonical_json({"schema_version": "native_experiment_registration.v1.0"}).encode()
     with refuses("native evidence exceeds its canonical object contract"):
@@ -184,7 +190,8 @@ def test_cli_register_budget_and_no_ledger_for_both_actions(source, tmp_path, ca
             "--snapshot-id", source[4].snapshot_id, "--scope", "shadow", "--as-of-month", "2025-01",
             "--event-id", EVENT_ID, "--no-ledger"]
     assert cli.main(["register", *args, "--max-evidence-bytes", str(cap - 1)]) == 2
-    assert json.loads(capsys.readouterr().out) == {"refused": "EXPERIMENT_IDENTITY_CONFLICT", "details": {}}
+    assert json.loads(capsys.readouterr().out) == {"refused": "RESOURCE_LIMIT_EXCEEDED",
+        "details": {"registration_bytes": cap, "max_registration_bytes": cap - 1}}
     assert support.evidence(source) == []
     assert cli.main(["register", *args, "--max-evidence-bytes", str(cap)]) == 0
     assert json.loads(capsys.readouterr().out) == {"registered": registration.variant_id, "run_id": registration.run_id}

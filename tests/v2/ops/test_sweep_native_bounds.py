@@ -19,10 +19,13 @@ from engine.v2.ops.errors import OpsError, make_problem
 from experiments import native_outcomes as outcomes
 from tests.v2.ops.native_bounds_support import (
     BoundedSqlRows,
+    catalog_rows,
     native_evidence,
+    object_bytes,
     register_native_case,
     registration_ref,
 )
+from tests.v2.ops.test_native_registration_read_bounds import size_refusal
 from tests.v2.research.test_native_registration import source as source
 
 CAP = 8192
@@ -120,10 +123,13 @@ def test_registration_size_is_checked_before_verified_read(source, tmp_path, mon
     registration = register_native_case(source)
     cap = registration_ref(source, registration).byte_size - 1
     assert len(canonical_json(native_evidence(source, registration.run_id)).encode()) <= cap
+    before_rows, before_objects = catalog_rows(source.conn), object_bytes(source.store)
     monkeypatch.setattr(source.store, "read_verified", forbid)
     monkeypatch.setattr(outcomes, "ledger_append", forbid)
-    assert_conflict(lambda: invoke(action, source, registration, tmp_path / "ledger.csv",
-                                  max_evidence_bytes=cap))
+    with size_refusal(cap + 1, cap):
+        invoke(action, source, registration, tmp_path / "ledger.csv", max_evidence_bytes=cap)
+    assert catalog_rows(source.conn) == before_rows and object_bytes(source.store) == before_objects
+    assert not (tmp_path / "ledger.csv").exists()
 
 
 def test_exact_registration_artifact_bound_allows_empty_replay(source, tmp_path):
