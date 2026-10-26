@@ -121,6 +121,12 @@ baseline records the new path directly, so the declared file list and the
 measurement identity it feeds refresh. Counts and source hashes remain
 historical, not a fresh measurement.
 
+Bumped to v22: ``tests/test_v2_ops_health.py`` moved to
+``tests/v2/ops/test_v2_ops_health.py`` (test-layout ratchet); the baseline
+already records the new path, so the declared file list and the measurement
+identity it feeds refresh. Counts and source hashes remain historical, not a
+fresh measurement.
+
 phase2 profile
 --------------
 The fixed suite is every test file named in ``checks/phase2_acceptance.json``
@@ -230,6 +236,7 @@ PHASE1_RENAMED = {
     "tests/test_v2_data_computed_moves_table.py": "tests/v2/data/test_computed_moves_table.py",
     "tests/test_v2_serving_bridge.py": "tests/v2/serving/test_v2_serving_bridge.py",
     "tests/test_v2_ops_training_job.py": "tests/v2/ops/test_v2_ops_training_job.py",
+    "tests/test_v2_ops_health.py": "tests/v2/ops/test_v2_ops_health.py",
     "tests/test_v2_ops_serving_browser.py": "tests/v2/serving/test_ops_serving_browser.py",
 }
 # Relocated tests kept explicitly in the suite, including moved baseline paths.

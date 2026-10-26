@@ -2638,6 +2638,20 @@ def test_classify_maps_each_reviewed_exception_family(tmp_path):
     assert "missing" not in problem.message
 
 
+def test_classify_maps_native_release_failures_to_model_not_ready():
+    from engine.v2.scoring.release_bindings import ModelNotReady, NoCurrentRelease
+
+    for exc in (ModelNotReady("chooser_analog_pool", "missing"),
+                NoCurrentRelease("no release has ever been promoted")):
+        problem = _worker._classify(exc)
+        assert problem.code == "MODEL_NOT_READY"
+        assert problem.message == "native score batch release binding is unavailable"
+        assert problem.details == {}
+        assert problem.retryable is False
+        assert "chooser_analog_pool" not in problem.message
+        assert "no release" not in problem.message
+
+
 def test_last_frame_reads_the_deepest_traceback_entry_or_none():
     assert _worker._last_frame(ValueError("no traceback")) is None
     try:

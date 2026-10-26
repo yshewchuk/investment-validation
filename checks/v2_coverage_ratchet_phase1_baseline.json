@@ -66,7 +66,7 @@
     "tests/test_v2_ops_fingerprints_code_assets.py",
     "tests/v2/ops/test_v2_ops_fingerprints_model_scan.py",
     "tests/test_v2_ops_fixtures.py",
-    "tests/test_v2_ops_health.py",
+    "tests/v2/ops/test_v2_ops_health.py",
     "tests/test_v2_ops_incremental_data.py",
     "tests/test_v2_ops_incremental_refresh_wiring.py",
     "tests/test_v2_ops_incremental_registration.py",
