@@ -211,7 +211,7 @@ What the gate checks, and its finding codes:
 | phase 4 | every traced frozen pair verifies, binds only staged models, and replays from the staged bytes with captured receipts under both no-fit guards; at least one pair replays | `P5_PHASE4_UNVERIFIED`, `P5_PHASE4_MEMBER_ABSENT`, `P5_PHASE4_MISMATCH`, `P5_PHASE4_ERROR`, `P5_PHASE4_EMPTY` (+ `P5_RUNTIME_FIT`/`P5_MODEL_CACHE_WRITE` with subject `phase4_replay`) |
 | report | the written report carries every member, consumer, control and finding row | `P5_REPORT_INCOMPLETE` |
 
-The gate never moves `$REL`'s own pointer: the round trip runs on a copy.
+The gate never moves `$REL`'s own pointer: the promote rehearsal runs on a copy.
 
 ## 4. Promote and roll back
 
