@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 from datetime import date, timedelta
 from pathlib import Path
+
+from engine.v2.models.release_layout import ReleaseLayoutError, catalog_path, read_catalog
 
 STEPS = ("train", "stage", "accept", "check", "promote")
 #: Completed months examined when the base has a ``retrain_cutoff``.
@@ -39,6 +42,29 @@ def _completed_months(session: date, count: int) -> list[tuple[str, date]]:
             year, month = year - 1, 12
         out.append((f"{year:04d}-{month:02d}", _month_end(year, month)))
     return out
+
+
+def open_catalog_readonly(path) -> sqlite3.Connection:
+    """Open an existing SQLite catalog without ever creating or mutating it."""
+    resolved = Path(path).resolve()
+    conn = sqlite3.connect(resolved.as_uri() + "?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def read_base_retrain_cutoff(release_root, release_id):
+    """The base release's ``sources.retrain_cutoff``, or None for ``"none"``/legacy."""
+    if release_id == "none":
+        return None
+    try:
+        path = catalog_path(Path(release_root), release_id)
+        catalog = read_catalog(path, release_id)
+        sources = catalog["sources"]
+        if "retrain_cutoff" not in sources:
+            return None
+        return sources["retrain_cutoff"]
+    except (OSError, ValueError, TypeError, KeyError, ReleaseLayoutError):
+        raise ValueError("base release catalog could not be read") from None
 
 
 def due_decision(session: str, base_retrain_cutoff: str | None, recorded: frozenset,

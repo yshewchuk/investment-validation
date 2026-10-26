@@ -14,6 +14,8 @@ from engine.v2.ops.pool_refresh import submit_pool_nightly_refresh_if_ready
 from engine.v2.ops.retrain_due import (
     chain_blocks_pool_sidecar,
     due_decision,
+    open_catalog_readonly,
+    read_base_retrain_cutoff,
     read_recorded,
     write_superseded,
 )
@@ -64,6 +66,46 @@ def test_due_decision():
 
     with pytest.raises(ValueError):
         due_decision("2026-13-01", None, recorded)
+
+
+def test_open_catalog_readonly_never_creates_or_writes(tmp_path):
+    catalog = tmp_path / "catalog.sqlite"
+    writer = sqlite3.connect(catalog)
+    writer.execute("CREATE TABLE jobs (namespace TEXT, idempotency_key TEXT)")
+    writer.execute("INSERT INTO jobs VALUES ('shadow', 'key')")
+    writer.commit()
+    writer.close()
+
+    conn = open_catalog_readonly(catalog)
+    try:
+        row = conn.execute("SELECT idempotency_key FROM jobs").fetchone()
+        assert row[0] == "key"
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("INSERT INTO jobs VALUES ('shadow', 'other')")
+    finally:
+        conn.close()
+
+    missing = tmp_path / "missing.sqlite"
+    with pytest.raises(sqlite3.OperationalError):
+        open_catalog_readonly(missing)
+    assert not missing.exists()
+
+
+def test_read_base_retrain_cutoff_handles_current_and_legacy_catalogs(tmp_path):
+    from engine.v2.models.release_layout import catalog_path, manifest_body, write_catalog
+
+    current_root = tmp_path / "current"
+    current = manifest_body(
+        "rel-current", "dep-1", [],
+        {"pool_cutoff": "2026-11-02", "retrain_cutoff": "2026-11-01"},
+    )
+    write_catalog(catalog_path(current_root, "rel-current"), current)
+    assert read_base_retrain_cutoff(current_root, "rel-current") == "2026-11-01"
+
+    legacy_root = tmp_path / "legacy"
+    legacy = manifest_body("rel-legacy", "dep-1", [], {"pool_cutoff": "2026-11-02"})
+    write_catalog(catalog_path(legacy_root, "rel-legacy"), legacy)
+    assert read_base_retrain_cutoff(legacy_root, "rel-legacy") is None
 
 
 def test_read_recorded_and_chain(tmp_path):

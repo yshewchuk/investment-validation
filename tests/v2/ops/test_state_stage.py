@@ -223,6 +223,93 @@ def test_worker_stages_candidate_carrying_the_unadvanced_members(tmp_path, monke
     assert names == {"prior.bin", "STR-THRU|0.5000|2026-10-01"}
 
 
+def test_monthly_stage_uses_the_deployed_pointer_as_prior(tmp_path, monkeypatch):
+    inventory, _ = _stage_prior(tmp_path, prior_sources={"pool_cutoff": "2026-11-02"})
+    store = phase5_release.deployment_root(tmp_path)
+    deployment.mark_staging_succeeded(store, "prior1")
+    deployment.promote(store, "prior1")
+
+    staged = {
+        "driver_size.json": ("driver_residual_pool:size", "size|2026-11-01"),
+        "driver_implied_t1.json": ("driver_residual_pool:implied_t1", "implied_t1|2026-11-01"),
+        "driver_runup_move.json": ("driver_residual_pool:runup_move", "runup_move|2026-11-01"),
+        "chooser.json": ("chooser_analog_pool", "chooser|2026-11-01"),
+    }
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    for name in staged:
+        (staging / name).write_bytes(f"new-{name}".encode())
+
+    def fake_payloads(paths, max_bytes=None):
+        from tools import phase5_state_stage_job
+
+        assert max_bytes == phase5_state_stage_job.MAX_STATE_BYTES
+        name = Path(paths[0]).name
+        member, object_name = staged[name]
+        return {member: {object_name: Path(paths[0]).read_bytes()}}
+
+    monkeypatch.setattr(phase5_prepare_release, "frozen_state_payloads", fake_payloads)
+    monkeypatch.setattr(inventory_module, "current_release_inventory",
+                        lambda *a, **k: (inventory, ()))
+    parameters = {"expected_ids": ["phase5_state_stage"], "release_root": str(tmp_path),
+                  "prior_release_id": "stale-plan-base", "release_id": "cand1",
+                  "cutoff": "2026-11-01", "mode": "monthly",
+                  "state_files": sorted(staged),
+                  "input_bindings": {**{name: f"job_x#training/{name}" for name in staged},
+                                     "legacy_manifest.json": "artifact_manifest"}}
+
+    result = run_state_stage_worker(parameters, staging)
+    assert result["completed_ids"] == ["phase5_state_stage"]
+    assert result["no_work"] is False
+    assert deployment.current_pointer(store).release_id == "prior1"
+    summary = json.loads((staging / "stage_result.json").read_text())
+    assert summary["release_id"] == "cand1"
+    assert summary["prior_release_id"] == "prior1"
+    assert summary["cutoff"] == "2026-11-01"
+    assert summary["n_new"] == 4 and summary["n_carried"] == 3
+
+    body = json.loads(phase5_release.catalog_path(tmp_path, "cand1").read_bytes())
+    prior = json.loads(phase5_release.catalog_path(tmp_path, "prior1").read_bytes())
+    assert body["sources"]["carried_from"] == "prior1"
+    assert body["sources"]["pool_cutoff"] == "2026-11-02"
+    assert body["sources"]["retrain_cutoff"] == "2026-11-01"
+    rows = {row["member_id"]: row for row in body["members"]}
+    prior_rows = {row["member_id"]: row for row in prior["members"]}
+    for name, (member, object_name) in staged.items():
+        digest = phase5_release.sha256_bytes((staging / name).read_bytes())
+        assert [(obj["name"], obj["content_hash"])
+                for obj in rows[member]["objects"]] == [(object_name, digest)]
+    for member in ("paired_residual_pool", "trailing_pnl_cutoff", "board_analog_matcher"):
+        assert rows[member]["objects"] == prior_rows[member]["objects"]
+    status = (phase5_release.deployment_root(tmp_path) / "releases" / "cand1"
+              / "staging-status.json")
+    assert json.loads(status.read_text())["state"] == "succeeded"
+
+
+def test_monthly_retrain_cutoff_equal_to_the_prior_is_refused(tmp_path):
+    _, body = _stage_prior(tmp_path, prior_sources={
+        "pool_cutoff": "2026-11-02", "retrain_cutoff": "2026-11-01"})
+    digest = phase5_release.sha256_bytes(b"new")
+    drivers = [assembly.PoolOutput(member_id, f"{member_id}|2026-11-01", digest,
+                                   "2026-11-01", len(b"new"))
+               for member_id in assembly.MONTHLY_DRIVER_MEMBER_IDS]
+    chooser = assembly.PoolOutput(assembly.CHOOSER_MEMBER_ID, "chooser|2026-11-01", digest,
+                                  "2026-11-01", len(b"new"))
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, release_id="cand2", expected_prior_release_id="prior1",
+                                outputs=drivers, chooser=[chooser], cutoff="2026-11-02",
+                                monthly=True, retrain_cutoff="2026-11-01")
+    assert err.value.code == "CUTOFF_NOT_ADVANCED"
+
+
+def test_monthly_stage_refuses_a_missing_deployed_base(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch, mode="monthly")
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert err.value.problem.details == {"code": "PRIOR_MISMATCH"}
+
+
 def test_successful_stage_publishes_the_staging_success_record(tmp_path, monkeypatch):
     parameters, staging = _wire(tmp_path, monkeypatch)
     assert run_state_stage_worker(parameters, staging)["completed_ids"] == ["phase5_state_stage"]
@@ -918,7 +1005,7 @@ def test_bootstrap_with_prior_equal_to_release_is_reported():
 
 def test_unknown_mode_is_reported():
     assert state_stage_parameter_problems(
-        None, _params(mode="sideways")) == ["mode must be 'carry' or 'bootstrap'"]
+        None, _params(mode="sideways")) == ["mode must be 'carry', 'bootstrap' or 'monthly'"]
 
 
 def test_carry_with_a_null_prior_is_reported():

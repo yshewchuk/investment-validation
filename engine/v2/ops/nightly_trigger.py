@@ -879,6 +879,24 @@ def _base_release_id() -> str:
     return deployed_release_id()
 
 
+def _monthly_retrain_section(ops_root: Path, as_of: str):
+    """The monthly-retrain decision pinned into the plan (loud on error)."""
+    base_release_id = _base_release_id()
+    if base_release_id == "none":
+        base_retrain_cutoff = None
+    else:
+        from engine.v2.models.deployment import production_release_root
+        base_retrain_cutoff = retrain_due.read_base_retrain_cutoff(
+            production_release_root(), base_release_id)
+    decision_conn = retrain_due.open_catalog_readonly(ops_root / "catalog.sqlite")
+    try:
+        return retrain_due.decide(
+            decision_conn, ops_root, as_of, base_release_id,
+            base_retrain_cutoff=base_retrain_cutoff)
+    finally:
+        decision_conn.close()
+
+
 def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=None, *,
                   full_run: bool = True,
                   expected_shadow_snapshot_id: str | None = None,
@@ -949,8 +967,7 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
         refresh_plan=None, expected_snapshot_id=expected_shadow_snapshot_id)
     conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
     try:
-        # #805 slice 2: the monthly-retrain decision, pinned into the plan (loud on error).
-        plan_args.retrain = retrain_due.decide(conn, ops_root, as_of, _base_release_id())
+        plan_args.retrain = _monthly_retrain_section(ops_root, as_of)
         planned = commands._plan_command(plan_args, ops_root, conn, clock)
     finally:
         conn.close()
