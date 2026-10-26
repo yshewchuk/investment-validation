@@ -188,6 +188,7 @@ _COVERAGE_RELOCATIONS = (
     ("tests/test_v2_ops_training_job.py", "tests/v2/ops/test_v2_ops_training_job.py", (1,)),
     ("tests/test_v2_ops_health.py", "tests/v2/ops/test_v2_ops_health.py", (1,)),
     ("tests/test_v2_ops_partition_consumer.py", "tests/v2/ops/test_partition_consumer.py", (1,)),
+    ("tests/test_v2_ops_serving_browser.py", "tests/v2/serving/test_ops_serving_browser.py", (1,)),
 )
 
 

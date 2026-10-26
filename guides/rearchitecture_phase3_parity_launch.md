@@ -523,9 +523,14 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
    still holds) and returns a typed `OPERATIONS_UNAVAILABLE` Problem when it
    is missing or malformed; missing engineering history renders as
    `unknown`, never green. `/health.json` (`engine/v2/serving/operations.py`)
-   reads bounded at the shared `OPERATIONS_HEALTH_MAX_BYTES` cap and accepts
-   `operations_health.v1.0` through `v1.2`; `v1.2` adds the additive
-   `native_stage_failures` list. See
+   still serves the health document bytes, and the operations shell around it
+   changed: the reader accepts `operations_health.v1.2` alongside v1.0/v1.1,
+   the shell's banner evaluates the document's `requested_session`/
+   `resolved_session` and `code_budgets` evidence (missing or malformed
+   evidence renders unknown, never a default), and `/release/current.json`
+   answers `Cache-Control: no-store` plus `X-Expected-Session` — the latest
+   completed NYSE session at the configured snapshot clock, omitted when that
+   clock is malformed. See
    `tests/v2/ops/test_v2_ops_engineering_history.py` (conflicts/degraded evidence/
    selfcheck carried; requested vs. resolved session; failed update keeps the
    old release and shows the reason; an unobserved window renders as
@@ -764,7 +769,7 @@ Exit: `/usr/bin/python3 -m pytest -q tests/v2/serving/test_v2_serving_api.py`
    surface and remain Phase 6 work.
 
 Exit commands: `npm --prefix ui run typecheck`, `npm --prefix ui run build`,
-and `/usr/bin/python3 -m pytest -q tests/test_v2_dashboard_browser.py`.
+and `/usr/bin/python3 -m pytest -q tests/v2/dashboard/test_v2_dashboard_browser.py`.
 Define these npm scripts when scaffolding; these are required new commands,
 not claims about existing tools. Use existing Python Playwright for browser
 tests rather than adding a second test framework solely for this slice.

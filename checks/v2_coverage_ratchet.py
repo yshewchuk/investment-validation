@@ -237,6 +237,7 @@ PHASE1_RENAMED = {
     "tests/test_v2_serving_bridge.py": "tests/v2/serving/test_v2_serving_bridge.py",
     "tests/test_v2_ops_training_job.py": "tests/v2/ops/test_v2_ops_training_job.py",
     "tests/test_v2_ops_health.py": "tests/v2/ops/test_v2_ops_health.py",
+    "tests/test_v2_ops_serving_browser.py": "tests/v2/serving/test_ops_serving_browser.py",
 }
 # Relocated tests kept explicitly in the suite, including moved baseline paths.
 PHASE1_EXTRA = (
@@ -627,7 +628,7 @@ def phase2_validate_measurement(measured, root=ROOT, registry=None):
 
 PHASE3_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase3_baseline.json"
 PHASE3_COVERAGE_SCHEMA = "phase3_coverage.v1.0"
-PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.1"
+PHASE3_BASELINE_SCHEMA = "phase3_coverage_baseline.v1.2"
 
 #: A scope choice (no phase3_acceptance.json "tests" registry exists to
 #: derive this from, unlike phase1/phase2) -- every real test file that
@@ -641,7 +642,7 @@ PHASE3_FIXED_SUITE = (
     "tests/test_v2_serving_projections.py",
     "tests/v2/serving/test_v2_serving_publication_binding.py",
     "tests/test_v2_dashboard_preview.py",
-    "tests/test_v2_dashboard_browser.py",
+    "tests/v2/dashboard/test_v2_dashboard_browser.py",
     "tests/v2/dashboard/test_v2_dashboard_integration.py",
     "tests/v2/serving/test_checks_phase3_gate.py",
     "tests/v2/dashboard/test_v2_dashboard_publish.py",

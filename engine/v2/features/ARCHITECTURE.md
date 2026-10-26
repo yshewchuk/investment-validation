@@ -155,6 +155,7 @@ source date could pass that cutoff while a later contributing date would
 not. A missing or null contributor never advances the max; empty history
 contributes none, yet computed history contributes even when `runup_asof`
 cannot resolve.
+The daily state is read at the last session strictly before `key.event_date` and on-or-before `decision_session` (the legacy `engine/features.py` rule), so an event dated on the decision day never sees its own post-print state.
 `panel_row` also carries the legacy-named model inputs that the panel math
 does not produce, derived with legacy semantics: `or_implied` and `or_rvol30`
 are the daily-state `im` and `rvol30` (absent when those are absent;
@@ -247,6 +248,10 @@ Normal repository scan validation and failures propagate.
 | the `REGIME_TICKER` rows are all outside `[history_start, decision_session]` | `regime`'s own no-history behavior: its fields stay `NaN` (its own Inputs table), `regime_asof` `NaT`; `panel_math`'s keys are unaffected (independent read) |
 | `price_history` has no row for `key.ticker` | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
 | `get_price_series`'s `session_date > observation_ceiling` | `QUERY_NOT_BOUNDED`, propagated unchanged — never a silent future read |
+| `key.event_date` is on or before the decision day | the daily state is read at the last session strictly before `key.event_date` (the event day's own post-print state is never read) |
+| `key.event_date` is after the decision day | the daily state is read at the decision day (the decision-day ceiling), never a later row |
+| `key.event_date` is on or before `history_start` (an empty eligible daily window) | `CONTRACT_MISMATCH` from the daily-state window check (`history_start must be on or before decision_session`); unreachable from the nightly producer, whose universe admits only events on or after the decision day (`native_board_universe`), so `event_day - 1` is never before `history_start` |
+| retry with the same pinned snapshot/key/`decision_session`/`history_start` | identical result; optional SPY reuse is limited to a caller-supplied build-local cache with the same snapshot/version/window key; no write, nothing to roll back |
 | retry with the same pinned snapshot/key/`decision_session`/`history_start` | identical result; optional regime-series reuse is limited to a caller-supplied build-local cache keyed on the same snapshot, pinned `price_history` version and window; no write, nothing to roll back |
 
 `regime.add_regime_features(events, market, *, as_of_column="date")` is

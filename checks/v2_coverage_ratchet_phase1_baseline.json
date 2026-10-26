@@ -98,7 +98,7 @@
     "tests/test_v2_ops_runtime.py",
     "tests/test_v2_ops_security_gate.py",
     "tests/test_v2_ops_serving.py",
-    "tests/test_v2_ops_serving_browser.py",
+    "tests/v2/serving/test_ops_serving_browser.py",
     "tests/test_v2_ops_serving_model_release.py",
     "tests/test_v2_ops_source_availability.py",
     "tests/test_v2_ops_store_barrier.py",

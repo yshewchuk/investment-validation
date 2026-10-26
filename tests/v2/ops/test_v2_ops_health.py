@@ -52,12 +52,12 @@ def test_withheld_and_delivered_on_the_same_occurrence_is_cleared(tmp_path):
     assert document["withheld_release"] is None
 
 
-def test_health_emits_v1_1_schema_and_copies_receipt_sessions(tmp_path):
+def test_health_emits_v1_2_schema_and_copies_receipt_sessions(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     seed_delivered_health_release(conn, release_id="r5", requested_session="2026-09-05",
                                   resolved_session="2026-09-04")
     document = health(conn, clock=clock)
-    assert document["schema_version"] == "operations_health.v1.1"
+    assert document["schema_version"] == "operations_health.v1.2"
     assert document["requested_session"] == "2026-09-05"
     assert document["resolved_session"] == "2026-09-04"
     assert document["current_release"]["occurrence"] == "2026-09-04"

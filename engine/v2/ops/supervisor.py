@@ -839,9 +839,9 @@ class Service:
                                 (claim.job_id,)).fetchone()
         if row is None:
             return None
-        from engine.v2.ops.nightly import _scope_from_native_score_batch_key
+        from engine.v2.ops.nightly import scope_from_native_score_batch_key
 
-        return _scope_from_native_score_batch_key(row["idempotency_key"])
+        return scope_from_native_score_batch_key(row["idempotency_key"])
 
     def _report_native_worker_release_problem(self, claim, problem):
         """A worker-side release refusal must leave the same durable row the
@@ -917,7 +917,6 @@ class Service:
                 and memo["release_id"] == pointer.release_id):
             if memo["ok"]:
                 self._last_native_release_problem = None
-                self._resolve_native_stage_failures(scope_hash)
                 return str(root)
             self._report_native_release_problem(
                 memo.get("error_code", "MODEL_NOT_READY"),
@@ -944,7 +943,6 @@ class Service:
         self._native_release_memo = {"root": str(root), "release_id": pointer.release_id,
                                      "ok": True}
         self._last_native_release_problem = None
-        self._resolve_native_stage_failures(scope_hash)
         return str(root)
 
     def _native_score_batch_backoff(self, memo, now):

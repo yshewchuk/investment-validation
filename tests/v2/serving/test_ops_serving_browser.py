@@ -34,8 +34,12 @@ def test_shell_renders_all_legacy_views_and_deep_link(tmp_path, browser_name):
     health = tmp_path / "health.json"
     health.write_text(json.dumps({"schema_version": "operations_health.v1.0",
                                   "generated_at": "2026-09-12T00:00:00Z",
-                                  "withheld_release": "r0",
-                                  "code_budgets": {"consecutive_nights": 2}}))
+                                  "withheld_release": {"release_id": "r0"},
+                                  "code_budgets": {"ok": False,
+                                                   "latest": {"occurrence": "2026-09-11"},
+                                                   "latest_occurrence": "2026-09-11",
+                                                   "consecutive_nights": 2,
+                                                   "unknown_occurrences": []}}))
     server = create_server(("127.0.0.1", 0), token="browser-secret", health_path=health,
                            release_root=tmp_path, frozen_at="2026-09-11T00:00:00Z")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -96,7 +100,10 @@ def test_shell_marks_old_pinned_board_and_missing_scheduled_observation(tmp_path
         "generated_at": generated_at,
         "withheld_release": None,
         "current_release": {"release_id": "r1"},
-        "code_budgets": {"consecutive_nights": 0, "unknown_occurrences": [scheduled]},
+        "code_budgets": {"ok": True, "latest": {"occurrence": scheduled},
+                         "latest_occurrence": scheduled,
+                         "consecutive_nights": 0,
+                         "unknown_occurrences": [scheduled]},
     }))
 
     server = create_server(("127.0.0.1", 0), token="browser-secret", health_path=health,
@@ -132,6 +139,7 @@ def test_shell_marks_old_pinned_board_and_missing_scheduled_observation(tmp_path
             state = page.locator("#state").inner_text()
             stamp = page.locator("#stamp").inner_text()
             frame_src = page.locator("#legacy").get_attribute("src") or ""
+            assert page.locator("#ops").get_attribute("class") == "unknown"
             assert "current" not in state
             assert scheduled in state
             assert "observation older than 24 hours" in state
@@ -191,7 +199,11 @@ def test_shell_requires_session_and_published_identity_for_current(tmp_path):
                        "generated_at": "2026-10-03T12:00:00Z",
                        "withheld_release": None,
                        "current_release": {"release_id": "r1"},
-                       "code_budgets": {"consecutive_nights": 0, "unknown_occurrences": []}}
+                       "code_budgets": {"ok": True,
+                                        "latest": {"occurrence": "2026-10-02"},
+                                        "latest_occurrence": "2026-10-02",
+                                        "consecutive_nights": 0,
+                                        "unknown_occurrences": []}}
     health.write_text(json.dumps(health_document))
 
     server = create_server(("127.0.0.1", 0), token="browser-secret", health_path=health,
@@ -223,6 +235,7 @@ def test_shell_requires_session_and_published_identity_for_current(tmp_path):
             )
             state = page.locator("#state").inner_text()
             assert state.startswith("unknown")
+            assert page.locator("#ops").get_attribute("class") == "unknown"
             assert "current" not in state
             assert "session identity evidence missing or malformed" in state
 
@@ -233,6 +246,7 @@ def test_shell_requires_session_and_published_identity_for_current(tmp_path):
                 '() => document.querySelector("#state").textContent === "current"',
                 timeout=2000,
             )
+            assert page.locator("#ops").get_attribute("class") == ""
 
             # Malformed full identifiers (not date-only) refuse current: the
             # SAME missing-or-malformed unknown reason, and the frame keeps
@@ -247,6 +261,7 @@ def test_shell_requires_session_and_published_identity_for_current(tmp_path):
             )
             state = page.locator("#state").inner_text()
             assert state.startswith("unknown")
+            assert page.locator("#ops").get_attribute("class") == "unknown"
             assert "current" not in state
             assert "/release/r1/" in (page.locator("#legacy").get_attribute("src") or "")
 
@@ -326,6 +341,7 @@ def test_shell_requires_session_and_published_identity_for_current(tmp_path):
             )
             state = page.locator("#state").inner_text()
             assert state.startswith("unknown")
+            assert page.locator("#ops").get_attribute("class") == "unknown"
             assert "health fetch failed: unavailable" in state
             assert "current" not in state
             assert page.locator("#published").inner_text() == "published release: r1"
@@ -354,6 +370,7 @@ def test_shell_requires_session_and_published_identity_for_current(tmp_path):
             )
             state = page.locator("#state").inner_text()
             assert state.startswith("unknown")
+            assert page.locator("#ops").get_attribute("class") == "unknown"
             assert "published current unavailable" in state
             assert "/release/r1/" in (page.locator("#legacy").get_attribute("src") or "")
 
@@ -396,7 +413,7 @@ def test_shell_treats_cli_produced_missing_or_mismatched_sessions_as_unknown(tmp
     health_path = root / "health.json"
     assert cli.main(["--root", str(root), "health", "--out", str(health_path)]) == 0
     health_document = json.loads(health_path.read_text())
-    assert health_document["schema_version"] == "operations_health.v1.1"
+    assert health_document["schema_version"] == "operations_health.v1.2"
     assert health_document["requested_session"] == requested_session
     assert health_document["resolved_session"] == resolved_session
     assert health_document["current_release"]["release_id"] == "r1"
@@ -426,6 +443,7 @@ def test_shell_treats_cli_produced_missing_or_mismatched_sessions_as_unknown(tmp
             )
             assert page.locator("#published").inner_text() == "published release: r1"
             assert page.locator("#release").inner_text() == "pinned release: r1"
+            assert page.locator("#ops").get_attribute("class") == ""
 
             missing_sessions = {key: value for key, value in health_document.items()
                                 if key not in ("requested_session", "resolved_session")}
@@ -439,6 +457,7 @@ def test_shell_treats_cli_produced_missing_or_mismatched_sessions_as_unknown(tmp
             )
             state = page.locator("#state").inner_text()
             assert state.startswith("unknown")
+            assert page.locator("#ops").get_attribute("class") == "unknown"
             assert "current" not in state
             assert "session identity evidence missing or malformed" in state
             assert page.locator("#published").inner_text() == "published release: r1"
@@ -456,6 +475,7 @@ def test_shell_treats_cli_produced_missing_or_mismatched_sessions_as_unknown(tmp
             )
             state = page.locator("#state").inner_text()
             assert state.startswith("unknown")
+            assert page.locator("#ops").get_attribute("class") == "unknown"
             assert "current" not in state
             assert "resolved session is later than requested session" in state
 
@@ -494,7 +514,10 @@ def test_shell_discards_superseded_current_release_responses(tmp_path):
                                   "generated_at": "2026-10-03T12:00:00Z",
                                   "withheld_release": None,
                                   "current_release": {"release_id": "r1"},
-                                  "code_budgets": {"consecutive_nights": 0,
+                                  "code_budgets": {"ok": True,
+                                                   "latest": {"occurrence": "2026-10-02"},
+                                                   "latest_occurrence": "2026-10-02",
+                                                   "consecutive_nights": 0,
                                                    "unknown_occurrences": []},
                                   "requested_session": "2026-10-04",
                                   "resolved_session": "2026-10-02"}))
@@ -531,7 +554,9 @@ def test_shell_discards_superseded_current_release_responses(tmp_path):
                 ' if (url.indexOf("/release/current.json") < 0) return _fetch.call(window, input, init);'
                 ' window.__currentCalls += 1;'
                 ' var id = "r" + window.__currentCalls;'
-                ' var response = {ok: true, json: function () {'
+                ' var response = {ok: true, headers: {get: function (name) {'
+                ' return name === "X-Expected-Session" ? "2026-10-02" : null; }},'
+                ' json: function () {'
                 ' window.__consumed.push(id);'
                 ' return Promise.resolve({release_id: id});'
                 ' }};'

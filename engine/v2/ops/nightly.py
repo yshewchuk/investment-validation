@@ -36,6 +36,13 @@ NATIVE_DAILY_MARKET_ACCOUNT = "orats-daily-market"
 #: budget must count the maximum.
 ORATS_CALLS_PER_DAILY_MARKET_UNIT = 4
 
+#: A native score batch's ``spec_json`` is decoded only when its UTF-8 encoding
+#: is at most this many bytes (1 MiB). Full-universe plans (6000 tickers) are
+#: well under the cap; the finite ceiling rejects runaway/oversized rows before
+#: ``json.loads`` so one bad row cannot exhaust memory. Exceeding it is
+#: fail-closed: ``_native_score_batch_identity`` returns ``None``.
+NATIVE_SCORE_BATCH_SPEC_MAX_BYTES = 1024 * 1024
+
 
 GRAPH = {
     "refresh": (), "finality": ("refresh",), "features": ("finality",),
@@ -1001,7 +1008,7 @@ def submit_computed_moves_refresh_if_ready(conn, registry, policy, store, *, cat
 #: (``_legacy_action("score")``).
 _LEGACY_SCORE_KIND = "legacy_score"
 
-def _scope_from_native_score_batch_key(idempotency_key):
+def scope_from_native_score_batch_key(idempotency_key):
     """Recover ``(as_of, scope_hash)`` from a ``native_score_batch`` job's
     idempotency key (``"nightly:<as_of>:<scope_hash>:native_score_batch"``).
 
@@ -1047,7 +1054,7 @@ def _native_parity_identity(conn):
         ("native_score_batch",)).fetchall()
     candidates = []
     for row in rows:
-        parsed = _scope_from_native_score_batch_key(row["idempotency_key"])
+        parsed = scope_from_native_score_batch_key(row["idempotency_key"])
         if parsed is None or not row["created_at"]:
             continue
         as_of, scope_hash = parsed
@@ -1211,12 +1218,35 @@ def _session_scope_from_score_key(idempotency_key):
     return session, scope_hash
 
 
+def _native_score_batch_parameters(spec_json):
+    """Return the spec's ``parameters`` mapping when ``spec_json`` is a usable
+    text document within ``NATIVE_SCORE_BATCH_SPEC_MAX_BYTES``, else ``None``."""
+    if not isinstance(spec_json, str):
+        return None
+    try:
+        encoded = spec_json.encode("utf-8")
+    except UnicodeError:
+        return None
+    if len(encoded) > NATIVE_SCORE_BATCH_SPEC_MAX_BYTES:
+        return None
+    try:
+        document = json.loads(spec_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    parameters = document.get("parameters") or {}
+    if not isinstance(parameters, dict):
+        return None
+    return parameters
+
+
 def _native_score_batch_identity(conn):
     """Cutover PR-7a: identity for the supervisor's own sidecar
     (``supervisor.Service._reconcile_native_score_batch_shadow``): the
     ``(session, scope_hash)`` of the LATEST succeeded legacy "score" job.
 
-    One indexed SQL statement selects at most one row: parsed session
+    One SQL statement selects at most one row: parsed session
     descending (the same "chronologically latest session, never
     latest-UPDATED row" reasoning ``_computed_moves_identity`` already
     documents), then ``jobs.created_at`` descending -- a real time order,
@@ -1235,11 +1265,14 @@ def _native_score_batch_identity(conn):
     Only rows with the ``nightly:<session>:<scope>:score`` key shape, a
     nonblank ``created_at``, and a ``spec_json`` whose ``typeof`` is
     ``'text'`` are eligible. Full-universe plans carry a complete
-    ``expected_population`` and legitimately exceed 64 KiB, so there is no
-    spec-size cutoff: a valid large spec is decoded normally. The lookup is
-    fail-closed for a missing row, a malformed key, or a NULL or non-text
-    spec, returning ``None``. It never falls back to an older candidate, so
-    one unreadable newest row cannot silently resurface a stale identity.
+    ``expected_population`` and legitimately exceed 64 KiB (the 6000-ticker
+    fixture stays under 1 MiB), so specs are bounded at the finite ceiling
+    ``NATIVE_SCORE_BATCH_SPEC_MAX_BYTES`` (1 MiB of UTF-8): anything larger
+    is rejected before ``json.loads``. The lookup is fail-closed for a
+    missing row, a malformed key, a NULL/non-text spec, a spec over the byte
+    ceiling, or JSON that does not decode to a document, returning ``None``.
+    It never falls back to an older candidate, so one unreadable newest row
+    cannot silently resurface a stale identity.
 
     Returns ``None`` when no legacy "score" job has ever succeeded, or when
     the newest eligible row cannot supply a usable identity. Otherwise the
@@ -1271,11 +1304,10 @@ def _native_score_batch_identity(conn):
     parsed = _session_scope_from_score_key(row["idempotency_key"])
     if parsed is None:
         return None
-    spec_json = row["spec_json"]
-    if spec_json is None:
+    parameters = _native_score_batch_parameters(row["spec_json"])
+    if parameters is None:
         return None
     session, scope_hash = parsed
-    parameters = json.loads(spec_json).get("parameters") or {}
     if not parameters.get("snapshot_generation_id"):
         return session, scope_hash, None
     return session, scope_hash, from_document(LegacyParameters, parameters)

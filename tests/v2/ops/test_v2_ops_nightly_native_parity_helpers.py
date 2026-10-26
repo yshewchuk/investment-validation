@@ -145,7 +145,7 @@ def _assert_sidecar_runtime_identity(resource_class, environment_ref, expected_r
 
 
 def test_scope_from_native_score_batch_key_parses_and_rejects():
-    parse = nightly._scope_from_native_score_batch_key
+    parse = nightly.scope_from_native_score_batch_key
     assert parse("nightly:S1:HASH1:native_score_batch") == ("S1", "HASH1")
     assert parse("nightly:S1:sha256:814516c45d0dea73b:native_score_batch") == (
         "S1", "sha256:814516c45d0dea73b")

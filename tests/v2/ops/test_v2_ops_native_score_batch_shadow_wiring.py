@@ -261,6 +261,7 @@ def test_identity_accepts_full_universe_spec_above_old_size_bound(tmp_path):
 
     spec_json = json.dumps(spec)
     assert len(spec_json.encode("utf-8")) > 65536
+    assert len(spec_json.encode("utf-8")) <= nightly.NATIVE_SCORE_BATCH_SPEC_MAX_BYTES
 
     conn.execute("UPDATE jobs SET spec_json = ? WHERE job_id = ?",
                  (spec_json, job_id_for("shadow", newer_key)))
@@ -273,6 +274,48 @@ def test_identity_accepts_full_universe_spec_above_old_size_bound(tmp_path):
     assert identity[2] is not None
     assert isinstance(identity[2], LegacyParameters)
     assert identity[2].snapshot_generation_id == "snap-full"
+
+
+def test_identity_rejects_oversized_spec_before_decode(tmp_path):
+    """A spec above the finite 1 MiB UTF-8 ceiling is rejected before
+    ``json.loads``, returning the fail-closed ``None`` even though it is the
+    newest succeeded "score" row -- it must never fall back to an older row."""
+    conn, clock, _ = catalog(tmp_path)
+    _mark_score_succeeded(conn, clock, session="2026-01-01")
+    clock.advance(3600)
+    newer_key = _mark_score_succeeded(conn, clock, session="2026-01-02")
+
+    row = conn.execute(
+        "SELECT spec_json FROM jobs WHERE job_id = ?",
+        (job_id_for("shadow", newer_key),)
+    ).fetchone()
+    spec = json.loads(row["spec_json"])
+    spec["parameters"]["snapshot_generation_id"] = "snap-huge"
+    spec["padding"] = "x" * nightly.NATIVE_SCORE_BATCH_SPEC_MAX_BYTES
+
+    spec_json = json.dumps(spec)
+    assert len(spec_json.encode("utf-8")) > nightly.NATIVE_SCORE_BATCH_SPEC_MAX_BYTES
+
+    conn.execute("UPDATE jobs SET spec_json = ? WHERE job_id = ?",
+                 (spec_json, job_id_for("shadow", newer_key)))
+    conn.commit()
+
+    assert nightly._native_score_batch_identity(conn) is None
+
+
+def test_identity_rejects_malformed_spec_json(tmp_path):
+    """Malformed JSON in the newest row's ``spec_json`` is fail-closed to
+    ``None`` rather than raising out of ``json.loads``."""
+    conn, clock, _ = catalog(tmp_path)
+    _mark_score_succeeded(conn, clock, session="2026-01-01")
+    clock.advance(3600)
+    newer_key = _mark_score_succeeded(conn, clock, session="2026-01-02")
+
+    conn.execute("UPDATE jobs SET spec_json = ? WHERE job_id = ?",
+                 ('{"parameters": ', job_id_for("shadow", newer_key)))
+    conn.commit()
+
+    assert nightly._native_score_batch_identity(conn) is None
 
 
 def test_identity_tie_breaks_deterministically_when_created_at_matches(tmp_path):
@@ -398,7 +441,7 @@ def test_submit_builds_one_shadow_batch_request_from_snapshot_parameters(tmp_pat
     assert request.job.output_namespace == "shadow"
     key = nightly._native_score_batch_key(session, scope_hash)
     assert request.idempotency_key == key
-    assert nightly._scope_from_native_score_batch_key(key) == (session, scope_hash)
+    assert nightly.scope_from_native_score_batch_key(key) == (session, scope_hash)
 
     parameters = request.job.parameters
     assert parameters["input_bindings"] is None
@@ -1071,6 +1114,64 @@ def test_successful_native_worker_resolves_scope_failures(tmp_path, monkeypatch)
 
     service._finish(SimpleNamespace(claim=claim), {"exit_code": 0})
 
+    row = conn.execute(
+        "SELECT resolved_at FROM native_stage_failures "
+        "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
+        ("2026-01-15", "scope-hash", "native_score_batch")).fetchone()
+    assert row["resolved_at"] is not None
+    conn.close()
+
+
+def test_failed_native_batch_stays_failed_after_release_success_then_resolves(
+        tmp_path, monkeypatch):
+    """A terminally failed native batch remains FAILED when a later release
+    binding succeeds; only a successful worker resolves it."""
+    from engine.v2.scoring import release_bindings
+
+    conn, clock, supervisor = catalog(tmp_path)
+    claim = _claim_native_score_batch(
+        conn, clock, supervisor, occurrence="2026-01-15", scope_hash="scope-hash")
+    problem = json.dumps({"code": "MODEL_NOT_READY"})
+    conn.execute(
+        "INSERT INTO native_stage_failures "
+        "(occurrence,scope_hash,stage_id,status,error_code,problem_json,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        ("2026-01-15", "scope-hash", "native_score_batch", "FAILED",
+         "MODEL_NOT_READY", problem, "2026-01-15T00:00:00Z", "2026-01-15T00:00:00Z"))
+    conn.commit()
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+
+    pointer = SimpleNamespace(sequence=1, release_id="release-1",
+                              previous_release_id=None, action="promote",
+                              at="2026-01-15T00:00:00Z")
+    monkeypatch.setattr(deployment, "production_release_root", lambda: tmp_path)
+    monkeypatch.setattr(deployment, "current_pointer", lambda root: pointer)
+    monkeypatch.setattr(release_bindings, "resolve_production_release_binding", lambda: None)
+
+    # 1. A fresh release verification success must leave the failed row unresolved.
+    result = service._native_release_root_or_none(
+        occurrence="2026-01-15", scope_hash="scope-hash")
+    assert result == str(tmp_path)
+    row = conn.execute(
+        "SELECT resolved_at FROM native_stage_failures "
+        "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
+        ("2026-01-15", "scope-hash", "native_score_batch")).fetchone()
+    assert row["resolved_at"] is None
+
+    # 2. A memoized release verification success must also leave it unresolved.
+    result = service._native_release_root_or_none(
+        occurrence="2026-01-15", scope_hash="scope-hash")
+    assert result == str(tmp_path)
+    row = conn.execute(
+        "SELECT resolved_at FROM native_stage_failures "
+        "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
+        ("2026-01-15", "scope-hash", "native_score_batch")).fetchone()
+    assert row["resolved_at"] is None
+
+    # 3. A succeeded worker resolves the failure.
+    monkeypatch.setattr(service, "_commit_success", lambda *args, **kwargs: None)
+    service._finish(SimpleNamespace(claim=claim), {"exit_code": 0})
     row = conn.execute(
         "SELECT resolved_at FROM native_stage_failures "
         "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",

@@ -27,7 +27,10 @@ extending them does not deliver the React application.
 - Resolve-once release identity: `GET /release/current.json` returns
   `{"release_id": ...}` for a client (the shell, the launcher) to pin and
   reuse, instead of re-following `/release/current`'s redirect on every
-  navigation. `/release/current/...` keeps working for direct requests.
+  navigation. It also sends `X-Expected-Session`, the latest completed NYSE
+  session at the configured snapshot clock; only absent/`"unknown"` means
+  live, and a malformed configured clock omits the header rather than using
+  live time. `/release/current/...` keeps working for direct requests.
 - The read-only v2 dashboard API (`api.py`, P3-2): authenticated, paginated,
   ETag'd JSON over `projections`' route-specific read helpers — `/api/v1/releases/
   current`, `/api/v1/releases/{id}`, `/api/v1/events`, `/api/v1/events/{id}/
@@ -60,8 +63,16 @@ underscore convention, and an import of a name absent from this list fails
 `checks/package_readmes.py`.
 
 operations.create_server starts the authenticated read-only health/release
-surface. It reads operations_health.v1.0 documents and immutable legacy bundles,
-and embeds the existing views beneath the current health banner.
+surface. It reads the three supported health schema versions —
+`operations_health.v1.0`, `operations_health.v1.1` and
+`operations_health.v1.2` — and immutable legacy bundles, and embeds the
+existing views beneath the current health banner. The shell's freshness
+evaluation consumes the `requested_session`/`resolved_session` evidence and
+`code_budgets.latest_occurrence` (the newest observed night); older health
+documents may omit `latest_occurrence`, and absent or malformed evidence
+leaves the shell unknown, never a default. The ops
+shell it serves is a compatibility exception (see Responsibilities), not
+application rendering: it stays only until the React migration replaces it.
 
 bridge (P3-1a): offline mapping of a verified `score.json` and a verified
 rendered bundle to `LegacyScoreBridge` rows, over `engine.v2.contracts.serving`
