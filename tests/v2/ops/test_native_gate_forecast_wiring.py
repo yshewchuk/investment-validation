@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from engine.v2.ops import native_score_batch
-from tests.test_v2_ops_native_score_batch import (
+from tests.v2.ops.test_native_score_batch import (
     _assemble,
     _event_inputs,
     _stage_release,
@@ -37,7 +37,7 @@ def test_str_thru_selector_receives_binding_event_date_and_as_of(
 
 
 def test_missing_causal_fold_refuses_row_model_not_ready(tmp_path):
-    binding = _stage_release(tmp_path)
+    binding = _stage_release(tmp_path, include_size_fold=False)
     event = _event_inputs()
 
     assembled, refusals = _assemble(binding, [event], as_of="2026-01-10")

@@ -52,7 +52,7 @@ from tests.data_scan_support import (
     fake_hash,
     publish_and_inspect,
 )
-from tests.test_v2_ops_native_score_batch import _stage_release
+from tests.v2.ops.test_native_score_batch import _stage_release
 
 _AS_OF = "2024-01-05"
 _EVENT_DATE = "2024-01-16"

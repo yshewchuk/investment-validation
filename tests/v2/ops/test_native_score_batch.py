@@ -1,13 +1,21 @@
 """Batch assembly and worker semantics for ``engine/v2/ops/native_score_batch``."""
+import copy
 import hashlib
 import json
+from dataclasses import replace
 from datetime import date, datetime, timezone
+
+import numpy as np
 
 import pandas as pd
 import pytest
 
 from engine.v2.contracts import ScoreRecord
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import content_hash, to_document
+from engine.v2.models.serving_fold_preflight import describe_size_fold
+from engine.v2.models.serving_folds import SizeFoldPolicy
+from tests.fixtures.size_serving_header import HEADER
+from tests.v2.models.serving_fold_support import fold_bytes, fold_name, release_inputs
 from engine.v2.models import (
     ArtifactInventoryMember,
     ArtifactMember,
@@ -54,22 +62,37 @@ def _linear_payload(intercept=1.0, coefficient=2.0) -> bytes:
     }, sort_keys=True).encode()
 
 
-def _write_empty_catalog(root, release_id: str) -> None:
-    """A members-empty ``phase5_release.json``: resolve_release_binding
-    requires the catalog to exist even when it declares no state objects."""
+class _SyntheticSizeEstimator:
+    def predict(self, rows):
+        return np.asarray(rows).sum(axis=1) * 0.01
+
+    def fit(self, *args):
+        raise AssertionError("runtime fitting is forbidden")
+
+
+def _size_cache():
+    cache = copy.deepcopy(HEADER)
+    cache.pop("capture")
+    cache.update(estimator=_SyntheticSizeEstimator(), pool_pred=np.array([0.1, 0.2]),
+                 pool_res=np.array([-0.01, 0.02]), fold_start="2026-01-01")
+    return cache
+
+
+def _write_empty_catalog(root, release_id: str, fold_object=None) -> None:
+    """Write the required catalog, optionally with one synthetic size fold."""
+    members = ([] if fold_object is None else [{
+        "member_id": "tier4_folds:size", "status": "STAGED", "objects": [fold_object],
+    }])
     body = {"schema_version": "phase5_staged_release.v1.0", "release_id": release_id,
-            "deployment_id": "d1", "members": [], "sources": {}}
+            "deployment_id": "d1", "members": members, "sources": {}}
     body["manifest_hash"] = content_hash(
         {k: v for k, v in body.items() if k != "manifest_hash"})
     (root / "phase5_release.json").write_text(json.dumps(body, sort_keys=True))
 
 
 def _stage_release(tmp_path, *, roles=("driver", "gate"),
-                   clock_ids=None, release_id="r1"):
-    """Stage one binding per role in ``roles`` for STR-THRU, promote, and
-    return the real, resolved ScoringReleaseBinding. ``clock_ids`` maps
-    role -> decision_clock_id string; defaults every role to
-    "entry-close"."""
+                   clock_ids=None, release_id="r1", include_size_fold=True):
+    """Stage STR-THRU roles and a causal synthetic size fold when available."""
     clock_ids = clock_ids or {}
     bindings = []
     artifacts = []
@@ -112,11 +135,42 @@ def _stage_release(tmp_path, *, roles=("driver", "gate"),
         artifacts=tuple(artifacts), bindings=tuple(release_bindings),
         requirements=tuple(requirements), artifact_manifest_ref="manifest://r",
         evidence_refs=("evidence://r",))
+    cache = None
+    if include_size_fold and "driver" in roles and "gate" in roles:
+        cache = _size_cache()
+        size_release, size_inventory, size_payloads = release_inputs(
+            "size", cache, clock=clock_ids.get("gate", "entry-close"),
+            release_id=release_id)
+        release = replace(release, bindings=release.bindings + size_release.bindings)
+        inventory = replace(
+            inventory,
+            known_clock_ids=tuple(sorted(set(inventory.known_clock_ids)
+                                         | set(size_inventory.known_clock_ids))),
+            artifacts=inventory.artifacts + size_inventory.artifacts,
+            bindings=inventory.bindings + size_inventory.bindings,
+            requirements=inventory.requirements + size_inventory.requirements)
+        payloads.update(size_payloads)
     dep_root = tmp_path / "deployment"
-    deployment.stage_release(dep_root, release, inventory, payloads)
+    manifest = deployment.stage_release(dep_root, release, inventory, payloads)
     deployment.mark_staging_succeeded(dep_root, release_id)
     deployment.promote(dep_root, release_id)
-    _write_empty_catalog(tmp_path, release_id)
+    fold_object = None
+    if cache is not None:
+        raw = fold_bytes(cache)
+        policy = SizeFoldPolicy(
+            model_id=cache["model_id"], feature_order=tuple(cache["features"]),
+            panel_sha256=cache["tier3_snapshot"], interval_floor=0.0)
+        descriptor = describe_size_fold(raw, fold_name(cache), policy, manifest)
+        path = tmp_path / descriptor.estimator.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        fold_object = {
+            "path": descriptor.estimator.path,
+            "content_hash": descriptor.estimator.content_hash,
+            "name": fold_name(cache), "bytes": len(raw),
+            "serving_fold": to_document(descriptor),
+        }
+    _write_empty_catalog(tmp_path, release_id, fold_object)
     return resolve_release_binding(tmp_path)
 
 
