@@ -462,6 +462,10 @@ def _bundle_or_refusal(
         # One row carrying a calculated answer field refuses that row only (#630).
         return _input_build_refusal(key, exc)
     if key.strategy == "STR-THRU":
+        event_id = event.calendar_row.get("event_id")
+        if not isinstance(event_id, str) or not event_id:
+            return NativeScoreBatchRowRefusal(
+                key, "MISSING_STAGED_INPUT", "calendar_row missing event_id")
         source = _gate_source_or_refusal(
             key, binding, key.event_date, as_of, gate_source_cache)
         if isinstance(source, NativeScoreBatchRowRefusal):
