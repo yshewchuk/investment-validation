@@ -25,6 +25,11 @@ Replaces (§4.4): `data/sources/`, `data/normalize/`, `data/pulls/`, `store.py`,
 
 `_bounded_catalog` is an internal scalar-only pre-transfer prerequisite, not a
 public factory or snapshot verifier.
+`_bounded_catalog_transfer` consumes those probes in the same borrowed read
+transaction, then caps decoded UTF-8 TEXT before strict native JSON decoding.
+Its ordered column maps are private intermediate payloads, not authenticated
+snapshots; native identity reconstruction and a public bounded session remain
+separate prerequisites. Neither helper opens objects or provides source coverage.
 
 ## Public interface
 
