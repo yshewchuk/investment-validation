@@ -134,8 +134,9 @@ def _stage(tmp_path, specs, release_id="r1", rows=None):
     size_spec = next((item for item in specs if item[0] == "size"), None)
     strategies = {(role, strategy_id) for role, strategy_id, _ in specs}
     fold_cache = None
-    if (("driver", "STR-THRU") in strategies
-            and ("gate", "STR-THRU") in strategies):
+    if (("gate", "STR-THRU") in strategies
+            and any(role == "driver" and strategy_id in {"STR-THRU", "*"}
+                    for role, strategy_id in strategies)):
         fold_cache = _size_cache()
         if size_spec is not None:
             fold_cache["model_id"] = f"m-size-{size_spec[1]}"
