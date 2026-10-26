@@ -7,10 +7,16 @@ from types import SimpleNamespace
 
 import pytest
 
+from dataclasses import replace
+
 from engine.v2.ops import native_score_batch as nsb
 from engine.v2.ops.native_score_batch import (
     _DriverSpec, _StrategySpec, _STRATEGY_REGISTRY, _matched_decision_clock,
     _mcap_usd, _pre_iv30, _entry_rule_declarations_or_refusal)
+from tests.v2.ops.test_native_score_batch_driver_alias import (
+    SIZE, GATE, _stage, _event_inputs, _assemble)
+
+IV_CRUSH = ("iv_crush", "*", ("x", "iv"))
 
 
 def _identity(model_id, clock="clock", role=None):
@@ -114,3 +120,54 @@ def test_entry_rule_declarations_or_refusal(monkeypatch):
     with_iv = call(mcap_log=25.0, iv30=45.0)
     assert with_iv["paired_residual_recipe"] == {
         "cutoff": "2026-01-09", "pre_iv30": 45.0}
+
+
+def test_twin_row_assembly_declares_entry_rule_and_planned_exit(tmp_path, monkeypatch):
+    binding = _stage(tmp_path, [SIZE, IV_CRUSH])
+    event = _event_inputs(
+        strategy="TWIN-P",
+        panel_row={"date": "2026-01-15", "signal": 1.5, "mcap_log": 25.0, "iv30": 45.0},
+    )
+
+    recorded = {}
+    def fake_entry_rule(binding, **kw):
+        recorded.update(kw)
+        return {
+            "paired_residual_artifact": None,
+            "paired_residual_recipe": {
+                "move_model_id": "m",
+                "crush_model_id": "c",
+                "cutoff": kw["cutoff"],
+                "content_hash": "h",
+            },
+            "trailing_cutoff_artifact": None,
+            "gate_recipe": {"mode": "entry_rule", "mcap_usd": kw["mcap_usd"]},
+        }
+
+    monkeypatch.setattr(nsb, "entry_rule_declarations", fake_entry_rule)
+
+    bundles = []
+    def fake_build(bundle):
+        bundles.append(bundle)
+        return object()
+
+    monkeypatch.setattr(nsb, "build_native_score_inputs", fake_build)
+
+    assembled, refusals = _assemble(binding, [event])
+    assert refusals == ()
+    bundle = bundles[0]
+    assert bundle.strategy == "TWIN-P"
+    assert bundle.gate_recipe == {"mode": "entry_rule", "mcap_usd": math.exp(25.0)}
+    assert bundle.residual_recipe == {"mode": "planned_exit"}
+    assert bundle.paired_residual_recipe["pre_iv30"] == 45.0
+    assert set(bundle.forecast_recipes) == {"forecast_abs_move", "pred_iv_crush_30"}
+    assert not any(key.startswith("gate:") for key in bundle.model_identity)
+    assert recorded["strategy"] == "TWIN-P"
+
+
+def test_twin_row_without_iv_crush_role_is_refused_alone(tmp_path):
+    binding = _stage(tmp_path, [SIZE])
+    event = _event_inputs(strategy="TWIN-P")
+    assembled, refusals = _assemble(binding, [event])
+    assert len(refusals) == 1
+    assert refusals[0].code == "RELEASE_MISSING_ROLE"

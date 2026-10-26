@@ -96,6 +96,8 @@ class _StrategySpec:
             raise ValueError("strategy driver outputs must be unique")
         if (self.gate_role is None) != (self.gate_policy_key is None):
             raise ValueError("gate_role and gate_policy_key must be both None or both set")
+        if self.gate_role is None and not self.entry_rule:
+            raise ValueError("gate-less strategies must use the entry_rule path")
         if self.entry_rule:
             if self.gate_role is not None:
                 raise ValueError("entry_rule strategies must be gate-less")
