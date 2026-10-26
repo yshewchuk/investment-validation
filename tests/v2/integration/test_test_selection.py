@@ -189,6 +189,7 @@ _COVERAGE_RELOCATIONS = (
     ("tests/test_v2_ops_health.py", "tests/v2/ops/test_v2_ops_health.py", (1,)),
     ("tests/test_v2_ops_partition_consumer.py", "tests/v2/ops/test_partition_consumer.py", (1,)),
     ("tests/test_v2_ops_serving_browser.py", "tests/v2/serving/test_ops_serving_browser.py", (1,)),
+    ("tests/test_v2_ops_native_score_batch.py", "tests/v2/ops/test_native_score_batch.py", (1,)),
 )
 
 
@@ -649,8 +650,12 @@ def test_r7_check_layout_ignores_modified_non_root_tests():
 
 
 def test_phase1_coverage_keeps_relocated_native_score_batch_file():
-    from checks.v2_coverage_ratchet import phase1_suite
+    from checks.v2_coverage_ratchet import PHASE1_BASELINE, phase1_suite
 
     relative = "tests/v2/ops/test_native_score_batch.py"
     assert (ROOT / relative).is_file()
     assert relative in phase1_suite(ROOT)
+
+    baseline = json.loads(PHASE1_BASELINE.read_text())
+    assert "tests/v2/ops/test_native_score_batch.py" in baseline["test_files"]
+    assert "tests/test_v2_ops_native_score_batch.py" not in baseline["test_files"]

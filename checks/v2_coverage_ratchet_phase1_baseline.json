@@ -1,6 +1,6 @@
 {
   "schema_version": "phase1_coverage.v1.0",
-  "suite_version": "phase1_coverage_suite.v22",
+  "suite_version": "phase1_coverage_suite.v23",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_dashboard_board_filters_ops_root.py",

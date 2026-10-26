@@ -161,7 +161,7 @@ def _stage_release(tmp_path, *, roles=("driver", "gate"),
             model_id=cache["model_id"], feature_order=tuple(cache["features"]),
             panel_sha256=cache["tier3_snapshot"], interval_floor=0.0)
         descriptor = describe_size_fold(raw, fold_name(cache), policy, manifest)
-        path = tmp_path / descriptor.estimator.path
+        path = dep_root / descriptor.estimator.path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw)
         fold_object = {
