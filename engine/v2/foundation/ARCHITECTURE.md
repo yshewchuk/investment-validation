@@ -11,14 +11,6 @@ joining them gives `canonical_json` exactly, including its nonfinite normalizati
 It owns no output I/O or byte ceiling. `experiments.v2_magnitude_search_run`
 consumes it to stage and byte-bound a complete report before stdout emission.
 
-`artifacts.OPERATIONS_HEALTH_MAX_BYTES` (1 MiB) is the single declared UTF-8 byte
-cap for a durable `operations_health` artifact, exported by the package so the two
-pipeline ends cannot drift: the ops health writer (`engine/v2/ops/health.py`)
-publishes within it (trimming optional content or refusing before replacement),
-and the serving health readers (`engine/v2/serving/operations.py`) read at most
-cap+1 bytes and refuse anything larger before decoding. The owner of the value
-is the artifact layer itself; it enforces nothing on its own.
-
 `market_calendar.build_calendar_sessions` projects sessions from observed source dates; `planned_exit_date` applies native strategy anchors. `CalendarEventKey` is structural so ops requests satisfy it without a foundation dependency on ops.
 
 `market_horizon.trading_days_before_print(calendar, *, entry_date, event_date,

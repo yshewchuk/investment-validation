@@ -25,10 +25,9 @@ import pytest
 from engine.paths import ROOT
 from engine.v2.contracts import JobReceipt, JobSpec, SubmitRequest
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactStore, canonical_json, content_hash
+from engine.v2.foundation import ArtifactStore, content_hash
 from engine.v2.models import deployment
 from engine.v2.ops import nightly
-from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.fingerprints import environment_identity
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
@@ -238,21 +237,42 @@ def test_identity_skips_row_with_missing_created_at(tmp_path):
     assert identity[:2] == nightly._session_scope_from_score_key(valid_key)
 
 
-def test_identity_fails_closed_when_newest_succeeded_spec_is_oversized(tmp_path):
-    """An older valid score row must never stand in for a newer oversized
-    one: the newest row wins the one-row lookup, then its unreadable spec
-    makes the whole identity ``None`` instead of falling back."""
+def test_identity_accepts_full_universe_spec_above_old_size_bound(tmp_path):
+    """A full-universe plan's spec legitimately exceeds 64 KiB, and the newest
+    row's spec must be decoded rather than discarded. The older valid row must
+    not stand in for the newer full-universe one."""
     conn, clock, _ = catalog(tmp_path)
     _mark_score_succeeded(conn, clock, session="2026-01-01")
     clock.advance(3600)
     newer_key = _mark_score_succeeded(conn, clock, session="2026-01-02")
-    oversized = ('{"padding": "' + "x" * nightly.MAX_NATIVE_SCORE_IDENTITY_SPEC_BYTES
-                 + '"}')
+
+    row = conn.execute(
+        "SELECT spec_json FROM jobs WHERE job_id = ?",
+        (job_id_for("shadow", newer_key),)
+    ).fetchone()
+    spec = json.loads(row["spec_json"])
+
+    parameters = spec["parameters"]
+    parameters["snapshot_generation_id"] = "snap-full"
+
+    population = [f"UNIV-{i:05d}" for i in range(6000)]
+    parameters["tickers"] = population
+    spec["expected_population"] = population
+
+    spec_json = json.dumps(spec)
+    assert len(spec_json.encode("utf-8")) > 65536
+
     conn.execute("UPDATE jobs SET spec_json = ? WHERE job_id = ?",
-                 (oversized, job_id_for("shadow", newer_key)))
+                 (spec_json, job_id_for("shadow", newer_key)))
     conn.commit()
 
-    assert nightly._native_score_batch_identity(conn) is None
+    identity = nightly._native_score_batch_identity(conn)
+
+    assert identity is not None
+    assert identity[:2] == nightly._session_scope_from_score_key(newer_key)
+    assert identity[2] is not None
+    assert isinstance(identity[2], LegacyParameters)
+    assert identity[2].snapshot_generation_id == "snap-full"
 
 
 def test_identity_tie_breaks_deterministically_when_created_at_matches(tmp_path):
@@ -277,8 +297,9 @@ def test_identity_tie_breaks_deterministically_when_created_at_matches(tmp_path)
 def test_submit_dedupes_an_existing_job_under_the_key(tmp_path, monkeypatch):
     """The dedup branch in isolation from the currently-unbuilt PR-6 producer:
     ``_native_score_batch_identity`` is monkeypatched for THIS ONE test to
-    pretend the succeeded "score" job pinned a snapshot, so the exists-check
-    is reached even though today's production default never pins one."""
+    pretend the succeeded "score" job pinned a snapshot. The helper remains
+    idempotent for an existing job, while the supervisor identity lookup still
+    returns it for release re-check."""
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path)
     score_key = _mark_score_succeeded(conn, clock, session="2026-01-01")
@@ -296,6 +317,12 @@ def test_submit_dedupes_an_existing_job_under_the_key(tmp_path, monkeypatch):
     conn.commit()
     monkeypatch.setattr(nightly, "_native_score_batch_identity",
                         lambda conn: (session, scope_hash, True))
+
+    service = Service(
+        conn, tmp_path, registry(), TEST_POLICY, clock=clock,
+        code_source=ROOT, store_root=tmp_path)
+    assert service._native_score_batch_identity_or_none(
+        clock.monotonic()) == (session, scope_hash, True)
 
     before = _native_score_batch_job_count(conn)
     assert nightly.submit_native_score_batch_shadow_if_ready(

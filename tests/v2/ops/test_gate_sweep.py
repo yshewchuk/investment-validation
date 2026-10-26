@@ -945,7 +945,7 @@ def test_version_twelve_catalog_refuses_without_migration_or_population_reads(tm
         with pytest.raises(OpsError) as caught:
             entry(conn, store, None, _request(), code_root=REPO, as_of_month=MONTH)
         assert caught.value.code == "INTEGRITY_FAILED"
-        assert caught.value.problem.details == {"reason": "schema_older", "owner": "ops", "missing": [13, 14]}
+        assert caught.value.problem.details == {"reason": "schema_older", "owner": "ops", "missing": [13, 14, 15]}
         roster = tmp_path / "roster.json"
         roster.write_text(json.dumps(_request()))
         assert sweep.main([action, "--roster", str(roster), "--catalog", str(path),

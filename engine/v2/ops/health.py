@@ -8,22 +8,10 @@ import uuid
 from datetime import date, timedelta
 from pathlib import Path
 
-from engine.v2.foundation import (
-    OPERATIONS_HEALTH_MAX_BYTES,
-    format_timestamp,
-    fsync_directory,
-)
+from engine.v2.foundation import format_timestamp, fsync_directory
 from engine.v2.ops.catalog import dumps, transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.publication import current as release_current
-from engine.v2.ops.schema import NATIVE_STAGE_FAILURE_TEXT_BYTES
-
-NATIVE_STAGE_FAILURE_DIAGNOSTIC = json.dumps({
-    "code": "RESOURCE_LIMIT_EXCEEDED",
-    "category": "resource",
-    "retryable": False,
-    "message": "native stage failure text exceeded health read bound",
-}, sort_keys=True, separators=(",", ":"))
 
 
 def _record_check(conn, occurrence, kind, ok, receipt):
@@ -409,39 +397,7 @@ def health(conn, *, clock, executor_mode="watchdog"):
         "AND generation_ref IS NULL").fetchone()[0]
     requested_session, resolved_session = _release_session_evidence(conn, current,
                                                                     expected_scope=current_scope)
-    limits = NATIVE_STAGE_FAILURE_TEXT_BYTES
-    oversized = " OR ".join(
-        f"length(CAST({field} AS BLOB)) > {limits[field]}"
-        for field in ("occurrence", "scope_hash", "stage_id", "status",
-                      "error_code", "problem_json", "created_at", "updated_at"))
-    native_stage_failures = [dict(row) for row in conn.execute(
-        "SELECT "
-        f"CASE WHEN length(CAST(raw_occurrence AS BLOB)) > {limits['occurrence']} "
-        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE raw_occurrence END AS occurrence, "
-        f"CASE WHEN length(CAST(raw_scope_hash AS BLOB)) > {limits['scope_hash']} "
-        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE raw_scope_hash END AS scope_hash, "
-        f"CASE WHEN length(CAST(raw_stage_id AS BLOB)) > {limits['stage_id']} "
-        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE raw_stage_id END AS stage_id, "
-        "CASE WHEN any_oversized THEN 'FAILED' ELSE raw_status END AS status, "
-        "CASE WHEN any_oversized THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE raw_error_code END AS error_code, "
-        f"CASE WHEN length(CAST(raw_problem_json AS BLOB)) > {limits['problem_json']} "
-        "THEN ? ELSE raw_problem_json END AS problem_json, "
-        f"CASE WHEN length(CAST(raw_created_at AS BLOB)) > {limits['created_at']} "
-        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE raw_created_at END AS created_at, "
-        f"CASE WHEN length(CAST(raw_updated_at AS BLOB)) > {limits['updated_at']} "
-        "THEN 'RESOURCE_LIMIT_EXCEEDED' ELSE raw_updated_at END AS updated_at "
-        "FROM ("
-        "SELECT occurrence AS raw_occurrence, scope_hash AS raw_scope_hash, "
-        "stage_id AS raw_stage_id, status AS raw_status, "
-        "error_code AS raw_error_code, problem_json AS raw_problem_json, "
-        "created_at AS raw_created_at, updated_at AS raw_updated_at, "
-        f"CASE WHEN {oversized} THEN 1 ELSE 0 END AS any_oversized "
-        "FROM native_stage_failures WHERE resolved_at IS NULL "
-        "ORDER BY occurrence DESC, scope_hash, stage_id LIMIT 100"
-        ") "
-        "ORDER BY raw_occurrence DESC, raw_scope_hash, raw_stage_id",
-        (NATIVE_STAGE_FAILURE_DIAGNOSTIC,))]
-    return {"schema_version": "operations_health.v1.2", "generated_at": format_timestamp(clock.now()),
+    return {"schema_version": "operations_health.v1.1", "generated_at": format_timestamp(clock.now()),
             "executor_mode": executor_mode, "containment": "best_effort" if executor_mode == "watchdog" else "kernel",
             "jobs": jobs, "watermarks": [dict(row) for row in conn.execute("SELECT * FROM watermarks ORDER BY pipeline, scope, stage")],
             "current_release": dict(current) if current else None,
@@ -449,165 +405,13 @@ def health(conn, *, clock, executor_mode="watchdog"):
             "withheld_release": withheld_release,
             "code_budgets": budget_streak(conn), "activation": "shadow_only",
             "decision_divergences": divergences,
-            "undetermined_outcome_sessions": undetermined_outcome_sessions,
-            "native_stage_failures": native_stage_failures}
-
-
-#: Per-string-field byte budget used when :func:`write_health` deterministically
-#: trims long optional text (e.g. job queue reasons) to keep the artifact
-#: inside ``OPERATIONS_HEALTH_MAX_BYTES``. The budget INCLUDES the appended
-#: truncation marker, so a trimmed field never exceeds it.
-HEALTH_TEXT_FIELD_MAX_BYTES = 4096
-_HEALTH_TEXT_TRUNCATION_MARKER = "…[truncated]"
-_HEALTH_TEXT_MARKER_BYTES = len(_HEALTH_TEXT_TRUNCATION_MARKER.encode("utf-8"))
-
-
-def _trim_long_optional_text(row):
-    """Clamp every string field of one health row longer than
-    ``HEALTH_TEXT_FIELD_MAX_BYTES`` to that budget, the fixed truncation
-    marker INCLUDED (UTF-8 safe prefix plus the marker, the whole result
-    never over budget). Mutates ``row``; returns the number of fields
-    trimmed."""
-    trimmed = 0
-    for field, value in list(row.items()):
-        if not isinstance(value, str) or len(value.encode("utf-8")) <= HEALTH_TEXT_FIELD_MAX_BYTES:
-            continue
-        kept = value.encode("utf-8")[
-            :HEALTH_TEXT_FIELD_MAX_BYTES - _HEALTH_TEXT_MARKER_BYTES
-        ].decode("utf-8", errors="ignore")
-        row[field] = kept + _HEALTH_TEXT_TRUNCATION_MARKER
-        trimmed += 1
-    return trimmed
-
-
-def _is_operations_health_document(document):
-    """True when ``schema_version`` names an ``operations_health`` document;
-    every other artifact ``write_health`` may be asked to publish passes
-    through untouched."""
-    schema_version = document.get("schema_version")
-    return (isinstance(schema_version, str)
-            and schema_version.startswith("operations_health."))
-
-
-def _health_bound_setup(document):
-    """Copy the document into a scratch ``working`` dict and detach the
-    optional ``jobs`` rows so trimming/dropping never mutates the caller's
-    document. Returns ``(working, has_jobs, jobs)``."""
-    working = dict(document)
-    has_jobs = isinstance(working.get("jobs"), list)
-    jobs = [dict(row) for row in (working.get("jobs") or [])]
-    return working, has_jobs, jobs
-
-
-def _serialize_working_health(working, jobs, has_jobs, trimmed_fields, dropped_jobs):
-    """Render the scratch state for one bounding iteration: reattach the
-    (possibly trimmed/dropped) jobs, disclose any trimming via
-    ``health_truncated``, and serialize to UTF-8 JSON."""
-    if has_jobs:
-        working["jobs"] = jobs
-    if trimmed_fields or dropped_jobs:
-        working["health_truncated"] = {"trimmed_text_fields": trimmed_fields,
-                                       "dropped_jobs": dropped_jobs}
-    return json.dumps(working).encode("utf-8")
-
-
-def _trim_jobs_text(jobs):
-    """Text-trim stage: clamp oversized string fields on every job row;
-    returns the total number of fields trimmed."""
-    return sum(_trim_long_optional_text(row) for row in jobs)
-
-
-def _drop_oldest_jobs(jobs, overshoot):
-    """Row-drop stage: remove the oldest job rows in bulk until the
-    deliberately conservative ``overshoot`` estimate is freed (the ``+256``
-    margin covers JSON-escaping drift around the marker-bounded trim, and
-    the caller's re-dump is the exact check). Returns the number of rows
-    dropped."""
-    freed = 0
-    drop_now = 0
-    while drop_now < len(jobs) and freed < overshoot:
-        freed += len(json.dumps(jobs[drop_now]).encode("utf-8")) + 1
-        drop_now += 1
-    del jobs[:drop_now]
-    return drop_now
-
-
-def _refuse_oversized_health(working, payload, trimmed_fields, dropped_jobs):
-    """Refusal stage: the mandatory skeleton plus the preserved native
-    failure rows still exceed the cap; raise BEFORE the old artifact is
-    replaced -- nothing is written, nothing is moved."""
-    raise fail("RESOURCE_LIMIT_EXCEEDED",
-               "operations health document exceeds the shared serving artifact cap even "
-               "after deterministic trimming of all optional content",
-               details={"max_bytes": OPERATIONS_HEALTH_MAX_BYTES,
-                        "measured_bytes": len(payload),
-                        "native_stage_failures": len(working.get("native_stage_failures") or []),
-                        "trimmed_text_fields": trimmed_fields,
-                        "dropped_jobs": dropped_jobs})
-
-
-def _bounded_health_payload(document):
-    """Serialize an ops artifact to UTF-8 JSON, enforcing the shared
-    ``OPERATIONS_HEALTH_MAX_BYTES`` cap ONLY on ``operations_health``
-    documents.
-
-    :func:`write_health` is reused to atomically write other artifacts -- the
-    ``operations_status.v1.0`` sidecar -- so any document whose
-    ``schema_version`` is not an ``operations_health`` one is serialized
-    UNCHANGED: no trimming, no injected ``health_truncated`` key and no size
-    refusal. An ``operations_health`` document already within the cap is
-    likewise returned unchanged.
-
-    For an ``operations_health`` document over the cap -- the SAME
-    ``OPERATIONS_HEALTH_MAX_BYTES`` the serving read enforces, so ops never
-    publishes an artifact serving will refuse to serve -- trimming is
-    deterministic and only ever touches optional content, in preference
-    order: long optional text fields on job rows (job queue reasons) are
-    clamped first by :func:`_trim_jobs_text`, then the OLDEST optional job
-    rows are dropped by :func:`_drop_oldest_jobs` (``health()`` orders jobs
-    by ``created_at, job_id``, so index 0 is the oldest). Every unresolved
-    ``native_stage_failures`` row is always preserved verbatim, as are the
-    mandatory top-level fields. Any trimming is indicated by a
-    ``health_truncated`` object counting what went. If the mandatory skeleton
-    plus the preserved native failure rows still exceed the cap,
-    :func:`_refuse_oversized_health` raises typed ``RESOURCE_LIMIT_EXCEEDED``
-    BEFORE the old health artifact is replaced.
-    """
-    payload = json.dumps(document).encode("utf-8")
-    if (not _is_operations_health_document(document)
-            or len(payload) <= OPERATIONS_HEALTH_MAX_BYTES):
-        return payload
-    working, has_jobs, jobs = _health_bound_setup(document)
-    trimmed_fields = 0
-    dropped_jobs = 0
-    text_pass_done = False
-    while True:
-        payload = _serialize_working_health(working, jobs, has_jobs,
-                                            trimmed_fields, dropped_jobs)
-        if len(payload) <= OPERATIONS_HEALTH_MAX_BYTES:
-            return payload
-        if not text_pass_done:
-            text_pass_done = True
-            trimmed_fields = _trim_jobs_text(jobs)
-        elif jobs:
-            overshoot = len(payload) - OPERATIONS_HEALTH_MAX_BYTES + 256
-            dropped_jobs += _drop_oldest_jobs(jobs, overshoot)
-        else:
-            _refuse_oversized_health(working, payload, trimmed_fields, dropped_jobs)
+            "undetermined_outcome_sessions": undetermined_outcome_sessions}
 
 
 def write_health(path, document):
-    """Atomically publish one ops JSON artifact (temp file, fsync, rename,
-    directory fsync). The ``OPERATIONS_HEALTH_MAX_BYTES`` bounding -- trim,
-    the ``health_truncated`` disclosure and the oversize refusal -- applies
-    ONLY to ``operations_health`` documents; any other artifact written
-    through here, the ``operations_status.v1.0`` publication sidecar
-    included, is serialized UNCHANGED whatever its size (see
-    :func:`_bounded_health_payload`)."""
     path = Path(path)
-    payload = _bounded_health_payload(document)
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex)
-    temporary.write_bytes(payload)
+    temporary.write_text(json.dumps(document))
     with temporary.open("rb") as stream:
         os.fsync(stream.fileno())
     os.replace(temporary, path)

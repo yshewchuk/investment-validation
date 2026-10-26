@@ -1001,12 +1001,6 @@ def submit_computed_moves_refresh_if_ready(conn, registry, policy, store, *, cat
 #: (``_legacy_action("score")``).
 _LEGACY_SCORE_KIND = "legacy_score"
 
-#: Upper bound on the ``spec_json`` text this identity lookup will decode.
-#: A larger spec is a fail-closed "no identity", never a reason to fall back
-#: to an older score row.
-MAX_NATIVE_SCORE_IDENTITY_SPEC_BYTES = 65536
-
-
 def _scope_from_native_score_batch_key(idempotency_key):
     """Recover ``(as_of, scope_hash)`` from a ``native_score_batch`` job's
     idempotency key (``"nightly:<as_of>:<scope_hash>:native_score_batch"``).
@@ -1240,12 +1234,12 @@ def _native_score_batch_identity(conn):
 
     Only rows with the ``nightly:<session>:<scope>:score`` key shape, a
     nonblank ``created_at``, and a ``spec_json`` whose ``typeof`` is
-    ``'text'`` and whose BLOB length is at most
-    ``MAX_NATIVE_SCORE_IDENTITY_SPEC_BYTES`` (64 KiB) are eligible. The
-    lookup is fail-closed: a missing row, a malformed key, or a NULL,
-    non-text, or oversized spec makes it return ``None``. It never falls
-    back to an older candidate, so one unreadable newest row cannot silently
-    resurface a stale identity.
+    ``'text'`` are eligible. Full-universe plans carry a complete
+    ``expected_population`` and legitimately exceed 64 KiB, so there is no
+    spec-size cutoff: a valid large spec is decoded normally. The lookup is
+    fail-closed for a missing row, a malformed key, or a NULL or non-text
+    spec, returning ``None``. It never falls back to an older candidate, so
+    one unreadable newest row cannot silently resurface a stale identity.
 
     Returns ``None`` when no legacy "score" job has ever succeeded, or when
     the newest eligible row cannot supply a usable identity. Otherwise the
@@ -1260,7 +1254,6 @@ def _native_score_batch_identity(conn):
     row = conn.execute(
         "SELECT idempotency_key, created_at, "
         "CASE WHEN typeof(spec_json) = 'text' "
-        "AND length(CAST(spec_json AS BLOB)) <= ? "
         "THEN spec_json ELSE NULL END AS spec_json "
         "FROM jobs "
         "WHERE kind = ? AND state = 'succeeded' "
@@ -1272,7 +1265,7 @@ def _native_score_batch_identity(conn):
         "ORDER BY substr(idempotency_key, 9, "
         "instr(substr(idempotency_key, 9), ':') - 1) DESC, "
         "created_at DESC, idempotency_key DESC LIMIT 1",
-        (MAX_NATIVE_SCORE_IDENTITY_SPEC_BYTES, _LEGACY_SCORE_KIND)).fetchone()
+        (_LEGACY_SCORE_KIND,)).fetchone()
     if row is None:
         return None
     parsed = _session_scope_from_score_key(row["idempotency_key"])

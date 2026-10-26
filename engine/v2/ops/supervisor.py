@@ -845,9 +845,10 @@ class Service:
 
     def _report_native_worker_release_problem(self, claim, problem):
         """A worker-side release refusal must leave the same durable row the
-        sidecar writes. The existing-job short circuit skips the sidecar once
-        this job exists, so the terminal failure path records it directly
-        from the job's idempotency key, with a fixed safe reason code."""
+        sidecar writes. An existing native job does not skip release re-check
+        or reconciliation; the idempotent submit path handles the existing
+        job. The terminal failure path records the refusal directly from the
+        job's idempotency key, with a fixed safe reason code."""
         if problem.code != "MODEL_NOT_READY":
             return
         parsed = self._native_score_batch_identity_from_claim(claim)
@@ -1116,45 +1117,41 @@ class Service:
             self._computed_moves_backoff(memo, now)
 
     def _native_score_batch_identity_or_none(self, now):
-        """The two CHEAP checks (plain indexed SELECTs, no pandas scan)
+        """The CHEAP lookup (a plain indexed SELECT, no pandas scan)
         _reconcile_native_score_batch_shadow needs every tick --
         nightly._native_score_batch_identity (the specific succeeded
-        "score" job to key off, and whether it pinned a snapshot) and
-        whether a job already exists under that identity's key -- split
+        "score" job to key off, and whether it pinned a snapshot) -- split
         out to mirror _computed_moves_identity_or_none's own shape and
         failure semantics exactly (CodeRabbit round 6, real finding: an
-        earlier draft ran both checks with no not_before gate at all, so a
+        earlier draft ran the lookup with no not_before gate at all, so a
         persistently-raising lookup -- a locked database, a malformed
         spec_json -- ran on EVERY tick forever, and its failure was folded
         into whatever real identity's build-attempt memo happened to be
         cached, silently spending that identity's own attempt budget on an
         unrelated lookup failure).
 
-        Returns the real identity tuple when the caller should proceed, or
-        None when it should return immediately -- covering a throttled
-        prior lookup failure (still inside its own not_before), a caught
-        exception (reported and backed off here, in a SEPARATE memo slot
-        (self._native_score_batch_lookup_memo), never touching
-        self._native_score_batch_memo's own real-identity attempt
-        count), "no identity
-        yet", and "already submitted" (a job exists under that key); the
-        last two clear self._native_score_batch_memo themselves. A
-        successful lookup -- whatever it returns -- always resets
+        Returns the latest eligible identity tuple when the caller should
+        proceed, or None when it should return immediately -- covering a
+        throttled prior lookup failure (still inside its own not_before),
+        a caught exception (reported and backed off here, in a SEPARATE
+        memo slot (self._native_score_batch_lookup_memo), never touching
+        self._native_score_batch_memo's own real-identity attempt count),
+        and "no identity yet"; "no identity yet" clears
+        self._native_score_batch_memo itself. It returns the latest
+        eligible identity regardless of whether the native batch job
+        exists, because the caller must still run release reconciliation;
+        the idempotent submit path handles an existing job. A successful
+        lookup -- whatever it returns -- always resets
         self._native_score_batch_lookup_memo to None, so a later failure
         starts a fresh backoff sequence rather than resuming an old
         one."""
-        from engine.v2.ops.nightly import _native_score_batch_identity, _native_score_batch_key
-        from engine.v2.ops.submission import job_id_for
+        from engine.v2.ops.nightly import _native_score_batch_identity
 
         lookup_memo = self._native_score_batch_lookup_memo
         if lookup_memo is not None and now < lookup_memo["not_before"]:
             return None
         try:
             identity = _native_score_batch_identity(self.conn)
-            exists = identity is not None and self.conn.execute(
-                "SELECT 1 FROM jobs WHERE job_id = ?",
-                (job_id_for("shadow", _native_score_batch_key(identity[0], identity[1])),)
-            ).fetchone() is not None
         except Exception as exc:
             lookup_memo = lookup_memo or {"attempts": 0, "not_before": 0.0}
             lookup_memo["attempts"] += 1
@@ -1165,7 +1162,7 @@ class Service:
             return None
         self._last_native_score_batch_problem = None
         self._native_score_batch_lookup_memo = None
-        if identity is None or exists:
+        if identity is None:
             self._native_score_batch_memo = None
             return None
         return identity
@@ -1179,7 +1176,9 @@ class Service:
 
         identity lookup runs first and returns without a release check when no
         eligible identity exists or the identity is not snapshot-pinned
-        (`producer_parameters is None`); otherwise release binding is checked; a
+        (`producer_parameters is None`); otherwise release binding is checked.
+        An existing native job does not skip release re-check or reconciliation;
+        the idempotent submit path handles the existing job. A
         release-unavailable result never consumes `_native_score_batch_memo`
         attempts; identity lookup continues to use its separate
         `_native_score_batch_lookup_memo`. After release binding succeeds, the
