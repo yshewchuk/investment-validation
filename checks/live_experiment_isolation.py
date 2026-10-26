@@ -8,14 +8,21 @@ scan is clean.
 from __future__ import annotations
 
 import ast
+import os
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PRODUCTION_PATHS = ("engine/v2/models/", "engine/v2/ops/retrain_", "tools/phase5_")
+PRODUCTION_PATHS = (
+    "engine/v2/models/", "engine/v2/ops/retrain_", "tools/phase5_",
+    "engine/v2/ops/training.py", "engine/v2/scoring/release_bindings.py",
+)
 EXPERIMENT_PATHS = ("engine/v2/research/", "experiments/")
+MAX_SOURCE_BYTES = 2 * 1024 * 1024
+GIT_TIMEOUT_SECONDS = 30
 PRODUCTION_FORBIDDEN_IMPORTS = (
     "engine.v2.foundation.experiment_holdouts",
     "engine.v2.ops.final_holdout",
@@ -113,7 +120,8 @@ def check_files(files: dict[str, bytes]) -> list[Finding]:
         root_aliases = {}
         for imported in ast.walk(tree):
             if (isinstance(imported, ast.ImportFrom) and imported.module and
-                    imported.module.rsplit(".", 1)[-1] == "deployment"):
+                    (imported.module == "engine.v2.models" or
+                     imported.module.rsplit(".", 1)[-1] == "deployment")):
                 for alias in imported.names:
                     if alias.name in ROOT_CALLERS:
                         root_aliases[alias.asname or alias.name] = alias.name
@@ -127,8 +135,9 @@ def check_files(files: dict[str, bytes]) -> list[Finding]:
                             f"{target} crosses the D7 isolation boundary",
                         ))
                         finding_keys.add(key)
-            if experiment and isinstance(node, (ast.Name, ast.Constant)):
-                value = node.id if isinstance(node, ast.Name) else node.value
+            if experiment and isinstance(node, (ast.Name, ast.Attribute, ast.Constant)):
+                value = (node.id if isinstance(node, ast.Name) else
+                         node.attr if isinstance(node, ast.Attribute) else node.value)
                 if isinstance(value, str):
                     normalized = value.lower().replace("\\", "/")
                     if (value == "DEPLOYED" or
@@ -151,16 +160,46 @@ def check_files(files: dict[str, bytes]) -> list[Finding]:
     return findings
 
 
+def _read_source(path: Path) -> bytes:
+    """Read one regular tracked source file without following links or exceeding the cap."""
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise IsolationCheckError("safe no-follow source reads are unavailable")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | no_follow)
+    except OSError as exc:
+        raise IsolationCheckError(f"tracked source read refused: {path}: {exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise IsolationCheckError(f"tracked source is not a regular file: {path}")
+        chunks = []
+        size = 0
+        while size <= MAX_SOURCE_BYTES:
+            chunk = os.read(fd, min(64 * 1024, MAX_SOURCE_BYTES + 1 - size))
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+            size += len(chunk)
+        raise IsolationCheckError(
+            f"tracked source exceeds {MAX_SOURCE_BYTES} bytes: {path}"
+        )
+    except OSError as exc:
+        raise IsolationCheckError(f"tracked source read refused: {path}: {exc}") from exc
+    finally:
+        os.close(fd)
+
+
 def scan_repository(root: Path = ROOT) -> list[Finding]:
     """Read every tracked Python source; refuse if any part of the scan fails."""
     try:
         result = subprocess.run(
             ["git", "ls-files", "-z", "--", "*.py"], cwd=root,
-            capture_output=True, check=True,
+            capture_output=True, check=True, timeout=GIT_TIMEOUT_SECONDS,
         )
         paths = [item.decode("utf-8") for item in result.stdout.split(b"\0") if item]
-        files = {path: (root / path).read_bytes() for path in paths}
-    except (OSError, UnicodeDecodeError, subprocess.CalledProcessError) as exc:
+        files = {path: _read_source(root / path) for path in paths}
+    except (OSError, UnicodeDecodeError, subprocess.CalledProcessError,
+            subprocess.TimeoutExpired) as exc:
         raise IsolationCheckError(f"complete tracked-source scan refused: {exc}") from exc
     return check_files(files)
 

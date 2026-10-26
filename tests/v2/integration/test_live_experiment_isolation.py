@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 # packages: ops
+# land: always-run
 
 from pathlib import Path
 
@@ -13,8 +14,19 @@ def _rules(findings):
     return {item.rule for item in findings}
 
 
-def test_tracked_repository_passes_real_isolation_scan():
+def test_tracked_repository_passes_real_isolation_scan(monkeypatch):
+    original = isolation.check_files
+    observed = {}
+
+    def check_actual_sources(files):
+        observed.update(files)
+        return original(files)
+
+    monkeypatch.setattr(isolation, "check_files", check_actual_sources)
     assert isolation.scan_repository(Path(__file__).resolve().parents[3]) == []
+    assert "checks/live_experiment_isolation.py" in observed
+    assert "engine/v2/models/deployment.py" in observed
+    assert "experiments/lib.py" in observed
 
 
 def test_production_training_cannot_import_holdout_or_research():
@@ -22,10 +34,11 @@ def test_production_training_cannot_import_holdout_or_research():
         "engine/v2/models/retrain_job.py":
             b"from engine.v2.foundation.experiment_holdouts import final_month\n"
             b"import engine.v2.research.population\n",
+        "engine/v2/ops/training.py": b"import engine.v2.research.population\n",
     }
     findings = isolation.check_files(files)
     assert _rules(findings) == {"forbidden-import"}
-    assert len(findings) == 2
+    assert len(findings) == 3
 
 
 def test_experiments_cannot_import_live_release_or_ledger_modules():
@@ -44,12 +57,13 @@ def test_experiments_cannot_name_live_roots_but_may_name_own_ledger():
         "experiments/run.py": (
             b"MODEL_RELEASE_ROOT = 'x'\n"
             b"POINTER = 'deployment/DEPLOYED'\n"
+            b"ROOT.MODEL_RELEASE_ROOT = 'x'\n"
             b"LEDGER = 'LEDGER.csv'\n"
         ),
     }
     findings = isolation.check_files(files)
     assert _rules(findings) == {"forbidden-live-root"}
-    assert len(findings) == 2
+    assert len(findings) == 3
 
 
 def test_new_production_root_caller_requires_explicit_review():
@@ -62,7 +76,7 @@ def test_new_production_root_caller_requires_explicit_review():
 def test_aliased_production_root_caller_is_still_enumerated():
     findings = isolation.check_files({
         "engine/v2/ops/new_job.py": (
-            b"from engine.v2.models.deployment import production_release_root as root\n"
+            b"from engine.v2.models import production_release_root as root\n"
             b"root()\n"
         ),
     })
@@ -73,6 +87,64 @@ def test_aliased_production_root_caller_is_still_enumerated():
 def test_invalid_source_is_a_finding_not_a_clean_partial_scan(body):
     findings = isolation.check_files({"experiments/broken.py": body})
     assert _rules(findings) == {"source-invalid"}
+
+
+def _listed_source(monkeypatch, name):
+    def listing(args, **kwargs):
+        return isolation.subprocess.CompletedProcess(
+            args, 0, stdout=(name + "\0").encode(), stderr=b""
+        )
+
+    monkeypatch.setattr(isolation.subprocess, "run", listing)
+
+
+def test_relative_research_import_into_models_release_is_blocked():
+    findings = isolation.check_files({
+        "engine/v2/research/sub/run.py": b"from ...models import deployment\n",
+    })
+    assert _rules(findings) == {"forbidden-import"}
+
+
+def test_known_production_root_caller_is_allowed():
+    assert isolation.check_files({
+        "engine/v2/ops/training.py": b"production_deployment_root()\n",
+    }) == []
+
+
+def test_cli_main_returns_success_for_the_tracked_repository():
+    assert isolation.main() == 0
+
+
+def test_cli_main_returns_failure_when_scan_finds_a_violation(monkeypatch, capsys):
+    finding = isolation.Finding("experiments/run.py", 1, "forbidden-import", "blocked")
+    monkeypatch.setattr(isolation, "scan_repository", lambda: [finding])
+    assert isolation.main() == 1
+    assert "forbidden-import" in capsys.readouterr().err
+
+
+def test_tracked_symlink_source_refuses_without_following_it(monkeypatch, tmp_path):
+    (tmp_path / "target.py").write_bytes(b"pass\n")
+    (tmp_path / "source.py").symlink_to(tmp_path / "target.py")
+    _listed_source(monkeypatch, "source.py")
+    with pytest.raises(isolation.IsolationCheckError, match="tracked source read refused"):
+        isolation.scan_repository(tmp_path)
+
+
+def test_oversized_tracked_source_refuses(monkeypatch, tmp_path):
+    monkeypatch.setattr(isolation, "MAX_SOURCE_BYTES", 4)
+    (tmp_path / "source.py").write_bytes(b"12345")
+    _listed_source(monkeypatch, "source.py")
+    with pytest.raises(isolation.IsolationCheckError, match="exceeds 4 bytes"):
+        isolation.scan_repository(tmp_path)
+
+
+def test_git_listing_timeout_refuses_instead_of_skipping_scan(monkeypatch, tmp_path):
+    def timeout(*args, **kwargs):
+        raise isolation.subprocess.TimeoutExpired("git", kwargs["timeout"])
+
+    monkeypatch.setattr(isolation.subprocess, "run", timeout)
+    with pytest.raises(isolation.IsolationCheckError, match="complete tracked-source scan refused"):
+        isolation.scan_repository(tmp_path)
 
 
 def test_git_listing_failure_refuses_instead_of_skipping_scan(monkeypatch, tmp_path):

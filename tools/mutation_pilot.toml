@@ -106,6 +106,7 @@ always_run = [
     "tests/test_architecture_doc_budgets.py",
     "tests/test_code_budgets.py",
     "tests/v2/integration/test_test_selection.py",
+    "tests/v2/integration/test_live_experiment_isolation.py",
 ]
 
 # Meta-tests that scan a tree by file walk (no import edge, #672): selected
