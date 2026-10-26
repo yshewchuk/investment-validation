@@ -981,11 +981,11 @@ Root doc §5 invariants this package is responsible for:
 Charge snapshot once, binding/dataset/contract per table, membership/fragment/object per occurrence, including unrelated tables, repeated IDs and zero-row fragments.
 Integers charge BLOB-cast decimal text, not SQLite cell sizes. Probes return counts/bytes, never native identity or admission capabilities.
 `_bounded_catalog_transfer.transfer_catalog` reuses those probes/projections in the same borrowed active read transaction; only SELECTs run, with no lifecycle/settings changes.
-Transfer requires an exact SQLite connection with Row/str factories; after all-table scalar admission it transfers incrementally in table-name/membership-ordinal order.
-Repeated type/count checks precede retention; every TEXT occurrence charges an independent UTF-8 cap before **any** JSON parsing. Only SQL charges integer text.
-Stdlib JSON uses the native duplicate-key hook; native decoding validates the full `TableContract` and private JSON-column shapes, retained in qualified column maps.
+An exact SQLite connection with Row/str factories is required; all-table admission precedes transfer in table-name/membership-ordinal order.
+Types and upper counts are checked before row retention; exact lower counts after each group. Every TEXT occurrence charges an independent UTF-8 cap before **any** JSON parsing; only SQL charges integer text.
+Results are detached qualified-column maps: native decoding validates the full `TableContract` and private JSON-column shapes; duplicate JSON keys refuse.
 The result does not validate `FragmentRecord` time semantics, `DatasetManifest` hash formats or identity/binding agreement; it offers no public session or scanning.
-Objects, providers, ordinary resolvers and parent/evidence payloads are not read. No source, coverage, confirmation, PIT or execution property is established.
+Catalog parent IDs/evidence-reference metadata are retained, never traversed; no referenced payload, object, provider or ordinary resolver is read. No source, coverage, confirmation, PIT or execution property is established.
 Limits bound transfer, not SQLite CPU/RSS. Existing readers stay intact; there is no partial result, fallback, write or automatic retry.
 The caller guarantees read-view provenance/cleanup. See the [bounded-session design](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md).
 

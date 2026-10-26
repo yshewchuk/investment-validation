@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from engine.v2.foundation import canonical_json
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.research import magnitude_panel_table as v1
 from engine.v2.research import magnitude_panel_v2_table as v2
 from experiments import magnitude_search_request_versions as versions
@@ -142,6 +142,7 @@ def test_v2_normalization_smaller_schedule_and_detachment():
     original = _request()
     saved = copy.deepcopy(original)
     expected = versions.compile_request(original)
+    baseline = copy.deepcopy(expected)
     aliases = dict(reversed(list(copy.deepcopy(original).items())))
     aliases["space"] = {family: dict(reversed(list(axes.items())))
         for family, axes in reversed(list(aliases["space"].items()))}
@@ -159,8 +160,12 @@ def test_v2_normalization_smaller_schedule_and_detachment():
     quote_recipes = [recipe for recipe in recipes if recipe["subset"] == "HMO"]
     quote_recipes[0]["quote_indicator"]["false_statuses"].clear()
     assert all(recipe["quote_indicator"]["false_statuses"] for recipe in quote_recipes[1:])
-    assert versions.compile_request(original) == versions.compile_request(saved)
+    assert versions.compile_request(original) == baseline
     assert original == saved
+    detached = versions.compile_request(original)
+    original["space"]["ridge"]["alpha"][0] = 999
+    assert detached == baseline
+    original = copy.deepcopy(saved)
     original.update(outer_years=["2024"], inner_years={"2024": ["2023"]}, max_fits=102)
     original["comparison"].update(max_logical_fits=3, max_component_fits=6)
     assert versions.compile_request(original)["counts"] == {"candidates": 33, "inner_folds": 1,
@@ -227,6 +232,8 @@ def test_exact_once_public_validation_and_no_io_or_fit(factory, monkeypatch):
         assert versions.compile_request(document)["counts"]["search_fits"] == 603
     assert seen == [document["limits"]["child"]]
     document["limits"]["child"]["memory_bytes"] = 1.0
-    with pytest.raises(OpsError):
+    with pytest.raises(OpsError) as caught:
         versions.compile_request(document)
+    assert caught.value.problem == make_problem("INVALID_EXPERIMENT_SPEC",
+        "search execution requires explicit positive integer resource limits")
     assert type(seen[-1]["memory_bytes"]) is float

@@ -734,6 +734,9 @@ mutation tests, and poisoned source/store/fit hooks. No real data is needed.
 
 P3a implementation estimate: 50–80 runtime / 180–240 tests / 20–35 docs, at most
 355 combined added lines; split before exceeding 400, never weaken the oracles.
+Packaging exception: P3a may share a SIZE-foundations PR with 1.B1b under the
+repository's separate non-test-code/documentation caps, preserving each
+component's acceptance and nonexecution boundary; tests remain required.
 Publish this design amendment before implementation. A clean replacement for
 #1290 preserves its old head/history and is preferable to rewriting unrelated
 work. Actual execution still needs P3b, the admitted causal context/materializer,

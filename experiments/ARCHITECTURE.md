@@ -275,13 +275,15 @@ defines the closed nested fields. Scope is request compatibility, not native adm
 
 The preview does not select a winner, fit or preprocess, reserve/register/publish,
 write a ledger, enforce resource containment, or authorize execution/holdout reads.
-The version adapter recognizes only the exact full-HMO v2 dictionary hash in a
-built-in dict/string; all other inputs delegate unchanged to the public compiler.
-For v2 it privately substitutes the full-HMO v1 hash in a shallow request copy,
-delegates all JSON/shape/grid/policy/year/cap/limit validation, then restores the
-actual normalized hash. It replaces every H/HM/HMO recipe through public
-`magnitude_panel_v2_table.recipe`, recomputes request/spec IDs and re-sorts specs.
-Standard JSON detaches the result; no surrogate ID or v1 recipe is emitted.
+The additive version adapter has the same closed request and schedule schemas.
+Its shared validation/refusal boundary is the public v1 compiler; public v2 panel
+recipes and foundation hashing own the version-specific metadata and identities.
+
+| Adapter input | Outcome |
+| --- | --- |
+| Built-in dict with a built-in string equal to the full-HMO v2 dictionary hash | Shared validation completes before expansion; detached v2 recipes and actual declaration identities, with sorted specifications and no surrogate identity. |
+| Any other input, including v1/unsupported/subset hashes or nonplain shapes | Delegate unchanged to the public v1 compiler; identical valid outputs and complete refusal envelopes. |
+
 V2 dictionary widths are 11/28/42; model columns are 11/28/43, with
 `has_implied_quote` last only for HMO, outside the numeric dictionary.
 Both versions retain 33 candidates and schedule-specific counts (603 search,

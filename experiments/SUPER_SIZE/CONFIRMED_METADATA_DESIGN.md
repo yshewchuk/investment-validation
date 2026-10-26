@@ -248,6 +248,11 @@ PR below targets <=400 combined added code/test/doc lines, stricter than the
 repository's separate category caps; re-estimate and split add/wire again if
 needed. Estimates are not waivers, completed work or real-data authorization.
 
+Packaging amendment: existing 1.B1b and P3a foundations may share one PR under
+the repository's separate non-test-code and documentation caps instead of the
+combined-line target above. Contracts, dependencies and acceptance tests remain
+unchanged; this does not enable execution or B2. 1.M1 remains separately reviewed.
+
 | Sub-slice / dependency and acceptance | Added code / tests / docs |
 | --- | --- |
 | 1.B0: bounded native-session design / contract below; required review before B1a code | 0 / 0 / 190–210 |
