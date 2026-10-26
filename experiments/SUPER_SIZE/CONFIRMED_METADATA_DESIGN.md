@@ -2,7 +2,11 @@
 
 Status: proposed design-only refinement of [stage 2](STAGE2_DESIGN.md), before
 implementation. This freezes a small metadata-proof boundary, not a panel
-context, executable request, scientific amendment or data-read authorization.
+context, executable request or data-read authorization. The October 26 population
+amendment below changes the proposed population claim and removes the
+source-wide population-coverage qualification dependency, pending design review.
+Numerical, holdout and timing policies remain unchanged; this is a design-policy
+change, not runtime activation.
 The accepted H/HM/HMO dictionary, 33-candidate search, 5/3/1 clocks, grouped
 eligibility, causal legacy comparator and all v1 identities remain unchanged.
 
@@ -15,13 +19,33 @@ cannot prove that sequence. This slice returns a complete per-ticker metadata
 index; a later qualified context selects the strict target/forecast prefix.
 It neither returns a numerical contributor set nor calls an event eligible.
 
-The supported source explicitly has **no formal coverage watermark**. Complete
-manifest membership establishes only the first confirmed event *within that
-dataset*. It cannot establish earliest real-world/source history, point-in-time
-calendar knowledge, expected-population coverage or coverage of the proposed
-evaluation years. Native coverage/availability receipt references are preserved
-as references, not opened or promoted into a stronger attestation. Separate
-coverage qualification remains mandatory before sealing or numerical use.
+### Frozen-dataset population amendment (October 26; design only)
+
+Owner choice: the population is **all eligible confirmed events within the
+pinned frozen dataset**, not all events captured by a provider or occurring in
+the real world. Eligibility still uses the unchanged native clock, holdout and
+grouped policies; confirmation alone is not eligibility. Metadata history,
+first_confirmed_date, ordinals and counts are dataset-relative. Preserve the
+complete manifest inventory and exhaust every partition, including events before
+history_start; selected development rows or caller assertions cannot replace it.
+
+The supported source explicitly has **no formal coverage watermark**. This is
+an acknowledged source limitation, not a blocker requiring source-wide coverage
+proof for this frozen-population experiment. Complete pinned membership does not
+prove provider/real-world completeness, the earliest real-world event,
+point-in-time publication knowledge, evaluation-year representativeness or
+statistical unbiasedness. Absence is not evidence of a missing real-world event.
+Report duplicates/conflicts, observed gaps and coverage patterns within the frozen
+dataset; do not invent expected events, fill gaps or silently change eligibility.
+Retain strict identity/ref integrity and existing duplicate/conflict refusals.
+
+Native coverage/availability receipt references remain authenticated references,
+not authenticated payloads or stronger attestations. No new evidence reader is
+required solely to certify population completeness outside the frozen dataset.
+Numerical use still requires independently qualified availability, forecast and
+label bounds, grouped/holdout admission, and evaluation-year feasibility. The
+1.C0 boundary below specifies the remaining work; this amendment neither solves
+label provenance nor authorizes a read, fit, seal or runtime-policy change.
 
 No provider, mutable legacy data, daily/computed-move values, outcomes, stored
 aggregates, fitting, registration, ledger or production entrypoint is accessed.
@@ -146,7 +170,7 @@ Sort ticker names lexicographically for canonical output; input order is immater
    that flag as warmup_complete to avoid falsely calling contributors admitted.
 
 Empty ticker requests refuse before repository access. Zero fragments establish
-only a zero-row pinned view, never source/population coverage. Every requested
+only a zero-row pinned view, never provider/real-world coverage. Every requested
 ticker receives an entry: `absent_in_snapshot` if it has no selected rows,
 `no_confirmed_events` if it has selected rows but none confirmed, otherwise
 `confirmed_events`. Only absent_in_snapshot and no_confirmed_events have
@@ -171,7 +195,8 @@ Native nested objects use their existing strict to_document shapes/versions;
 fragment_records is the complete native ordered membership, not only hits.
 It retains object refs, hashes, recorded bytes/rows and receipt refs without
 opening receipt payloads. Manifest coverage/availability refs and knowledge mode
-are preserved verbatim; neither reconstructed nor observed means complete/PIT here.
+are preserved verbatim; neither reconstructed nor observed proves source-wide
+completeness or point-in-time publication knowledge here.
 
 `tickers` is the sorted request. `sequences` is a list in that same order. Each
 entry has exactly `ticker`, `status`, `selected_rows`, `confirmed_rows`,
@@ -261,8 +286,8 @@ needed. Estimates are not waivers, completed work or real-data authorization.
 | 1.M2: native ref/inventory admission / 1.B3b; exact contract and complete membership with pre-allocation caps | 100–140 / 150–190 / 20–30 |
 | 1.M3: bounded ticker scan and index composition / 1.M1/1.M2; exhaust once per partition, detached output and poisoned payload tests | 100–140 / 150–190 / 20–30 |
 | P.M1: native history/grouped-policy compatibility proof / 1.M3; contaminated histories refuse, no post-aggregate filtering | 100–140 / 150–190 / 20–30 |
-| 1.C0: coverage/forecast/label qualification design / 1.M3; freeze available native evidence and source-specific bounds before code | 0 / 0 / 120–160 |
-| 1.C1: native coverage-reference admission / 1.C0; authenticate reviewed evidence or refuse, never infer coverage from metadata alone | 90–130 / 150–190 / 20–30 |
+| 1.C0: availability/forecast/label qualification design / 1.M3; separate reference, payload and bound evidence before code | 0 / 0 / 120–160 |
+| 1.C1: required availability-evidence admission / 1.C0; only evidence needed for causal availability, not source-wide population coverage | 90–130 / 150–190 / 20–30 |
 | 1.C2: forecast/label-bound admission / 1.C0; prove clocks independently of producer declarations | 100–140 / 150–190 / 20–30 |
 | 1.C3: closed v2 context declaration / P.M1,1.C1,1.C2; source-free shape/identity, no admission claim | 100–140 / 150–190 / 20–30 |
 | 1.C4: native v2 context composition / 1.C3; bind independently qualified sources and exact history | 100–140 / 150–190 / 20–30 |
@@ -276,6 +301,30 @@ P = 100–140/150–190/20–30; row 2 = 380–540/580–740/80–120. The origi
 one-week target is not reaffirmed. Only 1.M3 exposes authenticated build_index.
 Each implementation slice updates its owning data/research README/ARCHITECTURE
 under existing ceilings. 1.C0 may block; estimates never invent source evidence.
+
+### Remaining 1.C0 boundary (design required before numerical implementation)
+
+Distinguish three claims: (1) native identity authenticates evidence references;
+(2) opening and verifying the referenced payload authenticates its contents;
+(3) neither alone independently establishes forecast/label bounds. Do not add a
+coverage-watermark reader or separate attestation system for the population
+choice above. 1.C1 retains only genuinely required source-availability checks;
+C0 must identify the existing native evidence and supported read route for each
+such check, without treating absent publication stamps as observed-PIT.
+
+Reuse native `forecast_cutoff`, which already recomputes source-session ceilings
+from the pinned calendar. Label intervals need the actual measured source pre/post
+anchors, including BMO/AMC and missing-bar selection, not guessed calendar dates,
+producer-declared intervals or a receipt hash alone. C0 must establish how those
+anchors are authenticated and checked before any dependent protected-value read;
+that source-specific route remains unresolved here. Unsupported availability or
+unproved label bounds still refuse; no new numerical/clock policy is chosen.
+
+1.C2 retains independent forecast/label checks; 1.C3/1.C4 still depend on P.M1,
+the required availability checks and clock/label qualification. Complete frozen
+membership removes only the external-population coverage qualification demand.
+Explicit bounded resource enforcement remains mandatory. Synthetic fixtures and
+catalog caps establish neither real-data capacity nor an authorized run budget.
 
 Acceptance fixtures cover the exact full contract hash and same-column impostors;
 changed snapshot/dataset/fragment/object identity; all manifest years including
