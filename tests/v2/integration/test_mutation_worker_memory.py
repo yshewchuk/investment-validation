@@ -37,7 +37,7 @@ def test_authored_worker_budget_ignores_environment_package_and_path(monkeypatch
     monkeypatch.delattr(fixture.incremental, "_mutmut_mutated")
     assert fixture.snapshot_worker_policy() is TEST_POLICY
     assert _memory(TEST_POLICY) == 384 << 20
-    assert _memory(DEFAULT_POLICY) == 512 << 20
+    assert _memory(DEFAULT_POLICY) == 1 << 30
 
 
 @pytest.mark.parametrize("modules", [{}, {"mutmut.mutation.trampoline": SimpleNamespace()},
@@ -48,7 +48,7 @@ def test_authored_worker_without_a_trampoline_keeps_its_budget(monkeypatch, modu
     monkeypatch.setenv("MUTANT_UNDER_TEST", "stats")
     assert fixture.snapshot_worker_policy() is TEST_POLICY
     assert _memory(TEST_POLICY) == 384 << 20
-    assert _memory(DEFAULT_POLICY) == 512 << 20
+    assert _memory(DEFAULT_POLICY) == 1 << 30
 
 
 def test_only_instrumented_fixture_io_fetch_memory_changes(monkeypatch):
@@ -57,7 +57,7 @@ def test_only_instrumented_fixture_io_fetch_memory_changes(monkeypatch):
     policy = fixture.snapshot_worker_policy()
     assert _memory(policy) == 1 << 30
     assert _memory(TEST_POLICY) == 384 << 20
-    assert _memory(DEFAULT_POLICY) == 512 << 20
+    assert _memory(DEFAULT_POLICY) == 1 << 30
     expected = replace(TEST_POLICY, profiles=tuple(
         replace(profile, memory_bytes=1 << 30) if profile.name == "io_fetch" else profile
         for profile in TEST_POLICY.profiles))
@@ -75,7 +75,7 @@ def test_allowance_tracks_incremental_instrumentation_not_its_sibling(
     monkeypatch.setattr(getattr(fixture, generated_module), "_mutmut_mutated", wrapper, raising=False)
     assert _memory(fixture.snapshot_worker_policy()) == expected
     assert _memory(TEST_POLICY) == 384 << 20
-    assert _memory(DEFAULT_POLICY) == 512 << 20
+    assert _memory(DEFAULT_POLICY) == 1 << 30
 
 
 @pytest.mark.parametrize("instrumented", [False, True])

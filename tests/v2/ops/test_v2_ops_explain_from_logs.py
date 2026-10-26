@@ -72,8 +72,9 @@ sys.exit(1)
 """
 
 #: Opens one step ("ramp"), then allocates real memory past the "delivery"
-#: profile's 256 MiB cap and holds it -- the supervisor's own watchdog must
-#: detect and kill this, no cooperation from the stub beyond not exiting.
+#: profile's 384 MiB TEST_POLICY cap and holds it -- the supervisor's own
+#: watchdog must detect and kill this, no cooperation from the stub beyond
+#: not exiting.
 _STUB_RAMP = r"""
 import json, os, sys, time
 envelope = json.loads(sys.stdin.buffer.readline())
@@ -83,7 +84,7 @@ fd = os.open(os.path.join(diag, "steps.ndjson"), os.O_WRONLY | os.O_CREAT | os.O
 os.write(fd, json.dumps({"event": "start", "step": "ramp", "elapsed_seconds": 0.0,
          "rss_bytes": 0}).encode() + b"\n")
 os.close(fd)
-blob = bytearray(300 * (1 << 20))
+blob = bytearray(500 * (1 << 20))
 blob[0] = 1
 blob[-1] = 1
 time.sleep(30)
@@ -183,7 +184,7 @@ def test_resource_kill_names_step_peak_limit_and_elapsed(tmp_path, monkeypatch):
     assert job.failure.code == "RESOURCE_LIMIT_EXCEEDED"
     details = job.failure.details
     assert details["step"] == "ramp"
-    assert details["limit_bytes"] == 256 * (1 << 20)
+    assert details["limit_bytes"] == 384 * (1 << 20)
     assert details["peak_bytes"] > details["limit_bytes"]
     assert details["elapsed_s"] == 0.0
 
