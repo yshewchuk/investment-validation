@@ -425,6 +425,13 @@ CHAIN_DTE = "1,75"
 #: actually held, and `skip_held` makes an already-held one free.
 CHAIN_SESSIONS = 2
 
+#: Fraction of a session's wanted pairs already held past which the heal pass
+#: stops fetching that session. At or above it the only unheld names left are
+#: the chronic no-chain ones, and they cluster into all-404 batches (weekend
+#: runs 10-18/19: ~114 calls, almost all 404). A night that did not run leaves
+#: the newest session at ~0% held, so it is still healed.
+CHAIN_SKIP_HELD_FRACTION = 0.75
+
 
 def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_BATCH,
                            sessions: int = CHAIN_SESSIONS, skip_held: bool = True) -> dict:
@@ -437,9 +444,13 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     the only pullers that touched it were the strategy backtest scripts pulling
     HISTORY.
 
-    Cost is ~18 calls a night for a 176-ticker board, against a 20,000/month
-    budget — the endpoint is per (tradeDate, ticker-batch), so the whole board's
-    chains for one session cost less than a rounding error.
+    Cost is ~365 calls for the newest session against the ~3,600-ticker
+    calendar frontier that is the nightly universe (the endpoint is per
+    (tradeDate, ticker-batch)); the second session is usually almost free
+    because the previous run already got it, and a session that is at least
+    :data:`CHAIN_SKIP_HELD_FRACTION` held is skipped outright — what is left
+    unheld there is the chronic no-chain tail, and re-buying it is ~114
+    calls of 404s per weekend run.
 
     Truncation is checked, not assumed: see :data:`CHAIN_BATCH`.
 
@@ -498,11 +509,27 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
 
 
 def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_held) -> None:
-    """Fetch one trade date for whatever part of the universe still needs it."""
+    """Fetch one trade date for whatever part of the universe still needs it.
+
+    A session that is already at least :data:`CHAIN_SKIP_HELD_FRACTION` held
+    is not fetched at all: the remainder is the chronic no-chain tail and every
+    batch of it comes back 404. The decision is recorded, never silent.
+    """
     session_day = pd.Timestamp(stamp).normalize()
     if skip_held:
         wanted = [t for t in wanted_all if (t, session_day) not in held]
         out["skipped_held"] += len(wanted_all) - len(wanted)
+        if wanted_all and wanted:
+            fraction = (len(wanted_all) - len(wanted)) / len(wanted_all)
+            if fraction >= CHAIN_SKIP_HELD_FRACTION:
+                out.setdefault("sessions_skipped", []).append(
+                    {"session": stamp, "held_fraction": round(fraction, 3),
+                     "unheld": len(wanted)}
+                )
+                print(f"[chains] session {stamp}: {fraction:.0%} held, "
+                      f"skipping {len(wanted)} unheld pairs (no chain on file)",
+                      file=sys.stderr)
+                return
     else:
         wanted = list(wanted_all)
     for start in range(0, len(wanted), batch):
