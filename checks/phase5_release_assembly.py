@@ -279,8 +279,8 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
             raise ReleaseAssemblyRefusal("CUTOFF_MISMATCH", "monthly requires retrain_cutoff")
         retrain_day = _parse_day(
             retrain_cutoff, "CUTOFF_MISMATCH", "retrain_cutoff is not an ISO date")
-        if retrain_day > cutoff_day:
-            raise ReleaseAssemblyRefusal("CUTOFF_MISMATCH", "retrain_cutoff is after cutoff")
+        cutoff_day = max(cutoff_day, retrain_day)
+        cutoff = cutoff_day.isoformat()
         for output in (*_all_outputs(by_member), *chooser_objects):
             if output.carried:
                 raise ReleaseAssemblyRefusal(

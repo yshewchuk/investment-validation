@@ -176,6 +176,7 @@ def _stage_monthly_candidate(parameters, root: Path) -> dict:
                            {"code": "PRIOR_MISMATCH"}) from exc
     if prior_pool_date.isoformat() != prior_pool_cutoff:
         raise StageRefused("prior release could not be read", {"code": "PRIOR_MISMATCH"})
+    effective_cutoff = max(prior_pool_date, date.fromisoformat(retrain_cutoff)).isoformat()
     prior_class = classify_prior(release_root, base_id)
     if prior_class.kind != PRIOR_USABLE:
         raise StageRefused("prior release could not be read", {"code": "PRIOR_MISMATCH"})
@@ -215,14 +216,14 @@ def _stage_monthly_candidate(parameters, root: Path) -> dict:
             release_root, prior_release_id=base_id,
             release_id=parameters["release_id"], inventory=inventory,
             outputs=driver_outputs, chooser=chooser_outputs,
-            cutoff=prior_pool_cutoff, monthly=True, retrain_cutoff=retrain_cutoff)
+            cutoff=effective_cutoff, monthly=True, retrain_cutoff=retrain_cutoff)
     except ReleaseAssemblyRefusal as exc:
         raise StageRefused("release assembly refused", {"code": exc.code}) from exc
     except (rel.ReleaseLayoutError, OSError) as exc:
         raise StageRefused("candidate release could not be published") from exc
     check_parameters = dict(parameters)
     check_parameters.update(mode="monthly", prior_release_id=base_id,
-                            cutoff=prior_pool_cutoff, retrain_cutoff=retrain_cutoff)
+                            cutoff=effective_cutoff, retrain_cutoff=retrain_cutoff)
     light_checks(release_root, check_parameters, new_hashes)
     try:
         deployment.mark_staging_succeeded(Path(release_root) / "deployment",

@@ -256,7 +256,7 @@ and positional-lag behavior. Nonpositive prices produce missing move labels.
   prior_release_id, monthly=False) -> (pool_cutoff, tuple[PoolOutput])` returns every prior
   pool/chooser object as `carried=True`, recorded at the prior `sources.pool_cutoff`
   (`PRIOR_MISMATCH` on a missing prior or structurally malformed rows, object keys or `pool_cutoff`;
-  wrong-typed object fields are not checked here and refuse later as `POOL_SET_MISMATCH`, or `CHOOSER_MISMATCH` for the chooser). With `monthly=True`, `prior_carry_set` returns only board, paired and trailing objects. Monthly assembly supplies exactly the three driver residual pools and chooser; board, paired and trailing members carry from the stage-time base. It records `sources.retrain_cutoff` as an extended ISO date not after `sources.pool_cutoff`.
+  wrong-typed object fields are not checked here and refuse later as `POOL_SET_MISMATCH`, or `CHOOSER_MISMATCH` for the chooser). With `monthly=True`, `prior_carry_set` returns only board, paired and trailing objects. Monthly assembly supplies exactly the three driver residual pools and chooser; board, paired and trailing members carry from the stage-time base. It sets the candidate `pool_cutoff` to the later of the supplied base cutoff and `retrain_cutoff`, so a first retrain can stage when its exclusive boundary advances the base; the catalog invariant remains `retrain_cutoff <= pool_cutoff`.
 - `classify_prior(release_root, prior_release_id) -> PriorClass` — read-only; handled refusal, validation and I/O failures return `DAMAGED` rather than raising. Kind `NONE`/`NO_POOL_CATALOG`/`USABLE`/`DAMAGED` with a fixed reason (§2.2.2). Every present catalog (with or without `pool_cutoff`) must verify against its staged release and `deployment_id`; a legacy catalog without `pool_cutoff` is not checked for pool rows or objects, which it need not have. `USABLE` needs a valid catalog with an ISO `pool_cutoff`, optional ISO `retrain_cutoff` not after it, well-formed pool rows, objects whose hash and size verify, and a `deployment_id` equal to the staged release's.
 
 **Prior classification (#1102).** The `phase5_state_stage` job classifies the prior with one read-only helper, `classify_prior(release_root, prior_release_id)`; it never writes:
@@ -323,7 +323,7 @@ because the assembly helpers live in `checks/`; `projection` resource class (its
 stages a candidate release; it never touches `DEPLOYED` (`models_promote` is separate).
 
 - Parameters: `release_root` (the store's parent; empty resolves the production root at
-  plan time), `prior_release_id` (null only with `mode` `bootstrap` and no prior), `mode` (`carry` default or `bootstrap`, §2.2.2; `bootstrap` also takes the `bootstrap` mapping there), `release_id`, `cutoff` (extended ISO), `state_files` and
+  plan time), `prior_release_id` (null only with `mode` `bootstrap` and no prior), `mode` (`carry` default, `bootstrap` (§2.2.2), or `monthly`; `bootstrap` also takes the `bootstrap` mapping there), `release_id`, `cutoff` (extended ISO), `state_files` and
   `input_bindings` (a mapping from each state file name to its `training` output id; the job framework requires
   the producing job to have succeeded), plus a required `legacy_manifest.json` binding (the pinned legacy
   manifest, as `training` jobs bind it): the kind declares a `legacy_store` read, so the job's read set
@@ -335,6 +335,7 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 - In `carry` mode every other prior pool/chooser object, and every prior object of an advancing member not
   re-supplied, is carried (`prior_carry_set`), so older causal keys stay selectable and
   driver pools and the chooser keep their hash until a retrain (the planned monthly refresh, §2.3, is not built) re-supplies them.
+- In `monthly` mode the worker reads the deployed pointer and catalog again at stage time, uses that release as the base, accepts exactly the three driver pools and chooser, and carries board, paired and trailing members. The requested `cutoff` is `retrain_cutoff`. This stage path is plumbing only and has no production submitter until the monthly chain wiring split is implemented.
 - Output: a re-verified candidate release (never `DEPLOYED`) and `stage_result.json`. The
   inventory comes from the legacy champion registry under the new id; drift refuses before any write.
 - Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a

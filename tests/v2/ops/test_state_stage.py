@@ -224,7 +224,7 @@ def test_worker_stages_candidate_carrying_the_unadvanced_members(tmp_path, monke
 
 
 def test_monthly_stage_uses_the_deployed_pointer_as_prior(tmp_path, monkeypatch):
-    inventory, _ = _stage_prior(tmp_path, prior_sources={"pool_cutoff": "2026-11-02"})
+    inventory, _ = _stage_prior(tmp_path, prior_sources={"pool_cutoff": "2026-10-30"})
     store = phase5_release.deployment_root(tmp_path)
     deployment.mark_staging_succeeded(store, "prior1")
     deployment.promote(store, "prior1")
@@ -271,7 +271,7 @@ def test_monthly_stage_uses_the_deployed_pointer_as_prior(tmp_path, monkeypatch)
     body = json.loads(phase5_release.catalog_path(tmp_path, "cand1").read_bytes())
     prior = json.loads(phase5_release.catalog_path(tmp_path, "prior1").read_bytes())
     assert body["sources"]["carried_from"] == "prior1"
-    assert body["sources"]["pool_cutoff"] == "2026-11-02"
+    assert body["sources"]["pool_cutoff"] == "2026-11-01"
     assert body["sources"]["retrain_cutoff"] == "2026-11-01"
     rows = {row["member_id"]: row for row in body["members"]}
     prior_rows = {row["member_id"]: row for row in prior["members"]}
