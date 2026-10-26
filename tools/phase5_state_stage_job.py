@@ -112,6 +112,20 @@ def light_checks(release_root: Path, parameters, new_hashes: set[str]) -> None:
         raise StageRefused("candidate release failed the light checks")
 
 
+#: Re-exported for the pool sidecar (``engine/v2/ops/pool_refresh.py``, #1102
+#: slice C): ``engine/v2`` may not import ``checks`` at all (``import_layers``
+#: tier 0), so the classification reaches the sidecar through this sanctioned
+#: tools layer -- the same layer ``run_state_stage_worker`` already crosses for
+#: the worker path. ``stage_candidate`` keeps its own lazy import for the rest.
+from checks.phase5_release_assembly import (
+    PRIOR_DAMAGED,
+    PRIOR_NO_POOL_CATALOG,
+    PRIOR_NONE,
+    PRIOR_USABLE,
+    classify_prior,
+)
+
+
 def stage_candidate(parameters, root: Path) -> dict:
     """Assemble and stage the candidate release; returns a JSON-safe summary."""
     from engine.v2.models import release_layout as rel

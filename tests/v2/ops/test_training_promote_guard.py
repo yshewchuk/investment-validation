@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -16,7 +17,7 @@ from engine.v2.models import (
     ReleaseRequirement,
     deployment,
 )
-from engine.v2.foundation import SystemClock
+from engine.v2.foundation import SystemClock, content_hash
 from engine.v2.ops import cli, training
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
@@ -175,3 +176,73 @@ def test_plan_promote_help_documents_already_live_noop_exception():
     assert "idempotent no-op" in action.help
     assert "already-live" in action.help
     assert "unguarded" in action.help
+
+
+def test_promote_plan_refuses_both_guards_with_invalid_request(tmp_path):
+    with pytest.raises(OpsError) as excinfo:
+        training.promote_plan(release_root=str(tmp_path), release_id="r2",
+                              expected_previous_release_id="r1", require_empty_store=True)
+
+    assert excinfo.value.code == "INVALID_REQUEST"
+
+
+def test_promote_plan_require_empty_store_alone_is_accepted(tmp_path):
+    plan = training.promote_plan(release_root=str(tmp_path), release_id="r1",
+                                 require_empty_store=True)
+
+    assert plan["parameters"]["require_empty_store"] is True
+    assert plan["parameters"]["expected_previous_release_id"] is None
+
+
+def test_promote_plan_default_spec_hash_is_unchanged(tmp_path):
+    plan = training.promote_plan(release_root=str(tmp_path), release_id="r2")
+    legacy_parameters = {
+        "expected_ids": ("models_promote",),
+        "release_root": str(Path(tmp_path).expanduser().resolve()),
+        "release_id": "r2",
+        "expected_previous_release_id": None,
+        "input_bindings": None,
+    }
+
+    assert plan["parameters"] == legacy_parameters
+    assert "require_empty_store" not in plan["parameters"]
+    assert plan["spec_hash"] == content_hash(legacy_parameters)
+
+
+def test_promote_worker_forwards_require_empty_store(tmp_path):
+    _stage_pair(tmp_path)
+    (tmp_path / "staging").mkdir()
+
+    result = training.run_promote_worker(
+        {"expected_ids": ["models_promote"], "release_root": str(tmp_path),
+         "release_id": "r1", "require_empty_store": True}, tmp_path / "staging")
+
+    assert result["completed_ids"] == ["models_promote"]
+    assert deployment.current_pointer(tmp_path).release_id == "r1"
+
+    history_before = deployment.pointer_history(tmp_path)
+    with pytest.raises(OpsError) as excinfo:
+        training.run_promote_worker(
+            {"expected_ids": ["models_promote"], "release_root": str(tmp_path),
+             "release_id": "r2", "require_empty_store": True}, tmp_path / "staging")
+
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.problem.details == {"exception_class": "ConcurrentPromote"}
+    assert deployment.current_pointer(tmp_path).release_id == "r1"
+    assert deployment.pointer_history(tmp_path) == history_before
+
+
+def test_promote_worker_refuses_parameters_with_both_guards(tmp_path):
+    _stage_pair(tmp_path)
+    (tmp_path / "staging").mkdir()
+
+    with pytest.raises(OpsError) as excinfo:
+        training.run_promote_worker(
+            {"expected_ids": ["models_promote"], "release_root": str(tmp_path),
+             "release_id": "r2", "require_empty_store": True,
+             "expected_previous_release_id": "r1"}, tmp_path / "staging")
+
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert deployment.current_pointer(tmp_path) is None
+    assert deployment.pointer_history(tmp_path) == ()
+    assert not (tmp_path / "staging" / "pointer_state.json").exists()
