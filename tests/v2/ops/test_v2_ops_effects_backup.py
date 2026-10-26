@@ -898,3 +898,69 @@ def test_restore_refuses_files_over_max_backup_bytes(tmp_path, kind, expected_me
         assert not destination.exists()
     else:
         assert not (destination / "artifacts" / "evidence.bin").exists()
+
+
+def _bkp_key(index):
+    return "bkp" + format(index, "024x")
+
+
+def _make_backup(conn, clock, store, backup, key):
+    prepare_backup(conn, key, {}, clock=clock)
+    run_backup(conn, key=key, owner="worker", target=backup, clock=clock, store=store)
+    clock.advance(60)
+
+
+def test_backup_prune_keeps_three_newest_pairs(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    backup = tmp_path / "backup"
+    keys = [_bkp_key(index) for index in range(1, 6)]
+    for key in keys:
+        _make_backup(conn, clock, store, backup, key)
+    remaining_databases = sorted(path.name for path in backup.glob("bkp*.sqlite"))
+    remaining_manifests = sorted(path.name for path in backup.glob("bkp*.manifest.json"))
+    assert remaining_databases == sorted(key + ".sqlite" for key in keys[2:])
+    assert remaining_manifests == sorted(key + ".manifest.json" for key in keys[2:])
+    assert not (backup / (keys[0] + ".sqlite")).exists()
+    assert not (backup / (keys[1] + ".manifest.json")).exists()
+
+
+def test_backup_prune_skips_invalid_pair_with_later_cutoff(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    backup = tmp_path / "backup"
+    keys = [_bkp_key(index) for index in range(1, 5)]
+    for key in keys[:3]:
+        _make_backup(conn, clock, store, backup, key)
+    invalid_key = _bkp_key(9)
+    invalid_database = backup / (invalid_key + ".sqlite")
+    invalid_database.write_bytes(b"not a sqlite database")
+    (backup / (invalid_key + ".manifest.json")).write_bytes(json.dumps({
+        "schema_version": "catalog_backup.v1.0", "backup_key": invalid_key,
+        "cutoff": "2099-01-01T00:00:00.000000Z", "database": "sha256:" + "0" * 64,
+        "database_byte_size": invalid_database.stat().st_size, "artifacts": {},
+    }, sort_keys=True).encode())
+    _make_backup(conn, clock, store, backup, keys[3])
+    assert (invalid_database).exists()
+    assert (backup / (invalid_key + ".manifest.json")).exists()
+    remaining_databases = sorted(path.name for path in backup.glob("bkp*.sqlite"))
+    assert remaining_databases == sorted(
+        [key + ".sqlite" for key in keys[1:4]] + [invalid_key + ".sqlite"])
+    assert not (backup / (keys[0] + ".sqlite")).exists()
+
+
+def test_backup_prune_leaves_unrelated_files_untouched(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    notes = backup / "restore-notes.txt"
+    notes.write_bytes(b"keep me")
+    unmatched = backup / "bkp-legacy.sqlite"
+    unmatched.write_bytes(b"legacy")
+    keys = [_bkp_key(index) for index in range(1, 5)]
+    for key in keys:
+        _make_backup(conn, clock, store, backup, key)
+    assert notes.read_bytes() == b"keep me"
+    assert unmatched.read_bytes() == b"legacy"
+    assert (backup / (keys[3] + ".sqlite")).exists()

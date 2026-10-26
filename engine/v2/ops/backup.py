@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
+import sys
 from pathlib import Path
 
 from engine.v2.contracts import ArtifactRef
@@ -22,6 +24,7 @@ from engine.v2.ops.workflows.commands import read_bounded_json
 
 _MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_BACKUP_BYTES = 64 * 1024**3
+BACKUP_RETENTION = 3
 
 
 def prepare_backup(conn, key, artifacts, *, clock):
@@ -155,6 +158,40 @@ def _verify_existing_manifest(manifest_path, manifest):
         raise fail("INTEGRITY_FAILED", "backup manifest differs")
 
 
+def _prune_backups(target, current_key):
+    """Keep only the newest ``BACKUP_RETENTION`` validated backup pairs."""
+    key_pattern = re.compile(r"bkp[0-9a-f]{24}")
+    candidates = []
+    for database in target.glob("bkp*.sqlite"):
+        key = database.name[: -len(".sqlite")]
+        manifest_path = target / (key + ".manifest.json")
+        if key_pattern.fullmatch(key) is None or not manifest_path.exists():
+            continue
+        try:
+            manifest = read_bounded_json(manifest_path, _MAX_MANIFEST_BYTES)
+            if (not isinstance(manifest, dict) or manifest.get("backup_key") != key
+                    or not isinstance(manifest.get("cutoff"), str)):
+                continue
+            _verify_delivered_copy(database, manifest)
+            candidates.append((manifest["cutoff"], key, database, manifest_path))
+        except (OSError, ValueError, TypeError, RecursionError, OpsError):
+            continue
+    candidates.sort(key=lambda candidate: (candidate[0], candidate[1]), reverse=True)
+    survivors = 0
+    for _cutoff, key, database, manifest_path in candidates:
+        if key == current_key:
+            continue
+        if survivors < BACKUP_RETENTION - 1:
+            survivors += 1
+            continue
+        for path in (database, manifest_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                print("[backup-retention] BACKUP_FAILED: backup pair deletion failed",
+                      file=sys.stderr)
+
+
 def _copy_backup_artifact(store, target, name, document, fault):
     ref = from_document(ArtifactRef, document)
     if "/" in name or name in ("", ".", ".."):
@@ -217,6 +254,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
         fault("after_manifest_before_ack")
     complete(conn, effect["effect_id"], manifest, owner=owner,
              claim_token=effect["claim_token"], clock=clock)
+    _prune_backups(target, key)
     return manifest
 
 
