@@ -309,29 +309,50 @@ CHAIN_RETRY_MAX_BYTES = 1_000_000
 def _read_chain_retry() -> dict[str, set[str]]:
     """The retry memo; a missing or invalid file is empty and never raises.
 
-    Checked before it is opened: a non-regular file at the path (a symlink, a
-    directory, a FIFO) or one over :data:`CHAIN_RETRY_MAX_BYTES` is announced
-    once on stderr and ignored. Values must be lists of names — anything
-    else (a bare string, say) is skipped for that date, not split apart.
+    Race-free by construction: the open itself rejects symlinks
+    (``O_NOFOLLOW``) and never blocks on a FIFO (``O_NONBLOCK``), and the
+    fstat + read happen on the fd, so the inode checked is the inode read —
+    a swap of the path mid-read cannot slip a huge file past the cap. A
+    non-regular file (a symlink target aside — the path itself) or one over
+    :data:`CHAIN_RETRY_MAX_BYTES` is announced once on stderr and ignored;
+    so is an ``OSError`` at open except a missing file (ENOENT), the common
+    case of nothing owed. Values must be lists of names — anything else
+    (a bare string, say) is skipped for that date, not split apart.
     """
     try:
-        st = CHAIN_RETRY_PATH.lstat()
-    except OSError:
+        fd = os.open(CHAIN_RETRY_PATH,
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
         return {}  # missing: the common case — nothing owed, nothing to say
-    if not stat.S_ISREG(st.st_mode):
-        print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: not a regular file",
-              file=sys.stderr)
-        return {}
-    if st.st_size > CHAIN_RETRY_MAX_BYTES:
-        print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: {st.st_size} bytes "
-              f"over the {CHAIN_RETRY_MAX_BYTES}-byte cap", file=sys.stderr)
+    except OSError as exc:  # ELOOP on a symlink, ENOTDIR, EACCES, EISDIR...
+        print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: {exc}", file=sys.stderr)
         return {}
     try:
-        raw = json.loads(CHAIN_RETRY_PATH.read_text())
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: not a regular file",
+                  file=sys.stderr)
+            return {}
+        if st.st_size > CHAIN_RETRY_MAX_BYTES:
+            print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: {st.st_size} bytes "
+                  f"over the {CHAIN_RETRY_MAX_BYTES}-byte cap", file=sys.stderr)
+            return {}
+        # closefd=False: the fd stays ours to close in the finally; reading
+        # one past the cap detects a file that grew between fstat and read.
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            data = fh.read(CHAIN_RETRY_MAX_BYTES + 1)
+        if len(data) > CHAIN_RETRY_MAX_BYTES:
+            print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: grew past the "
+                  f"{CHAIN_RETRY_MAX_BYTES}-byte cap while being read",
+                  file=sys.stderr)
+            return {}
+        raw = json.loads(data)
         return {str(d): {str(t) for t in ts}
                 for d, ts in raw.items() if isinstance(ts, list)}
     except (OSError, ValueError, TypeError, AttributeError):
         return {}
+    finally:
+        os.close(fd)
 
 
 def _write_chain_retry(retry: dict[str, set[str]]) -> None:

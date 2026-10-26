@@ -15,6 +15,8 @@ patch, so this needs no data root and makes no provider call.
 from __future__ import annotations
 
 import json
+import os
+import threading
 
 import pandas as pd
 import pytest
@@ -274,9 +276,9 @@ def test_an_oversized_memo_is_ignored_with_one_stderr_line(monkeypatch, capsys, 
 
 def test_a_directory_at_the_memo_path_is_ignored_and_the_run_proceeds(
         monkeypatch, capsys, tmp_path):
-    """A non-regular file at the path (a misplaced ``mv``) is lstat-rejected
-    before it is opened: reads as {}, the save failure it also causes is
-    announced, and nothing raises."""
+    """A non-regular file at the path (a misplaced ``mv``) is fstat-rejected
+    on the open fd before anything is read: reads as {}, the save failure it
+    also causes is announced, and nothing raises."""
     _wire(monkeypatch, set(), tmp_path)
     nightly.CHAIN_RETRY_PATH.mkdir()
     f = _Fetcher(fail=lambda p: RuntimeError("HTTP 502"))
@@ -288,6 +290,44 @@ def test_a_directory_at_the_memo_path_is_ignored_and_the_run_proceeds(
     err = capsys.readouterr().err
     assert "not a regular file" in err, "the ignore is announced with its reason"
     assert "could not write" in err, "the save onto it is announced, not raised"
+
+
+def test_a_symlink_at_the_memo_path_is_ignored(monkeypatch, capsys, tmp_path):
+    """``O_NOFOLLOW`` refuses the symlink at open (ELOOP): the target's
+    contents never reach the run, one stderr line names the file, and the
+    read is not silent."""
+    _wire(monkeypatch, set(), tmp_path)
+    real = tmp_path / "elsewhere.json"
+    real.write_text(json.dumps({AS_OF: ["TKR09"]}))
+    nightly.CHAIN_RETRY_PATH.symlink_to(real)
+
+    assert nightly._read_chain_retry() == {}, "a symlink is never followed"
+    err = capsys.readouterr().err
+    assert f"ignoring {nightly.CHAIN_RETRY_PATH.name}" in err, \
+        "the refusal is announced with the file's name"
+    assert "TKR09" not in err, "the symlinked target's contents are not read"
+
+
+def test_a_fifo_at_the_memo_path_returns_empty_without_hanging(
+        monkeypatch, capsys, tmp_path):
+    """A FIFO would block a plain read-only open forever with no writer on the
+    other end; ``O_NONBLOCK`` opens it at once, the fstat sees a non-regular
+    file, and the read returns {} promptly. The thread+timeout harness fails
+    the test instead of hanging the suite if the flag is ever lost."""
+    _wire(monkeypatch, set(), tmp_path)
+    os.mkfifo(nightly.CHAIN_RETRY_PATH)
+    done = threading.Event()
+    box = []
+
+    def read():
+        box.append(nightly._read_chain_retry())
+        done.set()
+
+    t = threading.Thread(target=read, daemon=True)
+    t.start()
+    assert done.wait(5), "the FIFO read blocked — O_NONBLOCK is missing"
+    assert box == [{}], "a FIFO reads as no memo"
+    assert "not a regular file" in capsys.readouterr().err
 
 
 def test_a_memo_write_failure_is_announced_not_raised(monkeypatch, capsys, tmp_path):
