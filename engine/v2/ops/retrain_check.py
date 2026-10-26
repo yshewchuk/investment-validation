@@ -161,6 +161,10 @@ def run_retrain_check_worker(parameters, root: Path) -> dict:
     if candidate is None or incumbent is None:
         raise fail("VALIDATION_FAILED", "candidate or incumbent release is not staged",
                    details={"code": "RELEASE_NOT_STAGED"})
+    for manifest in (candidate, incumbent):
+        if not deployment.manifest_hash_matches(manifest):
+            raise fail("VALIDATION_FAILED", "staged release manifest hash does not match",
+                       details={"code": "STAGED_MANIFEST_HASH_MISMATCH"})
     candidate_meta = _binding_metadata(candidate.release)
     incumbent_meta = _binding_metadata(incumbent.release)
     candidate_objects = _model_objects(release_root, candidate.release)

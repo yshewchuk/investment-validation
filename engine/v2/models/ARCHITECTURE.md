@@ -482,14 +482,14 @@ Binding user decisions D1-D10 (2026-10-25, recorded in #805). Once per calendar 
 | train (driver pools, chooser) | Input unverifiable, cutoff past the session's data, unsettled-event filter refuses, `INPUT_CHANGED` | Job fails; later steps never submitted |
 | stage | `PRIOR_MISMATCH` (base drifted since training), `BINDINGS_DIFFER` on a pool-only retrain, `CUTOFF_NOT_ADVANCED`, `ID_CONFLICT`, light-check failure | Job fails; candidate never promotable (no staging-success record) |
 | accept | Acceptance fails or receipt hash differs from the candidate | Fails; candidate staged, incumbent deployed |
-| check (split 1) | Model-changing candidate has no decided pass rule (`ACCEPTANCE_RULE_UNDEFINED`); acceptance or model-object verification fails | Job fails without a check receipt; candidate stays staged and incumbent remains deployed |
+| check (split 1) | Model-changing candidate has no decided pass rule (`ACCEPTANCE_RULE_UNDEFINED`); acceptance, staged-manifest hash, or model-object verification fails | Job fails without a check receipt; candidate stays staged and incumbent remains deployed |
 | promote | `ConcurrentPromote`, receipt/guard mismatch | Fails; pointer and history unchanged |
 | any step, crash | Orphan objects, staged manifest | Never promoted; a rerun with the same inputs gives the same catalog |
 | nightly, slices not all built | See "Rollout" | Fails loudly with `RETRAIN_UNAVAILABLE` |
 
 | R | Retrain training | Stage | Accept / check / promote |
 |---|---|---|---|
-| R1 verified input | Base release, `M_end`, snapshot pin and training inputs verified before compute; a cutoff past the session's data refuses `VALIDATION_FAILED` | Output hashes, `retrain_cutoff`, member ids and base payload hashes re-verified; drift refuses `PRIOR_MISMATCH` before any write | Receipt and staging-success hash match the candidate; base equals the guard |
+| R1 verified input | Base release, `M_end`, snapshot pin and training inputs verified before compute; a cutoff past the session's data refuses `VALIDATION_FAILED` | Output hashes, `retrain_cutoff`, member ids and base payload hashes re-verified; drift refuses `PRIOR_MISMATCH` before any write | Acceptance evidence, catalog, and staged manifest hashes are verified before their identities enter the receipt; base equals the guard |
 | R2 cache | None; durable state each plan | None | Pointer read per swap |
 | R3 retry | Failed is terminal in the session; next session retries | One candidate id per (session, `M`); no second candidate | A failed key is terminal; no alternate target |
 | R4 transaction | Outputs private to the attempt, hashed after a clean exit | New candidate id; `DEPLOYED` untouched | Existing atomic pointer swap |

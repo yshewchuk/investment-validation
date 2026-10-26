@@ -47,7 +47,11 @@ def _model_release(release_root, release_id, *, payload=b"fitted-model", model_i
             name="estimator", path=path, content_hash=digest),))
     release = ModelRelease(release_id=release_id, deployment_id="deployment-test",
                            bindings=(binding,))
-    return SimpleNamespace(release=release, release_hash=f"release-hash-{release_id}")
+    return SimpleNamespace(
+        release=release,
+        release_hash=retrain_check.deployment.semantic_release_hash(release),
+        release_hash_version="semantic_manifest.v2",
+    )
 
 
 def _run(tmp_path, monkeypatch, *, candidate_model_id="m1", candidate_payload=b"fitted-model",
@@ -132,6 +136,20 @@ def test_object_drift_refuses_before_receipt(tmp_path, monkeypatch):
 
     assert excinfo.value.code == "VALIDATION_FAILED"
     assert excinfo.value.problem.details["code"] == "MODEL_OBJECT_HASH_MISMATCH"
+    assert not (attempt / "retrain_check_receipt.json").exists()
+
+
+def test_staged_manifest_hash_drift_refuses_before_receipt(tmp_path, monkeypatch):
+    attempt, params, _ = _run(tmp_path, monkeypatch)
+    candidate = retrain_check.deployment.read_manifest(
+        tmp_path / "store" / "deployment", "candidate")
+    candidate.release_hash = "sha256:stale"
+
+    with pytest.raises(OpsError) as excinfo:
+        retrain_check.run_retrain_check_worker(params, attempt)
+
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.problem.details["code"] == "STAGED_MANIFEST_HASH_MISMATCH"
     assert not (attempt / "retrain_check_receipt.json").exists()
 
 

@@ -106,6 +106,14 @@ _CASES = {
         resource_class="materialize",
         checkpoint_contract="legacy_materialization_manifest.v1.0",
         max_attempts=2, backoff=(5, 30), extra_field=("scratch_estimate_bytes", 5)),
+    "retrain_check": dict(
+        resource_class="validation",
+        checkpoint_contract="retrain_check_receipt.v1.0",
+        max_attempts=1, backoff=(), retry_name="none",
+        extra_field=("candidate_release_id", "candidate"),
+        required={"expected_ids": ["retrain_check"], "release_root": "root",
+                  "incumbent_release_id": "incumbent",
+                  "input_bindings": {"acceptance.json": "acceptance-job"}}),
     "training": dict(
         resource_class="experiment_heavy",
         checkpoint_contract="training_job_result.v1.0",
@@ -173,6 +181,7 @@ def test_submission_reads_resource_class_checkpoint_retry_and_max_refs(tmp_path,
     receipt = submit(
         conn, stages.registry(), POLICY,
         request(kind=name, resource_class=case["resource_class"],
+                retry_policy_ref=case.get("retry_name", "bounded"),
                 checkpoint_contract_ref=case["checkpoint_contract"],
                 parameters=params),
         clock=clock)
@@ -183,6 +192,7 @@ def test_submission_reads_resource_class_checkpoint_retry_and_max_refs(tmp_path,
     with pytest.raises(OpsError) as excinfo:
         submit(conn, stages.registry(), POLICY,
                request(key="bad-resource-class", kind=name,
+                       retry_policy_ref=case.get("retry_name", "bounded"),
                        resource_class="not-a-real-class",
                        checkpoint_contract_ref=case["checkpoint_contract"],
                        parameters=params),
@@ -196,6 +206,7 @@ def test_submission_reads_resource_class_checkpoint_retry_and_max_refs(tmp_path,
     with pytest.raises(OpsError) as excinfo:
         submit(conn, stages.registry(), POLICY,
                request(key="bad-contract", kind=name,
+                       retry_policy_ref=case.get("retry_name", "bounded"),
                        resource_class=case["resource_class"],
                        checkpoint_contract_ref="wrong.v1.0",
                        parameters=params),
@@ -217,6 +228,7 @@ def test_submission_reads_resource_class_checkpoint_retry_and_max_refs(tmp_path,
     with pytest.raises(OpsError) as excinfo:
         submit(conn, stages.registry(), POLICY,
                request(key="too-many-refs", kind=name,
+                       retry_policy_ref=case.get("retry_name", "bounded"),
                        resource_class=case["resource_class"],
                        checkpoint_contract_ref=case["checkpoint_contract"],
                        parameters=params,
@@ -301,6 +313,7 @@ def test_retry_policy_drives_advance_job_through_exhaustion(tmp_path, name):
     params = {"expected_ids": ["one"], **_extra_params(name)}
     receipt = submit(conn, stages.registry(), POLICY,
                      request(kind=name, resource_class=case["resource_class"],
+                             retry_policy_ref=case.get("retry_name", "bounded"),
                              checkpoint_contract_ref=case["checkpoint_contract"],
                              parameters=params),
                      clock=clock)
