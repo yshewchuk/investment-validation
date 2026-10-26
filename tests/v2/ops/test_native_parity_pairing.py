@@ -19,7 +19,7 @@ from engine.v2.ops.native_parity_report import (
 )
 from engine.v2.ops.native_score_batch import run_native_score_batch_worker
 from engine.v2.parity.tolerance import SCORE_RECORD_V1
-from tests.v2.ops.test_v2_ops_native_score_batch import (
+from tests.v2.ops.test_native_score_batch import (
     _event_doc,
     _stage_release,
     _worker_parameters,

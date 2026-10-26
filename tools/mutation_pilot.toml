@@ -318,7 +318,6 @@ mutate = [
 ]
 tests = [
     "tests/test_v2_ops_native*.py",
-    "tests/v2/ops/test_v2_ops_native_score_batch.py",
     "tests/test_phase4_planted_defect_control.py",
     "tests/test_phase4_numeric_negative_control_states.py",
     "tests/test_phase4_acceptance_independence.py",
@@ -693,7 +692,6 @@ tests = [
     # valid today (the native-refresh e2e files) and picks the new test up
     # from the commit that lands it.
     "tests/test_v2_ops_native*.py",
-    "tests/v2/ops/test_v2_ops_native_score_batch.py",
 ]
 
 [modules.ops_cli]
@@ -1199,7 +1197,6 @@ tests = [
     # pool from the commit that lands it, and the two native-refresh e2e files
     # it matches today keep the ops half covered before then.
     "tests/test_v2_ops_native*.py",
-    "tests/v2/ops/test_v2_ops_native_score_batch.py",
     "tests/v2/ops/test_retrain_due_and_chain.py",
 ]
 

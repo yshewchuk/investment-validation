@@ -216,16 +216,24 @@ no summaries), and equal inputs return equal tuples (see Failure semantics).
 Only tests consume this preparatory interface; existing selection and nightly
 dispatch are unchanged. See README for fields and ownership obligations.
 
-**Forward forecast assembly.** STR-THRU forward
+**Forward forecast assembly.** Contract: native STR-THRU scoring selects the
+exact causal size fold for the earlier of event and decision months and attaches
+it as the gate forecast source. STR-THRU forward
 inputs use native market/history features from the pinned snapshot (cutover
 6c), plus the verified release. The full-refit `size:*` champion supplies
 `driver_prediction`; a separate causally selected size fold supplies only the
 gate's requested `pred_abs_move` family and `forecast_edge`. Both execute in
 the existing scoring stages, never in the raw-row producer. Gate-only forecasts
 must not create a top-level sizing forecast or change the selected structure.
+`native_score_batch` selects the exact causal size fold for STR-THRU and
+attaches it as `gate_forecast_source`; a missing exact fold or selected-fold
+verification/load failure is refused as a per-row `MODEL_NOT_READY` with no
+fallback. Malformed release catalogs or descriptors fail release resolution
+before row assembly, rather than becoming per-row fold refusals. RUNUP is
+unchanged.
 
 `SourceBundle.gate_forecast_source` (optional `GateForecastSource`) carries the
-selected fold's `binding_id`, its fold-view `ModelRelease`, the shared
+selected fold's `binding_id` and verified estimator `artifact_hash`, its fold-view `ModelRelease`, the shared
 `FrozenInference` and the held-out `pool_pred`/`pool_res`/`interval_floor`.
 `_gate_forecast_members` builds `gate.forecast_executor` from that release and
 inference (role `size`; the champion `model_release` is not consulted) and
@@ -242,8 +250,10 @@ ordinary bundle path remains valid when the source is absent.
 | Thin pool | Bundle builds; the stage leaves the band columns unavailable |
 
 Failure semantics: building the source members does no I/O, caching, retry or
-fallback; a refusal returns no bundle. Choosing which fold to supply is the
-caller's duty and this input does not select or fall back.
+fallback; a refusal returns no bundle. The selection of the exact causal size
+fold for STR-THRU and its attachment as `gate_forecast_source` is
+`native_score_batch`'s responsibility; a missing or corrupt fold is refused as
+a per-row `MODEL_NOT_READY` with no fallback. RUNUP's behavior is unchanged.
 
 `resolve_release_binding` indexes the release's staged size folds (catalog
 member `tier4_folds:size`) into `ScoringReleaseBinding.size_folds`
@@ -395,7 +405,10 @@ machine-checked consumers allowlist by design. `engine.v2.ops.native_score_batch
 (Cutover PR-3) is a real production module that imports
 `assemble_nightly_source_bundle`/`NightlySourceBundleRefusal`/`validated_as_of`
 and calls `resolve_release_binding` from its `native_score_batch` job
-worker, and `engine.v2.ops.supervisor.py`'s tick loop (Cutover PR-7a) submits
+worker; it also imports and calls `gate_fold_selection.select_gate_forecast_source`
+to provide the STR-THRU causal size-fold forecast and its estimator provenance.
+The ops architecture dependency inventory records this direct scoring edge.
+`engine.v2.ops.supervisor.py`'s tick loop (Cutover PR-7a) submits
 that job for eligible pinned-snapshot identities (`engine/v2/ops/
 ARCHITECTURE.md`'s "Cutover PR-7a"). Separately, once an
 eligible snapshot-pinned identity is selected the same tick loop runs a

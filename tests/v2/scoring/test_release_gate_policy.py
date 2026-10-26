@@ -14,7 +14,10 @@ from engine.v2.models import (
     ReleaseBinding,
     ReleaseRequirement,
 )
+from engine.v2.foundation import to_document
 from engine.v2.models import deployment
+from engine.v2.models.serving_fold_preflight import describe_size_fold
+from engine.v2.models.serving_folds import SizeFoldPolicy
 from engine.v2.ops import native_score_batch
 from engine.v2.ops.native_score_batch import run_native_score_batch_worker
 from engine.v2.scoring.release_bindings import (
@@ -22,10 +25,12 @@ from engine.v2.scoring.release_bindings import (
     resolve_gate_policy,
     resolve_release_binding,
 )
-from tests.v2.ops.test_v2_ops_native_score_batch import (
+from tests.v2.models.serving_fold_support import fold_bytes, fold_name, release_inputs
+from tests.v2.ops.test_native_score_batch import (
     _event_doc,
     _linear_payload,
     _sha,
+    _size_cache,
     _worker_parameters,
     _write_empty_catalog,
 )
@@ -50,7 +55,8 @@ def _stage_gate_release(tmp_path, *, registry_payload: bytes | None, release_id=
     release_bindings = []
     requirements = []
     payloads = {}
-    for role in ("driver", "gate"):
+    roles = ("driver", "gate")
+    for role in roles:
         payload = _linear_payload()
         member_hash = _sha(payload)
         payloads[member_hash] = payload
@@ -91,11 +97,42 @@ def _stage_gate_release(tmp_path, *, registry_payload: bytes | None, release_id=
         artifacts=tuple(artifacts), bindings=tuple(release_bindings),
         requirements=tuple(requirements), artifact_manifest_ref="manifest://r",
         evidence_refs=("evidence://r",))
+    cache = None
+    if "driver" in roles and "gate" in roles:
+        cache = _size_cache()
+        size_release, size_inventory, size_payloads = release_inputs(
+            "size", cache, clock="entry-close", release_id=release_id)
+        release = dataclasses.replace(
+            release, bindings=release.bindings + size_release.bindings)
+        inventory = dataclasses.replace(
+            inventory,
+            known_clock_ids=tuple(sorted(set(inventory.known_clock_ids)
+                                         | set(size_inventory.known_clock_ids))),
+            artifacts=inventory.artifacts + size_inventory.artifacts,
+            bindings=inventory.bindings + size_inventory.bindings,
+            requirements=inventory.requirements + size_inventory.requirements)
+        payloads.update(size_payloads)
     dep_root = tmp_path / "deployment"
-    deployment.stage_release(dep_root, release, inventory, payloads)
+    manifest = deployment.stage_release(dep_root, release, inventory, payloads)
     deployment.mark_staging_succeeded(dep_root, release_id)
     deployment.promote(dep_root, release_id)
-    _write_empty_catalog(tmp_path, release_id)
+    fold_object = None
+    if cache is not None:
+        raw = fold_bytes(cache)
+        policy = SizeFoldPolicy(
+            model_id=cache["model_id"], feature_order=tuple(cache["features"]),
+            panel_sha256=cache["tier3_snapshot"], interval_floor=0.0)
+        descriptor = describe_size_fold(raw, fold_name(cache), policy, manifest)
+        path = dep_root / descriptor.estimator.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        fold_object = {
+            "path": descriptor.estimator.path,
+            "content_hash": descriptor.estimator.content_hash,
+            "name": fold_name(cache), "bytes": len(raw),
+            "serving_fold": to_document(descriptor),
+        }
+    _write_empty_catalog(tmp_path, release_id, fold_object)
     return resolve_release_binding(tmp_path)
 
 

@@ -72,6 +72,7 @@ def _slice_a_source(tmp_path):
         pool_pred=(1.0, 2.0, 3.0),
         pool_res=(0.25, -0.5, 1.25),
         interval_floor=0.0,
+        artifact_hash="c" * 64,
     )
 
 
