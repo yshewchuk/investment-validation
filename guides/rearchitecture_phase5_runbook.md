@@ -207,11 +207,11 @@ What the gate checks, and its finding codes:
 | lineage | every staged frozen state declares lineage; `upstream` names another staged state (`<member_id>/<object name>`); no cycle (`lineage.propagate_corrections` with no changesets) | `P5_LINEAGE_INVALID` |
 | consumers | each v2 score consumer resolves its members from the release, and refuses `MODEL_NOT_READY` with the member taken away | `P5_CONSUMER_UNRESOLVED`, `P5_CONSUMER_NO_REFUSAL`, `P5_CONSUMER_ERROR`, `P5_CONSUMER_PENDING`, `P5_CONSUMER_BLOCKED` |
 | no fitting | the consumer pass runs under both no-fit guards; any `forbid_fitting` call (even a swallowed one), any `joblib.dump`, and any file change under `data/models` or the release root is a finding; a planted fit and a planted write must be detected | `P5_RUNTIME_FIT`, `P5_MODEL_CACHE_WRITE`, `P5_GUARD_CONTROL_FAILED` |
-| rollback | on a scratch copy of the pointer state: promote, roll back, pointer resolves the incumbent again, manifests and earlier history byte-identical, exactly two history entries appended | `P5_ROLLBACK_NO_INCUMBENT`, `P5_ROLLBACK_CANDIDATE_ALREADY_DEPLOYED`, `P5_ROLLBACK_NOT_EXACT`, `P5_PROMOTE_REFUSED` |
+| promote | on a scratch copy of the pointer state: promote the candidate; the pointer resolves exactly to it (no rollback rehearsal, #805 D3) | `P5_PROMOTE_REFUSED`, `P5_PROMOTE_NOT_EXACT` |
 | phase 4 | every traced frozen pair verifies, binds only staged models, and replays from the staged bytes with captured receipts under both no-fit guards; at least one pair replays | `P5_PHASE4_UNVERIFIED`, `P5_PHASE4_MEMBER_ABSENT`, `P5_PHASE4_MISMATCH`, `P5_PHASE4_ERROR`, `P5_PHASE4_EMPTY` (+ `P5_RUNTIME_FIT`/`P5_MODEL_CACHE_WRITE` with subject `phase4_replay`) |
 | report | the written report carries every member, consumer, control and finding row | `P5_REPORT_INCOMPLETE` |
 
-The gate never moves `$REL`'s own pointer: the round trip runs on a copy.
+The gate never moves `$REL`'s own pointer: the promote rehearsal runs on a copy.
 
 ## 4. Promote and roll back
 
@@ -246,11 +246,9 @@ release stay replayable (`deployment.resolve_release`):
 Check afterwards: `deployment.current_pointer(live).release_id` is the
 incumbent id and `deployment.pointer_history(live)` grew by one entry.
 
-**First deployment.** With no incumbent pointer there is nothing to roll back
-to, and the gate reports `P5_ROLLBACK_NO_INCUMBENT`. `--first-deployment`
-accepts instead that promotion works and a rollback request is refused
-(`NoPriorRelease`) without moving the pointer. The legacy path stays the
-fallback until cutover; record that decision in the report handoff.
+**First deployment.** With no incumbent pointer the promote rehearsal still
+runs; acceptance needs no flag for it. The legacy path stays the fallback
+until cutover; record that decision in the report handoff.
 
 ## 5. Why the gate is red today
 
@@ -267,7 +265,6 @@ real inputs the gate is red only for inputs that were not built or staged:
   payoff artifact of its strategy, the recalibration probe through the
   same-key STR-THRU line). `recalibration_map:STR-RUNUP` and
   `payoff_line:STR-RUNUP` are catalog-only and are built at the same keys.
-- `P5_ROLLBACK_NO_INCUMBENT` unless `--incumbent` or `--first-deployment`.
 - With `--phase4-corpus`, whatever the replay finds:
   - `P5_PHASE4_MEMBER_ABSENT` for a pair captured against model bytes that
     are not staged. Examples: a Tier-4 fold of another month or snapshot
