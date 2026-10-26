@@ -37,7 +37,7 @@ over seven independently scored member rows.
 | Chooser block from a bundle (`chooser_recipe`, fold pools, analog pool, admissible table) | `scoring/chooser_inputs.py` (`chooser_block`, line ~85) |
 | Frozen state: `admissible_table:dyn_sv`, `chooser_analog_pool` | `scoring/release_bindings.py:75-76,164-165` (resolved, not consumed by the nightly) |
 | Menu accounting: one outcome per member, record or typed refusal, `INVALID_CHOOSER_MENU` / `CHOOSER_MENU_INCOMPLETE` | `scoring/dynamic_outcomes.py` |
-| Selection over scored records (`_choose_dynamic`: chooser_score else exp_pnl_sim, margin, tie, `NO_CHOOSER_CANDIDATE`) | `scoring/application.py:1439`; called by `score_event` and, as a private import, `tools/phase4_targeted_replay.py:661` |
+| Selection over scored records (`_choose_dynamic`: chooser_score else exp_pnl_sim, margin, tie, `NO_CHOOSER_CANDIDATE`) | `scoring/application.py:1439`; called by `score_event` and, as a private import, `tools/phase4_targeted_replay.py:661` (via `phase4_real.application`) |
 | Geometry, size tables, entry-rule gate for the members | steps 1-5 |
 
 ## 3. What is missing
@@ -80,7 +80,9 @@ CND-PS steps of #1157) register them. DYN-SV reuses those exact records instead 
   `DynamicCandidateOutcome`s built from them (accounting only), under one
   `DynamicMenuIdentity` built from the event context. No other input.
 - R2 completeness: `validate_dynamic_menu` must pass (all seven accounted, any may
-  be refused). A violation is a worker bug and aborts the batch, never a row refusal.
+  be refused). A violation refuses only that event's DYN-SV row with the
+  menu code (`INVALID_CHOOSER_MENU` / `CHOOSER_MENU_INCOMPLETE`) and never sinks the
+  batch; member rows are untouched.
 - R3 partial menu: members that refused are excluded and listed in
   `chooser_candidates` with their code; the rest are ranked (legacy behaviour).
   Ranking key is `chooser_score` if any eligible member has one, else `exp_pnl_sim`;
