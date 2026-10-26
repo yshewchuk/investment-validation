@@ -108,6 +108,12 @@ def test_read_base_retrain_cutoff_handles_current_and_legacy_catalogs(tmp_path):
     assert read_base_retrain_cutoff(legacy_root, "rel-legacy") is None
 
 
+def test_read_base_retrain_cutoff_handles_absent_legacy_and_current_catalogs(tmp_path):
+    assert read_base_retrain_cutoff(tmp_path, "rel-legacy-absent") is None
+    with pytest.raises(ValueError, match="base release catalog could not be read"):
+        read_base_retrain_cutoff(tmp_path, "pools-current-absent")
+
+
 def test_read_base_retrain_cutoff_rejects_invalid_legacy_pool_cutoff(tmp_path):
     from engine.v2.models.release_layout import catalog_path, manifest_body, write_catalog
 

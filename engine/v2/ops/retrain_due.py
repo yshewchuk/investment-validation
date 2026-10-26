@@ -59,6 +59,10 @@ def read_base_retrain_cutoff(release_root, release_id):
     try:
         path = catalog_path(Path(release_root), release_id)
         catalog = read_catalog(path, release_id)
+        if catalog is None:
+            if release_id.startswith("pools-"):
+                raise ValueError("missing catalog for current-format release")
+            return None
         sources = catalog["sources"]
         if "pool_cutoff" in sources:
             pool_cutoff = sources["pool_cutoff"]
