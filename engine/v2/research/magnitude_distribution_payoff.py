@@ -19,7 +19,7 @@ def _refuse():
     raise fail("CONTRACT_MISMATCH", "invalid magnitude payoff inputs or arithmetic")
 
 
-def _number(value):
+def _finite(value):
     if type(value) not in (int, float):
         _refuse()
     try:
@@ -34,12 +34,12 @@ def _number(value):
 def _samples(values):
     if type(values) is not list or not values:
         _refuse()
-    return [_number(value) for value in values]
+    return [_finite(value) for value in values]
 
 
 def _sum(values):
     try:
-        return _number(fsum(values))
+        return _finite(fsum(values))
     except OverflowError:
         _refuse()
 
@@ -47,14 +47,14 @@ def _sum(values):
 def _law(parts, spot, intercept, slope):
     uniforms, atoms = [], []
     for lo, hi, mass in parts:
-        low, high = sorted((_number((intercept + slope * lo) * spot),
-                            _number((intercept + slope * hi) * spot)))
+        low, high = sorted((_finite((intercept + slope * lo) * spot),
+                            _finite((intercept + slope * hi) * spot)))
         if low == high or high <= 0:
             atoms.append((max(0.0, high), mass))
         elif low >= 0:
             uniforms.append((low, high, mass))
         else:
-            positive = mass * (high / _number(high - low))
+            positive = mass * (high / _finite(high - low))
             atoms.append((0.0, mass - positive))
             uniforms.append((0.0, high, positive))
     atoms.sort()
@@ -76,31 +76,31 @@ def _cdf(law, threshold, *, shift, strict):
     # Compare the actual shifted atom, not threshold-shift: subtraction can
     # round differently at exact break-even and invent a profitable atom.
     search = bisect_left if strict else bisect_right
-    index = search(points, threshold, key=lambda point: _number(point + shift))
-    boundary = _number(threshold - shift) if uniforms else 0.0
+    index = search(points, threshold, key=lambda point: _finite(point + shift))
+    boundary = _finite(threshold - shift) if uniforms else 0.0
     value = _sum([prefix[index]] + [mass * max(0.0, min(1.0, (boundary - lo) / (hi - lo)))
                                   for lo, hi, mass in uniforms])
     return max(0.0, min(1.0, value))  # Floating-point endpoint roundoff only.
 
 
 def _integrate(parts, *, spot, entry_cost, intercept, slope, payoff_residuals):
-    spot, entry_cost = _number(spot), _number(entry_cost)
-    intercept, slope = _number(intercept), _number(slope)
+    spot, entry_cost = _finite(spot), _finite(entry_cost)
+    intercept, slope = _finite(intercept), _finite(slope)
     if spot <= 0 or entry_cost < 0:
         _refuse()
-    shifts = [_number(value * spot) for value in _samples(payoff_residuals)]
+    shifts = [_finite(value * spot) for value in _samples(payoff_residuals)]
     law = _law(parts, spot, intercept, slope)
     endpoints = law[1] + [edge for lo, hi, _ in law[0] for edge in (lo, hi)]
     low, high = min(endpoints), max(endpoints)
     for shift in shifts:
-        _number(low + shift)
-        _number(high + shift)
+        _finite(low + shift)
+        _finite(high + shift)
     size = len(shifts)
     mean_exit = _sum([law[3], _sum(value / size for value in shifts)])
     profit = _sum((1 - _cdf(law, entry_cost, shift=value, strict=False)) / size
                   for value in shifts)
     negative = _sum(_cdf(law, 0.0, shift=value, strict=True) / size for value in shifts)
-    return {"expected_profit": _number(mean_exit - entry_cost),
+    return {"expected_profit": _finite(mean_exit - entry_cost),
             "probability_profit": profit, "probability_negative_exit": negative,
             "mean_exit_value": mean_exit}
 
@@ -152,18 +152,18 @@ def mean_matched_control(target_mean, residuals) -> dict:
     Residual origin/earlier-OOF eligibility is NOT authenticated here.
     O(m) time/detached space; no input mutation, fitting, I/O or retry.
     """
-    target = _number(target_mean)
+    target = _finite(target_mean)
     if target <= 0:
         _refuse()
-    repaired = [max(0.0, _number(target + value)) for value in _samples(residuals)]
+    repaired = [max(0.0, _finite(target + value)) for value in _samples(residuals)]
     size = len(repaired)
     raw_mean = _sum(value / size for value in repaired)
     if raw_mean <= 0:
         _refuse()
-    scale = _number(target / raw_mean)
+    scale = _finite(target / raw_mean)
     if scale <= 0:
         _refuse()
-    draws = [_number(value * scale) for value in repaired]
+    draws = [_finite(value * scale) for value in repaired]
     return {"magnitudes": draws, "target_mean": target, "raw_mean": raw_mean,
             "scale": scale, "zero_count": sum(value == 0 for value in draws),
             "anchored_mean": _sum(value / size for value in draws)}

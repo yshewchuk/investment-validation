@@ -40,7 +40,7 @@ def _refuse() -> None:
     raise fail("CONTRACT_MISMATCH", "invalid magnitude distribution")
 
 
-def _number(value) -> float:
+def _finite(value) -> float:
     if type(value) not in (int, float):
         _refuse()
     try:
@@ -63,7 +63,7 @@ def _numbers(values, *, length=None) -> list:
     if type(values) is not list or (length is not None and len(values) != length):
         _refuse()
     for value in values:
-        _number(value)
+        _finite(value)
     return values.copy()
 
 
@@ -139,5 +139,5 @@ def bin_index(magnitude) -> int:
     be converted by the target owner; this helper never applies abs or clips.
     Uses comparisons rather than dividing huge magnitudes by the bin width.
     """
-    value = _number(magnitude)
+    value = _finite(magnitude)
     return bisect_right(_EDGES, value) - 1
