@@ -975,27 +975,26 @@ Root doc §5 invariants this package is responsible for:
   not a defect (cross-year carry tracked as issue
   [#195](https://github.com/yshewchuk/investment-validation/issues/195)).
 
-### Scalar-only bounded catalog prerequisite
+### Bounded catalog prerequisites (internal; no production caller)
 
-`_bounded_catalog.probe_catalog` is internal and has no production caller. It
-borrows an active caller transaction and emits only SELECTs, returning counts and
-SQL BLOB-length totals, not payloads, native identities or admission capabilities.
-Stdlib SQLite capped COUNT/LIMIT, typeof and BLOB-length probes enforce five caps.
-Charge snapshot once, binding/dataset/contract per table, membership/fragment/object
-per occurrence, including unrelated tables, repeated IDs and zero-row fragments.
-Integer fields count their BLOB-cast decimal text, not SQLite on-disk cell sizes.
-Only integer/NULL scalars cross into Python incrementally. The caller guarantees
-read-transaction provenance; no settings or transaction lifecycle are changed.
-Limits bound transfer, not SQLite CPU/RSS. No source, coverage, confirmation, PIT
-or execution property is established; existing readers stay intact. See the
-[bounded-session design](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md) for the surrounding contract.
+`_bounded_catalog.probe_catalog` uses stdlib SQLite COUNT/LIMIT, typeof and BLOB-length scalar-only probes for five caps.
+Charge snapshot once, binding/dataset/contract per table, membership/fragment/object per occurrence, including unrelated tables, repeated IDs and zero-row fragments.
+Integers charge BLOB-cast decimal text, not SQLite cell sizes. Probes return counts/bytes, never native identity or admission capabilities.
+`_bounded_catalog_transfer.transfer_catalog` reuses those probes/projections in the same borrowed active read transaction; only SELECTs run, with no lifecycle/settings changes.
+Transfer requires an exact SQLite connection with Row/str factories; after all-table scalar admission it transfers incrementally in table-name/membership-ordinal order.
+Repeated type/count checks precede retention; every TEXT occurrence charges an independent UTF-8 cap before **any** JSON parsing. Only SQL charges integer text.
+Stdlib JSON uses the native duplicate-key hook; native strict document decoding validates the full contract and typed JSON-column shapes, retained in qualified column maps.
+No identity or binding/hash agreement is authenticated: reconstruction, public factory lifetime and scanner wiring remain separate prerequisites.
+Objects, providers, ordinary resolvers and parent/evidence payloads are not read. No source, coverage, confirmation, PIT or execution property is established.
+Limits bound transfer, not SQLite CPU/RSS. Existing readers stay intact; there is no partial result, fallback, write or automatic retry.
+The caller guarantees read-view provenance/cleanup. See the [bounded-session design](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md).
 
-| Probe condition | Refusal (fixed redacted message; no partial result) | Retryable |
+| Probe/transfer condition | Refusal (fixed redacted message; no partial result) | Retryable |
 |---|---|---|
-| Wrong holder/string types, empty or non-UTF-8-encodable IDs/table, malformed limits, no active transaction or missing selected table | `CONTRACT_MISMATCH` | no |
+| Wrong holder/configuration/string types, empty or non-UTF-8-encodable IDs/table, malformed limits, no active transaction or missing selected table | `CONTRACT_MISMATCH` | no |
 | Requested snapshot absent | `SNAPSHOT_UNRESOLVED` | no |
-| Any explicit count or SQL BLOB byte cap exceeded | `RESULT_LIMIT_EXCEEDED` | no |
-| Missing joins, wrong SQL types or inconsistent membership | `MANIFEST_CORRUPT` | no |
+| Any explicit count, SQL BLOB byte or decoded UTF-8 cap exceeded | `RESULT_LIMIT_EXCEEDED` | no |
+| Missing joins, wrong types, inconsistent membership, JSON/depth/shape or Unicode failure | `MANIFEST_CORRUPT` | no |
 | SQLite primary BUSY/LOCKED/IOERR/CANTOPEN/FULL/NOMEM, including extended codes | `RESOURCE_UNAVAILABLE` | yes; caller owns retries |
 | Other SQLite errors, including code-less or closed-connection errors | `MANIFEST_CORRUPT` | no |
 | Existing native `DataError` | Unchanged code, message and retryability | unchanged |
