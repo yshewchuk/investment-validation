@@ -986,7 +986,7 @@ Types and upper counts are checked before row retention; exact lower counts afte
 Results are detached qualified-column maps: native decoding validates the full `TableContract` and private JSON-column shapes; duplicate JSON keys refuse.
 The result does not validate `FragmentRecord` time semantics, `DatasetManifest` hash formats or identity/binding agreement; it offers no public session or scanning.
 Catalog parent IDs/evidence-reference metadata are retained, never traversed; no referenced payload, object, provider or ordinary resolver is read. No source, coverage, confirmation, PIT or execution property is established.
-Limits bound transfer, not SQLite CPU/RSS. Existing readers stay intact; there is no partial result, fallback, write or automatic retry.
+Limits bound transfer, not SQLite CPU/RSS. Existing readers stay intact; there is no partial result, fallback, write or automatic retry; no cache; repeated reads of the same read view return equal detached payloads.
 The caller guarantees read-view provenance/cleanup. See the [bounded-session design](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md).
 
 | Probe/transfer condition | Refusal (fixed redacted message; no partial result) | Retryable |
