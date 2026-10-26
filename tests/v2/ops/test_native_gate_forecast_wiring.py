@@ -4,8 +4,10 @@ from types import SimpleNamespace
 import pandas as pd
 
 from engine.v2.ops import native_score_batch
+from engine.v2.ops.native_board_universe import BoardRequest
 from tests.v2.ops.test_native_score_batch import (
     _assemble,
+    _calendar_row,
     _event_doc,
     _event_inputs,
     _stage_release,
@@ -102,6 +104,53 @@ def test_missing_causal_fold_refuses_row_model_not_ready(tmp_path):
 
     assert assembled == {}
     assert [refusal.code for refusal in refusals] == ["MODEL_NOT_READY"]
+    assert refusals[0].detail == "causal size fold unavailable for gate forecast"
+
+
+def test_corrupt_staged_fold_bytes_refuse_row_model_not_ready(tmp_path):
+    binding = _stage_release(tmp_path)
+    descriptor = binding.size_folds.descriptors["2026-01-01"]
+    fold_path = tmp_path / "deployment" / descriptor.estimator.path
+    fold_path.write_bytes(b"corrupted size fold")
+    event = _event_inputs()
+
+    assembled, refusals = _assemble(binding, [event])
+
+    assert assembled == {}
+    assert len(refusals) == 1
+    assert refusals[0].code == "MODEL_NOT_READY"
+    assert refusals[0].detail == "causal size fold unavailable for gate forecast"
+
+
+def test_only_the_causal_month_with_a_staged_fold_is_assembled(tmp_path):
+    binding = _stage_release(tmp_path)
+    january = _event_inputs()
+    february = _event_inputs(
+        key=BoardRequest(ticker="TEST2", strategy="STR-THRU",
+                         event_date=pd.Timestamp("2026-02-15"), session="am"),
+        calendar_row=_calendar_row(
+            event_id="evt-feb", ticker="TEST2", event_date="2026-02-15",
+            entry_date="2026-02-15", exit_date="2026-02-16",
+            expiry="2026-02-16", calendar_observed_through="2026-02-09"),
+        panel_row={"date": "2026-02-15", "signal": 1.5},
+        panel_anchor="2026-02-09",
+        tier4_row={"pred_abs_move": 0.05,
+                   "pred_abs_move_fold_start": "2026-02-01"},
+        quote_rows=[
+            {"right": "C", "strike": 100.0, "expiry": "2026-02-16",
+             "bid": 1.0, "ask": 1.2, "observed_at": "2026-02-09"},
+            {"right": "P", "strike": 100.0, "expiry": "2026-02-16",
+             "bid": 1.1, "ask": 1.3, "observed_at": "2026-02-09"},
+        ],
+    )
+
+    assembled, refusals = _assemble(
+        binding, [january, february], as_of="2026-02-10")
+
+    assert list(assembled) == [january.key]
+    assert len(refusals) == 1
+    assert refusals[0].key == february.key
+    assert refusals[0].code == "MODEL_NOT_READY"
     assert refusals[0].detail == "causal size fold unavailable for gate forecast"
 
 
