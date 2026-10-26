@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
+import sys
 from pathlib import Path
 
 from engine.v2.contracts import ArtifactRef
@@ -12,6 +14,7 @@ from engine.v2.foundation import (
     format_timestamp,
     from_document,
     fsync_directory,
+    parse_timestamp,
     safe_relative_path,
 )
 from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
@@ -22,6 +25,8 @@ from engine.v2.ops.workflows.commands import read_bounded_json
 
 _MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_BACKUP_BYTES = 64 * 1024**3
+BACKUP_RETENTION = 3
+_BACKUP_KEY_PATTERN = re.compile(r"bkp[0-9a-f]{24}")
 
 
 def prepare_backup(conn, key, artifacts, *, clock):
@@ -155,6 +160,77 @@ def _verify_existing_manifest(manifest_path, manifest):
         raise fail("INTEGRITY_FAILED", "backup manifest differs")
 
 
+def _manifest_required_fields(manifest):
+    """The manifest shape both restore and retention admission require."""
+    return (isinstance(manifest, dict)
+            and isinstance(manifest.get("backup_key"), str)
+            and isinstance(manifest.get("database"), str)
+            and isinstance(manifest.get("artifacts"), dict))
+
+
+def _verified_backup_pairs(target):
+    """Collect backup pairs that verifiably belong to retention, newest first.
+
+    A pair is a candidate only when its name matches the backup-key pattern
+    exactly and its manifest parses bounded JSON into a dict with the shared
+    required fields, whose ``backup_key`` equals the name, whose ``cutoff`` is
+    a canonical timestamp (unchanged under ``parse_timestamp``/
+    ``format_timestamp``) and which carries a ``database_byte_size`` — legacy
+    v1 manifests are explicitly out of retention, like the unreadable,
+    oversized, mismatched or corrupt pairs. Every candidate's database copy
+    verifies against its receipt. Skipped pairs are left untouched.
+    """
+    candidates = []
+    for database in target.glob("bkp*.sqlite"):
+        key = database.name[: -len(".sqlite")]
+        manifest_path = target / (key + ".manifest.json")
+        if _BACKUP_KEY_PATTERN.fullmatch(key) is None or not manifest_path.exists():
+            continue
+        try:
+            manifest = read_bounded_json(manifest_path, _MAX_MANIFEST_BYTES)
+            cutoff = manifest.get("cutoff") if _manifest_required_fields(manifest) else None
+            if (not isinstance(cutoff, str) or manifest.get("backup_key") != key
+                    or "database_byte_size" not in manifest
+                    or format_timestamp(parse_timestamp(cutoff)) != cutoff):
+                continue
+            _verify_delivered_copy(database, manifest)
+            candidates.append((cutoff, key, database, manifest_path))
+        except (OSError, ValueError, TypeError, RecursionError, OpsError):
+            continue
+    candidates.sort(key=lambda candidate: (candidate[0], candidate[1]), reverse=True)
+    return candidates
+
+
+def _prune_backups(target, current_key):
+    """Keep the current pair plus the newest ``BACKUP_RETENTION`` - 1 other
+    verified pairs; skip anything ``_verified_backup_pairs`` left out."""
+    try:
+        candidates = _verified_backup_pairs(target)
+    except OSError as error:
+        print(f"[backup-retention] BACKUP_FAILED: backup pair scan failed: {error}",
+              file=sys.stderr)
+        return
+    allowed = BACKUP_RETENTION - (1 if current_key in {key for _c, key, _d, _m in candidates} else 0)
+    survivors = 0
+    for _cutoff, key, database, manifest_path in candidates:
+        if key == current_key:
+            continue
+        if survivors < allowed:
+            survivors += 1
+            continue
+        try:
+            database.unlink()
+        except OSError as error:
+            print(f"[backup-retention] BACKUP_FAILED: {database.name}: {error}",
+                  file=sys.stderr)
+            continue
+        try:
+            manifest_path.unlink(missing_ok=True)
+        except OSError as error:
+            print(f"[backup-retention] BACKUP_FAILED: {manifest_path.name}: {error}",
+                  file=sys.stderr)
+
+
 def _copy_backup_artifact(store, target, name, document, fault):
     ref = from_document(ArtifactRef, document)
     if "/" in name or name in ("", ".", ".."):
@@ -185,7 +261,18 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
     effect = claim(conn, "backup", owner=owner, clock=clock, logical_key=key)
     if effect is None:
         receipt = _delivered_or_stale(conn, "backup", key)
-        _verify_delivered_copy(Path(target) / (key + ".sqlite"), receipt)
+        replay_target = Path(target)
+        replay_database = replay_target / (key + ".sqlite")
+        replay_manifest = replay_target / (key + ".manifest.json")
+        if _BACKUP_KEY_PATTERN.fullmatch(key) is not None:
+            present = (replay_database.exists(), replay_manifest.exists())
+            if present == (False, False):
+                _prune_backups(replay_target, key)
+                return receipt
+            if present != (True, True):
+                raise fail("BACKUP_FAILED", "backup replay pair is incomplete")
+        _verify_delivered_copy(replay_database, receipt)
+        _prune_backups(replay_target, key)
         return receipt
     payload = json.loads(effect["payload_json"])
     target = Path(target)
@@ -217,6 +304,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
         fault("after_manifest_before_ack")
     complete(conn, effect["effect_id"], manifest, owner=owner,
              claim_token=effect["claim_token"], clock=clock)
+    _prune_backups(target, key)
     return manifest
 
 
@@ -228,10 +316,7 @@ def _read_restore_manifest(source):
         manifest = read_bounded_json(manifests[0], _MAX_MANIFEST_BYTES)
     except (OSError, ValueError, RecursionError) as error:
         raise fail("INTEGRITY_FAILED", "backup manifest is invalid") from error
-    if (not isinstance(manifest, dict)
-            or not isinstance(manifest.get("backup_key"), str)
-            or not isinstance(manifest.get("database"), str)
-            or not isinstance(manifest.get("artifacts"), dict)):
+    if not _manifest_required_fields(manifest):
         raise fail("INTEGRITY_FAILED", "backup manifest is invalid")
     return manifest
 
