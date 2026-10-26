@@ -224,7 +224,7 @@ outside the numeric table. Uniform ten-field descriptors inline source and
 derivation policies; all v2 dictionary hashes differ, including H, while v1
 remains unchanged. Recipe `missing_indicators` declares family-owned training
 preprocessing, not stored missing flags. Containers are detached; native table
-and dictionary hashes are distinct. Only synthetic tests call the factory:
+and dictionary hashes are distinct. Synthetic tests and the source-free versioned compiler consume recipes:
 no v2 context, reader, source qualification, fit or search activation exists.
 Resolved source snapshots must be bound separately by later native admission.
 
@@ -234,6 +234,7 @@ Resolved source snapshots must be bound separately by later native admission.
 
 `experiments/magnitude_search_request.py` consumes `magnitude_panel_table.recipe`
 and `eligibility_policy.eligibility_policy` for source-free dictionary/policy declarations, not data admission.
+`experiments/magnitude_search_request_versions.py` consumes both v1/v2 panel `recipe` APIs for dictionary dispatch only.
 
 Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
