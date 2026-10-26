@@ -28,8 +28,8 @@ public factory or snapshot verifier.
 `_bounded_catalog_transfer` consumes those probes in the same borrowed read
 transaction, then caps decoded UTF-8 TEXT before strict native JSON decoding.
 Its ordered column maps are private intermediate payloads, not authenticated
-snapshots; native identity reconstruction and a public bounded session remain
-separate prerequisites. Neither helper opens objects or provides source coverage.
+snapshots; native identity reconstruction and bounded factory admission are
+separate steps. Neither helper opens objects or provides source coverage.
 
 ## Public interface
 
@@ -53,6 +53,7 @@ timestamp to a naive UTC datetime, refusing `CONTRACT_MISMATCH` on invalid input
 
 | Module | Names |
 |---|---|
+| `bounded_snapshot` | `open_bounded_snapshot`, `BoundedSnapshot` — factory-owned bounded catalog admission, detached metadata getters and selected-table native scan/population-bound within a context lifetime; mandatory object cap, one active iterator, no production caller. |
 | `confirmed_event_metadata` | `classify_metadata` — pure tuple of native per-row confirmation reasons; validates supplied metadata without sorting, collapsing, prices, source admission or population eligibility. |
 | `iv_crush` | `build_rows`, `MAX_GAP_DAYS` — pure bounded single-ticker signed IV30 targets with pre/post anchors, next-day modeled availability, explicit skips and input hashes. No source verification, store access or experiment admission. |
 | `iv_crush_table` | `IV_CRUSH_CONTRACT`, `IV_CRUSH_TABLE_NAME` — native `iv_crush_targets.v2` definition; explicit skipped rows and caller-declared source identity, with no publication/finality claim. |
@@ -146,3 +147,8 @@ A negative control here looks like: corrupt one field of a frozen record, run
 the comparator, and assert it names **this package's stage** and that field
 path — not that "a row is red". A check that has never failed is not known to
 work.
+
+Private bounded-catalog prerequisites now include pure native identity reconstruction
+from transferred metadata. The bounded factory exposes detached metadata and
+selected-table native scans. Synthetic lifetime tests poison later SQL; see the
+[component contract](ARCHITECTURE.md#bounded-catalog-prerequisites-internal-no-production-caller).
