@@ -305,7 +305,12 @@ MIB = 1 << 20
 # memory/scratch reservation; it does not claim a measured full-universe fit.
 # v11 raises the four legacy read-set-staging profiles' scratch from 4 GiB to
 # 6 GiB (issue #1268; the bounded read set, issue #505, is the real fix).
-POLICY_VERSION = "ops_resources.2026-10-24.v11"
+# v12 (issue #1393) raises io_fetch memory 512 MiB -> 1 GiB (measured peak 514
+# MiB) and delivery 256 MiB -> 1536 MiB (measured peak 1068 MiB over 14 days:
+# backup, publication, ledger_export, engineering_gate), so admission and
+# headroom reflect real use; the reservation is the admission amount and the
+# executor watchdog / cgroup memory limit, so it must sit above the real peak.
+POLICY_VERSION = "ops_resources.2026-10-26.v12"
 
 DEFAULT_POLICY = ResourcePolicy(
     version=POLICY_VERSION,
@@ -318,9 +323,9 @@ DEFAULT_POLICY = ResourcePolicy(
     max_heavy_concurrency=1,
     max_disk_heavy_concurrency=1,
     profiles=(
-        ResourceProfile(name="io_fetch", memory_bytes=512 * MIB, cpu_count=1,
+        ResourceProfile(name="io_fetch", memory_bytes=1 * GIB, cpu_count=1,
                         scratch_bytes=2 * GIB, heavy=False),
-        ResourceProfile(name="delivery", memory_bytes=256 * MIB, cpu_count=1,
+        ResourceProfile(name="delivery", memory_bytes=1536 * MIB, cpu_count=1,
                         scratch_bytes=1 * GIB, heavy=False),
         # legacy_render (store_domains read) stages the legacy read set
         # through the same barrier as validation/legacy_score below --
