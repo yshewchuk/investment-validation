@@ -583,10 +583,10 @@ def test_15d_runup_ema_warms_up_from_long_price_history(monkeypatch):
 
     batches = _default_batches()
     prices = _price_rows(n=2200, end=_DECISION.date().isoformat())
-    # Keep a long flat old regime, then jump to the current level. A 400-row
-    # seed sees only 100s and yields a different EMA than the full series.
+    # Put a jump at the start of a 1000-row tail. That tail seeds at 100 and
+    # misses the full-history EMA's remaining contribution from the old 20s.
     for index, row in enumerate(prices):
-        row["close_adj"] = 20.0 if index < 1800 else 100.0
+        row["close_adj"] = 20.0 if index < 1200 else 100.0
     batches[(PRICE_HISTORY_TABLE_NAME, "AAA")] = prices
 
     calls: list = []
@@ -605,6 +605,10 @@ def test_15d_runup_ema_warms_up_from_long_price_history(monkeypatch):
     full_ema = pd.Series([row["close_adj"] for row in prices]).ewm(
         span=252, adjust=False).mean().iloc[-1]
     expected = (prices[-1]["close_adj"] / full_ema - 1.0) * 100.0
+    short_ema = pd.Series([row["close_adj"] for row in prices[-1000:]]).ewm(
+        span=252, adjust=False).mean().iloc[-1]
+    short_warmup = (prices[-1]["close_adj"] / short_ema - 1.0) * 100.0
+    assert abs(expected - short_warmup) > 0.01
     assert result.panel_row["dist_ema"] == pytest.approx(expected, abs=1e-5)
 
 
