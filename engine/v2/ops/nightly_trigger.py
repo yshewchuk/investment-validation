@@ -873,9 +873,11 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
 
 def _monthly_retrain_section(ops_root: Path, as_of: str):
     """The monthly-retrain decision pinned into the plan (loud on error)."""
+    from engine.v2.ops import pool_refresh
+
     decision_conn = retrain_due.open_catalog_readonly(ops_root / "catalog.sqlite")
     try:
-        return retrain_due.decide_for_deployed_base(decision_conn, ops_root, as_of)
+        return pool_refresh.decide_for_deployed_base(decision_conn, ops_root, as_of)
     finally:
         decision_conn.close()
 

@@ -91,11 +91,8 @@ def test_open_catalog_readonly_never_creates_or_writes(tmp_path):
     assert not missing.exists()
 
 
-def test_read_base_retrain_cutoff_handles_current_and_legacy_catalogs(monkeypatch, tmp_path):
-    import engine.v2.ops.pool_refresh as pool_refresh
+def test_read_base_retrain_cutoff_handles_current_and_legacy_catalogs(tmp_path):
     from engine.v2.models.release_layout import catalog_path, manifest_body, write_catalog
-
-    monkeypatch.setattr(pool_refresh, "validate_retrain_base", lambda *args: None)
 
     current_root = tmp_path / "current"
     current = manifest_body(
@@ -117,11 +114,8 @@ def test_read_base_retrain_cutoff_handles_absent_legacy_and_current_catalogs(tmp
         read_base_retrain_cutoff(tmp_path, "pools-current-absent")
 
 
-def test_read_base_retrain_cutoff_rejects_invalid_legacy_pool_cutoff(monkeypatch, tmp_path):
-    import engine.v2.ops.pool_refresh as pool_refresh
+def test_read_base_retrain_cutoff_rejects_invalid_legacy_pool_cutoff(tmp_path):
     from engine.v2.models.release_layout import catalog_path, manifest_body, write_catalog
-
-    monkeypatch.setattr(pool_refresh, "validate_retrain_base", lambda *args: None)
 
     root = tmp_path / "invalid"
     body = manifest_body("rel-invalid", "dep-1", [], {"pool_cutoff": "2026-11-1"})
@@ -130,7 +124,8 @@ def test_read_base_retrain_cutoff_rejects_invalid_legacy_pool_cutoff(monkeypatch
         read_base_retrain_cutoff(root, "rel-invalid")
 
 
-def test_read_base_retrain_cutoff_validates_before_catalog_read(monkeypatch, tmp_path):
+def test_decide_for_deployed_base_validates_before_cutoff_and_decision(monkeypatch, tmp_path):
+    import engine.v2.models.deployment as deployment
     import engine.v2.ops.pool_refresh as pool_refresh
     import engine.v2.ops.retrain_due as retrain_due
 
@@ -140,45 +135,31 @@ def test_read_base_retrain_cutoff_validates_before_catalog_read(monkeypatch, tmp
         calls.append("validate")
 
     def read(*args):
-        calls.append("read")
-        return {"sources": {"pool_cutoff": "2026-11-02", "retrain_cutoff": "2026-11-01"}}
+        calls.append("cutoff")
+        return "2026-10-01"
 
+    def decide(*args, **kwargs):
+        calls.append("decide")
+        return "decision"
+
+    monkeypatch.setattr(pool_refresh, "deployed_release_id", lambda: "rel-base")
+    monkeypatch.setattr(deployment, "production_release_root", lambda: tmp_path / "release")
     monkeypatch.setattr(pool_refresh, "validate_retrain_base", validate)
-    monkeypatch.setattr(retrain_due, "read_catalog", read)
+    monkeypatch.setattr(retrain_due, "read_base_retrain_cutoff", read)
+    monkeypatch.setattr(retrain_due, "decide", decide)
 
-    assert read_base_retrain_cutoff(tmp_path, "rel-base") == "2026-11-01"
-    assert calls == ["validate", "read"]
+    result = pool_refresh.decide_for_deployed_base(_conn(), tmp_path, "2026-11-02")
+    assert result == "decision"
+    assert calls == ["validate", "cutoff", "decide"]
 
 
 def test_read_base_retrain_cutoff_refuses_non_mapping_sources(monkeypatch, tmp_path):
-    import engine.v2.ops.pool_refresh as pool_refresh
     import engine.v2.ops.retrain_due as retrain_due
 
-    monkeypatch.setattr(pool_refresh, "validate_retrain_base", lambda *args: None)
     monkeypatch.setattr(retrain_due, "read_catalog", lambda *args: {"sources": []})
 
     with pytest.raises(ValueError, match="base release catalog could not be read"):
         read_base_retrain_cutoff(tmp_path, "rel-base")
-
-
-def test_decide_for_deployed_base_passes_cutoff_to_shared_decision(monkeypatch, tmp_path):
-    import engine.v2.models.deployment as deployment
-    import engine.v2.ops.pool_refresh as pool_refresh
-    import engine.v2.ops.retrain_due as retrain_due
-    from engine.v2.ops.retrain_due import decide_for_deployed_base
-
-    def decide(*args, **kwargs):
-        return args, kwargs
-
-    monkeypatch.setattr(pool_refresh, "deployed_release_id", lambda: "rel-base")
-    monkeypatch.setattr(deployment, "production_release_root", lambda: tmp_path / "release")
-    monkeypatch.setattr(retrain_due, "read_base_retrain_cutoff", lambda *args: "2026-10-01")
-    monkeypatch.setattr(retrain_due, "decide", decide)
-
-    conn = _conn()
-    args, kwargs = decide_for_deployed_base(conn, tmp_path, "2026-11-02")
-    assert args == (conn, tmp_path, "2026-11-02", "rel-base")
-    assert kwargs == {"base_retrain_cutoff": "2026-10-01"}
 
 
 def test_validate_retrain_base_refuses_damaged_classification(monkeypatch, tmp_path):

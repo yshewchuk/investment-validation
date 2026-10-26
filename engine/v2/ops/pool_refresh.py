@@ -667,3 +667,19 @@ def deployed_release_id() -> str:
     except deployment.MissingReleaseRoot:
         return "none"
     return "none" if pointer is None else pointer.release_id
+
+
+def decide_for_deployed_base(conn, ops_root, session: str) -> dict:
+    """Build either nightly plan path's retrain decision from the deployed base."""
+    from engine.v2.ops import retrain_due
+
+    base_release_id = deployed_release_id()
+    base_retrain_cutoff = None
+    if base_release_id != "none":
+        release_root = deployment.production_release_root()
+        validate_retrain_base(release_root, base_release_id)
+        base_retrain_cutoff = retrain_due.read_base_retrain_cutoff(
+            release_root, base_release_id)
+    return retrain_due.decide(
+        conn, ops_root, session, base_release_id,
+        base_retrain_cutoff=base_retrain_cutoff)

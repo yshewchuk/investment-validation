@@ -2400,11 +2400,11 @@ def test_default_plan_passes_the_decided_keys_to_the_plan(tmp_path, monkeypatch)
 
 def test_default_plan_pins_the_retrain_decision(tmp_path, monkeypatch):
     captured = {}
-    from engine.v2.ops import bootstrap, retrain_due
+    from engine.v2.ops import bootstrap, pool_refresh
     from engine.v2.ops.workflows import commands
 
     monkeypatch.setattr(
-        retrain_due, "decide_for_deployed_base",
+        pool_refresh, "decide_for_deployed_base",
         lambda conn, root, session: {"state": "not_due", "reason": "test", "base": "none"},
     )
     monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())

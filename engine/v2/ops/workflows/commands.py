@@ -277,8 +277,8 @@ def _retrain_section(args, root, conn):
     section = getattr(args, "retrain", None)
     if section is not None:
         return section
-    from engine.v2.ops import retrain_due
-    return retrain_due.decide_for_deployed_base(conn, root, args.as_of)
+    from engine.v2.ops import pool_refresh
+    return pool_refresh.decide_for_deployed_base(conn, root, args.as_of)
 
 
 def _plan_command(args, root, conn, clock):

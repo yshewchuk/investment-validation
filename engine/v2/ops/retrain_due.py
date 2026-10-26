@@ -58,12 +58,11 @@ def read_base_retrain_cutoff(release_root, release_id):
     if release_id == "none":
         return None
     try:
-        from engine.v2.ops.pool_refresh import validate_retrain_base
-
-        validate_retrain_base(Path(release_root), release_id)
         path = catalog_path(Path(release_root), release_id)
         catalog = read_catalog(path, release_id)
         if catalog is None:
+            if release_id.startswith("pools-"):
+                raise ValueError("missing catalog for current-format release")
             return None
         sources = catalog["sources"]
         if not isinstance(sources, Mapping):
@@ -154,21 +153,6 @@ def decide(conn, ops_root, session: str, base_release_id: str, *,
     print(f"[retrain] session={session} {json.dumps(decision, sort_keys=True)}",
           file=sys.stderr, flush=True)
     return decision
-
-
-def decide_for_deployed_base(conn, ops_root, session: str) -> dict:
-    """Build either nightly plan path's retrain decision from the deployed base."""
-    from engine.v2.ops import pool_refresh
-
-    base_release_id = pool_refresh.deployed_release_id()
-    base_retrain_cutoff = None
-    if base_release_id != "none":
-        from engine.v2.models.deployment import production_release_root
-
-        base_retrain_cutoff = read_base_retrain_cutoff(
-            production_release_root(), base_release_id)
-    return decide(conn, ops_root, session, base_release_id,
-                  base_retrain_cutoff=base_retrain_cutoff)
 
 
 def chain_blocks_pool_sidecar(conn, session: str, *, log: bool = True) -> bool:
