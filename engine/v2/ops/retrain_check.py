@@ -14,7 +14,12 @@ import stat
 from pathlib import Path
 from typing import Any
 
-from engine.v2.foundation import content_hash, safe_relative_path
+from engine.v2.foundation import (
+    DocumentError,
+    content_hash,
+    from_document,
+    safe_relative_path,
+)
 from engine.v2.foundation.artifacts import ArtifactError, _open_beneath
 from engine.v2.models import deployment
 from engine.v2.models.release_layout import (
@@ -45,7 +50,9 @@ class RetrainCheckParameters:
 
 def retrain_check_parameter_problems(_job: Any, params: Any) -> list[str]:
     problems = []
-    if tuple(getattr(params, "expected_ids", ())) != ("retrain_check",):
+    expected_ids = getattr(params, "expected_ids", None)
+    if (not isinstance(expected_ids, (tuple, list))
+            or tuple(expected_ids) != ("retrain_check",)):
         problems.append("expected_ids must be exactly ('retrain_check',)")
     for field in ("release_root", "candidate_release_id", "incumbent_release_id"):
         value = getattr(params, field, None)
@@ -151,7 +158,20 @@ def _model_objects(release_root: Path, release) -> dict[tuple[str, str, str], by
 
 
 def run_retrain_check_worker(parameters, root: Path) -> dict:
-    values = parameters if isinstance(parameters, dict) else dataclasses.asdict(parameters)
+    if isinstance(parameters, RetrainCheckParameters):
+        params = parameters
+    else:
+        try:
+            params = from_document(RetrainCheckParameters, parameters)
+        except DocumentError as exc:
+            raise fail("INVALID_REQUEST", "retrain_check parameters are invalid",
+                       details={"code": "RETRAIN_CHECK_PARAMETERS_INVALID"}) from exc
+    problems = retrain_check_parameter_problems(None, params)
+    if problems:
+        raise fail("INVALID_REQUEST", "retrain_check parameters are invalid",
+                   details={"code": "RETRAIN_CHECK_PARAMETERS_INVALID",
+                            "problems": problems})
+    values = dataclasses.asdict(params)
     candidate_id = values["candidate_release_id"]
     incumbent_id = values["incumbent_release_id"]
     release_root = Path(values["release_root"])
@@ -161,7 +181,10 @@ def run_retrain_check_worker(parameters, root: Path) -> dict:
     if candidate is None or incumbent is None:
         raise fail("VALIDATION_FAILED", "candidate or incumbent release is not staged",
                    details={"code": "RELEASE_NOT_STAGED"})
-    for manifest in (candidate, incumbent):
+    for manifest, expected_id in ((candidate, candidate_id), (incumbent, incumbent_id)):
+        if manifest.release.release_id != expected_id:
+            raise fail("VALIDATION_FAILED", "staged manifest release id does not match",
+                       details={"code": "STAGED_RELEASE_ID_MISMATCH"})
         if not deployment.manifest_hash_matches(manifest):
             raise fail("VALIDATION_FAILED", "staged release manifest hash does not match",
                        details={"code": "STAGED_MANIFEST_HASH_MISMATCH"})

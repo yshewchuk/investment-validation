@@ -153,6 +153,61 @@ def test_staged_manifest_hash_drift_refuses_before_receipt(tmp_path, monkeypatch
     assert not (attempt / "retrain_check_receipt.json").exists()
 
 
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        None,
+        {"expected_ids": None, "release_root": "/release",
+         "candidate_release_id": "candidate", "incumbent_release_id": "incumbent",
+         "input_bindings": {"acceptance.json": "acceptance-job"}},
+        retrain_check.RetrainCheckParameters(
+            expected_ids=None, release_root="/release",
+            candidate_release_id="candidate", incumbent_release_id="incumbent",
+            input_bindings={"acceptance.json": "acceptance-job"}),
+        {"expected_ids": ["retrain_check"], "release_root": "/release",
+         "candidate_release_id": "same", "incumbent_release_id": "same",
+         "input_bindings": {"acceptance.json": "acceptance-job"}},
+        {"expected_ids": ["retrain_check"], "release_root": "/release",
+         "candidate_release_id": "candidate", "incumbent_release_id": "incumbent"},
+    ],
+)
+def test_worker_refuses_invalid_parameters_before_reads_or_receipt(tmp_path, parameters):
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+
+    with pytest.raises(OpsError) as excinfo:
+        retrain_check.run_retrain_check_worker(parameters, attempt)
+
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert excinfo.value.problem.details["code"] == "RETRAIN_CHECK_PARAMETERS_INVALID"
+    assert not (attempt / "retrain_check_receipt.json").exists()
+
+
+@pytest.mark.parametrize("wrong_side", ["candidate", "incumbent"])
+def test_manifest_release_id_mismatch_refuses_before_receipt(tmp_path, monkeypatch, wrong_side):
+    attempt, params, _ = _run(tmp_path, monkeypatch)
+    store = tmp_path / "store" / "deployment"
+    manifests = {
+        "candidate": retrain_check.deployment.read_manifest(store, "candidate"),
+        "incumbent": retrain_check.deployment.read_manifest(store, "incumbent"),
+    }
+
+    def read_manifest(_root, release_id):
+        if wrong_side == "candidate" and release_id == "candidate":
+            return manifests["incumbent"]
+        if wrong_side == "incumbent" and release_id == "incumbent":
+            return manifests["candidate"]
+        return manifests[release_id]
+
+    monkeypatch.setattr(retrain_check.deployment, "read_manifest", read_manifest)
+    with pytest.raises(OpsError) as excinfo:
+        retrain_check.run_retrain_check_worker(params, attempt)
+
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.problem.details["code"] == "STAGED_RELEASE_ID_MISMATCH"
+    assert not (attempt / "retrain_check_receipt.json").exists()
+
+
 def test_symlinked_model_object_refuses_before_receipt(tmp_path, monkeypatch):
     attempt, params, _ = _run(tmp_path, monkeypatch)
     deployment_root = tmp_path / "store" / "deployment"
