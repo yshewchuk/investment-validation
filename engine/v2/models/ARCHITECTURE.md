@@ -476,8 +476,10 @@ Split list (code, in order; estimates in #822): 1 catalog `retrain_cutoff`, stag
 
 **Forward serving-fold contract.** Offline descriptor authoring is described
 below; verified loading is defined below. Size-fold selection is implemented in
-`engine/v2/scoring/gate_fold_selection.py`; no batch caller exists yet.
-Monthly folds
+`engine/v2/scoring/gate_fold_selection.py`; `engine.v2.ops.native_score_batch`
+selects the exact causal fold for each STR-THRU row and supplies it to the gate.
+Missing or invalid folds refuse the row with `MODEL_NOT_READY`; selection never
+falls back to another month or the champion. Monthly folds
 are separate from the full-refit champion bindings. A `ServingFoldRef`
 identifies one release-owned `tier4_folds:size` estimator object, its model,
 feature order, output, month start, full Tier-3 panel byte hash and declared

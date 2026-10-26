@@ -31,6 +31,7 @@ from engine.v2.ops.native_score_batch_types import (
     _event_date_identity,
 )
 from engine.v2.scoring.application import score_batch
+from engine.v2.scoring.gate_fold_selection import select_gate_forecast_source
 from engine.v2.scoring.identity import request_hash, score_request_key
 from engine.v2.scoring.native_analog_query import AmbiguousAnalogPool, analog_declarations
 from engine.v2.scoring.native_gate_features import GATE_ANALOG_COLUMNS, GATE_FORECAST_COLUMNS
@@ -39,7 +40,11 @@ from engine.v2.scoring.nightly_source_bundle import (
     assemble_nightly_source_bundle,
     validated_as_of,
 )
-from engine.v2.scoring.release_bindings import ModelIdentity, ScoringReleaseBinding
+from engine.v2.scoring.release_bindings import (
+    ModelIdentity,
+    ModelNotReady,
+    ScoringReleaseBinding,
+)
 from engine.v2.scoring.source_inputs import (
     AnswerFieldsInSource,
     SourceBundle,
@@ -412,6 +417,7 @@ def _bundle_or_refusal(
     key: BoardRequest,
     event: NightlyEventInputs,
     *,
+    binding: ScoringReleaseBinding,
     spec: _StrategySpec,
     drivers: tuple[_ResolvedDriver, ...],
     gate_identity: ModelIdentity,
@@ -430,7 +436,7 @@ def _bundle_or_refusal(
     publish unchanged; the free-text detail is not.
     """
     try:
-        return assemble_nightly_source_bundle(
+        bundle = assemble_nightly_source_bundle(
             source_ref=f"native-score-batch:{key.ticker}:{_iso(key.event_date)}:{key.strategy}",
             strategy=spec.bundle_strategy, as_of=as_of,
             calendar_row=event.calendar_row, panel_row=event.panel_row,
@@ -454,6 +460,32 @@ def _bundle_or_refusal(
     except AnswerFieldsInSource as exc:
         # One row carrying a calculated answer field refuses that row only (#630).
         return _input_build_refusal(key, exc)
+    if key.strategy == "STR-THRU":
+        source = _gate_source_or_refusal(key, binding, key.event_date, as_of)
+        if isinstance(source, NativeScoreBatchRowRefusal):
+            return source
+        return replace(bundle, gate_forecast_source=source)
+    return bundle
+
+
+def _gate_source_or_refusal(
+    key: BoardRequest,
+    binding: ScoringReleaseBinding,
+    event_date: Any,
+    as_of: Any,
+) -> Any | NativeScoreBatchRowRefusal:
+    """The gate forecast source for ``key``, or its fixed-detail refusal.
+
+    ``ModelNotReady`` from :func:`select_gate_forecast_source` is mapped to
+    ``MODEL_NOT_READY`` with the same safe detail the caller published before;
+    the exception text is never copied into the refusal (CWE-209).
+    """
+    try:
+        return select_gate_forecast_source(binding, event_date, as_of)
+    except ModelNotReady:
+        return NativeScoreBatchRowRefusal(
+            key, "MODEL_NOT_READY",
+            "causal size fold unavailable for gate forecast")
 
 
 def _assemble_one_event(
@@ -500,8 +532,8 @@ def _assemble_one_event(
     if problem is not None:
         return NativeScoreBatchRowRefusal(key, *problem)
     bundle = _bundle_or_refusal(
-        key, event, spec=spec, drivers=drivers, gate_identity=gate_identity,
-        gate_policy=gate_policy, as_of=as_of,
+        key, event, binding=binding, spec=spec, drivers=drivers,
+        gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,
         feature_names=feature_names, driver_name=driver_name)
     if isinstance(bundle, NativeScoreBatchRowRefusal):
         return bundle
