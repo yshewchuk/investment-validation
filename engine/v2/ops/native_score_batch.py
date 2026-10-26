@@ -504,6 +504,15 @@ def _gate_source_or_refusal(
     return source
 
 
+def _score_artifact_refs(drivers, gate_identity, bundle) -> tuple[str, ...]:
+    refs = [driver.identity.artifact_hash for driver in drivers]
+    refs.append(gate_identity.artifact_hash)
+    gate_source = bundle.gate_forecast_source
+    if gate_source is not None:
+        refs.append(gate_source.artifact_hash)
+    return tuple(dict.fromkeys(refs))
+
+
 def _assemble_one_event(
     event: NightlyEventInputs,
     *,
@@ -579,8 +588,7 @@ def _assemble_one_event(
         decision_clock_id=driver_identity.decision_clock_id,
         requested_decision_at=_iso(as_of) or "", snapshot_id=str(snapshot_id),
         mode="shadow", fill_model={"alpha": _SHADOW_FILL_ALPHA},
-        model_artifact_refs=tuple(dict.fromkeys(
-            (*[driver.identity.artifact_hash for driver in drivers], gate_identity.artifact_hash))),
+        model_artifact_refs=_score_artifact_refs(drivers, gate_identity, bundle),
     )
     return (request, native_inputs)
 

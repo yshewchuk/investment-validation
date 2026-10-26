@@ -159,7 +159,9 @@ def select_gate_forecast_source(binding, event_date, as_of) -> GateForecastSourc
             _MEMBER_ID, "size fold could not be verified or loaded") from None
     selected = ref.release.bindings[0]
     return GateForecastSource(
-        binding_id=selected.binding_id, release=ref.release, inference=ref.inference,
+        binding_id=selected.binding_id,
+        artifact_hash=ref.descriptor.estimator.content_hash,
+        release=ref.release, inference=ref.inference,
         pool_pred=ref.pool_pred, pool_res=ref.pool_res,
         interval_floor=ref.descriptor.policy.interval_floor)
 
