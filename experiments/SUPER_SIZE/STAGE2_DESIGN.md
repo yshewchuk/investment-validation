@@ -400,6 +400,9 @@ attempt/failure/zero-retry and infrastructure-failure-blocks-selection policies.
 
 ## 3. Quantiles and optional scope (designed, deferred beyond core)
 
+The separate [STR-THRU distribution design](../STR_THRU_DISTRIBUTION/DESIGN.md)
+proposes a follow-on experiment; it neither expands this core nor activates its readers.
+
 A separate follow-on recipe uses sklearn HGB quantile loss at q=[0.1, 0.5, 0.9],
 with the same causal table and nested folds. Freeze its own small grid and fit cap
 before execution. Select each quantile by inner pinball loss; report pinball,
