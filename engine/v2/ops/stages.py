@@ -350,6 +350,11 @@ def _native_parity_kind() -> JobKind:
         namespaces=frozenset({"shadow", "smoke"}))
 
 
+def _retrain_check_kinds():
+    from engine.v2.ops.retrain_check import retrain_check_job_kind
+    return [retrain_check_job_kind()]
+
+
 def _core_kinds():
     """The one-off ``JobKind`` entries with no generated sibling — every
     "loop over a small family" kind (the outbox effects, the legacy action
@@ -425,7 +430,7 @@ def _core_kinds():
             retry=RetryPolicy("bounded", 2, (5, 30)),
             checkpoint_contract="legacy_materialization_manifest.v1.0",
             namespaces=frozenset({"shadow", "smoke"})),
-        training_job_kind(),
+        training_job_kind(), *_retrain_check_kinds(),
         promote_job_kind(),
         rollback_job_kind(),
         _decisions_supersede_kind(),
