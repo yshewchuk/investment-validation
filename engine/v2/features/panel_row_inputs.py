@@ -69,8 +69,9 @@ CONTEXT_TICKERS: tuple[str, ...] = ("SPY",)
 _BATCH_LIMIT = 1000
 _RESULT_LIMIT = 10000
 
-#: Generous margin over add_runup_features's 300-session minimum.
-_RUNUP_LOOKBACK_SESSIONS = 400
+#: Enough warm-up to make the span-252 EMA's first-row seed negligible:
+#: (1 - 2 / 253) ** 2000 is below 1.3e-7.
+_RUNUP_LOOKBACK_SESSIONS = 2000
 
 #: Pre-decode byte cap for the one ^GSPC regime fragment read per scan: the
 #: regime partition holds the whole index history (tens of MB), so this caps a

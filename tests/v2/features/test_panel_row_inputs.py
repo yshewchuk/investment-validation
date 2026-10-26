@@ -577,6 +577,41 @@ def test_15c_regime_price_query_bounds_pinned_to_decision(monkeypatch):
     assert query.lookback_sessions == 0
 
 
+def test_15d_runup_ema_warms_up_from_long_price_history(monkeypatch):
+    """The real pinned-price reader supplies enough history to erase the EMA seed."""
+    from engine.v2.data import price_history_query
+
+    batches = _default_batches()
+    prices = _price_rows(n=2200, end=_DECISION.date().isoformat())
+    # Put a jump at the start of a 1000-row tail. That tail seeds at 100 and
+    # misses the full-history EMA's remaining contribution from the old 20s.
+    for index, row in enumerate(prices):
+        row["close_adj"] = 20.0 if index < 1200 else 100.0
+    batches[(PRICE_HISTORY_TABLE_NAME, "AAA")] = prices
+
+    calls: list = []
+    real = price_history_query.get_price_series
+
+    def recording(repository, query, snapshot, **kwargs):
+        if query.ticker == "AAA":
+            calls.append(query)
+        return real(repository, query, snapshot, **kwargs)
+
+    monkeypatch.setattr(price_history_query, "get_price_series", recording)
+    result = _scan(batches=batches)
+
+    assert len(calls) == 1
+    assert calls[0].lookback_sessions == 2000
+    full_ema = pd.Series([row["close_adj"] for row in prices]).ewm(
+        span=252, adjust=False).mean().iloc[-1]
+    expected = (prices[-1]["close_adj"] / full_ema - 1.0) * 100.0
+    short_ema = pd.Series([row["close_adj"] for row in prices[-1000:]]).ewm(
+        span=252, adjust=False).mean().iloc[-1]
+    short_warmup = (prices[-1]["close_adj"] / short_ema - 1.0) * 100.0
+    assert abs(expected - short_warmup) > 0.01
+    assert result.panel_row["dist_ema"] == pytest.approx(expected, abs=1e-5)
+
+
 def test_16_zero_day_computed_moves_window_returns_empty_not_a_query_error():
     """``history_start == min(event_date, decision)`` means a zero-row window.
 
