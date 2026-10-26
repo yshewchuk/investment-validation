@@ -38,6 +38,7 @@ import fcntl
 import gc
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -300,20 +301,46 @@ def _remember_unknown_symbol(ticker: str) -> None:
 #: heal window. Definitive 404s are never recorded here — they have no chain.
 CHAIN_RETRY_PATH = paths.REPORTS / "orats_chain_retry.json"
 
+#: Cap on the memo's on-disk size: a file this big is not a memo anyone wrote
+#: deliberately, and parsing it would stall the refresh for no reason.
+CHAIN_RETRY_MAX_BYTES = 1_000_000
+
 
 def _read_chain_retry() -> dict[str, set[str]]:
-    """The retry memo; a missing or invalid file is empty and never raises."""
+    """The retry memo; a missing or invalid file is empty and never raises.
+
+    Checked before it is opened: a non-regular file at the path (a symlink, a
+    directory, a FIFO) or one over :data:`CHAIN_RETRY_MAX_BYTES` is announced
+    once on stderr and ignored. Values must be lists of names — anything
+    else (a bare string, say) is skipped for that date, not split apart.
+    """
+    try:
+        st = CHAIN_RETRY_PATH.lstat()
+    except OSError:
+        return {}  # missing: the common case — nothing owed, nothing to say
+    if not stat.S_ISREG(st.st_mode):
+        print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: not a regular file",
+              file=sys.stderr)
+        return {}
+    if st.st_size > CHAIN_RETRY_MAX_BYTES:
+        print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: {st.st_size} bytes "
+              f"over the {CHAIN_RETRY_MAX_BYTES}-byte cap", file=sys.stderr)
+        return {}
     try:
         raw = json.loads(CHAIN_RETRY_PATH.read_text())
-        return {str(d): {str(t) for t in ts} for d, ts in raw.items()}
+        return {str(d): {str(t) for t in ts}
+                for d, ts in raw.items() if isinstance(ts, list)}
     except (OSError, ValueError, TypeError, AttributeError):
         return {}
 
 
 def _write_chain_retry(retry: dict[str, set[str]]) -> None:
+    from engine.data.manifest import write_text_atomic
+
     try:
         paths.assert_writable(CHAIN_RETRY_PATH).parent.mkdir(parents=True, exist_ok=True)
-        CHAIN_RETRY_PATH.write_text(
+        write_text_atomic(
+            CHAIN_RETRY_PATH,
             json.dumps({d: sorted(ts) for d, ts in sorted(retry.items())}, indent=1))
     except OSError as exc:  # a lost memo costs a re-buy window, never a crashed nightly
         print(f"[chains] could not write {CHAIN_RETRY_PATH.name}: {exc}", file=sys.stderr)
@@ -485,9 +512,8 @@ CHAIN_SESSIONS = 2
 #: names with no chain on file, so its batches cluster into all-404s (weekend
 #: runs 10-18/19: ~114 calls, almost all 404). The skip is not total:
 #: transient failures and quota-cut names are still re-asked via
-#: :data:`CHAIN_RETRY_PATH`; only definitive 404s and names
-#: never-attempted-and-failed are dropped. A night that did not run leaves the
-#: newest session at ~0% held, so it is still healed.
+#: :data:`CHAIN_RETRY_PATH`; only definitive 404s are dropped. A night that
+#: did not run leaves the newest session at ~0% held, so it is still healed.
 CHAIN_SKIP_HELD_FRACTION = 0.75
 
 
@@ -509,8 +535,8 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     :data:`CHAIN_SKIP_HELD_FRACTION` held stops buying its unheld tail — the
     names left there are mostly ones with no chain on file (transient failures
     and quota-cut names are still re-asked via :data:`CHAIN_RETRY_PATH`; only
-    definitive 404s and never-attempted-and-failed names are dropped), and
-    re-buying that tail is ~114 calls of 404s per weekend run.
+    definitive 404s are dropped), and re-buying that tail is ~114 calls of
+    404s per weekend run.
 
     Truncation is checked, not assumed: see :data:`CHAIN_BATCH`.
 
@@ -518,9 +544,11 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     ORATS publishes a session's chains around midnight, so a run in the evening
     that asks only for today gets nothing back — silently, because an
     unpublished date and a name with no chain look identical. Asking for the
-    previous session too means the run always acquires something, and it heals
-    a gap left by a night that did not run: each session is asked for again
-    until held or it reaches CHAIN_SKIP_HELD_FRACTION held.
+    previous session too acquires something only while the older session is
+    still below :data:`CHAIN_SKIP_HELD_FRACTION` held or the newest is unheld
+    — a skipped older session buys nothing. It does heal a gap left by a night
+    that did not run: each session is asked for again until held or it reaches
+    CHAIN_SKIP_HELD_FRACTION held.
 
     **A pair already in the store is never re-bought** (``skip_held``). Without
     it, covering several sessions would multiply the nightly cost; with it the
@@ -575,9 +603,8 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
     buying its unheld tail — those names are mostly ones with no chain on
     file — but it is not skipped outright: the names in :data:`CHAIN_RETRY_PATH`
     that are still unheld (transient failures, quota-cut remainders) are
-    re-asked. A definitive 404 never enters that file, so 404s and
-    never-attempted-and-failed names are the only ones dropped. The decision
-    is recorded, never silent.
+    re-asked. A definitive 404 never enters that file, so only definitive 404s
+    are dropped. The decision is recorded, never silent.
     """
     session_day = pd.Timestamp(stamp).normalize()
     if skip_held:

@@ -5,9 +5,8 @@ the unheld names left are mostly ones with no chain on file, and the batches
 came back all-404. Past ``CHAIN_SKIP_HELD_FRACTION`` the session is recorded
 in ``sessions_skipped`` and its tail is not bought; the names that failed
 transiently or were cut off by quota are kept alive in ``CHAIN_RETRY_PATH``
-and ARE re-asked even in a skipped session. Only definitive 404s and
-never-attempted-and-failed names are dropped. A fresh (or unheld) session
-still is healed in full.
+and ARE re-asked even in a skipped session. Only definitive 404s are
+dropped. A fresh (or unheld) session still is healed in full.
 
 Every dependency below the public signature — the fetcher, the store's held
 set, the trading calendar, the retry file — is a synthetic fake or a tmp_path
@@ -112,6 +111,33 @@ def test_a_skipped_session_still_retries_the_failed_names(monkeypatch, tmp_path)
     assert nightly._read_chain_retry() == {}, "the OK fetch empties the entry"
 
 
+def test_a_retry_name_that_is_now_held_is_not_re_asked(monkeypatch, tmp_path):
+    """The skip re-asks the intersection of the memo and the UNHELD tail: a
+    memo name that got held since is not bought again."""
+    _wire(monkeypatch, {(t, pd.Timestamp(AS_OF)) for t in TICKERS[:8]}, tmp_path)
+    nightly.CHAIN_RETRY_PATH.write_text(json.dumps({AS_OF: ["TKR00", "TKR09"]}))
+    f = _Fetcher()
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+
+    assert f.asked_tickers == ["TKR09"], "the held memo name must not be re-asked"
+    assert out["sessions_skipped"][0]["retried"] == 1
+
+
+def test_a_memo_value_that_is_a_string_is_ignored(monkeypatch, tmp_path):
+    """A value is a LIST of names: a bare string for a date would split into
+    characters if iterated naively, so it is skipped for that date."""
+    _wire(monkeypatch, {(t, pd.Timestamp(AS_OF)) for t in TICKERS[:8]}, tmp_path)
+    nightly.CHAIN_RETRY_PATH.write_text(json.dumps({AS_OF: "TKR09"}))
+    f = _Fetcher()
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+
+    assert nightly._read_chain_retry() == {}, "the string is dropped, not char-split"
+    assert f.asked == [], "no pending names survived: the session just skips"
+    assert "retried" not in out["sessions_skipped"][0]
+
+
 def test_a_zero_held_session_is_still_healed(monkeypatch, tmp_path):
     """A night that did not run leaves ~0% held — exactly what healing is for."""
     _wire(monkeypatch, set(), tmp_path)
@@ -196,6 +222,89 @@ def test_old_entries_are_pruned_past_the_window(monkeypatch, tmp_path):
     kept = nightly._read_chain_retry()
     assert stale not in kept, "the 15-day-old entry is pruned"
     assert kept[fresh] == {"OLD2"} and kept[AS_OF] == set(TICKERS)
+
+
+def test_prune_keeps_exactly_14_days_and_drops_15(monkeypatch, tmp_path):
+    """Boundary: the cutoff is ``>=``, so an entry exactly 14 days behind the
+    fetched session survives its persist and 15 days does not."""
+    _wire(monkeypatch, set(), tmp_path)
+    keep = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=14)).date())
+    drop = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=15)).date())
+    nightly.CHAIN_RETRY_PATH.write_text(json.dumps({keep: ["OLD1"], drop: ["OLD2"]}))
+    f = _Fetcher(fail=lambda p: RuntimeError("HTTP 502"))
+
+    nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+
+    kept = nightly._read_chain_retry()
+    assert kept[keep] == {"OLD1"}, "exactly 14 days old is still inside the window"
+    assert drop not in kept, "15 days old is past it"
+    assert kept[AS_OF] == set(TICKERS)
+
+
+def test_a_corrupt_memo_reads_empty_and_the_run_proceeds(monkeypatch, tmp_path):
+    """Non-JSON at the memo path: treated as no debt, silently (the docstring
+    promise is never raises) — and it never blocks the refresh."""
+    _wire(monkeypatch, set(), tmp_path)
+    nightly.CHAIN_RETRY_PATH.write_text("{not json at all")
+    f = _Fetcher()
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+
+    assert nightly._read_chain_retry() == {}
+    assert out["calls"] == 1 and f.asked == [AS_OF], "the refresh proceeds"
+
+
+def test_an_oversized_memo_is_ignored_with_one_stderr_line(monkeypatch, capsys, tmp_path):
+    """A memo over CHAIN_RETRY_MAX_BYTES is announced once per read and never
+    parsed — and the run proceeds as if there were no memo."""
+    _wire(monkeypatch, set(), tmp_path)
+    payload = json.dumps({AS_OF: ["TKR09"]})
+    nightly.CHAIN_RETRY_PATH.write_text(payload + " " * nightly.CHAIN_RETRY_MAX_BYTES)
+
+    assert nightly._read_chain_retry() == {}
+    err = capsys.readouterr().err.splitlines()
+    assert len([line for line in err if "[chains] ignoring" in line]) == 1, \
+        "one line naming the file and the size cap, per read"
+    assert "cap" in err[0]
+
+    f = _Fetcher()
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+    assert out["calls"] == 1, "the oversized memo never blocks the refresh"
+
+
+def test_a_directory_at_the_memo_path_is_ignored_and_the_run_proceeds(
+        monkeypatch, capsys, tmp_path):
+    """A non-regular file at the path (a misplaced ``mv``) is lstat-rejected
+    before it is opened: reads as {}, the save failure it also causes is
+    announced, and nothing raises."""
+    _wire(monkeypatch, set(), tmp_path)
+    nightly.CHAIN_RETRY_PATH.mkdir()
+    f = _Fetcher(fail=lambda p: RuntimeError("HTTP 502"))
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+
+    assert out["failed"], "the run proceeds and still reports its fetch failures"
+    assert nightly._read_chain_retry() == {}, "a directory reads as no memo"
+    err = capsys.readouterr().err
+    assert "not a regular file" in err, "the ignore is announced with its reason"
+    assert "could not write" in err, "the save onto it is announced, not raised"
+
+
+def test_a_memo_write_failure_is_announced_not_raised(monkeypatch, capsys, tmp_path):
+    """A lost memo costs at most a re-buy window: an OSError from the atomic
+    writer is printed to stderr and the refresh finishes normally."""
+    _wire(monkeypatch, set(), tmp_path)
+
+    def boom(path, text):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr("engine.data.manifest.write_text_atomic", boom)
+    f = _Fetcher(fail=lambda p: RuntimeError("HTTP 502"))
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+
+    assert out["failed"] and out["calls"] == 0, "the run completes despite the lost memo"
+    assert "could not write orats_chain_retry.json" in capsys.readouterr().err
 
 
 def test_skip_held_false_fetches_regardless(monkeypatch, tmp_path):
