@@ -65,9 +65,10 @@ def due_decision(session: str, base_retrain_cutoff: str | None, recorded: frozen
             "superseded": sorted(item[0] for item in open_months[1:])}
 
 
-def read_recorded(conn, ops_root) -> frozenset:
+def read_recorded(conn, ops_root, session: str | None = None) -> frozenset:
     """Months with a durable success (a succeeded ``retrain-promote`` job) or a
-    ``superseded`` marker file."""
+    ``superseded`` marker file; with ``session`` only markers inside the decision's
+    12-month window are read."""
     months = set()
     rows = conn.execute(
         "SELECT idempotency_key FROM jobs WHERE namespace = 'shadow' AND state = 'succeeded' "
@@ -78,7 +79,12 @@ def read_recorded(conn, ops_root) -> frozenset:
         if parts[0] == "retrain-promote" and len(parts) >= 4:
             months.add(parts[2])
     marker_dir = Path(ops_root) / _MARKER_DIR
-    if marker_dir.is_dir():
+    if session is not None:
+        # Bounded: only the months a decision can examine are probed, never the whole archive.
+        months.update(month for month, _ in _completed_months(date.fromisoformat(session),
+                                                              MAX_LOOKBACK_MONTHS)
+                      if (marker_dir / f"{month}.json").exists())
+    elif marker_dir.is_dir():
         months.update(path.stem for path in marker_dir.glob("????-??.json"))
     return frozenset(months)
 
@@ -102,7 +108,7 @@ def decide(conn, ops_root, session: str, base_release_id: str, *,
            first_month: str = FIRST_ELIGIBLE_MONTH) -> dict:
     """Evaluate the decision at plan-build time, write markers for older due months and
     log the outcome to stderr. The returned section is pinned into the plan."""
-    decision = due_decision(session, base_retrain_cutoff, read_recorded(conn, ops_root), first_month)
+    decision = due_decision(session, base_retrain_cutoff, read_recorded(conn, ops_root, session), first_month)
     decision["base"] = base_release_id
     if decision["state"] == "due":
         write_superseded(ops_root, decision["superseded"], decision["month"], session)

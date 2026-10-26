@@ -323,3 +323,19 @@ def test_first_november_session_is_due_for_october():
     assert due_decision("2026-11-02", None, frozenset())["month"] == "2026-10"
     decision = due_decision("2026-11-02", "2026-08-01", frozenset())
     assert decision["superseded"] == []
+
+
+def test_read_recorded_with_a_session_probes_only_the_window(tmp_path):
+    conn = _conn()
+    marker_dir = tmp_path / "retrain_superseded"
+    marker_dir.mkdir(parents=True)
+    (marker_dir / "2026-10.json").write_text("{}")
+    (marker_dir / "2020-01.json").write_text("{}")
+
+    windowed = read_recorded(conn, tmp_path, "2026-11-02")
+    assert "2026-10" in windowed
+    assert "2020-01" not in windowed
+
+    full = read_recorded(conn, tmp_path)
+    assert "2026-10" in full
+    assert "2020-01" in full
