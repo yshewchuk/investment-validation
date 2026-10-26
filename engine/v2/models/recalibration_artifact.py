@@ -45,7 +45,12 @@ from engine.v2.foundation.canonical import (
     untag_nonfinite,
 )
 
-from .payoff_artifact import PayoffArtifactKey, payoff_artifact_key
+from .payoff_artifact import (
+    MAX_ARTIFACT_BYTES,
+    PayoffArtifactKey,
+    payoff_artifact_key,
+    read_artifact_bytes,
+)
 
 __all__ = [
     "RECALIBRATION_MAP_ARTIFACT_V1",
@@ -249,11 +254,23 @@ class RecalibrationArtifactLoader:
         except ValueError as exc:
             raise RecalibrationArtifactError("artifact path escapes artifact root") from exc
         try:
-            raw = path.read_bytes()
+            raw = read_artifact_bytes(path)
         except OSError as exc:
             raise RecalibrationArtifactError(f"missing recalibration artifact: {ref.path}") from exc
-        if CONTENT_HASH_PREFIX + hashlib.sha256(raw).hexdigest() != ref.content_hash:
-            raise RecalibrationArtifactError(f"recalibration artifact hash mismatch: {ref.path}")
+        return self.load_bytes(raw, ref.content_hash, path=ref.path)
+
+    def load_bytes(self, raw: bytes, content_hash: str, *,
+                   path: str | None = None) -> RecalibrationMapArtifact:
+        suffix = f": {path}" if path else ""
+        if not isinstance(raw, bytes):
+            raise RecalibrationArtifactError("recalibration artifact bytes must be bytes")
+        if len(raw) > MAX_ARTIFACT_BYTES:
+            raise RecalibrationArtifactError("recalibration artifact exceeds byte limit")
+        if CONTENT_HASH_PREFIX + hashlib.sha256(raw).hexdigest() != content_hash:
+            raise RecalibrationArtifactError(f"recalibration artifact hash mismatch{suffix}")
+        cached = self._cache.get(content_hash)
+        if cached is not None:
+            return cached
         try:
             document = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -261,8 +278,8 @@ class RecalibrationArtifactLoader:
         if not isinstance(document, Mapping):
             raise RecalibrationArtifactError("recalibration artifact must be a JSON object")
         artifact = _artifact_from_document(document)
-        if artifact.content_hash != ref.content_hash:
+        if artifact.content_hash != content_hash:
             raise RecalibrationArtifactError(
-                f"recalibration artifact content disagrees with its own hash: {ref.path}")
-        self._cache[ref.content_hash] = artifact
+                f"recalibration artifact content disagrees with its own hash{suffix}")
+        self._cache[content_hash] = artifact
         return artifact

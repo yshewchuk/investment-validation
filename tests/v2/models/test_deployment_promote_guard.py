@@ -161,3 +161,29 @@ def test_rollback_never_takes_the_expected_incumbent_guard(tmp_path):
     state = deployment.rollback(tmp_path)
     assert state.release_id == "r1"
     assert deployment.current_pointer(tmp_path).release_id == "r1"
+
+
+def test_current_pointer_refuses_an_oversize_deployed_file(tmp_path):
+    _staged_pair(tmp_path)
+    deployment.promote(tmp_path, "r1")
+    (tmp_path / "DEPLOYED").write_bytes(b"x" * (deployment.MAX_POINTER_BYTES + 1))
+
+    with pytest.raises(ValueError, match="deployment pointer is not a bounded regular file"):
+        deployment.current_pointer(tmp_path)
+
+
+def test_current_pointer_refuses_a_deployed_symlink(tmp_path):
+    _staged_pair(tmp_path)
+    deployment.promote(tmp_path, "r1")
+    pointer = tmp_path / "DEPLOYED"
+    target = tmp_path / "elsewhere.json"
+    target.write_bytes(pointer.read_bytes())
+    pointer.unlink()
+    pointer.symlink_to(target)
+
+    with pytest.raises(ValueError, match="deployment pointer is not a bounded regular file"):
+        deployment.current_pointer(tmp_path)
+
+
+def test_current_pointer_returns_none_when_deployed_is_missing(tmp_path):
+    assert deployment.current_pointer(tmp_path) is None

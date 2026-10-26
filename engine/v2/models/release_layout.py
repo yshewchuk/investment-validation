@@ -52,6 +52,10 @@ from engine.v2.models.release_objects import (  # noqa: F401  (re-exported)
 PHASE5_RELEASE_SCHEMA = "phase5_staged_release.v1.0"
 MANIFEST_NAME = "phase5_release.json"
 
+
+class CatalogConflict(ReleaseLayoutError):
+    """A candidate catalog already exists with different content."""
+
 STAGED = "STAGED"
 MISSING = "MISSING"
 PENDING = "PENDING"
@@ -233,13 +237,25 @@ def preserve_legacy_manifest(release_root: Path, legacy_path: Path | None = None
         _write_catalog(path, body)
 
 
-def write_manifest(release_root: Path, body: Mapping[str, Any]) -> Path:
+def write_manifest(release_root: Path, body: Mapping[str, Any], *,
+                   candidate_only: bool = False) -> Path:
     body = _validate_catalog(dict(body))
-    preserve_legacy_manifest(release_root)
-    _verify_staged(deployment_root(release_root), body["release_id"])
     path = _catalog_path(release_root, body["release_id"])
+    if candidate_only:
+        existing = _read_catalog(path)
+        if existing is not None:
+            existing_unhashed = {key: value for key, value in existing.items()
+                                 if key != "manifest_hash"}
+            new_unhashed = {key: value for key, value in body.items()
+                            if key != "manifest_hash"}
+            if existing_unhashed != new_unhashed:
+                raise CatalogConflict("candidate catalog exists with different content")
+    else:
+        preserve_legacy_manifest(release_root)
+    _verify_staged(deployment_root(release_root), body["release_id"])
     _write_catalog(path, body)
-    _write_catalog(Path(release_root) / MANIFEST_NAME, body)
+    if not candidate_only:
+        _write_catalog(Path(release_root) / MANIFEST_NAME, body)
     return path
 
 
@@ -274,7 +290,8 @@ def staged_manifest_path(store, release_id):
 
 
 __all__ = [
-    "ANALOG_MODULES", "DEPLOYMENT_DIR", "EXPECTED_MODEL_BINDINGS", "MANIFEST_NAME",
+    "ANALOG_MODULES", "CatalogConflict", "DEPLOYMENT_DIR", "EXPECTED_MODEL_BINDINGS",
+    "MANIFEST_NAME",
     "MAX_CATALOG_BYTES", "MEMBER_STATUSES", "MISSING", "OBJECTS_DIR",
     "ObjectVerificationError", "PENDING",
     "PHASE5_RELEASE_SCHEMA",

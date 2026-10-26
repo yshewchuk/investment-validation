@@ -42,6 +42,8 @@ from engine.v2.foundation.canonical import (
     untag_nonfinite,
 )
 
+from .frozen_state_io import BoundedStateReadError, read_bounded_state
+
 __all__ = [
     "PAYOFF_LINE_ARTIFACT_V1",
     "PAYOFF_SURFACE_ARTIFACT_V1",
@@ -54,11 +56,13 @@ __all__ = [
     "payoff_artifact_key",
     "make_payoff_line_artifact",
     "make_payoff_surface_artifact",
+    "read_artifact_bytes",
     "serialize_payoff_artifact",
 ]
 
 PAYOFF_LINE_ARTIFACT_V1 = "payoff_line_artifact.v1.0"
 PAYOFF_SURFACE_ARTIFACT_V1 = "payoff_surface_artifact.v1.0"
+MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 
 #: ``(strategy, alpha rounded to 4dp, cutoff as an ISO date or None)``.
 PayoffArtifactKey = tuple[str, float, "str | None"]
@@ -206,6 +210,21 @@ def serialize_payoff_artifact(artifact: "PayoffLineArtifact | PayoffSurfaceArtif
     as the ref and these bytes as the file, not re-derive either separately.
     """
     return canonical_json(artifact._payload()).encode("utf-8")
+
+
+def read_artifact_bytes(path: Path) -> bytes:
+    """Read one artifact file, capped at :data:`MAX_ARTIFACT_BYTES`.
+
+    ``read_bounded_state`` reports its refusals as
+    :class:`~engine.v2.models.frozen_state_io.BoundedStateReadError`, a
+    ``ValueError``. Artifact loaders map read failures to their own errors
+    and promise ``OSError`` for a missing/unreadable/oversized file, so
+    translate that refusal here and keep the original as the cause.
+    """
+    try:
+        return read_bounded_state(path, MAX_ARTIFACT_BYTES, no_follow=False)
+    except BoundedStateReadError as exc:
+        raise OSError(str(exc)) from exc
 
 
 def make_payoff_line_artifact(
@@ -367,12 +386,24 @@ class PayoffArtifactLoader:
         except ValueError as exc:
             raise PayoffArtifactError("artifact path escapes artifact root") from exc
         try:
-            raw = path.read_bytes()
+            raw = read_artifact_bytes(path)
         except OSError as exc:
             raise PayoffArtifactError(f"missing payoff artifact: {ref.path}") from exc
+        return self.load_bytes(raw, ref.content_hash, path=ref.path)
+
+    def load_bytes(self, raw: bytes, content_hash: str, *,
+                   path: str | None = None) -> PayoffLineArtifact | PayoffSurfaceArtifact:
+        suffix = f": {path}" if path else ""
+        if not isinstance(raw, bytes):
+            raise PayoffArtifactError("payoff artifact bytes must be bytes")
+        if len(raw) > MAX_ARTIFACT_BYTES:
+            raise PayoffArtifactError("payoff artifact exceeds byte limit")
         digest = CONTENT_HASH_PREFIX + hashlib.sha256(raw).hexdigest()
-        if digest != ref.content_hash:
-            raise PayoffArtifactError(f"payoff artifact hash mismatch: {ref.path}")
+        if digest != content_hash:
+            raise PayoffArtifactError(f"payoff artifact hash mismatch{suffix}")
+        cached = self._cache.get(content_hash)
+        if cached is not None:
+            return cached
         try:
             document = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -380,13 +411,13 @@ class PayoffArtifactLoader:
         if not isinstance(document, Mapping):
             raise PayoffArtifactError("payoff artifact document must be a JSON object")
         artifact = _artifact_from_document(document)
-        if artifact.content_hash != ref.content_hash:
+        if artifact.content_hash != content_hash:
             # Defense in depth: the bytes matched ``ref`` above, but a writer
             # bug (rounding, a field the payload builder forgot) could still
             # produce a document whose OWN recomputed identity disagrees with
             # what it was published under.
             raise PayoffArtifactError(
-                f"payoff artifact content disagrees with its own hash: {ref.path}"
+                f"payoff artifact content disagrees with its own hash{suffix}"
             )
-        self._cache[ref.content_hash] = artifact
+        self._cache[content_hash] = artifact
         return artifact
