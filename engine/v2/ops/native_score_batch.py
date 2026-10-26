@@ -425,6 +425,7 @@ def _bundle_or_refusal(
     as_of: Any,
     feature_names: Sequence[str],
     driver_name: str,
+    gate_source_cache: dict[tuple[int, str], Any],
 ) -> SourceBundle | NativeScoreBatchRowRefusal:
     """``assemble_nightly_source_bundle``'s result, or a re-wrapped refusal.
 
@@ -461,7 +462,8 @@ def _bundle_or_refusal(
         # One row carrying a calculated answer field refuses that row only (#630).
         return _input_build_refusal(key, exc)
     if key.strategy == "STR-THRU":
-        source = _gate_source_or_refusal(key, binding, key.event_date, as_of)
+        source = _gate_source_or_refusal(
+            key, binding, key.event_date, as_of, gate_source_cache)
         if isinstance(source, NativeScoreBatchRowRefusal):
             return source
         return replace(bundle, gate_forecast_source=source)
@@ -473,6 +475,7 @@ def _gate_source_or_refusal(
     binding: ScoringReleaseBinding,
     event_date: Any,
     as_of: Any,
+    gate_source_cache: dict[tuple[int, str], Any],
 ) -> Any | NativeScoreBatchRowRefusal:
     """The gate forecast source for ``key``, or its fixed-detail refusal.
 
@@ -480,12 +483,21 @@ def _gate_source_or_refusal(
     ``MODEL_NOT_READY`` with a fixed safe detail, and that exception text is
     never copied into the refusal (CWE-209).
     """
+    causal_month = min(
+        pd.Timestamp(event_date).strftime("%Y-%m"),
+        pd.Timestamp(as_of).strftime("%Y-%m"),
+    )
+    cache_key = (id(binding), causal_month)
+    if cache_key in gate_source_cache:
+        return gate_source_cache[cache_key]
     try:
-        return select_gate_forecast_source(binding, event_date, as_of)
+        source = select_gate_forecast_source(binding, event_date, as_of)
     except ModelNotReady:
         return NativeScoreBatchRowRefusal(
             key, "MODEL_NOT_READY",
             "causal size fold unavailable for gate forecast")
+    gate_source_cache[cache_key] = source
+    return source
 
 
 def _assemble_one_event(
@@ -498,6 +510,7 @@ def _assemble_one_event(
     calendar_revision: str,
     feature_names: Sequence[str],
     driver_name: str,
+    gate_source_cache: dict[tuple[int, str], Any],
 ) -> tuple[ScoreRequest, NativeScoreInputs] | NativeScoreBatchRowRefusal:
     """One event's ``(ScoreRequest, NativeScoreInputs)`` pair, or its refusal.
 
@@ -534,7 +547,8 @@ def _assemble_one_event(
     bundle = _bundle_or_refusal(
         key, event, binding=binding, spec=spec, drivers=drivers,
         gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,
-        feature_names=feature_names, driver_name=driver_name)
+        feature_names=feature_names, driver_name=driver_name,
+        gate_source_cache=gate_source_cache)
     if isinstance(bundle, NativeScoreBatchRowRefusal):
         return bundle
     event_id = event.calendar_row.get("event_id")
@@ -622,6 +636,44 @@ def _checked_batch_arguments(
     return events
 
 
+def _assemble_validated_events(
+    events: tuple[NightlyEventInputs, ...],
+    *,
+    as_of: Any,
+    snapshot_id: str,
+    calendar_revision: str,
+    binding: ScoringReleaseBinding,
+    feature_names: Sequence[str],
+    gate_policy: Mapping[str, Mapping[str, Any]],
+    driver_name: str,
+) -> tuple[dict[BoardRequest, tuple[ScoreRequest, NativeScoreInputs]],
+           tuple[NativeScoreBatchRowRefusal, ...]]:
+    """Assemble checked rows and enforce request-hash uniqueness."""
+    results: dict[BoardRequest, tuple[ScoreRequest, NativeScoreInputs]] = {}
+    refusals: list[NativeScoreBatchRowRefusal] = []
+    seen_hashes: dict[str, BoardRequest] = {}
+    gate_source_cache: dict[tuple[int, str], Any] = {}
+    for event in events:
+        outcome = _assemble_one_event(
+            event, binding=binding, gate_policy=gate_policy, as_of=as_of,
+            snapshot_id=snapshot_id, calendar_revision=calendar_revision,
+            feature_names=feature_names, driver_name=driver_name,
+            gate_source_cache=gate_source_cache,
+        )
+        if isinstance(outcome, NativeScoreBatchRowRefusal):
+            refusals.append(outcome)
+            continue
+        request, _ = outcome
+        row_hash = request_hash(request)
+        if row_hash in seen_hashes:
+            raise ValueError(
+                f"duplicate request_hash {row_hash} for {event.key!r} and "
+                f"{seen_hashes[row_hash]!r}")
+        seen_hashes[row_hash] = event.key
+        results[event.key] = outcome
+    return results, tuple(refusals)
+
+
 def assemble_score_batch_inputs(
     *,
     as_of: Any,
@@ -680,28 +732,12 @@ def assemble_score_batch_inputs(
         binding=binding, snapshot_id=snapshot_id, calendar_revision=calendar_revision,
         as_of=as_of, events=events)
     gate_policy = dict(gate_policy or {})
-
-    results: dict[BoardRequest, tuple[ScoreRequest, NativeScoreInputs]] = {}
-    refusals: list[NativeScoreBatchRowRefusal] = []
-    seen_hashes: dict[str, BoardRequest] = {}
-    for event in events:
-        outcome = _assemble_one_event(
-            event, binding=binding, gate_policy=gate_policy, as_of=as_of,
-            snapshot_id=snapshot_id, calendar_revision=calendar_revision,
-            feature_names=feature_names, driver_name=driver_name,
-        )
-        if isinstance(outcome, NativeScoreBatchRowRefusal):
-            refusals.append(outcome)
-            continue
-        request, _ = outcome
-        row_hash = request_hash(request)
-        if row_hash in seen_hashes:
-            raise ValueError(
-                f"duplicate request_hash {row_hash} for {event.key!r} and "
-                f"{seen_hashes[row_hash]!r}")
-        seen_hashes[row_hash] = event.key
-        results[event.key] = outcome
-    return results, tuple(refusals)
+    return _assemble_validated_events(
+        events, as_of=as_of, snapshot_id=snapshot_id,
+        calendar_revision=calendar_revision, binding=binding,
+        feature_names=feature_names, gate_policy=gate_policy,
+        driver_name=driver_name,
+    )
 
 
 def _event_inputs_from_document(doc: Mapping[str, Any]) -> NightlyEventInputs:

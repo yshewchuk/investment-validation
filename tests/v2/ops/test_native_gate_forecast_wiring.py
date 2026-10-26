@@ -45,3 +45,30 @@ def test_missing_causal_fold_refuses_row_model_not_ready(tmp_path):
     assert assembled == {}
     assert [refusal.code for refusal in refusals] == ["MODEL_NOT_READY"]
     assert refusals[0].detail == "causal size fold unavailable for gate forecast"
+
+
+def test_gate_source_cache_reuses_only_same_causal_month(monkeypatch):
+    binding = object()
+    key = _event_inputs().key
+    source = SimpleNamespace(binding_id="selected-gate-fold")
+    calls = []
+    cache = {}
+
+    def selector(selected_binding, event_date, as_of):
+        calls.append((selected_binding, event_date, as_of))
+        return source
+
+    monkeypatch.setattr(native_score_batch, "select_gate_forecast_source", selector)
+
+    first = native_score_batch._gate_source_or_refusal(
+        key, binding, "2025-08-02", "2025-12-10", cache)
+    same_month = native_score_batch._gate_source_or_refusal(
+        key, binding, "2025-08-31", "2025-12-10", cache)
+    next_month = native_score_batch._gate_source_or_refusal(
+        key, binding, "2025-09-01", "2025-12-10", cache)
+
+    assert first is same_month is next_month is source
+    assert calls == [
+        (binding, "2025-08-02", "2025-12-10"),
+        (binding, "2025-09-01", "2025-12-10"),
+    ]
