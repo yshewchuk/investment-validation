@@ -3,6 +3,7 @@ from __future__ import annotations
 # packages: ops
 # land: always-run
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -33,12 +34,13 @@ def test_production_training_cannot_import_holdout_or_research():
     files = {
         "engine/v2/models/retrain_job.py":
             b"from engine.v2.foundation.experiment_holdouts import final_month\n"
+            b"from engine.v2.foundation.final_holdout import request_from_document\n"
             b"import engine.v2.research.population\n",
         "engine/v2/ops/training.py": b"import engine.v2.research.population\n",
     }
     findings = isolation.check_files(files)
     assert _rules(findings) == {"forbidden-import"}
-    assert len(findings) == 3
+    assert len(findings) == 4
 
 
 def test_experiments_cannot_import_live_release_or_ledger_modules():
@@ -50,6 +52,21 @@ def test_experiments_cannot_import_live_release_or_ledger_modules():
     findings = isolation.check_files(files)
     assert _rules(findings) == {"forbidden-import"}
     assert len(findings) == 2
+
+
+def test_experiments_cannot_import_each_live_release_symbol():
+    files = {
+        "experiments/live.py": (
+            b"from engine.v2.models import current_release\n"
+            b"from engine.v2.models import current_pointer\n"
+            b"from engine.v2.models import resolve_release\n"
+            b"import engine.ledger\n"
+            b"from engine.paths import LEDGER\n"
+        ),
+    }
+    findings = isolation.check_files(files)
+    assert _rules(findings) == {"forbidden-import"}
+    assert len(findings) == 5
 
 
 def test_experiments_cannot_name_live_roots_but_may_name_own_ledger():
@@ -83,6 +100,27 @@ def test_aliased_production_root_caller_is_still_enumerated():
     assert _rules(findings) == {"unlisted-root-caller"}
 
 
+def test_relative_aliased_production_root_caller_is_still_enumerated():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"from ..models import production_release_root as root\n"
+            b"root()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+
+
+def test_attribute_aliased_production_root_caller_is_still_enumerated():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"from engine.v2.models import deployment\n"
+            b"root = deployment.production_release_root\n"
+            b"root()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+
+
 @pytest.mark.parametrize("body", [b"def broken(:\n", b"\xff"])
 def test_invalid_source_is_a_finding_not_a_clean_partial_scan(body):
     findings = isolation.check_files({"experiments/broken.py": body})
@@ -90,12 +128,9 @@ def test_invalid_source_is_a_finding_not_a_clean_partial_scan(body):
 
 
 def _listed_source(monkeypatch, name):
-    def listing(args, **kwargs):
-        return isolation.subprocess.CompletedProcess(
-            args, 0, stdout=(name + "\0").encode(), stderr=b""
-        )
-
-    monkeypatch.setattr(isolation.subprocess, "run", listing)
+    monkeypatch.setattr(
+        isolation, "_git_catalog", lambda root: (name + "\0").encode()
+    )
 
 
 def test_relative_research_import_into_models_release_is_blocked():
@@ -139,18 +174,24 @@ def test_oversized_tracked_source_refuses(monkeypatch, tmp_path):
 
 
 def test_git_listing_timeout_refuses_instead_of_skipping_scan(monkeypatch, tmp_path):
-    def timeout(*args, **kwargs):
-        raise isolation.subprocess.TimeoutExpired("git", kwargs["timeout"])
+    def timeout(root):
+        raise subprocess.TimeoutExpired("git", isolation.GIT_TIMEOUT_SECONDS)
 
-    monkeypatch.setattr(isolation.subprocess, "run", timeout)
+    monkeypatch.setattr(isolation, "_git_catalog", timeout)
     with pytest.raises(isolation.IsolationCheckError, match="complete tracked-source scan refused"):
         isolation.scan_repository(tmp_path)
 
 
 def test_git_listing_failure_refuses_instead_of_skipping_scan(monkeypatch, tmp_path):
-    def fail(*args, **kwargs):
+    def fail(root):
         raise FileNotFoundError("git unavailable")
 
-    monkeypatch.setattr(isolation.subprocess, "run", fail)
+    monkeypatch.setattr(isolation, "_git_catalog", fail)
     with pytest.raises(isolation.IsolationCheckError, match="complete tracked-source scan refused"):
         isolation.scan_repository(tmp_path)
+
+
+def test_catalog_overflow_refuses_instead_of_reading_unbounded_listing(monkeypatch):
+    monkeypatch.setattr(isolation, "MAX_CATALOG_BYTES", 1)
+    with pytest.raises(isolation.IsolationCheckError, match="exceeds 1 bytes"):
+        isolation._git_catalog(isolation.ROOT)

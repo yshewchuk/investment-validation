@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import ast
 import os
+import selectors
 import stat
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,19 +24,27 @@ PRODUCTION_PATHS = (
 )
 EXPERIMENT_PATHS = ("engine/v2/research/", "experiments/")
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
+MAX_CATALOG_BYTES = 16 * 1024 * 1024
+MAX_CATALOG_STDERR_BYTES = 4 * 1024
 GIT_TIMEOUT_SECONDS = 30
 PRODUCTION_FORBIDDEN_IMPORTS = (
     "engine.v2.foundation.experiment_holdouts",
+    "engine.v2.foundation.final_holdout",
     "engine.v2.ops.final_holdout",
     "engine.v2.research",
 )
 EXPERIMENT_FORBIDDEN_IMPORTS = (
     "engine.v2.ledger",
+    "engine.v2.models.current_release",
+    "engine.v2.models.current_pointer",
+    "engine.v2.models.resolve_release",
     "engine.v2.models.deployment",
     "engine.v2.models.release_layout",
     "engine.v2.models.release_objects",
     "engine.v2.models.releases",
     "engine.v2.models.inventory",
+    "engine.ledger",
+    "engine.paths.LEDGER",
 )
 EXPERIMENT_FORBIDDEN_TOKENS = (
     "model_release_root", "release_store", "release-store",
@@ -119,12 +129,36 @@ def check_files(files: dict[str, bytes]) -> list[Finding]:
         denied += EXPERIMENT_FORBIDDEN_IMPORTS if experiment else ()
         root_aliases = {}
         for imported in ast.walk(tree):
-            if (isinstance(imported, ast.ImportFrom) and imported.module and
-                    (imported.module == "engine.v2.models" or
-                     imported.module.rsplit(".", 1)[-1] == "deployment")):
-                for alias in imported.names:
-                    if alias.name in ROOT_CALLERS:
-                        root_aliases[alias.asname or alias.name] = alias.name
+            if isinstance(imported, ast.ImportFrom):
+                targets = _imports(imported, path)
+                if not targets:
+                    continue
+                base = targets[0]
+                if (base == "engine.v2.models" or
+                        base.rsplit(".", 1)[-1] == "deployment"):
+                    for alias in imported.names:
+                        if alias.name in ROOT_CALLERS:
+                            root_aliases[alias.asname or alias.name] = alias.name
+        changed = True
+        while changed:
+            changed = False
+            for assigned in ast.walk(tree):
+                if not isinstance(assigned, ast.Assign):
+                    continue
+                value = assigned.value
+                if isinstance(value, ast.Attribute):
+                    symbol = value.attr if value.attr in ROOT_CALLERS else None
+                elif isinstance(value, ast.Name):
+                    symbol = root_aliases.get(value.id)
+                else:
+                    symbol = None
+                if symbol is None:
+                    continue
+                for target in assigned.targets:
+                    if (isinstance(target, ast.Name) and
+                            root_aliases.get(target.id) != symbol):
+                        root_aliases[target.id] = symbol
+                        changed = True
         for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 for target in _imports(node, path):
@@ -189,17 +223,128 @@ def _read_source(path: Path) -> bytes:
         os.close(fd)
 
 
+def _git_catalog(root: Path) -> bytes:
+    """Return bounded ``git ls-files`` stdout, draining both pipes before the deadline."""
+    deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
+    try:
+        selector = selectors.DefaultSelector()
+    except OSError as exc:
+        raise IsolationCheckError(
+            f"complete tracked-source scan refused: git ls-files failed: {exc}"
+        ) from exc
+    try:
+        process = subprocess.Popen(
+            ["git", "ls-files", "-z", "--", "*.py"], cwd=root,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        selector.close()
+        raise IsolationCheckError(
+            f"complete tracked-source scan refused: git ls-files failed: {exc}"
+        ) from exc
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    stdout_size = 0
+    stderr_size = 0
+    try:
+        stdout = process.stdout
+        stderr = process.stderr
+        if stdout is None or stderr is None:
+            raise IsolationCheckError(
+                "complete tracked-source scan refused: git ls-files pipes unavailable"
+            )
+        os.set_blocking(stdout.fileno(), False)
+        os.set_blocking(stderr.fileno(), False)
+        selector.register(stdout, selectors.EVENT_READ)
+        selector.register(stderr, selectors.EVENT_READ)
+        open_streams = 2
+        while open_streams:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise IsolationCheckError(
+                    "complete tracked-source scan refused: git ls-files exceeded "
+                    f"{GIT_TIMEOUT_SECONDS}s"
+                )
+            for key, _ in selector.select(remaining):
+                stream = key.fileobj
+                try:
+                    chunk = os.read(stream.fileno(), 64 * 1024)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    open_streams -= 1
+                    continue
+                if stream is stdout:
+                    stdout_size += len(chunk)
+                    if stdout_size > MAX_CATALOG_BYTES:
+                        raise IsolationCheckError(
+                            "complete tracked-source scan refused: git ls-files output "
+                            f"exceeds {MAX_CATALOG_BYTES} bytes"
+                        )
+                    stdout_chunks.append(chunk)
+                elif stderr_size < MAX_CATALOG_STDERR_BYTES:
+                    keep = chunk[:MAX_CATALOG_STDERR_BYTES - stderr_size]
+                    stderr_chunks.append(keep)
+                    stderr_size += len(keep)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise IsolationCheckError(
+                "complete tracked-source scan refused: git ls-files exceeded "
+                f"{GIT_TIMEOUT_SECONDS}s"
+            )
+        try:
+            returncode = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            raise IsolationCheckError(
+                "complete tracked-source scan refused: git ls-files exceeded "
+                f"{GIT_TIMEOUT_SECONDS}s"
+            ) from exc
+        if returncode != 0:
+            diagnostic = b"".join(stderr_chunks).decode("utf-8", "replace").strip()
+            raise IsolationCheckError(
+                "complete tracked-source scan refused: git ls-files exited "
+                f"{returncode}: {diagnostic}"
+            )
+        return b"".join(stdout_chunks)
+    except (OSError, ValueError) as exc:
+        raise IsolationCheckError(
+            f"complete tracked-source scan refused: git ls-files failed: {exc}"
+        ) from exc
+    finally:
+        try:
+            selector.close()
+        finally:
+            try:
+                if process.poll() is None:
+                    process.kill()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=GIT_TIMEOUT_SECONDS)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+
+
 def scan_repository(root: Path = ROOT) -> list[Finding]:
     """Read every tracked Python source; refuse if any part of the scan fails."""
     try:
-        result = subprocess.run(
-            ["git", "ls-files", "-z", "--", "*.py"], cwd=root,
-            capture_output=True, check=True, timeout=GIT_TIMEOUT_SECONDS,
-        )
-        paths = [item.decode("utf-8") for item in result.stdout.split(b"\0") if item]
+        catalog = _git_catalog(root)
+        paths = []
+        for item in catalog.split(b"\0"):
+            if not item:
+                continue
+            try:
+                paths.append(item.decode("utf-8"))
+            except UnicodeDecodeError as exc:
+                raise IsolationCheckError(
+                    f"complete tracked-source scan refused: invalid UTF-8 path: {exc}"
+                ) from exc
         files = {path: _read_source(root / path) for path in paths}
-    except (OSError, UnicodeDecodeError, subprocess.CalledProcessError,
-            subprocess.TimeoutExpired) as exc:
+    except (OSError, UnicodeDecodeError, subprocess.SubprocessError) as exc:
         raise IsolationCheckError(f"complete tracked-source scan refused: {exc}") from exc
     return check_files(files)
 
