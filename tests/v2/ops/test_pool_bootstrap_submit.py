@@ -3,7 +3,9 @@
 Synthetic only, reusing ``test_pool_nightly_refresh``'s fake db/planners: a
 ``NONE`` (missing-pointer) or ``NO_POOL_CATALOG`` prior runs the twelve-phase
 bootstrap training, the ``mode: "bootstrap"`` stage with the four environment
-inputs, and the guarded promote; a ``DAMAGED`` prior refuses.
+inputs, and the guarded promote; a ``DAMAGED`` prior refuses. The prior is
+classified only on the tick that starts a cycle, and recipe-job bookkeeping
+files never reach the stage's state refs.
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ from checks.phase5_release_assembly import (
     PRIOR_DAMAGED,
     PRIOR_NO_POOL_CATALOG,
     PRIOR_NONE,
+    PRIOR_USABLE,
     PriorClass,
 )
 from engine.v2.ops import pool_refresh
@@ -80,8 +83,6 @@ def test_none_prior_submits_the_twelve_training_jobs(monkeypatch, tmp_path, caps
         pool_refresh.phase_key(SESSION, phase, "none", TAG)
         for phase in pool_refresh.BOOTSTRAP_TRAINING_PHASES]
 
-    runup = pool_refresh.runup_entry_date(SESSION)
-    assert runup != SESSION and runup < SESSION
     expected = {
         "train-paired": {"mode": "state", "state": "paired_residual_pool",
                          "cutoffs": (SESSION,)},
@@ -103,13 +104,13 @@ def test_none_prior_submits_the_twelve_training_jobs(monkeypatch, tmp_path, caps
                            "alpha": pool_refresh.FILL_ALPHA, "cutoffs": (SESSION,)},
         "train-surface-runup": {"mode": "recipe",
                                 "recipe": "payoff_surface:STR-RUNUP:calibration",
-                                "alpha": pool_refresh.FILL_ALPHA, "cutoffs": (runup,)},
+                                "alpha": pool_refresh.FILL_ALPHA, "cutoffs": (SESSION,)},
         "train-line-runup": {"mode": "recipe",
                              "recipe": "payoff_line:STR-RUNUP:calibration",
-                             "alpha": pool_refresh.FILL_ALPHA, "cutoffs": (runup,)},
+                             "alpha": pool_refresh.FILL_ALPHA, "cutoffs": (SESSION,)},
         "train-map-runup": {"mode": "recipe",
                             "recipe": "recalibration_map:STR-RUNUP:calibration",
-                            "alpha": pool_refresh.FILL_ALPHA, "cutoffs": (runup,)},
+                            "alpha": pool_refresh.FILL_ALPHA, "cutoffs": (SESSION,)},
     }
     built = _by_phase(rec)
     assert set(built) == set(expected)
@@ -305,14 +306,93 @@ def test_pool_cycle_pending_true_for_a_no_pool_catalog_bootstrap(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# 7. the STR-RUNUP entry date: trading days, weekends and holidays
+# 7. recipe bookkeeping files are not state refs; only the artifacts bind
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("session,expected", [
-    ("2026-01-09", "2025-12-18"),  # Friday: crosses two weekends, Christmas and New Year
-    ("2026-08-10", "2026-07-21"),  # Monday: three weekends, no holiday
-    ("2026-01-02", "2025-12-11"),  # the tests' session: New Year's Day is a holiday
-])
-def test_runup_entry_date_counts_trading_days(session, expected):
-    assert pool_refresh.runup_entry_date(session) == expected
+def test_recipe_bookkeeping_files_are_skipped_by_the_stage_plan(monkeypatch, tmp_path):
+    _env(monkeypatch)
+    rec = _wire(monkeypatch, tmp_path, pointer=None, prior_class=NONE_CLASS)
+    conn = _db()
+    _add_score(conn)
+    bookkeeping = [
+        "training/job.json",
+        "training/summary.json",
+        "training/folds__runup__COMPLETE.json",
+        "training/folds__runup__membership_receipt.json",
+        "training/folds__runup__label_availability_receipt.json",
+    ]
+    jobs = {}
+    for phase in pool_refresh.BOOTSTRAP_TRAINING_PHASES:
+        if phase == "train-line-runup":
+            jobs[phase] = _succeeded_training(
+                conn, phase,
+                bookkeeping + ["training/folds__runup__payoff_artifact.json"],
+                prior="none")
+        elif phase == "train-map-runup":
+            jobs[phase] = _succeeded_training(
+                conn, phase,
+                bookkeeping + ["training/folds__runup__recalibration_artifact.json"],
+                prior="none")
+        else:
+            jobs[phase] = _succeeded_training(conn, phase, [f"training/{phase}.json"],
+                                              prior="none")
+
+    assert _submit(conn, tmp_path) == ["receipt"]  # no refusal on the shared names
+    assert len(rec.stage) == 1
+    refs = rec.stage[0]["state_refs"]
+    expected_refs = {
+        f"{phase}.json": f"{jobs[phase]}#training/{phase}.json"
+        for phase in pool_refresh.BOOTSTRAP_TRAINING_PHASES
+        if phase not in ("train-line-runup", "train-map-runup")}
+    expected_refs["folds__runup__payoff_artifact.json"] = (
+        f"{jobs['train-line-runup']}#training/folds__runup__payoff_artifact.json")
+    expected_refs["folds__runup__recalibration_artifact.json"] = (
+        f"{jobs['train-map-runup']}#training/folds__runup__recalibration_artifact.json")
+    assert refs == expected_refs
+
+
+# --------------------------------------------------------------------------
+# 8. the prior is classified only on the tick that starts the cycle
+# --------------------------------------------------------------------------
+
+
+def test_bootstrap_cycle_classifies_only_on_the_start_tick(monkeypatch, tmp_path):
+    _env(monkeypatch)
+    _wire(monkeypatch, tmp_path, pointer=None, prior_class=NONE_CLASS)
+    calls = []
+
+    def classify(_root, _prior_id):
+        calls.append(1)
+        return NONE_CLASS
+
+    monkeypatch.setattr(pool_refresh, "classify_prior", classify)
+    conn = _db()
+    _add_score(conn)
+    assert len(_submit(conn, tmp_path)) == 12  # the start tick classified once
+    assert len(calls) == 1
+    for phase in pool_refresh.BOOTSTRAP_TRAINING_PHASES:
+        _add_training(conn, phase, prior="none", state="running")
+    assert _submit(conn, tmp_path) == []  # later ticks: keys fix the family
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is True
+    assert len(calls) == 1
+
+
+def test_carry_cycle_classifies_only_on_the_start_tick(monkeypatch, tmp_path):
+    _wire(monkeypatch, tmp_path)
+    calls = []
+
+    def classify(_root, _prior_id):
+        calls.append(1)
+        return PriorClass(PRIOR_USABLE, "the fake prior catalog is usable")
+
+    monkeypatch.setattr(pool_refresh, "classify_prior", classify)
+    conn = _db()
+    _add_score(conn)
+    assert len(_submit(conn, tmp_path)) == 3  # the start tick classified once
+    assert len(calls) == 1
+    for phase in pool_refresh.TRAINING_PHASES:
+        _add_training(conn, phase, state="running")
+    assert _submit(conn, tmp_path) == []  # later ticks: keys fix the family
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is True
+    assert len(calls) == 1
