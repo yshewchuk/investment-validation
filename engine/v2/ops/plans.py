@@ -28,6 +28,8 @@ def check_retrain_section(retrain):
     if not isinstance(retrain, dict) or retrain.get("state") not in ("due", "not_due"):
         raise fail("INVALID_REQUEST", "retrain section must be a mapping with state due or not_due")
     if retrain["state"] != "due":
+        if not all(isinstance(retrain.get(name), str) and retrain[name] for name in ("reason", "base")):
+            raise fail("INVALID_REQUEST", "a not_due retrain section needs reason and base")
         return
     from datetime import date, timedelta
     try:

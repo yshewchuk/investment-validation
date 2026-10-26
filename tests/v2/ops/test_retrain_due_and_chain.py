@@ -356,6 +356,9 @@ def test_plan_retrain_section_is_detached_from_the_callers_dict():
     {"state": "due", "month": "2026-13", "m_end": "2026-13-31", "base": "rel1"},
     {"state": "due", "month": "2026-10", "m_end": "2026-10-15", "base": "rel1"},
     {"state": "due", "month": "2026-09", "m_end": "2026-10-31", "base": "rel1"},
+    {"state": "not_due"},
+    {"state": "not_due", "reason": "x"},
+    {"state": "not_due", "base": "rel1"},
 ])
 def test_malformed_retrain_sections_are_invalid_requests(value):
     import engine.v2.ops.plans
