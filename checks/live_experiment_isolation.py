@@ -108,6 +108,162 @@ def _scope(path: str, roots: tuple[str, ...]) -> bool:
     return any(path.startswith(root) for root in roots)
 
 
+class _Scope:
+    def __init__(self, parent: _Scope | None) -> None:
+        self.parent = parent
+        self.bound: set[str] = set()
+        self.symbols: dict[str, set[str]] = {}
+
+    def bind(self, name: str, symbols: set[str] | None = None) -> None:
+        self.bound.add(name)
+        if symbols:
+            self.symbols.setdefault(name, set()).update(symbols)
+
+    def resolve(self, name: str) -> set[str]:
+        scope: _Scope | None = self
+        while scope is not None:
+            if name in scope.bound:
+                return set(scope.symbols.get(name, ()))
+            scope = scope.parent
+        return set()
+
+
+def _dotted(node: ast.AST) -> str:
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return ""
+
+
+def _target_names(target: ast.AST) -> list[str]:
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for element in target.elts:
+            names.extend(_target_names(element))
+        return names
+    if isinstance(target, ast.Starred):
+        return _target_names(target.value)
+    return []
+
+
+def _dynamic_import_target(
+    node: ast.Call,
+    importlib_modules: set[str],
+    import_module_names: set[str],
+) -> str | None:
+    function = node.func
+    if isinstance(function, ast.Name):
+        is_import = function.id == "__import__" or function.id in import_module_names
+    elif isinstance(function, ast.Attribute):
+        is_import = _dotted(function) == "importlib.import_module" or (
+            isinstance(function.value, ast.Name)
+            and function.value.id in importlib_modules
+            and function.attr == "import_module"
+        )
+    else:
+        is_import = False
+    if not is_import or not node.args:
+        return None
+    first = node.args[0]
+    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+        return first.value
+    return None
+
+
+def _scoped_nodes(
+    tree: ast.Module,
+    path: str,
+    importlib_modules: set[str],
+    import_module_names: set[str],
+) -> tuple[list[tuple[_Scope, ast.Assign]], list[tuple[_Scope, ast.Call]]]:
+    assignments: list[tuple[_Scope, ast.Assign]] = []
+    calls: list[tuple[_Scope, ast.Call]] = []
+    module_scope = _Scope(None)
+
+    def bind_arguments(arguments: ast.arguments, scope: _Scope) -> None:
+        for argument in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs):
+            scope.bind(argument.arg)
+        if arguments.vararg is not None:
+            scope.bind(arguments.vararg.arg)
+        if arguments.kwarg is not None:
+            scope.bind(arguments.kwarg.arg)
+
+    def visit(node: ast.AST, scope: _Scope) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scope.bind(node.name)
+            for item in (*node.decorator_list, *node.args.defaults,
+                         *(node.args.kw_defaults or ())):
+                if item is not None:
+                    visit(item, scope)
+            child = _Scope(scope)
+            bind_arguments(node.args, child)
+            for statement in node.body:
+                visit(statement, child)
+            return
+        if isinstance(node, ast.Lambda):
+            for item in (*node.args.defaults, *(node.args.kw_defaults or ())):
+                if item is not None:
+                    visit(item, scope)
+            child = _Scope(scope)
+            bind_arguments(node.args, child)
+            visit(node.body, child)
+            return
+        if isinstance(node, ast.ClassDef):
+            scope.bind(node.name)
+            for item in (*node.decorator_list, *node.bases,
+                         *(keyword.value for keyword in node.keywords)):
+                visit(item, scope)
+            child = _Scope(scope)
+            for statement in node.body:
+                visit(statement, child)
+            return
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "importlib":
+                    importlib_modules.add(alias.asname or "importlib")
+                scope.bind(alias.asname or alias.name.split(".")[0])
+            return
+        if isinstance(node, ast.ImportFrom):
+            if (node.module or "") == "importlib":
+                for alias in node.names:
+                    if alias.name == "import_module":
+                        import_module_names.add(alias.asname or alias.name)
+            targets = _imports(node, path)
+            if targets:
+                base = targets[0]
+                if (base == "engine.v2.models" or
+                        base.rsplit(".", 1)[-1] == "deployment"):
+                    for alias in node.names:
+                        if alias.name in ROOT_CALLERS:
+                            scope.bind(alias.asname or alias.name, {alias.name})
+            for alias in node.names:
+                if alias.name != "*":
+                    scope.bind(alias.asname or alias.name)
+            return
+        if isinstance(node, ast.Assign):
+            assignments.append((scope, node))
+            for target in node.targets:
+                for name in _target_names(target):
+                    scope.bind(name)
+                visit(target, scope)
+            visit(node.value, scope)
+            return
+        if isinstance(node, ast.Call):
+            calls.append((scope, node))
+        for child in ast.iter_child_nodes(node):
+            visit(child, scope)
+
+    for statement in tree.body:
+        visit(statement, module_scope)
+    return assignments, calls
+
+
 def check_files(files: dict[str, bytes]) -> list[Finding]:
     """Return every static violation; syntax and encoding errors are findings."""
     findings: list[Finding] = []
@@ -123,55 +279,62 @@ def check_files(files: dict[str, bytes]) -> list[Finding]:
             line = getattr(exc, "lineno", 1) or 1
             findings.append(Finding(path, line, "source-invalid", str(exc)))
 
+    def add_forbidden_import(path: str, line: int, detail: str) -> None:
+        key = (path, line, "forbidden-import")
+        if key not in finding_keys:
+            findings.append(Finding(path, line, "forbidden-import", detail))
+            finding_keys.add(key)
+
     for path, tree in trees.items():
         production = _scope(path, PRODUCTION_PATHS)
         experiment = _scope(path, EXPERIMENT_PATHS)
         denied = (PRODUCTION_FORBIDDEN_IMPORTS if production else ())
         denied += EXPERIMENT_FORBIDDEN_IMPORTS if experiment else ()
-        root_aliases = {}
-        for imported in ast.walk(tree):
-            if isinstance(imported, ast.ImportFrom):
-                targets = _imports(imported, path)
-                if not targets:
-                    continue
-                base = targets[0]
-                if (base == "engine.v2.models" or
-                        base.rsplit(".", 1)[-1] == "deployment"):
-                    for alias in imported.names:
-                        if alias.name in ROOT_CALLERS:
-                            root_aliases[alias.asname or alias.name] = alias.name
+        importlib_modules = {"importlib"}
+        import_module_names: set[str] = set()
+        assignments, calls = _scoped_nodes(
+            tree, path, importlib_modules, import_module_names)
         changed = True
         while changed:
             changed = False
-            for assigned in ast.walk(tree):
-                if not isinstance(assigned, ast.Assign):
-                    continue
+            for scope, assigned in assignments:
                 value = assigned.value
                 if isinstance(value, ast.Attribute):
-                    symbol = value.attr if value.attr in ROOT_CALLERS else None
+                    symbols = {value.attr} if value.attr in ROOT_CALLERS else set()
                 elif isinstance(value, ast.Name):
-                    symbol = root_aliases.get(value.id)
+                    symbols = scope.resolve(value.id)
                 else:
-                    symbol = None
-                if symbol is None:
-                    continue
+                    symbols = set()
                 for target in assigned.targets:
-                    if (isinstance(target, ast.Name) and
-                            root_aliases.get(target.id) != symbol):
-                        root_aliases[target.id] = symbol
-                        changed = True
+                    for name in _target_names(target):
+                        current = scope.symbols.setdefault(name, set())
+                        if not symbols.issubset(current):
+                            current.update(symbols)
+                            changed = True
         for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 for target in _imports(node, path):
-                    key = (path, node.lineno, "forbidden-import")
                     refused = _under(target, denied) or (
                         experiment and target == "engine.v2.models")
-                    if refused and key not in finding_keys:
-                        findings.append(Finding(
-                            path, node.lineno, "forbidden-import",
+                    if refused:
+                        add_forbidden_import(
+                            path, node.lineno,
                             f"{target} crosses the D7 isolation boundary",
-                        ))
-                        finding_keys.add(key)
+                        )
+                if experiment and isinstance(node, ast.ImportFrom):
+                    targets = _imports(node, path)
+                    base = targets[0] if targets else ""
+                    star_refused = any(
+                        alias.name == "*" for alias in node.names
+                    ) and any(
+                        root.rpartition(".")[0] == base
+                        for root in EXPERIMENT_FORBIDDEN_IMPORTS
+                    )
+                    if star_refused:
+                        add_forbidden_import(
+                            path, node.lineno,
+                            f"{base} star import exposes a forbidden API",
+                        )
             if experiment and isinstance(node, (ast.Name, ast.Attribute, ast.Constant)):
                 if isinstance(node, ast.Attribute) and node.attr == "LEDGER":
                     findings.append(Finding(
@@ -189,17 +352,42 @@ def check_files(files: dict[str, bytes]) -> list[Finding]:
                                 path, getattr(node, "lineno", 1), "forbidden-live-root",
                                 f"experiment source names isolated live root/token {value!r}",
                             ))
-            if isinstance(node, ast.Call) and not path.startswith("tests/"):
-                function = node.func
-                name = function.id if isinstance(function, ast.Name) else (
-                    function.attr if isinstance(function, ast.Attribute) else "")
-                name = root_aliases.get(name, name)
-                allowed = ROOT_CALLERS.get(name)
-                if allowed is not None and path not in allowed:
-                    findings.append(Finding(
-                        path, node.lineno, "unlisted-root-caller",
-                        f"{name} caller must be reviewed and added to ROOT_CALLERS",
-                    ))
+            if experiment and isinstance(node, ast.Attribute):
+                dotted = _dotted(node)
+                if dotted and _under(dotted, EXPERIMENT_FORBIDDEN_IMPORTS):
+                    add_forbidden_import(
+                        path, node.lineno,
+                        f"{dotted} crosses the D7 isolation boundary",
+                    )
+            if experiment and isinstance(node, ast.Call):
+                target = _dynamic_import_target(
+                    node, importlib_modules, import_module_names)
+                if target and _under(target, EXPERIMENT_FORBIDDEN_IMPORTS):
+                    add_forbidden_import(
+                        path, node.lineno,
+                        f"{target} crosses the D7 isolation boundary",
+                    )
+        if not path.startswith("tests/"):
+            for scope, call in calls:
+                function = call.func
+                if isinstance(function, ast.Name):
+                    symbols = scope.resolve(function.id)
+                    if not symbols and function.id in ROOT_CALLERS:
+                        symbols = {function.id}
+                elif isinstance(function, ast.Attribute):
+                    symbols = scope.resolve(function.attr)
+                    if not symbols and function.attr in ROOT_CALLERS:
+                        symbols = {function.attr}
+                else:
+                    symbols = set()
+                for symbol in symbols:
+                    allowed = ROOT_CALLERS.get(symbol)
+                    if allowed is not None and path not in allowed:
+                        findings.append(Finding(
+                            path, call.lineno, "unlisted-root-caller",
+                            f"{symbol} caller must be reviewed and added to ROOT_CALLERS",
+                        ))
+                        break
     return findings
 
 

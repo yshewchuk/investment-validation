@@ -144,6 +144,95 @@ def test_attribute_aliased_production_root_caller_is_still_enumerated():
     assert _rules(findings) == {"unlisted-root-caller"}
 
 
+def test_experiment_star_import_exposing_live_ledger_is_refused():
+    findings = isolation.check_files({
+        "experiments/star.py": b"from engine.paths import *\np = LEDGER\n",
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert len(findings) == 1
+
+
+def test_experiment_qualified_live_release_attribute_is_refused():
+    findings = isolation.check_files({
+        "experiments/qualified.py": (
+            b"import engine.v2.models.no_fit\n"
+            b"engine.v2.models.current_release(None)\n"
+        ),
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert len(findings) == 1
+
+
+def test_permitted_no_fit_submodule_import_remains_clean():
+    assert isolation.check_files({
+        "experiments/no_fit.py": (
+            b"import engine.v2.models.no_fit\n"
+            b"engine.v2.models.no_fit.prepare()\n"
+        ),
+    }) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"import importlib\n"
+        b"importlib.import_module('engine.v2.models.deployment')\n",
+        b"import importlib as il\n"
+        b"il.import_module('engine.v2.models.deployment')\n",
+        b"from importlib import import_module as load\n"
+        b"load('engine.v2.models.deployment')\n",
+        b"__import__('engine.v2.models.deployment')\n",
+    ],
+)
+def test_experiment_literal_dynamic_import_of_live_module_is_refused(body):
+    findings = isolation.check_files({"experiments/dynamic.py": body})
+    assert _rules(findings) == {"forbidden-import"}
+    assert len(findings) == 1
+
+
+def test_conflicting_resolver_assignments_in_one_scope_do_not_oscillate():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"from engine.v2.models import production_release_root\n"
+            b"from engine.v2.models import production_deployment_root\n"
+            b"alias = production_release_root\n"
+            b"alias = production_deployment_root\n"
+            b"alias()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+    assert [item.line for item in findings] == [5]
+
+
+def test_conflicting_resolver_assignments_in_separate_scopes_do_not_oscillate():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"from engine.v2.models import production_release_root\n"
+            b"from engine.v2.models import production_deployment_root\n"
+            b"def first():\n"
+            b"    alias = production_release_root\n"
+            b"    alias()\n"
+            b"def second():\n"
+            b"    alias = production_deployment_root\n"
+            b"    alias()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+    assert [item.line for item in findings] == [5, 8]
+
+
+def test_resolver_aliases_do_not_leak_between_functions():
+    assert isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"def first():\n"
+            b"    from engine.v2.models import production_release_root as alias\n"
+            b"    alias = alias\n"
+            b"def second():\n"
+            b"    alias()\n"
+        ),
+    }) == []
+
+
 @pytest.mark.parametrize("body", [b"def broken(:\n", b"\xff"])
 def test_invalid_source_is_a_finding_not_a_clean_partial_scan(body):
     findings = isolation.check_files({"experiments/broken.py": body})
