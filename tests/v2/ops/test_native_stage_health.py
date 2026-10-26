@@ -67,6 +67,26 @@ def test_health_writer_trims_jobs_and_preserves_failure(tmp_path):
     assert len(document["jobs"][0]["queue_reason_json"]) == 1_100_000
 
 
+def test_health_writer_drops_oldest_jobs_after_trimming_text(tmp_path):
+    jobs = [{"job_id": f"{index:03d}", "queue_reason_json": "x" * 5_000}
+            for index in range(300)]
+    document = {"schema_version": "operations_health.v1.2",
+                "jobs": jobs,
+                "native_stage_failures": []}
+    target = tmp_path / "health.json"
+    write_health(target, document)
+    result = json.loads(target.read_bytes())
+    assert target.stat().st_size <= 1_048_576
+    truncated = result["health_truncated"]
+    assert truncated["trimmed_text_fields"] == 300
+    dropped = truncated["dropped_jobs"]
+    assert dropped > 0
+    remaining = result["jobs"]
+    assert len(remaining) == 300 - dropped
+    assert remaining[0]["job_id"] == f"{dropped:03d}"
+    assert remaining[-1]["job_id"] == "299"
+
+
 def test_health_writer_refuses_when_mandatory_content_exceeds_cap(tmp_path):
     target = tmp_path / "health.json"
     target.write_bytes(b"prior")

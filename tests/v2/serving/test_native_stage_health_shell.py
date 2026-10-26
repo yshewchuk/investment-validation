@@ -80,6 +80,21 @@ def test_shell_renders_native_failure_as_degraded(tmp_path):
                 arg=reason, timeout=3000)
             assert "native stage failure: occurrence 2026-10-24" in page.locator("#state").inner_text()
             assert "degraded" in page.locator("#ops").get_attribute("class")
+            payload.pop("native_stage_failures")
+            page.reload()
+            missing_reason = "native stage failure evidence missing or malformed: expected an array"
+            page.wait_for_function(
+                "expected => document.querySelector('#state').textContent.includes(expected)",
+                arg=missing_reason, timeout=3000)
+            assert page.locator("#ops").get_attribute("class") == "unknown"
+
+            payload["native_stage_failures"] = [dict(failure, problem_json="{")]
+            page.reload()
+            malformed_reason = "native stage failure problem details malformed"
+            page.wait_for_function(
+                "expected => document.querySelector('#state').textContent.includes(expected)",
+                arg=malformed_reason, timeout=3000)
+            assert page.locator("#ops").get_attribute("class") == "unknown"
             context.close()
         finally:
             server.shutdown()

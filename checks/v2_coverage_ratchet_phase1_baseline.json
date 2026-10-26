@@ -1,6 +1,6 @@
 {
   "schema_version": "phase1_coverage.v1.0",
-  "suite_version": "phase1_coverage_suite.v22",
+  "suite_version": "phase1_coverage_suite.v23",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_dashboard_board_filters_ops_root.py",
@@ -82,7 +82,7 @@
     "tests/test_v2_ops_nightly_calendar_inputs.py",
     "tests/test_v2_ops_nightly_quote_rows.py",
     "tests/test_v2_ops_nightly_raw_rows.py",
-    "tests/test_v2_ops_outcome_session_backfill_wiring.py",
+    "tests/v2/ops/test_outcome_session_backfill_wiring.py",
     "tests/v2/ops/test_partition_consumer.py",
     "tests/test_v2_ops_price_history.py",
     "tests/test_v2_ops_provider_admission.py",
