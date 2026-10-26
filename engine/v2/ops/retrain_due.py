@@ -16,6 +16,10 @@ from pathlib import Path
 STEPS = ("train", "stage", "accept", "check", "promote")
 #: Completed months examined when the base has a ``retrain_cutoff``.
 MAX_LOOKBACK_MONTHS = 12
+#: First month whose retrain is wired (models ARCHITECTURE section 2.3 Rollout: the first
+#: affected nightly is 2026-11-02, for October). Earlier completed months are never due, so
+#: the unavailable chain cannot block the October sessions after deployment.
+FIRST_ELIGIBLE_MONTH = "2026-10"
 _MARKER_DIR = "retrain_superseded"
 _SCAN_LIMIT = 400
 
@@ -37,7 +41,8 @@ def _completed_months(session: date, count: int) -> list[tuple[str, date]]:
     return out
 
 
-def due_decision(session: str, base_retrain_cutoff: str | None, recorded: frozenset) -> dict:
+def due_decision(session: str, base_retrain_cutoff: str | None, recorded: frozenset,
+                 first_month: str = FIRST_ELIGIBLE_MONTH) -> dict:
     """The plan's ``retrain`` section: ``{"state": "not_due", "reason": ...}`` or
     ``{"state": "due", "month", "m_end", "superseded": [older due months]}``."""
     day = date.fromisoformat(session)
@@ -47,8 +52,11 @@ def due_decision(session: str, base_retrain_cutoff: str | None, recorded: frozen
         cutoff = date.fromisoformat(base_retrain_cutoff)
         candidates = [item for item in _completed_months(day, MAX_LOOKBACK_MONTHS)
                       if item[1] + timedelta(days=1) > cutoff]
+    candidates = [item for item in candidates if item[0] >= first_month]
     if not candidates:
-        return {"state": "not_due", "reason": "base_retrain_cutoff_current"}
+        return {"state": "not_due",
+                "reason": "before_first_eligible_month" if _completed_months(day, 1)[0][0] < first_month
+                else "base_retrain_cutoff_current"}
     open_months = [item for item in candidates if item[0] not in recorded]
     if not open_months:
         return {"state": "not_due", "reason": "month_already_recorded"}
@@ -90,10 +98,11 @@ def write_superseded(ops_root, months, target: str, session: str) -> None:
 
 
 def decide(conn, ops_root, session: str, base_release_id: str, *,
-           base_retrain_cutoff: str | None = None) -> dict:
+           base_retrain_cutoff: str | None = None,
+           first_month: str = FIRST_ELIGIBLE_MONTH) -> dict:
     """Evaluate the decision at plan-build time, write markers for older due months and
     log the outcome to stderr. The returned section is pinned into the plan."""
-    decision = due_decision(session, base_retrain_cutoff, read_recorded(conn, ops_root))
+    decision = due_decision(session, base_retrain_cutoff, read_recorded(conn, ops_root), first_month)
     decision["base"] = base_release_id
     if decision["state"] == "due":
         write_superseded(ops_root, decision["superseded"], decision["month"], session)

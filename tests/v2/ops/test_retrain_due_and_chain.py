@@ -35,14 +35,14 @@ def test_due_decision():
     assert decision["m_end"] == "2026-10-31"
     assert decision["superseded"] == []
 
-    decision = due_decision("2026-10-31", None, recorded)
+    decision = due_decision("2026-10-31", None, recorded, first_month="0000-00")
     assert decision["month"] == "2026-09"
 
     decision = due_decision("2026-11-02", None, frozenset({"2026-10"}))
     assert decision["state"] == "not_due"
     assert decision["reason"] == "month_already_recorded"
 
-    decision = due_decision("2026-01-05", None, recorded)
+    decision = due_decision("2026-01-05", None, recorded, first_month="0000-00")
     assert decision["month"] == "2025-12"
     assert decision["m_end"] == "2025-12-31"
 
@@ -50,7 +50,7 @@ def test_due_decision():
     assert decision["month"] == "2026-10"
     assert decision["superseded"] == []
 
-    decision = due_decision("2026-11-02", "2026-08-01", recorded)
+    decision = due_decision("2026-11-02", "2026-08-01", recorded, first_month="0000-00")
     assert decision["month"] == "2026-10"
     assert decision["superseded"] == ["2026-08", "2026-09"]
 
@@ -58,7 +58,7 @@ def test_due_decision():
     assert decision["state"] == "not_due"
     assert decision["reason"] == "base_retrain_cutoff_current"
 
-    decision = due_decision("2024-03-01", None, recorded)
+    decision = due_decision("2024-03-01", None, recorded, first_month="0000-00")
     assert decision["m_end"] == "2024-02-29"
 
     with pytest.raises(ValueError):
@@ -225,7 +225,8 @@ def test_decide_reads_a_real_catalog_and_writes_markers(tmp_path):
     from engine.v2.ops.retrain_due import decide
 
     conn = open_catalog(tmp_path / "catalog.sqlite", clock=SystemClock())
-    decision = decide(conn, tmp_path, "2026-11-02", "rel1", base_retrain_cutoff="2026-08-01")
+    decision = decide(conn, tmp_path, "2026-11-02", "rel1", base_retrain_cutoff="2026-08-01",
+                      first_month="0000-00")
     assert decision["state"] == "due"
     assert decision["month"] == "2026-10"
     assert decision["superseded"] == ["2026-08", "2026-09"]
@@ -310,3 +311,15 @@ def test_pool_cycle_pending_is_false_while_the_chain_blocks(monkeypatch, tmp_pat
     conn.commit()
 
     assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+
+
+def test_october_sessions_are_not_due_before_the_rollout_month():
+    for session in ("2026-10-27", "2026-10-31"):
+        assert due_decision(session, None, frozenset()) == {
+            "state": "not_due", "reason": "before_first_eligible_month"}
+
+
+def test_first_november_session_is_due_for_october():
+    assert due_decision("2026-11-02", None, frozenset())["month"] == "2026-10"
+    decision = due_decision("2026-11-02", "2026-08-01", frozenset())
+    assert decision["superseded"] == []
