@@ -32,12 +32,12 @@ over seven independently scored member rows.
 | Piece | Where |
 |---|---|
 | Menu constant, DYN-SV registry entry (`chooser` role `dyn_sv_chooser_v1_1`) | `engine/v2/registry/strategies.py:15,89-141` |
-| One `DYN-SV` `BoardRequest` per event, last in the universe | `ops/native_board_universe.py:216-251` |
-| Chooser feature derivation (50 computed columns) | `scoring/native_chooser_features.py`, `native_chooser.py` |
-| Chooser block from a bundle (`chooser_recipe`, fold pools, analog pool, admissible table) | `scoring/chooser_inputs.py` (`chooser_block`, line ~85) |
-| Frozen state: `admissible_table:dyn_sv`, `chooser_analog_pool` | `scoring/release_bindings.py:75-76,164-165` (resolved, not consumed by the nightly) |
-| Menu accounting: one outcome per member, record or typed refusal, `INVALID_CHOOSER_MENU` / `CHOOSER_MENU_INCOMPLETE` | `scoring/dynamic_outcomes.py` |
-| Selection over scored records (`_choose_dynamic`: chooser_score else exp_pnl_sim, margin, tie, `NO_CHOOSER_CANDIDATE`) | `scoring/application.py:1439`; called by `score_event` and, as a private import, `tools/phase4_targeted_replay.py:661` (via `phase4_real.application`) |
+| One `DYN-SV` `BoardRequest` per event, last in the universe | `engine/v2/ops/native_board_universe.py:216-251` |
+| Chooser feature derivation (50 computed columns) | `engine/v2/scoring/native_chooser_features.py`, `native_chooser.py` |
+| Chooser block from a bundle (`chooser_recipe`, fold pools, analog pool, admissible table) | `engine/v2/scoring/chooser_inputs.py` (`chooser_block`, line ~85) |
+| Frozen state: `admissible_table:dyn_sv`, `chooser_analog_pool` | `engine/v2/scoring/release_bindings.py:75-76,164-165` (resolved, not consumed by the nightly) |
+| Menu accounting: one outcome per member, record or typed refusal, `INVALID_CHOOSER_MENU` / `CHOOSER_MENU_INCOMPLETE` | `engine/v2/scoring/dynamic_outcomes.py` |
+| Selection over scored records (`_choose_dynamic`: chooser_score else exp_pnl_sim, margin, tie, `NO_CHOOSER_CANDIDATE`) | `engine/v2/scoring/application.py:1439`; called by `score_event` and, as a private import, `tools/phase4_targeted_replay.py:661` (via `phase4_real.application`) |
 | Geometry, size tables, entry-rule gate for the members | steps 1-5 |
 
 ## 3. What is missing
@@ -95,8 +95,10 @@ CND-PS steps of #1157) register them. DYN-SV reuses those exact records instead 
   `exp_pnl_sim` fallback (`score.py:5223`) uses default quicksort, so fallback ties
   are unspecified there. Legacy's stable order is its frame (scoring) order, while
   native's is `DYNAMIC_MENU` order; the board universe's request order
-  (`native_board_universe.py:50`) may differ from both. Slice 2 measures real ties
-  and records the result.
+  (`native_board_universe.py:50`) may differ from both. `component_contracts.md`
+  §9.4 requires preserving the actual baseline tie behaviour, so `DYNAMIC_MENU`
+  order is only the default: slice 2 measures the baseline tie order on real events
+  and pins native to it, and a mismatch is a slice 2 finding, not a design choice.
 - R7 identity for refusal-only events: when every member refused there is no record
   to carry the event identity, so the post-pass builds `DynamicMenuIdentity` from the
   event context (calendar row, snapshot, release) the worker already holds, never
