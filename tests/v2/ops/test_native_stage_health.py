@@ -9,6 +9,7 @@ from engine.v2.ops import cli
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.health import health, write_health
+from engine.v2.ops.schema import NATIVE_STAGE_FAILURE_TEXT_BYTES
 from tests.ops_support import seed_delivered_health_release
 
 
@@ -21,14 +22,16 @@ def _problem():
             "details": {"reason": "NO_CURRENT_RELEASE"}}
 
 
-def _insert(conn, occurrence, *, resolved_at=None):
+def _insert(conn, occurrence, *, resolved_at=None, scope_hash="scope",
+            stage_id="native_score_batch", problem_json=None):
     stamp = "2026-01-01T00:00:00Z"
+    if problem_json is None:
+        problem_json = json.dumps(_problem(), sort_keys=True, separators=(",", ":"))
     conn.execute(
         "INSERT INTO native_stage_failures "
         "(occurrence,scope_hash,stage_id,status,error_code,problem_json,created_at,updated_at,resolved_at) "
         "VALUES (?,?,?,'FAILED','MODEL_NOT_READY',?,?,?,?)",
-        (occurrence, "scope", "native_score_batch",
-         json.dumps(_problem(), sort_keys=True, separators=(",", ":")),
+        (occurrence, scope_hash, stage_id, problem_json,
          stamp, stamp, resolved_at))
 
 
@@ -44,9 +47,55 @@ def test_health_projects_only_newest_100_unresolved_failures(tmp_path):
         _insert(conn, "999", resolved_at="2026-01-02T00:00:00Z")
         rows = health(conn, clock=clock)["native_stage_failures"]
         assert [row["occurrence"] for row in rows] == [f"{i:03d}" for i in range(100, 0, -1)]
+        assert rows[0]["scope_hash"] == "scope"
+        assert rows[0]["stage_id"] == "native_score_batch"
+        assert rows[0]["occurrence"] == "100"
         assert rows[0]["status"] == "FAILED"
         assert rows[0]["error_code"] == "MODEL_NOT_READY"
         assert json.loads(rows[0]["problem_json"]) == _problem()
+    finally:
+        conn.close()
+
+
+def test_health_projection_orders_ties_by_scope_and_stage(tmp_path):
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "catalog.sqlite", clock=clock)
+    seed_delivered_health_release(conn, release_id="health-release",
+                                  requested_session="2026-01-01",
+                                  resolved_session="2026-01-01")
+    try:
+        _insert(conn, "same", scope_hash="z-scope", stage_id="native_score_batch")
+        _insert(conn, "same", scope_hash="a-scope", stage_id="stage-b")
+        _insert(conn, "same", scope_hash="a-scope", stage_id="stage-a")
+        rows = health(conn, clock=clock)["native_stage_failures"]
+        assert [(row["scope_hash"], row["stage_id"]) for row in rows] == [
+            ("a-scope", "stage-a"),
+            ("a-scope", "stage-b"),
+            ("z-scope", "native_score_batch"),
+        ]
+    finally:
+        conn.close()
+
+
+def test_health_projection_replaces_oversized_durable_failure_text(tmp_path):
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "catalog.sqlite", clock=clock)
+    seed_delivered_health_release(conn, release_id="health-release",
+                                  requested_session="2026-01-01",
+                                  resolved_session="2026-01-01")
+    try:
+        conn.execute("PRAGMA ignore_check_constraints = ON")
+        _insert(conn, "oversized",
+                problem_json="x" * (NATIVE_STAGE_FAILURE_TEXT_BYTES["problem_json"] + 1))
+        conn.execute("PRAGMA ignore_check_constraints = OFF")
+        rows = health(conn, clock=clock)["native_stage_failures"]
+        row = rows[0]
+        assert row["occurrence"] == "oversized"
+        assert row["scope_hash"] == "scope"
+        assert row["stage_id"] == "native_score_batch"
+        assert row["status"] == "FAILED"
+        assert row["error_code"] == "RESOURCE_LIMIT_EXCEEDED"
+        assert json.loads(row["problem_json"])["code"] == "RESOURCE_LIMIT_EXCEEDED"
     finally:
         conn.close()
 
