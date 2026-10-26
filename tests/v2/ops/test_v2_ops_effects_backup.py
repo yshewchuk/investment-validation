@@ -51,8 +51,10 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path, monkeypatch):
     assert error.value.code == "INVALID_REQUEST"
     manifest_path = next(backup.glob("*.manifest.json"))
     manifest_path.write_bytes(b"x" * (1024 * 1024 + 1))
-    with pytest.raises(ValueError, match="not a bounded regular file"):
+    with pytest.raises(OpsError) as error:
         restore_backup(backup, tmp_path / "restored-oversized-manifest")
+    assert error.value.code == "INTEGRITY_FAILED"
+    assert error.value.problem.message == "backup manifest is invalid"
 
 
 def test_backup_copy_failure_remains_retryable(tmp_path):
@@ -131,8 +133,8 @@ def test_backup_rejects_non_ok_quick_check(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(("contents", "message"), [
     (b"", "backup database is empty"),
-    (b"not a sqlite database", "backup database size differs from source"),
-    ("oversized", "backup database size differs from source"),
+    (b"not a sqlite database", "backup database verification failed"),
+    ("oversized", "backup database size differs from its page count"),
 ])
 def test_backup_bad_copy_remains_retryable(tmp_path, monkeypatch, contents, message):
     conn, clock, _ = catalog(tmp_path)
@@ -279,18 +281,20 @@ def test_backup_cleanup_failure_is_retryable(tmp_path, monkeypatch):
     assert cleanup_attempts == [backup / "cleanup-failure.sqlite"]
 
 
-def test_backup_rejects_existing_copy_with_source_size_mismatch(tmp_path):
+def test_backup_reject_existing_copy_with_invalid_sqlite(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     prepare_backup(conn, "fk-copy", {}, clock=clock)
     backup = tmp_path / "backup"
     backup.mkdir()
     destination = backup / "fk-copy.sqlite"
-    destination.write_bytes(b"partial")
+    backup_module.backup_to(conn, destination)
+    with destination.open("r+b") as stream:
+        stream.write(b"x")
     with pytest.raises(OpsError) as error:
         run_backup(conn, key="fk-copy", owner="worker", target=backup, clock=clock, store=store)
     assert error.value.code == "BACKUP_FAILED"
-    assert error.value.problem.message == "backup database size differs from source"
+    assert error.value.problem.message == "backup database verification failed"
     assert error.value.problem.retryable is True
     assert not destination.exists()
     state = conn.execute(
@@ -490,6 +494,21 @@ def test_backup_accept_manifest_at_size_cap(tmp_path):
     ).fetchone()[0] == "delivered"
 
 
+def test_backup_rejects_manifest_exceeding_size_limit(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "small-limit", {}, clock=clock)
+    backup = tmp_path / "backup"
+    monkeypatch.setattr(backup_module, "_MAX_MANIFEST_BYTES", 1)
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key="small-limit", owner="worker", target=backup,
+                   clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.message == "backup manifest exceeds 1 MiB"
+    assert error.value.problem.retryable is True
+    assert not (backup / "small-limit.manifest.json").exists()
+
+
 def test_manifest_success_before_ack_is_idempotent_and_keys_are_safe(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
@@ -506,6 +525,8 @@ def test_manifest_success_before_ack_is_idempotent_and_keys_are_safe(tmp_path):
                    fault=crash)
     first = (backup / "b3.manifest.json").read_bytes()
     clock.advance(301)
+    conn.execute("CREATE TABLE backup_growth(value TEXT)")
+    conn.executemany("INSERT INTO backup_growth(value) VALUES (?)", [("x" * 1000,)] * 1000)
     second = run_backup(conn, key="b3", owner="retry", target=backup, clock=clock, store=store)
     assert (backup / "b3.manifest.json").read_bytes() == first
     assert second["cutoff"] == "2026-09-12T00:00:00.000000Z"
