@@ -228,7 +228,7 @@ old = ["nightly:legacy settle", "cli:engine.ledger score", "writer:engine/ledger
 new = ["nightly:v2 settlement", "action:legacy_settlement", "py:engine/v2/ops/decision_commit.py::import_settlement_candidates_in_transaction"]
 producer = "legacy_settlement action (engine.ledger.score_outcomes) imported into the catalog"
 identity = "outcome generation_ref + settlement watermark"
-tests = ["tests/test_v2_ops_outcome_session_backfill_wiring.py", "tests/test_v2_ops_critical_review.py", "tests/test_ledger.py"]
+tests = ["tests/v2/ops/test_outcome_session_backfill_wiring.py", "tests/test_v2_ops_critical_review.py", "tests/test_ledger.py"]
 disposition = "compatibility-adapter"
 owner = "P6-3"
 
