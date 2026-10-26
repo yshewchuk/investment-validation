@@ -25,6 +25,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
+from engine.v2.foundation import SystemClock  # noqa: E402
 from engine.v2.ops import nightly_trigger  # noqa: E402
 from engine.v2.ops.errors import OpsError, fail, make_problem  # noqa: E402
 from engine.v2.ops.nightly_trigger import (  # noqa: E402
@@ -918,9 +919,10 @@ class _DummyConn:
 
 
 @pytest.fixture(autouse=True)
-def _retrain_decision_not_under_test(monkeypatch):
+def _retrain_decision_not_under_test(monkeypatch, tmp_path):
     """#805 slice 2: these tests stand in a dummy catalog; the decision itself is covered in
     test_retrain_due_and_chain.py against a real catalog."""
+    _open_ops_catalog(tmp_path, SystemClock()).close()
     monkeypatch.setattr(nightly_trigger.retrain_due, "decide",
                         lambda conn, ops_root, session, base, **_: {
                             "state": "not_due", "reason": "test", "base": base})

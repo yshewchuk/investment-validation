@@ -42,6 +42,17 @@ def object_cutoff(member: str, name: str, cutoff: str) -> str:
     return cutoff if member == "trailing_pnl_cutoff" else name.rsplit("|", 1)[-1]
 
 
+def _validate_monthly_object_cutoffs(new: dict[str, dict[str, bytes]],
+                                    retrain_cutoff: str) -> None:
+    """Every monthly object name must record exactly the retrain cutoff."""
+    for member, objects in new.items():
+        for name in objects:
+            if object_cutoff(member, name, retrain_cutoff) != retrain_cutoff:
+                raise StageRefused(
+                    "a monthly object name cutoff disagrees with retrain_cutoff",
+                    {"code": "CUTOFF_MISMATCH"})
+
+
 def classify(root: Path, names, *, monthly: bool = False) -> dict[str, dict[str, bytes]]:
     """Load the bound state files; they must cover exactly the required members."""
     from engine.v2.models.frozen_state import FrozenStateError
@@ -181,6 +192,7 @@ def _stage_monthly_candidate(parameters, root: Path) -> dict:
     if prior_class.kind != PRIOR_USABLE:
         raise StageRefused("prior release could not be read", {"code": "PRIOR_MISMATCH"})
     new = classify(Path(root), parameters["state_files"], monthly=True)
+    _validate_monthly_object_cutoffs(new, retrain_cutoff)
     try:
         _, carried = prior_carry_set(release_root, base_id, monthly=True)
     except ReleaseAssemblyRefusal as exc:

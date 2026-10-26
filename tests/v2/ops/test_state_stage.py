@@ -302,6 +302,18 @@ def test_monthly_retrain_cutoff_equal_to_the_prior_is_refused(tmp_path):
     assert err.value.code == "CUTOFF_NOT_ADVANCED"
 
 
+@pytest.mark.parametrize("member,name", [
+    ("driver_residual_pool:size", "size|2026-10-31"),
+    ("chooser_analog_pool", "chooser|2026-10-31"),
+])
+def test_monthly_object_name_cutoff_must_match_the_retrain_cutoff(member, name):
+    from tools import phase5_state_stage_job as job
+
+    with pytest.raises(job.StageRefused) as err:
+        job._validate_monthly_object_cutoffs({member: {name: b"x"}}, "2026-11-01")
+    assert err.value.details == {"code": "CUTOFF_MISMATCH"}
+
+
 def test_monthly_stage_refuses_a_missing_deployed_base(tmp_path, monkeypatch):
     parameters, staging = _wire(tmp_path, monkeypatch, mode="monthly")
     with pytest.raises(OpsError) as err:

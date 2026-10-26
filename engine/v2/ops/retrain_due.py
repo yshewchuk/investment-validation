@@ -60,6 +60,11 @@ def read_base_retrain_cutoff(release_root, release_id):
         path = catalog_path(Path(release_root), release_id)
         catalog = read_catalog(path, release_id)
         sources = catalog["sources"]
+        if "pool_cutoff" in sources:
+            pool_cutoff = sources["pool_cutoff"]
+            if not isinstance(pool_cutoff, str) or \
+                    date.fromisoformat(pool_cutoff).isoformat() != pool_cutoff:
+                raise ValueError("invalid sources.pool_cutoff")
         if "retrain_cutoff" not in sources:
             return None
         return sources["retrain_cutoff"]

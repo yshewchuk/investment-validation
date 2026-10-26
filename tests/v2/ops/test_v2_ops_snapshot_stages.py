@@ -1284,6 +1284,7 @@ def test_trigger_real_cli_plan_checks_verified_snapshot(case, monkeypatch, move_
     # Reuse the existing synthetic capture and real snapshot/catalog fixtures.
     args = parser().parse_args(_plan_files(case))
     open_catalog = bootstrap.open_catalog
+    open_catalog(case.root / "catalog.sqlite", clock=case.clock).close()
     monkeypatch.setattr(bootstrap, "open_catalog", lambda path, **kwargs:
                         open_catalog(case.tmp / "catalog.sqlite", **kwargs))
     monkeypatch.setattr(nightly_trigger, "_ops_root", lambda root: case.root)
