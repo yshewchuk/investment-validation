@@ -763,6 +763,21 @@ class Service:
 
     def _report_native_release_problem(self, detail_code, message, *, occurrence, scope_hash):
         """Persist and deduplicate a typed native stage release failure."""
+        # A later release check must not reopen a failure after this exact
+        # occurrence/scope already completed its native batch successfully.
+        key = f"nightly:{occurrence}:{scope_hash}:native_score_batch"
+        try:
+            succeeded = self.conn.execute(
+                "SELECT 1 FROM jobs WHERE kind = ? AND idempotency_key = ? "
+                "AND state = 'succeeded' LIMIT 1",
+                ("native_score_batch", key)).fetchone()
+        except Exception as exc:
+            print(json.dumps({"event": "native_stage_failure_success_lookup_failed",
+                              "occurrence": occurrence, "stage_id": "native_score_batch",
+                              "exception_type": type(exc).__name__}))
+            return
+        if succeeded is not None:
+            return
         problem = make_problem(
             "MODEL_NOT_READY", "native score batch release binding is unavailable",
             details={"reason": detail_code})

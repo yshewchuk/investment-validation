@@ -1342,12 +1342,21 @@ def main(argv=None):
                 root.chmod(0o700)
             if not root.is_dir():
                 raise fail("INVALID_REQUEST", "operations root must be initialized first")
-            conn = open_catalog(root / "catalog.sqlite", clock=clock)
-            try:
-                _ensure_outcome_sessions_backfilled(conn, root, clock)
-                document = dispatch(args, root, conn, clock)
-            finally:
-                conn.close()
+            if args.command == "health":
+                catalog = root / "catalog.sqlite"
+                conn = sqlite3.connect(catalog.resolve().as_uri() + "?mode=ro", uri=True)
+                conn.row_factory = sqlite3.Row
+                try:
+                    document = dispatch(args, root, conn, clock)
+                finally:
+                    conn.close()
+            else:
+                conn = open_catalog(root / "catalog.sqlite", clock=clock)
+                try:
+                    _ensure_outcome_sessions_backfilled(conn, root, clock)
+                    document = dispatch(args, root, conn, clock)
+                finally:
+                    conn.close()
         _print_result(args, document)
         return document.get("exit_code", 0) if args.command == "headroom" else 0
     except OpsError as exc:

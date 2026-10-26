@@ -1215,4 +1215,21 @@ def test_failed_native_batch_stays_failed_after_release_success_then_resolves(
         "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
         ("2026-01-15", "scope-hash", "native_score_batch")).fetchone()
     assert row["resolved_at"] is not None
+
+    # The retained success identity suppresses a later release failure for
+    # this occurrence/scope; recovery history stays resolved.
+    conn.execute("UPDATE jobs SET state = 'succeeded' WHERE job_id = ?", (claim.job_id,))
+    service._native_release_memo = None
+
+    def unavailable():
+        raise release_bindings.ModelNotReady("test model unavailable")
+
+    monkeypatch.setattr(release_bindings, "resolve_production_release_binding", unavailable)
+    assert service._native_release_root_or_none(
+        occurrence="2026-01-15", scope_hash="scope-hash") is None
+    row = conn.execute(
+        "SELECT resolved_at FROM native_stage_failures "
+        "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
+        ("2026-01-15", "scope-hash", "native_score_batch")).fetchone()
+    assert row["resolved_at"] is not None
     conn.close()

@@ -171,6 +171,26 @@ export interface OperationsStatus {
   schema_version: "operations_status.v1.0";
 }
 
+/** Durable failed native stage row projected by operations_health.v1.2. */
+export interface NativeStageFailure {
+  occurrence: string;
+  scope_hash: string;
+  stage_id: string;
+  status: "FAILED";
+  error_code: string;
+  /** Canonical JSON text for a typed problem.v1.0 envelope. */
+  problem_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Additive health surface consumed by the operations shell. */
+export interface OperationsHealthV12 {
+  schema_version: "operations_health.v1.2";
+  generated_at: string;
+  native_stage_failures: NativeStageFailure[];
+}
+
 /**
  * The real `Problem` envelope (`problem.v1.0`, component_contracts.md
  * §2.4), read directly -- `engine/v2/serving/api.py` (P3-2, in review) uses
