@@ -1,6 +1,7 @@
 """#805 slice 2: due-month decision, durable records and the retrain/pool-sidecar chain."""
 from __future__ import annotations
 
+import copy
 import json
 import sqlite3
 from pathlib import Path
@@ -139,10 +140,11 @@ def test_not_due_plan_has_restage_only():
     retrain = _retrain_requests(requests)
     assert len(retrain) == 1
     assert retrain[0].job.parameters["step"] == "restage"
-    ph = plan["plan_hash"][:12]
-    key = f"retrain-restage:2026-09-18:{ph}"
-    assert retrain[0].idempotency_key == key
     score = _score_request(requests)
+    score_id = job_id_for("shadow", score.idempotency_key)
+    suffix = score_id.rsplit("_", 1)[-1][:16]
+    key = f"retrain-restage:2026-09-18:{suffix}"
+    assert retrain[0].idempotency_key == key
     assert job_id_for("shadow", key) in score.job.dependency_job_ids
     assert requests.index(retrain[0]) < requests.index(score)
 
@@ -157,14 +159,16 @@ def test_due_plan_has_six_retrain_steps():
     requests = _requests(plan)
     retrain = _retrain_requests(requests)
     assert len(retrain) == 6
-    ph = plan["plan_hash"][:12]
+    score = _score_request(requests)
+    score_id = job_id_for("shadow", score.idempotency_key)
+    suffix = score_id.rsplit("_", 1)[-1][:16]
     expected_keys = [
-        f"retrain-restage:2026-09-18:{ph}",
-        f"retrain-train:2026-09-18:2026-10:rel1:{ph}",
-        f"retrain-stage:2026-09-18:2026-10:rel1:{ph}",
-        f"retrain-accept:2026-09-18:2026-10:rel1:{ph}",
-        f"retrain-check:2026-09-18:2026-10:rel1:{ph}",
-        f"retrain-promote:2026-09-18:2026-10:rel1:{ph}",
+        f"retrain-restage:2026-09-18:{suffix}",
+        f"retrain-train:2026-09-18:2026-10:rel1:{suffix}",
+        f"retrain-stage:2026-09-18:2026-10:rel1:{suffix}",
+        f"retrain-accept:2026-09-18:2026-10:rel1:{suffix}",
+        f"retrain-check:2026-09-18:2026-10:rel1:{suffix}",
+        f"retrain-promote:2026-09-18:2026-10:rel1:{suffix}",
     ]
     for request, key in zip(retrain, expected_keys):
         assert request.idempotency_key == key
@@ -173,8 +177,7 @@ def test_due_plan_has_six_retrain_steps():
     for previous, current in zip(retrain, retrain[1:]):
         assert job_id_for("shadow", previous.idempotency_key) in current.job.dependency_job_ids
 
-    score = _score_request(requests)
-    last_key = f"retrain-promote:2026-09-18:2026-10:rel1:{ph}"
+    last_key = f"retrain-promote:2026-09-18:2026-10:rel1:{suffix}"
     assert job_id_for("shadow", last_key) in score.job.dependency_job_ids
 
 
@@ -184,15 +187,37 @@ def test_replan_gets_fresh_retrain_keys():
     plan2 = base_plan.copy()
     plan1["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
     plan2["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
-    plan1["plan_hash"] = "aaaa11112222"
-    plan2["plan_hash"] = "bbbb33334444"
-    retrain1 = _retrain_requests(_requests(plan1))
-    retrain2 = _retrain_requests(_requests(plan2))
+    plan1["plan_hash"] = "a" * 64
+    plan2["plan_hash"] = "a" * 64
+    plan1["decision_clock"] = "2026-09-18T10:00:00Z"
+    plan2["decision_clock"] = "2026-09-18T11:00:00Z"
+    requests1 = _requests(plan1)
+    requests2 = _requests(plan2)
+    retrain1 = _retrain_requests(requests1)
+    retrain2 = _retrain_requests(requests2)
     assert len(retrain1) == 1
     assert len(retrain2) == 1
     id1 = job_id_for("shadow", retrain1[0].idempotency_key)
     id2 = job_id_for("shadow", retrain2[0].idempotency_key)
     assert id1 != id2
+    score1 = _score_request(requests1)
+    score2 = _score_request(requests2)
+    assert id1 in score1.job.dependency_job_ids
+    assert id2 in score2.job.dependency_job_ids
+    assert id1 not in score2.job.dependency_job_ids
+    assert id2 not in score1.job.dependency_job_ids
+
+
+def test_unchanged_saved_plan_resubmission_reuses_the_same_keys():
+    plan = _plan()
+    plan["plan_hash"] = "a" * 64
+    plan["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
+    retrain1 = _retrain_requests(_requests(copy.deepcopy(plan)))
+    retrain2 = _retrain_requests(_requests(copy.deepcopy(plan)))
+    assert len(retrain1) == 1
+    assert len(retrain2) == 1
+    assert retrain1[0].idempotency_key == retrain2[0].idempotency_key
+    assert [r.idempotency_key for r in retrain1] == [r.idempotency_key for r in retrain2]
 
 
 def test_worker_restage_stub(tmp_path):

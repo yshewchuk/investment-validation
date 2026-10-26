@@ -22,7 +22,7 @@ KIND = "retrain_step"
 def step_key(step: str, session: str, month: str, base: str, plan_hash: str) -> str:
     """``retrain-restage:{session}:{plan_hash}`` or ``retrain-{step}:{session}:{M}:{base}:{plan_hash}`` (R6).
 
-    ``plan_hash`` is the first 12 characters of the plan hash, so a same-session replan
+    ``plan_hash`` is the plan generation token (16 hex characters), so a same-session replan
     with a changed manifest gets fresh jobs."""
     if step == "restage":
         return f"retrain-restage:{session}:{plan_hash}"
@@ -51,7 +51,11 @@ def attach_retrain_chain(plan, requests, keys, implementation_ref, runtime, cont
     from engine.v2.ops.plans import check_retrain_section
     check_retrain_section(section)
     session = plan["session"]
-    ph = str(plan["plan_hash"])[:12]
+    # The plan generation: the score stage's job id embeds the scope hash (decision clock,
+    # implementation, manifest) that every ordinary stage key carries; plan_hash alone does not
+    # change on an unchanged-input replan. Without a score stage, fall back to the plan hash.
+    ph = (keys["score"].rsplit("_", 1)[-1] if "score" in keys
+          else str(plan["plan_hash"]).rsplit(":", 1)[-1])[:16]
     refresh = (keys["refresh"],) if "refresh" in keys else ()
     restage_key = step_key("restage", session, "", "", ph)
     chain = [_request("restage", restage_key, session, "", "", refresh,
