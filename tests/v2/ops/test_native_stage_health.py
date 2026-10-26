@@ -9,6 +9,7 @@ from engine.v2.ops import cli
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.health import health, write_health
+from tests.ops_support import seed_delivered_health_release
 
 
 def _problem():
@@ -34,6 +35,9 @@ def _insert(conn, occurrence, *, resolved_at=None):
 def test_health_projects_only_newest_100_unresolved_failures(tmp_path):
     clock = SystemClock()
     conn = open_catalog(tmp_path / "catalog.sqlite", clock=clock)
+    seed_delivered_health_release(conn, release_id="health-release",
+                                  requested_session="2026-01-01",
+                                  resolved_session="2026-01-01")
     try:
         for index in range(101):
             _insert(conn, f"{index:03d}")

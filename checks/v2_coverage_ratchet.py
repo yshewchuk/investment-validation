@@ -220,7 +220,7 @@ def package_counts(document, root=ROOT):
 # --------------------------------------------------------------------------
 
 PHASE1_BASELINE = ROOT / "checks/v2_coverage_ratchet_phase1_baseline.json"
-PHASE1_SUITE_VERSION = "phase1_coverage_suite.v22"
+PHASE1_SUITE_VERSION = "phase1_coverage_suite.v23"
 
 
 # Baseline tests whose file was renamed (not just moved) after the baseline was written.
@@ -238,6 +238,7 @@ PHASE1_RENAMED = {
     "tests/test_v2_ops_training_job.py": "tests/v2/ops/test_v2_ops_training_job.py",
     "tests/test_v2_ops_health.py": "tests/v2/ops/test_v2_ops_health.py",
     "tests/test_v2_ops_serving_browser.py": "tests/v2/serving/test_ops_serving_browser.py",
+    "tests/test_v2_ops_outcome_session_backfill_wiring.py": "tests/v2/ops/test_outcome_session_backfill_wiring.py",
 }
 # Relocated tests kept explicitly in the suite, including moved baseline paths.
 PHASE1_EXTRA = (
@@ -246,6 +247,7 @@ PHASE1_EXTRA = (
     "tests/v2/ops/test_forward_calendar_store.py",
     "tests/v2/ops/test_v2_ops_calendar_moves_jobs.py",
     "tests/v2/ops/test_v2_ops_refresh_staging.py",
+    "tests/v2/ops/test_outcome_session_backfill_wiring.py",
 )
 
 

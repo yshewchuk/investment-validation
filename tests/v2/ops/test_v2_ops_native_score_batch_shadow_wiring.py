@@ -1218,7 +1218,8 @@ def test_failed_native_batch_stays_failed_after_release_success_then_resolves(
 
     # The retained success identity suppresses a later release failure for
     # this occurrence/scope; recovery history stays resolved.
-    conn.execute("UPDATE jobs SET state = 'succeeded' WHERE job_id = ?", (claim.job_id,))
+    conn.execute("UPDATE jobs SET state = 'succeeded', active_attempt_id = NULL WHERE job_id = ?",
+                 (claim.job_id,))
     service._native_release_memo = None
 
     def unavailable():
