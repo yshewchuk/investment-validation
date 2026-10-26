@@ -256,12 +256,15 @@ elapsed/rate/ETA, refusals and stage RSS; no per-event logging or extra scans.
 | Unsupported exact contract/ref | UNSUPPORTED_CONTRACT |
 | Explicit cap exceeded | RESULT_LIMIT_EXCEEDED |
 | Semantic duplicate/date/cluster conflict | IDENTITY_CONFLICT |
-| Native integrity/query/object/availability failure | Preserve native DataError code and retryability; no relabeling as empty. |
+| Native integrity/query/object/availability failure | Preserve the complete native DataError envelope; no relabeling as empty. |
 
 Native duplicate-primary-key detection can raise MANIFEST_CORRUPT before the
 semantic conflict check; preserve it. Do not catch all native errors as generic
-CONTRACT_MISMATCH. Every failure is all-or-nothing, with redacted messages and no
-values, paths, partial index, artifact/catalog writes or contributor claims.
+CONTRACT_MISMATCH. Every failure is all-or-nothing: no partial index, artifact/
+catalog writes or contributor claims. Newly mapped failures use fixed messages;
+existing native DataErrors retain code, category, retryability, stage, message
+and details, including identity-builder diagnostics. Credentials/tokens must
+never enter logs; this diagnostic rule does not relax publication hygiene.
 
 ## Acceptance and small implementation sequence
 
@@ -277,6 +280,17 @@ Packaging amendment: existing 1.B1b and P3a foundations may share one PR under
 the repository's separate non-test-code and documentation caps instead of the
 combined-line target above. Contracts, dependencies and acceptance tests remain
 unchanged; this does not enable execution or B2. 1.M1 remains separately reviewed.
+B2 likewise uses the repository separate non-test-code/documentation caps, not
+the combined-line estimate, to keep identity checks and synthetic oracles in one
+review unit. Scientific scope, acceptance and later session/scanner work stay unchanged.
+B3a/B3b share one session/scanner PR under separate non-test-code/documentation
+caps to reduce review-queue overhead. Factory lifecycle and native scanner
+wiring remain distinct acceptance areas; scientific/acceptance semantics and
+all later index/coverage dependencies are unchanged.
+B2, B3a and B3b may also share one identity/session/scanner review unit under
+the same separate category caps. Each acceptance boundary remains mandatory;
+this packaging-only consolidation changes no runtime, scientific semantics or
+execution authority and leaves B1b/P3a foundations and coverage design separate.
 
 | Sub-slice / dependency and acceptance | Added code / tests / docs |
 | --- | --- |
@@ -497,13 +511,15 @@ research admit_snapshot translates it to SNAPSHOT_UNRESOLVED (engine/v2/research
 The index's exact earnings-contract allowlist still refuses UNSUPPORTED_CONTRACT;
 the generic session authenticates catalog identity, not that research allowlist.
 
-Preserve an existing native DataError first. For new catalog sqlite3.Error,
+Preserve an existing native DataError unchanged, including its code, category,
+retryability, stage, message and details; do not add a B2 redaction wrapper.
+For new catalog sqlite3.Error,
 test a present numeric primary result code (extended code & 255) against the
 resource row first; absent codes use the remaining-error row, never message text.
 Missing required schema/join partners are malformed catalog, not an absent
 snapshot or empty membership. New mappings never flatten scanner DataErrors.
 
-| Failure boundary | Outcome (fixed redacted message; admission returns no partial session) |
+| Failure boundary | Outcome (fixed messages for newly mapped failures only; no partial session) |
 | --- | --- |
 | Factory invalid holder/table name/configuration/limits or active transaction; facade binding/lifetime guards above | CONTRACT_MISMATCH, nonretryable; excludes every factory snapshot-reference failure below and native DataQuery/scan-cap validation. |
 | Factory: missing/malformed SnapshotRef, missing requested snapshot or supplied ref differs | SNAPSHOT_UNRESOLVED, nonretryable. |
@@ -511,7 +527,7 @@ snapshot or empty membership. New mappings never flatten scanner DataErrors.
 | Any explicit count or either byte counter exceeds cap | RESULT_LIMIT_EXCEEDED, nonretryable; no cap relaxation. |
 | Catalog SQLite primary BUSY/LOCKED/IOERR/CANTOPEN/FULL/NOMEM (including extended variants) | RESOURCE_UNAVAILABLE, retryable by registry only; no automatic retry. |
 | Catalog: broken join/type/JSON/Unicode/native identity, including DocumentError from stored catalog decoding; SQLite errors excluding the preceding resource codes, including code-less TEXT decode failure | MANIFEST_CORRUPT, nonretryable. |
-| Native DataError from identity/query/object checks | Preserve code and retryability; do not blanket-wrap. |
+| Native DataError from identity/query/object checks | Preserve the complete native envelope unchanged; do not blanket-wrap. |
 
 Synthetic acceptance must prove cap equality/one-over, huge unrelated payloads
 and IDs rejected before text transfer, repeated memberships charged, missing
@@ -523,5 +539,5 @@ nonselected object reads. Verify deep mutation isolation, fresh reopen, failure
 cleanup, early/never-started generator closure and exact bound/scan parity.
 A concurrent second-connection commit between probes and transfer must not
 change the admitted view; no fixture may stand in for private source coverage.
-B1a/B1b/B2/B3a/B3b estimates top out at 360 combined lines, within the <=400 ceiling;
-re-estimate/split if tests exceed them. Index work waits for all five slices.
+B1a/B1b/B2/B3a/B3b estimates top out at 360 combined lines; the packaging
+exceptions above use repository category caps. Index work waits for all five slices.
