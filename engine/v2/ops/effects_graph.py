@@ -840,12 +840,13 @@ def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=
     try:
         manifest = run_backup(conn, key=key, owner=owner, target=target, clock=clock, store=store,
                               fault=fault, keepalive=keepalive)
-    except Exception:
+    except Exception as error:
+        failure = (error.problem.message if isinstance(error, OpsError) else "backup_failed")
         row = conn.execute(
             "SELECT effect_id, claim_token FROM outbox WHERE kind='backup' AND logical_key=? "
             "AND claimed_by=?", (key, owner)).fetchone()
         if row is not None:
-            fail_effect(conn, row["effect_id"], {"error": "backup_failed"}, owner=owner,
+            fail_effect(conn, row["effect_id"], {"error": failure}, owner=owner,
                        claim_token=row["claim_token"], clock=clock)
         raise
     # "its own" watermark (D20): a retry after failure never advances any

@@ -1,8 +1,6 @@
 # `engine/v2/ops` — architecture
 
-Layer 7.0 in the root `/ARCHITECTURE.md` layer table. Replaces the new supervisor/catalog design,
-`dashboard/nightly.py` (as a job graph) and `tools/bounded_run.py` (as an executor adapter). The root doc covers shared
-layer rules; this doc covers package detail.
+Layer 7.0 in the root `/ARCHITECTURE.md` layer table. Replaces the new supervisor/catalog design, `dashboard/nightly.py` (as a job graph) and `tools/bounded_run.py` (as an executor adapter). The root doc covers shared layer rules; this doc covers package detail.
 
 ## Purpose
 
@@ -17,6 +15,8 @@ The `design/ops-package-split` PR records the proposed module homes and move sli
 
 ## Primary contracts and public interfaces
 
+**Catalog backup.** A fresh catalog copy is marked delivered only after it is non-empty, its file size matches its own SQLite page count and page size, and it passes read-only `PRAGMA quick_check` plus the online helper's integrity and foreign-key checks; its copied-byte SHA-256 and byte size are recorded in new manifests. Database copies and artifacts over 64 GiB fail with retryable `BACKUP_FAILED`; restore refuses catalog or artifact files over the same ceiling with `INTEGRITY_FAILED`. A replay of an already-delivered effect verifies the copy against the stored size and SHA-256 before returning its receipt. Existing-manifest comparison reads at most 1 MiB+1 before JSON parsing, generated manifests over 1 MiB are refused with `BACKUP_FAILED`, and restore refuses malformed JSON or missing/wrongly typed `backup_key`, `database`, or `artifacts` fields with `INTEGRITY_FAILED`. Older v1 manifests without a database byte size use the source database's measured size during restore.
+
 `publication.publish_local` refuses an ineligible release with `PUBLICATION_REFUSED` and sorted `details.failed_gates` names from the manifest's `gates` whose `ok` value is `false`.
 **Operations health output.** `health` emits `operations_health.v1.2`; `code_budgets.latest_occurrence` names the newest observed night, `null` when none exists. It selects the current delivered release from each published scope's `CURRENT` pointer, then orders those releases by occurrence, delivery time and release ID. `requested_session` and `resolved_session` come from the unique delivered `ledger_export_receipt.v1.0` associated through a consistent `release_intent` receipt with that release, including same-session reruns; the export receipt's scope must match the selected pointer scope or validation is `VALIDATION_FAILED`. Sessions never come from `generated_at`. `operations_health.v1.2` does not expose `native_stage_failures`; catalog persistence is separate. Invalid or ambiguous evidence is `VALIDATION_FAILED`; the CLI removes its output and does not retry. Identical catalog, pointer and clock inputs produce byte-identical JSON; evolution follows `guides/component_contracts.md` §2.3 and older versions remain valid. A publication status sidecar compares withheld releases against its own scope's delivered `CURRENT` row; when none exists, it treats current as absent and does not fall back to another scope's latest delivery. Unsafe unrelated-scope pointers do not prevent that write; aggregate health reads each published scope pointer and propagates unsafe-pointer errors. **I/O outcomes:**
 
@@ -25,8 +25,7 @@ The `design/ops-package-split` PR records the proposed module homes and move sli
 | Catalog read | Uses the supplied connection directly; no health-specific transaction or cache (an existing caller transaction still applies). |
 | Receipt evidence invalid | `VALIDATION_FAILED`; CLI removes the configured output and does not retry. |
 | Persisted release association omits its primary ID | `VALIDATION_FAILED`; session evidence is not emitted. |
-| Temporary write, file fsync or replace fails | Before replacement, the prior destination remains; a partial or complete sibling temporary file may remain. |
-| Directory fsync fails after replacement | The new destination exists; crash durability is uncertain. |
+| Local output persistence fails | Before replacement, the prior destination remains and a sibling temporary may remain; after replacement, directory-fsync failure leaves the new destination with uncertain crash durability. |
 
 The operator interface is the versioned command protocol exposed by `engine/v2/ops/cli.py`
 (`python3 -m engine.v2.ops <command>`), derived directly from its `argparse` definitions:

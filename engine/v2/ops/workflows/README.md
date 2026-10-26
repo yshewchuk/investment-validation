@@ -38,7 +38,8 @@ bounded, no-follow regular-file readers `read_bounded_json(path, max_bytes)` and
 ## Consumers
 
 `engine.v2.ops.cli` (`ops plan`, `ops submit`, the refresh action, ledger
-commands) and `engine.v2.ops.nightly_trigger` (in-process plan and submit).
+commands), `engine.v2.ops.nightly_trigger` (in-process plan and submit), and
+`engine.v2.ops.backup` (`read_bounded_json` for backup manifest parsing).
 
 ## Usage
 
