@@ -20,6 +20,7 @@ class GateForecastSource:
     """
 
     binding_id: str
+    artifact_hash: str
     release: ModelRelease
     inference: FrozenInference
     pool_pred: tuple[float, ...]

@@ -189,13 +189,14 @@ _COVERAGE_RELOCATIONS = (
     ("tests/test_v2_ops_health.py", "tests/v2/ops/test_v2_ops_health.py", (1,)),
     ("tests/test_v2_ops_partition_consumer.py", "tests/v2/ops/test_partition_consumer.py", (1,)),
     ("tests/test_v2_ops_serving_browser.py", "tests/v2/serving/test_ops_serving_browser.py", (1,)),
+    ("tests/test_v2_ops_native_score_batch.py", "tests/v2/ops/test_native_score_batch.py", (1,)),
     ("tests/test_v2_ops_outcome_session_backfill_wiring.py",
      "tests/v2/ops/test_outcome_session_backfill_wiring.py", (1,)),
 )
 
 
 @pytest.mark.parametrize("phase, expected_version", [
-    (1, "phase1_coverage_suite.v23"),
+    (1, "phase1_coverage_suite.v24"),
     (2, "phase2_coverage_suite:7ae743b96f5398e1a4cfbb1f88d6bf811af0ca4aaf785f3ece4b2f1d8431fd4d"),
 ])
 def test_test_layout_moves_refresh_both_coverage_inventories(phase, expected_version):
@@ -648,3 +649,15 @@ def test_r7_check_layout_ignores_modified_non_root_tests():
     assert report.ok
     report = tb.check_layout(base, base, 1, 1, modified_paths=["tests/test_a.py"])
     assert not report.ok
+
+
+def test_phase1_coverage_keeps_relocated_native_score_batch_file():
+    from checks.v2_coverage_ratchet import PHASE1_BASELINE, phase1_suite
+
+    relative = "tests/v2/ops/test_native_score_batch.py"
+    assert (ROOT / relative).is_file()
+    assert relative in phase1_suite(ROOT)
+
+    baseline = json.loads(PHASE1_BASELINE.read_text())
+    assert "tests/v2/ops/test_native_score_batch.py" in baseline["test_files"]
+    assert "tests/test_v2_ops_native_score_batch.py" not in baseline["test_files"]
