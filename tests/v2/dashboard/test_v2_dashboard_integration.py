@@ -300,6 +300,32 @@ def test_dashboard_against_real_api_full_flow(tmp_path, ui_dist_dir, browser):
                 assert ops_code == 200
                 ops_doc = json.loads(ops_body)
                 assert ops_doc.get("schema_version") == "operations_status.v1.0"
+
+                # A status may DESCRIBE a release other than the board pin
+                # and the latest published release -- here both stay
+                # release A while the document names release B. The banner
+                # reports the three identities separately.
+                ops_described_b = json.loads(json.dumps(ops_doc))
+                ops_described_b["release_id"] = release_b.release_id
+                ops_described_b["attempted_release_id"] = release_b.release_id
+                ops_described_b["stale"] = False
+                ops_described_b["withheld"] = False
+                ops_described_b["failed_update"] = False
+                (target / "operations_status.json").write_text(json.dumps(ops_described_b))
+
+                expect(page.get_by_test_id("operations-status")).to_contain_text(
+                    f"release identity mismatch: board {release_a.release_id}, "
+                    f"status {release_b.release_id}, published {release_a.release_id}",
+                    timeout=5000)
+                identities = page.get_by_test_id("operations-identities")
+                expect(identities).to_contain_text(
+                    f"health/status-described {release_b.release_id}")
+                expect(identities).to_contain_text(f"board pin {release_a.release_id}")
+                expect(identities).to_contain_text(f"latest published {release_a.release_id}")
+                expect(page.get_by_test_id("release-id")).to_contain_text(release_a.release_id)
+
+                (target / "operations_status.json").write_text(json.dumps(ops_doc))
+
                 ops_failed = json.loads(json.dumps(ops_doc))
                 fail_msg = "synthetic failure"
                 ops_failed["attempted_release_id"] = release_b.release_id
@@ -325,14 +351,31 @@ def test_dashboard_against_real_api_full_flow(tmp_path, ui_dist_dir, browser):
                 expect(page.get_by_test_id("operations-status")).to_contain_text(
                     "latest update attempt failed")
 
-                # Malformed wire behavior: remove required top-level conflicts field
-                ops_malformed = json.loads(json.dumps(ops_doc))
-                ops_malformed.pop("conflicts", None)
-                (target / "operations_status.json").write_text(json.dumps(ops_malformed))
-                expect(page.get_by_test_id("operations-status")).to_contain_text("unknown", timeout=5000)
-                expect(page.get_by_test_id("operations-attempt")).to_contain_text("no observation available", timeout=5000)
+                # Malformed wire behavior: the typed client refuses each
+                # schema-invalid document (status unknown, no observation,
+                # board pin untouched), restoring the valid document
+                # between cases.
+                def _assert_refused(ops_malformed):
+                    (target / "operations_status.json").write_text(json.dumps(ops_malformed))
+                    expect(page.get_by_test_id("operations-status")).to_contain_text(
+                        "unknown", timeout=5000)
+                    expect(page.get_by_test_id("operations-attempt")).to_contain_text(
+                        "no observation available", timeout=5000)
+                    expect(page.get_by_test_id("release-id")).to_contain_text(
+                        release_a.release_id)
+                    (target / "operations_status.json").write_text(json.dumps(ops_doc))
 
-                (target / "operations_status.json").write_text(json.dumps(ops_doc))
+                ops_missing_conflicts = json.loads(json.dumps(ops_doc))
+                ops_missing_conflicts.pop("conflicts", None)
+                _assert_refused(ops_missing_conflicts)
+
+                ops_int_release_id = json.loads(json.dumps(ops_doc))
+                ops_int_release_id["release_id"] = 17
+                _assert_refused(ops_int_release_id)
+
+                ops_half_retry = json.loads(json.dumps(ops_doc))
+                ops_half_retry["engineering_history"][0]["retry_count"] = 0.5
+                _assert_refused(ops_half_retry)
 
                 expect(page.get_by_test_id("event-table")).to_be_visible()
                 expect(page.get_by_test_id("pagination-count")).to_contain_text(f"of {N_EVENTS}")

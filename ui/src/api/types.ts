@@ -139,8 +139,7 @@ export interface JsonObject {
   [key: string]: JsonValue;
 }
 
-/** Complete `operations_status.v1.0` `/api/v1/operations` sidecar,
- *  distinct from `operations_health.v1.0` `/health.json`. */
+/** One `engineering_history` row (`engineering_night.v1.0`). */
 export interface OperationsStatusEngineeringHistoryRow {
   occurrence: string;
   status: EngineeringNightStatus;
@@ -149,6 +148,8 @@ export interface OperationsStatusEngineeringHistoryRow {
   schema_version: "engineering_night.v1.0";
 }
 
+/** Complete `operations_status.v1.0` `/api/v1/operations` sidecar,
+ *  distinct from `operations_health.v1.0` `/health.json`. */
 export interface OperationsStatus {
   scope: string;
   release_id: string | null;
