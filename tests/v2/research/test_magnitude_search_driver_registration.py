@@ -123,9 +123,10 @@ def test_large_binding_reaches_driver_dispatch_only_with_exact_finite_override(
     if action == "collect":
         monkeypatch.setattr(cli, "connect", support.forbid_access)
 
-    refusal = {"refused": to_document(fail("EXPERIMENT_IDENTITY_CONFLICT",
-        "native registration differs from its immutable binding").problem)}
     for budget in (None, source.size - 1, source.size):
+        refusal = {"refused": to_document(fail("RESOURCE_LIMIT_EXCEEDED",
+            "native registration exceeds its UTF-8 byte budget", details={"registration_bytes": source.size,
+                "max_registration_bytes": MAX_NATIVE_EVIDENCE_BYTES if budget is None else budget}).problem)}
         override = [] if budget is None else ["--max-registration-bytes", str(budget)]
         accepted = budget == source.size
         assert cli.main([*arguments, *override]) == (0 if accepted else 2)

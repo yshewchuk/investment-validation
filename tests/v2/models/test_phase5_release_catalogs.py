@@ -445,3 +445,47 @@ def test_reprepare_failed_acceptance_invalidates_prior_approval(tmp_path):
     assert (dep / "DEPLOYED").read_bytes() == pointer
     assert {p.name: p.read_bytes() for p in (dep / "history").glob("*.json")} == history
     assert not deployment._staging_status_path(dep, "A").exists()
+
+
+def test_prepare_release_main_refuses_a_symlinked_frozen_state(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "target.json"
+    target.write_text('{"schema_version": "paired_residual_pool.v1.0"}')
+    link = tmp_path / "link.json"
+    link.symlink_to(target)
+
+    def fake_real_inputs(args, pinned_panel=None):
+        prep.frozen_state_payloads(args.frozen_state or ())
+
+    monkeypatch.setattr(prep, "_real_inputs", fake_real_inputs)
+    rc = prep.main(["--release-id", "cand1", "--out", str(tmp_path / "out"),
+                    "--frozen-state", str(link)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert err.startswith("refused: ")
+
+
+def test_prepare_release_main_refuses_an_oversize_frozen_state(tmp_path, monkeypatch, capsys):
+    big = tmp_path / "big.json"
+    with big.open("wb") as handle:
+        handle.truncate(prep.MAX_STATE_BYTES + 1)
+
+    def fake_real_inputs(args, pinned_panel=None):
+        prep.frozen_state_payloads(args.frozen_state or ())
+
+    monkeypatch.setattr(prep, "_real_inputs", fake_real_inputs)
+    rc = prep.main(["--release-id", "cand1", "--out", str(tmp_path / "out"),
+                    "--frozen-state", str(big)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "refused: BoundedStateReadError:" in err
+
+
+def test_prepare_release_main_refuses_an_oserror_from_the_payload_readers(tmp_path, monkeypatch, capsys):
+    def broken(args, pinned_panel=None):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(prep, "_real_inputs", broken)
+    rc = prep.main(["--release-id", "cand1", "--out", str(tmp_path / "out")])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "refused: OSError: disk unavailable" in err

@@ -3,10 +3,10 @@
 Rearchitecture Phase 3 guide §8 P3-3, exit commands:
     npm --prefix ui run typecheck
     npm --prefix ui run build
-    python3 -m pytest -q tests/test_v2_dashboard_browser.py
+    python3 -m pytest -q tests/v2/dashboard/test_v2_dashboard_browser.py
 
 The whole module drives a real Playwright browser (same reason
-``tests/test_v2_ops_serving_browser.py`` groups its whole file, per
+``tests/v2/serving/test_ops_serving_browser.py`` groups its whole file, per
 ``tests/conftest.py``'s xdist grouping rule) and starts one real subprocess
 per module (``npm --prefix ui run build``), so it is pinned to a single
 xdist worker.
@@ -30,7 +30,7 @@ from tests.fixtures.v2_ui_mock_api import build_default_state, serve_in_thread
 
 pytestmark = [pytest.mark.xdist_group("serial"), pytest.mark.browser]  # drives a real Playwright browser or needs node/npm (ui/ build)
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 UI_ROOT = REPO_ROOT / "ui"
 TOKEN = "browser-secret"
 

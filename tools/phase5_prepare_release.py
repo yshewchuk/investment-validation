@@ -65,6 +65,7 @@ from engine.v2.models.release_layout import (  # noqa: E402
     PENDING,
     STAGED,
     STATE_SPECS,
+    CatalogConflict,
     ObjectVerificationError,
     StateSpec,
     deployment_root,
@@ -98,6 +99,9 @@ from engine.v2.models.training.chooser_pool_source import (  # noqa: E402
     read_chooser_pool_frame,
     require_chooser_pool_columns,
 )
+
+MAX_MODEL_BYTES = 512 * 1024 * 1024
+MAX_STATE_BYTES = 512 * 1024 * 1024
 
 JOBLIB_ADAPTER = "joblib-estimator.v1"
 #: Output name per role for the frozen binding, following the Phase 4 native
@@ -138,7 +142,14 @@ class StateBuild:
 # --------------------------------------------------------------------------
 
 
-def model_release(inventory: ModelReleaseInventory, *, read=lambda p: Path(p).read_bytes(),
+def _bounded_model_read(path: Path) -> bytes:
+    try:
+        return read_bounded_state(path, MAX_MODEL_BYTES, no_follow=True)
+    except (BoundedStateReadError, OSError) as exc:
+        raise PrepareRefused("model artifact cannot be read") from exc
+
+
+def model_release(inventory: ModelReleaseInventory, *, read=_bounded_model_read,
                   resolve=lambda ref: Path(ref)) -> tuple[ModelRelease, dict[str, bytes]]:
     """One joblib binding per inventory binding, members named by required kind.
 
@@ -178,7 +189,7 @@ def model_release(inventory: ModelReleaseInventory, *, read=lambda p: Path(p).re
 # --------------------------------------------------------------------------
 
 
-def _payoff_member_id(artifact) -> str:
+def payoff_member_id(artifact) -> str:
     from engine.v2.models.payoff_artifact import PayoffLineArtifact
 
     kind = "payoff_line" if isinstance(artifact, PayoffLineArtifact) else "payoff_surface"
@@ -193,11 +204,11 @@ def payoff_payloads(training_roots: Iterable[Path]) -> dict[str, dict[str, bytes
     found: dict[str, dict[str, bytes]] = {}
     for base in training_roots:
         for path in sorted(Path(base).rglob(PAYOFF_ARTIFACT_FILE)):
-            data = path.read_bytes()
-            artifact = PayoffArtifactLoader(path.parent).load(
-                PayoffArtifactRef(path=path.name, content_hash=sha256_bytes(data)))
+            data = read_bounded_state(path, MAX_STATE_BYTES, no_follow=True)
+            artifact = PayoffArtifactLoader(path.parent).load_bytes(
+                data, sha256_bytes(data))
             name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
-            found.setdefault(_payoff_member_id(artifact), {})[name] = data
+            found.setdefault(payoff_member_id(artifact), {})[name] = data
     return found
 
 
@@ -212,11 +223,64 @@ def recalibration_payloads(training_roots: Iterable[Path]) -> dict[str, dict[str
     found: dict[str, dict[str, bytes]] = {}
     for base in training_roots:
         for path in sorted(Path(base).rglob(RECALIBRATION_ARTIFACT_FILE)):
-            data = path.read_bytes()
-            artifact = RecalibrationArtifactLoader(path.parent).load(
-                RecalibrationArtifactRef(path=path.name, content_hash=sha256_bytes(data)))
+            data = read_bounded_state(path, MAX_STATE_BYTES, no_follow=True)
+            artifact = RecalibrationArtifactLoader(path.parent).load_bytes(
+                data, sha256_bytes(data))
             name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
             found.setdefault(f"recalibration_map:{artifact.strategy}", {})[name] = data
+    return found
+
+
+def artifact_file_payloads(files: Iterable[Path | tuple[Path, bytes]]) -> dict[str, dict[str, bytes]]:
+    """Load payoff and recalibration artifact files, classified by JSON ``schema_version``."""
+    from engine.v2.models.payoff_artifact import (
+        PAYOFF_LINE_ARTIFACT_V1,
+        PAYOFF_SURFACE_ARTIFACT_V1,
+        PayoffArtifactLoader,
+        PayoffArtifactRef,
+    )
+    from engine.v2.models.recalibration_artifact import (
+        RECALIBRATION_MAP_ARTIFACT_V1,
+        RecalibrationArtifactLoader,
+        RecalibrationArtifactRef,
+    )
+    found: dict[str, dict[str, bytes]] = {}
+    for item in files:
+        if isinstance(item, tuple):
+            path, data = item
+            if not isinstance(data, bytes) or len(data) > MAX_STATE_BYTES:
+                raise PrepareRefused("a bound state file could not be loaded")
+        else:
+            path = Path(item)
+            try:
+                data = read_bounded_state(path, MAX_STATE_BYTES, no_follow=True)
+            except (BoundedStateReadError, OSError) as exc:
+                raise PrepareRefused("a bound state file could not be loaded") from exc
+        try:
+            document = json.loads(data)
+        except (ValueError, TypeError) as exc:
+            raise PrepareRefused("a bound state file could not be loaded") from exc
+        schema = document.get("schema_version") if isinstance(document, dict) else None
+        if not isinstance(schema, str):
+            raise PrepareRefused("a bound state file could not be loaded")
+        if schema in (PAYOFF_LINE_ARTIFACT_V1, PAYOFF_SURFACE_ARTIFACT_V1):
+            artifact = PayoffArtifactLoader(path.parent).load_bytes(
+                data, sha256_bytes(data))
+            name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
+            member = payoff_member_id(artifact)
+            if name in found.setdefault(member, {}):
+                raise PrepareRefused("a state object appears twice", {"member": member})
+            found[member][name] = data
+        elif schema == RECALIBRATION_MAP_ARTIFACT_V1:
+            artifact = RecalibrationArtifactLoader(path.parent).load_bytes(
+                data, sha256_bytes(data))
+            name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
+            member = f"recalibration_map:{artifact.strategy}"
+            if name in found.setdefault(member, {}):
+                raise PrepareRefused("a state object appears twice", {"member": member})
+            found[member][name] = data
+        else:
+            raise PrepareRefused("a bound state file could not be loaded")
     return found
 
 
@@ -236,7 +300,7 @@ def frozen_state_files(paths: Iterable[Path]) -> list[Path]:
 
 
 def frozen_state_payloads(files: Iterable[Path],
-                          max_bytes: int | None = None) -> dict[str, dict[str, bytes]]:
+                          max_bytes: int | None = MAX_STATE_BYTES) -> dict[str, dict[str, bytes]]:
     """Pre-built P5-4 frozen states (residual pools, tables), by member.
 
     The training job's ``--state`` outputs
@@ -250,11 +314,11 @@ def frozen_state_payloads(files: Iterable[Path],
     from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
     from engine.v2.models.frozen_state_io import read_bounded_state
 
+    limit = MAX_STATE_BYTES if max_bytes is None else max_bytes
     found: dict[str, dict[str, bytes]] = {}
     for path in frozen_state_files(files):
-        data = path.read_bytes() if max_bytes is None else read_bounded_state(
-            path, max_bytes, no_follow=True)
-        state = FrozenStateLoader(path.parent, max_bytes=max_bytes).load(
+        data = read_bounded_state(path, limit, no_follow=True)
+        state = FrozenStateLoader(path.parent, max_bytes=limit).load(
             FrozenStateRef(path=path.name, content_hash=sha256_bytes(data)))
         schema = state.schema_version
         if schema.startswith("driver_residual_pool"):
@@ -517,11 +581,29 @@ def _object_entry(out: Path, build: StateBuild, name: str, data: bytes, validate
     return entry
 
 
+def _staging_id_conflict(exc) -> bool:
+    """True when ``exc`` is a conflict with already-staged candidate content."""
+    if isinstance(exc, CatalogConflict):
+        return True
+    if isinstance(exc, deployment.StagingRefused):
+        codes = {issue.code for issue in exc.issues}
+        return bool(codes & {"RELEASE_ID_REUSED", "MANIFEST_UNREADABLE"})
+    return False
+
+
 def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInventory,
                   payloads: Mapping[str, bytes], states: list[StateBuild], *,
                   sources: Mapping[str, str] | None = None,
-                  incumbent: Path | None = None, pinned_panel: PinnedPanelContext | None = None) -> Path:
-    """Stage the model bindings, write the state objects, write the manifest."""
+                  incumbent: Path | None = None, pinned_panel: PinnedPanelContext | None = None,
+                  candidate_only: bool = False) -> Path:
+    """Stage the model bindings, write the state objects, write the manifest.
+
+    In ``candidate_only`` mode the existing candidate's staging-success record
+    is snapshotted before it is withdrawn and restored when this attempt loses
+    an id conflict with that candidate (``CatalogConflict`` or a
+    ``StagingRefused`` carrying ``RELEASE_ID_REUSED``/``MANIFEST_UNREADABLE``).
+    Any other failure leaves the record withdrawn as before.
+    """
     if sources and any(str(key).startswith(COPY_PREFIX) for key in sources):
         raise PrepareRefused(f"{COPY_PREFIX}refused: caller-supplied pinned sources")
     release, states = _rebase_member_paths(release, states, pinned_panel)
@@ -529,17 +611,28 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
     out = Path(out)
     root = deployment_root(out)
     root.mkdir(parents=True, exist_ok=True)
-    if incumbent is not None:
+    if incumbent is not None and not candidate_only:
         _copy_incumbent(incumbent, root)
-    deployment.invalidate_staging_success(root, release.release_id)
-    staged = deployment.stage_release(root, release, inventory, dict(payloads))
-    rows = []
-    for build in states:
-        objects = [_object_entry(out, build, name, data, validated, chooser_validated, staged, pinned_panel)
-                   for name, data in sorted(build.payloads.items())]
-        rows.append(member_row(build.spec, build.status, objects, build.detail))
-    body = manifest_body(release.release_id, release.deployment_id, rows, sources or {})
-    return write_manifest(out, body)
+    snapshot = (deployment.read_staging_success_record(root, release.release_id)
+                if candidate_only else None)
+    try:
+        deployment.invalidate_staging_success(root, release.release_id)
+        staged = deployment.stage_release(root, release, inventory, dict(payloads))
+        rows = []
+        for build in states:
+            objects = [_object_entry(out, build, name, data, validated, chooser_validated, staged, pinned_panel)
+                       for name, data in sorted(build.payloads.items())]
+            rows.append(member_row(build.spec, build.status, objects, build.detail))
+        body = manifest_body(release.release_id, release.deployment_id, rows, sources or {})
+        return write_manifest(out, body, candidate_only=candidate_only)
+    except (CatalogConflict, deployment.StagingRefused) as exc:
+        if candidate_only and snapshot is not None and _staging_id_conflict(exc):
+            try:
+                deployment.restore_staging_success_record(root, release.release_id, snapshot)
+            except (OSError, deployment.DeploymentError) as restore_exc:
+                raise PrepareRefused(
+                    "staging success record could not be restored") from restore_exc
+        raise
 
 
 def _plan(release: ModelRelease, states: list[StateBuild]) -> dict:
@@ -554,7 +647,7 @@ def _plan(release: ModelRelease, states: list[StateBuild]) -> dict:
     }
 
 
-def _merge(found: dict[str, dict[str, bytes]], more: Mapping[str, Mapping[str, bytes]]) -> None:
+def merge_payloads(found: dict[str, dict[str, bytes]], more: Mapping[str, Mapping[str, bytes]]) -> None:
     """Add objects per member; a later source adds to, never drops, a member."""
     for member_id, objects in more.items():
         found.setdefault(member_id, {}).update(objects)
@@ -596,21 +689,21 @@ def _collect_payloads(args, snapshot: str, feature_ids: Mapping[str, str]) -> di
     from engine.data.features import tier4
 
     found: dict[str, dict[str, bytes]] = {}
-    _merge(found, tier4_fold_payloads(Path(args.tier4_dir or tier4.SERVING_DIR),
+    merge_payloads(found, tier4_fold_payloads(Path(args.tier4_dir or tier4.SERVING_DIR),
                                      feature_ids, snapshot, args.fold_month))
     if modules_available(("engine.v2.models.payoff_artifact",))[0]:
-        _merge(found, payoff_payloads(args.training_root or ()))
+        merge_payloads(found, payoff_payloads(args.training_root or ()))
     if modules_available(("engine.v2.models.recalibration_artifact",))[0]:
-        _merge(found, recalibration_payloads(args.training_root or ()))
+        merge_payloads(found, recalibration_payloads(args.training_root or ()))
     if modules_available(("engine.v2.models.frozen_state",))[0]:
-        _merge(found, default_admissible_table())
-        _merge(found, frozen_state_payloads(args.frozen_state or ()))
+        merge_payloads(found, default_admissible_table())
+        merge_payloads(found, frozen_state_payloads(args.frozen_state or ()))
     if modules_available(("engine.v2.models.chooser_analog_pool",))[0]:
-        _merge(found, chooser_pool_payloads(paths.FEATURES / "chooser_analog_pool.parquet"))
+        merge_payloads(found, chooser_pool_payloads(paths.FEATURES / "chooser_analog_pool.parquet"))
     return found
 
 
-def _fold_policies(found: Mapping[str, Mapping[str, bytes]], snapshot: str):
+def fold_policies(found: Mapping[str, Mapping[str, bytes]], snapshot: str):
     from engine.data.features import tier4
 
     producer = tier4.size_feature_model()
@@ -648,7 +741,7 @@ def _real_inputs(args, pinned_panel: PinnedPanelContext | None = None
     snapshot = _resolve_snapshot(args, pinned_panel)
     feature_ids = {b.role: b.artifact_id for b in inventory.bindings if b.strategy_id == "*"}
     found = _collect_payloads(args, snapshot, feature_ids)
-    policy, chooser_policies = _fold_policies(found, snapshot)
+    policy, chooser_policies = fold_policies(found, snapshot)
     return release, inventory, payloads, build_states(
         found, size_fold_policy=policy, chooser_fold_policies=chooser_policies)
 
@@ -700,7 +793,8 @@ def main(argv=None) -> int:
             print(f"plan only: {args.out / 'plan.json'}")
             return 0
         print(f"staged: {manifest}")
-    except (PrepareRefused, deployment.DeploymentError, ValueError) as exc:
+    except (PrepareRefused, deployment.DeploymentError, BoundedStateReadError,
+            OSError, ValueError) as exc:
         print(f"refused: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     return 0

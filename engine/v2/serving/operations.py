@@ -8,7 +8,11 @@ import json
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from engine.v2.foundation import ArtifactError, safe_relative_path
+from engine.v2.foundation import (
+    ArtifactError,
+    latest_completed_session,
+    safe_relative_path,
+)
 from engine.v2.models.deployment import (
     DeploymentError,
     ReleaseNotStaged,
@@ -102,12 +106,27 @@ def _resolve_current_id(config) -> str:
     return name
 
 
+#: Maximum bytes a health artifact may hold. Both readers take this many
+#: bytes plus one, so an oversize artifact is refused as a ValueError instead
+#: of being streamed whole into memory on the shell's 30s poll path.
+_HEALTH_MAX_BYTES = 1_048_576
+
+
+def _read_health_document_bytes(path: Path) -> bytes:
+    """Bounded raw health read shared by both readers: cap plus one byte."""
+    with path.open("rb") as handle:
+        raw = handle.read(_HEALTH_MAX_BYTES + 1)
+    if len(raw) > _HEALTH_MAX_BYTES:
+        raise ValueError("health artifact exceeds the size limit")
+    return raw
+
+
 def _read_health(path: Path) -> bytes:
     if path.is_symlink() or not path.is_file():
         raise ValueError("health artifact is indirect")
-    document = json.loads(path.read_text())
+    document = json.loads(_read_health_document_bytes(path))
     if not isinstance(document, dict) or document.get("schema_version") not in (
-            "operations_health.v1.0", "operations_health.v1.1"):
+            "operations_health.v1.0", "operations_health.v1.1", "operations_health.v1.2"):
         raise ValueError("unsupported health artifact")
     return json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
@@ -120,21 +139,152 @@ def _read_calibration_health(path: Path) -> bytes:
     (``engine.v2.ledger.calibration.export_health_file``). That document --
     like the legacy ``health.json`` it mirrors -- carries no
     ``schema_version``, so it is recognized by ``generated_at`` and canonicalized
-    exactly as ``/health.json`` does. An ``operations_health.v1.0`` or
-    ``operations_health.v1.1`` document is accepted too (the same reader then
+    exactly as ``/health.json`` does. An ``operations_health.v1.0``,
+    ``operations_health.v1.1`` or ``operations_health.v1.2`` document is
+    accepted too (the same reader then
     serves either exported health file); anything else is refused, never served
     as empty JSON.
     """
     if path.is_symlink() or not path.is_file():
         raise ValueError("health artifact is indirect")
-    document = json.loads(path.read_text())
+    document = json.loads(_read_health_document_bytes(path))
     if not isinstance(document, dict):
         raise ValueError("unsupported health artifact")
-    if document.get("schema_version") in ("operations_health.v1.0", "operations_health.v1.1"):
+    if document.get("schema_version") in ("operations_health.v1.0", "operations_health.v1.1",
+                                           "operations_health.v1.2"):
         return _read_health(path)
     if "generated_at" not in document or "n_scored" not in document:
         raise ValueError("unsupported health artifact")
     return json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+
+def _shell_markup(frozen: str) -> str:
+    """Outer shell markup: status line, navigation and the pinned iframe."""
+    routes = ("/#/trades/board", "/#/trades/explorer", "/#/trades/book", "/#/models/modelx",
+              "/derivation", "/analogs", "/#/models/health")
+    views = "".join(f'<a href="{route}">{view}</a> ' for view, route in zip(_VIEWS, routes))
+    return f'''<!doctype html><meta charset="utf-8"><title>Operations shell</title>
+<style>body{{margin:0;font:14px sans-serif}}#ops{{padding:8px;background:#20252b;color:#eee}}#ops.unknown{{background:#634}}#ops.degraded{{background:#642}}#ops.stale{{background:#653}}nav a{{margin-right:12px}}main{{min-height:90vh}}</style>
+<div id="ops" class="unknown">health: <span id="state">unknown</span> <small id="stamp">offline frozen at {frozen}</small><br><small id="release">pinned release: resolving</small> <small id="published">published release: resolving</small><br><small id="requested">requested session: unavailable</small> <small id="resolved">resolved session: unavailable</small> <small id="expected">expected session: unavailable</small><br><small id="outcome">latest outcome: unknown</small><br><span id="drift"></span> <button id="optin" type="button" hidden>reload to opt into current</button></div>
+<nav>{views}</nav><main><iframe id="legacy" title="legacy dashboard" src="about:blank" style="width:100%;height:90vh;border:0"></iframe></main>'''
+
+
+#: The shell's session/evidence-parsing and outcome-line helpers, held as a
+#: plain JS chunk (no Python interpolation) that ``_shell_script`` splices in
+#: verbatim where they always stood -- one responsibility per piece, identical
+#: emitted bytes.
+_SHELL_EVIDENCE_JS = '''function sessionDate(s){if(typeof s!=='string'||!s)return null;const m=/^(?:eng-night-)?([0-9]{4}-[0-9]{2}-[0-9]{2})$/.exec(s);if(!m)return null;const tail=m[1];const at=Date.parse(tail);if(Number.isNaN(at))return null;return new Date(at).toISOString().slice(0,10)===tail?at:null;}
+function expectedSession(s){if(typeof s!=='string'||!s)return null;const at=sessionDate(s);return at===null?null:new Date(at).toISOString().slice(0,10);}
+async function readCurrent(){let ok=false,id=null,exp=null;try{const r=await fetch('/release/current.json',{credentials:'same-origin'});if(!r.ok)throw Error('http');const j=await r.json();id=(j&&typeof j.release_id==='string'&&j.release_id)?j.release_id:null;exp=expectedSession(r.headers.get('X-Expected-Session'));ok=true;}catch(e){}return {ok:ok,id:id,exp:exp};}
+async function pollCurrent(){const seq=++currentSeq,found=await readCurrent();if(seq!==currentSeq)return;published=found.ok?found.id:null;expected=found.ok?found.exp:null;render();}
+function withheldEvidence(h){if(!Object.prototype.hasOwnProperty.call(h,'withheld_release'))return {missing:true,malformed:true,value:null};const value=h.withheld_release;if(value===null)return {missing:false,malformed:false,value:null};if(typeof value!=='object'||Array.isArray(value))return {missing:false,malformed:true,value:null};return {missing:false,malformed:false,value:value};}
+function withheldReason(w){return w.missing?'withheld release evidence missing':'withheld release evidence missing or malformed';}
+function withheldDetail(){return 'release withheld: (details omitted)';}
+function scheduleEvidence(h){const cb=h&&h.code_budgets;if(!cb||typeof cb!=='object'||Array.isArray(cb)||typeof cb.ok!=='boolean'||!Number.isInteger(cb.consecutive_nights)||cb.consecutive_nights<0||!Array.isArray(cb.unknown_occurrences))return null;if(Object.prototype.hasOwnProperty.call(cb,'latest_occurrence')&&cb.latest_occurrence!==null&&typeof cb.latest_occurrence!=='string')return null;const lt=cb.latest;if(lt===null)return cb.ok===false&&cb.consecutive_nights===0&&cb.unknown_occurrences.length===0&&(!Object.prototype.hasOwnProperty.call(cb,'latest_occurrence')||cb.latest_occurrence===null)?cb:null;if(!lt||typeof lt!=='object'||Array.isArray(lt))return null;if(Object.prototype.hasOwnProperty.call(cb,'latest_occurrence')&&cb.latest_occurrence===null)return null;return cb;}
+function latestUnknownObs(cb){if(!Object.prototype.hasOwnProperty.call(cb,'latest_occurrence'))return cb.unknown_occurrences.length>0;return cb.latest_occurrence===null||cb.unknown_occurrences.indexOf(cb.latest_occurrence)>=0;}
+function outcome(){if(!health)return 'latest outcome: unknown (health unavailable)';const parts=[],w=withheldEvidence(health),cb=scheduleEvidence(health);if(w.malformed){parts.push(withheldReason(w));return 'latest outcome: unknown: '+parts.join('; ');}if(w.value)parts.push(withheldDetail());if(!cb){parts.push('engineering schedule evidence missing or malformed');return 'latest outcome: unknown: '+parts.join('; ');}const lu=latestUnknownObs(cb);let verdict=cb.ok?'pass':(lu?'unknown':(cb.consecutive_nights!==0?'fail':'unknown'));if(!cb.ok){if(lu||cb.consecutive_nights===0)parts.push('latest engineering outcome unknown (not observed)');else parts.push('latest engineering outcome failed');}if(cb.consecutive_nights!==0)parts.push(cb.consecutive_nights+' consecutive failed engineering night(s)');if(cb.unknown_occurrences.length>0){if(lu)verdict='unknown';parts.push('scheduled observations missing: '+cb.unknown_occurrences.join(', '));}if(w.value&&verdict==='pass')verdict='degraded';if(verdict==='pass')parts.push('no failures recorded');return 'latest outcome: '+verdict+': '+parts.join('; ');}
+'''
+
+
+def _shell_script(frozen: str) -> str:
+    """Status polling and presentation, client-side only.
+
+    ``textContent`` carries every dynamic value and the shell writes nothing.
+    ``/release/current.json`` is polled every 30s; its published id is
+    compared with the pin and its ``X-Expected-Session`` header supplies the
+    scheduled session that ``resolved_session`` is checked against. When the
+    ids differ the shell says the displayed board is stale,
+    shows the health observation's age, and offers a reload button to opt
+    into current -- the frame is never re-pointed automatically.
+    ``/health.json`` polls every 30s and is usable only as an
+    ``operations_health.v1.0``, ``operations_health.v1.1`` or
+    ``operations_health.v1.2`` object with a
+    parseable, non-future ``generated_at``; age shows in whole days/hours
+    (minimum one hour when nonzero, more than 24h stale). The shell shows the
+    requested/resolved/expected sessions (session ids date-parse as
+    ``YYYY-MM-DD`` with an optional ``eng-night-`` prefix) and the latest
+    outcome evidence. "current" requires age <=24h, a resolved session not
+    older than the expected completed session, a health
+    ``current_release.release_id`` matching BOTH the pin and the latest
+    published id, no withheld release, zero consecutive failed nights and no
+    missing scheduled observations -- each failed gate names its own explicit
+    reason (missing/malformed identity, session or schedule evidence is
+    unknown, never current; ``consecutive_nights`` is trusted only as a
+    nonnegative integer). A withheld release reads degraded, like its banner.
+    ``latest_occurrence``, when supplied, names the newest observation: an
+    unknown list that does not name it is older missing evidence -- the
+    outcome line still calls the latest night failed, streak and gap stay
+    visible, the banner is unknown; without the field any nonempty list
+    conservatively reads as the latest night unknown. Ok false without a
+    streak or gap -- the producers' fresh no-observation shape, whose null
+    ``latest``/``latest_occurrence`` live only there -- reads unknown, never failed or
+    malformed. Any fetch or parse failure shows unknown/unavailable without
+    erasing the pin or throwing out of the shell.
+    """
+    return f'''<script>
+const FROZEN='{frozen}',DAY=86400000;
+const state=document.querySelector('#state'),stamp=document.querySelector('#stamp'),banner=document.querySelector('#ops'),releaseEl=document.querySelector('#release'),publishedEl=document.querySelector('#published'),requestedEl=document.querySelector('#requested'),resolvedEl=document.querySelector('#resolved'),expectedEl=document.querySelector('#expected'),outcomeEl=document.querySelector('#outcome'),driftEl=document.querySelector('#drift'),optin=document.querySelector('#optin'),frame=document.querySelector('#legacy');
+let pinned=null,published,expected,health=null,healthNote='health not fetched yet',currentSeq=0,healthSeq=0;
+function age(ms){{let h=Math.floor(ms/3600000);if(ms>0&&h<1)h=1;const d=Math.floor(h/24);return d?d+'d '+(h%24)+'h':h+'h';}}function usable(j){{if(!j||typeof j!=='object'||Array.isArray(j)||!['operations_health.v1.0','operations_health.v1.1','operations_health.v1.2'].includes(j.schema_version))return false;const at=Date.parse(j.generated_at);return !Number.isNaN(at)&&at<=Date.now();}}
+async function pollHealth(){{const seq=++healthSeq;try{{const r=await fetch('/health.json',{{credentials:'same-origin'}});if(seq!==healthSeq)return;if(!r.ok)throw Error('http');const j=await r.json();if(seq!==healthSeq)return;if(usable(j)){{health=j;healthNote='';}}else{{health=null;healthNote='health artifact unusable: schema or generated_at';}}}}catch(e){{if(seq!==healthSeq)return;health=null;healthNote='health fetch failed: unavailable';}}if(seq!==healthSeq)return;render();}}
+{_SHELL_EVIDENCE_JS}function evaluate(){{const ms=Date.now()-Date.parse(health.generated_at),text=age(ms),reasons=[];let unknown=false,stale=false;
+function add(reason,kind){{reasons.push(reason);if(kind==='unknown')unknown=true;else if(kind==='stale')stale=true;}}
+if(ms>DAY)add('observation older than 24 hours','stale');
+const w=withheldEvidence(health);
+if(w.malformed)add(withheldReason(w),'unknown');else if(w.value)add(withheldDetail(),'degraded');
+const cr=(health.current_release&&typeof health.current_release==='object'&&typeof health.current_release.release_id==='string'&&health.current_release.release_id)?health.current_release.release_id:null;
+if(cr===null)add('health names no current release identity','unknown');
+else{{if(pinned===null)add('release mismatch: health says '+cr+', frame pin unavailable','unknown');else if(cr!==pinned)add('release mismatch: health says '+cr+', frame pinned to '+pinned,'stale');
+if(published===undefined)add('release mismatch: health says '+cr+', published current not yet observed','unknown');else if(published===null)add('release mismatch: health says '+cr+', published current unavailable','unknown');else if(cr!==published)add('release mismatch: health says '+cr+', published current is '+published,'stale');}}
+const rq=sessionDate(health.requested_session),rs=sessionDate(health.resolved_session),ex=expected===undefined||expected===null?null:sessionDate(expected);
+if(rq===null||rs===null)add('session identity evidence missing or malformed','unknown');
+else if(expected===undefined)add('expected session evidence not yet observed','unknown');
+else if(ex===null)add('expected session evidence missing or malformed','unknown');
+else if(rs>ex)add('resolved session is later than expected session','unknown');
+else if(rs>rq)add('resolved session is later than requested session','unknown');
+else if(rs<ex)add('resolved session is older than expected session','stale');
+const cb=scheduleEvidence(health);
+if(!cb)add('engineering schedule evidence missing or malformed','unknown');
+else{{const lu=latestUnknownObs(cb);if(cb.ok===false){{if(lu||cb.consecutive_nights===0)add('latest engineering outcome unknown (not observed)','unknown');else add('latest engineering outcome failed','degraded');}}if(cb.consecutive_nights!==0)add('failed engineering nights: '+cb.consecutive_nights+' consecutive','degraded');if(cb.unknown_occurrences.length>0)add('scheduled observations missing: '+cb.unknown_occurrences.join(', '),'unknown');}}
+stamp.textContent='updated '+text+' ago';
+if(reasons.length===0){{state.textContent='current';banner.className='';return;}}
+state.textContent=(unknown?'unknown: ':stale?'stale: ':'degraded: ')+reasons.join('; ')+' (observation '+text+' old)';
+banner.className=unknown?'unknown':stale?'stale':'degraded';}}
+function render(){{releaseEl.textContent='pinned release: '+(pinned||'unavailable');
+publishedEl.textContent='published release: '+(published===undefined?'resolving':(published||'unavailable'));
+requestedEl.textContent='requested session: '+(health&&typeof health.requested_session==='string'&&health.requested_session?health.requested_session:'unavailable');
+resolvedEl.textContent='resolved session: '+(health&&typeof health.resolved_session==='string'&&health.resolved_session?health.resolved_session:'unavailable');
+expectedEl.textContent='expected session: '+(expected===undefined?'resolving':(expected||'unavailable'));
+outcomeEl.textContent=outcome();
+if(pinned&&published&&published!==pinned){{driftEl.textContent='the displayed board is stale: pinned to '+pinned+' while the published current is '+published+(health?', health observation '+age(Date.now()-Date.parse(health.generated_at))+' old':'');optin.hidden=false;}}
+else{{driftEl.textContent='';optin.hidden=true;}}
+if(!health){{state.textContent='unknown / stale: '+healthNote;stamp.textContent='offline frozen at '+FROZEN;banner.className='unknown';return;}}
+evaluate();}}
+function route(){{if(!pinned)return;frame.src='/release/'+pinned+'/index.html'+(location.hash||'#/trades/board');}}
+async function init(){{const seq=++currentSeq,found=await readCurrent();if(found.ok&&found.id&&!pinned)pinned=found.id;if(seq!==currentSeq){{if(pinned){{route();render();}}return;}}published=found.ok?found.id:null;expected=found.ok?found.exp:null;render();route();}}
+optin.addEventListener('click',function(){{location.reload();}});
+window.addEventListener('hashchange',function(){{try{{route();}}catch(e){{}}}});
+init();pollHealth();setInterval(pollHealth,30000);setInterval(pollCurrent,30000);
+</script>'''
+
+
+def _safe_frozen_stamp(frozen_at: object) -> str:
+    """Normalize ``frozen_at`` to a value that is safe to embed.
+
+    Only a parseable ISO timestamp (or the exact ``"unknown"`` sentinel) is
+    ever spliced into the shell's HTML or JavaScript; anything malformed,
+    empty or non-string collapses to ``"unknown"`` so a quote, backslash or
+    script terminator in the configured clock can never break the document.
+    """
+    if not isinstance(frozen_at, str) or not frozen_at:
+        return "unknown"
+    if frozen_at == "unknown":
+        return "unknown"
+    try:
+        latest_completed_session(frozen_at=frozen_at)
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+    return frozen_at
 
 
 def shell_document(*, frozen_at: str | None = None) -> bytes:
@@ -145,73 +295,11 @@ def shell_document(*, frozen_at: str | None = None) -> bytes:
     hashchange re-navigates the frame using that SAME pinned id; the shell
     never re-resolves ``current`` after the first load, so a ``CURRENT``
     pointer switch mid-session cannot move an already-open frame to a
-    different release. ``/release/current/...`` keeps working for direct,
-    non-shell requests (back-compat), but the shell itself never builds a
-    frame URL from it.
-
-    Status presentation (client-side only, ``textContent`` for all dynamic
-    text, no writes): ``/release/current.json`` is ALSO polled every 30s and
-    its latest published id kept only for COMPARISON against the pin; when
-    they differ the shell says the displayed board is stale, shows the health
-    observation's age, and offers a reload button to opt into current -- the
-    frame is never re-pointed automatically. ``/health.json`` polls every 30s
-    and is usable only as an ``operations_health.v1.0`` or
-    ``operations_health.v1.1`` object with a parseable, non-future
-    ``generated_at``; age shows in whole days/hours
-    (minimum one hour when nonzero, more than 24h stale). "current" requires
-    age <=24h, a health ``current_release.release_id`` matching BOTH the pin
-    and the latest published id, no withheld release, zero consecutive failed
-    nights and no missing scheduled observations -- each failed gate names
-    its own explicit reason (missing/malformed identity or schedule evidence
-    is unknown, never current). Any fetch/parse failure shows
-    unknown/unavailable without erasing the pin or throwing out of the shell.
+    different release. The status rules live in ``_shell_script``; any fetch
+    or parse failure shows unknown/unavailable without erasing the pin.
     """
-    frozen = frozen_at or "unknown"
-    routes = ("/#/trades/board", "/#/trades/explorer", "/#/trades/book", "/#/models/modelx",
-              "/derivation", "/analogs", "/#/models/health")
-    views = "".join(f'<a href="{route}">{view}</a> ' for view, route in zip(_VIEWS, routes))
-    html = f'''<!doctype html><meta charset="utf-8"><title>Operations shell</title>
-<style>body{{margin:0;font:14px sans-serif}}#ops{{padding:8px;background:#20252b;color:#eee}}#ops.unknown{{background:#634}}#ops.degraded{{background:#642}}nav a{{margin-right:12px}}main{{min-height:90vh}}</style>
-<div id="ops" class="unknown">health: <span id="state">unknown</span> <small id="stamp">offline frozen at {frozen}</small><br><small id="release">pinned release: resolving</small> <small id="published">published release: resolving</small><br><span id="drift"></span> <button id="optin" type="button" hidden>reload to opt into current</button></div>
-<nav>{views}</nav><main><iframe id="legacy" title="legacy dashboard" src="about:blank" style="width:100%;height:90vh;border:0"></iframe></main>
-<script>
-const FROZEN='{frozen}',DAY=86400000;
-const state=document.querySelector('#state'),stamp=document.querySelector('#stamp'),banner=document.querySelector('#ops'),releaseEl=document.querySelector('#release'),publishedEl=document.querySelector('#published'),driftEl=document.querySelector('#drift'),optin=document.querySelector('#optin'),frame=document.querySelector('#legacy');
-let pinned=null,published,health=null,healthNote='health not fetched yet',currentSeq=0,healthSeq=0;
-function age(ms){{let h=Math.floor(ms/3600000);if(ms>0&&h<1)h=1;const d=Math.floor(h/24);return d?d+'d '+(h%24)+'h':h+'h';}}
-function usable(j){{if(!j||typeof j!=='object'||Array.isArray(j)||!['operations_health.v1.0','operations_health.v1.1'].includes(j.schema_version))return false;const at=Date.parse(j.generated_at);return !Number.isNaN(at)&&at<=Date.now();}}
-async function pollHealth(){{const seq=++healthSeq;try{{const r=await fetch('/health.json',{{credentials:'same-origin'}});if(seq!==healthSeq)return;if(!r.ok)throw Error('http');const j=await r.json();if(seq!==healthSeq)return;if(usable(j)){{health=j;healthNote='';}}else{{health=null;healthNote='health artifact unusable: schema or generated_at';}}}}catch(e){{if(seq!==healthSeq)return;health=null;healthNote='health fetch failed: unavailable';}}if(seq!==healthSeq)return;render();}}
-async function pollCurrent(){{const seq=++currentSeq;let ok=false,id=null;try{{const r=await fetch('/release/current.json',{{credentials:'same-origin'}});if(!r.ok)throw Error('http');const j=await r.json();id=(j&&typeof j.release_id==='string'&&j.release_id)?j.release_id:null;ok=true;}}catch(e){{}}if(seq!==currentSeq)return;published=ok?id:null;render();}}
-function sessionDate(s){{if(typeof s!=='string'||!s)return null;const m=/^(?:eng-night-)?([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})$/.exec(s);if(!m)return null;const tail=m[1];const at=Date.parse(tail);if(Number.isNaN(at))return null;return new Date(at).toISOString().slice(0,10)===tail?at:null;}}
-function evaluate(){{const ms=Date.now()-Date.parse(health.generated_at),text=age(ms),reasons=[];let unknown=false;
-if(health.withheld_release)reasons.push('release withheld: '+(typeof health.withheld_release==='string'?health.withheld_release:'(details omitted)'));
-const cr=(health.current_release&&typeof health.current_release==='object'&&typeof health.current_release.release_id==='string'&&health.current_release.release_id)?health.current_release.release_id:null;
-if(cr===null){{unknown=true;reasons.push('health names no current release identity');}}
-else{{if(pinned===null)reasons.push('release mismatch: health says '+cr+', frame pin unavailable');else if(cr!==pinned)reasons.push('release mismatch: health says '+cr+', frame pinned to '+pinned);
-if(published===undefined){{unknown=true;reasons.push('release mismatch: health says '+cr+', published current not yet observed');}}else if(published===null){{unknown=true;reasons.push('release mismatch: health says '+cr+', published current unavailable');}}else if(cr!==published)reasons.push('release mismatch: health says '+cr+', published current is '+published);}}
-const rq=sessionDate(health.requested_session),rs=sessionDate(health.resolved_session);
-if(rq===null||rs===null){{unknown=true;reasons.push('session identity evidence missing or malformed');}}else if(rs>rq){{unknown=true;reasons.push('resolved session is later than requested session');}}
-const cb=health.code_budgets;
-if(!cb||typeof cb!=='object'||typeof cb.consecutive_nights!=='number'||!Array.isArray(cb.unknown_occurrences)){{unknown=true;reasons.push('engineering schedule evidence missing or malformed');}}
-else{{if(cb.consecutive_nights!==0)reasons.push('failed engineering nights: '+cb.consecutive_nights+' consecutive');if(cb.unknown_occurrences.length>0)reasons.push('scheduled observations missing: '+cb.unknown_occurrences.join(', '));}}
-if(ms>DAY)reasons.push('observation older than 24 hours');
-stamp.textContent='updated '+text+' ago';
-if(reasons.length===0){{state.textContent='current';banner.className='';return;}}
-state.textContent=(unknown?'unknown: ':'degraded: ')+reasons.join('; ')+' (observation '+text+' old)';
-banner.className=unknown?'unknown':'degraded';}}
-function render(){{releaseEl.textContent='pinned release: '+(pinned||'unavailable');
-publishedEl.textContent='published release: '+(published===undefined?'resolving':(published||'unavailable'));
-if(pinned&&published&&published!==pinned){{driftEl.textContent='the displayed board is stale: pinned to '+pinned+' while the published current is '+published+(health?', health observation '+age(Date.now()-Date.parse(health.generated_at))+' old':'');optin.hidden=false;}}
-else{{driftEl.textContent='';optin.hidden=true;}}
-if(!health){{state.textContent='unknown / stale: '+healthNote;stamp.textContent='offline frozen at '+FROZEN;banner.className='unknown';return;}}
-evaluate();}}
-function route(){{if(!pinned)return;frame.src='/release/'+pinned+'/index.html'+(location.hash||'#/trades/board');}}
-async function init(){{const seq=++currentSeq;let ok=false,id=null;try{{const r=await fetch('/release/current.json',{{credentials:'same-origin'}});if(!r.ok)throw Error('http');const j=await r.json();id=(j&&typeof j.release_id==='string'&&j.release_id)?j.release_id:null;ok=true;}}catch(e){{}}if(ok&&id&&!pinned)pinned=id;if(seq!==currentSeq){{if(pinned){{route();render();}}return;}}published=ok?id:null;render();route();}}
-optin.addEventListener('click',function(){{location.reload();}});
-window.addEventListener('hashchange',function(){{try{{route();}}catch(e){{}}}});
-init();pollHealth();setInterval(pollHealth,30000);setInterval(pollCurrent,30000);
-</script>'''
-    return html.encode()
+    frozen = _safe_frozen_stamp(frozen_at)
+    return (_shell_markup(frozen) + "\n" + _shell_script(frozen)).encode()
 
 
 def _model_release_document(root: Path) -> tuple[HTTPStatus, dict]:
@@ -566,8 +654,19 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             return self._send(HTTPStatus.UNAUTHORIZED, b"unauthorized\n", "text/plain")
         try:
             name = _resolve_current_id(config)
-            body = json.dumps({"release_id": name}, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-            return self._send(HTTPStatus.OK, body, "application/json")
+            body = json.dumps({"release_id": name}, sort_keys=True,
+                              separators=(",", ":")).encode() + b"\n"
+            headers = {"Cache-Control": "no-store"}
+            try:
+                headers["X-Expected-Session"] = latest_completed_session(
+                    frozen_at=config.frozen_at)
+            except (ValueError, OverflowError):
+                # A malformed configured snapshot clock is refused, never
+                # replaced by live time: the route serves the release id
+                # without expected-session evidence and the shell shows it
+                # unknown.
+                pass
+            return self._send(HTTPStatus.OK, body, "application/json", headers)
         except (ArtifactError, OSError, ValueError):
             return self._send(HTTPStatus.NOT_FOUND, b"unknown release\n", "text/plain")
 
