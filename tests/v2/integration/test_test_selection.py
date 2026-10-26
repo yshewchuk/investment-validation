@@ -190,6 +190,8 @@ _COVERAGE_RELOCATIONS = (
     ("tests/test_v2_ops_partition_consumer.py", "tests/v2/ops/test_partition_consumer.py", (1,)),
     ("tests/test_v2_ops_serving_browser.py", "tests/v2/serving/test_ops_serving_browser.py", (1,)),
     ("tests/test_v2_ops_native_score_batch.py", "tests/v2/ops/test_native_score_batch.py", (1,)),
+    ("tests/test_v2_ops_outcome_session_backfill_wiring.py",
+     "tests/v2/ops/test_outcome_session_backfill_wiring.py", (1,)),
 )
 
 

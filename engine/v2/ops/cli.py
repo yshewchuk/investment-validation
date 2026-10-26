@@ -19,7 +19,7 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.ops import executor
-from engine.v2.ops.bootstrap import open_catalog
+from engine.v2.ops.bootstrap import open_catalog, require_compatible_catalog
 from engine.v2.ops.catalog import integrity_errors, transaction
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.diagnostics import process_family_liveness
@@ -503,6 +503,12 @@ def _health_command(args, conn, clock):
     if getattr(args, "out", None) is not None:
         write_health(args.out, document)
     return document
+
+
+def _remove_health_output(args):
+    output = getattr(args, "out", None) if args.command == "health" else None
+    if output is not None and (output.is_file() or output.is_symlink()):
+        output.unlink(missing_ok=True)
 
 
 def dispatch(args, root, conn, clock):
@@ -1342,15 +1348,36 @@ def main(argv=None):
                 root.chmod(0o700)
             if not root.is_dir():
                 raise fail("INVALID_REQUEST", "operations root must be initialized first")
-            conn = open_catalog(root / "catalog.sqlite", clock=clock)
-            try:
-                _ensure_outcome_sessions_backfilled(conn, root, clock)
-                document = dispatch(args, root, conn, clock)
-            finally:
-                conn.close()
+            if args.command == "health":
+                catalog = root / "catalog.sqlite"
+                conn = None
+                try:
+                    try:
+                        conn = sqlite3.connect(catalog.resolve().as_uri() + "?mode=ro", uri=True)
+                    except sqlite3.Error:
+                        raise fail("INVALID_REQUEST",
+                                   "health catalog is missing, locked, or unavailable") from None
+                    conn.row_factory = sqlite3.Row
+                    try:
+                        require_compatible_catalog(conn)
+                        document = dispatch(args, root, conn, clock)
+                    except sqlite3.Error:
+                        raise fail("INTEGRITY_FAILED",
+                                   "health catalog could not be verified or read") from None
+                finally:
+                    if conn is not None:
+                        conn.close()
+            else:
+                conn = open_catalog(root / "catalog.sqlite", clock=clock)
+                try:
+                    _ensure_outcome_sessions_backfilled(conn, root, clock)
+                    document = dispatch(args, root, conn, clock)
+                finally:
+                    conn.close()
         _print_result(args, document)
         return document.get("exit_code", 0) if args.command == "headroom" else 0
     except OpsError as exc:
+        _remove_health_output(args)
         print(json.dumps(to_document(exc.problem)))
         return 2
     except (OSError, ValueError, TypeError) as exc:

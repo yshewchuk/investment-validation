@@ -1180,6 +1180,23 @@ def test_failed_native_batch_stays_failed_after_release_success_then_resolves(
     service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
                       code_source=ROOT, store_root=tmp_path)
 
+    # Without a matching succeeded batch identity, release failure recording remains active.
+    service._report_native_release_problem(
+        "NO_CURRENT_RELEASE", "unavailable",
+        occurrence="2026-01-16", scope_hash="scope-hash")
+    assert conn.execute(
+        "SELECT state FROM jobs WHERE kind = ? AND idempotency_key = ?",
+        ("native_score_batch",
+         "nightly:2026-01-16:scope-hash:native_score_batch")).fetchone() is None
+    row = conn.execute(
+        "SELECT status, error_code, resolved_at FROM native_stage_failures "
+        "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
+        ("2026-01-16", "scope-hash", "native_score_batch")).fetchone()
+    assert row is not None
+    assert row["status"] == "FAILED"
+    assert row["error_code"] == "MODEL_NOT_READY"
+    assert row["resolved_at"] is None
+
     pointer = SimpleNamespace(sequence=1, release_id="release-1",
                               previous_release_id=None, action="promote",
                               at="2026-01-15T00:00:00Z")
@@ -1210,6 +1227,24 @@ def test_failed_native_batch_stays_failed_after_release_success_then_resolves(
     # 3. A succeeded worker resolves the failure.
     monkeypatch.setattr(service, "_commit_success", lambda *args, **kwargs: None)
     service._finish(SimpleNamespace(claim=claim), {"exit_code": 0})
+    row = conn.execute(
+        "SELECT resolved_at FROM native_stage_failures "
+        "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
+        ("2026-01-15", "scope-hash", "native_score_batch")).fetchone()
+    assert row["resolved_at"] is not None
+
+    # The retained success identity suppresses a later release failure for
+    # this occurrence/scope; recovery history stays resolved.
+    conn.execute("UPDATE jobs SET state = 'succeeded', active_attempt_id = NULL WHERE job_id = ?",
+                 (claim.job_id,))
+    service._native_release_memo = None
+
+    def unavailable():
+        raise release_bindings.ModelNotReady("test model unavailable")
+
+    monkeypatch.setattr(release_bindings, "resolve_production_release_binding", unavailable)
+    assert service._native_release_root_or_none(
+        occurrence="2026-01-15", scope_hash="scope-hash") is None
     row = conn.execute(
         "SELECT resolved_at FROM native_stage_failures "
         "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",

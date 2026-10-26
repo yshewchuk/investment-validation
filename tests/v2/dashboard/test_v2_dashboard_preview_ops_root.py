@@ -25,10 +25,10 @@ from engine.v2.ops import cli
 from engine.v2.ops.bootstrap import open_catalog
 from tests.ops_support import TEST_POLICY
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 TOKEN = "refresh-launcher-secret"
 SESSION = "2026-09-10"
-_NIGHTLY_JOB_COUNT = 14  # the legacy-mode DAG (P6-2 added "features")
+_NIGHTLY_JOB_COUNT = 15  # the 14 legacy-mode DAG stages + the planned restage job (#805)
 
 
 # --------------------------------------------------------------------------

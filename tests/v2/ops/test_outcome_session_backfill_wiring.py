@@ -110,7 +110,8 @@ def test_first_production_open_backfills_once_second_open_does_not_rescan(tmp_pa
 
     monkeypatch.setattr(session_backfill, "_nightly_session_map", _counting_map)
 
-    code = cli.main(["--root", str(root), "health"])
+    # Health is deliberately read-only; the first writable CLI open performs the backfill.
+    code = cli.main(["--root", str(root), "init"])
     assert code == 0
     assert len(calls) == 1
 
@@ -124,7 +125,7 @@ def test_first_production_open_backfills_once_second_open_does_not_rescan(tmp_pa
     # A second production-path open of the SAME catalog must not rescan --
     # the one-shot schema_versions marker short-circuits before any artifact
     # or row is touched.
-    code = cli.main(["--root", str(root), "health"])
+    code = cli.main(["--root", str(root), "init"])
     assert code == 0
     assert len(calls) == 1
 
@@ -212,8 +213,14 @@ def test_doctor_and_health_report_the_undetermined_count(tmp_path, capsys):
     assert before["outcome_sessions"]["undetermined"] == 2
 
     assert cli.main(["--root", str(root), "health"]) == 0
-    capsys.readouterr()  # discard this call's stdout; only the next is asserted below
+    capsys.readouterr()  # health is read-only and leaves the pre-backfill state intact
 
+    after_health = cli.doctor(root, clock)
+    assert after_health["outcome_sessions"]["backfill_applied"] is False
+    assert after_health["outcome_sessions"]["undetermined"] == 2
+
+    assert cli.main(["--root", str(root), "init"]) == 0
+    capsys.readouterr()  # drop the init JSON so the health read below is one document
     after = cli.doctor(root, clock)
     assert after["outcome_sessions"]["backfill_applied"] is True
     assert after["outcome_sessions"]["undetermined"] == 1  # bad_row stays NULL
@@ -254,7 +261,7 @@ def test_same_session_rerun_after_automatic_backfill_commits_zero(tmp_path):
 
     # The real production entry point -- not a direct call to
     # backfill_outcome_sessions -- recovers the session automatically.
-    assert cli.main(["--root", str(root), "health"]) == 0
+    assert cli.main(["--root", str(root), "init"]) == 0
 
     conn = open_catalog(root / "catalog.sqlite", clock=clock)
     try:

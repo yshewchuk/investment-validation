@@ -436,7 +436,7 @@ The pointer is re-read before each phase submit; if its class or id changed sinc
 
 **Cost.** Unmeasured. The job writes the objects and verifies the pinned panel copy (it hashes the whole panel object) and reads every model artifact and Tier-4 fold, so it is not yet classified light or heavy; the supervisor runs the first live one.
 
-### 2.3 Monthly retrain (design, cutover PR-13b, #805; not implemented)
+### 2.3 Monthly retrain (design, cutover PR-13b, #805; slice 2 built: due decision, planned chain stub, sidecar gate; no step is implemented)
 
 Binding user decisions D1-D10 (2026-10-25, recorded in #805). Once per calendar month the nightly refreshes the objects that change only on a retrain: the three driver residual pools and the chooser analog pool (and, later, champion/gate models). The retrain is a **planned early step of the nightly** (D8), not a `Service.tick()` sidecar: a chain of ordinary job kinds that the nightly plan includes when a month is due, ahead of scoring. Plan shape: `refresh` → `restage` (always planned) → train → stage → accept → check → promote → `score` (`score` depends on the last chain job); the chain jobs exist only when a month is due. The ops doc ("Current nightly orchestration boundary") points here.
 
@@ -503,7 +503,7 @@ Binding user decisions D1-D10 (2026-10-25, recorded in #805). Once per calendar 
 **Split list** (code, in order; each ≤ ~400 non-test lines, handed out one at a time):
 
 1. Acceptance and non-regression check: `retrain-check` job kind, receipt binding candidate, release and incumbent hashes, `C = M - 6` fits; a pool-only candidate returns the recorded no-op. Nothing wires it into the nightly yet (D2).
-2. Due-month decision, plan integration and the guard: pure function `due_month`, `superseded` markers, `retrain` plan section (`not_due` reason recorded), the planned chain of nodes with the `RETRAIN_UNAVAILABLE` stub for unbuilt steps, `score` made dependent on the chain, sidecar gating. Must land before 2026-11-02.
+2. Due-month decision, plan integration and the guard (built): `retrain_due.due_decision`, `superseded` marker files `retrain_superseded/{M}.json`, the `retrain` plan section (`not_due` reason logged and pinned; `base` is the deployed release id or `none`; the base `retrain_cutoff` is absent until slice 3, so only the latest completed month is considered), job kind `retrain_step` (`retrain_plan.py`; keys `retrain-restage:{session}:{plan}`, `retrain-{step}:{session}:{M}:{base}:{plan}` (`{plan}` = the plan generation token, 16 hex characters of the score job id, so every same-session replan gets fresh jobs)) with a `restage` stub (`restage: unchecked`) and `RETRAIN_UNAVAILABLE` for every chain step, `score` dependent on the chain, and the pool sidecar held while a `retrain-` job of the session is nonterminal or failed (cancelled jobs do not hold it). A plan without the section plans none of it. Must land before 2026-11-02.
 3. Catalog `sources.retrain_cutoff`, stage-time base read, §2.1 advance rule, the monthly accepted member set in `classify`/`prior_carry_set` (driver pools and chooser supplied).
 4. Isolation guard `checks/live_experiment_isolation.py` (D7), before any training code lands.
 5. Driver pool and chooser regeneration with the settled-by-`M_end` admission filter and `experiment_inputs: "none"`.
