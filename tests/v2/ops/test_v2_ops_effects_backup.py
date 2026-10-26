@@ -964,3 +964,77 @@ def test_backup_prune_leaves_unrelated_files_untouched(tmp_path):
     assert notes.read_bytes() == b"keep me"
     assert unmatched.read_bytes() == b"legacy"
     assert (backup / (keys[3] + ".sqlite")).exists()
+
+
+def test_backup_prune_replay_of_pruned_key_returns_receipt_and_keeps_three(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    backup = tmp_path / "backup"
+    keys = [_bkp_key(index) for index in range(1, 5)]
+    receipts = {}
+    for key in keys:
+        prepare_backup(conn, key, {}, clock=clock)
+        receipts[key] = run_backup(conn, key=key, owner="worker", target=backup,
+                                   clock=clock, store=store)
+        clock.advance(60)
+    pruned = keys[0]
+    assert not (backup / (pruned + ".sqlite")).exists()
+    assert not (backup / (pruned + ".manifest.json")).exists()
+    receipt = run_backup(conn, key=pruned, owner="worker", target=backup,
+                         clock=clock, store=store)
+    assert receipt == receipts[pruned]
+    assert sorted(path.name for path in backup.glob("bkp*.sqlite")) == sorted(
+        key + ".sqlite" for key in keys[1:])
+    assert sorted(path.name for path in backup.glob("bkp*.manifest.json")) == sorted(
+        key + ".manifest.json" for key in keys[1:])
+
+
+def test_backup_prune_retains_oldest_current_with_two_newest(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    backup = tmp_path / "backup"
+    current = _bkp_key(1)
+    prepare_backup(conn, current, {}, clock=clock)
+    clock.advance(60)
+    others = [_bkp_key(index) for index in range(2, 6)]
+    for key in others:
+        _make_backup(conn, clock, store, backup, key)
+    run_backup(conn, key=current, owner="worker", target=backup, clock=clock, store=store)
+    remaining = sorted(path.name for path in backup.glob("bkp*.sqlite"))
+    assert remaining == sorted(
+        [current + ".sqlite"] + [key + ".sqlite" for key in others[-2:]])
+    assert not (backup / (others[0] + ".sqlite")).exists()
+    assert not (backup / (others[1] + ".manifest.json")).exists()
+    assert (backup / (current + ".manifest.json")).exists()
+
+
+def test_backup_prune_database_unlink_failure_keeps_manifest_and_delivers(tmp_path,
+                                                                          monkeypatch,
+                                                                          capsys):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    backup = tmp_path / "backup"
+    keys = [_bkp_key(index) for index in range(1, 4)]
+    for key in keys:
+        _make_backup(conn, clock, store, backup, key)
+    doomed = keys[0]
+    real_unlink = Path.unlink
+
+    def failing_unlink(self, *args, **kwargs):
+        if self.name == doomed + ".sqlite":
+            raise OSError("simulated database unlink failure")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    current = _bkp_key(4)
+    _make_backup(conn, clock, store, backup, current)
+    captured = capsys.readouterr()
+    assert "[backup-retention] BACKUP_FAILED" in captured.err
+    assert doomed + ".sqlite" in captured.err
+    assert "simulated database unlink failure" in captured.err
+    assert (backup / (doomed + ".sqlite")).exists()
+    assert (backup / (doomed + ".manifest.json")).exists()
+    assert (backup / (current + ".sqlite")).exists()
+    assert conn.execute(
+        "SELECT state FROM outbox WHERE kind='backup' AND logical_key=?", (current,)
+    ).fetchone()[0] == "delivered"

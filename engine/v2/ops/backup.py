@@ -25,6 +25,7 @@ from engine.v2.ops.workflows.commands import read_bounded_json
 _MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_BACKUP_BYTES = 64 * 1024**3
 BACKUP_RETENTION = 3
+_BACKUP_KEY_PATTERN = re.compile(r"bkp[0-9a-f]{24}")
 
 
 def prepare_backup(conn, key, artifacts, *, clock):
@@ -158,38 +159,63 @@ def _verify_existing_manifest(manifest_path, manifest):
         raise fail("INTEGRITY_FAILED", "backup manifest differs")
 
 
-def _prune_backups(target, current_key):
-    """Keep only the newest ``BACKUP_RETENTION`` validated backup pairs."""
-    key_pattern = re.compile(r"bkp[0-9a-f]{24}")
+def _verified_backup_pairs(target):
+    """Collect backup pairs that verifiably belong to retention, newest first.
+
+    A pair is a candidate only when its name matches the backup-key pattern
+    exactly and its manifest parses bounded JSON into a dict carrying the
+    fields ``_read_restore_manifest`` requires (``backup_key`` equal to the
+    name, a string ``database``, a dict ``artifacts`` and a string ``cutoff``)
+    plus a ``database_byte_size``, and the database copy verifies against that
+    receipt. Legacy v1 manifests without ``database_byte_size`` and anything
+    else unverifiable (unreadable, oversized, mismatched, corrupt) are
+    explicitly out of retention: skipped and left untouched.
+    """
     candidates = []
     for database in target.glob("bkp*.sqlite"):
         key = database.name[: -len(".sqlite")]
         manifest_path = target / (key + ".manifest.json")
-        if key_pattern.fullmatch(key) is None or not manifest_path.exists():
+        if _BACKUP_KEY_PATTERN.fullmatch(key) is None or not manifest_path.exists():
             continue
         try:
             manifest = read_bounded_json(manifest_path, _MAX_MANIFEST_BYTES)
             if (not isinstance(manifest, dict) or manifest.get("backup_key") != key
-                    or not isinstance(manifest.get("cutoff"), str)):
+                    or not isinstance(manifest.get("database"), str)
+                    or not isinstance(manifest.get("artifacts"), dict)
+                    or not isinstance(manifest.get("cutoff"), str)
+                    or "database_byte_size" not in manifest):
                 continue
             _verify_delivered_copy(database, manifest)
             candidates.append((manifest["cutoff"], key, database, manifest_path))
         except (OSError, ValueError, TypeError, RecursionError, OpsError):
             continue
     candidates.sort(key=lambda candidate: (candidate[0], candidate[1]), reverse=True)
+    return candidates
+
+
+def _prune_backups(target, current_key):
+    """Keep the current pair plus the newest ``BACKUP_RETENTION`` - 1 other
+    verified pairs; skip anything ``_verified_backup_pairs`` left out."""
+    candidates = _verified_backup_pairs(target)
+    allowed = BACKUP_RETENTION - (1 if current_key in {key for _c, key, _d, _m in candidates} else 0)
     survivors = 0
     for _cutoff, key, database, manifest_path in candidates:
         if key == current_key:
             continue
-        if survivors < BACKUP_RETENTION - 1:
+        if survivors < allowed:
             survivors += 1
             continue
-        for path in (database, manifest_path):
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                print("[backup-retention] BACKUP_FAILED: backup pair deletion failed",
-                      file=sys.stderr)
+        try:
+            database.unlink()
+        except OSError as error:
+            print(f"[backup-retention] BACKUP_FAILED: {database.name}: {error}",
+                  file=sys.stderr)
+            continue
+        try:
+            manifest_path.unlink(missing_ok=True)
+        except OSError as error:
+            print(f"[backup-retention] BACKUP_FAILED: {manifest_path.name}: {error}",
+                  file=sys.stderr)
 
 
 def _copy_backup_artifact(store, target, name, document, fault):
@@ -222,7 +248,15 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
     effect = claim(conn, "backup", owner=owner, clock=clock, logical_key=key)
     if effect is None:
         receipt = _delivered_or_stale(conn, "backup", key)
-        _verify_delivered_copy(Path(target) / (key + ".sqlite"), receipt)
+        replay_target = Path(target)
+        replay_database = replay_target / (key + ".sqlite")
+        if (_BACKUP_KEY_PATTERN.fullmatch(key) is not None
+                and not replay_database.exists()
+                and not (replay_target / (key + ".manifest.json")).exists()):
+            _prune_backups(replay_target, key)
+            return receipt
+        _verify_delivered_copy(replay_database, receipt)
+        _prune_backups(replay_target, key)
         return receipt
     payload = json.loads(effect["payload_json"])
     target = Path(target)
