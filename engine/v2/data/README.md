@@ -146,3 +146,7 @@ A negative control here looks like: corrupt one field of a frozen record, run
 the comparator, and assert it names **this package's stage** and that field
 path — not that "a row is red". A check that has never failed is not known to
 work.
+
+Private bounded-catalog prerequisites now include pure native identity reconstruction
+from transferred metadata. They expose no public session or scanner; see the
+[component contract](ARCHITECTURE.md#bounded-catalog-prerequisites-internal-no-production-caller).

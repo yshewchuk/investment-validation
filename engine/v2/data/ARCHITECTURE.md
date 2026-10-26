@@ -977,24 +977,24 @@ Root doc §5 invariants this package is responsible for:
 
 ### Bounded catalog prerequisites (internal; no production caller)
 
-`_bounded_catalog.probe_catalog` uses stdlib SQLite COUNT/LIMIT, typeof and BLOB-length scalar-only probes for five caps.
-Charge snapshot once, binding/dataset/contract per table, membership/fragment/object per occurrence, including unrelated tables, repeated IDs and zero-row fragments.
-Integers charge BLOB-cast decimal text, not SQLite cell sizes. Probes return counts/bytes, never native identity or admission capabilities.
-`_bounded_catalog_transfer.transfer_catalog` reuses those probes/projections in the same borrowed active read transaction; only SELECTs run, with no lifecycle/settings changes.
-An exact SQLite connection with Row/str factories is required; all-table admission precedes transfer in table-name/membership-ordinal order.
-Types and upper counts are checked before row retention; exact lower counts after each group. Every TEXT occurrence charges an independent UTF-8 cap before **any** JSON parsing; only SQL charges integer text.
-Results are detached qualified-column maps: native decoding validates the full `TableContract` and private JSON-column shapes; duplicate JSON keys refuse.
-The result does not validate `FragmentRecord` time semantics, `DatasetManifest` hash formats or identity/binding agreement; it offers no public session or scanning.
-Catalog parent IDs/evidence-reference metadata are retained, never traversed; no referenced payload, object, provider or ordinary resolver is read. No source, coverage, confirmation, PIT or execution property is established.
-Limits bound transfer, not SQLite CPU/RSS. Existing readers stay intact; there is no partial result, fallback, write or automatic retry.
-The caller guarantees read-view provenance/cleanup. See the [bounded-session design](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md).
+`_bounded_catalog.probe_catalog` uses stdlib SQLite COUNT/LIMIT, typeof and BLOB-length scalar probes for five caps.
+Charge snapshot once, binding/dataset/contract per table and membership/fragment/object per occurrence, including unrelated tables, repeated IDs and zero-row fragments; integer charges are BLOB-cast decimal text. Probes establish counts/bytes, not identity.
+`_bounded_catalog_transfer.transfer_catalog` reuses probes/projections in the borrowed active read transaction: SELECTs only, no lifecycle/settings changes; exact SQLite connection with Row/str factories required.
+All-table admission precedes table-name/membership-ordinal transfer. Types and upper counts are checked before retention, exact lower counts after each group. Independent TEXT UTF-8 accounting passes before **any** JSON parsing; only SQL charges integer text.
+Detached qualified-column maps use native decoding for full TableContract/private JSON shapes; duplicate JSON keys refuse. Transfer alone does not validate FragmentRecord time semantics, DatasetManifest hash formats or identity/binding agreement.
+`_bounded_catalog_identity.reconstruct_catalog(payload, expected)` consumes an unmodified transfer through native decoders/builders, not a new hash recipe or public provenance token.
+B2 checks every contract/binding, ordered fragment/object membership, dataset count/hash/mode and snapshot field, then requires complete expected SnapshotRef equality. Empty/unselected tables participate; repeated ObjectRefs are deduplicated only after agreement checks. Output is native ResolvedSnapshot.
+Parent IDs/evidence remain values, never traversed. No referenced payload, object bytes, provider or ordinary resolver is read; B2 has no SQL/logging. Metadata proves no source, coverage, confirmation, PIT or execution property.
+Limits bound transfer, not SQLite CPU/RSS. Existing readers remain intact; no partial result, fallback, write or automatic retry. Caller owns read-view provenance/cleanup. Session lifetime/scanner wiring remain later work; see the [design](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md).
 
-| Probe/transfer condition | Refusal (fixed redacted message; no partial result) | Retryable |
+| Condition | Refusal (fixed messages for new mappings only; no partial result) | Retryable |
 |---|---|---|
 | Wrong holder/configuration/string types, empty or non-UTF-8-encodable IDs/table, malformed limits, no active transaction or missing selected table | `CONTRACT_MISMATCH` | no |
-| Requested snapshot absent | `SNAPSHOT_UNRESOLVED` | no |
-| Any explicit count, SQL BLOB byte or decoded UTF-8 cap exceeded | `RESULT_LIMIT_EXCEEDED` | no |
-| Missing joins, wrong types, inconsistent membership, JSON/depth/shape or Unicode failure | `MANIFEST_CORRUPT` | no |
+| Requested snapshot absent; B2 malformed/different expected SnapshotRef | `SNAPSHOT_UNRESOLVED` | no |
+| Any count, SQL BLOB byte or decoded UTF-8 cap exceeded | `RESULT_LIMIT_EXCEEDED` | no |
+| Missing joins, wrong types, inconsistent membership, JSON/depth/shape/Unicode failure; B2 catalog decode or identity mismatch | `MANIFEST_CORRUPT` | no |
 | SQLite primary BUSY/LOCKED/IOERR/CANTOPEN/FULL/NOMEM, including extended codes | `RESOURCE_UNAVAILABLE` | yes; caller owns retries |
 | Other SQLite errors, including code-less or closed-connection errors | `MANIFEST_CORRUPT` | no |
-| Existing native `DataError` | Unchanged code, message and retryability | unchanged |
+| Existing native `DataError`, including B2 builders | Entire envelope unchanged: code/category/retryability/stage/message/details; no redaction wrapper | unchanged |
+
+Tokens/credentials must never enter logs. Preserving native diagnostics does not relax publication hygiene.
