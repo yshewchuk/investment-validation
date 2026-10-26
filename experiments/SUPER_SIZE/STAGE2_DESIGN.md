@@ -7,6 +7,24 @@ private-data reads, experiment runs or merging. Check this document in before co
 [Current executable contract](SPEC.md) remains authoritative. The accepted scope
 retains the deferred work below and freezes neither a dataset nor a resource budget.
 
+## Frozen-population claim boundary (October 26; design only)
+
+Owner choice: study all eligible confirmed events **within the pinned frozen
+dataset**, with no source-wide completeness claim. Historical first-known events,
+ordinals and counts are dataset-relative. Exhaust the complete manifest inventory,
+including pre-history_start events; keep duplicate/conflict refusals and report
+observed gaps/coverage patterns without inferring missing events from absence.
+No formal source watermark is required to establish this population. This does
+not establish provider/real-world completeness, earliest real-world history,
+point-in-time publication knowledge, evaluation-year representativeness or
+statistical unbiasedness. Conclusions are limited to this frozen population.
+
+The [metadata checkpoint](CONFIRMED_METADATA_DESIGN.md#frozen-dataset-population-amendment-october-26-design-only)
+records the exact distinction between population membership and remaining
+availability/forecast/label qualification. All native clocks, leakage, holdout,
+grouped eligibility and resource bounds remain unchanged. This amendment awaits
+design review before numerical/runtime changes; it grants no read/run authority.
+
 ## Priority and evidence
 
 Target roughly one engineering week for a bounded mean-magnitude comparison,
@@ -149,7 +167,7 @@ backfill, full-panel copy, rounding or independent availability claim is allowed
 
 **Historical implied mean.** Freeze one shared reconstruction for HMO and the
 causal incumbent. For each target/horizon, establish the full pinned canonical
-confirmed-event metadata prefix from its first known event, strictly before both
+confirmed-event metadata prefix from its first known event within that dataset, strictly before both
 the target event date and source-session ceiling. This includes metadata before
 history_start; that start bounds numeric contributions, not ordinal calculation.
 Keep the ordered metadata sequence and its zero-based ordinal; warm-up is four events, as the native
@@ -423,7 +441,7 @@ Proposed development schedule: outer_years ["2022", "2023", "2024"]; inner_years
 {"2022": ["2020", "2021"], "2023": ["2021", "2022"], "2024": ["2022", "2023"]}.
 Training begins at the anchor's explicit training_start, before the first inner year.
 These are prospective choices, not verified coverage. Metadata-only admission must
-confirm source coverage and holdout eligibility before sealing; insufficient years
+confirm frozen-dataset year feasibility and holdout eligibility before sealing; insufficient years
 block rather than silently disappear. Any amended years/grid require a new request
 and a new experiment ID, because the reservation identity omits the request hash,
 before the new evaluation. The runtime PR must accept `--no-ledger` and refuse any
@@ -492,7 +510,7 @@ A negative difference favors the challenger. No significance-driven stopping,
 deployment, final holdout read or release follows automatically from this experiment.
 
 The owner accepted the core and causal legacy-refit approach on October 21. Before
-sealing, still confirm exact immutable inputs, coverage/year feasibility and numeric
+sealing, still confirm exact immutable inputs, frozen-dataset year feasibility and numeric
 resource limits, and verify the implementation matches the accepted baseline contract.
 RMSE remains primary unless explicitly amended before outcomes. A practical minimum
 gain/promotion rule is a separate future decision; this run reports evidence only.
@@ -501,7 +519,8 @@ gain/promotion rule is a separate future decision; this run reports evidence onl
 
 The [confirmed-event metadata proof checkpoint](CONFIRMED_METADATA_DESIGN.md)
 proposes a metadata-first split of the historical-implied prefix work. It proves
-only complete pinned-view membership; coverage and numerical admission remain separate.
+only complete pinned-view membership; causal availability and numerical admission
+remain separate, not an additional source-wide population-completeness requirement.
 Its 1.B*, 1.M*, P.M*, 1.C* and 2.M* labels refine rows 1, P and 2 (parity P1/P2).
 This section owns scientific scope/dependencies; the checkpoint's mapped estimates
 supersede these original coarse estimates for its named remaining work, not fit
