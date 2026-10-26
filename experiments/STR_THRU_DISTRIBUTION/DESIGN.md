@@ -141,28 +141,41 @@ At the final status read, train #1390 was `d8ecc917` with both #1375 and #1396; 
 
 **Frozen-gate baseline qualification:** open P1 #1423 reports that native `entry_cost_pct` uses decision-session close while legacy gate training uses the priced chain's spot. The owner reports 67 numeric mismatches plus 22 separate null/quote-availability differences; these private-artifact counts were not independently reproduced here. Before making gate-relative claims, require a stable staged chain-spot/validation contract and exact feature-source parity, or explicitly label the benchmark unqualified. Keep the decision about strike geometry's spot source separate. This is a dependency to its existing owner, not authorization to fix it or inspect private artifacts. [#1423][spotissue]
 
-Each row below is one proposed PR, with estimated **added code / test / documentation lines**. Estimates include owning README/ARCHITECTURE updates, are not run authority or delivery promises, and must be re-estimated/split before implementation if the bounds cannot hold. Existing SIZE/clock/spot dependencies are separately owned prerequisites, not hidden work in these estimates.
+### Platform ownership and reuse
 
-| Slice and dependency | Deliverable and acceptance | Added code / tests / docs |
+This is not a platform rewrite or a new generic distribution framework. Reuse the existing snapshot/reader, fold, resource, trial, replay and holdout owners; add only minimal versioned integration where the new output contract requires it. No percentage split is estimated before those adapters are implemented.
+
+- **A:** `engine/v2/research/magnitude_distribution.py` (#1430) and companion numerical utilities are reusable **magnitude-family research** code, not universal distributions: absolute moves and the fixed grid are deliberate family/recipe choices. STR-THRU payoff assumptions and comparison controls remain research-specific, not production scoring changes.
+- **B:** reuse native `engine/v2/research/magnitude_*` readers/folds/stored panels and `experiments/magnitude_search_*` admission/resource/trial machinery; add the smallest distribution identity/admission adapters, not a replacement store, reader or scheduler.
+- **C:** add the distribution candidate and causal calibration alongside existing `experiments/magnitude_candidate_fit.py`, `magnitude_candidate_recipe.py` and `magnitude_fitted.py`. The histogram-versus-point recipe and residual controls serve this experiment; reuse later does not justify global model infrastructure now.
+- **D:** reuse bounded execution and native replay/cash-book/report boundaries; the distribution comparison runner, after-cost policy and additional report columns are experiment-specific. Existing holdout permissions and production entrypoints do not expand.
+
+### Four-bundle implementation amendment, 26 October 2026
+
+The approved packaging is **four implementation PRs**, not ten serial review units. Original slice IDs below identify retained substeps, not separate PRs. This changes review packaging and bounded size allowances only: scientific controls, tests, source qualification and run authority are unchanged. The design PR itself is not one of the four.
+
+Estimates are **added source / test / documentation lines**, including owning README/ARCHITECTURE/inventory updates. User-approved source ceilings exclude tests; documentation has a separate ceiling. Bundle A uses the actual initial #1430 format slice (143 source / 227 tests / 20 docs) plus the remaining estimates. These are not delivery promises; stop and re-scope before exceeding an approved ceiling. Existing SIZE/clock/spot dependencies remain separately owned prerequisites, not hidden work in these bounds.
+
+| Bundle and dependency | Retained deliverable and acceptance | Estimated source / tests / docs | Approved source / docs ceiling |
+| --- | --- | --- | --- |
+| A / design; expands #1430 (1a–1c) | Source-free bin/tail representation and refusal oracles; CRPS/RPS/log/Brier and reconstruction sensitivity; frozen payoff adapter and mean-matched controls, including linear invariance, clipping and nonlinear synthetic oracles. | 443–603 / 667–867 / 65–105 | 650 / 120 |
+| B / stable A format interface and qualified native sources (2a–2b) | Versioned recipe/fold/feature admission, protected/future poisoning, identity/all-horizon tests; resource/fit-count envelope and trial identity, exact limits and failure/replay tests. | 340–520 / 460–680 / 65–115 | 550 / 120 |
+| C / B (3a–3b) | Fixed histogram and matched point fitting, absent classes, deterministic fits/receipts; causal OOF residual/calibration controls, strict inner-only provenance and zero-mean refusal. | 360–560 / 500–740 / 70–120 | 600 / 120 |
+| D / A and C, plus frozen economics (3c, 4a–4b) | Sealed bounded local runner/report, complete attempts/no default execution; net-cost overlay/common selector, units/multipliers/fees/cutoffs; native cash-book/report integration, paired capital/coverage and missing-outcome diagnostics. | 500–780 / 720–1080 / 105–180 | 800 / 180 |
+
+A's scoring/payoff substeps and B's admission/resource work may proceed partly in parallel after the numerical interface stabilizes; B still waits for qualified SIZE/native inputs. C follows B; D joins A and C. This reduces review rounds, not causal prerequisites or testing. D contains the first bounded diagnostic runner and the first complete after-cost portfolio comparison; no runnable experiment is claimed before it and the independent data prerequisites are ready.
+
+The following remain conditional **design-only** proposals, outside the four implementation PRs; they are not prerequisites for the first experiment and receive no blanket implementation size exemption:
+
+| Later design and dependency | Deliverable | Added code / tests / docs |
 | --- | --- | --- |
-| 0 this review | Scientific design and discovery links only; no registration, private reads or training. | 0 / 0 / 180–220 |
-| 1a / reviewed design | Source-free distribution/bin/tail representation; support, normalization and refusal oracles. | 140–220 / 180–280 / 20–40 |
-| 1b / 1a | CRPS/RPS/log/Brier metrics and reconstruction sensitivity; independent synthetic score oracles. | 160–240 / 220–320 / 20–40 |
-| 1c / 1a | Frozen payoff adapter and mean-matched controls; linear invariance, clipping and nonlinear toy tests. | 140–220 / 220–320 / 25–45 |
-| 2a / 1a and qualified native sources | Versioned recipe/fold/feature admission; protected/future poisoning, identity and all-horizon tests. | 220–320 / 280–400 / 40–70 |
-| 2b / 2a | Resource/fit-count envelope and trial identity wiring; exact limits and failure/replay tests. | 120–200 / 180–280 / 25–45 |
-| 3a / 2a–2b | Fixed histogram and matched point-fitting adapters; absent classes, deterministic fits and receipts. | 180–280 / 240–360 / 35–60 |
-| 3b / 3a | Causal OOF mean/residual/calibration controls; strict inner-only provenance and zero-mean refusal. | 180–280 / 260–380 / 35–60 |
-| 3c / 1b–1c and 3b | Bounded local-run/report wiring; sealed requests and complete attempts, no default execution. | 160–260 / 240–360 / 40–70 |
-| 4a / frozen economics and 3c | Net-cost overlay and common selector; units, multipliers, fees and cutoff tests. | 160–240 / 220–340 / 30–50 |
-| 4b / 4a | Native cash-book/report integration; paired capital/coverage and missing-outcome diagnostics. | 180–280 / 260–380 / 35–60 |
 | 5a / useful development evidence only | Separate nonlinear/joint or direct-P&L follow-on design and its own implementation estimates. | 0 / 0 / 120–180 |
 | 5b / frozen winner only | Separate final-confirmation design, fixed reference and protected-read acceptance/implementation estimates. | 0 / 0 / 120–180 |
 | 5c / successful authorized confirmation only | Separate deployment design, including new release contracts and implementation estimates. | 0 / 0 / 120–180 |
 
-Slices 1–4 add research contracts only: no provider, private execution, production gate, strategy/exit optimization or automatic promotion. Metadata admission is not payload authority; no slice may hide a feature rebuild. Slices 5a–5c budget designs only, not unspecified future implementations. Real development remains explicitly authorized user-run local work; no final holdout, model release or deployment is authorized here.
+Bundles A–D add research contracts/code only: no provider, private execution, production gate, strategy/exit optimization or automatic promotion. Metadata admission is not payload authority; no bundle may hide a feature rebuild. Designs 5a–5c budget designs only, not unspecified future implementations. Real development remains separately authorized user-run local work; no final holdout, model release or deployment is authorized here.
 
-Implementation PRs stay within the current approximate 400-added-non-test-code/120-added-doc-line limits, with tests under `tests/v2/`. Standard sklearn/NumPy/stdlib cover the initial modeling and numerical work; no new optimization/distribution framework is needed. Count classifier trees, calibration/residual fits, storage, memory and wall time, and retain existing no-automatic-retry semantics and bounded progress logging.
+Only these four bundles receive the explicit ceilings above in place of the ordinary approximate 400-added-source/120-added-doc-line limits. Tests stay under `tests/v2/`; their exclusion from the source cap does not waive coverage. Standard sklearn/NumPy/stdlib cover the initial modeling and numerical work; no new framework is needed. Count classifier trees, calibration/residual fits, storage, memory and wall time, and retain no-automatic-retry semantics and bounded progress logging.
 
 Synthetic acceptance includes exact bin boundaries/zero/tails, normalization/NaN/negative mass refusal, absent classes, deterministic replay, all-tail and no-tail cases, proper score oracles, identical-mean linear-EV invariance, nonlinear toy distinction, cost/multiplier accounting, no future fit/calibration, protected-event poisoning, all-horizon grouping, source identity mismatch, and no legacy runtime changes. Before any real run, require an explicit resource/coverage preflight and a sealed run budget; no expensive operation was performed for this plan.
 
@@ -170,7 +183,7 @@ Synthetic acceptance includes exact bin boundaries/zero/tails, normalization/NaN
 
 1. **Recommended scope:** absolute magnitude first, fixed unhedged D0-to-D+1 exit, primary D−1 decision. Confirm this before registration, especially if the intended experiment is instead signed moves or the historical entry-close decision.
 2. **Economics:** choose the actual commission/fee schedule, representative execution assumption, capital/concentration limits and minimum worthwhile net uplift. The plan can report a cost grid meanwhile, but cannot invent Yuri's risk tolerance or broker costs.
-3. **Authority:** publication of this design is authorized; implementation, local private-data runs and any final holdout opening remain separate decisions. This review does not activate a recipe, allocate an experiment number or modify production behavior.
+3. **Authority:** design publication and the four bounded research-code bundles are authorized; local private-data/training runs and any final holdout opening remain separate decisions. This review does not activate a recipe, allocate an experiment number or modify production behavior.
 
 This document adds no runtime interface, dependency or data-access authority. Existing README/ARCHITECTURE runtime contracts remain unchanged; the indexing links identify a proposed follow-on only. No original private dataset, provider/training job, model release or final holdout is part of this review. Design acceptance is not preregistration or scientific approval.
 
