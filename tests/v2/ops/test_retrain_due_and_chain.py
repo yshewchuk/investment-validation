@@ -256,3 +256,18 @@ def test_chain_submits_through_the_real_registry_and_gates_the_sidecar(tmp_path)
     submit_graph(conn, registry(), policy, requests, clock=SystemClock())
     assert chain_blocks_pool_sidecar(conn, "2026-09-18") is True
     assert read_recorded(conn, tmp_path) == frozenset()
+
+
+@pytest.mark.parametrize("step", ["train", "stage", "accept", "check", "promote"])
+@pytest.mark.parametrize("state", ["running", "failed", "queued"])
+def test_sidecar_gate_blocks_on_every_chain_step_key(step, state):
+    conn = _conn()
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02', 'succeeded')")
+    conn.execute(
+        "INSERT INTO jobs VALUES ('shadow', ?, ?)",
+        (f"retrain-{step}:2026-11-02:2026-10:rel1", state),
+    )
+    conn.commit()
+
+    assert chain_blocks_pool_sidecar(conn, "2026-11-02") is True
+    assert chain_blocks_pool_sidecar(conn, "2026-11-03") is False
