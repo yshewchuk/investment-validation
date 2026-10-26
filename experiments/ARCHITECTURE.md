@@ -248,7 +248,8 @@ both flag states publish/verify the same plan and never write a ledger.
 
 `magnitude_search_request.compile_request(request)` consumes a plain-JSON
 `magnitude_search_request.v2` declaration and returns a detached
-`magnitude_search_schedule.v2` preview. Its only callers are synthetic tests;
+`magnitude_search_schedule.v2` preview. Its callers are synthetic tests and the
+additive `magnitude_search_request_versions.compile_request(request)` adapter;
 there is no CLI or runtime activation. Standard JSON/product and foundation
 canonical hashing implement normalization/enumeration. The owning research
 panel `recipe` supplies ordered subset dictionaries; shared `eligibility_policy`
@@ -274,7 +275,21 @@ defines the closed nested fields. Scope is request compatibility, not native adm
 
 The preview does not select a winner, fit or preprocess, reserve/register/publish,
 write a ledger, enforce resource containment, or authorize execution/holdout reads.
-Existing v1 planning, fitting, journals and replay are unchanged.
+The version adapter recognizes only the exact full-HMO v2 dictionary hash in a
+built-in dict/string; all other inputs delegate unchanged to the public compiler.
+For v2 it privately substitutes the full-HMO v1 hash in a shallow request copy,
+delegates all JSON/shape/grid/policy/year/cap/limit validation, then restores the
+actual normalized hash. It replaces every H/HM/HMO recipe through public
+`magnitude_panel_v2_table.recipe`, recomputes request/spec IDs and re-sorts specs.
+Standard JSON detaches the result; no surrogate ID or v1 recipe is emitted.
+V2 dictionary widths are 11/28/42; model columns are 11/28/43, with
+`has_implied_quote` last only for HMO, outside the numeric dictionary.
+Both versions retain 33 candidates and schedule-specific counts (603 search,
+9 logical/18 component comparison fits for the three-outer/six-inner fixture).
+The adapter has synthetic callers only, no CLI/native caller or fitting path.
+Work/space scale with the declaration plus fixed metadata specifications; caps
+bound enumeration, not input bytes, memory or real-data resource feasibility.
+Existing compiler/panel definitions and v1 runtime source closures are unchanged.
 
 ## Source-free candidate recipe and single-horizon fit
 
