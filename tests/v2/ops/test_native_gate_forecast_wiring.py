@@ -61,6 +61,9 @@ def test_real_synthetic_fold_populates_gate_output(tmp_path):
         size_feature_names=("x",))
     selected_source = native_score_batch.select_gate_forecast_source(
         binding, pd.Timestamp("2026-01-15"), pd.Timestamp("2026-01-10"))
+    expected_descriptor = binding.size_folds.descriptors["2026-01-01"]
+    assert selected_source.artifact_hash == expected_descriptor.estimator.content_hash
+    assert selected_source.artifact_hash != binding.size_folds.catalog_hash
     staging = tmp_path / "staging"
     staging.mkdir()
     low_doc = _event_doc(event_id="evt-low")
