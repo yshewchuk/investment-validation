@@ -52,12 +52,15 @@ def test_missing_event_id_refuses_before_missing_fold(tmp_path):
 
     assert assembled == {}
     assert [refusal.code for refusal in refusals] == ["MISSING_STAGED_INPUT"]
+    assert refusals[0].detail == "calendar_row missing event_id"
 
 
 def test_real_synthetic_fold_populates_gate_output(tmp_path):
-    _stage_release(
+    binding = _stage_release(
         tmp_path, gate_output_name="gate_score", gate_feature_name="pred_abs_move",
         size_feature_names=("x",))
+    selected_source = native_score_batch.select_gate_forecast_source(
+        binding, pd.Timestamp("2026-01-15"), pd.Timestamp("2026-01-10"))
     staging = tmp_path / "staging"
     staging.mkdir()
     low_doc = _event_doc(event_id="evt-low")
@@ -73,6 +76,10 @@ def test_real_synthetic_fold_populates_gate_output(tmp_path):
     parameters["gate_policy"] = {"STR-THRU": {"threshold": 1.02}}
     native_score_batch.run_native_score_batch_worker(parameters, staging)
     records = json.loads((staging / "records.json").read_text())["records"]
+    assert all(
+        selected_source.artifact_hash in record["canonical_request"]["model_artifact_refs"]
+        for record in records.values()
+    )
     low_terms = records["TEST|STR-THRU|2026-01-15|am"]["gate_terms"]
     high_terms = records["TEST2|STR-THRU|2026-01-15|am"]["gate_terms"]
 
@@ -97,8 +104,9 @@ def test_missing_causal_fold_refuses_row_model_not_ready(tmp_path):
 
 def test_gate_source_cache_reuses_only_same_causal_month(tmp_path, monkeypatch):
     binding = _stage_release(tmp_path)
-    as_of = "2026-01-10"
-    source = SimpleNamespace(binding_id="january-fold", artifact_hash="hash-january")
+    as_of = pd.Timestamp("2026-03-10")
+    january = SimpleNamespace(binding_id="january-fold", artifact_hash="hash-january")
+    february = SimpleNamespace(binding_id="february-fold", artifact_hash="hash-february")
     calls = []
     captured = []
 
@@ -110,9 +118,9 @@ def test_gate_source_cache_reuses_only_same_causal_month(tmp_path, monkeypatch):
             calendar_row={
                 "event_id": event_id, "ticker": ticker, "event_date": day,
                 "entry_date": day, "exit_date": following, "expiry": following,
-                "spot": 100.0, "calendar_observed_through": "2026-01-09",
+                "spot": 100.0, "calendar_observed_through": "2026-03-09",
             },
-            panel_anchor="2026-01-09",
+            panel_anchor="2026-03-09",
         )
 
     events = [
@@ -123,7 +131,7 @@ def test_gate_source_cache_reuses_only_same_causal_month(tmp_path, monkeypatch):
 
     def selector(selected_binding, event_date, received_as_of):
         calls.append((selected_binding, event_date, received_as_of))
-        return source
+        return february if event_date.month == 2 else january
 
     monkeypatch.setattr(native_score_batch, "select_gate_forecast_source", selector)
     monkeypatch.setattr(
@@ -135,9 +143,13 @@ def test_gate_source_cache_reuses_only_same_causal_month(tmp_path, monkeypatch):
 
     assert refusals == ()
     assert len(assembled) == 3
-    assert calls == [(binding, pd.Timestamp("2026-01-20"), pd.Timestamp(as_of))]
-    assert [bundle.gate_forecast_source for bundle in captured] == [source, source, source]
-    assert all(
-        "hash-january" in request.model_artifact_refs
-        for request, _ in assembled.values()
-    )
+    assert calls == [
+        (binding, pd.Timestamp("2026-01-20"), as_of),
+        (binding, pd.Timestamp("2026-02-01"), as_of),
+    ]
+    assert [bundle.gate_forecast_source for bundle in captured] == [
+        january, january, february,
+    ]
+    assert "hash-january" in assembled[events[0].key][0].model_artifact_refs
+    assert "hash-january" in assembled[events[1].key][0].model_artifact_refs
+    assert "hash-february" in assembled[events[2].key][0].model_artifact_refs
