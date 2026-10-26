@@ -353,7 +353,8 @@ def _cycle_job_states(conn, session, prior, tag, release_id, phases=PHASES):
 def _family_cycle_pending(conn, session, family, prior_token, tag, prior_id, release_id):
     """Is the started cycle of this family still pending? Active while a phase job
     of its key set has not succeeded, not pending once one has stalled; a clear
-    carry with a prior other than the candidate still awaits stage/promote."""
+    cycle with a prior other than the candidate still awaits stage/promote, and
+    with a missing pointer (a bootstrap) only once its jobs exist."""
     phases = BOOTSTRAP_PHASES if family == "bootstrap" else PHASES
     job_states = _cycle_job_states(conn, session, prior_token, tag, release_id,
                                    phases=phases)
@@ -361,7 +362,10 @@ def _family_cycle_pending(conn, session, family, prior_token, tag, prior_id, rel
         return False
     if job_states == "active":
         return True
-    return prior_id is not None and prior_id != release_id
+    if prior_id is None:
+        return any(_exists(conn, phase_key(session, phase, prior_token, tag))
+                   for phase in phases)
+    return prior_id != release_id
 
 
 def pool_cycle_pending(conn, release_root):
