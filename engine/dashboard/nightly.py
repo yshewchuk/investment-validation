@@ -421,15 +421,17 @@ CHAIN_DTE = "1,75"
 #: Trading sessions the nightly refreshes, counting back from ``as_of``.
 #: Two, because ORATS publishes a session around midnight: a run in the evening
 #: cannot get today, so it must also ask for yesterday or it acquires nothing.
-#: It also heals a night that did not run — a session is re-asked until it is
-#: actually held, and `skip_held` makes an already-held one free.
+#: It also heals a night that did not run — a session is re-asked until held
+#: or the session reaches CHAIN_SKIP_HELD_FRACTION held, and `skip_held` makes
+#: an already-held one free.
 CHAIN_SESSIONS = 2
 
 #: Fraction of a session's wanted pairs already held past which the heal pass
-#: stops fetching that session. At or above it the only unheld names left are
-#: the chronic no-chain ones, and they cluster into all-404 batches (weekend
-#: runs 10-18/19: ~114 calls, almost all 404). A night that did not run leaves
-#: the newest session at ~0% held, so it is still healed.
+#: stops fetching that session. At or above it the unheld remainder is mostly
+#: names with no chain on file, so its batches cluster into all-404s (weekend
+#: runs 10-18/19: ~114 calls, almost all 404); a transient failure is possible
+#: among them and is not retried while the session stays skipped. A night that
+#: did not run leaves the newest session at ~0% held, so it is still healed.
 CHAIN_SKIP_HELD_FRACTION = 0.75
 
 
@@ -448,9 +450,10 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     calendar frontier that is the nightly universe (the endpoint is per
     (tradeDate, ticker-batch)); the second session is usually almost free
     because the previous run already got it, and a session that is at least
-    :data:`CHAIN_SKIP_HELD_FRACTION` held is skipped outright — what is left
-    unheld there is the chronic no-chain tail, and re-buying it is ~114
-    calls of 404s per weekend run.
+    :data:`CHAIN_SKIP_HELD_FRACTION` held is skipped outright — the unheld
+    names left there are mostly ones with no chain on file (a transient
+    failure is possible and is not retried while the session stays skipped),
+    and re-buying that tail is ~114 calls of 404s per weekend run.
 
     Truncation is checked, not assumed: see :data:`CHAIN_BATCH`.
 
@@ -460,7 +463,7 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     unpublished date and a name with no chain look identical. Asking for the
     previous session too means the run always acquires something, and it heals
     a gap left by a night that did not run: each session is asked for again
-    until it is actually held.
+    until held or it reaches CHAIN_SKIP_HELD_FRACTION held.
 
     **A pair already in the store is never re-bought** (``skip_held``). Without
     it, covering several sessions would multiply the nightly cost; with it the
@@ -512,8 +515,9 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
     """Fetch one trade date for whatever part of the universe still needs it.
 
     A session that is already at least :data:`CHAIN_SKIP_HELD_FRACTION` held
-    is not fetched at all: the remainder is the chronic no-chain tail and every
-    batch of it comes back 404. The decision is recorded, never silent.
+    is not fetched at all: the unheld names left are mostly ones with no chain
+    on file (a transient failure is possible and is not retried while the
+    session stays skipped). The decision is recorded, never silent.
     """
     session_day = pd.Timestamp(stamp).normalize()
     if skip_held:
@@ -527,7 +531,9 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                      "unheld": len(wanted)}
                 )
                 print(f"[chains] session {stamp}: {fraction:.0%} held, "
-                      f"skipping {len(wanted)} unheld pairs (no chain on file)",
+                      f"skipping {len(wanted)} unheld pairs (mostly no chain "
+                      "on file; a transient failure is possible and is not "
+                      "retried while the session stays skipped)",
                       file=sys.stderr)
                 return
     else:
@@ -2212,8 +2218,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="trading sessions of chains to refresh, counting back from --as-of. "
              "2 is the steady state (ORATS publishes around midnight, so tonight "
              "needs yesterday too); widen it once to heal a gap left by nights "
-             "that did not run. Already-held pairs are skipped, so a wider "
-             "window costs only what is genuinely missing.",
+             "that did not run — a session is re-asked until held or the session "
+             "reaches CHAIN_SKIP_HELD_FRACTION held. Already-held pairs are "
+             "skipped, so a wider window costs only what is genuinely missing.",
     )
     parser.add_argument("--max-staleness", type=int, default=MAX_STALENESS_DAYS)
     parser.add_argument("--json", default=None, help="write the run report to this path")
