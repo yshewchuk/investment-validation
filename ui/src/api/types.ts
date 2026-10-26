@@ -184,11 +184,11 @@ export interface NativeStageFailure {
   updated_at: string;
 }
 
-/** Additive health surface consumed by the operations shell. */
+/** Additive typed health surface; older v1.2 reports may omit the new field. */
 export interface OperationsHealthV12 {
   schema_version: "operations_health.v1.2";
   generated_at: string;
-  native_stage_failures: NativeStageFailure[];
+  native_stage_failures?: NativeStageFailure[];
 }
 
 /**

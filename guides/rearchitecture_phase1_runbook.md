@@ -124,6 +124,7 @@ requires `--idempotency-key`, but what it MEANS depends on the plan kind:
 `generated_at`, `executor_mode` (`watchdog`), `containment` (`best_effort`),
 `jobs` (everything not succeeded/cancelled, with queue reasons), `watermarks`,
 `current_release` (latest delivered), `withheld_release` (latest `eligible=0`),
+`native_stage_failures` (unresolved native failure records; optional in legacy reports),
 `code_budgets` (`ok`, `first_failed_on`, `consecutive_nights`,
 `unknown_occurrences`, `latest`, `latest_occurrence` — the newest observed
 night, `null` when none exists — and `override`, always `null` while D5
