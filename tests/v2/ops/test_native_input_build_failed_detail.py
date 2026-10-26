@@ -5,7 +5,7 @@ from __future__ import annotations
 from engine.v2.ops import native_score_batch
 from engine.v2.ops.native_score_batch import NativeScoreBatchRowRefusal
 from engine.v2.scoring.source_inputs import _reject_answers
-from tests.test_v2_ops_native_score_batch import (
+from tests.v2.ops.test_native_score_batch import (
     _assemble,
     _event_inputs,
     _stage_release,

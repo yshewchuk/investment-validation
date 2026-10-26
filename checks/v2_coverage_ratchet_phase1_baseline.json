@@ -1,6 +1,6 @@
 {
   "schema_version": "phase1_coverage.v1.0",
-  "suite_version": "phase1_coverage_suite.v23",
+  "suite_version": "phase1_coverage_suite.v24",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
     "tests/test_v2_dashboard_board_filters_ops_root.py",
@@ -78,7 +78,7 @@
     "tests/test_v2_ops_native_parity_sidecar.py",
     "tests/test_v2_ops_native_refresh_e2e.py",
     "tests/test_v2_ops_native_refresh_nightly_e2e.py",
-    "tests/test_v2_ops_native_score_batch.py",
+    "tests/v2/ops/test_native_score_batch.py",
     "tests/test_v2_ops_nightly_calendar_inputs.py",
     "tests/test_v2_ops_nightly_quote_rows.py",
     "tests/test_v2_ops_nightly_raw_rows.py",
