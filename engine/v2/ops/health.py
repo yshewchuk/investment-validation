@@ -167,6 +167,7 @@ def budget_streak(conn):
     return {"ok": bool(rows) and rows[0]["ok"] == 1, "first_failed_on": first,
             "consecutive_nights": failures, "unknown_occurrences": unknown,
             "latest": json.loads(rows[0]["receipt_json"]) if rows else None,
+            "latest_occurrence": rows[0]["occurrence"] if rows else None,
             "override": None}
 
 
@@ -397,7 +398,7 @@ def health(conn, *, clock, executor_mode="watchdog"):
         "AND generation_ref IS NULL").fetchone()[0]
     requested_session, resolved_session = _release_session_evidence(conn, current,
                                                                     expected_scope=current_scope)
-    return {"schema_version": "operations_health.v1.1", "generated_at": format_timestamp(clock.now()),
+    return {"schema_version": "operations_health.v1.2", "generated_at": format_timestamp(clock.now()),
             "executor_mode": executor_mode, "containment": "best_effort" if executor_mode == "watchdog" else "kernel",
             "jobs": jobs, "watermarks": [dict(row) for row in conn.execute("SELECT * FROM watermarks ORDER BY pipeline, scope, stage")],
             "current_release": dict(current) if current else None,

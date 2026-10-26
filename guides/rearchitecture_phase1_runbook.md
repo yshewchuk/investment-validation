@@ -13,7 +13,7 @@ fenced cancellation; immutable planning and submission; a resource policy
 (`ops_resources.2026-09-12.v1`, `engine/v2/ops/profiles.py`); a watchdog
 executor (D7: `executor_mode=watchdog`, `containment=best_effort` — cgroup2 is
 mounted read-only on this host, so kernel containment is unavailable); the
-operator CLI `python3 -m engine.v2.ops`; the `operations_health.v1.1` document
+operator CLI `python3 -m engine.v2.ops`; the `operations_health.v1.2` document
 (`engine/v2/ops/health.py`); the authenticated serving shell
 (`engine/v2/serving/operations.py`); and a catalog-backed decision authority
 **built and rehearsed against copies only** (D4).
@@ -62,7 +62,7 @@ manifest.
 |---|---|---|
 | `init` | Create the root (0700) and open the catalog. Installs no timer, starts nothing. | `python3 -m engine.v2.ops --root data/operations init` |
 | `doctor` | Read-only host + catalog inspection: capacity sample, catalog existence, diagnostics (hook state, `unmanaged_processes`, environment, executor probe, profiles), `integrity_errors`, `schema_versions`, `activation`. Opens the catalog `mode=ro`; never starts jobs or changes quotas. | `python3 -m engine.v2.ops doctor --json` |
-| `health` | Print the `operations_health.v1.1` document (§3). | `python3 -m engine.v2.ops health --json` |
+| `health` | Print the `operations_health.v1.2` document (§3). | `python3 -m engine.v2.ops health --json` |
 | `serve` | Run the supervisor claim/execute loop; `--once` drains and exits when nothing is active. `--store-root PATH` points a snapshot-backed launch at the legacy checkout, when it is not the code checkout `serve` runs from (see above). | `python3 -m engine.v2.ops serve --once --store-root /path/to/legacy/checkout` |
 | `snapshot plan-import` / `snapshot submit` | Import the rebuilt legacy tree into a shadow snapshot. Pass the current head snapshot ID and generation to `plan-import`; wait for the trades replay to finish first. Full rebuild order and heavy-run rules: [`native board rebuild runbook`](native_board_rebuild_runbook.md). | `python3 -m engine.v2.ops snapshot plan-import --source-root /path/to/legacy --scope shadow --expected-head-snapshot-id <id> --expected-head-generation <generation>` |
 | `capture-inputs` | The supported capture for `plan nightly --input-manifest` (2026-09-14). Enumerates and hashes, read-only, every file the seven nightly barrier kinds (`legacy_finality`, `legacy_decisions`, `legacy_settlement`, `legacy_model_evidence`, `legacy_render`, `legacy_selfcheck`, `legacy_features`) actually read — see `engine/v2/data/legacy_nightly_read_plan.py` for the declared, cited families — and writes a `LegacyInputManifest` with `capture_implementation_ref="legacy_nightly_capture.v1"`. `--as-of`, `--tickers`, `--context-tickers` (defaults to `--tickers`), `--year-start/--year-end`, `--source-root` (the legacy checkout to scan), `--output` (where to write the manifest JSON) are all required except `--tickers`/`--context-tickers`. Refuses with a typed problem (`SOURCE_EMPTY`/`INPUT_CHANGED`) when a required family has no files, e.g. no cached ORATS market-wide files for any of the 15 finality lookback sessions. | `python3 -m engine.v2.ops capture-inputs --as-of 2026-09-12 --tickers AAA,BBB --year-start 2024 --year-end 2026 --source-root /path/to/legacy/checkout --output manifest.json` |
@@ -120,15 +120,17 @@ requires `--idempotency-key`, but what it MEANS depends on the plan kind:
 
 ## 3. Health surface
 
-`health(conn, clock=...)` returns `operations_health.v1.0`:
+`health(conn, clock=...)` returns `operations_health.v1.2`:
 `generated_at`, `executor_mode` (`watchdog`), `containment` (`best_effort`),
 `jobs` (everything not succeeded/cancelled, with queue reasons), `watermarks`,
 `current_release` (latest delivered), `withheld_release` (latest `eligible=0`),
 `code_budgets` (`ok`, `first_failed_on`, `consecutive_nights`,
-`unknown_occurrences`, `latest`, `override` — always `null` while D5 stands)
-and `activation: shadow_only`. The streak counts scheduled nightly
+`unknown_occurrences`, `latest`, `latest_occurrence` — the newest observed
+night, `null` when none exists — and `override`, always `null` while D5
+stands) and `activation: shadow_only`. The streak counts scheduled nightly
 *occurrences*, not attempts (§10.4); missing checks land in
-`unknown_occurrences`, never as green.
+`unknown_occurrences`, never as green; `latest_occurrence` lets consumers
+tell a missing latest night from an older gap behind a failed one.
 
 **No timer writes `health.json` yet.** The producer is the CLI:
 
@@ -147,7 +149,7 @@ its `generated_at` age rather than hiding it.
 ```python
 from engine.v2.serving.operations import create_server
 server = create_server(("127.0.0.1", 8790), token=os.environ["OPS_TOKEN"],
-                       health_path="data/operations/health.json", release_root="data/operations/release", frozen_at="2026-09-13T00:00:00Z")
+                       health_path="data/operations/health.json", release_root="data/operations/release", frozen_at="unknown")
 server.serve_forever()
 ```
 
@@ -160,10 +162,14 @@ server.serve_forever()
   `/release/<id>/<path>` (auth; `current` resolves through the pointer).
   `release_root` must contain `CURRENT` (a single path component) and
   `releases/<id>/...`; symlinks anywhere in the path are refused.
-- Banner states, polled every 30s: **withheld** when `withheld_release` is
-  set; **degraded** when `code_budgets.consecutive_nights > 0`; **current**
-  otherwise. On any health-fetch failure the banner shows **unknown / stale**
-  with the `frozen_at` stamp — it must never fall back to green (§10.4).
+- Banner states, polled every 30s: **unknown** on fetch/parse failure or
+  missing/malformed identity, session or schedule evidence or a missing
+  scheduled observation; **stale** when the observation is older than 24
+  hours or `resolved_session` is older than expected; **degraded** for a
+  failed latest night or withheld release; **current** only when all
+  evidence passes (precedence unknown > stale > degraded). On any
+  health-fetch failure the banner shows **unknown / stale** with the
+  `frozen_at` stamp — it must never fall back to green (§10.4).
 
 ## 4. Resource policy
 
@@ -403,7 +409,7 @@ The rehearsal is a test, not a hope:
 | CLI printed a Problem and exited 2 | The JSON on stdout is the envelope (`problem.v1.0`). `INVALID_REQUEST` on submit usually means a blocked plan (nightly without `--input-manifest`) or a plan kind not enabled for submission. |
 | Bounded job exited 137 | Read the tail: `CAP BREACH, killing tree` + a per-process memory breakdown = the watchdog did its job; raise the cap only with reviewed evidence. A bare `[bounded] exited -9` with the last heartbeat under cap = the **kernel** OOM killer — the cap was not the binding constraint; re-budget against `free -m` (AGENTS.md). |
 | Replay/canary receipt refused by the gate | Receipts are content-bound: a changed corpus, code, dependency set or baseline invalidates them. Re-run §5c/§5d; never edit a receipt. |
-| Health looks stale | The banner shows `unknown / stale` on any fetch failure — by design, never green. `code_budgets.unknown_occurrences` lists nights whose check is missing (absence is not health). For the legacy Models view inside the shell, AGENTS.md's `model_evidence_stale` flag applies: a failed evidence rebuild degrades to the cached table; check the flag before trusting the page. |
+| Health looks stale | The shell banner classifies its evidence — by design, never green: `unknown` on any fetch failure or missing/malformed identity, session or schedule evidence or any missing scheduled observation; `stale` when the observation is older than 24 hours or `resolved_session` is older than the `X-Expected-Session` served with `/release/current.json`; `degraded` for a failed latest night or withheld release. `code_budgets.unknown_occurrences` lists nights whose check is missing (absence is not health) — when `latest_occurrence` names a failed night the gaps are older, the outcome line still says failed and the banner stays unknown. For the legacy Models view inside the shell, AGENTS.md's `model_evidence_stale` flag applies: a failed evidence rebuild degrades to the cached table; check the flag before trusting the page. |
 | Competing unknown processes | `doctor` → `diagnostics.unmanaged_processes`; reconcile before resuming (§7 step 3). |
 
 ## 9. Host discipline
