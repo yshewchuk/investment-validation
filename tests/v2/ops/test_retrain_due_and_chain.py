@@ -23,7 +23,7 @@ from engine.v2.ops.worker import _dispatch_retrain_step
 def _conn():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.execute("CREATE TABLE jobs (namespace TEXT, idempotency_key TEXT, state TEXT)")
+    conn.execute("CREATE TABLE jobs (namespace TEXT, idempotency_key TEXT, state TEXT, created_at TEXT)")
     return conn
 
 def test_due_decision():
@@ -67,8 +67,8 @@ def test_due_decision():
 
 def test_read_recorded_and_chain(tmp_path):
     conn = _conn()
-    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-11-02:2026-10:rel1', 'succeeded')")
-    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-09-30:2026-09:rel1', 'failed')")
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-11-02:2026-10:rel1:abc123abc123', 'succeeded', '2026-11-02T00:00:00Z')")
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-09-30:2026-09:rel1:abc123abc123', 'failed', '2026-11-02T00:00:00Z')")
     conn.commit()
 
     recorded = read_recorded(conn, tmp_path)
@@ -89,16 +89,16 @@ def test_read_recorded_and_chain(tmp_path):
     assert (ops_root / "retrain_superseded" / "2026-08.json").read_text() == first_content
 
     conn2 = _conn()
-    conn2.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02', 'succeeded')")
+    conn2.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'succeeded', '2026-11-02T00:00:00Z')")
     conn2.commit()
     assert chain_blocks_pool_sidecar(conn2, "2026-11-02") is False
 
-    conn2.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02', 'running')")
+    conn2.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'running', '2026-11-02T00:00:01Z')")
     conn2.commit()
     assert chain_blocks_pool_sidecar(conn2, "2026-11-02") is True
 
     conn3 = _conn()
-    conn3.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-03', 'failed')")
+    conn3.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-03:abc123abc123', 'failed', '2026-11-02T00:00:00Z')")
     conn3.commit()
     assert chain_blocks_pool_sidecar(conn3, "2026-11-02") is False
 
@@ -224,7 +224,7 @@ def test_sidecar_gate(monkeypatch, tmp_path):
     monkeypatch.setattr(pool_refresh, "pool_refresh_identity", lambda conn: ("2026-11-02", "manifest"))
 
     conn = _conn()
-    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02', 'failed')")
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'failed', '2026-11-02T00:00:00Z')")
     conn.commit()
 
     assert submit_pool_nightly_refresh_if_ready(
@@ -232,7 +232,7 @@ def test_sidecar_gate(monkeypatch, tmp_path):
     ) == []
 
     conn2 = _conn()
-    conn2.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02', 'succeeded')")
+    conn2.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'succeeded', '2026-11-02T00:00:00Z')")
     conn2.commit()
 
     with pytest.raises(Exception):
@@ -286,10 +286,10 @@ def test_chain_submits_through_the_real_registry_and_gates_the_sidecar(tmp_path)
 @pytest.mark.parametrize("state", ["running", "failed", "queued"])
 def test_sidecar_gate_blocks_on_every_chain_step_key(step, state):
     conn = _conn()
-    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02', 'succeeded')")
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'succeeded', '2026-11-02T00:00:00Z')")
     conn.execute(
-        "INSERT INTO jobs VALUES ('shadow', ?, ?)",
-        (f"retrain-{step}:2026-11-02:2026-10:rel1", state),
+        "INSERT INTO jobs VALUES ('shadow', ?, ?, ?)",
+        (f"retrain-{step}:2026-11-02:2026-10:rel1:abc123abc123", state, "2026-11-02T00:00:00Z"),
     )
     conn.commit()
 
@@ -300,17 +300,39 @@ def test_sidecar_gate_blocks_on_every_chain_step_key(step, state):
 def test_cancelled_chain_rows_do_not_hold_the_sidecar():
     conn = _conn()
     conn.execute(
-        "INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'cancelled')"
+        "INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'cancelled', '2026-11-02T00:00:00Z')"
     )
     conn.commit()
     assert chain_blocks_pool_sidecar(conn, "2026-11-02") is False
 
     conn_failed = _conn()
     conn_failed.execute(
-        "INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'failed')"
+        "INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'failed', '2026-11-02T00:00:00Z')"
     )
     conn_failed.commit()
     assert chain_blocks_pool_sidecar(conn_failed, "2026-11-02") is True
+
+
+def test_superseded_generation_rows_do_not_hold_the_sidecar():
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:aaaaaaaaaaaa', 'failed', '2026-11-02T01:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:bbbbbbbbbbbb', 'succeeded', '2026-11-02T02:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO jobs VALUES ('shadow', 'retrain-train:2026-11-02:2026-10:rel1:bbbbbbbbbbbb', 'succeeded', '2026-11-02T02:00:00Z')"
+    )
+    conn.commit()
+
+    assert chain_blocks_pool_sidecar(conn, "2026-11-02") is False
+
+    conn.execute(
+        "UPDATE jobs SET state = 'failed' WHERE idempotency_key = 'retrain-train:2026-11-02:2026-10:rel1:bbbbbbbbbbbb'"
+    )
+    conn.commit()
+    assert chain_blocks_pool_sidecar(conn, "2026-11-02") is True
 
 
 def test_plan_retrain_section_is_detached_from_the_callers_dict():
@@ -325,15 +347,32 @@ def test_plan_retrain_section_is_detached_from_the_callers_dict():
     assert plan["retrain"]["superseded"] == []
 
 
+@pytest.mark.parametrize("value", [
+    True,
+    {},
+    {"state": "bogus"},
+    {"state": "due"},
+    {"state": "due", "month": "2026-10", "m_end": "2026-10-31"},
+])
+def test_malformed_retrain_sections_are_invalid_requests(value):
+    import engine.v2.ops.plans
+
+    root = Path(__file__).resolve().parents[3]
+    with pytest.raises(OpsError) as excinfo:
+        engine.v2.ops.plans.nightly_plan(str(root), "2026-09-18", retrain=value)
+    assert excinfo.value.problem.code == "INVALID_REQUEST"
+
+
 def test_gate_and_records_are_scoped_before_the_limit(tmp_path):
     conn = _conn()
     for i in range(450):
         conn.execute(
-            "INSERT INTO jobs VALUES ('shadow', ?, 'succeeded')",
-            (f"retrain-train:2025-12-{i:03d}:m:b",),
+            "INSERT INTO jobs VALUES ('shadow', ?, 'succeeded', ?)",
+            (f"retrain-train:2025-12-{i:03d}:m:b:abc123abc123", "2026-11-02T00:00:00Z"),
         )
-    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-11-02:2026-10:rel1', 'failed')")
-    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-12-01:2026-11:rel1', 'succeeded')")
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'succeeded', '2026-11-02T00:00:00Z')")
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-11-02:2026-10:rel1:abc123abc123', 'failed', '2026-11-02T00:00:00Z')")
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-12-01:2026-11:rel1:abc123abc123', 'succeeded', '2026-11-02T00:00:00Z')")
     conn.commit()
 
     assert chain_blocks_pool_sidecar(conn, "2026-11-02") is True
@@ -346,7 +385,7 @@ def test_pool_cycle_pending_is_false_while_the_chain_blocks(monkeypatch, tmp_pat
     monkeypatch.setattr(pool_refresh, "pool_refresh_identity", lambda conn: ("2026-11-02", "manifest"))
 
     conn = _conn()
-    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02', 'failed')")
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'failed', '2026-11-02T00:00:00Z')")
     conn.commit()
 
     assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False

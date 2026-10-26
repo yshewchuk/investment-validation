@@ -122,13 +122,24 @@ def chain_blocks_pool_sidecar(conn, session: str, *, log: bool = True) -> bool:
     pool-nightly sidecar must submit nothing (models ARCHITECTURE section 2.3 Promotion).
     A cancelled job (a superseded plan generation) does not hold the sidecar. The prefix
     range ``[prefix, prefix + ";")`` still matches because the plan hash is appended after
-    the session. One bounded query per step, scoped to the session before the limit."""
+    the session. One bounded query per step, scoped to the session before the limit. Only
+    the newest plan generation of the session counts, so superseded failed rows of an
+    earlier same-session plan do not hold it."""
+    prefix = f"retrain-restage:{session}"
+    latest = conn.execute(
+        "SELECT idempotency_key FROM jobs WHERE namespace = 'shadow' "
+        "AND idempotency_key >= ? AND idempotency_key < ? "
+        "ORDER BY created_at DESC, idempotency_key DESC LIMIT 1", (prefix, prefix + ";")).fetchone()
+    if latest is None:
+        return False
+    plan = latest["idempotency_key"].rsplit(":", 1)[1]
     for step in ("restage", *STEPS):
         prefix = f"retrain-{step}:{session}"
         row = conn.execute(
             "SELECT idempotency_key, state FROM jobs WHERE namespace = 'shadow' "
-            "AND idempotency_key >= ? AND idempotency_key < ? AND state NOT IN ('succeeded', 'cancelled') LIMIT 1",
-            (prefix, prefix + ";")).fetchone()
+            "AND idempotency_key >= ? AND idempotency_key < ? AND idempotency_key LIKE ? "
+            "AND state NOT IN ('succeeded', 'cancelled') LIMIT 1",
+            (prefix, prefix + ";", "%:" + plan)).fetchone()
         if row is not None:
             if log:
                 print(f"[retrain] pool sidecar held: {row['idempotency_key']} is {row['state']}",
