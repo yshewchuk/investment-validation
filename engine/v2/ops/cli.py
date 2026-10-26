@@ -1346,13 +1346,18 @@ def main(argv=None):
                 catalog = root / "catalog.sqlite"
                 conn = None
                 try:
-                    conn = sqlite3.connect(catalog.resolve().as_uri() + "?mode=ro", uri=True)
+                    try:
+                        conn = sqlite3.connect(catalog.resolve().as_uri() + "?mode=ro", uri=True)
+                    except sqlite3.Error:
+                        raise fail("INVALID_REQUEST",
+                                   "health catalog is missing, locked, or unavailable") from None
                     conn.row_factory = sqlite3.Row
-                    require_compatible_catalog(conn)
-                    document = dispatch(args, root, conn, clock)
-                except sqlite3.Error:
-                    raise fail("INVALID_REQUEST",
-                               "health catalog is missing, locked, or unavailable") from None
+                    try:
+                        require_compatible_catalog(conn)
+                        document = dispatch(args, root, conn, clock)
+                    except sqlite3.Error:
+                        raise fail("INTEGRITY_FAILED",
+                                   "health catalog could not be verified or read") from None
                 finally:
                     if conn is not None:
                         conn.close()

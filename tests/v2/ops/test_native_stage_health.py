@@ -160,6 +160,26 @@ def test_health_cli_pre_migration_catalog_returns_integrity_failed_json(tmp_path
     assert "traceback" not in document
 
 
+def test_health_cli_missing_catalog_returns_invalid_request_json(tmp_path, capsys):
+    assert cli.main(["health", "--root", str(tmp_path)]) == 2
+
+    document = json.loads(capsys.readouterr().out)
+    assert document["code"] == "INVALID_REQUEST"
+    assert document["message"] == "health catalog is missing, locked, or unavailable"
+    assert "traceback" not in document
+
+
+def test_health_cli_malformed_catalog_returns_integrity_failed_json(tmp_path, capsys):
+    (tmp_path / "catalog.sqlite").write_bytes(b"not a sqlite database")
+
+    assert cli.main(["health", "--root", str(tmp_path)]) == 2
+
+    document = json.loads(capsys.readouterr().out)
+    assert document["code"] == "INTEGRITY_FAILED"
+    assert document["message"] == "health catalog could not be verified or read"
+    assert "traceback" not in document
+
+
 def test_health_cli_refuses_migration_checksum_mismatch_readonly(tmp_path, capsys):
     conn = open_catalog(tmp_path / "catalog.sqlite", clock=SystemClock())
     try:

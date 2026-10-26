@@ -31,6 +31,9 @@ def _data_migration(entry: tuple) -> Migration:
 
 
 _DATA_MIGRATIONS = tuple(_data_migration(entry) for entry in data_schema.MIGRATIONS)
+_LEDGER_MIGRATIONS = (Migration(1, "decision_authority", SCHEMA),
+                      Migration(2, "decision_generation_divergence", SCHEMA_V2),
+                      Migration(3, "calibration_state", SCHEMA_V3))
 
 
 def open_catalog(path: Path | str, *, clock: Clock) -> sqlite3.Connection:
@@ -38,10 +41,7 @@ def open_catalog(path: Path | str, *, clock: Clock) -> sqlite3.Connection:
     conn = connect(path)
     try:
         migrate(conn, schema.OWNER, schema.MIGRATIONS, clock=clock)
-        migrate(conn, "ledger", (Migration(1, "decision_authority", SCHEMA),
-                                 Migration(2, "decision_generation_divergence", SCHEMA_V2),
-                                 Migration(3, "calibration_state", SCHEMA_V3)),
-               clock=clock)
+        migrate(conn, "ledger", _LEDGER_MIGRATIONS, clock=clock)
         migrate(conn, data_schema.OWNER, _DATA_MIGRATIONS, clock=clock)
     except BaseException:
         conn.close()
@@ -52,7 +52,5 @@ def open_catalog(path: Path | str, *, clock: Clock) -> sqlite3.Connection:
 def require_compatible_catalog(conn: sqlite3.Connection) -> None:
     """Refuse read-only operations on a catalog schema this code cannot support."""
     require_current(conn, schema.OWNER, schema.MIGRATIONS)
-    require_current(conn, "ledger", (Migration(1, "decision_authority", SCHEMA),
-                                     Migration(2, "decision_generation_divergence", SCHEMA_V2),
-                                     Migration(3, "calibration_state", SCHEMA_V3)))
+    require_current(conn, "ledger", _LEDGER_MIGRATIONS)
     require_current(conn, data_schema.OWNER, _DATA_MIGRATIONS)
