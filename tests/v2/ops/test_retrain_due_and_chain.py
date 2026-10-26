@@ -133,19 +133,23 @@ def test_plan_without_retrain_has_no_retrain_step():
 
 def test_not_due_plan_has_restage_only():
     plan = _plan()
+    plan["plan_hash"] = "a" * 64
     plan["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
     requests = _requests(plan)
     retrain = _retrain_requests(requests)
     assert len(retrain) == 1
     assert retrain[0].job.parameters["step"] == "restage"
-    assert retrain[0].idempotency_key == "retrain-restage:2026-09-18"
+    ph = plan["plan_hash"][:12]
+    key = f"retrain-restage:2026-09-18:{ph}"
+    assert retrain[0].idempotency_key == key
     score = _score_request(requests)
-    assert job_id_for("shadow", "retrain-restage:2026-09-18") in score.job.dependency_job_ids
+    assert job_id_for("shadow", key) in score.job.dependency_job_ids
     assert requests.index(retrain[0]) < requests.index(score)
 
 
 def test_due_plan_has_six_retrain_steps():
     plan = _plan()
+    plan["plan_hash"] = "a" * 64
     plan["retrain"] = {
         "state": "due", "month": "2026-10", "m_end": "2026-10-31",
         "superseded": [], "base": "rel1",
@@ -153,13 +157,14 @@ def test_due_plan_has_six_retrain_steps():
     requests = _requests(plan)
     retrain = _retrain_requests(requests)
     assert len(retrain) == 6
+    ph = plan["plan_hash"][:12]
     expected_keys = [
-        "retrain-restage:2026-09-18",
-        "retrain-train:2026-09-18:2026-10:rel1",
-        "retrain-stage:2026-09-18:2026-10:rel1",
-        "retrain-accept:2026-09-18:2026-10:rel1",
-        "retrain-check:2026-09-18:2026-10:rel1",
-        "retrain-promote:2026-09-18:2026-10:rel1",
+        f"retrain-restage:2026-09-18:{ph}",
+        f"retrain-train:2026-09-18:2026-10:rel1:{ph}",
+        f"retrain-stage:2026-09-18:2026-10:rel1:{ph}",
+        f"retrain-accept:2026-09-18:2026-10:rel1:{ph}",
+        f"retrain-check:2026-09-18:2026-10:rel1:{ph}",
+        f"retrain-promote:2026-09-18:2026-10:rel1:{ph}",
     ]
     for request, key in zip(retrain, expected_keys):
         assert request.idempotency_key == key
@@ -169,8 +174,25 @@ def test_due_plan_has_six_retrain_steps():
         assert job_id_for("shadow", previous.idempotency_key) in current.job.dependency_job_ids
 
     score = _score_request(requests)
-    last_key = "retrain-promote:2026-09-18:2026-10:rel1"
+    last_key = f"retrain-promote:2026-09-18:2026-10:rel1:{ph}"
     assert job_id_for("shadow", last_key) in score.job.dependency_job_ids
+
+
+def test_replan_gets_fresh_retrain_keys():
+    base_plan = _plan()
+    plan1 = base_plan.copy()
+    plan2 = base_plan.copy()
+    plan1["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
+    plan2["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
+    plan1["plan_hash"] = "aaaa11112222"
+    plan2["plan_hash"] = "bbbb33334444"
+    retrain1 = _retrain_requests(_requests(plan1))
+    retrain2 = _retrain_requests(_requests(plan2))
+    assert len(retrain1) == 1
+    assert len(retrain2) == 1
+    id1 = job_id_for("shadow", retrain1[0].idempotency_key)
+    id2 = job_id_for("shadow", retrain2[0].idempotency_key)
+    assert id1 != id2
 
 
 def test_worker_restage_stub(tmp_path):
@@ -248,6 +270,7 @@ def test_chain_submits_through_the_real_registry_and_gates_the_sidecar(tmp_path)
 
     conn = open_catalog(tmp_path / "catalog.sqlite", clock=SystemClock())
     plan = _plan()
+    plan["plan_hash"] = "a" * 64
     plan["retrain"] = {
         "state": "due", "month": "2026-10", "m_end": "2026-10-31",
         "superseded": [], "base": "rel1",
@@ -272,6 +295,22 @@ def test_sidecar_gate_blocks_on_every_chain_step_key(step, state):
 
     assert chain_blocks_pool_sidecar(conn, "2026-11-02") is True
     assert chain_blocks_pool_sidecar(conn, "2026-11-03") is False
+
+
+def test_cancelled_chain_rows_do_not_hold_the_sidecar():
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'cancelled')"
+    )
+    conn.commit()
+    assert chain_blocks_pool_sidecar(conn, "2026-11-02") is False
+
+    conn_failed = _conn()
+    conn_failed.execute(
+        "INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'failed')"
+    )
+    conn_failed.commit()
+    assert chain_blocks_pool_sidecar(conn_failed, "2026-11-02") is True
 
 
 def test_plan_retrain_section_is_detached_from_the_callers_dict():

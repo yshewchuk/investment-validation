@@ -120,12 +120,14 @@ def decide(conn, ops_root, session: str, base_release_id: str, *,
 def chain_blocks_pool_sidecar(conn, session: str, *, log: bool = True) -> bool:
     """True while this session's ``restage`` or retrain job is nonterminal or failed: the
     pool-nightly sidecar must submit nothing (models ARCHITECTURE section 2.3 Promotion).
-    One bounded query per step, scoped to the session before the limit."""
+    A cancelled job (a superseded plan generation) does not hold the sidecar. The prefix
+    range ``[prefix, prefix + ";")`` still matches because the plan hash is appended after
+    the session. One bounded query per step, scoped to the session before the limit."""
     for step in ("restage", *STEPS):
         prefix = f"retrain-{step}:{session}"
         row = conn.execute(
             "SELECT idempotency_key, state FROM jobs WHERE namespace = 'shadow' "
-            "AND idempotency_key >= ? AND idempotency_key < ? AND state != 'succeeded' LIMIT 1",
+            "AND idempotency_key >= ? AND idempotency_key < ? AND state NOT IN ('succeeded', 'cancelled') LIMIT 1",
             (prefix, prefix + ";")).fetchone()
         if row is not None:
             if log:

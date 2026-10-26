@@ -19,11 +19,14 @@ from engine.v2.ops.submission import job_id_for
 KIND = "retrain_step"
 
 
-def step_key(step: str, session: str, month: str = "", base: str = "") -> str:
-    """``retrain-restage:{session}`` or ``retrain-{step}:{session}:{M}:{base}`` (R6)."""
+def step_key(step: str, session: str, month: str, base: str, plan_hash: str) -> str:
+    """``retrain-restage:{session}:{plan_hash}`` or ``retrain-{step}:{session}:{M}:{base}:{plan_hash}`` (R6).
+
+    ``plan_hash`` is the first 12 characters of the plan hash, so a same-session replan
+    with a changed manifest gets fresh jobs."""
     if step == "restage":
-        return f"retrain-restage:{session}"
-    return f"retrain-{step}:{session}:{month}:{base}"
+        return f"retrain-restage:{session}:{plan_hash}"
+    return f"retrain-{step}:{session}:{month}:{base}:{plan_hash}"
 
 
 def _request(step, key, session, month, base, parents, implementation_ref, runtime, contract):
@@ -46,14 +49,15 @@ def attach_retrain_chain(plan, requests, keys, implementation_ref, runtime, cont
     if not section:
         return requests
     session = plan["session"]
+    ph = str(plan["plan_hash"])[:12]
     refresh = (keys["refresh"],) if "refresh" in keys else ()
-    restage_key = step_key("restage", session)
+    restage_key = step_key("restage", session, "", "", ph)
     chain = [_request("restage", restage_key, session, "", "", refresh,
                       implementation_ref, runtime, contract)]
     last = job_id_for("shadow", restage_key)
     if section.get("state") == "due":
         for step in STEPS:
-            key = step_key(step, session, section["month"], section["base"])
+            key = step_key(step, session, section["month"], section["base"], ph)
             chain.append(_request(step, key, session, section["month"], section["base"],
                                   (last,), implementation_ref, runtime, contract))
             last = job_id_for("shadow", key)

@@ -10,7 +10,7 @@
     "tests/test_v2_dashboard_preview_analogs.py",
     "tests/test_v2_dashboard_preview_derivation.py",
     "tests/test_v2_dashboard_preview_model_root.py",
-    "tests/test_v2_dashboard_preview_ops_root.py",
+    "tests/v2/dashboard/test_v2_dashboard_preview_ops_root.py",
     "tests/test_v2_data_atomicity.py",
     "tests/test_v2_data_catalog.py",
     "tests/test_v2_data_commit.py",
