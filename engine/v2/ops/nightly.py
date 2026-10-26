@@ -369,7 +369,7 @@ def _legacy_resource(kind):
         return "materialize"
     if kind == "legacy_render":
         return "projection"
-    if kind in ("ledger_export", "engineering_gate", "publication", "backup"):
+    if kind in ("ledger_export", "engineering_gate", "publication", "backup", "retrain_step"):
         return "delivery"
     return "validation"
 
@@ -447,7 +447,7 @@ _SNAPSHOT_REQUIRED = ("snapshot_ref_artifact_id", "materialization_request_ref",
 def _checkpoint_contract(kind):
     if kind == "decision_evidence":
         return "decision_evidence_pair.v1.0"
-    if kind in ("ledger_export", "engineering_gate", "publication", "backup"):
+    if kind in ("ledger_export", "engineering_gate", "publication", "backup", "retrain_step"):
         return "effect_receipt.v1.0"
     if kind == "legacy_materialize":
         return "legacy_materialization_manifest.v1.0"
@@ -1411,6 +1411,17 @@ def _stage_request_for(stage, kind, plan, key, keys, *, tickers, year_start, yea
                       implementation_ref, environment_ref))
 
 
+def _with_retrain_chain(plan, requests, keys, implementation_ref, environment_ref):
+    """#805 slice 2: add the planned ``restage``/retrain jobs when the plan has a ``retrain``
+    section (``retrain_plan`` cannot import this module, so the runtime identity is passed)."""
+    from engine.v2.ops.retrain_plan import KIND, attach_retrain_chain
+    runtime = _sidecar_runtime_identity(KIND)
+    if environment_ref:
+        runtime["environment_ref"] = environment_ref
+    return attach_retrain_chain(plan, requests, keys, implementation_ref, runtime,
+                                _checkpoint_contract(KIND))
+
+
 def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
                               environment_ref=None, include_prerequisites=False,
                               expected_population=(), alt_strikes=1, input_refs=(),
@@ -1488,7 +1499,7 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
             effect_scope=effect_scope, snapshot=snapshot, context_tickers=context_tickers,
             include_prerequisites=include_prerequisites, implementation_ref=implementation_ref,
             environment_ref=environment_ref))
-    return tuple(requests)
+    return _with_retrain_chain(plan, tuple(requests), keys, implementation_ref, environment_ref)
 
 
 def _run_stage(stage, handler, value, input_hash):

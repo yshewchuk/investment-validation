@@ -155,6 +155,17 @@ class SupersedeParameters:
 
 
 @dataclass(frozen=True)
+class RetrainStepParameters:
+    """#805 slice 2 ``retrain_step`` (``restage`` or a monthly retrain chain step)."""
+
+    expected_ids: tuple[str, ...]
+    session: str = ""
+    step: str = ""
+    month: str = ""
+    base: str = ""
+
+
+@dataclass(frozen=True)
 class LegacyParameters:
     expected_ids: tuple[str, ...]
     session: str = ""
@@ -454,6 +465,12 @@ def registry():
             retry=RetryPolicy("bounded", 3, (5, 30)),
             checkpoint_contract="effect_receipt.v1.0",
             namespaces=frozenset({"shadow", "smoke"})))
+    kinds.append(JobKind(
+        name="retrain_step", worker="retrain_step", parameters=RetrainStepParameters,
+        resource_classes=frozenset({"delivery"}), effects=("staged",),
+        retry=RetryPolicy("bounded", 3, (5, 30)),
+        checkpoint_contract="effect_receipt.v1.0",
+        namespaces=frozenset({"shadow", "smoke"})))
     profiles = {"legacy_score": "legacy_score", "legacy_score_requests": "legacy_score",
                 "legacy_decision_replay": "legacy_score",
                 "legacy_finality": "validation",

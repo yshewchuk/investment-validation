@@ -52,6 +52,7 @@ from typing import Callable, Iterable, Literal
 from zoneinfo import ZoneInfo
 
 from engine.v2.foundation import SystemClock, format_timestamp
+from engine.v2.ops import retrain_due
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.workflows.commands import MAX_EXPECTED_POPULATION_BYTES as _MAX_POPULATION_BYTES
 from engine.v2.ops.workflows.commands import read_bounded_json
@@ -870,6 +871,14 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
                          expected_population=population_keys)
 
 
+def _base_release_id() -> str:
+    """The deployed release id the retrain keys are scoped to, or ``"none"`` when no release
+    root is configured or nothing was ever promoted. An unreadable pointer raises
+    ``VALIDATION_FAILED`` (not swallowed)."""
+    from engine.v2.ops.pool_refresh import deployed_release_id
+    return deployed_release_id()
+
+
 def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=None, *,
                   full_run: bool = True,
                   expected_shadow_snapshot_id: str | None = None,
@@ -940,6 +949,8 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
         refresh_plan=None, expected_snapshot_id=expected_shadow_snapshot_id)
     conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
     try:
+        # #805 slice 2: the monthly-retrain decision, pinned into the plan (loud on error).
+        plan_args.retrain = retrain_due.decide(conn, ops_root, as_of, _base_release_id())
         planned = commands._plan_command(plan_args, ops_root, conn, clock)
     finally:
         conn.close()

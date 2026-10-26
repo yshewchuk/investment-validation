@@ -380,7 +380,8 @@ def pool_cycle_pending(conn, release_root):
     tag): the keys then fix its family (``train-chooser`` bootstrap,
     ``train-paired`` alone carry) and its key set is checked without
     classification; a ``DAMAGED`` prior or a failed classification is
-    always ``False``. ``False``
+    always ``False``. ``False`` also while the session's restage/retrain chain
+    blocks the sidecar. ``False``
     when there is no connection, no identity, no readable pointer, any of the
     cycle's five phase jobs is in a terminal stall state, or the pointer names
     the candidate and every existing phase job succeeded. Reads only the same
@@ -391,6 +392,11 @@ def pool_cycle_pending(conn, release_root):
     if identity is None:
         return False
     session, manifest_id = identity
+    from engine.v2.ops.retrain_due import chain_blocks_pool_sidecar
+    if chain_blocks_pool_sidecar(conn, session, log=False):
+        # #805 slice 2: the sidecar submits nothing while the session's retrain chain is not
+        # succeeded, so no cycle can start; reporting it pending would hold the serve to the deadline.
+        return False
     tag = manifest_tag(manifest_id)
     release_id = f"pools-{session}-{tag}"
     try:
@@ -435,6 +441,10 @@ def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_
     if identity is None:
         return []
     session, manifest_id = identity
+    from engine.v2.ops.retrain_due import chain_blocks_pool_sidecar
+    if chain_blocks_pool_sidecar(conn, session):
+        # #805 slice 2: this session's restage/retrain job is nonterminal or failed.
+        return []
     tag = manifest_tag(manifest_id)
     pointer = _read_pointer(Path(release_root) / "deployment")
     prior_id = None if pointer is None else pointer.release_id
@@ -636,3 +646,14 @@ def _state_refs(conn, session, prior, tag, code_source, phases=TRAINING_PHASES,
     if not state_refs:
         raise fail("VALIDATION_FAILED", "no training state files to stage")
     return state_refs
+
+
+def deployed_release_id() -> str:
+    """The deployed release id the retrain keys are scoped to (#805), or ``"none"`` when no
+    release root is configured or nothing was ever promoted. An unreadable pointer raises
+    ``VALIDATION_FAILED`` (not swallowed)."""
+    try:
+        pointer = _read_pointer(deployment.production_release_root() / "deployment")
+    except deployment.MissingReleaseRoot:
+        return "none"
+    return "none" if pointer is None else pointer.release_id
