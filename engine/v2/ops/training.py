@@ -61,12 +61,10 @@ class PromoteParameters:
     #: ``None`` keeps the unguarded behavior.
     expected_previous_release_id: str | None = None
     #: Optional bootstrap empty-store guard forwarded to
-    #: ``deployment.promote``: when true, the worker's swap refuses
-    #: ``CONCURRENT_PROMOTE`` unless nothing is deployed (an already-live
-    #: target stays the no-op). Mutually exclusive with
-    #: ``expected_previous_release_id``. Omitted from non-bootstrap plans so
-    #: their recorded ``spec_hash`` stays unchanged; old plans without the
-    #: key keep this default.
+    #: ``deployment.promote``: refuses ``CONCURRENT_PROMOTE`` unless nothing is
+    #: deployed (already-live target stays the no-op). Mutually exclusive with
+    #: ``expected_previous_release_id``; omitted from non-bootstrap plans so their
+    #: recorded ``spec_hash`` stays unchanged.
     require_empty_store: bool = False
     input_bindings: dict[str, str] | None = None
 
@@ -364,12 +362,11 @@ def promote_plan(*, release_root, release_id,
     docstring) here, at plan time -- a missing key is ``INVALID_REQUEST``
     and never reaches the worker with an empty root. An operator may also
     pass ``expected_previous_release_id`` (the optional expected-incumbent
-    guard); ``None`` keeps the unguarded behavior. ``require_empty_store``
-    is the bootstrap empty-store guard (the pointer must still be absent);
-    a plan setting both guards is refused ``INVALID_REQUEST`` here, matching
-    the mutual exclusion :func:`run_promote_worker` and ``deployment.promote``
-    enforce. The key is omitted from a non-bootstrap plan's parameters, so
-    every existing plan's recorded ``spec_hash`` is unchanged."""
+    guard); ``None`` keeps the unguarded behavior. ``require_empty_store`` is
+    the bootstrap empty-store guard; a plan setting both guards is refused
+    ``INVALID_REQUEST`` (as ``run_promote_worker`` and ``deployment.promote``
+    enforce). Omitted from a non-bootstrap plan, so existing ``spec_hash``es
+    are unchanged."""
     from engine.v2.foundation import content_hash
     from engine.v2.models import deployment
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
@@ -394,8 +391,7 @@ def promote_plan(*, release_root, release_id,
                                release_id=release_id,
                                expected_previous_release_id=expected_previous_release_id,
                                require_empty_store=bool(require_empty_store))
-    # Omit the false key: a non-bootstrap plan's parameters document -- and
-    # therefore its spec_hash -- stays byte-identical to every existing plan.
+    # Omit a false key: a non-bootstrap plan's spec_hash stays byte-identical.
     parameters = vars(params)
     if not require_empty_store:
         del parameters["require_empty_store"]
@@ -642,15 +638,12 @@ def run_promote_worker(parameters, root) -> dict:
     successful first. Its callers are operator ``submit``s and the
     pool-nightly sidecar (``engine/v2/ops/pool_refresh.py``).
 
-    ``require_empty_store`` (absent on every pre-bootstrap plan, hence the
-    ``.get`` default) is forwarded to the swap. A parameter document setting
-    both it and ``expected_previous_release_id`` is a malformed request,
-    refused with the same typed ``INVALID_REQUEST`` every other param error
-    gets -- the plan builder refuses the same combination, and left
-    un-checked the mutual-exclusion ``ValueError`` out of
-    ``deployment.promote`` would only reach an operator through the
-    harness's generic ``VALIDATION_FAILED`` flattening, after the swap
-    was never even attempted.
+    ``require_empty_store`` (``.get`` default: pre-bootstrap plans lack the key)
+    is forwarded to the swap. A document setting both it and
+    ``expected_previous_release_id`` is malformed, refused the same typed
+    ``INVALID_REQUEST`` as every other param error -- unchecked, the
+    mutual-exclusion ``ValueError`` would only reach the operator through the
+    harness's generic ``VALIDATION_FAILED`` flattening.
     """
     from engine.v2.foundation import to_document
     from engine.v2.models import deployment

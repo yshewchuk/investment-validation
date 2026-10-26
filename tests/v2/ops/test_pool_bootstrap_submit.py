@@ -184,7 +184,7 @@ def test_second_tick_submits_the_bootstrap_stage(monkeypatch, tmp_path):
     assert stage["cutoff"] == SESSION
     assert stage["release_root"] == str(tmp_path)
     assert stage["manifest_ref"] == MANIFEST
-    assert set(stage["state_refs"]) == {f"{phase}.json"
+    assert set(stage["state_refs"]) == {f"{phase}__{phase}.json"
                                         for phase in pool_refresh.BOOTSTRAP_TRAINING_PHASES}
     assert rec.requests[-1][1] == pool_refresh.phase_key(SESSION, "stage", "none", TAG)
 
@@ -315,41 +315,45 @@ def test_recipe_bookkeeping_files_are_skipped_by_the_stage_plan(monkeypatch, tmp
     rec = _wire(monkeypatch, tmp_path, pointer=None, prior_class=NONE_CLASS)
     conn = _db()
     _add_score(conn)
+    fold = f"folds__cut-{SESSION}__"
     bookkeeping = [
         "training/job.json",
         "training/summary.json",
-        "training/folds__runup__COMPLETE.json",
-        "training/folds__runup__membership_receipt.json",
-        "training/folds__runup__label_availability_receipt.json",
+        f"training/{fold}COMPLETE.json",
+        f"training/{fold}membership_receipt.json",
+        f"training/{fold}label_availability_receipt.json",
     ]
+    # every recipe job publishes the same flat fold-artifact name
+    artifacts = {
+        "train-line-thru": "payoff_artifact.json",
+        "train-map-thru": "recalibration_artifact.json",
+        "train-surface-runup": "payoff_artifact.json",
+        "train-line-runup": "payoff_artifact.json",
+        "train-map-runup": "recalibration_artifact.json",
+    }
     jobs = {}
     for phase in pool_refresh.BOOTSTRAP_TRAINING_PHASES:
-        if phase == "train-line-runup":
+        if phase in artifacts:
             jobs[phase] = _succeeded_training(
-                conn, phase,
-                bookkeeping + ["training/folds__runup__payoff_artifact.json"],
-                prior="none")
-        elif phase == "train-map-runup":
-            jobs[phase] = _succeeded_training(
-                conn, phase,
-                bookkeeping + ["training/folds__runup__recalibration_artifact.json"],
+                conn, phase, bookkeeping + [f"training/{fold}{artifacts[phase]}"],
                 prior="none")
         else:
             jobs[phase] = _succeeded_training(conn, phase, [f"training/{phase}.json"],
                                               prior="none")
 
-    assert _submit(conn, tmp_path) == ["receipt"]  # no refusal on the shared names
-    assert len(rec.stage) == 1
+    assert _submit(conn, tmp_path) == ["receipt"]  # identical names, no refusal
     refs = rec.stage[0]["state_refs"]
-    expected_refs = {
-        f"{phase}.json": f"{jobs[phase]}#training/{phase}.json"
-        for phase in pool_refresh.BOOTSTRAP_TRAINING_PHASES
-        if phase not in ("train-line-runup", "train-map-runup")}
-    expected_refs["folds__runup__payoff_artifact.json"] = (
-        f"{jobs['train-line-runup']}#training/folds__runup__payoff_artifact.json")
-    expected_refs["folds__runup__recalibration_artifact.json"] = (
-        f"{jobs['train-map-runup']}#training/folds__runup__recalibration_artifact.json")
-    assert refs == expected_refs
+    expected = {f"{phase}__{phase}.json": f"{jobs[phase]}#training/{phase}.json"
+                for phase in pool_refresh.BOOTSTRAP_TRAINING_PHASES
+                if phase not in artifacts}
+    for phase, artifact in artifacts.items():
+        expected[f"{phase}__{fold}{artifact}"] = (
+            f"{jobs[phase]}#training/{fold}{artifact}")
+    assert refs == expected
+    recipe_refs = {key: value for key, value in refs.items()
+                   if key.split("__", 1)[0] in artifacts}
+    assert len(recipe_refs) == 5  # one distinct phase-prefixed key per recipe job
+    assert all("/" not in key and key.endswith(".json") for key in refs)
 
 
 # --------------------------------------------------------------------------

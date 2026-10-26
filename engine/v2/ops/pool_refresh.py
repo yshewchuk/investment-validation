@@ -4,15 +4,13 @@ Advances the three ``phase5_state_stage`` pool members (``paired_residual_pool``
 ``board_analog_matcher``, ``trailing_pnl_cutoff``) one cutoff per night: the session
 of the latest succeeded legacy ``finality`` or ``features`` job. When the pointer's
 release classifies ``NONE``/``NO_POOL_CATALOG`` it runs the bootstrap cycle instead
-(the 12 training phases, a ``mode: "bootstrap"`` stage and an empty-store or
-expected-incumbent guarded promote); a ``DAMAGED`` prior submits nothing and reports
-``VALIDATION_FAILED``. The pointer is classified only on the tick that starts a
-cycle: once a cycle's keys exist they fix its family (§2.2.2). Contract:
-``engine/v2/models/ARCHITECTURE.md`` sections 2.2.1 and 2.2.2. Called from
-``Service.tick()``; never a GRAPH node; the Service sidecar
-catches and reports any failure. Reads durable state only (no memo): each phase key
-is checked against the ``jobs`` table every call, and phase N+1 is submitted only
-once every phase-N job has succeeded.
+(12 training phases, a ``mode: "bootstrap"`` stage, guarded promote); ``DAMAGED``
+submits nothing and reports ``VALIDATION_FAILED``; classification runs only on the
+tick that starts a cycle -- the cycle's keys then fix its family (§2.2.2). Contract:
+``engine/v2/models/ARCHITECTURE.md`` section 2.2.1. Called from ``Service.tick()``;
+never a GRAPH node; the Service sidecar catches and reports any failure. Reads
+durable state only (no memo): each phase key is checked against the ``jobs`` table
+every call, and phase N+1 is submitted only once every phase-N job has succeeded.
 """
 from __future__ import annotations
 
@@ -35,9 +33,8 @@ from engine.v2.ops.submission import job_id_for, submit
 PHASES = ("train-paired", "train-board", "train-trailing", "stage", "promote")
 TRAINING_PHASES = PHASES[:3]
 
-#: The bootstrap cycle's training phases (#1102 slice C): the three carried pools,
-#: the three driver residual pools, the chooser analog pool and the six calibration
-#: recipes; then ``stage`` and ``promote``.
+#: The bootstrap cycle's training phases (#1102 slice C): the carried pools, the
+#: driver residual pools, the chooser pool and the five calibration recipes.
 BOOTSTRAP_TRAINING_PHASES = (
     "train-paired", "train-board", "train-trailing",
     "train-driver-size", "train-driver-implied_t1", "train-driver-runup_move",
@@ -47,18 +44,14 @@ BOOTSTRAP_TRAINING_PHASES = (
 )
 BOOTSTRAP_PHASES = BOOTSTRAP_TRAINING_PHASES + ("stage", "promote")
 
-#: Recipe (calibration) training-job bookkeeping files: ``_state_refs`` skips
-#: any ``training/`` remainder whose basename (the part after the last ``__``,
-#: or the whole remainder) is one of these -- they are job plumbing, not state
-#: files, and two recipe jobs would otherwise collide on ``job.json`` /
-#: ``summary.json`` (``training/folds__<fold>__<name>`` forms included).
+#: Recipe (calibration) training-job bookkeeping files -- job plumbing, not
+#: state files; ``_state_refs`` skips a remainder with one of these basenames.
 _RECIPE_BOOKKEEPING_BASENAMES = frozenset({
     "job.json", "summary.json", "COMPLETE.json",
     "membership_receipt.json", "label_availability_receipt.json",
 })
 
-#: Bootstrap assembly inputs: environment variable name -> ``bootstrap`` key, read
-#: at submit time (never at import time).
+#: Bootstrap assembly inputs: environment variable name -> ``bootstrap`` key.
 _BOOTSTRAP_ENV = (
     ("BOOTSTRAP_TIER4_DIR", "tier4_dir"),
     ("BOOTSTRAP_PANEL_CATALOG", "panel_catalog"),
@@ -66,10 +59,9 @@ _BOOTSTRAP_ENV = (
     ("BOOTSTRAP_PANEL_ARTIFACT_ROOT", "panel_artifact_root"),
 )
 
-#: The prior classifier, imported lazily by ``_classify_prior`` from the
-#: ``tools.phase5_state_stage_job`` re-export (``engine/v2`` may not import
-#: ``checks`` at all, so the classification crosses through the tools layer);
-#: ``None`` until then, and tests may patch this attribute to a stub.
+#: The prior classifier, ``None`` until ``_classify_prior`` lazily re-imports it
+#: from ``tools.phase5_state_stage_job`` (``engine/v2`` may not import ``checks``);
+#: tests may patch this attribute to a stub.
 classify_prior = None
 
 FILL_ALPHA = 0.5  # engine.fills.MID.alpha, the shadow fill alpha native_score_batch scores with
@@ -130,12 +122,9 @@ def _log(message):
 
 
 def _classify_prior(release_root, prior_id):
-    """Classify the pointer's release with the stage job's own classifier
-    (``checks.phase5_release_assembly.classify_prior`` via the sanctioned
-    ``tools.phase5_state_stage_job`` re-export; ``engine/v2`` may not import
-    ``checks`` directly) using the stage job's argument shape: the first arg is the store root (this
-    sidecar's ``release_root``) and a missing pointer passes ``None`` (which the
-    classifier reports as ``NONE``). The import is lazy."""
+    """Classify the pointer's release with the stage job's own classifier via the
+    sanctioned ``tools.phase5_state_stage_job`` re-export (lazy import; a missing
+    pointer passes ``None``, which classifies as ``NONE``)."""
     fn = classify_prior
     if fn is None:
         from tools.phase5_state_stage_job import classify_prior as fn
@@ -236,11 +225,8 @@ def _state(conn, key):
 
 def _started_family(conn, session, prior_token, tag):
     """The family of the cycle already started for this (session, prior token,
-    tag), or ``None`` when no cycle job exists yet. ``train-chooser`` is only
-    ever submitted by the bootstrap cycle; ``train-paired`` is submitted by
-    both, so it alone means carry. The keys are built from the current pointer,
-    so a changed prior yields ``None`` and a new cycle under a fresh
-    classification."""
+    tag), else ``None``: ``train-chooser`` is bootstrap-only, ``train-paired``
+    alone means carry. A changed prior yields ``None`` (fresh classification)."""
     if _exists(conn, phase_key(session, "train-chooser", prior_token, tag)):
         return "bootstrap"
     if _exists(conn, phase_key(session, "train-paired", prior_token, tag)):
@@ -351,9 +337,9 @@ def _pointer_named_candidate_states(conn, session, tag):
 
 
 def _cycle_job_states(conn, session, prior, tag, release_id, phases=PHASES):
-    """Classify this cycle's phase jobs (the carry five by default, the bootstrap
-    fourteen): ``"stalled"`` when one is failed/cancelled/blocked, ``"active"``
-    while an existing phase job has not succeeded, else ``"clear"``."""
+    """Classify this cycle's phase jobs: ``"stalled"`` when one is
+    failed/cancelled/blocked, ``"active"`` while an existing phase job has not
+    succeeded, else ``"clear"``."""
     if prior == release_id:
         return _pointer_named_candidate_states(conn, session, tag)
     states = [_state(conn, phase_key(session, phase, prior, tag)) for phase in phases]
@@ -365,10 +351,9 @@ def _cycle_job_states(conn, session, prior, tag, release_id, phases=PHASES):
 
 
 def _family_cycle_pending(conn, session, family, prior_token, tag, prior_id, release_id):
-    """Is the started cycle of this family still pending? Active while a phase
-    job of the family's key set has not succeeded, not pending once one has
-    stalled; a clear cycle with a prior other than the candidate still awaits
-    its stage/promote (a missing pointer's clear bootstrap is not pending)."""
+    """Is the started cycle of this family still pending? Active while a phase job
+    of its key set has not succeeded, not pending once one has stalled; a clear
+    carry with a prior other than the candidate still awaits stage/promote."""
     phases = BOOTSTRAP_PHASES if family == "bootstrap" else PHASES
     job_states = _cycle_job_states(conn, session, prior_token, tag, release_id,
                                    phases=phases)
@@ -388,16 +373,14 @@ def pool_cycle_pending(conn, release_root):
     not succeeded, even if the pointer already names the candidate release:
     the promote must be drained before the serve closes the worker. The prior
     is classified only when no cycle job exists yet for (session, prior token,
-    tag): when the cycle's keys exist they fix its family (bootstrap if a
-    ``train-chooser`` job exists, carry if only ``train-paired`` does) and the
-    matching key set is checked without classification. A missing pointer or a
-    ``NO_POOL_CATALOG`` prior is checked against the bootstrap cycle's key set
-    (prior token ``none`` for a missing pointer), so the serve stays up while a
-    bootstrap cycle is active and not stalled; a missing pointer with no
-    bootstrap job running stays ``False`` (nothing has started). A
-    ``DAMAGED`` prior, an unreadable pointer, no connection, no identity or a
-    classification failure is ``False``. Reads only the same durable state as
-    the sidecar, never raises and never writes."""
+    tag): the keys then fix its family (``train-chooser`` bootstrap,
+    ``train-paired`` alone carry) and its key set is checked without
+    classification; a ``DAMAGED`` prior or a failed classification is
+    always ``False``. ``False``
+    when there is no connection, no identity, no readable pointer, any of the
+    cycle's five phase jobs is in a terminal stall state, or the pointer names
+    the candidate and every existing phase job succeeded. Reads only the same
+    durable state as the sidecar and never writes."""
     if conn is None:
         return False
     identity = pool_refresh_identity(conn)
@@ -410,8 +393,7 @@ def pool_cycle_pending(conn, release_root):
         from tools.phase5_state_stage_job import PRIOR_DAMAGED, PRIOR_NO_POOL_CATALOG, PRIOR_NONE
         pointer = _read_pointer(Path(release_root) / "deployment")
         if pointer is not None and pointer.release_id == release_id:
-            # The cycle is done except for draining its promote attempt; the
-            # candidate is never the prior to classify.
+            # Candidate live: only its promote drain can keep the serve up.
             return _pointer_named_candidate_states(conn, session, tag) == "active"
         prior_id = None if pointer is None else pointer.release_id
         prior_token = "none" if prior_id is None else prior_id
@@ -438,14 +420,11 @@ def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_
                                          code_source, clock):
     """Submit at most the ready phase of the pool-nightly cycle; returns this call's
     JobReceipts (empty = waiting/idle). ``release_root`` is the store's parent; the
-    deployment dir lives under ``<release_root>/deployment``. The pointer's release
-    is classified only when no cycle job exists yet for (session, prior token, tag)
-    (the prior verification is heavy per-tick I/O, §2.2.2): once a cycle's keys
-    exist they fix its family -- ``train-chooser`` means bootstrap, ``train-paired``
-    alone means carry -- and the stage/promote jobs re-derive the class themselves.
-    A fresh classification of ``USABLE`` runs the carry cycle, ``NONE`` (a missing
-    pointer) and ``NO_POOL_CATALOG`` run the bootstrap cycle, and ``DAMAGED``
-    submits nothing and raises for the sidecar's deduped report."""
+    deployment dir lives under ``<release_root>/deployment``. The prior is classified
+    only when no cycle job exists yet for (session, prior token, tag) -- the keys
+    then fix its family, keeping heavy prior verification off every tick (§2.2.2).
+    ``USABLE`` runs the carry cycle; ``NONE`` (missing pointer) and
+    ``NO_POOL_CATALOG`` the bootstrap; ``DAMAGED`` submits nothing and raises."""
     if conn is None:
         return []
     identity = pool_refresh_identity(conn)
@@ -471,9 +450,7 @@ def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_
         if classified.kind in (PRIOR_NONE, PRIOR_NO_POOL_CATALOG):
             family = "bootstrap"
         elif prior_id is None:
-            # Unreachable with the real classifier (a missing pointer is NONE);
-            # keeps a stubbed classifier from keying the carry cycle on a "None"
-            # prior token.
+            # Unreachable with the real classifier; stops a stub keying carry on "None".
             return []
         else:
             family = "carry"
@@ -488,10 +465,8 @@ def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_
 
 def _submit_carry(conn, registry, policy, release_root, session, manifest_id, tag,
                   prior, release_id, prior_class, *, code_source, clock):
-    """The existing carry cycle (§2.2.1), keyed by the usable prior release id.
-    ``prior_class`` is the fresh classification of the tick that starts the cycle
-    (``None`` when the cycle's existing keys already fixed its family); it is
-    logged only then."""
+    """The existing carry cycle (§2.2.1), keyed by the usable prior release id;
+    ``prior_class`` is logged only on the tick that classified it."""
     missing = [phase for phase in TRAINING_PHASES
                if not _exists(conn, phase_key(session, phase, prior, tag))]
     if missing:
@@ -519,8 +494,6 @@ def _submit_carry(conn, registry, policy, release_root, session, manifest_id, ta
             release_root=str(release_root), prior_release_id=prior,
             release_id=release_id, cutoff=session, state_refs=state_refs,
             manifest_ref=manifest_id, source_root=code_source)
-        if prior_class is not None:
-            _log_prior(session, tag, prior_class)
         _log(f"{session} {tag} carry submitted 1 stage job")
         return [submit(conn, registry, policy,
                        request_from_plan(plan, stage_key), clock=clock)]
@@ -534,24 +507,19 @@ def _submit_carry(conn, registry, policy, release_root, session, manifest_id, ta
         release_root=str(Path(release_root) / "deployment"),
         release_id=release_id, expected_previous_release_id=prior)
     plan["implementation_ref"] = _implementation_ref(code_source)
-    if prior_class is not None:
-        _log_prior(session, tag, prior_class)
     _log(f"{session} {tag} carry submitted 1 promote job")
     return [submit(conn, registry, policy,
                    request_from_plan(plan, promote_key), clock=clock)]
 
 
 def _log_prior(session, tag, prior):
-    """The cycle's prior class and reason, logged once, on the tick that
-    classifies it and acts (the tick that starts the cycle; a purely waiting
-    tick stays silent)."""
+    """The prior class and reason, logged once on the tick that classifies."""
     _log(f"{session} {tag} prior class {prior.kind}: {prior.reason}")
 
 
 def _bootstrap_inputs():
-    """The four bootstrap assembly inputs, read from the environment at submit
-    time; any unset or blank value refuses ``VALIDATION_FAILED`` before any
-    training job is submitted (a cycle that cannot stage must not spend training)."""
+    """The four bootstrap assembly inputs from the environment, read at submit
+    time; any unset or blank value refuses before any training job is spent."""
     inputs = {}
     for env_name, key in _BOOTSTRAP_ENV:
         value = (os.environ.get(env_name) or "").strip()
@@ -564,12 +532,10 @@ def _bootstrap_inputs():
 
 def _submit_bootstrap(conn, registry, policy, store, release_root, session, manifest_id,
                       tag, prior_id, prior_class, *, code_source, clock):
-    """The bootstrap cycle (#1102 slice C): the twelve training phases (all
-    missing ones in one tick, like the carry cycle), then one ``mode: "bootstrap"``
-    stage, then the guarded promote -- each phase only once every earlier job has
-    succeeded. ``prior_class`` is the fresh classification of the tick that starts
-    the cycle (``None`` when the cycle's existing keys already fixed its family);
-    it is logged only then."""
+    """The bootstrap cycle (#1102 slice C): twelve training phases (all missing
+    ones in one tick), one ``mode: "bootstrap"`` stage, then the guarded promote,
+    each phase only after every earlier job succeeded. ``prior_class`` is logged
+    only on the tick that classified it."""
     bootstrap = _bootstrap_inputs()
     prior_token = "none" if prior_id is None else prior_id
     release_id = f"pools-{session}-{tag}"
@@ -597,14 +563,12 @@ def _submit_bootstrap(conn, registry, policy, store, release_root, session, mani
     stage_key = phase_key(session, "stage", prior_token, tag)
     if not _exists(conn, stage_key):
         state_refs = _state_refs(conn, session, prior_token, tag, code_source,
-                                 phases=BOOTSTRAP_TRAINING_PHASES)
+                                 phases=BOOTSTRAP_TRAINING_PHASES, prefix_phase=True)
         plan = state_stage.state_stage_plan(
             release_root=str(release_root), prior_release_id=prior_id,
             release_id=release_id, cutoff=session, state_refs=state_refs,
             manifest_ref=manifest_id, source_root=code_source,
             mode="bootstrap", bootstrap=bootstrap)
-        if prior_class is not None:
-            _log_prior(session, tag, prior_class)
         _log(f"{session} {tag} bootstrap submitted 1 stage job")
         return [submit(conn, registry, policy,
                        request_from_plan(plan, stage_key), clock=clock)]
@@ -622,23 +586,23 @@ def _submit_bootstrap(conn, registry, policy, store, release_root, session, mani
         promote_kwargs["expected_previous_release_id"] = prior_id
     plan = training.promote_plan(**promote_kwargs)
     plan["implementation_ref"] = _implementation_ref(code_source)
-    if prior_class is not None:
-        _log_prior(session, tag, prior_class)
     _log(f"{session} {tag} bootstrap submitted 1 promote job")
     return [submit(conn, registry, policy,
                    request_from_plan(plan, promote_key), clock=clock)]
 
 
-def _state_refs(conn, session, prior, tag, code_source, phases=TRAINING_PHASES):
+def _state_refs(conn, session, prior, tag, code_source, phases=TRAINING_PHASES,
+                prefix_phase=False):
     """Latest succeeded attempt's plain ``training/*.json`` outputs across the given
     training phases (the carry cycle's three by default, the bootstrap cycle's
-    twelve), keyed by file remainder (``paired.json`` etc.). A duplicate name
-    or an empty set is ``VALIDATION_FAILED``; summaries (``*.summary.json``),
-    recipe-job bookkeeping files (a remainder whose basename -- the part after
-    the last ``__``, or the whole remainder -- is in
-    ``_RECIPE_BOOKKEEPING_BASENAMES``) and non-``.json`` names are excluded, so
-    only the calibration artifacts (``payoff_artifact`` /
-    ``recalibration_artifact``) of a recipe job are bound."""
+    twelve), keyed by file remainder (``paired.json`` etc.) or, with
+    ``prefix_phase``, ``f"{phase}__{remainder}"`` -- every bootstrap recipe job
+    publishes the same ``folds__cut-<session>__payoff_artifact.json`` /
+    ``...__recalibration_artifact.json`` names, so un-prefixed they collide. A
+    duplicate name or an empty set is ``VALIDATION_FAILED``; summaries
+    (``*.summary.json``), recipe-job bookkeeping files (a remainder whose
+    basename -- the part after the last ``__``, or the whole remainder -- is in
+    ``_RECIPE_BOOKKEEPING_BASENAMES``) and non-``.json`` names are excluded."""
     state_refs = {}
     for phase in phases:
         key = phase_key(session, phase, prior, tag)
@@ -659,6 +623,8 @@ def _state_refs(conn, session, prior, tag, code_source, phases=TRAINING_PHASES):
             remainder = name[len("training/"):]
             if remainder.rpartition("__")[2] in _RECIPE_BOOKKEEPING_BASENAMES:
                 continue
+            if prefix_phase:
+                remainder = f"{phase}__{remainder}"
             if remainder in state_refs:
                 raise fail("VALIDATION_FAILED", "a state file name appears twice",
                            details={"name": remainder})

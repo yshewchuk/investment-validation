@@ -103,7 +103,7 @@ evidence. See the models and data component contracts.
   `experiments.magnitude_search_execution` separately owns its fixed bounded
   fit-only child with per-fit journal acknowledgements, outside the ops job/recovery
   lifecycle and this v2-only enforcement.
-  Known exception: `engine.v2.ops.state_stage` reaches
+  Known exception: `engine.v2.ops.state_stage` and `engine.v2.ops.pool_refresh` reach
   `checks/phase5_release_assembly.py` through `tools/phase5_state_stage_job.py` (no direct
   import); the catalog layout already lives in `engine/v2/models`, and the exception ends
   when the assembly helpers move there too (#807).
