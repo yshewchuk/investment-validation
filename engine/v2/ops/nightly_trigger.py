@@ -871,28 +871,11 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
                          expected_population=population_keys)
 
 
-def _base_release_id() -> str:
-    """The deployed release id the retrain keys are scoped to, or ``"none"`` when no release
-    root is configured or nothing was ever promoted. An unreadable pointer raises
-    ``VALIDATION_FAILED`` (not swallowed)."""
-    from engine.v2.ops.pool_refresh import deployed_release_id
-    return deployed_release_id()
-
-
 def _monthly_retrain_section(ops_root: Path, as_of: str):
     """The monthly-retrain decision pinned into the plan (loud on error)."""
-    base_release_id = _base_release_id()
-    if base_release_id == "none":
-        base_retrain_cutoff = None
-    else:
-        from engine.v2.models.deployment import production_release_root
-        base_retrain_cutoff = retrain_due.read_base_retrain_cutoff(
-            production_release_root(), base_release_id)
     decision_conn = retrain_due.open_catalog_readonly(ops_root / "catalog.sqlite")
     try:
-        return retrain_due.decide(
-            decision_conn, ops_root, as_of, base_release_id,
-            base_retrain_cutoff=base_retrain_cutoff)
+        return retrain_due.decide_for_deployed_base(decision_conn, ops_root, as_of)
     finally:
         decision_conn.close()
 

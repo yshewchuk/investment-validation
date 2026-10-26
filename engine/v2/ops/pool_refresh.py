@@ -131,6 +131,16 @@ def _classify_prior(release_root, prior_id):
     return fn(Path(release_root), prior_id)
 
 
+def validate_retrain_base(release_root, prior_id):
+    """Refuse a damaged deployed base before its retrain cutoff affects planning."""
+    from tools.phase5_state_stage_job import PRIOR_NO_POOL_CATALOG, PRIOR_USABLE
+
+    prior = _classify_prior(release_root, prior_id)
+    if prior.kind not in (PRIOR_NO_POOL_CATALOG, PRIOR_USABLE):
+        raise ValueError("base release catalog could not be read")
+    return prior
+
+
 def _session_scope_from_stage_key(idempotency_key):
     """Recover ``(session, scope_hash)`` from a legacy ``finality`` or ``features``
     job's own idempotency key (``"nightly:<session>:<scope_hash>:<stage>"``).
