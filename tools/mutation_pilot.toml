@@ -1223,6 +1223,7 @@ mutate = [
 ]
 tests = [
     "tests/v2/research/test_magnitude_search_request.py",
+    "tests/v2/research/test_magnitude_search_request_versions.py",
     "tests/v2/research/test_eligibility_policy.py",
     "tests/v2/research/test_magnitude_search_plan.py",
     "tests/v2/research/test_magnitude_search_trials.py",
