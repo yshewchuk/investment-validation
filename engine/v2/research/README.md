@@ -95,6 +95,11 @@ modules (`_snapshot`, `_pricing`, `_plan`, `_chains`, `_trades_table`,
 `_trades_revisions`, `_trades_publish`, `_replay_run`, `_build_run`) are
 internal too.
 
+`_confirmed_metadata.reduce_sequences` is internal synthetic-only metadata reduction,
+not a public index builder. It returns detached per-ticker sequences from a complete
+caller-supplied seven-column view, using data's public confirmation/sequence primitives.
+It proves neither source completeness nor coverage/eligibility and performs no I/O.
+
 The replay half: `replay.replay`, `replay.replay_one`, `replay.ALPHA_GRID`,
 `_replay_run.run`, `_replay_run.events_frame`, `_plan.plan_events`,
 `_chains.ChainIndex`, `_chains.load_chain_index`,
