@@ -155,6 +155,11 @@ def test_symlinked_model_object_refuses_before_receipt(tmp_path, monkeypatch):
 
 def test_job_kind_is_registered_and_non_retrying():
     kind = registry().get("retrain_check")
+    params = retrain_check.RetrainCheckParameters(
+        expected_ids=("retrain_check",), release_root="/release-store",
+        candidate_release_id="candidate", incumbent_release_id="incumbent",
+        input_bindings={"acceptance.json": "acceptance-job"})
 
     assert kind.worker == "retrain_check"
     assert kind.retry == RetryPolicy("none", 1)
+    assert kind.validate(None, params) == []

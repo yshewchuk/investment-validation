@@ -43,7 +43,7 @@ class RetrainCheckParameters:
     input_bindings: dict[str, str] | None = None
 
 
-def retrain_check_parameter_problems(params: Any) -> list[str]:
+def retrain_check_parameter_problems(_job: Any, params: Any) -> list[str]:
     problems = []
     if tuple(getattr(params, "expected_ids", ())) != ("retrain_check",):
         problems.append("expected_ids must be exactly ('retrain_check',)")
