@@ -144,6 +144,133 @@ def test_attribute_aliased_production_root_caller_is_still_enumerated():
     assert _rules(findings) == {"unlisted-root-caller"}
 
 
+def test_annotated_assignment_alias_is_enumerated():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"from engine.v2.models import production_release_root\n"
+            b"alias: object = production_release_root\n"
+            b"alias()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+    assert [item.line for item in findings] == [3]
+
+
+def test_named_expression_alias_is_enumerated():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"from engine.v2.models import production_release_root\n"
+            b"if (alias := production_release_root):\n"
+            b"    alias()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+    assert [item.line for item in findings] == [3]
+
+
+def test_conditional_assignment_alias_is_enumerated():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"import os\n"
+            b"from engine.v2.models import production_release_root\n"
+            b"alias = production_release_root if os.name else None\n"
+            b"alias()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+    assert [item.line for item in findings] == [4]
+
+
+def test_loop_binding_alias_is_enumerated():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"from engine.v2.models import production_release_root\n"
+            b"for alias in (production_release_root,):\n"
+            b"    alias()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+    assert [item.line for item in findings] == [3]
+
+
+def test_tuple_unpacking_alias_is_enumerated():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"import os\n"
+            b"from engine.v2.models import production_release_root\n"
+            b"first, second = production_release_root, os.name\n"
+            b"first()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+    assert [item.line for item in findings] == [4]
+
+
+def test_with_binding_alias_is_enumerated():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"from engine.v2.models import production_release_root\n"
+            b"with production_release_root as alias:\n"
+            b"    alias()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+    assert [item.line for item in findings] == [3]
+
+
+def test_attribute_assignment_alias_is_enumerated():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"from engine.v2.models import deployment\n"
+            b"class Job:\n"
+            b"    def run(self):\n"
+            b"        self.resolver = deployment.production_release_root\n"
+            b"        self.resolver()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+    assert [item.line for item in findings] == [5]
+
+
+def test_attribute_alias_resolves_across_methods():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"from engine.v2.models import deployment\n"
+            b"class Job:\n"
+            b"    def __init__(self):\n"
+            b"        self.resolver = deployment.production_release_root\n"
+            b"    def run(self):\n"
+            b"        self.resolver()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+    assert [item.line for item in findings] == [6]
+
+
+def test_getattr_assignment_alias_is_enumerated():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"from engine.v2.models import deployment\n"
+            b"def run():\n"
+            b"    resolver = getattr(deployment, 'production_release_root')\n"
+            b"    resolver()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+    assert [item.line for item in findings] == [4]
+
+
+def test_getattr_call_is_enumerated():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"from engine.v2.models import deployment\n"
+            b"getattr(deployment, 'production_release_root')()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+    assert [item.line for item in findings] == [2]
+
+
 def test_experiment_star_import_exposing_live_ledger_is_refused():
     findings = isolation.check_files({
         "experiments/star.py": b"from engine.paths import *\np = LEDGER\n",
@@ -175,6 +302,40 @@ def test_permitted_no_fit_submodule_import_remains_clean():
 @pytest.mark.parametrize(
     "body",
     [
+        b"from engine.v2.models import no_fit\n",
+        b"from engine.v2.models import fitting_forbidden\n",
+    ],
+)
+def test_experiments_may_import_explicit_safe_models_symbols(body):
+    assert isolation.check_files({"experiments/safe_symbol.py": body}) == []
+
+
+def test_experiments_cannot_import_listed_models_symbol():
+    findings = isolation.check_files({
+        "experiments/unsafe_symbol.py":
+            b"from engine.v2.models import deployment\n",
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert [item.line for item in findings] == [1]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"import engine.v2.models\n",
+        b"from engine.v2 import models\n",
+        b"from engine.v2.models import *\n",
+    ],
+)
+def test_experiments_cannot_import_models_package_namespace(body):
+    findings = isolation.check_files({"experiments/namespace.py": body})
+    assert _rules(findings) == {"forbidden-import"}
+    assert len(findings) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
         b"import importlib\n"
         b"importlib.import_module('engine.v2.models.deployment')\n",
         b"import importlib as il\n"
@@ -188,6 +349,146 @@ def test_experiment_literal_dynamic_import_of_live_module_is_refused(body):
     findings = isolation.check_files({"experiments/dynamic.py": body})
     assert _rules(findings) == {"forbidden-import"}
     assert len(findings) == 1
+
+
+def test_dynamic_import_keyword_name_is_checked():
+    findings = isolation.check_files({
+        "experiments/dynamic_keyword.py": (
+            b"import importlib\n"
+            b"importlib.import_module(name='engine.v2.models.deployment')\n"
+        ),
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert [item.line for item in findings] == [2]
+
+
+def test_dynamic_relative_import_with_literal_package_is_checked():
+    findings = isolation.check_files({
+        "experiments/dynamic_relative.py": (
+            b"import importlib\n"
+            b"importlib.import_module('.deployment', package='engine.v2.models')\n"
+        ),
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert [item.line for item in findings] == [2]
+
+
+def test_dynamic_double_relative_import_resolves_by_level():
+    findings = isolation.check_files({
+        "experiments/dynamic_double_relative.py": (
+            b"import importlib\n"
+            b"importlib.import_module('..deployment', "
+            b"package='engine.v2.models.releases')\n"
+        ),
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert [item.line for item in findings] == [2]
+
+
+def test_dynamic_dunder_import_fromlist_member_is_checked():
+    findings = isolation.check_files({
+        "experiments/dynamic_fromlist.py":
+            b"__import__('engine.v2', fromlist=['ledger'])\n",
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert [item.line for item in findings] == [1]
+
+
+def test_dynamic_dunder_import_star_fromlist_exposing_descendants_is_refused():
+    findings = isolation.check_files({
+        "experiments/dynamic_star_fromlist.py":
+            b"__import__('engine.v2', fromlist=['*'])\n",
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert [item.line for item in findings] == [1]
+
+
+def test_unresolved_dynamic_import_target_is_refused():
+    findings = isolation.check_files({
+        "experiments/dynamic_unresolved.py": (
+            b"import importlib\n"
+            b"importlib.import_module(live_module)\n"
+        ),
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert [item.line for item in findings] == [2]
+
+
+def test_relative_dynamic_import_without_literal_package_is_refused():
+    findings = isolation.check_files({
+        "experiments/dynamic_no_package.py": (
+            b"import importlib\n"
+            b"importlib.import_module('.deployment')\n"
+        ),
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert [item.line for item in findings] == [2]
+
+
+def test_aliased_dynamic_import_is_checked():
+    findings = isolation.check_files({
+        "experiments/dynamic_alias.py": (
+            b"from importlib import import_module as load\n"
+            b"load(name='engine.v2.ledger.rows')\n"
+        ),
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert [item.line for item in findings] == [2]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"import builtins as b\n"
+        b"b.__import__('engine.v2.models.deployment')\n",
+        b"from builtins import __import__ as load\n"
+        b"load('engine.v2.models.deployment')\n",
+    ],
+)
+def test_builtins_aliased_dynamic_import_is_checked(body):
+    findings = isolation.check_files({"experiments/dynamic_builtins.py": body})
+    assert _rules(findings) == {"forbidden-import"}
+    assert [item.line for item in findings] == [2]
+
+
+def test_dynamic_models_namespace_attribute_is_refused():
+    findings = isolation.check_files({
+        "experiments/dynamic_models_attribute.py": (
+            b"import importlib\n"
+            b"importlib.import_module('engine.v2.models').current_release(None)\n"
+        ),
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert [item.line for item in findings] == [2]
+
+
+def test_production_phase5_dynamic_holdout_import_is_refused():
+    findings = isolation.check_files({
+        "tools/phase5_runner.py": (
+            b"import importlib\n"
+            b"importlib.import_module('engine.v2.foundation.final_holdout')\n"
+        ),
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert [item.line for item in findings] == [2]
+
+
+def test_unrelated_literal_dynamic_import_remains_clean():
+    assert isolation.check_files({
+        "tools/phase5_runner.py": (
+            b"import importlib\n"
+            b"importlib.import_module('json')\n"
+        ),
+    }) == []
+
+
+def test_safe_literal_dynamic_no_fit_import_remains_clean():
+    assert isolation.check_files({
+        "experiments/dynamic_no_fit.py": (
+            b"import importlib\n"
+            b"importlib.import_module('engine.v2.models.no_fit')\n"
+        ),
+    }) == []
 
 
 def test_conflicting_resolver_assignments_in_one_scope_do_not_oscillate():
