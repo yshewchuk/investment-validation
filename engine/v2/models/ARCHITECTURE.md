@@ -401,7 +401,7 @@ When the prior is `NONE` or `NO_POOL_CATALOG` (§2.2), the stage job, once a sid
 | The staging-success record cannot be written after a successful read-back | "staging success could not be recorded"; the candidate stays staged and unpromotable until a rerun |
 | The staging-success record cannot be restored after an id conflict | "candidate release could not be published" (no `ID_CONFLICT` code) |
 | Pinned panel unverifiable, or a fold or policy or preflight disagrees with it (the `PrepareRefused` text is not echoed) | message only; no catalog written |
-| Candidate catalog present with different content, or the candidate id already staged with different content (`RELEASE_ID_REUSED`, `MANIFEST_UNREADABLE`); the existing candidate and its staging-success record are preserved | `ID_CONFLICT` |
+| Candidate catalog present with different content or unreadable (`CatalogConflict`), or the candidate id already staged with different content (`RELEASE_ID_REUSED`, `MANIFEST_UNREADABLE`); the existing candidate and its staging-success record are preserved | `ID_CONFLICT` |
 | Candidate does not read back `USABLE` | "candidate release failed the light checks" |
 
 | Rule | Behaviour |

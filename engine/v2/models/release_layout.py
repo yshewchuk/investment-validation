@@ -244,8 +244,6 @@ def write_manifest(release_root: Path, body: Mapping[str, Any], *,
     if candidate_only:
         try:
             existing = _read_catalog(path)
-        except CatalogConflict:
-            raise
         except ReleaseLayoutError as exc:
             raise CatalogConflict("candidate catalog exists but could not be read") from exc
         if existing is not None:

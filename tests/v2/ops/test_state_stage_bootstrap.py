@@ -576,7 +576,7 @@ def test_write_manifest_candidate_only_unreadable_catalog_is_a_conflict(tmp_path
     path = phase5_release.catalog_path(tmp_path, "cand2")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json")
-    with pytest.raises(phase5_release.CatalogConflict):
+    with pytest.raises(phase5_release.CatalogConflict, match="could not be read"):
         phase5_release.write_manifest(tmp_path, body, candidate_only=True)
     assert path.read_text() == "{not json"
 
