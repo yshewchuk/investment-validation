@@ -242,7 +242,10 @@ def write_manifest(release_root: Path, body: Mapping[str, Any], *,
     body = _validate_catalog(dict(body))
     path = _catalog_path(release_root, body["release_id"])
     if candidate_only:
-        existing = _read_catalog(path)
+        try:
+            existing = _read_catalog(path)
+        except ReleaseLayoutError as exc:
+            raise CatalogConflict("candidate catalog exists but could not be read") from exc
         if existing is not None:
             existing_unhashed = {key: value for key, value in existing.items()
                                  if key != "manifest_hash"}

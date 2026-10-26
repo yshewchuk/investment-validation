@@ -402,13 +402,12 @@ The pointer is re-read before each phase submit; if its class or id changed sinc
 
 **Parameters (bootstrap).** The §2.2 parameters plus `bootstrap`: `{tier4_dir, panel_catalog, panel_snapshot_id, panel_artifact_root}`, all non-empty strings, present exactly when `mode` is `bootstrap` (otherwise plan-time `INVALID_REQUEST`; a carry plan's parameters are unchanged). `state_files` are plain `.json` names of every bound input: frozen states (driver residual pools, paired, board, trailing, chooser; classified by their own schema as `frozen_state_payloads` does) and payoff-line, payoff-surface and recalibration-map artifacts (classified by `schema_version`). The panel identity is the pinned panel copy (`verify_panel_copy`), never `auto`; `tier4_dir` is read, never written, and only folds whose snapshot matches that identity are taken. The admissible table is the static `default_admissible_table()`. The legacy chooser parquet is never read.
 
-**Assembly** (after `classify_prior`: `DAMAGED` refuses `PRIOR_MISMATCH`, `USABLE` refuses `PRIOR_USABLE`, both before any write):
+**Assembly invariants** (after `classify_prior`: `DAMAGED` refuses `PRIOR_MISMATCH`, `USABLE` refuses `PRIOR_USABLE`, both before any write):
 
-1. Build the inventory from the champion registry (drift refuses) under the candidate id, and the model bindings with `model_release`.
-2. `NO_POOL_CATALOG` only: the candidate's bindings must equal the incumbent's staged bindings, compared on binding id, model id, role, strategy, clock, adapter, feature order, output names and member content hashes, and the inventory `deployment_id` must equal the incumbent's; any difference refuses `BINDINGS_DIFFER` (a model change takes the §2.3 acceptance path). `NONE` has no incumbent to compare with.
-3. Read the bound files; add the legacy-trained Tier-4 serving folds as `tier4_folds:*` members (read only, not retrained, never relabeled native); `build_states`. Every catalog state must be `STAGED`; a `MISSING` or `PENDING` one refuses `EMPTY_MEMBER` with the member ids. Paired, board and chooser objects must carry `cutoff` as the last name segment and a trailing month may not start after it; calibration folds keep their own key cutoff (STR-RUNUP folds may be earlier).
-4. `write_release` stages the bindings and writes the objects content-addressed, with the catalog under the candidate id only: no root `phase5_release.json` is written or preserved and the incumbent's directory is not touched. `sources` = `pool_cutoff` = `cutoff`, `carried_from` null (it says only that no prior catalog was carried, not that the data is native), plus the pinned panel identity.
-5. `classify_prior(release_root, release_id)` must read the candidate back as `USABLE` and `light_checks` must pass; then `mark_staging_succeeded`. `DEPLOYED` is never touched.
+- Binding equality (`NO_POOL_CATALOG` only): the candidate's bindings equal the incumbent's staged bindings (binding id, model id, role, strategy, clock, adapter, feature order, output names, member content hashes) and the inventory `deployment_id` equals the incumbent's; any difference refuses `BINDINGS_DIFFER` (a model change takes the §2.3 acceptance path). `NONE` has no incumbent to compare with.
+- Legacy-trained Tier-4 serving folds enter as `tier4_folds:*` members, read only, never retrained or relabeled native. Every catalog state must be `STAGED`; a `MISSING` or `PENDING` one refuses `EMPTY_MEMBER` with the member ids. Paired, board and chooser objects carry `cutoff` as the last name segment and no trailing month starts after it; calibration folds keep their own key cutoff.
+- The catalog is written under the candidate id only (`candidate_only`): no root `phase5_release.json` is written or preserved and the incumbent's directory is untouched. `sources` = `pool_cutoff` = `cutoff`, `carried_from` null (no prior catalog carried, not that the data is native), plus the pinned panel identity.
+- The candidate must read back `USABLE` (`classify_prior`) and pass `light_checks` before `mark_staging_succeeded`. `DEPLOYED` is never touched.
 
 | Condition | Outcome (`VALIDATION_FAILED`, fixed message) |
 |---|---|
@@ -421,7 +420,7 @@ The pointer is re-read before each phase submit; if its class or id changed sinc
 | The staging-success record cannot be written after a successful read-back | "staging success could not be recorded"; the candidate stays staged and unpromotable until a rerun |
 | The staging-success record cannot be restored after an id conflict | "candidate release could not be published" (no `ID_CONFLICT` code) |
 | Pinned panel unverifiable, or a fold or policy or preflight disagrees with it (the `PrepareRefused` text is not echoed) | message only; no catalog written |
-| Candidate catalog present with different content, or the candidate id already staged with different content (`RELEASE_ID_REUSED`, `MANIFEST_UNREADABLE`); the existing candidate and its staging-success record are preserved | `ID_CONFLICT` |
+| Candidate catalog present with different content or unreadable (`CatalogConflict`), or the candidate id already staged with different content (`RELEASE_ID_REUSED`, `MANIFEST_UNREADABLE`); the existing candidate and its staging-success record are preserved | `ID_CONFLICT` |
 | Candidate does not read back `USABLE` | "candidate release failed the light checks" |
 
 | Rule | Behaviour |

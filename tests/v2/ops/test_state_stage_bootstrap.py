@@ -563,6 +563,24 @@ def test_write_manifest_candidate_only_requires_identical_content(tmp_path):
         phase5_release.write_manifest(tmp_path, other, candidate_only=True)
 
 
+def test_write_manifest_candidate_only_unreadable_catalog_is_a_conflict(tmp_path):
+    from engine.v2.models import deployment
+
+    release, inventory, payloads = _fixture("cand2")
+    deployment.stage_release(phase5_release.deployment_root(tmp_path), release,
+                             inventory, payloads)
+    body = phase5_release.manifest_body(
+        "cand2", "d1", [phase5_release.member_row(
+            _spec("paired_residual_pool"), phase5_release.STAGED, [], "x")],
+        {"pool_cutoff": "2026-10-01", "carried_from": None})
+    path = phase5_release.catalog_path(tmp_path, "cand2")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json")
+    with pytest.raises(phase5_release.CatalogConflict, match="could not be read"):
+        phase5_release.write_manifest(tmp_path, body, candidate_only=True)
+    assert path.read_text() == "{not json"
+
+
 def test_artifact_file_payloads_refuses_an_unknown_schema(tmp_path):
     path = tmp_path / "unknown.json"
     path.write_text(json.dumps({"schema_version": "mystery.v1"}))

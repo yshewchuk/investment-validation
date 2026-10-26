@@ -43,7 +43,7 @@ bundle members only feed legacy pages.
 | Board rows and per-event detail (`board`, `tickers/*`) | The `serving_projection` job already designed in [serving_projection_job.md](serving_projection_job.md) (#717: a leaf after `publication`, unchanged placement and failure table). This design changes only its row source: it reads persisted native score-batch records and refusals instead of `bundle.tar` | changed (slice 3) |
 | Row-level flags (`flags`, panel lag, calendar conflict, execution clock) | Per-row `flags` the native display row carries, plus `operations_status.json` session fields; no flags document. The legacy panel-lag and calendar-conflict flags have no native producer and are dropped at cutover (accepted loss; a native producer is post-cutover work) | exists; legacy document dropped |
 | Native parity (not a bundle member) | Catalog `native_parity` job report read by the API; unchanged | exists |
-| Health (`health.json`) | `operations_health.v1.1` (`ops/health.py`) and the ledger calibration `ledger_health.v1` file | exists |
+| Health (`health.json`) | `operations_health.v1.2` (`ops/health.py`) and the ledger calibration `ledger_health.v1` file | exists |
 | Model identity and release (`meta` model block, `strategies`) | `/models/release` view over the deployed model release (`models.deployment`) | exists |
 | Book (`book`) | Ledger portfolio (`engine/v2/ledger/portfolio.py`); no bundle copy | exists; see question Q3 |
 | Per-input model evidence (`models`, `model_evidence.json`) | None at cutover. `model_evidence_ref` stays `None`, which the release contract already allows | deferred (Q2) |
@@ -64,7 +64,9 @@ authority the same way the shadow batch is today (`ops/ARCHITECTURE.md` promotio
 this design promotes nothing beyond what the wiring slice states. If a display field needs stage
 observations the batch does not persist (the analog fields behind #681 are the known case), the
 batch writer persists them in slice 3 and the schema version is bumped. No fallback fills a
-missing field from any other source.
+missing field from any other source. Slice 3 specifies the adapter from a persisted record to the
+`native_display_row` inputs; it keeps `analog_fields=None` (analog stage not run) distinct from
+`n_analogs=0` (ran, found none) and never maps one to the other.
 
 Key contract (existing, not redesigned). Batch records and refusals are keyed by
 `ticker|event_date_identity|strategy|session` (`native_score_batch_records.v2.0`). Serving rows
@@ -104,7 +106,7 @@ Procedure.
    chooser record; `detail` is compared by shape. The exact field list is fixed in slice 1 with a
    fixture, because a native chooser digest cannot be reproduced by renaming a record.
 5. Write `native_selfcheck.v1.0`: `ok`, `n_checked`, `n_batch_records`, `seed`, `sample_keys`,
-   `mismatches` (scrubbed: field, stored and fresh value, no paths or exception text),
+   `mismatches` (scrubbed: field, stored and fresh value, no paths or exception text; slice 1 fixes a typed allowlist of `field` names and value types with the schema, and a value outside it is replaced by its type name),
    `snapshot_id`, `batch_artifact_id`. Elapsed time goes to stderr only, so the artifact is
    byte-stable. `ok` is false on any mismatch and on any sampled input that cannot be built
    (mismatch code `INPUT_UNBUILDABLE`). A missing or unreadable snapshot is a job failure instead.
@@ -121,7 +123,7 @@ release id, occurrence and files, per `_gate_is_bound`). The receipt must name t
 artifact and the pinned snapshot; slice 2 confirms the receipt builder against `nightly.py` and
 the selfcheck failure produces `PUBLICATION_REFUSED` with `failed_gates: ["projection"]`.
 
-Cost. Work is bounded by `N` rows, not the universe: it loads only the snapshot slices for the
+Cost. Work is bounded by `max(N, forced)` rows (forced rows are capped, step 1), not the universe: it loads only the snapshot slices for the
 sampled tickers. This is the property #505 needed, so the interim 3 GiB `projection` profile and
 the whole-table reads of `legacy_nightly_read_plan.py` are deleted rather than resized. The new
 job kinds get profiles measured on a subset run by the owner of the wiring PR, with the

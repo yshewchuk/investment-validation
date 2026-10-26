@@ -296,7 +296,7 @@ def test_health_route_serves_every_supported_schema_version(tmp_path, schema_ver
 
 
 _OVERSIZE_HEALTH_BYTES = 2 * 1024 * 1024  # comfortably past the readers' 1 MiB cap
-_HEALTH_CAP_BYTES = 1_048_576  # operations._HEALTH_MAX_BYTES: the exact cap
+_HEALTH_CAP_BYTES = 1_048_576  # health_file.HEALTH_MAX_BYTES: the exact cap
 
 
 def _write_padded_json(path: Path, document: dict, size: int) -> None:
@@ -1065,3 +1065,23 @@ def test_latest_completed_session_now_overrides_valid_frozen_at():
     assert latest_completed_session(
         datetime(2026, 10, 5, 21, tzinfo=timezone.utc),
         frozen_at="2026-10-02T21:00:00Z") == "2026-10-05"
+
+
+def test_health_readers_refuse_symlink_and_fifo(tmp_path):
+    import os
+    from engine.v2.serving import operations
+
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps({"schema_version": "operations_health.v1.2"}))
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    fifo = tmp_path / "fifo.json"
+    os.mkfifo(fifo)
+    for reader in (operations._read_health, operations._read_calibration_health):
+        for bad in (link, fifo):
+            with pytest.raises(ValueError, match="health artifact is indirect"):
+                reader(bad)
+    expected = json.dumps({"schema_version": "operations_health.v1.2"},
+                          sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    assert operations._read_health(real) == expected
+    assert operations._read_calibration_health(real) == expected
