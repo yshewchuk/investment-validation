@@ -40,8 +40,8 @@ def _pin_refresh_mode(identity, plan, refresh_mode, refresh_plan, catalog_path=N
     head at submission time; a caller-supplied plan remains a strict override.
     """
     if retrain is not None:  # #805 slice 2: the retrain_due.decide section, pinned into plan identity
-        identity.update(retrain=retrain)
-        plan.update(retrain=retrain)
+        identity.update(retrain=json.loads(json.dumps(retrain)))
+        plan.update(retrain=json.loads(json.dumps(retrain)))
     if refresh_mode not in ("legacy", "native"):
         raise fail("INVALID_REQUEST", "refresh_mode must be legacy or native")
     if refresh_mode != "native":

@@ -271,3 +271,15 @@ def test_sidecar_gate_blocks_on_every_chain_step_key(step, state):
 
     assert chain_blocks_pool_sidecar(conn, "2026-11-02") is True
     assert chain_blocks_pool_sidecar(conn, "2026-11-03") is False
+
+
+def test_plan_retrain_section_is_detached_from_the_callers_dict():
+    import engine.v2.ops.plans
+
+    root = Path(__file__).resolve().parents[3]
+    section = {"state": "due", "month": "2026-10", "m_end": "2026-10-31", "superseded": [], "base": "rel1"}
+    plan = engine.v2.ops.plans.nightly_plan(str(root), "2026-09-18", retrain=section)
+    section["state"] = "not_due"
+    section["superseded"].append("x")
+    assert plan["retrain"]["state"] == "due"
+    assert plan["retrain"]["superseded"] == []
