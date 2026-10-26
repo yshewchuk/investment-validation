@@ -53,11 +53,12 @@ def _sha(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
-def _linear_payload(intercept=1.0, coefficient=2.0) -> bytes:
+def _linear_payload(intercept=1.0, coefficient=2.0, *, output_name="prediction",
+                    feature_name="x") -> bytes:
     return json.dumps({
         "schema_version": "linear_estimator.v1.0",
-        "feature_order": ["x"],
-        "outputs": [{"name": "prediction", "intercept": intercept,
+        "feature_order": [feature_name],
+        "outputs": [{"name": output_name, "intercept": intercept,
                      "coefficients": [coefficient]}],
     }, sort_keys=True).encode()
 
@@ -92,7 +93,8 @@ def _write_empty_catalog(root, release_id: str, fold_object=None) -> None:
 
 def _stage_release(tmp_path, *, roles=("driver", "gate"),
                    clock_ids=None, release_id="r1", include_size_fold=True,
-                   size_fold_start="2026-01-01"):
+                   size_fold_start="2026-01-01", gate_output_name="prediction",
+                   gate_feature_name="x", size_feature_names=None):
     """Stage STR-THRU roles and a causal synthetic size fold when available."""
     clock_ids = clock_ids or {}
     bindings = []
@@ -101,7 +103,9 @@ def _stage_release(tmp_path, *, roles=("driver", "gate"),
     requirements = []
     payloads = {}
     for role in roles:
-        payload = _linear_payload()
+        output_name = gate_output_name if role == "gate" else "prediction"
+        feature_name = gate_feature_name if role == "gate" else "x"
+        payload = _linear_payload(output_name=output_name, feature_name=feature_name)
         member_hash = _sha(payload)
         payloads[member_hash] = payload
         member = ArtifactMember(name="estimator", path="unused.json",
@@ -112,19 +116,19 @@ def _stage_release(tmp_path, *, roles=("driver", "gate"),
         bindings.append(ModelBinding(
             binding_id=binding_id, model_id=model_id, role=role,
             strategy_id="STR-THRU", decision_clock_id=clock_id,
-            adapter="json-linear.v1", feature_order=("x",),
-            output_names=("prediction",), members=(member,)))
+            adapter="json-linear.v1", feature_order=(feature_name,),
+            output_names=(output_name,), members=(member,)))
         artifacts.append(ModelArtifactInventory(
             artifact_id=model_id, role=role, strategy_ids=("STR-THRU",),
             compatible_clock_ids=(clock_id,), target_contract_ref="return.v1",
-            ordered_features=("x",),
+            ordered_features=(feature_name,),
             members=(ArtifactInventoryMember(
                 member_id=f"{model_id}:estimator", kind="estimator",
                 artifact_ref=f"artifact://{model_id}",
                 content_hash=member_hash),)))
         release_bindings.append(ReleaseBinding(
             role=role, strategy_id="STR-THRU", clock_id=clock_id,
-            artifact_id=model_id, ordered_features=("x",),
+            artifact_id=model_id, ordered_features=(feature_name,),
             required_member_kinds=("estimator",)))
         requirements.append(ReleaseRequirement(
             role=role, strategy_id="STR-THRU", clock_id=clock_id))
@@ -139,6 +143,8 @@ def _stage_release(tmp_path, *, roles=("driver", "gate"),
     cache = None
     if include_size_fold and "driver" in roles and "gate" in roles:
         cache = _size_cache(fold_start=size_fold_start)
+        if size_feature_names is not None:
+            cache["features"] = list(size_feature_names)
         size_release, size_inventory, size_payloads = release_inputs(
             "size", cache, clock=clock_ids.get("gate", "entry-close"),
             release_id=release_id)

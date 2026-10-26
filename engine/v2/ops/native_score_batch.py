@@ -620,7 +620,7 @@ def _checked_batch_arguments(
     calendar_revision: Any,
     as_of: Any,
     events: Sequence[Any],
-) -> tuple[NightlyEventInputs, ...]:
+) -> tuple[tuple[NightlyEventInputs, ...], pd.Timestamp]:
     """Validate every batch-level (shared-by-every-row) argument to
     :func:`assemble_score_batch_inputs`, or raise.
 
@@ -635,7 +635,7 @@ def _checked_batch_arguments(
     if not isinstance(calendar_revision, str) or not calendar_revision:
         raise ValueError("calendar_revision must be a non-empty string")
     try:
-        validated_as_of(as_of, label="as_of")
+        normalized_as_of = validated_as_of(as_of, label="as_of")
     except NightlySourceBundleRefusal as exc:
         raise ValueError(f"invalid as_of: {exc.code}: {exc.detail}") from exc
     events = tuple(events)
@@ -645,7 +645,7 @@ def _checked_batch_arguments(
     keys = [event.key for event in events]
     if len(keys) != len(set(keys)):
         raise ValueError("duplicate BoardRequest key in events")
-    return events
+    return events, normalized_as_of
 
 
 def _assemble_validated_events(
@@ -740,7 +740,7 @@ def assemble_score_batch_inputs(
     ``snapshot_id``/``calendar_revision`` would otherwise flow straight
     into every ``ScoreRequest`` via ``str()``.
     """
-    events = _checked_batch_arguments(
+    events, as_of = _checked_batch_arguments(
         binding=binding, snapshot_id=snapshot_id, calendar_revision=calendar_revision,
         as_of=as_of, events=events)
     gate_policy = dict(gate_policy or {})
