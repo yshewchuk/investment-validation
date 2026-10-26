@@ -82,7 +82,11 @@ def test_mcap_usd(value, expected):
     (45.0, 45.0), (0, None), (-1, None), (float("nan"), None),
     (None, None), ("45", None), (True, None)])
 def test_pre_iv30(value, expected):
-    assert _pre_iv30({"pre_iv30": value}) == expected
+    assert _pre_iv30({"iv30": value}) == expected
+
+
+def test_pre_iv30_ignores_legacy_panel_key():
+    assert _pre_iv30({"pre_iv30": 45.0}) is None
 
 
 def test_entry_rule_declarations_or_refusal(monkeypatch):
@@ -105,6 +109,8 @@ def test_entry_rule_declarations_or_refusal(monkeypatch):
     assert no_iv["residual_recipe"] == {"mode": "planned_exit"}
     assert "pre_iv30" not in no_iv["paired_residual_recipe"]
     assert captured["mcap_usd"] == math.exp(25.0)
-    with_iv = call(mcap_log=25.0, pre_iv30=45.0)
+    legacy_only = call(mcap_log=25.0, pre_iv30=45.0)
+    assert "pre_iv30" not in legacy_only["paired_residual_recipe"]
+    with_iv = call(mcap_log=25.0, iv30=45.0)
     assert with_iv["paired_residual_recipe"] == {
         "cutoff": "2026-01-09", "pre_iv30": 45.0}

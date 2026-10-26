@@ -22,7 +22,7 @@ from engine.v2.scoring.release_bindings import (
     resolve_gate_policy,
     resolve_release_binding,
 )
-from tests.test_v2_ops_native_score_batch import (
+from tests.v2.ops.test_v2_ops_native_score_batch import (
     _event_doc,
     _linear_payload,
     _sha,

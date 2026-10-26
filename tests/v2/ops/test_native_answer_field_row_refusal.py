@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from engine.v2.ops.native_score_batch import NativeScoreBatchRowRefusal
-from tests.test_v2_ops_native_score_batch import (
+from tests.v2.ops.test_v2_ops_native_score_batch import (
     _assemble,
     _calendar_row,
     _event_inputs,

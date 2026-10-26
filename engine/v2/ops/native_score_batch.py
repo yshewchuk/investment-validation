@@ -78,7 +78,7 @@ class _StrategySpec:
     (the entry-rule strategies); ``entry_rule`` selects that contract. Missing
     size/iv_crush role, clock mismatch, or no/ambiguous paired pool or trailing
     cutoff refuses only that row; missing/non-finite mcap leaves the mcap term
-    undetermined; missing pre_iv30 is a stage flag. No retries, caches or fallbacks.
+    undetermined; missing panel ``iv30`` is a stage flag. No retries, caches or fallbacks.
     """
 
     drivers: tuple[_DriverSpec, ...]
@@ -365,8 +365,8 @@ def _mcap_usd(panel_row: Mapping[str, Any]) -> float | None:
 
 
 def _pre_iv30(panel_row: Mapping[str, Any]) -> float | None:
-    """The row's positive pre-event 30-day implied vol, or ``None`` when absent."""
-    value = panel_row.get("pre_iv30")
+    """The row's positive pre-event 30-day implied vol (panel ``iv30``), or ``None`` when absent."""
+    value = panel_row.get("iv30")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     try:
@@ -390,7 +390,7 @@ def _entry_rule_declarations_or_refusal(
 
     ``entry_rule_declarations`` owns the exact-key checks (unique paired pool,
     event month's trailing cutoff, usable mcap); this only adds the planned-
-    exit recipe and, when the row carries one, its ``pre_iv30``. Its
+    exit recipe and, when the row carries one, its ``iv30`` (recipe key ``pre_iv30``). Its
     ``NightlySourceBundleRefusal`` is re-wrapped per-row by the caller.
     """
     size_identity, crush_identity = entry_rule_ids
