@@ -380,7 +380,8 @@ def pool_cycle_pending(conn, release_root):
     tag): the keys then fix its family (``train-chooser`` bootstrap,
     ``train-paired`` alone carry) and its key set is checked without
     classification; a ``DAMAGED`` prior or a failed classification is
-    always ``False``. ``False``
+    always ``False``. ``False`` also while the session's restage/retrain chain
+    blocks the sidecar. ``False``
     when there is no connection, no identity, no readable pointer, any of the
     cycle's five phase jobs is in a terminal stall state, or the pointer names
     the candidate and every existing phase job succeeded. Reads only the same
@@ -391,6 +392,11 @@ def pool_cycle_pending(conn, release_root):
     if identity is None:
         return False
     session, manifest_id = identity
+    from engine.v2.ops.retrain_due import chain_blocks_pool_sidecar
+    if chain_blocks_pool_sidecar(conn, session, log=False):
+        # #805 slice 2: the sidecar submits nothing while the session's retrain chain is not
+        # succeeded, so no cycle can start; reporting it pending would hold the serve to the deadline.
+        return False
     tag = manifest_tag(manifest_id)
     release_id = f"pools-{session}-{tag}"
     try:

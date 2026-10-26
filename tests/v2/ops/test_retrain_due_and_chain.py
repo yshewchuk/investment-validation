@@ -283,3 +283,30 @@ def test_plan_retrain_section_is_detached_from_the_callers_dict():
     section["superseded"].append("x")
     assert plan["retrain"]["state"] == "due"
     assert plan["retrain"]["superseded"] == []
+
+
+def test_gate_and_records_are_scoped_before_the_limit(tmp_path):
+    conn = _conn()
+    for i in range(450):
+        conn.execute(
+            "INSERT INTO jobs VALUES ('shadow', ?, 'succeeded')",
+            (f"retrain-train:2025-12-{i:03d}:m:b",),
+        )
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-11-02:2026-10:rel1', 'failed')")
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-12-01:2026-11:rel1', 'succeeded')")
+    conn.commit()
+
+    assert chain_blocks_pool_sidecar(conn, "2026-11-02") is True
+    assert "2026-11" in read_recorded(conn, tmp_path)
+
+
+def test_pool_cycle_pending_is_false_while_the_chain_blocks(monkeypatch, tmp_path):
+    import engine.v2.ops.pool_refresh as pool_refresh
+
+    monkeypatch.setattr(pool_refresh, "pool_refresh_identity", lambda conn: ("2026-11-02", "manifest"))
+
+    conn = _conn()
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02', 'failed')")
+    conn.commit()
+
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
