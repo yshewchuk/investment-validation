@@ -26,7 +26,8 @@ def test_shell_requires_typed_v12_failures_and_marks_each_degraded():
     script = shell_document(frozen_at="2026-10-26T12:00:00Z").decode()
     assert "const nsf=health.native_stage_failures;" in script
     assert "health.schema_version==='operations_health.v1.2'" in script
-    assert "native stage failure evidence missing or malformed: expected an array" in script
+    assert "Object.prototype.hasOwnProperty.call(health,'native_stage_failures')" in script
+    assert "native stage failure evidence malformed: expected an array" in script
     assert "native stage failure problem details malformed" in script
     assert "native stage failure: occurrence '" in script
     assert "state.textContent=" in script
@@ -82,7 +83,15 @@ def test_shell_renders_native_failure_as_degraded(tmp_path):
             assert "degraded" in page.locator("#ops").get_attribute("class")
             payload.pop("native_stage_failures")
             page.reload()
-            missing_reason = "native stage failure evidence missing or malformed: expected an array"
+            page.wait_for_function(
+                "document.querySelector('#state').textContent.trim() === 'current'",
+                timeout=3000)
+            assert page.locator("#ops").get_attribute("class") not in ("unknown", "degraded")
+            assert "native stage failure" not in page.locator("#state").inner_text()
+
+            payload["native_stage_failures"] = None
+            page.reload()
+            missing_reason = "native stage failure evidence malformed: expected an array"
             page.wait_for_function(
                 "expected => document.querySelector('#state').textContent.includes(expected)",
                 arg=missing_reason, timeout=3000)

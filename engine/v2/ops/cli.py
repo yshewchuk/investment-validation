@@ -505,6 +505,12 @@ def _health_command(args, conn, clock):
     return document
 
 
+def _remove_health_output(args):
+    output = getattr(args, "out", None) if args.command == "health" else None
+    if output is not None and (output.is_file() or output.is_symlink()):
+        output.unlink(missing_ok=True)
+
+
 def dispatch(args, root, conn, clock):
     if args.command == "init":
         return {"initialized": True, "activation": "shadow_only"}
@@ -1371,6 +1377,7 @@ def main(argv=None):
         _print_result(args, document)
         return document.get("exit_code", 0) if args.command == "headroom" else 0
     except OpsError as exc:
+        _remove_health_output(args)
         print(json.dumps(to_document(exc.problem)))
         return 2
     except (OSError, ValueError, TypeError) as exc:

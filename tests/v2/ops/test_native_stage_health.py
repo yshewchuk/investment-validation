@@ -151,13 +151,16 @@ def test_health_writer_refuses_when_mandatory_content_exceeds_cap(tmp_path):
 
 def test_health_cli_pre_migration_catalog_returns_integrity_failed_json(tmp_path, capsys):
     sqlite3.connect(tmp_path / "catalog.sqlite").close()
+    output = tmp_path / "health.json"
+    output.write_bytes(b"stale artifact")
 
-    assert cli.main(["health", "--root", str(tmp_path)]) == 2
+    assert cli.main(["health", "--root", str(tmp_path), "--out", str(output)]) == 2
 
     document = json.loads(capsys.readouterr().out)
     assert document["code"] == "INTEGRITY_FAILED"
     assert document["message"] == "ops schema is missing migrations"
     assert "traceback" not in document
+    assert not output.exists()
 
 
 def test_health_cli_missing_catalog_returns_invalid_request_json(tmp_path, capsys):
@@ -171,13 +174,31 @@ def test_health_cli_missing_catalog_returns_invalid_request_json(tmp_path, capsy
 
 def test_health_cli_malformed_catalog_returns_integrity_failed_json(tmp_path, capsys):
     (tmp_path / "catalog.sqlite").write_bytes(b"not a sqlite database")
+    output = tmp_path / "health.json"
+    output.write_bytes(b"stale artifact")
 
-    assert cli.main(["health", "--root", str(tmp_path)]) == 2
+    assert cli.main(["health", "--root", str(tmp_path), "--out", str(output)]) == 2
 
     document = json.loads(capsys.readouterr().out)
     assert document["code"] == "INTEGRITY_FAILED"
     assert document["message"] == "health catalog could not be verified or read"
     assert "traceback" not in document
+    assert not output.exists()
+
+
+def test_health_cli_payload_cap_refusal_removes_stale_output(tmp_path, monkeypatch, capsys):
+    open_catalog(tmp_path / "catalog.sqlite", clock=SystemClock()).close()
+    output = tmp_path / "health.json"
+    output.write_bytes(b"stale artifact")
+    document = {"schema_version": "operations_health.v1.2", "jobs": [],
+                "native_stage_failures": [{"problem_json": "x" * 1_100_000}]}
+    monkeypatch.setattr(cli, "health", lambda *a, **k: document)
+
+    assert cli.main(["health", "--root", str(tmp_path), "--out", str(output)]) == 2
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["code"] == "RESOURCE_LIMIT_EXCEEDED"
+    assert not output.exists()
 
 
 def test_health_cli_refuses_migration_checksum_mismatch_readonly(tmp_path, capsys):

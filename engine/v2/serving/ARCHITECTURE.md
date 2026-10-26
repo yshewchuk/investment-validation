@@ -17,11 +17,12 @@ non-array object (never "no withholding"), or when `code_budgets` schedule
 evidence is missing or malformed -- its `latest` may be `null` only in the
 producers' fresh no-observation shape (`ok` false, zero streak, no missing
 observations), which stays unknown evidence, never malformed.
-For `operations_health.v1.2`, `native_stage_failures` must be an array of
-`FAILED` records carrying `occurrence`, `stage_id`, `error_code` and typed
-`problem_json`; a missing/non-array list or malformed entry leaves shell
-health unknown. Every valid entry adds a degraded reason. Older v1.0/v1.1
-documents may omit the list.
+For `operations_health.v1.2`, `native_stage_failures` may be absent in an
+existing report; the health producer emits it in new reports. When present,
+it must be an array of `FAILED` records carrying `occurrence`, `stage_id`,
+`error_code` and typed `problem_json`; a non-array list or malformed entry
+leaves shell health unknown. Every valid entry adds a degraded reason.
+Older v1.0/v1.1 documents may omit the list.
 
 The [README](README.md) lists the checked exports (the only names other packages may import). By module:
 - `operations.create_server` (authenticated HTTP listener).
