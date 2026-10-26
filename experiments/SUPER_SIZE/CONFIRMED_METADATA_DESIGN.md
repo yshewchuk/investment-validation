@@ -3,7 +3,10 @@
 Status: proposed design-only refinement of [stage 2](STAGE2_DESIGN.md), before
 implementation. This freezes a small metadata-proof boundary, not a panel
 context, executable request or data-read authorization. The October 26 population
-amendment below changes the proposed claim boundary only, pending design review.
+amendment below changes the proposed population claim and removes the
+source-wide population-coverage qualification dependency, pending design review.
+Numerical, holdout and timing policies remain unchanged; this is a design-policy
+change, not runtime activation.
 The accepted H/HM/HMO dictionary, 33-candidate search, 5/3/1 clocks, grouped
 eligibility, causal legacy comparator and all v1 identities remain unchanged.
 
