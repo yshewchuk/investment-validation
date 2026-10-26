@@ -917,6 +917,15 @@ class _DummyConn:
         return None
 
 
+@pytest.fixture(autouse=True)
+def _retrain_decision_not_under_test(monkeypatch):
+    """#805 slice 2: these tests stand in a dummy catalog; the decision itself is covered in
+    test_retrain_due_and_chain.py against a real catalog."""
+    monkeypatch.setattr(nightly_trigger.retrain_due, "decide",
+                        lambda conn, ops_root, session, base, **_: {
+                            "state": "not_due", "reason": "test", "base": base})
+
+
 def test_default_plan_passes_full_run_and_the_full_population(tmp_path, monkeypatch):
     document = _write_population(
         tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"])
@@ -2379,6 +2388,38 @@ def test_default_plan_passes_the_decided_keys_to_the_plan(tmp_path, monkeypatch)
     args = captured["args"]
     assert args.expected_population is None
     assert args.expected_population_keys == ("AAA|X|2026-09-25",)
+
+    nightly_trigger._default_plan(
+        tmp_path, AS_OF, ("AAA",), (), None,
+        expected_shadow_snapshot_id="s", expected_population=None)
+    args = captured["args"]
+    assert args.expected_population_keys is None
+
+
+def test_default_plan_pins_the_retrain_decision(tmp_path, monkeypatch):
+    captured = {}
+    from engine.v2.ops import bootstrap
+    from engine.v2.ops.workflows import commands
+
+    monkeypatch.setattr(nightly_trigger, "_base_release_id", lambda: "none")
+    monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
+    manifest_path = tmp_path / "captured_manifest.json"
+    monkeypatch.setattr(nightly_trigger, "_capture_input_manifest",
+                        lambda *a, **k: manifest_path)
+
+    def fake_plan(args, root, conn, clock):
+        captured["args"] = args
+        return {"plan_ref": "plan_keys", "plan": {}}
+
+    monkeypatch.setattr(commands, "_plan_command", fake_plan)
+    plan_ref = nightly_trigger._default_plan(
+        tmp_path, AS_OF, ("AAA",), (), None,
+        expected_shadow_snapshot_id="s", expected_population=("AAA|X|2026-09-25",))
+    assert plan_ref == "plan_keys"
+    args = captured["args"]
+    assert args.expected_population is None
+    assert args.expected_population_keys == ("AAA|X|2026-09-25",)
+    assert args.retrain == {"state": "not_due", "reason": "test", "base": "none"}
 
     nightly_trigger._default_plan(
         tmp_path, AS_OF, ("AAA",), (), None,

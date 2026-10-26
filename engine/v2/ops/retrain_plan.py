@@ -26,25 +26,22 @@ def step_key(step: str, session: str, month: str = "", base: str = "") -> str:
     return f"retrain-{step}:{session}:{month}:{base}"
 
 
-def _request(step, key, session, month, base, parents, implementation_ref, environment_ref):
-    from engine.v2.ops.nightly import _checkpoint_contract, _sidecar_runtime_identity
-
+def _request(step, key, session, month, base, parents, implementation_ref, runtime, contract):
     parameters = to_document(RetrainStepParameters(
         expected_ids=(key,), session=session, step=step, month=month, base=base))
-    runtime = _sidecar_runtime_identity(KIND)
-    if environment_ref:
-        runtime["environment_ref"] = environment_ref
     job = JobSpec(kind=KIND, implementation_ref=implementation_ref, spec_hash=None,
                   parameters=parameters, input_refs=(),
                   dependency_job_ids=tuple(parents), output_namespace="shadow",
-                  retry_policy_ref="bounded", checkpoint_contract_ref=_checkpoint_contract(KIND),
-                  **runtime)
+                  retry_policy_ref="bounded", checkpoint_contract_ref=contract, **runtime)
     return SubmitRequest(namespace="shadow", idempotency_key=key, principal="operator", job=job)
 
 
-def attach_retrain_chain(plan, requests, keys, implementation_ref, environment_ref):
+def attach_retrain_chain(plan, requests, keys, implementation_ref, runtime, contract):
     """Insert the restage (+ chain) requests before ``score`` and make ``score`` depend on
-    the last of them. A plan without a ``retrain`` section is returned unchanged."""
+    the last of them. A plan without a ``retrain`` section is returned unchanged.
+    ``runtime`` is the caller's ``resource_class``/``environment_ref`` dict for the kind
+    and ``contract`` its checkpoint contract (passed in so this module does not import
+    ``nightly``)."""
     section = plan.get("retrain")
     if not section:
         return requests
@@ -52,13 +49,13 @@ def attach_retrain_chain(plan, requests, keys, implementation_ref, environment_r
     refresh = (keys["refresh"],) if "refresh" in keys else ()
     restage_key = step_key("restage", session)
     chain = [_request("restage", restage_key, session, "", "", refresh,
-                      implementation_ref, environment_ref)]
+                      implementation_ref, runtime, contract)]
     last = job_id_for("shadow", restage_key)
     if section.get("state") == "due":
         for step in STEPS:
             key = step_key(step, session, section["month"], section["base"])
             chain.append(_request(step, key, session, section["month"], section["base"],
-                                  (last,), implementation_ref, environment_ref))
+                                  (last,), implementation_ref, runtime, contract))
             last = job_id_for("shadow", key)
     out = []
     inserted = False

@@ -217,3 +217,42 @@ def test_sidecar_gate(monkeypatch, tmp_path):
         submit_pool_nightly_refresh_if_ready(
             conn2, None, None, None, tmp_path, code_source=None, clock=None
         )
+
+
+def test_decide_reads_a_real_catalog_and_writes_markers(tmp_path):
+    from engine.v2.foundation import SystemClock
+    from engine.v2.ops.bootstrap import open_catalog
+    from engine.v2.ops.retrain_due import decide
+
+    conn = open_catalog(tmp_path / "catalog.sqlite", clock=SystemClock())
+    decision = decide(conn, tmp_path, "2026-11-02", "rel1", base_retrain_cutoff="2026-08-01")
+    assert decision["state"] == "due"
+    assert decision["month"] == "2026-10"
+    assert decision["superseded"] == ["2026-08", "2026-09"]
+    assert decision["base"] == "rel1"
+    assert (tmp_path / "retrain_superseded" / "2026-08.json").exists()
+    assert (tmp_path / "retrain_superseded" / "2026-09.json").exists()
+
+    second = decide(conn, tmp_path, "2026-11-02", "rel1", base_retrain_cutoff="2026-08-01")
+    assert second["month"] == "2026-10"
+    assert second["superseded"] == []
+    assert chain_blocks_pool_sidecar(conn, "2026-11-02") is False
+
+
+def test_chain_submits_through_the_real_registry_and_gates_the_sidecar(tmp_path):
+    from engine.v2.foundation import SystemClock
+    from engine.v2.ops.bootstrap import open_catalog
+    from engine.v2.ops.stages import registry
+    from engine.v2.ops.submission import NamespacePolicy, submit_graph
+
+    conn = open_catalog(tmp_path / "catalog.sqlite", clock=SystemClock())
+    plan = _plan()
+    plan["retrain"] = {
+        "state": "due", "month": "2026-10", "m_end": "2026-10-31",
+        "superseded": [], "base": "rel1",
+    }
+    requests = build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026)
+    policy = NamespacePolicy({"operator": frozenset({"shadow"})})
+    submit_graph(conn, registry(), policy, requests, clock=SystemClock())
+    assert chain_blocks_pool_sidecar(conn, "2026-09-18") is True
+    assert read_recorded(conn, tmp_path) == frozenset()
