@@ -864,3 +864,37 @@ def test_backup_refuses_files_over_max_bytes(tmp_path, kind, monkeypatch):
         run_backup(conn, key=key, owner="worker", target=backup, clock=clock, store=store)
     assert error.value.code == "BACKUP_FAILED"
     assert error.value.problem.retryable is True
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_message"),
+    [("catalog", "restored catalog exceeds size limit"),
+     ("artifact", "restored artifact exceeds size limit")],
+)
+def test_restore_refuses_files_over_max_backup_bytes(tmp_path, kind, expected_message,
+                                                      monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    key = "restore-cap-" + kind
+    catalog_bytes = conn.execute("PRAGMA page_count").fetchone()[0] * conn.execute(
+        "PRAGMA page_size").fetchone()[0]
+    artifacts = {}
+    if kind == "artifact":
+        artifacts["evidence.bin"] = store.publish_bytes(
+            b"x" * (catalog_bytes + 1), schema_ref="evidence.v1.0")
+    prepare_backup(conn, key, artifacts, clock=clock)
+    backup = tmp_path / "backup"
+    manifest = run_backup(conn, key=key, owner="worker", target=backup,
+                          clock=clock, store=store)
+    limit = 1 if kind == "catalog" else manifest["database_byte_size"]
+    monkeypatch.setattr(backup_module, "MAX_BACKUP_BYTES", limit)
+
+    destination = tmp_path / "restore"
+    with pytest.raises(OpsError) as error:
+        restore_backup(backup, destination)
+    assert error.value.code == "INTEGRITY_FAILED"
+    assert error.value.problem.message == expected_message
+    if kind == "catalog":
+        assert not destination.exists()
+    else:
+        assert not (destination / "artifacts" / "evidence.bin").exists()

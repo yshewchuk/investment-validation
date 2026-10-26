@@ -242,6 +242,8 @@ def _restore_catalog(source, destination, manifest):
         actual_size = database_source.stat().st_size
     except OSError as error:
         raise fail("INTEGRITY_FAILED", "backup manifest is invalid") from error
+    if actual_size > MAX_BACKUP_BYTES:
+        raise fail("INTEGRITY_FAILED", "restored catalog exceeds size limit")
     expected_size = manifest.get("database_byte_size", actual_size)
     if (not isinstance(expected_size, int) or isinstance(expected_size, bool)
             or expected_size <= 0 or expected_size != actual_size):
@@ -270,7 +272,10 @@ def restore_backup(source, destination):
         path = destination / "artifacts" / name
         path.parent.mkdir(parents=True, exist_ok=True)
         artifact_source = source / "artifacts" / name
-        if artifact_source.stat().st_size != info["byte_size"]:
+        artifact_size = artifact_source.stat().st_size
+        if artifact_size > MAX_BACKUP_BYTES:
+            raise fail("INTEGRITY_FAILED", "restored artifact exceeds size limit")
+        if artifact_size != info["byte_size"]:
             raise fail("INTEGRITY_FAILED", "restored artifact size mismatch")
         shutil.copyfile(artifact_source, path)
         if path.stat().st_size != info["byte_size"]:
