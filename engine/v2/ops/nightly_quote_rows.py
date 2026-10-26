@@ -79,17 +79,46 @@ def _quote_number(value: Any) -> float | None:
     return None if math.isnan(number) else number
 
 
+def _chain_spot(value: Any) -> float:
+    """One surviving quote row's chain ``spot`` as a float.
+
+    The chain spot is the legacy ``entry_cost_pct`` denominator, so an unusable
+    one is as fatal as an unusable bid/ask: ``None``, NaN, +/-inf, a
+    non-numeric or bool value, or a non-positive number is ``CONTRACT_MISMATCH``
+    with a fixed message that never echoes the staged value. Whether an
+    incomplete bid/ask makes the domain unusable stays
+    ``nightly_source_bundle.quote_domain_map``'s own validation; only the spot
+    is judged here.
+    """
+    if isinstance(value, bool):
+        raise data_fail("CONTRACT_MISMATCH", "option chain row has an unusable spot")
+    try:
+        spot = float(value)
+    except (TypeError, ValueError):
+        raise data_fail("CONTRACT_MISMATCH", "option chain row has an unusable spot") from None
+    if not math.isfinite(spot) or spot <= 0.0:
+        raise data_fail("CONTRACT_MISMATCH", "option chain row has an unusable spot")
+    return spot
+
+
 def _matching_quote_rows(rows: list[dict], expiry: str,
                          decision_session: str) -> tuple[Mapping[str, Any], ...]:
     staged: list[Mapping[str, Any]] = []
+    chain_spot: float | None = None
     for row in rows:
         if _date_string(row["expiry"]) != expiry:
             continue
+        spot = _chain_spot(row["spot"])
+        if chain_spot is None:
+            chain_spot = spot
+        elif spot != chain_spot:
+            raise data_fail(
+                "CONTRACT_MISMATCH", "option chain rows disagree on the spot for one expiry")
         staged.append({
             "ticker": row["ticker"], "right": row["right"],
             "strike": float(row["strike"]), "expiry": expiry,
             "bid": _quote_number(row["bid"]), "ask": _quote_number(row["ask"]),
-            "observed_at": decision_session,
+            "chain_spot": spot, "observed_at": decision_session,
         })
     return tuple(staged)
 
@@ -122,6 +151,15 @@ def scan_quote_rows(
     propagate unchanged. ``chain_rows`` (that ticker's rows for the session, from
     one batched build read) replaces the scan when given; ``None`` keeps
     the per-key scan.
+
+    Every row that survives the expiry filter also carries ``chain_spot``: the
+    chain's own ``spot`` as a float, staged for a later ``entry_cost_pct``
+    consumer and read by nothing here. Only surviving rows are judged -- a row
+    for another expiry or date with a null spot never fails the slice, because
+    ``require_chain_rows`` checks presence, never value. A surviving row whose
+    spot is ``None``, NaN, non-finite, non-numeric, bool or non-positive, or
+    surviving rows that disagree on it, raise ``CONTRACT_MISMATCH`` with a
+    fixed message (same class as an unusable bid/ask): no partial tuple.
     """
     if not isinstance(key, BoardRequest) or any(
         not isinstance(value, str) or not value.strip()
