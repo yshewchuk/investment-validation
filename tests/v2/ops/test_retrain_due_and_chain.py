@@ -1,0 +1,483 @@
+"""#805 slice 2: due-month decision, durable records and the retrain/pool-sidecar chain."""
+from __future__ import annotations
+
+import copy
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from engine.v2.ops.errors import OpsError
+from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
+from engine.v2.ops.pool_refresh import submit_pool_nightly_refresh_if_ready
+from engine.v2.ops.retrain_due import (
+    chain_blocks_pool_sidecar,
+    due_decision,
+    read_recorded,
+    write_superseded,
+)
+from engine.v2.ops.submission import job_id_for
+from engine.v2.ops.worker import _dispatch_retrain_step
+
+
+def _conn():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE jobs (namespace TEXT, idempotency_key TEXT, state TEXT, created_at TEXT)")
+    return conn
+
+def test_due_decision():
+    recorded = frozenset()
+
+    decision = due_decision("2026-11-02", None, recorded)
+    assert decision["state"] == "due"
+    assert decision["month"] == "2026-10"
+    assert decision["m_end"] == "2026-10-31"
+    assert decision["superseded"] == []
+
+    decision = due_decision("2026-10-31", None, recorded, first_month="0000-00")
+    assert decision["month"] == "2026-09"
+
+    decision = due_decision("2026-11-02", None, frozenset({"2026-10"}))
+    assert decision["state"] == "not_due"
+    assert decision["reason"] == "month_already_recorded"
+
+    decision = due_decision("2026-01-05", None, recorded, first_month="0000-00")
+    assert decision["month"] == "2025-12"
+    assert decision["m_end"] == "2025-12-31"
+
+    decision = due_decision("2026-11-02", "2026-10-01", recorded)
+    assert decision["month"] == "2026-10"
+    assert decision["superseded"] == []
+
+    decision = due_decision("2026-11-02", "2026-08-01", recorded, first_month="0000-00")
+    assert decision["month"] == "2026-10"
+    assert decision["superseded"] == ["2026-08", "2026-09"]
+
+    decision = due_decision("2026-11-02", "2026-11-01", recorded)
+    assert decision["state"] == "not_due"
+    assert decision["reason"] == "base_retrain_cutoff_current"
+
+    decision = due_decision("2024-03-01", None, recorded, first_month="0000-00")
+    assert decision["m_end"] == "2024-02-29"
+
+    with pytest.raises(ValueError):
+        due_decision("2026-13-01", None, recorded)
+
+
+def test_read_recorded_and_chain(tmp_path):
+    conn = _conn()
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-11-02:2026-10:rel1:abc123abc123', 'succeeded', '2026-11-02T00:00:00Z')")
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-09-30:2026-09:rel1:abc123abc123', 'failed', '2026-11-02T00:00:00Z')")
+    conn.commit()
+
+    recorded = read_recorded(conn, tmp_path)
+    assert "2026-10" in recorded
+    assert "2026-09" not in recorded
+
+    marker_dir = tmp_path / "retrain_superseded"
+    marker_dir.mkdir(parents=True)
+    (marker_dir / "2026-08.json").write_text('{"month":"2026-08"}')
+
+    recorded = read_recorded(conn, tmp_path)
+    assert "2026-08" in recorded
+
+    ops_root = tmp_path / "ops_root"
+    write_superseded(ops_root, ["2026-08"], "2026-10", "2026-11-02")
+    first_content = (ops_root / "retrain_superseded" / "2026-08.json").read_text()
+    write_superseded(ops_root, ["2026-08"], "2026-11", "2026-11-02")
+    assert (ops_root / "retrain_superseded" / "2026-08.json").read_text() == first_content
+
+    conn2 = _conn()
+    conn2.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'succeeded', '2026-11-02T00:00:00Z')")
+    conn2.commit()
+    assert chain_blocks_pool_sidecar(conn2, "2026-11-02") is False
+
+    conn2.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'running', '2026-11-02T00:00:01Z')")
+    conn2.commit()
+    assert chain_blocks_pool_sidecar(conn2, "2026-11-02") is True
+
+    conn3 = _conn()
+    conn3.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-03:abc123abc123', 'failed', '2026-11-02T00:00:00Z')")
+    conn3.commit()
+    assert chain_blocks_pool_sidecar(conn3, "2026-11-02") is False
+
+
+def _plan(session="2026-09-18"):
+    root = Path(__file__).resolve().parents[3]
+    return build_nightly_plan(str(root), session)
+
+
+def _requests(plan):
+    return build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026)
+
+
+def _retrain_requests(requests):
+    return [r for r in requests if r.job.kind == "retrain_step"]
+
+
+def _score_request(requests):
+    for r in requests:
+        if r.job.kind == "legacy_score":
+            return r
+    raise AssertionError("no legacy_score request")
+
+
+def test_plan_without_retrain_has_no_retrain_step():
+    plan = _plan()
+    before = _requests(plan)
+    assert _retrain_requests(before) == []
+    after = _requests(plan)
+    assert [r.job.kind for r in before] == [r.job.kind for r in after]
+
+
+def test_not_due_plan_has_restage_only():
+    plan = _plan()
+    plan["plan_hash"] = "a" * 64
+    plan["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
+    requests = _requests(plan)
+    retrain = _retrain_requests(requests)
+    assert len(retrain) == 1
+    assert retrain[0].job.parameters["step"] == "restage"
+    score = _score_request(requests)
+    score_id = job_id_for("shadow", score.idempotency_key)
+    suffix = score_id.rsplit("_", 1)[-1][:16]
+    key = f"retrain-restage:2026-09-18:{suffix}"
+    assert retrain[0].idempotency_key == key
+    assert job_id_for("shadow", key) in score.job.dependency_job_ids
+    assert requests.index(retrain[0]) < requests.index(score)
+
+
+def test_due_plan_has_six_retrain_steps():
+    plan = _plan()
+    plan["plan_hash"] = "a" * 64
+    plan["retrain"] = {
+        "state": "due", "month": "2026-10", "m_end": "2026-10-31",
+        "superseded": [], "base": "rel1",
+    }
+    requests = _requests(plan)
+    retrain = _retrain_requests(requests)
+    assert len(retrain) == 6
+    score = _score_request(requests)
+    score_id = job_id_for("shadow", score.idempotency_key)
+    suffix = score_id.rsplit("_", 1)[-1][:16]
+    expected_keys = [
+        f"retrain-restage:2026-09-18:{suffix}",
+        f"retrain-train:2026-09-18:2026-10:rel1:{suffix}",
+        f"retrain-stage:2026-09-18:2026-10:rel1:{suffix}",
+        f"retrain-accept:2026-09-18:2026-10:rel1:{suffix}",
+        f"retrain-check:2026-09-18:2026-10:rel1:{suffix}",
+        f"retrain-promote:2026-09-18:2026-10:rel1:{suffix}",
+    ]
+    for request, key in zip(retrain, expected_keys):
+        assert request.idempotency_key == key
+
+    assert retrain[0].job.dependency_job_ids == ()
+    for previous, current in zip(retrain, retrain[1:]):
+        assert job_id_for("shadow", previous.idempotency_key) in current.job.dependency_job_ids
+
+    last_key = f"retrain-promote:2026-09-18:2026-10:rel1:{suffix}"
+    assert job_id_for("shadow", last_key) in score.job.dependency_job_ids
+
+
+def test_replan_gets_fresh_retrain_keys():
+    base_plan = _plan()
+    plan1 = base_plan.copy()
+    plan2 = base_plan.copy()
+    plan1["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
+    plan2["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
+    plan1["plan_hash"] = "a" * 64
+    plan2["plan_hash"] = "a" * 64
+    plan1["decision_clock"] = "2026-09-18T10:00:00Z"
+    plan2["decision_clock"] = "2026-09-18T11:00:00Z"
+    requests1 = _requests(plan1)
+    requests2 = _requests(plan2)
+    retrain1 = _retrain_requests(requests1)
+    retrain2 = _retrain_requests(requests2)
+    assert len(retrain1) == 1
+    assert len(retrain2) == 1
+    id1 = job_id_for("shadow", retrain1[0].idempotency_key)
+    id2 = job_id_for("shadow", retrain2[0].idempotency_key)
+    assert id1 != id2
+    score1 = _score_request(requests1)
+    score2 = _score_request(requests2)
+    assert id1 in score1.job.dependency_job_ids
+    assert id2 in score2.job.dependency_job_ids
+    assert id1 not in score2.job.dependency_job_ids
+    assert id2 not in score1.job.dependency_job_ids
+
+
+def test_unchanged_saved_plan_resubmission_reuses_the_same_keys():
+    plan = _plan()
+    plan["plan_hash"] = "a" * 64
+    plan["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
+    retrain1 = _retrain_requests(_requests(copy.deepcopy(plan)))
+    retrain2 = _retrain_requests(_requests(copy.deepcopy(plan)))
+    assert len(retrain1) == 1
+    assert len(retrain2) == 1
+    assert retrain1[0].idempotency_key == retrain2[0].idempotency_key
+    assert [r.idempotency_key for r in retrain1] == [r.idempotency_key for r in retrain2]
+
+
+def test_worker_restage_stub(tmp_path):
+    result = _dispatch_retrain_step(
+        {"step": "restage", "session": "s", "month": "", "expected_ids": ["k"]},
+        tmp_path,
+    )
+    assert result["outputs"][0]["name"] == "retrain_step_receipt"
+    document = json.loads((tmp_path / "receipt.json").read_text())
+    assert document["restage"] == "unchecked"
+
+
+@pytest.mark.parametrize("step", ["train", "stage", "accept", "check", "promote"])
+def test_worker_chain_steps_raise(step, tmp_path):
+    with pytest.raises(OpsError) as excinfo:
+        _dispatch_retrain_step(
+            {"step": step, "session": "s", "month": "m", "expected_ids": ["k"]},
+            tmp_path,
+        )
+    assert excinfo.value.problem.code == "VALIDATION_FAILED"
+    details = excinfo.value.problem.details
+    assert details["code"] == "RETRAIN_UNAVAILABLE"
+    assert details["step"] == step
+
+
+def test_sidecar_gate(monkeypatch, tmp_path):
+    import engine.v2.ops.pool_refresh as pool_refresh
+
+    monkeypatch.setattr(pool_refresh, "pool_refresh_identity", lambda conn: ("2026-11-02", "manifest"))
+
+    conn = _conn()
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'failed', '2026-11-02T00:00:00Z')")
+    conn.commit()
+
+    assert submit_pool_nightly_refresh_if_ready(
+        conn, None, None, None, tmp_path, code_source=None, clock=None
+    ) == []
+
+    conn2 = _conn()
+    conn2.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'succeeded', '2026-11-02T00:00:00Z')")
+    conn2.commit()
+
+    with pytest.raises(Exception):
+        submit_pool_nightly_refresh_if_ready(
+            conn2, None, None, None, tmp_path, code_source=None, clock=None
+        )
+
+
+def test_decide_reads_a_real_catalog_and_writes_markers(tmp_path):
+    from engine.v2.foundation import SystemClock
+    from engine.v2.ops.bootstrap import open_catalog
+    from engine.v2.ops.retrain_due import decide
+
+    conn = open_catalog(tmp_path / "catalog.sqlite", clock=SystemClock())
+    decision = decide(conn, tmp_path, "2026-11-02", "rel1", base_retrain_cutoff="2026-08-01",
+                      first_month="0000-00")
+    assert decision["state"] == "due"
+    assert decision["month"] == "2026-10"
+    assert decision["superseded"] == ["2026-08", "2026-09"]
+    assert decision["base"] == "rel1"
+    assert (tmp_path / "retrain_superseded" / "2026-08.json").exists()
+    assert (tmp_path / "retrain_superseded" / "2026-09.json").exists()
+
+    second = decide(conn, tmp_path, "2026-11-02", "rel1", base_retrain_cutoff="2026-08-01")
+    assert second["month"] == "2026-10"
+    assert second["superseded"] == []
+    assert chain_blocks_pool_sidecar(conn, "2026-11-02") is False
+
+
+def test_chain_submits_through_the_real_registry_and_gates_the_sidecar(tmp_path):
+    from engine.v2.foundation import SystemClock
+    from engine.v2.ops.bootstrap import open_catalog
+    from engine.v2.ops.stages import registry
+    from engine.v2.ops.submission import NamespacePolicy, submit_graph
+
+    conn = open_catalog(tmp_path / "catalog.sqlite", clock=SystemClock())
+    plan = _plan()
+    plan["plan_hash"] = "a" * 64
+    plan["retrain"] = {
+        "state": "due", "month": "2026-10", "m_end": "2026-10-31",
+        "superseded": [], "base": "rel1",
+    }
+    requests = build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026)
+    policy = NamespacePolicy({"operator": frozenset({"shadow"})})
+    submit_graph(conn, registry(), policy, requests, clock=SystemClock())
+    assert chain_blocks_pool_sidecar(conn, "2026-09-18") is True
+    assert read_recorded(conn, tmp_path) == frozenset()
+
+
+@pytest.mark.parametrize("step", ["train", "stage", "accept", "check", "promote"])
+@pytest.mark.parametrize("state", ["running", "failed", "queued"])
+def test_sidecar_gate_blocks_on_every_chain_step_key(step, state):
+    conn = _conn()
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'succeeded', '2026-11-02T00:00:00Z')")
+    conn.execute(
+        "INSERT INTO jobs VALUES ('shadow', ?, ?, ?)",
+        (f"retrain-{step}:2026-11-02:2026-10:rel1:abc123abc123", state, "2026-11-02T00:00:00Z"),
+    )
+    conn.commit()
+
+    assert chain_blocks_pool_sidecar(conn, "2026-11-02") is True
+    assert chain_blocks_pool_sidecar(conn, "2026-11-03") is False
+
+
+def test_cancelled_chain_rows_do_not_hold_the_sidecar():
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'cancelled', '2026-11-02T00:00:00Z')"
+    )
+    conn.commit()
+    assert chain_blocks_pool_sidecar(conn, "2026-11-02") is False
+
+    conn_failed = _conn()
+    conn_failed.execute(
+        "INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'failed', '2026-11-02T00:00:00Z')"
+    )
+    conn_failed.commit()
+    assert chain_blocks_pool_sidecar(conn_failed, "2026-11-02") is True
+
+
+def test_superseded_generation_rows_do_not_hold_the_sidecar():
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:aaaaaaaaaaaa', 'failed', '2026-11-02T01:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:bbbbbbbbbbbb', 'succeeded', '2026-11-02T02:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO jobs VALUES ('shadow', 'retrain-train:2026-11-02:2026-10:rel1:bbbbbbbbbbbb', 'succeeded', '2026-11-02T02:00:00Z')"
+    )
+    conn.commit()
+
+    assert chain_blocks_pool_sidecar(conn, "2026-11-02") is False
+
+    conn.execute(
+        "UPDATE jobs SET state = 'failed' WHERE idempotency_key = 'retrain-train:2026-11-02:2026-10:rel1:bbbbbbbbbbbb'"
+    )
+    conn.commit()
+    assert chain_blocks_pool_sidecar(conn, "2026-11-02") is True
+
+
+def test_plan_retrain_section_is_detached_from_the_callers_dict():
+    import engine.v2.ops.plans
+
+    root = Path(__file__).resolve().parents[3]
+    section = {"state": "due", "month": "2026-10", "m_end": "2026-10-31", "superseded": [], "base": "rel1"}
+    plan = engine.v2.ops.plans.nightly_plan(str(root), "2026-09-18", retrain=section)
+    section["state"] = "not_due"
+    section["superseded"].append("x")
+    assert plan["retrain"]["state"] == "due"
+    assert plan["retrain"]["superseded"] == []
+
+
+@pytest.mark.parametrize("value", [
+    True,
+    {},
+    {"state": "bogus"},
+    {"state": "due"},
+    {"state": "due", "month": "2026-10", "m_end": "2026-10-31"},
+    {"state": "due", "month": "2026-13", "m_end": "2026-13-31", "base": "rel1"},
+    {"state": "due", "month": "2026-10", "m_end": "2026-10-15", "base": "rel1"},
+    {"state": "due", "month": "2026-09", "m_end": "2026-10-31", "base": "rel1"},
+    {"state": "not_due"},
+    {"state": "not_due", "reason": "x"},
+    {"state": "not_due", "base": "rel1"},
+])
+def test_malformed_retrain_sections_are_invalid_requests(value):
+    import engine.v2.ops.plans
+
+    root = Path(__file__).resolve().parents[3]
+    with pytest.raises(OpsError) as excinfo:
+        engine.v2.ops.plans.nightly_plan(str(root), "2026-09-18", retrain=value)
+    assert excinfo.value.problem.code == "INVALID_REQUEST"
+
+
+def test_gate_and_records_are_scoped_before_the_limit(tmp_path):
+    conn = _conn()
+    for i in range(450):
+        conn.execute(
+            "INSERT INTO jobs VALUES ('shadow', ?, 'succeeded', ?)",
+            (f"retrain-train:2025-12-{i:03d}:m:b:abc123abc123", "2026-11-02T00:00:00Z"),
+        )
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'succeeded', '2026-11-02T00:00:00Z')")
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-11-02:2026-10:rel1:abc123abc123', 'failed', '2026-11-02T00:00:00Z')")
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-promote:2026-12-01:2026-11:rel1:abc123abc123', 'succeeded', '2026-11-02T00:00:00Z')")
+    conn.commit()
+
+    assert chain_blocks_pool_sidecar(conn, "2026-11-02") is True
+    assert "2026-11" in read_recorded(conn, tmp_path)
+
+
+def test_pool_cycle_pending_is_false_while_the_chain_blocks(monkeypatch, tmp_path):
+    import engine.v2.ops.pool_refresh as pool_refresh
+
+    monkeypatch.setattr(pool_refresh, "pool_refresh_identity", lambda conn: ("2026-11-02", "manifest"))
+
+    conn = _conn()
+    conn.execute("INSERT INTO jobs VALUES ('shadow', 'retrain-restage:2026-11-02:abc123abc123', 'failed', '2026-11-02T00:00:00Z')")
+    conn.commit()
+
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+
+
+def test_october_sessions_are_not_due_before_the_rollout_month():
+    for session in ("2026-10-27", "2026-10-31"):
+        assert due_decision(session, None, frozenset()) == {
+            "state": "not_due", "reason": "before_first_eligible_month"}
+
+
+def test_first_november_session_is_due_for_october():
+    assert due_decision("2026-11-02", None, frozenset())["month"] == "2026-10"
+    decision = due_decision("2026-11-02", "2026-08-01", frozenset())
+    assert decision["superseded"] == []
+
+
+def test_read_recorded_with_a_session_probes_only_the_window(tmp_path):
+    conn = _conn()
+    marker_dir = tmp_path / "retrain_superseded"
+    marker_dir.mkdir(parents=True)
+    (marker_dir / "2026-10.json").write_text("{}")
+    (marker_dir / "2020-01.json").write_text("{}")
+
+    windowed = read_recorded(conn, tmp_path, "2026-11-02")
+    assert "2026-10" in windowed
+    assert "2020-01" not in windowed
+
+    full = read_recorded(conn, tmp_path)
+    assert "2026-10" in full
+    assert "2020-01" in full
+
+
+def test_manual_nightly_plan_evaluates_the_retrain_decision(monkeypatch, tmp_path):
+    import types
+
+    from engine.v2.foundation import SystemClock
+    from engine.v2.ops.bootstrap import open_catalog
+    from engine.v2.ops.workflows.commands import _retrain_section
+
+    monkeypatch.setattr("engine.v2.ops.pool_refresh.deployed_release_id", lambda: "none")
+    conn = open_catalog(tmp_path / "catalog.sqlite", clock=SystemClock())
+
+    due = _retrain_section(types.SimpleNamespace(as_of="2026-11-02"), tmp_path, conn)
+    assert due["state"] == "due"
+    assert due["month"] == "2026-10"
+
+    early = _retrain_section(types.SimpleNamespace(as_of="2026-09-18"), tmp_path, conn)
+    assert early["state"] == "not_due"
+    assert early["reason"] == "before_first_eligible_month"
+
+    explicit = {"state": "not_due", "reason": "explicit"}
+    args = types.SimpleNamespace(as_of="2026-11-02", retrain=explicit)
+    assert _retrain_section(args, tmp_path, conn) is explicit
+
+
+@pytest.mark.parametrize("section", [{"state": "bogus"}, {}])
+def test_chain_builder_refuses_malformed_sections(section):
+    plan = _plan()
+    plan["plan_hash"] = "a" * 64
+    plan["retrain"] = section
+    with pytest.raises(OpsError) as excinfo:
+        _requests(plan)
+    assert excinfo.value.problem.code == "INVALID_REQUEST"

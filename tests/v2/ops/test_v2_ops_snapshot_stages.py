@@ -627,6 +627,10 @@ def test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts(case, monkey
     assert finality_bindings["legacy_manifest.json"] == planned["plan"]["input_manifest_ref"]
     assert materialize_id in finality_spec["dependency_job_ids"]
     for kind, (_, spec) in by_kind.items():
+        if kind == "retrain_step":
+            continue
+        if kind == "retrain_step":
+            continue
         bindings = spec["parameters"]["input_bindings"]
         if kind not in ("legacy_score", "legacy_decision_replay", "legacy_render",
                         "legacy_selfcheck", "legacy_model_evidence", "legacy_materialize"):

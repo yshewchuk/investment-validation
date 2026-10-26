@@ -1,7 +1,7 @@
 """Guide §5.5 item 1 ("Separate a retry from a new same-session plan").
 
 The Sep-14 2026 operator trace: a 4-ticker nightly for session 2026-09-10 was
-planned and submitted, all 14 jobs were cancelled, then a resource-profile
+    planned and submitted, all 15 jobs were cancelled, then a resource-profile
 merge (``ef7020a``) landed and the operator re-planned the identical
 session/tickers/population/snapshot. The new plan's own ``submit`` call
 returned ``IDEMPOTENCY_CONFLICT`` on the first stage -- ``nightly.py``'s
@@ -166,7 +166,7 @@ def test_operator_scenario_replan_after_manifest_change_gets_fresh_jobs_and_old_
                      "--idempotency-key", "gen1"]) == 0
     submission_1 = json.loads(capsys.readouterr().out)
     gen1_job_ids = [job["job_id"] for job in submission_1["jobs"]]
-    assert len(gen1_job_ids) == 14  # the legacy-mode DAG (no snapshot materialize stage; P6-2 added "features")
+    assert len(gen1_job_ids) == 15  # the legacy-mode DAG (no snapshot materialize stage; P6-2 added "features"); + the planned restage job (#805)
 
     conn = open_catalog(root / "catalog.sqlite", clock=SystemClock())
     try:
@@ -196,7 +196,7 @@ def test_operator_scenario_replan_after_manifest_change_gets_fresh_jobs_and_old_
                      "--idempotency-key", "gen2"]) == 0
     submission_2 = json.loads(capsys.readouterr().out)
     gen2_job_ids = [job["job_id"] for job in submission_2["jobs"]]
-    assert len(gen2_job_ids) == 14
+    assert len(gen2_job_ids) == 15
     assert set(gen2_job_ids).isdisjoint(gen1_job_ids)
 
     conn = open_catalog(root / "catalog.sqlite", clock=SystemClock())
@@ -205,7 +205,7 @@ def test_operator_scenario_replan_after_manifest_change_gets_fresh_jobs_and_old_
             "SELECT job_id, state FROM jobs WHERE job_id IN (" +
             ",".join("?" * len(gen1_job_ids)) + ")", gen1_job_ids)}
         assert all(state in ("cancelled", "blocked") for state in rows.values())
-        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 28
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 30
     finally:
         conn.close()
 
