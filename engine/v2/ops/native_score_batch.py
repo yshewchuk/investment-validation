@@ -477,8 +477,8 @@ def _gate_source_or_refusal(
     """The gate forecast source for ``key``, or its fixed-detail refusal.
 
     ``ModelNotReady`` from :func:`select_gate_forecast_source` is mapped to
-    ``MODEL_NOT_READY`` with the same safe detail the caller published before;
-    the exception text is never copied into the refusal (CWE-209).
+    ``MODEL_NOT_READY`` with a fixed safe detail, and that exception text is
+    never copied into the refusal (CWE-209).
     """
     try:
         return select_gate_forecast_source(binding, event_date, as_of)
