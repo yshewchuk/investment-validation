@@ -122,14 +122,14 @@ def test_stage_sequence_excludes_native_score_batch():
 
 
 # --------------------------------------------------------------------------
-# _native_score_batch_identity / submit_native_score_batch_shadow_if_ready
+# native_score_batch_identity / submit_native_score_batch_shadow_if_ready
 # --------------------------------------------------------------------------
 
 
 def test_identity_returns_none_with_no_succeeded_score_job(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path)
-    assert nightly._native_score_batch_identity(conn) is None
+    assert nightly.native_score_batch_identity(conn) is None
     assert nightly.submit_native_score_batch_shadow_if_ready(
         conn, registry(), _POLICY, store, "irrelevant-root",
         catalog_path=str(tmp_path / "ops.sqlite"), objects_root=str(tmp_path),
@@ -142,7 +142,7 @@ def test_identity_finds_latest_session_and_reports_no_snapshot_pinned(tmp_path):
     score_key = _mark_score_succeeded(conn, clock, session="2026-01-01")
     session, scope_hash = nightly._session_scope_from_score_key(score_key)
 
-    assert nightly._native_score_batch_identity(conn) == (session, scope_hash, None)
+    assert nightly.native_score_batch_identity(conn) == (session, scope_hash, None)
 
     before = conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"]
     assert nightly.submit_native_score_batch_shadow_if_ready(
@@ -157,7 +157,7 @@ def test_identity_picks_latest_of_two_sessions(tmp_path):
     _mark_score_succeeded(conn, clock, session="2026-01-01")
     later_key = _mark_score_succeeded(conn, clock, session="2026-01-02")
 
-    identity = nightly._native_score_batch_identity(conn)
+    identity = nightly.native_score_batch_identity(conn)
 
     assert identity is not None
     assert identity[:2] == nightly._session_scope_from_score_key(later_key)
@@ -211,7 +211,7 @@ def test_identity_orders_by_created_at_not_scope_hash(tmp_path):
     clock.advance(60)
     _submit_succeeded(later_requests, later_key)
 
-    identity = nightly._native_score_batch_identity(conn)
+    identity = nightly.native_score_batch_identity(conn)
 
     assert identity[:2] == (session, later_hash)  # time order (the fix) picks `later`
     assert identity[1] != first_hash  # the old max(scope_hash) selector would pick `first`
@@ -231,7 +231,7 @@ def test_identity_skips_row_with_missing_created_at(tmp_path):
                  (job_id_for("shadow", blank_key),))
     conn.commit()
 
-    identity = nightly._native_score_batch_identity(conn)
+    identity = nightly.native_score_batch_identity(conn)
 
     assert identity is not None
     assert identity[:2] == nightly._session_scope_from_score_key(valid_key)
@@ -267,13 +267,14 @@ def test_identity_accepts_full_universe_spec_above_old_size_bound(tmp_path):
                  (spec_json, job_id_for("shadow", newer_key)))
     conn.commit()
 
-    identity = nightly._native_score_batch_identity(conn)
+    identity = nightly.native_score_batch_identity(conn)
 
     assert identity is not None
     assert identity[:2] == nightly._session_scope_from_score_key(newer_key)
     assert identity[2] is not None
     assert isinstance(identity[2], LegacyParameters)
     assert identity[2].snapshot_generation_id == "snap-full"
+    assert identity[2].tickers == tuple(population)
 
 
 def test_identity_rejects_oversized_spec_before_decode(tmp_path):
@@ -300,7 +301,7 @@ def test_identity_rejects_oversized_spec_before_decode(tmp_path):
                  (spec_json, job_id_for("shadow", newer_key)))
     conn.commit()
 
-    assert nightly._native_score_batch_identity(conn) is None
+    assert nightly.native_score_batch_identity(conn) is None
 
 
 def test_identity_rejects_malformed_spec_json(tmp_path):
@@ -315,7 +316,7 @@ def test_identity_rejects_malformed_spec_json(tmp_path):
                  ('{"parameters": ', job_id_for("shadow", newer_key)))
     conn.commit()
 
-    assert nightly._native_score_batch_identity(conn) is None
+    assert nightly.native_score_batch_identity(conn) is None
 
 
 def test_identity_tie_breaks_deterministically_when_created_at_matches(tmp_path):
@@ -328,8 +329,8 @@ def test_identity_tie_breaks_deterministically_when_created_at_matches(tmp_path)
     key_a = _mark_score_succeeded(conn, clock, session=session, tickers=("AAAA",))
     key_b = _mark_score_succeeded(conn, clock, session=session, tickers=("BBBB",))
 
-    first_call = nightly._native_score_batch_identity(conn)
-    second_call = nightly._native_score_batch_identity(conn)
+    first_call = nightly.native_score_batch_identity(conn)
+    second_call = nightly.native_score_batch_identity(conn)
 
     assert first_call is not None
     assert first_call == second_call
@@ -339,7 +340,7 @@ def test_identity_tie_breaks_deterministically_when_created_at_matches(tmp_path)
 
 def test_submit_dedupes_an_existing_job_under_the_key(tmp_path, monkeypatch):
     """The dedup branch in isolation from the currently-unbuilt PR-6 producer:
-    ``_native_score_batch_identity`` is monkeypatched for THIS ONE test to
+    ``native_score_batch_identity`` is monkeypatched for THIS ONE test to
     pretend the succeeded "score" job pinned a snapshot. The helper remains
     idempotent for an existing job, while the supervisor identity lookup still
     returns it for release re-check."""
@@ -358,7 +359,7 @@ def test_submit_dedupes_an_existing_job_under_the_key(tmp_path, monkeypatch):
         (batch_job_id, "shadow", key, "digest", "operator", "native_score_batch",
          "{}", "legacy_score", "legacy_action.v1.0", "{}", "queued", 0, 1, stamp, stamp))
     conn.commit()
-    monkeypatch.setattr(nightly, "_native_score_batch_identity",
+    monkeypatch.setattr(nightly, "native_score_batch_identity",
                         lambda conn: (session, scope_hash, True))
 
     service = Service(
@@ -381,7 +382,7 @@ def test_submit_raises_when_native_identity_lacks_snapshot_id(tmp_path, monkeypa
     store = ArtifactStore(tmp_path)
     score_key = _mark_score_succeeded(conn, clock, session="2026-01-01")
     session, scope_hash = nightly._session_scope_from_score_key(score_key)
-    monkeypatch.setattr(nightly, "_native_score_batch_identity",
+    monkeypatch.setattr(nightly, "native_score_batch_identity",
                         lambda conn: (session, scope_hash, True))
 
     with pytest.raises(OpsError):
@@ -402,7 +403,7 @@ def test_submit_builds_one_shadow_batch_request_from_snapshot_parameters(tmp_pat
     store = ArtifactStore(tmp_path)
     score_key = _mark_score_succeeded(conn, clock, session="2026-01-01")
     session, scope_hash = nightly._session_scope_from_score_key(score_key)
-    monkeypatch.setattr(nightly, "_native_score_batch_identity",
+    monkeypatch.setattr(nightly, "native_score_batch_identity",
                         lambda conn: (session, scope_hash, True))
 
     snapshot_id = "snapshot-2026-01-01-abc123"
@@ -503,7 +504,7 @@ def test_service_tick_submits_without_running_pinned_producer(tmp_path, monkeypa
     monkeypatch.setattr(
         "engine.v2.ops.nightly_raw_row_producer.build_native_score_batch_events",
         _producer)
-    monkeypatch.setattr(nightly, "_native_score_batch_identity",
+    monkeypatch.setattr(nightly, "native_score_batch_identity",
                         lambda conn: (session, scope_hash, producer_parameters))
 
     service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
@@ -581,7 +582,7 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
         "engine.v2.ops.nightly_raw_row_producer.build_native_score_batch_events",
         _producer)
     monkeypatch.setattr(
-        nightly, "_native_score_batch_identity",
+        nightly, "native_score_batch_identity",
         lambda conn: (score_session, score_scope, producer_parameters))
     from engine.v2.scoring import release_bindings
     monkeypatch.setattr(
@@ -732,7 +733,7 @@ def test_service_submits_worker_producer_parameters_without_staging(tmp_path, mo
     monkeypatch.setattr(
         "engine.v2.ops.nightly_raw_row_producer.build_native_score_batch_events",
         _producer)
-    monkeypatch.setattr(nightly, "_native_score_batch_identity",
+    monkeypatch.setattr(nightly, "native_score_batch_identity",
                         lambda conn: (session, scope_hash, producer_parameters))
 
     service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
@@ -936,7 +937,7 @@ def test_service_tick_noop_without_pinned_snapshot_skips_release_checker(tmp_pat
     checker is not called and no native_stage_failures row is created."""
     conn, clock, _ = catalog(tmp_path)
     _mark_score_succeeded(conn, clock, session="2026-01-01")
-    identity = nightly._native_score_batch_identity(conn)
+    identity = nightly.native_score_batch_identity(conn)
     assert identity is not None and identity[2] is None
     service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
                       code_source=ROOT, store_root=tmp_path)
@@ -972,7 +973,7 @@ def test_service_tick_never_submits_with_release_root_but_no_promoted_release(tm
 
 def test_identity_lookup_failure_is_throttled_not_retried_every_tick(tmp_path, monkeypatch):
     """CodeRabbit round 6, real finding: before the fix, a persistently
-    raising _native_score_batch_identity ran again on EVERY tick -- the
+    raising native_score_batch_identity ran again on EVERY tick -- the
     not_before it wrote into the memo was never read back. This bypasses
     the release-root gate (irrelevant to the bug) by monkeypatching
     _native_release_root_or_none directly."""
@@ -986,7 +987,7 @@ def test_identity_lookup_failure_is_throttled_not_retried_every_tick(tmp_path, m
         calls.append(1)
         raise ValueError("planted identity lookup failure")
 
-    monkeypatch.setattr(nightly, "_native_score_batch_identity", _boom)
+    monkeypatch.setattr(nightly, "native_score_batch_identity", _boom)
 
     service._reconcile_native_score_batch_shadow()  # 1st failure: attempts -> 1, backed off
     assert len(calls) == 1
@@ -1017,7 +1018,7 @@ def test_identity_lookup_failure_never_spends_a_real_identitys_attempt_budget(tm
     def _boom(conn):
         raise ValueError("planted identity lookup failure")
 
-    monkeypatch.setattr(nightly, "_native_score_batch_identity", _boom)
+    monkeypatch.setattr(nightly, "native_score_batch_identity", _boom)
 
     service._reconcile_native_score_batch_shadow()
 
@@ -1096,17 +1097,28 @@ def test_worker_reported_model_not_ready_survives_validation_to_native_row(
     conn.close()
 
 
-def test_successful_native_worker_resolves_scope_failures(tmp_path, monkeypatch):
+def test_successful_native_worker_resolves_only_matching_occurrence_and_scope(
+        tmp_path, monkeypatch):
+    """A succeeded worker resolves the failure for its own occurrence and
+    scope only. Regression rows sharing either key must stay unresolved: a
+    later occurrence reusing the same scope is a different nightly attempt,
+    and another scope's row belongs to another batch."""
     conn, clock, supervisor = catalog(tmp_path)
     claim = _claim_native_score_batch(
         conn, clock, supervisor, occurrence="2026-01-15", scope_hash="scope-hash")
     problem = json.dumps({"code": "MODEL_NOT_READY"})
-    conn.execute(
+    conn.executemany(
         "INSERT INTO native_stage_failures "
         "(occurrence,scope_hash,stage_id,status,error_code,problem_json,created_at,updated_at) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        ("2026-01-15", "scope-hash", "native_score_batch", "FAILED",
-         "MODEL_NOT_READY", problem, "2026-01-15T00:00:00Z", "2026-01-15T00:00:00Z"))
+        [
+            ("2026-01-15", "scope-hash", "native_score_batch", "FAILED",
+             "MODEL_NOT_READY", problem, "2026-01-15T00:00:00Z", "2026-01-15T00:00:00Z"),
+            ("2026-01-16", "scope-hash", "native_score_batch", "FAILED",
+             "MODEL_NOT_READY", problem, "2026-01-16T00:00:00Z", "2026-01-16T00:00:00Z"),
+            ("2026-01-15", "other-scope", "native_score_batch", "FAILED",
+             "MODEL_NOT_READY", problem, "2026-01-15T00:00:00Z", "2026-01-15T00:00:00Z"),
+        ])
     conn.commit()
     service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
                       code_source=ROOT, store_root=tmp_path)
@@ -1114,11 +1126,37 @@ def test_successful_native_worker_resolves_scope_failures(tmp_path, monkeypatch)
 
     service._finish(SimpleNamespace(claim=claim), {"exit_code": 0})
 
-    row = conn.execute(
-        "SELECT resolved_at FROM native_stage_failures "
-        "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
-        ("2026-01-15", "scope-hash", "native_score_batch")).fetchone()
-    assert row["resolved_at"] is not None
+    rows = {
+        (row["occurrence"], row["scope_hash"]): row["resolved_at"]
+        for row in conn.execute(
+            "SELECT occurrence, scope_hash, resolved_at FROM native_stage_failures")
+    }
+    assert rows[("2026-01-15", "scope-hash")] is not None
+    assert rows[("2026-01-16", "scope-hash")] is None
+    assert rows[("2026-01-15", "other-scope")] is None
+    conn.close()
+
+
+def test_identity_from_claim_contains_parser_exception(tmp_path, monkeypatch, capsys):
+    """A parser exception is contained: the helper returns None and logs a
+    bounded structured stderr event so worker failure recording still runs."""
+    conn, clock, supervisor = catalog(tmp_path)
+    claim = _claim_native_score_batch(
+        conn, clock, supervisor, occurrence="2026-01-15", scope_hash="scope-hash")
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    monkeypatch.setattr(
+        "engine.v2.ops.nightly.scope_from_native_score_batch_key",
+        lambda key: (_ for _ in ()).throw(RuntimeError("parser exploded")))
+    result = service._native_score_batch_identity_from_claim(claim)
+    assert result is None
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()
+              if line.strip()]
+    assert events == [{
+        "event": "native_stage_identity_from_claim_failed",
+        "job_id": claim.job_id,
+        "exception_type": "RuntimeError",
+    }]
     conn.close()
 
 

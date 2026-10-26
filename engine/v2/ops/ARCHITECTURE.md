@@ -154,12 +154,12 @@ Four new symbols, mirroring `native_score_batch`'s own PR-7a shape:
   mirroring `_computed_moves_identity` (`nightly.py:830`): finds the
   latest succeeded `native_score_batch` job by its own idempotency key
   (`"nightly:<as_of>:<scope_hash>:native_score_batch"`, `#88`'s own R6),
-  parses `(as_of, scope_hash)` out of it, and recovers the paired
-  succeeded `"score"` job's id with the SAME query `#88`'s own
-  `_native_score_batch_identity` already runs to find a session's
-  `"score"` job (`"nightly:<as_of>:<scope_hash>:score"`) — reused here
-  with `(as_of, scope_hash)` already known rather than searched for,
-  never a second, independently written lookup. Returns `(as_of,
+  parses `(as_of, scope_hash)` out of it, computes the paired
+  succeeded `"score"` job's idempotency key
+  (`"nightly:<as_of>:<scope_hash>:score"`), and checks that computed job
+  id directly. This is a second lookup against the known key, not the
+  same ordered search `nightly.native_score_batch_identity` runs for the
+  sidecar. Returns `(as_of,
   scope_hash, score_job_id, native_score_batch_job_id)`, or `None` when
   no succeeded `native_score_batch` job exists yet.
 - `stages.py::_native_parity_kind()` — **implemented, slice 2B(a)** — a `JobKind`, mirroring `_native_score_batch_kind()` (`stages.py:271`) in shape: `name="native_parity"`, `worker="native_parity"`, `parameters=NativeParityParameters` (new, `RescoreParameters`-shaped — only `expected_ids` and `input_bindings`; this job carries no scalar data of its own, since every input it reads is job-bound), `resource_classes=frozenset({"validation"})` (a pure comparison, no provider fetch — the same classification `decision_evidence` already has), `effects=("staged",)`, `retry=RetryPolicy("bounded", 2, (5, 30))`, `checkpoint_contract="native_parity_report.v1.3"` (matching `native_parity_report.SCHEMA_VERSION`; v1.3 adds `ticker` and `reason` to native refusal entries below), `namespaces=frozenset({"shadow", "smoke"})`. `worker.py::dispatch` routes the `"native_parity"` branch to `native_parity_report.run_native_parity_worker` (below), using the same lazy-import-inside-`_dispatch_*` pattern as `_dispatch_native_score_batch` (`worker.py:167-168`, `:198-200`).
@@ -436,7 +436,7 @@ shape: `supervisor.Service._reconcile_native_score_batch_shadow`
 (tick-loop sidecar, called from `Service.tick`);
 `nightly.submit_native_score_batch_shadow_if_ready` (the builder the
 sidecar calls — see "Raw-row producer" below for what it does once a
-`"score"` job pins a snapshot); `nightly._native_score_batch_identity` (a
+`"score"` job pins a snapshot); `nightly.native_score_batch_identity` (a
 cheap catalog-only identity check parsing the paired `"score"` job's own
 idempotency key to recover `(session, scope_hash, snapshot_pinned)`, or
 `None`). `nightly.GRAPH` gains a `"native_score_batch": ("score",)` node
@@ -597,7 +597,7 @@ Entry/exit/expiry, spot and calendar-observed-through are caller-staged; validat
   worker's own `NativeScoreBatchParameters` carries `release_root`, the pinned
   snapshot ID, and the catalog/object roots used to open it.
 
-**Native batch input sourcing.** For each eligible snapshot-pinned score occurrence/scope, unavailable release binding or worker `MODEL_NOT_READY` is durably recorded as `FAILED` with typed `MODEL_NOT_READY`; it never becomes success or triggers fallback; only a succeeded native worker resolves prior failures; this failure does not block board publication; parity requires a succeeded native batch.
+**Native batch input sourcing.** For each eligible snapshot-pinned score occurrence/scope, unavailable release binding or worker `MODEL_NOT_READY` is durably recorded as `FAILED` with typed `MODEL_NOT_READY`; it never becomes success or triggers fallback; only a succeeded native worker resolves prior failures; this failure does not block board publication; parity requires a succeeded native batch. If catalog persistence itself fails while recording the failure, the sidecar logs `native_stage_failure_persistence_failed` (without the raw exception text) and returns without submitting; no row is durably recorded.
 
 `SourceBundle` construction (`assemble_nightly_source_bundle`, `source_inputs.build_native_score_inputs`) happens inside the worker — both are pure, I/O-free functions over the worker-local event documents, so the submission side never touches `engine.v2.scoring.source_inputs`.
 
@@ -1048,7 +1048,7 @@ a read-only comparison. It performs no consistency check against `engine.score.D
 excludes both disabled strategies (CAL-P, CND-P), so the enumerator adds the v2-owned `engine.v2.domain.generation.DISABLED` keys to the set (no legacy read): every legacy key ends as a record or a keyed refusal ([#1105](https://github.com/yshewchuk/investment-validation/issues/1105)). The raw-row producer refuses each such key in place as `UNSUPPORTED_STRATEGY` with fixed detail (once the intraday check has passed; an intraday disabled key is refused as `INTRADAY_EVENT_NOT_ADMITTED`), before the `option_chains` check or any calendar, panel or quote read; other rows are unaffected (per-row, collected, no cache/retry/partial write). `SUPPORTED_STRATEGIES` is also checked against
 `engine.v2.registry.strategies.DYNAMIC_MENU` (a subset assertion paid once at import time, no I/O, no legacy dependency).
 
-**Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops. The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process.
+**Callers:** dashboard's documented lazy `cli.refresh_action` import (root §4), and unlayered callers under `tools/`, `experiments/`, `checks/`, and `tests/`; no other layered or legacy engine caller imports ops. The raw-row producer consumes `board_requests`; only `native_score_batch.run_native_score_batch_worker` calls it in production, in the worker process. `worker.py` dispatches every job kind and consumes the same native scoring and release-binding interfaces as `native_score_batch.py`.
 `experiments.native_sweep_collection` consumes `catalog.transaction`/`sql_text_budget`/`decode_bounded_text`, `checkpoints.registered_artifact`, `experiments.experiment_spec_from_document`, `fingerprints.source_closure`, `native_registration.read_native_evidence`/`native_evidence_json`/`MAX_NATIVE_EVIDENCE_BYTES`, `submission.get_job`/`MAX_JOB_FAILURE_BYTES` and `errors.OpsError`/`fail` to verify exact terminal attempts and coordinate native scientific publication. Its direct catalog reads are `attempts` and `attempt_outputs`, and its immutable intent/index binding updates `experiment_runs.evidence_json` inside `catalog.transaction`; artifact registration lookup remains owned by `registered_artifact`.
 `experiments.v2_gate_collect` consumes `catalog.connect`, `submission.get_job`/`MAX_JOB_FAILURE_BYTES` and `errors.OpsError`/`fail`; observation grants no supervisor ownership or final-read authority. `experiments.registered_runup` consumes `experiments.ExperimentSpec`/`resolve_experiment_plan` and `errors.OpsError`/`fail`; `experiments.v2_runup_study` consumes `catalog.connect`, `experiments.experiment_spec_from_document` and `errors.OpsError`/`fail` for registered CLI admission.
 `experiments/native_registration.py` imports ops `catalog.transaction`/`sql_text_budget`/`decode_bounded_text`, `errors.OpsError`/`fail`, `experiments.ExperimentSpec`, `experiments.resolve_experiment_plan`/`register_hypothesis_in_transaction`,
@@ -1218,6 +1218,7 @@ job.
 | Sidecar | Missing-input case | Idempotency key scope |
 |---|---|---|
 | `native_score_batch` shadow | no succeeded legacy score, or an identity whose plan is not snapshot-pinned — the sidecar returns without submitting; for each eligible snapshot-pinned score occurrence/scope, unavailable release binding or worker `MODEL_NOT_READY` is durably recorded as `FAILED` with typed `MODEL_NOT_READY`; it never becomes success or triggers fallback; only a succeeded native worker resolves prior failures; this failure does not block board publication; parity requires a succeeded native batch; an eligible pinned-snapshot tick submits producer parameters and the worker produces both documents (R1–R6 above) | the specific succeeded score job read, not session alone |
+| catalog persistence fails while recording the failure | logs `native_stage_failure_persistence_failed` (no raw exception text) and returns without submitting; no row is durably recorded | n/a |
 | `native_parity` | no paired, succeeded `native_score_batch`/`score` identity yet, including a failed release-binding stage — returns without submitting; a CONFIRMED schema mismatch parks that `native_score_batch_job_id`, skipping the artifact read and attempt spend on every later tick carrying it (the identity/existing-job lookup itself still runs on eligible ticks) | the specific `native_score_batch` identity read |
 | `_ensure_shadow_snapshot` | the legacy store has not caught up to `as_of` yet — `"not_yet"`/`"snapshot_not_yet"`, resumable, no attempt consumed | `(as_of, attempt)`; a genuine retry after a terminal failure mints a fresh `attempt`, never reusing a dead key |
 | pool-nightly refresh | no succeeded `finality`/`features` job, no deployed pointer, or no `legacy_manifest.json` binding on that job — returns without submitting; a pointer that is not a bounded regular file is reported | one key per phase, scoped by session, scoring manifest and prior release id (`Service._reconcile_pool_nightly_refresh`; contract in models doc §2.2.1) |

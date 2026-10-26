@@ -2647,6 +2647,7 @@ def test_classify_maps_native_release_failures_to_model_not_ready():
         assert problem.code == "MODEL_NOT_READY"
         assert problem.message == "native score batch release binding is unavailable"
         assert problem.details == {}
+        assert problem.retryable is False
         assert "chooser_analog_pool" not in problem.message
         assert "no release" not in problem.message
 

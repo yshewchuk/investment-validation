@@ -40,7 +40,9 @@ ORATS_CALLS_PER_DAILY_MARKET_UNIT = 4
 #: is at most this many bytes (1 MiB). Full-universe plans (6000 tickers) are
 #: well under the cap; the finite ceiling rejects runaway/oversized rows before
 #: ``json.loads`` so one bad row cannot exhaust memory. Exceeding it is
-#: fail-closed: ``_native_score_batch_identity`` returns ``None``.
+#: fail-closed: ``native_score_batch_identity`` returns ``None``. The bound is
+#: also applied in SQL (``length(CAST(spec_json AS BLOB)) <= ?``) so an
+#: oversized row is never transferred into Python in the first place.
 NATIVE_SCORE_BATCH_SPEC_MAX_BYTES = 1024 * 1024
 
 
@@ -1241,7 +1243,7 @@ def _native_score_batch_parameters(spec_json):
     return parameters
 
 
-def _native_score_batch_identity(conn):
+def native_score_batch_identity(conn):
     """Cutover PR-7a: identity for the supervisor's own sidecar
     (``supervisor.Service._reconcile_native_score_batch_shadow``): the
     ``(session, scope_hash)`` of the LATEST succeeded legacy "score" job.
@@ -1287,6 +1289,7 @@ def _native_score_batch_identity(conn):
     row = conn.execute(
         "SELECT idempotency_key, created_at, "
         "CASE WHEN typeof(spec_json) = 'text' "
+        "AND length(CAST(spec_json AS BLOB)) <= ? "
         "THEN spec_json ELSE NULL END AS spec_json "
         "FROM jobs "
         "WHERE kind = ? AND state = 'succeeded' "
@@ -1298,7 +1301,7 @@ def _native_score_batch_identity(conn):
         "ORDER BY substr(idempotency_key, 9, "
         "instr(substr(idempotency_key, 9), ':') - 1) DESC, "
         "created_at DESC, idempotency_key DESC LIMIT 1",
-        (_LEGACY_SCORE_KIND,)).fetchone()
+        (NATIVE_SCORE_BATCH_SPEC_MAX_BYTES, _LEGACY_SCORE_KIND)).fetchone()
     if row is None:
         return None
     parsed = _session_scope_from_score_key(row["idempotency_key"])
@@ -1343,7 +1346,7 @@ def submit_native_score_batch_shadow_if_ready(conn, registry, policy, store, rel
 
     if conn is None:
         return None
-    identity = _native_score_batch_identity(conn)
+    identity = native_score_batch_identity(conn)
     if identity is None:
         return None
     session, scope_hash, snapshot_pinned = identity
