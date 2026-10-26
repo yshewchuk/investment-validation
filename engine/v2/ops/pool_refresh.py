@@ -435,6 +435,10 @@ def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_
     if identity is None:
         return []
     session, manifest_id = identity
+    from engine.v2.ops.retrain_due import chain_blocks_pool_sidecar
+    if chain_blocks_pool_sidecar(conn, session):
+        # #805 slice 2: this session's restage/retrain job is nonterminal or failed.
+        return []
     tag = manifest_tag(manifest_id)
     pointer = _read_pointer(Path(release_root) / "deployment")
     prior_id = None if pointer is None else pointer.release_id

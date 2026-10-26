@@ -287,7 +287,8 @@ def _plan_command(args, root, conn, clock):
                             snapshot_inputs=_snapshot_inputs(args, root, conn, clock, context_tickers,
                                                              population, snapshot_id),
                             refresh_mode=args.refresh_mode, refresh_plan=_read_refresh_plan(args),
-                            catalog_path=_catalog_path(conn), objects_root=str(root))
+                            catalog_path=_catalog_path(conn), objects_root=str(root),
+                            retrain=getattr(args, "retrain", None))
     elif args.kind == "training":
         plan = _training_plan(args, root, conn, clock)
     elif args.kind == "promote":

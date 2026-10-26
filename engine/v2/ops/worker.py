@@ -180,7 +180,7 @@ def dispatch(worker, parameters, root, *, envelope=None):
     if worker in ("snapshot_import", "legacy_rebuild_candidate"):
         return _dispatch_snapshot_import(worker, parameters, root)
     if worker in ("ledger_export", "engineering_gate", "publication", "backup",
-                  "decisions_supersede"):
+                  "decisions_supersede", "retrain_step"):
         return _dispatch_effect_receipt(worker, parameters, root)
     if worker == "artifact_check":
         output = root / "receipt.json"
@@ -348,11 +348,34 @@ def _dispatch_effect_receipt(worker, parameters, root):
     same ``attempt_outputs`` row set keyed ``(attempt_id, name)`` — a shared
     name collides there. See ``supervisor.Service._commit_success``.
     """
+    if worker == "retrain_step":
+        return _dispatch_retrain_step(parameters, root)
     receipt = {"schema_version": "effect_receipt.v1.0", "kind": worker,
                "expected_ids": list(parameters["expected_ids"])}
     (root / "receipt.json").write_text(json.dumps(receipt))
     name = worker + "_receipt"
     return {"outputs": [{"name": name, "path": "receipt.json", "schema": "effect_receipt.v1.0"}],
+            "completed_ids": list(parameters["expected_ids"]),
+            "no_work": not parameters["expected_ids"]}
+
+
+def _dispatch_retrain_step(parameters, root):
+    """#805 slice 2 stub (models ARCHITECTURE section 2.3 Rollout). ``restage`` checks
+    nothing and records ``restage: unchecked``; every chain step fails loudly with
+    ``VALIDATION_FAILED`` / ``details.code`` ``RETRAIN_UNAVAILABLE`` naming the step, so the
+    nightly fails and nothing scores on the incumbent. Never a silent skip."""
+    step = parameters["step"]
+    if step != "restage":
+        from engine.v2.ops.errors import fail
+        raise fail("VALIDATION_FAILED", "retrain step is not implemented",
+                   details={"code": "RETRAIN_UNAVAILABLE", "step": step,
+                            "session": parameters["session"], "month": parameters["month"]})
+    receipt = {"schema_version": "effect_receipt.v1.0", "kind": "retrain_step",
+               "step": "restage", "restage": "unchecked",
+               "expected_ids": list(parameters["expected_ids"])}
+    (root / "receipt.json").write_text(json.dumps(receipt))
+    return {"outputs": [{"name": "retrain_step_receipt", "path": "receipt.json",
+                         "schema": "effect_receipt.v1.0"}],
             "completed_ids": list(parameters["expected_ids"]),
             "no_work": not parameters["expected_ids"]}
 

@@ -23,7 +23,7 @@ NIGHTLY_GRAPH = {
 
 
 def _pin_refresh_mode(identity, plan, refresh_mode, refresh_plan, catalog_path=None,
-                      objects_root=None):
+                      objects_root=None, retrain=None):
     """R3B-3: validate and pin ``refresh_mode``/``refresh_plan`` onto
     ``identity``/``plan`` in place. Mirrors the ``input_mode`` block in
     :func:`nightly_plan`: the default ``"legacy"`` touches neither dict, so
@@ -39,6 +39,9 @@ def _pin_refresh_mode(identity, plan, refresh_mode, refresh_plan, catalog_path=N
     ``build_legacy_job_requests`` builds the production plan from the shadow
     head at submission time; a caller-supplied plan remains a strict override.
     """
+    if retrain is not None:  # #805 slice 2: the retrain_due.decide section, pinned into plan identity
+        identity.update(retrain=retrain)
+        plan.update(retrain=retrain)
     if refresh_mode not in ("legacy", "native"):
         raise fail("INVALID_REQUEST", "refresh_mode must be legacy or native")
     if refresh_mode != "native":
@@ -91,7 +94,7 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
                  tickers=(), context_tickers=(), year_start=2024, year_end=2026,
                  expected_population=(), candidate_exclusions=(), clock=None, input_mode="legacy",
                  snapshot_inputs=None, full_run=False, refresh_mode="legacy", refresh_plan=None,
-                 catalog_path=None, objects_root=None):
+                 catalog_path=None, objects_root=None, retrain=None):
     """``full_run`` (``--full-run``, decision: writing the global ``"shadow"``
     effect scope must be explicit) records this plan's universe declaration.
     Without it, ``build_legacy_job_requests`` always uses a subset effect
@@ -150,7 +153,7 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
         identity.update(input_mode=input_mode, snapshot_inputs=snapshot_inputs)
         plan.update(input_mode=input_mode, snapshot_inputs=dict(snapshot_inputs))
     _pin_refresh_mode(identity, plan, refresh_mode, refresh_plan,
-                      catalog_path=catalog_path, objects_root=objects_root)
+                      catalog_path=catalog_path, objects_root=objects_root, retrain=retrain)
     plan.update(kind="nightly", session=session, graph=NIGHTLY_GRAPH,
                 plan_hash=content_hash(identity),
                 input_manifest_ref=manifest_ref, tickers=list(tickers),
