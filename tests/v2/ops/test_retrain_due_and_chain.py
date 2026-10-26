@@ -339,3 +339,26 @@ def test_read_recorded_with_a_session_probes_only_the_window(tmp_path):
     full = read_recorded(conn, tmp_path)
     assert "2026-10" in full
     assert "2020-01" in full
+
+
+def test_manual_nightly_plan_evaluates_the_retrain_decision(monkeypatch, tmp_path):
+    import types
+
+    from engine.v2.foundation import SystemClock
+    from engine.v2.ops.bootstrap import open_catalog
+    from engine.v2.ops.workflows.commands import _retrain_section
+
+    monkeypatch.setattr("engine.v2.ops.pool_refresh.deployed_release_id", lambda: "none")
+    conn = open_catalog(tmp_path / "catalog.sqlite", clock=SystemClock())
+
+    due = _retrain_section(types.SimpleNamespace(as_of="2026-11-02"), tmp_path, conn)
+    assert due["state"] == "due"
+    assert due["month"] == "2026-10"
+
+    early = _retrain_section(types.SimpleNamespace(as_of="2026-09-18"), tmp_path, conn)
+    assert early["state"] == "not_due"
+    assert early["reason"] == "before_first_eligible_month"
+
+    explicit = {"state": "not_due", "reason": "explicit"}
+    args = types.SimpleNamespace(as_of="2026-11-02", retrain=explicit)
+    assert _retrain_section(args, tmp_path, conn) is explicit

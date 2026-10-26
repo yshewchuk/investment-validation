@@ -646,3 +646,14 @@ def _state_refs(conn, session, prior, tag, code_source, phases=TRAINING_PHASES,
     if not state_refs:
         raise fail("VALIDATION_FAILED", "no training state files to stage")
     return state_refs
+
+
+def deployed_release_id() -> str:
+    """The deployed release id the retrain keys are scoped to (#805), or ``"none"`` when no
+    release root is configured or nothing was ever promoted. An unreadable pointer raises
+    ``VALIDATION_FAILED`` (not swallowed)."""
+    try:
+        pointer = _read_pointer(deployment.production_release_root() / "deployment")
+    except deployment.MissingReleaseRoot:
+        return "none"
+    return "none" if pointer is None else pointer.release_id

@@ -875,14 +875,8 @@ def _base_release_id() -> str:
     """The deployed release id the retrain keys are scoped to, or ``"none"`` when no release
     root is configured or nothing was ever promoted. An unreadable pointer raises
     ``VALIDATION_FAILED`` (not swallowed)."""
-    from engine.v2.models import deployment
-    from engine.v2.ops.pool_refresh import _read_pointer
-
-    try:
-        pointer = _read_pointer(deployment.production_release_root() / "deployment")
-    except deployment.MissingReleaseRoot:
-        return "none"
-    return "none" if pointer is None else pointer.release_id
+    from engine.v2.ops.pool_refresh import deployed_release_id
+    return deployed_release_id()
 
 
 def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=None, *,

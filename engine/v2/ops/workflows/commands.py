@@ -270,6 +270,17 @@ def _training_plan(args, root, conn, clock):
         manifest_ref=None if native else _read_input_manifest_ref(args, root, conn, clock, nightly=False))
 
 
+def _retrain_section(args, root, conn):
+    """#805 slice 2: the plan's retrain decision. The scheduled trigger passes its own
+    (``args.retrain``); a manual ``ops plan nightly`` evaluates the same decision here, so no
+    nightly plan is built without one (never a silent skip)."""
+    section = getattr(args, "retrain", None)
+    if section is not None:
+        return section
+    from engine.v2.ops import pool_refresh, retrain_due
+    return retrain_due.decide(conn, root, args.as_of, pool_refresh.deployed_release_id())
+
+
 def _plan_command(args, root, conn, clock):
     if args.kind == "nightly":
         tickers = _ticker_list(args.tickers)
@@ -288,7 +299,7 @@ def _plan_command(args, root, conn, clock):
                                                              population, snapshot_id),
                             refresh_mode=args.refresh_mode, refresh_plan=_read_refresh_plan(args),
                             catalog_path=_catalog_path(conn), objects_root=str(root),
-                            retrain=getattr(args, "retrain", None))
+                            retrain=_retrain_section(args, root, conn))
     elif args.kind == "training":
         plan = _training_plan(args, root, conn, clock)
     elif args.kind == "promote":
