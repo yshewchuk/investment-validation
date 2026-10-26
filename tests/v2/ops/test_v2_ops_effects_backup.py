@@ -46,15 +46,30 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path, monkeypatch):
     restored = restore_backup(backup, tmp_path / "restored")
     assert (restored / "artifacts" / "evidence.bin").read_bytes() == b"evidence"
     assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()[0] == "delivered"
+    legacy_manifest = {name: value for name, value in manifest.items() if name != "database_byte_size"}
+    (backup / "b1.manifest.json").write_bytes(
+        json.dumps(legacy_manifest, sort_keys=True, separators=(",", ":")).encode())
+    restored_legacy = restore_backup(backup, tmp_path / "restored-legacy-manifest")
+    assert "sha256:" + hashlib.sha256(
+        (restored_legacy / "ops.sqlite").read_bytes()).hexdigest() == manifest["database"]
     with pytest.raises(OpsError) as error:
         restore_backup(backup, tmp_path / "restored")
     assert error.value.code == "INVALID_REQUEST"
+    real_read_bounded_json = backup_module.read_bounded_json
+    recorded_max_bytes = []
+
+    def recording_read_bounded_json(path, max_bytes):
+        recorded_max_bytes.append(max_bytes)
+        return real_read_bounded_json(path, max_bytes)
+
+    monkeypatch.setattr(backup_module, "read_bounded_json", recording_read_bounded_json)
     manifest_path = next(backup.glob("*.manifest.json"))
     manifest_path.write_bytes(b"x" * (1024 * 1024 + 1))
     with pytest.raises(OpsError) as error:
         restore_backup(backup, tmp_path / "restored-oversized-manifest")
     assert error.value.code == "INTEGRITY_FAILED"
     assert error.value.problem.message == "backup manifest is invalid"
+    assert recorded_max_bytes == [backup_module._MAX_MANIFEST_BYTES]
 
 
 def test_backup_copy_failure_remains_retryable(tmp_path):
@@ -303,6 +318,31 @@ def test_backup_reject_existing_copy_with_invalid_sqlite(tmp_path):
     assert state == "running"
 
 
+def test_backup_rejects_existing_copy_with_foreign_key_violation(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    prepare_backup(conn, "fk-existing", {}, clock=clock)
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    destination = backup / "fk-existing.sqlite"
+    existing = backup_module.sqlite3.connect(destination)
+    existing.execute("PRAGMA foreign_keys=OFF")
+    existing.executescript(
+        "CREATE TABLE existing_parent(id INTEGER PRIMARY KEY);"
+        "CREATE TABLE existing_child(parent_id INTEGER REFERENCES existing_parent(id));"
+        "INSERT INTO existing_child(parent_id) VALUES (42);"
+    )
+    existing.commit()
+    existing.close()
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key="fk-existing", owner="worker", target=backup,
+                   clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.message == "backup database verification failed"
+    assert error.value.problem.retryable is True
+    assert not destination.exists()
+
+
 def test_backup_rejects_oversized_manifest(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
@@ -398,6 +438,18 @@ def test_backup_manifest_read_error_is_typed_retryable(tmp_path, monkeypatch):
     assert conn.execute(
         "SELECT state FROM outbox WHERE kind='backup' AND logical_key=?", (key,)
     ).fetchone()[0] == "running"
+
+
+def test_restore_reject_malformed_manifest_before_creating_destination(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "b1.manifest.json").write_bytes(b"{}")
+    destination = tmp_path / "destination"
+    with pytest.raises(OpsError) as error:
+        restore_backup(source, destination)
+    assert error.value.code == "INTEGRITY_FAILED"
+    assert error.value.problem.message == "backup manifest is invalid"
+    assert not destination.exists()
 
 
 def test_backup_fsyncs_database_copy(tmp_path, monkeypatch):
@@ -513,7 +565,7 @@ def test_manifest_success_before_ack_is_idempotent_and_keys_are_safe(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match="UNSAFE_PATH"):
         prepare_backup(conn, "../escape", {"evidence.bin": ref}, clock=clock)
     prepare_backup(conn, "b3", {"evidence.bin": ref}, clock=clock)
     backup = tmp_path / "backup"

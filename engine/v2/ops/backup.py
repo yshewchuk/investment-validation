@@ -102,8 +102,6 @@ def _copy_verified_database(conn, database):
         is_new = not database.exists()
         if is_new:
             backup_to(conn, database)
-        if database.stat().st_size == 0:
-            raise fail("BACKUP_FAILED", "backup database is empty")
         return _verified_database_hash(database, check_integrity=not is_new)
     except (OpsError, OSError, sqlite3.Error) as error:
         message = (error.problem.message if isinstance(error, OpsError)
@@ -185,11 +183,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=
     return manifest
 
 
-def restore_backup(source, destination):
-    """Restore into a new isolated root and verify every database/artifact byte."""
-    source, destination = Path(source), Path(destination)
-    if destination.exists():
-        raise fail("INVALID_REQUEST", "restore destination already exists")
+def _read_restore_manifest(source):
     manifests = list(source.glob("*.manifest.json"))
     if len(manifests) != 1:
         raise fail("INTEGRITY_FAILED", "backup manifest is missing or ambiguous")
@@ -197,13 +191,28 @@ def restore_backup(source, destination):
         manifest = read_bounded_json(manifests[0], _MAX_MANIFEST_BYTES)
     except (OSError, ValueError, RecursionError) as error:
         raise fail("INTEGRITY_FAILED", "backup manifest is invalid") from error
+    if (not isinstance(manifest, dict)
+            or not isinstance(manifest.get("backup_key"), str)
+            or not isinstance(manifest.get("database"), str)
+            or not isinstance(manifest.get("artifacts"), dict)):
+        raise fail("INTEGRITY_FAILED", "backup manifest is invalid")
+    return manifest
+
+
+def _restore_catalog(source, destination, manifest):
+    database_source = source / (manifest["backup_key"] + ".sqlite")
+    try:
+        actual_size = database_source.stat().st_size
+    except OSError as error:
+        raise fail("INTEGRITY_FAILED", "backup manifest is invalid") from error
+    expected_size = manifest.get("database_byte_size", actual_size)
+    if (not isinstance(expected_size, int) or isinstance(expected_size, bool)
+            or expected_size <= 0 or expected_size != actual_size):
+        raise fail("INTEGRITY_FAILED", "restored catalog size mismatch")
     destination.mkdir(parents=True)
     database = destination / "ops.sqlite"
-    database_source = source / (manifest["backup_key"] + ".sqlite")
-    if database_source.stat().st_size != manifest["database_byte_size"]:
-        raise fail("INTEGRITY_FAILED", "restored catalog size mismatch")
     shutil.copyfile(database_source, database)
-    if database.stat().st_size != manifest["database_byte_size"]:
+    if database.stat().st_size != expected_size:
         raise fail("INTEGRITY_FAILED", "restored catalog size mismatch")
     probe = sqlite3.connect(database)
     try:
@@ -211,6 +220,15 @@ def restore_backup(source, destination):
             raise fail("INTEGRITY_FAILED", "restored catalog failed verification")
     finally:
         probe.close()
+
+
+def restore_backup(source, destination):
+    """Restore into a new isolated root and verify every database/artifact byte."""
+    source, destination = Path(source), Path(destination)
+    if destination.exists():
+        raise fail("INVALID_REQUEST", "restore destination already exists")
+    manifest = _read_restore_manifest(source)
+    _restore_catalog(source, destination, manifest)
     for name, info in manifest["artifacts"].items():
         path = destination / "artifacts" / name
         path.parent.mkdir(parents=True, exist_ok=True)
