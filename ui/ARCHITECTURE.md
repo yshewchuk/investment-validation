@@ -12,6 +12,38 @@ Its presentation scope includes the legacy dashboard views still awaiting migrat
 `src/api/client.ts` is the sole fetch boundary to the authenticated serving API.
 Wire shapes and shipped views are detailed in the [README](README.md).
 
+## Operations status contract (`GET /api/v1/operations`)
+
+One JSON object produced by ops (`OperationsStatus`, `engine/v2/contracts/operations.py`), served as a plain untyped document by `engine/v2/serving/api.py` from the scope-root `operations_status.json`; producer field names are the keys and tuples are arrays. The document always describes the scope's current state, never a pinned release; a `?release_id=` pin differing from the document's own `release_id` is a typed 409, a missing, symlinked, non-object, unparseable or other-versioned file is a typed retryable 503, and responses are `Cache-Control: no-store`. The typed client validates required fields, nullability/types, history row schema and flags; the existing operations presentation validates session-date form and ordering as separately described under Failure semantics. The typed client treats malformed or missing documents as unknown, never current.
+
+Top-level fields — all always present; nullability is the wire value:
+
+| Field | Type | Nullable | Notes |
+|---|---|---|---|
+| `scope` | string | no | publication scope this sidecar describes |
+| `release_id`, `attempted_release_id` | string | yes | `release_id` is the release current after this write (the new one on success, the unchanged prior one on a failed update, `null` if none has ever published); `attempted_release_id` is this attempt's own candidate id, whether or not it became current, or `null` when the attempt failed before any publication candidate existed |
+| `generated_at`, `requested_session`, `resolved_session` | string | no | write timestamp; `YYYY-MM-DD` session dates |
+| `engineering_history` | array | no | `EngineeringNight` rows, oldest first; below |
+| `engineering_streak` | JSON object | no | summary derived from that same history; carried, never re-derived |
+| `conflicts`, `degraded_model_evidence` | JSON arrays | no | the render job's `calendar_date_conflict` / `model_evidence_stale` flags carried from the bound render bundle, never reconstructed |
+| `selfcheck` | JSON value | yes | the bound `selfcheck.json` verbatim, or the explicit unknown `{"ok": null, "known": false, "detail": ...}` — never a bare null misread as "checked and fine" |
+| `stale`, `stale_reason` | boolean, string | no, yes | stale when the current release was not updated by the latest attempt |
+| `withheld`, `withheld_reason` | boolean, string | no, yes | staged-but-not-eligible current release |
+| `failed_update`, `failed_update_reason` | boolean, string | no, yes | display rule below |
+| `schema_version` | string | no | exactly `operations_status.v1.0` |
+
+`engineering_history` rows (`EngineeringNight`):
+
+| Field | Type | Nullable | Notes |
+|---|---|---|---|
+| `occurrence` | string | no | `YYYY-MM-DD` scheduled night |
+| `status` | `pass` / `fail` / `unknown` | no | a scheduled night with no recorded observation is `unknown`, never rendered green |
+| `retry_count` | integer | no | extra observations of this SAME occurrence — never a count of nights |
+| `detail` | JSON value | yes | the observation receipt, or `null` |
+| `schema_version` | string | no | exactly `engineering_night.v1.0` |
+
+Failed-update display: `failed_update` and `stale` are explicit producer flags, and the UI validates and displays these flags rather than inferring the outcome from nullable identifiers. For a failed publication with a candidate, `attempted_release_id` names that candidate while `release_id` remains the unchanged current release; for a terminal failure with no candidate, `attempted_release_id` is `null`.
+
 ## Inputs
 
 Saved JSON release metadata, paginated events, score details and operations data
