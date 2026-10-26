@@ -38,6 +38,7 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path, monkeypatch):
 
     monkeypatch.setattr(backup_module.sqlite3, "connect", recording_connect)
     manifest = run_backup(conn, key="b1", owner="worker", target=backup, clock=clock, store=store)
+    assert manifest["database_byte_size"] == (backup / "b1.sqlite").stat().st_size
     assert recorded_uris == [(backup / "b1.sqlite").resolve().as_uri() + "?mode=ro"]
     assert any(statement.upper() == "PRAGMA QUICK_CHECK" for statement in recorded_sql)
     assert manifest["artifacts"]["evidence.bin"]["content_hash"] == ref.content_hash
@@ -70,6 +71,68 @@ def test_backup_copies_artifacts_and_restores_new_root(tmp_path, monkeypatch):
     assert error.value.code == "INTEGRITY_FAILED"
     assert error.value.problem.message == "backup manifest is invalid"
     assert recorded_max_bytes == [backup_module._MAX_MANIFEST_BYTES]
+
+
+def test_restore_rejects_manifest_size_mismatches(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "size-mismatch", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    manifest = run_backup(conn, key="size-mismatch", owner="worker", target=backup,
+                          clock=clock, store=store)
+    manifest_path = next(backup.glob("*.manifest.json"))
+    destination = tmp_path / "restored"
+
+    modified_manifest = {
+        **manifest, "database_byte_size": manifest["database_byte_size"] + 1,
+    }
+    manifest_path.write_bytes(
+        json.dumps(modified_manifest, sort_keys=True, separators=(",", ":")).encode())
+    with pytest.raises(OpsError) as error:
+        restore_backup(backup, destination)
+    assert error.value.code == "INTEGRITY_FAILED"
+    assert error.value.problem.message == "restored catalog size mismatch"
+    assert not destination.exists()
+
+    modified_manifest = {
+        **manifest,
+        "artifacts": {
+            **manifest["artifacts"],
+            "evidence.bin": {
+                **manifest["artifacts"]["evidence.bin"],
+                "byte_size": manifest["artifacts"]["evidence.bin"]["byte_size"] + 1,
+            },
+        },
+    }
+    manifest_path.write_bytes(
+        json.dumps(modified_manifest, sort_keys=True, separators=(",", ":")).encode())
+    with pytest.raises(OpsError) as error:
+        restore_backup(backup, destination)
+    assert error.value.code == "INTEGRITY_FAILED"
+    assert error.value.problem.message == "restored artifact size mismatch"
+
+
+def test_backup_rejects_artifact_size_mismatch(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "bad-artifact-size", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+
+    def short_copy(source, destination):
+        destination.write_bytes(b"x")
+
+    monkeypatch.setattr(backup_module.shutil, "copyfile", short_copy)
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key="bad-artifact-size", owner="worker", target=backup,
+                   clock=clock, store=store)
+    assert error.value.code == "INTEGRITY_FAILED"
+    assert error.value.problem.message == "backup artifact size mismatch"
+    state = conn.execute(
+        "SELECT state FROM outbox WHERE kind='backup' AND logical_key='bad-artifact-size'"
+    ).fetchone()[0]
+    assert state == "running"
 
 
 def test_backup_copy_failure_remains_retryable(tmp_path):
