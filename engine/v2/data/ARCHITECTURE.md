@@ -969,7 +969,7 @@ or execution property is established; existing readers stay intact. See the
 
 | Probe condition | Refusal (fixed redacted message; no partial result) | Retryable |
 |---|---|---|
-| Wrong holder/string types, empty IDs/table, malformed limits, no active transaction or missing selected table | `CONTRACT_MISMATCH` | no |
+| Wrong holder/string types, empty or non-UTF-8-encodable IDs/table, malformed limits, no active transaction or missing selected table | `CONTRACT_MISMATCH` | no |
 | Requested snapshot absent | `SNAPSHOT_UNRESOLVED` | no |
 | Any explicit count or SQL BLOB byte cap exceeded | `RESULT_LIMIT_EXCEEDED` | no |
 | Missing joins, wrong SQL types or inconsistent membership | `MANIFEST_CORRUPT` | no |

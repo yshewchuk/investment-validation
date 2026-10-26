@@ -96,6 +96,11 @@ def _validate_inputs(conn, snapshot_id, table_name, limits):
             or type(limits) is not dict or set(limits) != _LIMITS
             or any(type(v) is not int or not 0 < v < sys.maxsize for v in limits.values())):
         raise errors.fail("CONTRACT_MISMATCH", "invalid catalog probe configuration")
+    try:
+        snapshot_id.encode("utf-8")
+        table_name.encode("utf-8")
+    except UnicodeEncodeError:
+        raise errors.fail("CONTRACT_MISMATCH", "invalid catalog probe configuration") from None
 
 
 def probe_catalog(conn: sqlite3.Connection, snapshot_id: str, table_name: str,

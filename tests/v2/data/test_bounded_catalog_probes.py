@@ -330,3 +330,36 @@ def test_linked_identifier_types_refuse_without_losing_joins(catalog, field, tab
 def test_names_refuse_without_losing_selected_table(catalog, table, where):
     catalog.execute(f"UPDATE data_{table} SET table_name=? WHERE {where}", (b"bad name",))
     refused(catalog, "MANIFEST_CORRUPT")
+
+
+@pytest.mark.parametrize("position", [1, 2])
+@pytest.mark.parametrize("value", ["\ud800", "\udfff", "private\ud800suffix", "\ud800\udfff"])
+def test_unencodable_request_refuses_before_sql(catalog, monkeypatch, position, value):
+    def forbidden(*_):
+        pytest.fail("invalid request reached catalog cursor")
+
+    monkeypatch.setattr(ScalarConnection, "cursor", forbidden)
+    args = [catalog, "s", "a", LIMITS]
+    args[position] = value
+    settings = catalog.row_factory, catalog.text_factory
+    with pytest.raises(DataError) as caught:
+        probes.probe_catalog(*args)
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert caught.value.problem.message == "invalid catalog probe configuration"
+    assert not caught.value.problem.retryable and caught.value.problem.details == {}
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+    assert catalog.in_transaction and settings == (catalog.row_factory, catalog.text_factory)
+
+
+@pytest.mark.parametrize("position", [1, 2])
+@pytest.mark.parametrize("value", ["雪", "x\0𝄞"])
+def test_utf8_request_text_remains_accepted(catalog, position, value):
+    args = [catalog, "s", "a", LIMITS]
+    args[position] = value
+    if position == 1:
+        catalog.execute("UPDATE data_snapshots SET snapshot_id=?", (value,))
+        catalog.execute("UPDATE data_snapshot_tables SET snapshot_id=?", (value,))
+    else:
+        catalog.execute("UPDATE data_snapshot_tables SET table_name=? WHERE table_name='a'", (value,))
+    result = probes.probe_catalog(*args)
+    assert (result.tables, result.catalog_fragments, result.fragments, result.partitions) == (2, 4, 2, 2)
