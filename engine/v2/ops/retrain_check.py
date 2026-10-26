@@ -64,6 +64,10 @@ def retrain_check_parameter_problems(_job: Any, params: Any) -> list[str]:
     bindings = getattr(params, "input_bindings", None)
     if not isinstance(bindings, dict) or ACCEPTANCE_FILE not in bindings:
         problems.append("input_bindings must bind acceptance.json")
+    if isinstance(bindings, dict) and not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in bindings.items()):
+        problems.append("input_bindings must map strings to strings")
     return problems
 
 
@@ -202,7 +206,7 @@ def run_retrain_check_worker(parameters, root: Path) -> dict:
         "candidate_release_hash": candidate.release_hash,
         "incumbent_release_id": incumbent_id,
         "incumbent_release_hash": incumbent.release_hash,
-        "check_candidate_release_hash": incumbent.release_hash,
+        "check_candidate_release_hash": candidate.release_hash,
         "acceptance_evidence_hash": evidence["evidence_hash"],
     }
     output = Path(root) / "retrain_check_receipt.json"

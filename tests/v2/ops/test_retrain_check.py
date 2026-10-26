@@ -84,6 +84,8 @@ def test_pool_only_check_binds_acceptance_and_model_hashes_repeatably(tmp_path, 
 
     assert second["receipt"] == first["receipt"]
     assert first["receipt"]["acceptance_evidence_hash"] == evidence["evidence_hash"]
+    assert first["receipt"]["candidate_release_hash"] != first["receipt"]["incumbent_release_hash"]
+    assert first["receipt"]["check_candidate_release_hash"] == first["receipt"]["candidate_release_hash"]
     assert first["receipt"]["result"] == "pool_only_noop"
     assert first_bytes == (attempt / "retrain_check_receipt.json").read_bytes()
     assert not (tmp_path / "store" / "deployment" / "DEPLOYED").exists()
@@ -169,6 +171,14 @@ def test_staged_manifest_hash_drift_refuses_before_receipt(tmp_path, monkeypatch
          "input_bindings": {"acceptance.json": "acceptance-job"}},
         {"expected_ids": ["retrain_check"], "release_root": "/release",
          "candidate_release_id": "candidate", "incumbent_release_id": "incumbent"},
+        retrain_check.RetrainCheckParameters(
+            expected_ids=("retrain_check",), release_root="/release",
+            candidate_release_id="candidate", incumbent_release_id="incumbent",
+            input_bindings={"acceptance.json": None}),
+        retrain_check.RetrainCheckParameters(
+            expected_ids=("retrain_check",), release_root="/release",
+            candidate_release_id="candidate", incumbent_release_id="incumbent",
+            input_bindings={"acceptance.json": "acceptance-job", "extra.json": 1}),
     ],
 )
 def test_worker_refuses_invalid_parameters_before_reads_or_receipt(tmp_path, parameters):
