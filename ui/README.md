@@ -265,13 +265,15 @@ detail-fetch failure never takes down the board (§7).
   no information. Owner: P3-4 or later, per the coordinator's 2026-09-14
   instruction that this tree is out of scope for the bridge/UI slice.
 - **Health/flags screens**: `GET /api/v1/operations` is implemented in the
-  typed client (`DataClient.getOperations`) but still not surfaced in any
-  view — the guide assigns a "dedicated full health/flags screen" to Phase
-  6 (§5.5 point 3). Unchanged from P3-3a, except the response shape itself
-  (guide §5.5 items 2-3, `engine.v2.contracts.OperationsStatus`,
+  typed client (`DataClient.getOperations`) and its live status is
+  currently shown by `ReleaseBanner`; a dedicated full health/flags screen
+  remains Phase 6 (§5.5 point 3). Unchanged from P3-3a, except the response
+  shape itself (guide §5.5 items 2-3, `engine.v2.contracts.OperationsStatus`,
   `operations_status.v1.0`): `release_id`/`attempted_release_id` (the
-  currently-served release versus the latest attempt, which differ exactly
-  when `failed_update` is true), `requested_session`/`resolved_session`
+  currently-served release versus the latest attempt — the producer flags
+  are authoritative; do not infer `failed_update` by comparing the IDs, and
+  `attempted_release_id` may be null for a terminal failure),
+  `requested_session`/`resolved_session`
   (verbatim, no re-derivation), `engineering_history` (per scheduled night:
   `occurrence`/`status` — `pass`/`fail`/`unknown`, never a fabricated
   green — /`retry_count`/`detail`) and `engineering_streak`, `conflicts`/
@@ -285,8 +287,7 @@ detail-fetch failure never takes down the board (§7).
   typed 409 `OPERATIONS_STATUS_NOT_FOR_RELEASE` (`requested_release_id`/
   `status_release_id` in `details`) rather than silently substituting a
   different release's status — useful once a screen has pinned a release
-  and polls this route later. Omitted, behavior is unchanged. `ui/src` is
-  not touched by this note; the typed client does not pass the param yet.
+  and polls this route later. Omitted, behavior is unchanged.
 - **Sort control, portfolio/book aggregates, models/explorer/derivation/
   flags screens, job submission, live refresh** — Phase 6 (guide §3.2);
   unshipped screens link to the compatibility surface, not to a stub.

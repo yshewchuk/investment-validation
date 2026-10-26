@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from checks.phase5_release_assembly import PRIOR_USABLE, PriorClass
 from engine.v2.foundation import content_hash, to_document
 from engine.v2.models import deployment
 from engine.v2.ops import pool_refresh, supervisor, training
@@ -110,8 +111,11 @@ def _write_pointer(release_root, release_id):
     (deploy / "DEPLOYED").write_bytes(_pointer_bytes(release_id))
 
 
-def _wire(monkeypatch, tmp_path, *, pointer=PRIOR):
-    """Patch every collaborator ``pool_refresh`` calls; records each call."""
+def _wire(monkeypatch, tmp_path, *, pointer=PRIOR, prior_class=None):
+    """Patch every collaborator ``pool_refresh`` calls; records each call. The fake
+    pointers carry no catalog, so the real classifier would report
+    ``NO_POOL_CATALOG``; ``classify_prior`` is stubbed to ``USABLE`` to keep the
+    carry-cycle assertions, and ``prior_class`` overrides that stub."""
     rec = SimpleNamespace(training=[], stage=[], promote=[], requests=[], submits=[])
 
     def training_plan(**kwargs):
@@ -134,12 +138,17 @@ def _wire(monkeypatch, tmp_path, *, pointer=PRIOR):
         rec.submits.append(request)
         return "receipt"
 
+    def classify_prior(_release_root, _prior_id):
+        return (prior_class if prior_class is not None else
+                PriorClass(PRIOR_USABLE, "the fake prior catalog is usable"))
+
     deploy = Path(tmp_path) / "deployment"
     pointer_file = deploy / "DEPLOYED"
     if pointer is None:
         pointer_file.unlink(missing_ok=True)
     else:
         _write_pointer(tmp_path, pointer)
+    monkeypatch.setattr(pool_refresh, "classify_prior", classify_prior)
     monkeypatch.setattr(pool_refresh.training, "training_plan", training_plan)
     monkeypatch.setattr(pool_refresh.training, "promote_plan", promote_plan)
     monkeypatch.setattr(pool_refresh.state_stage, "state_stage_plan", stage_plan)
@@ -590,6 +599,9 @@ def test_existing_promote_is_idempotent(monkeypatch, tmp_path):
 
 def test_promote_request_pins_the_code_source_implementation(monkeypatch, tmp_path):
     recorded = []
+    monkeypatch.setattr(pool_refresh, "classify_prior",
+                        lambda _root, _pid: PriorClass(PRIOR_USABLE,
+                                                     "fake prior catalog is usable"))
     monkeypatch.setattr(pool_refresh.deployment, "current_pointer",
                         lambda root: SimpleNamespace(release_id=PRIOR))
     monkeypatch.setattr(
@@ -896,6 +908,9 @@ def test_state_refs_with_only_summaries_is_a_typed_refusal(monkeypatch, tmp_path
 
 def test_real_training_planners_build_the_three_phase_plans(monkeypatch, tmp_path):
     recorded = []
+    monkeypatch.setattr(pool_refresh, "classify_prior",
+                        lambda _root, _pid: PriorClass(PRIOR_USABLE,
+                                                     "fake prior catalog is usable"))
     monkeypatch.setattr(pool_refresh.deployment, "current_pointer",
                         lambda root: SimpleNamespace(release_id=PRIOR))
 
@@ -1213,6 +1228,9 @@ def _seed_code_source(root):
 def test_promote_request_pins_the_override_code_source(monkeypatch, tmp_path):
     other_source = tmp_path / "code"
     _seed_code_source(other_source)
+    monkeypatch.setattr(pool_refresh, "classify_prior",
+                        lambda _root, _pid: PriorClass(PRIOR_USABLE,
+                                                     "fake prior catalog is usable"))
     monkeypatch.setattr(pool_refresh.deployment, "current_pointer",
                         lambda root: SimpleNamespace(release_id=PRIOR))
     recorded = []
@@ -1241,6 +1259,9 @@ def test_promote_request_pins_the_override_code_source(monkeypatch, tmp_path):
 def test_training_requests_pin_the_override_code_source(monkeypatch, tmp_path):
     other_source = tmp_path / "code"
     _seed_code_source(other_source)
+    monkeypatch.setattr(pool_refresh, "classify_prior",
+                        lambda _root, _pid: PriorClass(PRIOR_USABLE,
+                                                     "fake prior catalog is usable"))
     monkeypatch.setattr(pool_refresh.deployment, "current_pointer",
                         lambda root: SimpleNamespace(release_id=PRIOR))
     recorded = []

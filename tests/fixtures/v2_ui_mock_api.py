@@ -177,12 +177,28 @@ class MockState:
     dist_root: Path | None = None
     force_events_error: bool = False
     operations: dict = field(default_factory=lambda: {
-        "schema_version": "operations_health.v1.0",
-        "generated_at": "2026-09-14T00:00:00Z",
-        "withheld_release": None,
-        "code_budgets": {"ok": True, "first_failed_on": None, "consecutive_nights": 0,
-                         "unknown_occurrences": [], "latest": {"occurrence": "2026-09-14"},
-                         "latest_occurrence": "2026-09-14", "override": None},
+        "scope": "shadow",
+        "release_id": "r1",
+        "attempted_release_id": "r1",
+        "generated_at": "2026-10-03T23:31:00Z",
+        "requested_session": "eng-night-2026-10-03",
+        "resolved_session": "eng-night-2026-10-03",
+        "engineering_history": [
+            {"occurrence": "2026-10-03", "status": "pass", "retry_count": 0,
+             "detail": None, "schema_version": "engineering_night.v1.0"},
+        ],
+        "engineering_streak": {"ok": True, "first_failed_on": None, "consecutive_nights": 0,
+                               "unknown_occurrences": [], "latest": None, "override": None},
+        "conflicts": [],
+        "degraded_model_evidence": [],
+        "selfcheck": {"ok": True, "known": True, "detail": None},
+        "stale": False,
+        "stale_reason": None,
+        "withheld": False,
+        "withheld_reason": None,
+        "failed_update": False,
+        "failed_update_reason": None,
+        "schema_version": "operations_status.v1.0",
     })
 
     def set_current(self, release_id: str | None) -> None:

@@ -26,6 +26,9 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import expect
 
+from engine.v2.contracts import EngineeringNight, OperationsStatus
+from engine.v2.foundation import to_document
+from engine.v2.ops.health import engineering_streak_from_history
 from tests.fixtures.v2_ui_mock_api import build_default_state, serve_in_thread
 
 pytestmark = [pytest.mark.xdist_group("serial"), pytest.mark.browser]  # drives a real Playwright browser or needs node/npm (ui/ build)
@@ -66,6 +69,37 @@ def _authed_page(browser, server, base):
     return context, page
 
 
+def _operations_status(*, release_id: str | None, generated_at: str,
+                       requested_session: str, resolved_session: str,
+                       nights: list[tuple[str, str]],
+                       attempted_release_id: str | None = None,
+                       stale: bool = False, withheld: bool = False,
+                       failed_update: bool = False) -> dict:
+    """A complete, schema-valid ``operations_status.v1.0`` sidecar.
+
+    The client validates strictly (``assertOperationsStatus`` in
+    ``ui/src/api/client.ts``), so a partial document is not "unknown because
+    the board disagrees with it" -- it is rejected outright. Every fixture
+    therefore goes through the real contract types: the
+    ``engine.v2.contracts.operations.OperationsStatus`` fields, full
+    ``engineering_night.v1.0`` rows, and the ``engineering_streak`` summary
+    derived from that SAME history by the producer's own
+    :func:`engine.v2.ops.health.engineering_streak_from_history` -- the shape
+    ``engine.v2.ops.effects_graph._write_operations_status`` writes.
+    """
+    history = tuple(EngineeringNight(occurrence=occurrence, status=status,
+                                     retry_count=0, detail=None)
+                    for occurrence, status in nights)
+    return to_document(OperationsStatus(
+        scope="shadow", release_id=release_id, attempted_release_id=attempted_release_id,
+        generated_at=generated_at, requested_session=requested_session,
+        resolved_session=resolved_session, engineering_history=history,
+        engineering_streak=engineering_streak_from_history(history),
+        conflicts=(), degraded_model_evidence=(),
+        selfcheck={"ok": True, "known": True, "detail": None},
+        stale=stale, withheld=withheld, failed_update=failed_update))
+
+
 # --------------------------------------------------------------------------
 # release banner
 # --------------------------------------------------------------------------
@@ -99,18 +133,12 @@ def test_operations_status_marks_old_pinned_board_and_missing_scheduled_session(
     missing scheduled session must never read as ``current``, and the board stays
     pinned to the release it loaded even after ``current`` moves on -- asserted
     without a click or a reload."""
-    operations_status = {
-        "schema_version": "operations_status.v1.0",
-        "generated_at": "2026-09-10T00:00:00Z",
-        "release_id": "r1",
-        "attempted_release_id": "r1",
-        "requested_session": "eng-night-2026-09-10",
-        "resolved_session": "eng-night-2026-09-10",
-        "engineering_history": [{"occurrence": "2026-09-20", "status": "unknown"}],
-        "stale": False,
-        "withheld": False,
-        "failed_update": False,
-    }
+    operations_status = _operations_status(
+        release_id="r1", attempted_release_id="r1",
+        generated_at="2026-09-10T00:00:00Z",
+        requested_session="eng-night-2026-09-10",
+        resolved_session="eng-night-2026-09-10",
+        nights=[("2026-09-20", "unknown")])
     # The route reads this holder at fulfill time, so the payload can be
     # swapped mid-test and the next 100ms operations poll picks it up.
     served = {"status": operations_status}
@@ -181,18 +209,12 @@ def test_current_release_poll_failure_makes_operations_unknown(browser, server, 
     loaded board survive, nothing repins or swaps, and the next scheduled
     poll recovers on its own (no immediate browser-invented retry)."""
     state.set_current("r2")
-    status = {
-        "schema_version": "operations_status.v1.0",
-        "generated_at": "2026-10-03T23:31:00Z",
-        "release_id": "r2",
-        "attempted_release_id": "r2",
-        "requested_session": "eng-night-2026-10-03",
-        "resolved_session": "eng-night-2026-10-03",
-        "engineering_history": [{"occurrence": "2026-10-03", "status": "pass"}],
-        "stale": False,
-        "withheld": False,
-        "failed_update": False,
-    }
+    status = _operations_status(
+        release_id="r2", attempted_release_id="r2",
+        generated_at="2026-10-03T23:31:00Z",
+        requested_session="eng-night-2026-10-03",
+        resolved_session="eng-night-2026-10-03",
+        nights=[("2026-10-03", "pass")])
     problem = {
         "code": "SIMULATED_ERROR", "category": "internal", "retryable": True,
         "message": "simulated current-release poll failure", "stage": None,
@@ -254,18 +276,12 @@ def test_current_release_rollback_to_pin_clears_drift_hint(browser, server, stat
     hint clears, latest published shows r1, and only now, with pin, published
     and status all agreeing on r1, may operations be labelled current."""
     state.set_current("r2")
-    status = {
-        "schema_version": "operations_status.v1.0",
-        "generated_at": "2026-10-03T23:31:00Z",
-        "release_id": "r1",
-        "attempted_release_id": "r1",
-        "requested_session": "eng-night-2026-10-03",
-        "resolved_session": "eng-night-2026-10-03",
-        "engineering_history": [{"occurrence": "2026-10-03", "status": "pass"}],
-        "stale": False,
-        "withheld": False,
-        "failed_update": False,
-    }
+    status = _operations_status(
+        release_id="r1", attempted_release_id="r1",
+        generated_at="2026-10-03T23:31:00Z",
+        requested_session="eng-night-2026-10-03",
+        resolved_session="eng-night-2026-10-03",
+        nights=[("2026-10-03", "pass")])
     base = f"http://127.0.0.1:{server.server_port}"
     context, page = _authed_page(browser, server, base)
     page.route(
@@ -307,18 +323,12 @@ def test_malformed_or_future_resolved_session_is_unknown(browser, server, state)
     only well-formed part is a trailing ISO date, and ISO date-suffixed
     identifiers whose resolved date is later than the requested date. Neither
     may crash the page or disturb the pinned r1 board."""
-    base_status = {
-        "schema_version": "operations_status.v1.0",
-        "generated_at": "2026-10-03T23:31:00Z",
-        "release_id": "r1",
-        "attempted_release_id": "r1",
-        "requested_session": "eng-night-2026-10-03",
-        "resolved_session": "eng-night-2026-10-03",
-        "engineering_history": [{"occurrence": "2026-10-03", "status": "pass"}],
-        "stale": False,
-        "withheld": False,
-        "failed_update": False,
-    }
+    base_status = _operations_status(
+        release_id="r1", attempted_release_id="r1",
+        generated_at="2026-10-03T23:31:00Z",
+        requested_session="eng-night-2026-10-03",
+        resolved_session="eng-night-2026-10-03",
+        nights=[("2026-10-03", "pass")])
     # The route reads this holder at fulfill time, so each 100ms operations
     # poll picks up the swapped session evidence without a reload.
     served = {"status": base_status}
@@ -533,13 +543,12 @@ def _count_current_requests(page) -> list[int]:
 
 def _pinned_board_page(browser, server):
     """An r1-pinned board, frozen clock, valid r1 operations sidecar."""
-    status = {
-        "schema_version": "operations_status.v1.0", "generated_at": "2026-10-04T00:00:00Z",
-        "release_id": "r1", "attempted_release_id": "r1",
-        "requested_session": "eng-night-2026-10-03", "resolved_session": "eng-night-2026-10-03",
-        "engineering_history": [{"occurrence": "2026-10-03", "status": "pass"}],
-        "stale": False, "withheld": False, "failed_update": False,
-    }
+    status = _operations_status(
+        release_id="r1", attempted_release_id="r1",
+        generated_at="2026-10-04T00:00:00Z",
+        requested_session="eng-night-2026-10-03",
+        resolved_session="eng-night-2026-10-03",
+        nights=[("2026-10-03", "pass")])
     base = f"http://127.0.0.1:{server.server_port}"
     context, page = _authed_page(browser, server, base)
     page.route("**/api/v1/operations", lambda route: route.fulfill(

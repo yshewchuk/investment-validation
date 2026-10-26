@@ -36,6 +36,15 @@ NATIVE_DAILY_MARKET_ACCOUNT = "orats-daily-market"
 #: budget must count the maximum.
 ORATS_CALLS_PER_DAILY_MARKET_UNIT = 4
 
+#: A native score batch's ``spec_json`` is decoded only when its UTF-8 encoding
+#: is at most this many bytes (1 MiB). Full-universe plans (6000 tickers) are
+#: well under the cap; the finite ceiling rejects runaway/oversized rows before
+#: ``json.loads`` so one bad row cannot exhaust memory. Exceeding it is
+#: fail-closed: ``native_score_batch_identity`` returns ``None``. The bound is
+#: also applied in SQL (``length(CAST(spec_json AS BLOB)) <= ?``) so an
+#: oversized row is never transferred into Python in the first place.
+NATIVE_SCORE_BATCH_SPEC_MAX_BYTES = 1024 * 1024
+
 
 GRAPH = {
     "refresh": (), "finality": ("refresh",), "features": ("finality",),
@@ -1001,8 +1010,7 @@ def submit_computed_moves_refresh_if_ready(conn, registry, policy, store, *, cat
 #: (``_legacy_action("score")``).
 _LEGACY_SCORE_KIND = "legacy_score"
 
-
-def _scope_from_native_score_batch_key(idempotency_key):
+def scope_from_native_score_batch_key(idempotency_key):
     """Recover ``(as_of, scope_hash)`` from a ``native_score_batch`` job's
     idempotency key (``"nightly:<as_of>:<scope_hash>:native_score_batch"``).
 
@@ -1048,7 +1056,7 @@ def _native_parity_identity(conn):
         ("native_score_batch",)).fetchall()
     candidates = []
     for row in rows:
-        parsed = _scope_from_native_score_batch_key(row["idempotency_key"])
+        parsed = scope_from_native_score_batch_key(row["idempotency_key"])
         if parsed is None or not row["created_at"]:
             continue
         as_of, scope_hash = parsed
@@ -1212,62 +1220,97 @@ def _session_scope_from_score_key(idempotency_key):
     return session, scope_hash
 
 
-def _native_score_batch_identity(conn):
-    """Cutover PR-7a: cheap (indexed SELECT plus one small JSON decode per
-    succeeded "score" job -- no pandas scan) identity for the supervisor's
-    own sidecar (``supervisor.Service._reconcile_native_score_batch_shadow``):
-    the ``(session, scope_hash)`` of the LATEST succeeded legacy "score" job
-    -- latest SESSION first (the same "chronologically latest session,
-    never latest-UPDATED row" reasoning ``_computed_moves_identity`` already
-    documents), then, among jobs sharing that session, latest by
-    ``jobs.created_at`` -- a real time order, never by ``scope_hash``: two
-    "score" jobs in the SAME session (a legacy-mode run and a later
-    snapshot-mode rerun, say) differ only in ``scope_hash``, a content
-    hash with no time meaning, so picking by ``max(scope_hash)`` (the
-    original, wrong version of this function) picked whichever happened to
-    hash higher, not whichever ran later -- and retains that SPECIFIC job's
-    decoded ``LegacyParameters`` only when it pinned a snapshot
-    (``_stage_parameters`` only sets ``snapshot_generation_id`` when a
-    plan's ``input_mode="snapshot"``; production's own default,
-    ``"legacy"``, never does), else ``None``.
+def _native_score_batch_parameters(spec_json):
+    """Return the spec's ``parameters`` mapping when ``spec_json`` is a usable
+    text document within ``NATIVE_SCORE_BATCH_SPEC_MAX_BYTES``, else ``None``."""
+    if not isinstance(spec_json, str):
+        return None
+    try:
+        encoded = spec_json.encode("utf-8")
+    except UnicodeError:
+        return None
+    if len(encoded) > NATIVE_SCORE_BATCH_SPEC_MAX_BYTES:
+        return None
+    try:
+        document = json.loads(spec_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    parameters = document.get("parameters") or {}
+    if not isinstance(parameters, dict):
+        return None
+    return parameters
 
-    A row whose ``created_at`` is missing or blank (the schema declares the
-    column ``NOT NULL``, so this should never happen, but this function
-    never trusts a row that violates its own contract enough to crash or
-    silently win a time comparison it cannot make) is excluded from
-    consideration entirely. A ``created_at`` tie among same-session
-    candidates breaks on ``scope_hash`` alone, only to keep the result
-    deterministic -- any deterministic choice among truly-simultaneous
-    jobs is correct; ordering by ``scope_hash`` FIRST was the bug.
 
-    Returns ``None`` when no legacy "score" job has ever succeeded, or none
-    of its rows carry both a parseable idempotency key and a usable
-    ``created_at``. Otherwise the third value is the selected row's decoded
-    ``LegacyParameters`` when its ``snapshot_generation_id`` is nonempty --
-    the exact selected snapshot id, ``horizon_days`` and ``tickers`` the
-    Slice 5 sidecar needs, with no second identity query -- and ``None``
-    for a legacy/unpinned/missing snapshot.
+def native_score_batch_identity(conn):
+    """Cutover PR-7a: identity for the supervisor's own sidecar
+    (``supervisor.Service._reconcile_native_score_batch_shadow``): the
+    ``(session, scope_hash)`` of the LATEST succeeded legacy "score" job.
+
+    One SQL statement selects at most one row: parsed session
+    descending (the same "chronologically latest session, never
+    latest-UPDATED row" reasoning ``_computed_moves_identity`` already
+    documents), then ``jobs.created_at`` descending -- a real time order,
+    never by ``scope_hash``: two "score" jobs in the SAME session (a
+    legacy-mode run and a later snapshot-mode rerun, say) differ only in
+    ``scope_hash``, a content hash with no time meaning -- then
+    ``idempotency_key`` descending as a deterministic tiebreak, ``LIMIT 1``.
+    There is no all-row ``fetchall``/list/``max`` scan and no second identity
+    query.
+
+    The selected row retains its decoded ``LegacyParameters`` only when it
+    pinned a snapshot (``_stage_parameters`` only sets
+    ``snapshot_generation_id`` when a plan's ``input_mode="snapshot"``;
+    production's own default, ``"legacy"``, never does), else ``None``.
+
+    Only rows with the ``nightly:<session>:<scope>:score`` key shape, a
+    nonblank ``created_at``, and a ``spec_json`` whose ``typeof`` is
+    ``'text'`` are eligible. Full-universe plans carry a complete
+    ``expected_population`` and legitimately exceed 64 KiB (the 6000-ticker
+    fixture stays under 1 MiB), so specs are bounded at the finite ceiling
+    ``NATIVE_SCORE_BATCH_SPEC_MAX_BYTES`` (1 MiB of UTF-8): anything larger
+    is rejected before ``json.loads``. The lookup is fail-closed for a
+    missing row, a malformed key, a NULL/non-text spec, a spec over the byte
+    ceiling, or JSON that does not decode to a document, returning ``None``.
+    It never falls back to an older candidate, so one unreadable newest row
+    cannot silently resurface a stale identity.
+
+    Returns ``None`` when no legacy "score" job has ever succeeded, or when
+    the newest eligible row cannot supply a usable identity. Otherwise the
+    third value is the selected row's decoded ``LegacyParameters`` when its
+    ``snapshot_generation_id`` is nonempty -- the exact selected snapshot id,
+    ``horizon_days`` and ``tickers`` the Slice 5 sidecar needs -- and
+    ``None`` for a legacy/unpinned/missing snapshot.
     """
     from engine.v2.foundation import from_document
     from engine.v2.ops.stages import LegacyParameters
 
-    rows = conn.execute(
-        "SELECT idempotency_key, spec_json, created_at FROM jobs WHERE kind = ? AND state = 'succeeded'",
-        (_LEGACY_SCORE_KIND,)).fetchall()
-    candidates = []
-    for row in rows:
-        parsed = _session_scope_from_score_key(row["idempotency_key"])
-        if parsed is None:
-            continue
-        created_at = row["created_at"]
-        if not created_at:
-            continue
-        candidates.append((parsed[0], created_at, parsed[1], row["spec_json"]))
-    if not candidates:
+    row = conn.execute(
+        "SELECT idempotency_key, created_at, "
+        "CASE WHEN typeof(spec_json) = 'text' "
+        "AND length(CAST(spec_json AS BLOB)) <= ? "
+        "THEN spec_json ELSE NULL END AS spec_json "
+        "FROM jobs "
+        "WHERE kind = ? AND state = 'succeeded' "
+        "AND idempotency_key LIKE 'nightly:%:score' "
+        "AND instr(substr(idempotency_key, 9), ':') > 1 "
+        "AND instr(substr(idempotency_key, "
+        "9 + instr(substr(idempotency_key, 9), ':')), ':') > 1 "
+        "AND created_at IS NOT NULL AND trim(created_at) <> '' "
+        "ORDER BY substr(idempotency_key, 9, "
+        "instr(substr(idempotency_key, 9), ':') - 1) DESC, "
+        "created_at DESC, idempotency_key DESC LIMIT 1",
+        (NATIVE_SCORE_BATCH_SPEC_MAX_BYTES, _LEGACY_SCORE_KIND)).fetchone()
+    if row is None:
         return None
-    session, _, scope_hash, spec_json = max(
-        candidates, key=lambda item: (item[0], item[1], item[2]))
-    parameters = json.loads(spec_json).get("parameters") or {}
+    parsed = _session_scope_from_score_key(row["idempotency_key"])
+    if parsed is None:
+        return None
+    parameters = _native_score_batch_parameters(row["spec_json"])
+    if parameters is None:
+        return None
+    session, scope_hash = parsed
     if not parameters.get("snapshot_generation_id"):
         return session, scope_hash, None
     return session, scope_hash, from_document(LegacyParameters, parameters)
@@ -1303,7 +1346,7 @@ def submit_native_score_batch_shadow_if_ready(conn, registry, policy, store, rel
 
     if conn is None:
         return None
-    identity = _native_score_batch_identity(conn)
+    identity = native_score_batch_identity(conn)
     if identity is None:
         return None
     session, scope_hash, snapshot_pinned = identity

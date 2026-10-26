@@ -24,6 +24,98 @@ import type {
   ProblemEnvelope,
 } from "./types";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function invalidOperationsStatus(): ApiError {
+  return new ApiError(
+    500,
+    clientProblem("INVALID_OPERATIONS_STATUS", "operations status invalid"),
+  );
+}
+
+function assertOperationsStatus(value: unknown): asserts value is OperationsStatus {
+  if (!isRecord(value)) {
+    throw invalidOperationsStatus();
+  }
+  const obj = value;
+
+  const requiredStrings = ["scope", "generated_at", "requested_session", "resolved_session"];
+  for (const key of requiredStrings) {
+    if (typeof obj[key] !== "string") {
+      throw invalidOperationsStatus();
+    }
+  }
+  if (obj.schema_version !== "operations_status.v1.0") {
+    throw invalidOperationsStatus();
+  }
+
+  const stringOrNull = [
+    "release_id",
+    "attempted_release_id",
+    "stale_reason",
+    "withheld_reason",
+    "failed_update_reason",
+  ];
+  for (const key of stringOrNull) {
+    const v = obj[key];
+    if (!(typeof v === "string" || v === null)) {
+      throw invalidOperationsStatus();
+    }
+  }
+
+  const booleans = ["stale", "withheld", "failed_update"];
+  for (const key of booleans) {
+    if (typeof obj[key] !== "boolean") {
+      throw invalidOperationsStatus();
+    }
+  }
+
+  if (!Array.isArray(obj.engineering_history)) {
+    throw invalidOperationsStatus();
+  }
+  for (const row of obj.engineering_history) {
+    if (!isRecord(row)) {
+      throw invalidOperationsStatus();
+    }
+    const r = row;
+    if (typeof r.occurrence !== "string") {
+      throw invalidOperationsStatus();
+    }
+    if (r.status !== "pass" && r.status !== "fail" && r.status !== "unknown") {
+      throw invalidOperationsStatus();
+    }
+    if (
+      typeof r.retry_count !== "number" ||
+      !Number.isFinite(r.retry_count) ||
+      !Number.isInteger(r.retry_count) ||
+      r.retry_count < 0
+    ) {
+      throw invalidOperationsStatus();
+    }
+    if (r.schema_version !== "engineering_night.v1.0") {
+      throw invalidOperationsStatus();
+    }
+    if (!("detail" in r)) {
+      throw invalidOperationsStatus();
+    }
+  }
+
+  if (!isRecord(obj.engineering_streak) || Array.isArray(obj.engineering_streak)) {
+    throw invalidOperationsStatus();
+  }
+  if (!Array.isArray(obj.conflicts)) {
+    throw invalidOperationsStatus();
+  }
+  if (!Array.isArray(obj.degraded_model_evidence)) {
+    throw invalidOperationsStatus();
+  }
+  if (!("selfcheck" in obj)) {
+    throw invalidOperationsStatus();
+  }
+}
+
 /**
  * `status` is the HTTP response's own status code -- the real `Problem`
  * body carries no `status` alias (see `ProblemEnvelope`'s doc comment), so
@@ -192,7 +284,10 @@ export function createHttpDataClient(basePath = "/api/v1"): DataClient {
       return getJson<LegacyScoreBridge>(`${basePath}/scores/${encodeURIComponent(scoreId)}${search}`, signal);
     },
     getOperations(signal) {
-      return getJson<OperationsStatus>(`${basePath}/operations`, signal);
+      return getJson<unknown>(`${basePath}/operations`, signal).then((raw) => {
+        assertOperationsStatus(raw);
+        return raw;
+      });
     },
     getNativeParity(signal) {
       return getJson<NativeParitySummary>(`${basePath}/native_parity`, signal);

@@ -761,34 +761,135 @@ class Service:
                           "problem": {field: to_document(problem)[field]
                                       for field in ("code", "category", "retryable", "message")}}))
 
-    def _report_native_release_problem(self, detail_code, message):
-        """Dedup-by-(code, message) report for a release-unavailable
-        outcome (MissingReleaseRoot, an unreadable pointer file,
-        ModelNotReady, NoCurrentRelease, or "nothing ever promoted") --
-        the identical dedup pattern _report_computed_moves_problem uses.
-        Takes a plain (detail_code, message) pair rather than an exception
-        because deployment.py/release_bindings.py raise plain ValueError
-        subclasses, never OpsError, and NoCurrentRelease carries no .code
-        attribute at all (Cutover PR-7a). The unregistered deployment-layer
-        detail_code is folded into the message text of an always-registered
-        VALIDATION_FAILED problem rather than passed to make_problem as its
-        code."""
-        problem = make_problem("VALIDATION_FAILED", f"{detail_code}: {message}")
-        problem_key = (problem.code, problem.message)
+    def _report_native_release_problem(self, detail_code, message, *, occurrence, scope_hash):
+        """Persist and deduplicate a typed native stage release failure."""
+        problem = make_problem(
+            "MODEL_NOT_READY", "native score batch release binding is unavailable",
+            details={"reason": detail_code})
+        stamp = format_timestamp(self.clock.now())
+        problem_json = json.dumps(to_document(problem), sort_keys=True, separators=(",", ":"))
+        try:
+            existing = self.conn.execute(
+                "SELECT resolved_at FROM native_stage_failures "
+                "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
+                (occurrence, scope_hash, "native_score_batch")).fetchone()
+            if existing is None:
+                with transaction(self.conn):
+                    self.conn.execute(
+                        """INSERT INTO native_stage_failures
+                           (occurrence, scope_hash, stage_id, status, error_code,
+                            problem_json, created_at, updated_at)
+                           VALUES (?, ?, ?, 'FAILED', ?, ?, ?, ?)
+                           ON CONFLICT(occurrence, scope_hash, stage_id) DO NOTHING""",
+                        (occurrence, scope_hash, "native_score_batch", problem.code,
+                         problem_json, stamp, stamp))
+            elif existing["resolved_at"] is not None:
+                # A new failure after recovery must become current health again:
+                # reopen the retained history row rather than leaving it resolved.
+                with transaction(self.conn):
+                    self.conn.execute(
+                        """UPDATE native_stage_failures
+                           SET status = 'FAILED', error_code = ?, problem_json = ?,
+                               updated_at = ?, resolved_at = NULL
+                           WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?""",
+                        (problem.code, problem_json, stamp, occurrence, scope_hash,
+                         "native_score_batch"))
+        except Exception as exc:
+            print(json.dumps({"event": "native_stage_failure_persistence_failed",
+                              "occurrence": occurrence,
+                              "stage_id": "native_score_batch",
+                              "problem_code": problem.code,
+                              "exception_type": type(exc).__name__}))
+        problem_key = (problem.code, problem.message, occurrence)
         if problem_key == self._last_native_release_problem:
             return
         self._last_native_release_problem = problem_key
         print(json.dumps({"event": "native_score_batch_release_unavailable",
+                          "reason": detail_code,
                           "problem": {field: to_document(problem)[field]
                                       for field in ("code", "category", "retryable", "message")}}))
 
-    def _native_release_root_or_none(self):
+    def _resolve_native_stage_failures(self, occurrence, scope_hash):
+        """Mark the unresolved ``native_score_batch`` failure for one
+        occurrence and scope resolved with a single timestamp and transaction.
+        Failure rows are keyed by occurrence and scope, so resolving one must
+        not clear a different occurrence that merely reused the same scope.
+        Catalog history is kept: the rows stay, only ``resolved_at`` is set. A
+        persistence failure is logged and leaves the rows unresolved, exactly
+        like the reporter's own failure path."""
+        stamp = format_timestamp(self.clock.now())
+        try:
+            with transaction(self.conn):
+                self.conn.execute(
+                    "UPDATE native_stage_failures SET resolved_at = ? "
+                    "WHERE occurrence = ? AND scope_hash = ? "
+                    "AND stage_id = 'native_score_batch' "
+                    "AND resolved_at IS NULL",
+                    (stamp, occurrence, scope_hash))
+        except Exception as exc:
+            print(json.dumps({"event": "native_stage_failure_resolution_failed",
+                              "occurrence": occurrence,
+                              "scope_hash": scope_hash,
+                              "stage_id": "native_score_batch",
+                              "exception_type": type(exc).__name__}))
+
+    def _native_score_batch_identity_from_claim(self, claim):
+        """Recover ``(occurrence, scope_hash)`` from a claimed
+        ``native_score_batch`` job's own idempotency key, or ``None`` for any
+        other kind or an unreadable row. The SELECT and parser are contained
+        here: a closed connection or malformed key logs a bounded structured
+        stderr event and returns ``None`` so the caller's failure recording
+        still runs."""
+        if claim.spec.kind != "native_score_batch":
+            return None
+        try:
+            row = self.conn.execute("SELECT idempotency_key FROM jobs WHERE job_id = ?",
+                                    (claim.job_id,)).fetchone()
+            if row is None:
+                return None
+            from engine.v2.ops.nightly import scope_from_native_score_batch_key
+
+            return scope_from_native_score_batch_key(row["idempotency_key"])
+        except Exception as exc:
+            print(json.dumps({"event": "native_stage_identity_from_claim_failed",
+                              "job_id": claim.job_id,
+                              "exception_type": type(exc).__name__}),
+                  file=sys.stderr)
+            return None
+
+    def _report_native_worker_release_problem(self, claim, problem):
+        """A worker-side release refusal must leave the same durable row the
+        sidecar writes. An existing native job does not skip release re-check
+        or reconciliation; the idempotent submit path handles the existing
+        job. The terminal failure path records the refusal directly from the
+        job's idempotency key, with a fixed safe reason code."""
+        if problem.code != "MODEL_NOT_READY":
+            return
+        parsed = self._native_score_batch_identity_from_claim(claim)
+        if parsed is None:
+            return
+        occurrence, scope_hash = parsed
+        self._report_native_release_problem(
+            "WORKER_MODEL_NOT_READY",
+            "native score batch worker release binding is unavailable",
+            occurrence=occurrence, scope_hash=scope_hash)
+
+    def _resolve_native_score_batch_success(self, claim):
+        """A succeeded ``native_score_batch`` worker proves the release is
+        usable for its own occurrence and scope, so clear only the matching
+        unresolved row left by an earlier failed attempt."""
+        parsed = self._native_score_batch_identity_from_claim(claim)
+        if parsed is not None:
+            occurrence, scope_hash = parsed
+            self._resolve_native_stage_failures(occurrence, scope_hash)
+
+    def _native_release_root_or_none(self, *, occurrence, scope_hash):
         """Cutover PR-7a: the cheap release-identity gate -- see
-        ARCHITECTURE.md "Inputs"/"Cutover PR-7a's input sourcing". Runs on
-        EVERY tick, unconditionally, ahead of and independent of
-        self._native_score_batch_memo's own backoff -- a release-unavailable
-        outcome here NEVER touches that memo (R2: it must not count as one
-        of ITS spent attempts).
+        ARCHITECTURE.md "Inputs"/"Cutover PR-7a's input sourcing". Called only
+        after an eligible identity has been selected, not on every tick; it runs
+        ahead of and independent of self._native_score_batch_memo's own backoff --
+        a release-unavailable outcome here NEVER touches that memo (R2: it must
+        not count as one of ITS spent attempts).
 
         Three calls, gated in two stages: deployment.production_release_root()
         (one os.environ read) and deployment.current_pointer() against this
@@ -805,45 +906,77 @@ class Service:
         Returns the verified release root as a plain path string, or None
         when unavailable for any reason."""
         from engine.v2.models import deployment
-        from engine.v2.scoring import release_bindings
 
         try:
             root = deployment.production_release_root()
         except deployment.MissingReleaseRoot as exc:
-            self._report_native_release_problem("MISSING_RELEASE_ROOT", str(exc))
+            self._report_native_release_problem(
+                "MISSING_RELEASE_ROOT", str(exc),
+                occurrence=occurrence, scope_hash=scope_hash)
             return None
         try:
             pointer = deployment.current_pointer(root / "deployment")
         except (OSError, ValueError):
             self._report_native_release_problem(
-                "MODEL_NOT_READY", "the deployment pointer could not be read")
+                "MODEL_NOT_READY", "the deployment pointer could not be read",
+                occurrence=occurrence, scope_hash=scope_hash)
             return None
         if pointer is None:
             self._report_native_release_problem(
-                "NO_CURRENT_RELEASE", "no release has ever been promoted at this release root")
+                "NO_CURRENT_RELEASE", "no release has ever been promoted at this release root",
+                occurrence=occurrence, scope_hash=scope_hash)
             return None
         memo = self._native_release_memo
         if (memo is not None and memo["root"] == str(root)
                 and memo["release_id"] == pointer.release_id):
-            self._last_native_release_problem = None
-            return str(root) if memo["ok"] else None
+            if memo["ok"]:
+                self._last_native_release_problem = None
+                return str(root)
+            self._report_native_release_problem(
+                memo.get("error_code", "MODEL_NOT_READY"),
+                "the release is unavailable",
+                occurrence=occurrence, scope_hash=scope_hash)
+            return None
+        if not self._verify_native_release_binding(root, pointer, occurrence, scope_hash):
+            return None
+        return str(root)
+
+    def _verify_native_release_binding(self, root, pointer, occurrence, scope_hash):
+        """Run the expensive release verification and persist any refusal. A
+        ``NoCurrentRelease`` maps to reason ``NO_CURRENT_RELEASE``; a named
+        ``ModelNotReady`` keeps its own code. A persistence failure here leaves
+        the memo unavailable but does not raise out of the tick."""
+        from engine.v2.scoring import release_bindings
+
         try:
             release_bindings.resolve_production_release_binding()
-        except (release_bindings.ModelNotReady, release_bindings.NoCurrentRelease) as exc:
+        except release_bindings.NoCurrentRelease as exc:
+            error_code = "NO_CURRENT_RELEASE"
             self._native_release_memo = {"root": str(root), "release_id": pointer.release_id,
-                                         "ok": False}
-            self._report_native_release_problem(getattr(exc, "code", "MODEL_NOT_READY"), str(exc))
-            return None
+                                         "ok": False, "error_code": error_code}
+            self._report_native_release_problem(
+                error_code, str(exc),
+                occurrence=occurrence, scope_hash=scope_hash)
+            return False
+        except release_bindings.ModelNotReady as exc:
+            error_code = getattr(exc, "code", "MODEL_NOT_READY")
+            self._native_release_memo = {"root": str(root), "release_id": pointer.release_id,
+                                         "ok": False, "error_code": error_code}
+            self._report_native_release_problem(
+                error_code, str(exc),
+                occurrence=occurrence, scope_hash=scope_hash)
+            return False
         except Exception:
             self._native_release_memo = {"root": str(root), "release_id": pointer.release_id,
-                                         "ok": False}
+                                         "ok": False, "error_code": "MODEL_NOT_READY"}
             self._report_native_release_problem(
-                "MODEL_NOT_READY", "release verification failed")
-            return None
+                "MODEL_NOT_READY", "release verification failed",
+                occurrence=occurrence, scope_hash=scope_hash)
+            return False
         self._native_release_memo = {"root": str(root), "release_id": pointer.release_id,
                                      "ok": True}
         self._last_native_release_problem = None
-        return str(root)
+        return True
 
     def _native_score_batch_backoff(self, memo, now):
         """Cutover PR-7a: identical schedule to _computed_moves_backoff,
@@ -1015,45 +1148,41 @@ class Service:
             self._computed_moves_backoff(memo, now)
 
     def _native_score_batch_identity_or_none(self, now):
-        """The two CHEAP checks (plain indexed SELECTs, no pandas scan)
+        """The CHEAP lookup (a plain indexed SELECT, no pandas scan)
         _reconcile_native_score_batch_shadow needs every tick --
-        nightly._native_score_batch_identity (the specific succeeded
-        "score" job to key off, and whether it pinned a snapshot) and
-        whether a job already exists under that identity's key -- split
+        nightly.native_score_batch_identity (the specific succeeded
+        "score" job to key off, and whether it pinned a snapshot) -- split
         out to mirror _computed_moves_identity_or_none's own shape and
         failure semantics exactly (CodeRabbit round 6, real finding: an
-        earlier draft ran both checks with no not_before gate at all, so a
+        earlier draft ran the lookup with no not_before gate at all, so a
         persistently-raising lookup -- a locked database, a malformed
         spec_json -- ran on EVERY tick forever, and its failure was folded
         into whatever real identity's build-attempt memo happened to be
         cached, silently spending that identity's own attempt budget on an
         unrelated lookup failure).
 
-        Returns the real identity tuple when the caller should proceed, or
-        None when it should return immediately -- covering a throttled
-        prior lookup failure (still inside its own not_before), a caught
-        exception (reported and backed off here, in a SEPARATE memo slot
-        (self._native_score_batch_lookup_memo), never touching
-        self._native_score_batch_memo's own real-identity attempt
-        count), "no identity
-        yet", and "already submitted" (a job exists under that key); the
-        last two clear self._native_score_batch_memo themselves. A
-        successful lookup -- whatever it returns -- always resets
+        Returns the latest eligible identity tuple when the caller should
+        proceed, or None when it should return immediately -- covering a
+        throttled prior lookup failure (still inside its own not_before),
+        a caught exception (reported and backed off here, in a SEPARATE
+        memo slot (self._native_score_batch_lookup_memo), never touching
+        self._native_score_batch_memo's own real-identity attempt count),
+        and "no identity yet"; "no identity yet" clears
+        self._native_score_batch_memo itself. It returns the latest
+        eligible identity regardless of whether the native batch job
+        exists, because the caller must still run release reconciliation;
+        the idempotent submit path handles an existing job. A successful
+        lookup -- whatever it returns -- always resets
         self._native_score_batch_lookup_memo to None, so a later failure
         starts a fresh backoff sequence rather than resuming an old
         one."""
-        from engine.v2.ops.nightly import _native_score_batch_identity, _native_score_batch_key
-        from engine.v2.ops.submission import job_id_for
+        from engine.v2.ops.nightly import native_score_batch_identity
 
         lookup_memo = self._native_score_batch_lookup_memo
         if lookup_memo is not None and now < lookup_memo["not_before"]:
             return None
         try:
-            identity = _native_score_batch_identity(self.conn)
-            exists = identity is not None and self.conn.execute(
-                "SELECT 1 FROM jobs WHERE job_id = ?",
-                (job_id_for("shadow", _native_score_batch_key(identity[0], identity[1])),)
-            ).fetchone() is not None
+            identity = native_score_batch_identity(self.conn)
         except Exception as exc:
             lookup_memo = lookup_memo or {"attempts": 0, "not_before": 0.0}
             lookup_memo["attempts"] += 1
@@ -1064,7 +1193,7 @@ class Service:
             return None
         self._last_native_score_batch_problem = None
         self._native_score_batch_lookup_memo = None
-        if identity is None or exists:
+        if identity is None:
             self._native_score_batch_memo = None
             return None
         return identity
@@ -1076,15 +1205,18 @@ class Service:
         See nightly.submit_native_score_batch_shadow_if_ready and ARCHITECTURE.md
         "Outputs"/"Failure semantics" for the full account.
 
-        R2 (two independent memos): _native_release_root_or_none runs FIRST, every
-        tick, and a release-unavailable outcome NEVER touches
-        self._native_score_batch_memo's own attempt count;
-        _native_score_batch_identity_or_none runs next into its OWN
-        self._native_score_batch_lookup_memo, never conflated with a real
-        identity's build-attempt count. Only past both does this method reach the
-        SAME bounded backoff schedule _reconcile_computed_moves_refresh uses.
-        Past the memo gate a snapshot-pinned identity submits the identity and
-        producer parameters; raw-row production and its complete
+        identity lookup runs first and returns without a release check when no
+        eligible identity exists or the identity is not snapshot-pinned
+        (`producer_parameters is None`); otherwise release binding is checked.
+        An existing native job does not skip release re-check or reconciliation;
+        the idempotent submit path handles the existing job. A
+        release-unavailable result never consumes `_native_score_batch_memo`
+        attempts; identity lookup continues to use its separate
+        `_native_score_batch_lookup_memo`. After release binding succeeds, the
+        worker submission uses the SAME bounded backoff schedule
+        _reconcile_computed_moves_refresh uses; release checks are not backed
+        off. Past the memo gate a snapshot-pinned identity submits the identity
+        and producer parameters; raw-row production and its complete
         event/refusal documents run in the native worker; every exception is
         caught and reported the same redacted way _reconcile_publication_status
         reports its own, never crashing the tick."""
@@ -1093,13 +1225,16 @@ class Service:
         from engine.v2.ops.submission import NamespacePolicy
 
         now = self.clock.monotonic()
-        release_root = self._native_release_root_or_none()
-        if release_root is None:
-            return
         identity = self._native_score_batch_identity_or_none(now)
         if identity is None:
             return
-        session, _scope_hash, producer_parameters = identity
+        session, scope_hash, producer_parameters = identity
+        if producer_parameters is None:
+            return
+        release_root = self._native_release_root_or_none(
+            occurrence=session, scope_hash=scope_hash)
+        if release_root is None:
+            return
         memo = self._native_score_batch_memo
         if memo is None or memo["identity"] != identity:
             memo = {"identity": identity, "attempts": 0, "not_before": 0.0}
@@ -1781,7 +1916,10 @@ class Service:
         except Exception as exc:
             problem = (exc.problem if isinstance(exc, OpsError)
                        else self._completion_problem(claim, exc))
+            self._report_native_worker_release_problem(claim, problem)
             self._record_failure(claim, status, problem)
+        else:
+            self._resolve_native_score_batch_success(claim)
         finally:
             self._progress_state.pop(claim.attempt_id, None)
 

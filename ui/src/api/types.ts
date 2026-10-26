@@ -127,18 +127,47 @@ export interface LegacyScoreBridge {
 /** `EngineeringStatus`, contracts/operations.py. */
 export type EngineeringNightStatus = "pass" | "fail" | "unknown";
 
-/** UI-consumed subset of the `operations_status.v1.0` `/api/v1/operations` sidecar,
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonObject
+  | JsonValue[];
+
+export interface JsonObject {
+  [key: string]: JsonValue;
+}
+
+/** One `engineering_history` row (`engineering_night.v1.0`). */
+export interface OperationsStatusEngineeringHistoryRow {
+  occurrence: string;
+  status: EngineeringNightStatus;
+  retry_count: number;
+  detail: JsonValue;
+  schema_version: "engineering_night.v1.0";
+}
+
+/** Complete `operations_status.v1.0` `/api/v1/operations` sidecar,
  *  distinct from `operations_health.v1.0` `/health.json`. */
 export interface OperationsStatus {
-  generated_at: string;
+  scope: string;
   release_id: string | null;
   attempted_release_id: string | null;
+  generated_at: string;
   requested_session: string;
   resolved_session: string;
-  engineering_history: Array<{ occurrence: string; status: EngineeringNightStatus }>;
+  engineering_history: OperationsStatusEngineeringHistoryRow[];
+  engineering_streak: JsonObject;
+  conflicts: JsonValue[];
+  degraded_model_evidence: JsonValue[];
+  selfcheck: JsonValue;
   stale: boolean;
+  stale_reason: string | null;
   withheld: boolean;
+  withheld_reason: string | null;
   failed_update: boolean;
+  failed_update_reason: string | null;
   schema_version: "operations_status.v1.0";
 }
 

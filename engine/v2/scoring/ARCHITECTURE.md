@@ -26,12 +26,15 @@ are consumed today by `engine.v2.ops.native_score_batch.py`'s
 submits a `native_score_batch` job when an eligible pinned-snapshot identity
 has staged producer inputs (cutover PR-6, `engine/v2/ops/ARCHITECTURE.md`).
 Separately, the same tick loop's
-cheap release-identity gate runs every tick, and calls
+cheap release-identity gate runs only after an eligible snapshot-pinned
+native score batch identity is selected, and calls
 `release_bindings.resolve_production_release_binding()` — which
-hash-verifies every model file — whenever the release root/id it sees has
-changed since the last tick (memo-gated: skipped on repeat ticks once that
-identity's already been resolved, success or refusal), independent of the
-`native_score_batch` job (see Dependencies).
+hash-verifies every model file — whenever the release root/id it sees is not
+the pair it last fully resolved or refused (memo-gated on that exact pair:
+no re-verification on repeat ticks once resolved, success or refusal, though
+a cached refusal still records the stage failure for each newly eligible
+occurrence), ahead of and independent of the job's own submission memo
+(see Dependencies).
 
 ## Primary contracts and public interfaces
 
@@ -394,13 +397,14 @@ machine-checked consumers allowlist by design. `engine.v2.ops.native_score_batch
 and calls `resolve_release_binding` from its `native_score_batch` job
 worker, and `engine.v2.ops.supervisor.py`'s tick loop (Cutover PR-7a) submits
 that job for eligible pinned-snapshot identities (`engine/v2/ops/
-ARCHITECTURE.md`'s "Cutover PR-7a"). Separately, the same tick loop runs a
-cheap release-identity check every tick and calls
-`release_bindings.resolve_production_release_binding()` live whenever that
-identity changes (memo-gated: skipped on repeat ticks once the current
-release root/id has already been resolved, success or refusal) — a
-release-readiness check that runs independently of whether the job is
-submitted.
+ARCHITECTURE.md`'s "Cutover PR-7a"). Separately, once an
+eligible snapshot-pinned identity is selected the same tick loop runs a
+cheap release-identity check and calls
+`release_bindings.resolve_production_release_binding()` whenever the current
+release root/id is not the pair it last fully resolved or refused
+(memo-gated: no re-verification on repeat ticks once resolved, success or
+refusal) — a release-readiness check that runs ahead of, and never consumes,
+the job's own submission backoff.
 
 ## External systems and libraries
 

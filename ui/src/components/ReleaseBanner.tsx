@@ -111,7 +111,6 @@ export function ReleaseBanner({
   let observed = "observation unavailable";
   if (status !== null && !operationsLoading && !operationsUnavailable) {
     observed = timed ? `observed ${age}` : "observation time unknown";
-    if (status.schema_version !== "operations_status.v1.0") addUnknownReason("unexpected operations status schema");
     if (!timed) addUnknownReason("observation time is invalid or in the future");
     else if (now - at > 86_400_000) addKnownReason(`observation is older than 24 hours (${age})`);
     if (described === "unavailable") addUnknownReason("health/status-described release identity unavailable");

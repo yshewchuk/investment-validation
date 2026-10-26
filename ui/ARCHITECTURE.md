@@ -12,6 +12,38 @@ Its presentation scope includes the legacy dashboard views still awaiting migrat
 `src/api/client.ts` is the sole fetch boundary to the authenticated serving API.
 Wire shapes and shipped views are detailed in the [README](README.md).
 
+## Operations status contract (`GET /api/v1/operations`)
+
+One JSON object produced by ops (`OperationsStatus`, `engine/v2/contracts/operations.py`), served as a plain untyped document by `engine/v2/serving/api.py` from the scope-root `operations_status.json`; producer field names are the keys and tuples are arrays. The document always describes the scope's current state, never a pinned release. The successful 200 `GET /api/v1/operations` response carries `Cache-Control: no-store`; a supplied `?release_id=` differing from the document's own `release_id` is a typed 409, and a missing, symlinked, non-object, unparseable or unsupported-schema file is a typed retryable 503 — error responses are `Problem` envelopes and no `no-store` header is promised for them. The typed client validates required fields, nullability/types, history row schema and flags, and a client-side schema rejection renders unknown/unavailable and clears status evidence without moving the board pin; the existing operations presentation validates session-date form and ordering as separately described under Failure semantics. The typed client treats malformed or missing documents as unknown, never current.
+
+Top-level fields — all always present; nullability is the wire value:
+
+| Field | Type | Nullable | Notes |
+|---|---|---|---|
+| `scope` | string | no | publication scope this sidecar describes |
+| `release_id`, `attempted_release_id` | string | yes | `release_id` is the release current after this write (the new one on success, the unchanged prior one on a failed update, `null` if none has ever published); `attempted_release_id` is this attempt's own candidate id, whether or not it became current, or `null` when the attempt failed before any publication candidate existed |
+| `generated_at`, `requested_session`, `resolved_session` | string | no | write timestamp; `YYYY-MM-DD` session dates |
+| `engineering_history` | array | no | `EngineeringNight` rows, oldest first; below |
+| `engineering_streak` | JSON object | no | summary derived from that same history; carried, never re-derived |
+| `conflicts`, `degraded_model_evidence` | JSON arrays | no | the render job's `calendar_date_conflict` / `model_evidence_stale` flags carried from the bound render bundle, never reconstructed |
+| `selfcheck` | JSON value | yes | required field; the bound `selfcheck.json` carried verbatim, including JSON `null` if present — the producer's missing-binding shape is the explicit unknown `{"ok": null, "known": false, "detail": ...}`, and `null` itself is never evidence of success |
+| `stale`, `stale_reason` | boolean, string | no, yes | stale when the current release was not updated by the latest attempt |
+| `withheld`, `withheld_reason` | boolean, string | no, yes | describes a staged candidate not eligible for publication |
+| `failed_update`, `failed_update_reason` | boolean, string | no, yes | display rule below |
+| `schema_version` | string | no | exactly `operations_status.v1.0` |
+
+`engineering_history` rows (`EngineeringNight`):
+
+| Field | Type | Nullable | Notes |
+|---|---|---|---|
+| `occurrence` | string | no | `YYYY-MM-DD` scheduled night |
+| `status` | `pass` / `fail` / `unknown` | no | a scheduled night with no recorded observation is `unknown`, never rendered green |
+| `retry_count` | integer | no | extra observations of this SAME occurrence — never a count of nights |
+| `detail` | JSON value | yes | the observation receipt, or `null` |
+| `schema_version` | string | no | exactly `engineering_night.v1.0` |
+
+Failed-update display: `failed_update` and `stale` are explicit producer flags, and the UI validates and displays these flags rather than inferring the outcome from nullable identifiers. For a failed publication with a candidate, `attempted_release_id` names that candidate while `release_id` remains the unchanged current release; for a terminal failure with no candidate, `attempted_release_id` is `null`.
+
 ## Inputs
 
 Saved JSON release metadata, paginated events, score details and operations data
@@ -59,7 +91,9 @@ cookie. Build output is static assets; serving those bytes is transport.
 | Current release changes | Announce only; reload opts in. Cache keys retain explicit release pin. |
 | Release-current polling | Default 30 seconds (`?pollMs=` test override); hidden tabs make no calls; becoming visible runs one check; requests never overlap. Only the latest request may replace publication evidence; a failed latest read clears identity and drift to unknown, a successful rollback to the pin clears drift, and operations status uses only the latest successful identity. The pin never moves, and failures wait for the next unchanged interval without immediate retry. |
 | Operations status | Show its observation age, requested/resolved sessions, engineering history (including scheduled `unknown` occurrences), latest attempt outcome, its described release, the board pin, and the latest published release separately. More than 24 hours old is stale; a scheduled `unknown` or `fail` observation is never current. Requested/resolved session dates must use the producer's `YYYY-MM-DD` form or the UI's `eng-night-YYYY-MM-DD` form, be valid calendar dates, and resolved must not be later than requested. Never label the board current unless its pin equals the latest successful current-release discovery. |
-| Missing, malformed, stale-session, or wrong-release operations status | Show unknown/stale with the observation age and reason; absent or malformed session dates, unrecognized session prefixes, resolved sessions later than requested, and unavailable publication identity are unknown. Do not turn a failed read into current. A status release mismatch never repins the board. |
+| Serving refusal for operations status (401, release-pin 409, or 503) | Show unknown/unavailable with no observation evidence; retain the board and pin. The refusal is a serving `Problem` response. |
+| Client schema rejection for operations status | A malformed successful payload is rejected by the typed client; the app clears status evidence and shows unknown/unavailable without an age, attempt, or status-described identity. The board pin stays in place. |
+| Valid but stale-session or wrong-identity operations status | Show the valid observation age and reason; malformed session dates, unrecognized session prefixes, resolved sessions later than requested, or unavailable publication identity are unknown. Do not turn a failed read into current. A status release mismatch never repins the board. |
 | Parity loading, 401 or `no_report` | Explicit loading/auth/no-report state, independent of release resolution; no-report rendering reads status only. |
 | Parity `stale` | Banner with saved identity, counts and refusal reasons still shown. |
 | Parity `unavailable` | Explicit error; failed data is withheld, never presented as an empty comparison. |

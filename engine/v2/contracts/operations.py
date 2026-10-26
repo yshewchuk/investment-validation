@@ -100,6 +100,10 @@ FAILURE_CODES: dict[str, tuple[str, bool]] = {
     # head yet is a dependency that may resolve on its own once the pending
     # commit lands, not a permanent failure (§10 build_comparison_receipt).
     "SNAPSHOT_NOT_READY": ("dependency", True),
+    # The native nightly stage cannot bind the promoted release: a dependency
+    # failure that a retry of the same binding cannot repair, only a release or
+    # promotion change can.
+    "MODEL_NOT_READY": ("dependency", False),
     "VALIDATION_FAILED": ("validation", False),
     "PUBLICATION_REFUSED": ("validation", False),
     "IDEMPOTENCY_CONFLICT": ("validation", False),

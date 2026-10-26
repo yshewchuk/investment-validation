@@ -60,6 +60,12 @@ class PromoteParameters:
     #: ``CONCURRENT_PROMOTE`` unless the live pointer names this release.
     #: ``None`` keeps the unguarded behavior.
     expected_previous_release_id: str | None = None
+    #: Optional bootstrap empty-store guard forwarded to
+    #: ``deployment.promote``: refuses ``CONCURRENT_PROMOTE`` unless nothing is
+    #: deployed (already-live target stays the no-op). Mutually exclusive with
+    #: ``expected_previous_release_id``; omitted from non-bootstrap plans so their
+    #: recorded ``spec_hash`` stays unchanged.
+    require_empty_store: bool = False
     input_bindings: dict[str, str] | None = None
 
 
@@ -348,7 +354,7 @@ def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategi
 
 
 def promote_plan(*, release_root, release_id,
-                 expected_previous_release_id=None) -> dict:
+                 expected_previous_release_id=None, require_empty_store=False) -> dict:
     """Build an operator-submitted ``models_promote`` plan. An empty
     ``release_root`` resolves ``engine.v2.models.deployment.
     production_deployment_root()`` (config key ``MODEL_RELEASE_ROOT``,
@@ -356,13 +362,20 @@ def promote_plan(*, release_root, release_id,
     docstring) here, at plan time -- a missing key is ``INVALID_REQUEST``
     and never reaches the worker with an empty root. An operator may also
     pass ``expected_previous_release_id`` (the optional expected-incumbent
-    guard); ``None`` keeps the unguarded behavior."""
+    guard); ``None`` keeps the unguarded behavior. ``require_empty_store`` is
+    the bootstrap empty-store guard; a plan setting both guards is refused
+    ``INVALID_REQUEST`` (as ``run_promote_worker`` and ``deployment.promote``
+    enforce). Omitted from a non-bootstrap plan, so existing ``spec_hash``es
+    are unchanged."""
     from engine.v2.foundation import content_hash
     from engine.v2.models import deployment
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 
     if not release_id:
         raise fail("INVALID_REQUEST", "promote plan needs a release id")
+    if require_empty_store and expected_previous_release_id is not None:
+        raise fail("INVALID_REQUEST", "promote plan cannot set both the empty-store "
+                   "and the expected-incumbent guard")
     if not release_root:
         try:
             release_root = deployment.production_deployment_root()
@@ -376,11 +389,16 @@ def promote_plan(*, release_root, release_id,
     profile = profile_named(DEFAULT_POLICY, "delivery")
     params = PromoteParameters(expected_ids=("models_promote",), release_root=release_root,
                                release_id=release_id,
-                               expected_previous_release_id=expected_previous_release_id)
+                               expected_previous_release_id=expected_previous_release_id,
+                               require_empty_store=bool(require_empty_store))
+    # Omit a false key: a non-bootstrap plan's spec_hash stays byte-identical.
+    parameters = vars(params)
+    if not require_empty_store:
+        del parameters["require_empty_store"]
     root3 = Path(__file__).resolve().parents[3]
     return {"schema_version": "operations_plan.v1.0", "kind": "promote", "mode": "shadow",
-            "effects": ["staged"], "parameters": vars(params), "input_refs": [],
-            "blocked_prerequisites": [], "spec_hash": content_hash(vars(params)),
+            "effects": ["staged"], "parameters": parameters, "input_refs": [],
+            "blocked_prerequisites": [], "spec_hash": content_hash(parameters),
             "implementation_ref": content_hash(worker_source_manifest(root3)),
             "environment_ref": content_hash(
                 environment_identity(profile.thread_count or profile.cpu_count)),
@@ -619,15 +637,27 @@ def run_promote_worker(parameters, root) -> dict:
     job) can only ever succeed against a release that was staged and marked
     successful first. Its callers are operator ``submit``s and the
     pool-nightly sidecar (``engine/v2/ops/pool_refresh.py``).
+
+    ``require_empty_store`` (``.get`` default: pre-bootstrap plans lack the key)
+    is forwarded to the swap. A document setting both it and
+    ``expected_previous_release_id`` is malformed, refused the same typed
+    ``INVALID_REQUEST`` as every other param error -- unchecked, the
+    mutual-exclusion ``ValueError`` would only reach the operator through the
+    harness's generic ``VALIDATION_FAILED`` flattening.
     """
     from engine.v2.foundation import to_document
     from engine.v2.models import deployment
 
+    if (parameters.get("require_empty_store", False)
+            and parameters.get("expected_previous_release_id") is not None):
+        raise fail("INVALID_REQUEST", "promote parameters set both the empty-store "
+                   "and the expected-incumbent guard")
     try:
         state = deployment.promote(
             Path(parameters["release_root"]), parameters["release_id"],
             expected_previous_release_id=parameters.get(
-                "expected_previous_release_id"))
+                "expected_previous_release_id"),
+            require_empty_store=parameters.get("require_empty_store", False))
     except deployment.DeploymentError as exc:
         raise fail("VALIDATION_FAILED", "promote refused",
                    details={"exception_class": type(exc).__name__}) from exc

@@ -187,3 +187,71 @@ def test_current_pointer_refuses_a_deployed_symlink(tmp_path):
 
 def test_current_pointer_returns_none_when_deployed_is_missing(tmp_path):
     assert deployment.current_pointer(tmp_path) is None
+
+
+def test_require_empty_store_refuses_when_a_release_is_deployed_and_writes_nothing(tmp_path):
+    _staged_pair(tmp_path)
+    deployment.promote(tmp_path, "r1")
+    before_pointer = deployment.current_pointer(tmp_path)
+    before_history = deployment.pointer_history(tmp_path)
+
+    with pytest.raises(ConcurrentPromote) as error:
+        deployment.promote(tmp_path, "r2", require_empty_store=True)
+
+    assert error.value.code == "CONCURRENT_PROMOTE"
+    assert isinstance(error.value, DeploymentError)
+    assert error.value.retryable is False
+    assert error.value.release_id == "r2"
+    assert error.value.expected_previous_release_id is None
+    assert "expected an empty store but a release is deployed" in str(error.value)
+    assert deployment.current_pointer(tmp_path) == before_pointer
+    assert deployment.pointer_history(tmp_path) == before_history
+    assert len(before_history) == 1
+
+
+def test_require_empty_store_passes_on_an_empty_store(tmp_path):
+    _staged_pair(tmp_path)
+
+    state = deployment.promote(tmp_path, "r1", require_empty_store=True)
+
+    assert state.release_id == "r1"
+    assert state.previous_release_id is None
+    assert deployment.current_pointer(tmp_path).release_id == "r1"
+    assert [item.release_id for item in deployment.pointer_history(tmp_path)] == ["r1"]
+
+
+def test_require_empty_store_already_live_target_stays_the_noop(tmp_path):
+    _staged_pair(tmp_path)
+    prior = deployment.promote(tmp_path, "r1")
+
+    repeated = deployment.promote(tmp_path, "r1", require_empty_store=True)
+
+    assert repeated == prior
+    assert len(deployment.pointer_history(tmp_path)) == 1
+    assert deployment.current_pointer(tmp_path).release_id == "r1"
+
+
+def test_promote_refuses_both_guards_together_as_a_value_error(tmp_path):
+    _staged_pair(tmp_path)
+    deployment.promote(tmp_path, "r1")
+    before_pointer = deployment.current_pointer(tmp_path)
+    before_history = deployment.pointer_history(tmp_path)
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        deployment.promote(tmp_path, "r2", require_empty_store=True,
+                           expected_previous_release_id="r1")
+
+    assert deployment.current_pointer(tmp_path) == before_pointer
+    assert deployment.pointer_history(tmp_path) == before_history
+
+
+def test_swapping_the_expected_incumbent_guard_message_is_unchanged(tmp_path):
+    _staged_pair(tmp_path)
+    deployment.promote(tmp_path, "r1")
+
+    with pytest.raises(ConcurrentPromote) as error:
+        deployment.promote(tmp_path, "r2", expected_previous_release_id="rX")
+
+    assert error.value.expected_previous_release_id == "rX"
+    assert "expected incumbent 'rX' deployed" in str(error.value)
+    assert "expected an empty store" not in str(error.value)
