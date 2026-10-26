@@ -38,13 +38,13 @@ from engine.paths import ROOT
 
 sys.path.insert(0, str(ROOT))
 
-from engine.v2.contracts import PreviewRelease  # noqa: E402
+from engine.v2.contracts import EngineeringNight, OperationsStatus, PreviewRelease  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
-from engine.v2.foundation import ArtifactStore  # noqa: E402
+from engine.v2.foundation import ArtifactStore, to_document  # noqa: E402
+from engine.v2.ops.health import engineering_streak_from_history  # noqa: E402
 from engine.v2.serving import projections  # noqa: E402
 from engine.v2.serving.api import create_app  # noqa: E402
 from tests.ops_support import catalog, enqueue_claim  # noqa: E402
-from tests.v2.serving.test_v2_serving_api import _get, _start, _stop  # noqa: E402
 from tests.test_v2_serving_projections import (  # noqa: E402
     _bundle,
     _compact,
@@ -55,6 +55,7 @@ from tests.test_v2_serving_projections import (  # noqa: E402
     _score_doc,
     _serving,
 )
+from tests.v2.serving.test_v2_serving_api import _get, _start, _stop  # noqa: E402
 from tests.v2.serving.test_v2_serving_publication_binding import (  # noqa: E402
     _stage_and_publish,
     _stage_files,
@@ -274,6 +275,107 @@ def test_dashboard_against_real_api_full_flow(tmp_path, ui_dist_dir, browser):
                 storage = page.evaluate(
                     "() => Object.entries(localStorage).map(([k,v]) => k + '=' + v).join(';')")
                 assert TOKEN not in storage
+
+                # This setup stages real release files but does not invoke the
+                # production publication_effect, so seed a complete, valid
+                # sidecar built through the real contract and streak helper
+                # before exercising the real HTTP route.
+                history = (EngineeringNight(occurrence="2026-09-14", status="pass",
+                                            retry_count=0, detail=None),)
+                seeded = to_document(OperationsStatus(
+                    scope=scope, release_id=release_a.release_id,
+                    attempted_release_id=release_a.release_id,
+                    generated_at="2026-09-14T00:00:00Z",
+                    requested_session="eng-night-2026-09-14",
+                    resolved_session="eng-night-2026-09-14",
+                    engineering_history=history,
+                    engineering_streak=engineering_streak_from_history(history),
+                    conflicts=(), degraded_model_evidence=(),
+                    selfcheck={"ok": True, "known": True, "detail": None},
+                    stale=False, stale_reason=None, withheld=False, withheld_reason=None,
+                    failed_update=False, failed_update_reason=None))
+                (target / "operations_status.json").write_text(json.dumps(seeded))
+
+                ops_code, ops_body, _ = _get(base, "/api/v1/operations", token=TOKEN)
+                assert ops_code == 200
+                ops_doc = json.loads(ops_body)
+                assert ops_doc.get("schema_version") == "operations_status.v1.0"
+
+                # A status may DESCRIBE a release other than the board pin
+                # and the latest published release -- here both stay
+                # release A while the document names release B. The banner
+                # reports the three identities separately.
+                ops_described_b = json.loads(json.dumps(ops_doc))
+                ops_described_b["release_id"] = release_b.release_id
+                ops_described_b["attempted_release_id"] = release_b.release_id
+                ops_described_b["stale"] = False
+                ops_described_b["withheld"] = False
+                ops_described_b["failed_update"] = False
+                (target / "operations_status.json").write_text(json.dumps(ops_described_b))
+
+                expect(page.get_by_test_id("operations-status")).to_contain_text(
+                    f"release identity mismatch: board {release_a.release_id}, "
+                    f"status {release_b.release_id}, published {release_a.release_id}",
+                    timeout=5000)
+                identities = page.get_by_test_id("operations-identities")
+                expect(identities).to_contain_text(
+                    f"health/status-described {release_b.release_id}")
+                expect(identities).to_contain_text(f"board pin {release_a.release_id}")
+                expect(identities).to_contain_text(f"latest published {release_a.release_id}")
+                expect(page.get_by_test_id("release-id")).to_contain_text(release_a.release_id)
+
+                (target / "operations_status.json").write_text(json.dumps(ops_doc))
+
+                ops_failed = json.loads(json.dumps(ops_doc))
+                fail_msg = "synthetic failure"
+                ops_failed["attempted_release_id"] = release_b.release_id
+                ops_failed["failed_update"] = True
+                ops_failed["failed_update_reason"] = fail_msg
+                ops_failed["stale"] = True
+                ops_failed["stale_reason"] = fail_msg
+                # preserve release_id as release_a.release_id
+                ops_failed["release_id"] = release_a.release_id
+                (target / "operations_status.json").write_text(json.dumps(ops_failed))
+
+                code_cur, body_cur, _ = _get(base, "/api/v1/releases/current", token=TOKEN)
+                assert code_cur == 200
+                assert json.loads(body_cur)["release_id"] == release_a.release_id
+
+                expect(page.get_by_test_id("operations-status")).to_contain_text("unknown", timeout=5000)
+                expect(page.get_by_test_id("operations-attempt")).to_contain_text(release_b.release_id)
+                expect(page.get_by_test_id("operations-identities")).to_contain_text(release_a.release_id)
+                expect(page.get_by_test_id("release-id")).to_contain_text(release_a.release_id)
+                # The rendered failure reason for failed_update is the banner's
+                # fixed wording (ReleaseBanner.tsx never renders the raw
+                # failed_update_reason string itself).
+                expect(page.get_by_test_id("operations-status")).to_contain_text(
+                    "latest update attempt failed")
+
+                # Malformed wire behavior: the typed client refuses each
+                # schema-invalid document (status unknown, no observation,
+                # board pin untouched), restoring the valid document
+                # between cases.
+                def _assert_refused(ops_malformed):
+                    (target / "operations_status.json").write_text(json.dumps(ops_malformed))
+                    expect(page.get_by_test_id("operations-status")).to_contain_text(
+                        "unknown", timeout=5000)
+                    expect(page.get_by_test_id("operations-attempt")).to_contain_text(
+                        "no observation available", timeout=5000)
+                    expect(page.get_by_test_id("release-id")).to_contain_text(
+                        release_a.release_id)
+                    (target / "operations_status.json").write_text(json.dumps(ops_doc))
+
+                ops_missing_conflicts = json.loads(json.dumps(ops_doc))
+                ops_missing_conflicts.pop("conflicts", None)
+                _assert_refused(ops_missing_conflicts)
+
+                ops_int_release_id = json.loads(json.dumps(ops_doc))
+                ops_int_release_id["release_id"] = 17
+                _assert_refused(ops_int_release_id)
+
+                ops_half_retry = json.loads(json.dumps(ops_doc))
+                ops_half_retry["engineering_history"][0]["retry_count"] = 0.5
+                _assert_refused(ops_half_retry)
 
                 expect(page.get_by_test_id("event-table")).to_be_visible()
                 expect(page.get_by_test_id("pagination-count")).to_contain_text(f"of {N_EVENTS}")
