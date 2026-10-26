@@ -7,7 +7,7 @@ from functools import lru_cache
 from typing import Any, Protocol
 
 __all__ = ["CalendarEventKey", "CalendarSessions", "CalendarInputError",
-           "build_calendar_sessions", "planned_exit_date"]
+           "build_calendar_sessions", "is_scheduled_session", "planned_exit_date"]
 
 
 class CalendarInputError(ValueError):
@@ -102,17 +102,20 @@ def _holidays(year: int) -> frozenset[date]:
     return frozenset(out | {d for d in one_offs if d.year == year})
 
 
+def is_scheduled_session(day: date) -> bool:
+    """Public weekday/non-holiday predicate shared by projection, calendar
+    validation and the serving clock; bounded by the holiday-year LRU."""
+    if not isinstance(day, date) or isinstance(day, datetime):
+        raise CalendarInputError(f"session day must be a date: {day!r}")
+    return day.weekday() < 5 and day not in _holidays(day.year)
+
+
 def _rule_sessions(start: date, end: date) -> list[date]:
     """Projected sessions in ``(start, end]`` — the legacy projection convention."""
     if end <= start:
         return []
-    holidays = {d for year in range(start.year, end.year + 1) for d in _holidays(year)}
-    out: list[date] = []
-    for step in range(1, (end - start).days + 1):
-        day = start + timedelta(days=step)
-        if day.weekday() < 5 and day not in holidays:
-            out.append(day)
-    return out
+    return [start + timedelta(days=step) for step in range(1, (end - start).days + 1)
+            if is_scheduled_session(start + timedelta(days=step))]
 
 
 def _first_rule_session_after(day: date) -> date:
@@ -137,7 +140,7 @@ def build_calendar_sessions(observed_sessions: tuple[str, ...], *, event_through
         day = _as_day(entry, "observed session")
         if day.weekday() >= 5:
             raise CalendarInputError(f"observed session {entry} is a weekend")
-        if day in _holidays(day.year):
+        if not is_scheduled_session(day):
             raise CalendarInputError(f"observed session {entry} is a scheduled market holiday")
         days.add(day)
     through = _as_day(event_through, "event_through")
@@ -184,7 +187,7 @@ def _calendar_days(raw_days: Any) -> list[date]:
     days = [_as_day(text, "calendar day") for text in raw_days]
     if days != sorted(set(days)):
         raise CalendarInputError("calendar days must be sorted and duplicate-free")
-    if any(d.weekday() > 4 or d in _holidays(d.year) for d in days):
+    if any(not is_scheduled_session(d) for d in days):
         raise CalendarInputError("calendar days must be weekday non-holiday sessions")
     return days
 

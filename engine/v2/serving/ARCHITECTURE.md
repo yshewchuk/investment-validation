@@ -8,9 +8,16 @@ Application rendering belongs in the [React app](../../../ui/ARCHITECTURE.md).
 
 ## Primary contracts and public interfaces
 
-**Operations health currency.** Serving accepts `operations_health.v1.0` and
-`operations_health.v1.1`. Older v1.0 documents remain valid; either absent or
-malformed session field leaves currency `unknown` without a default.
+**Operations health currency.** Serving accepts `operations_health.v1.0`,
+`operations_health.v1.1` and `operations_health.v1.2`; older v1.0/v1.1
+documents remain valid. Currency is
+`unknown`, without a default, when a session field is absent or malformed,
+when `withheld_release` is missing or any type other than `null` or a
+non-array object (never "no withholding"), or when `code_budgets` schedule
+evidence is missing or malformed -- its `latest` may be `null` only in the
+producers' fresh no-observation shape (`ok` false, zero streak, no missing
+observations), which stays unknown evidence, never malformed.
+
 The [README](README.md) lists the checked exports (the only names other packages may import). By module:
 - `operations.create_server` (authenticated HTTP listener).
 - `api`: `create_app` (authenticated read-only JSON API), `ApiError`; run as
@@ -131,6 +138,32 @@ unrecognized publication identity is unknown to clients; failed reads do not
 change a release pin. Serving never retries. Reads have no write or partial
 artifact.
 
+`GET /release/current.json` also sends `X-Expected-Session`, the latest
+completed NYSE session at the configured `frozen_at` snapshot clock, from
+`market_schedule.latest_completed_session`. That close boundary is regular
+16:00 America/New_York except on the three early-close days `market_schedule`
+models privately (a session July 3, the Friday after Thanksgiving, and a
+session Christmas Eve), each closing 13:00; exceptional exchange-announced
+half-days beyond these modeled rules are not covered and keep the 16:00
+boundary. Only an
+absent `frozen_at` or the exact string `"unknown"` means live; a malformed,
+empty or non-string configured clock is refused and the route omits the header
+instead of substituting live time, so clients show expected session unknown.
+The shell compares that expected session with health's `resolved_session` and
+uses `requested_session` for the later-than-requested refusal. Successful
+(200) responses from this route carry `Cache-Control: no-store` -- refusals
+(401, 404) are sent without it: the release pointer and the
+scheduled-session clock can change between the shell's 30-second polls, and a
+cached header would silently freeze the freshness evaluation at an old
+session.
+
+| `GET /release/current.json` condition | Outcome |
+|---|---|
+| Authenticated, safe pointer, clock live or parseable | 200 JSON + `Cache-Control: no-store` + `X-Expected-Session` |
+| Authenticated, safe pointer, `frozen_at` malformed/empty/non-string | 200 JSON + `no-store`; header omitted, never live time |
+| Pointer unsafe, indirect or unreadable | 404 `unknown release` |
+| Unauthenticated | 401; no release identity leaked |
+
 `GET /api/v1/native_parity` exposes report identity and the existing aggregate,
 plus `native_refused_tickers`, the saved refusal entries from both refusal
 collections projected as `{ticker, reason}` records. Older refusal rows
@@ -203,8 +236,9 @@ not projection content, and the binding file is bound as an ops artifact when pu
 `operations_status.json` as UTF-8 regular files, at most 1 MiB, without following a symlink at
 the final path component (the `releases/<id>/` directory is followed). Unsafe or invalid input
 reads as absent (`NO_CURRENT_RELEASE` for the pointer chain, `OPERATIONS_UNAVAILABLE` for the
-status document). The operations listener's reads and the native-parity report load are not
-bounded.
+status document). The operations listener's health reads are bounded at 1 MiB, an
+oversize artifact refused as a health-file failure; the native-parity report load remains
+unbounded.
 `/operations` serves `<publication_root>/operations_status.json` only; it is the publication-time
 status document, never a serving-projection status sidecar, so under the
 serving `publisher/` it answers `OPERATIONS_UNAVAILABLE` (503) until a producer writes that file.
@@ -223,7 +257,7 @@ ceiling, while a larger population retains the lookup limit.
 |---|---|
 | Missing input: identity | No or wrong token: `UNAUTHORIZED` (401). Event-scores and score-detail routes without a release pin: `RELEASE_ID_REQUIRED` (400); no route searches across releases. `GET /events` without a pin uses the current release. |
 | Missing input: data | Unknown release/event/score: 404. No current release: `NO_CURRENT_RELEASE` (503, retryable). Binding that fails re-verification: `CURRENT_BINDING_INVALID` (500, not retryable). Bad filter/limit: `INVALID_REQUEST` (422). |
-| Missing input: files | Absent, indirect or unreadable health file: 503. Analog index missing, failing to open, or outdated: 503 with a `reason_code`; post-open `sqlite3.Error` or `json.JSONDecodeError` during currency checks or analog reads returns `SERVING_INDEX_UNREADABLE` (503, typed JSON). API `sqlite3.Error` while opening the index (except the native-parity freshness check, which reads a `sqlite3.OperationalError` re-open or release read as `available`, while a resolver `SERVING_INDEX_UNREADABLE` stays 503), or post-open `sqlite3.Error`, `json.JSONDecodeError` or `DocumentError` (a stored release of an older schema) during index projection reads or current-binding verification returns `SERVING_INDEX_UNREADABLE` (503, retryable `Problem`, no raw exception text); connections always close. Artifact decoding failures retain their existing behavior. Parity report absent is `no_report` (200); malformed is `unavailable` (503). Legacy bundle: `LegacyBundleError` with a code, never coerced or dropped. |
+| Missing input: files | Absent, indirect, unreadable or oversize (over 1 MiB) health file: 503 `unknown`. Analog index missing, failing to open, or outdated: 503 with a `reason_code`; post-open `sqlite3.Error` or `json.JSONDecodeError` during currency checks or analog reads returns `SERVING_INDEX_UNREADABLE` (503, typed JSON). API `sqlite3.Error` while opening the index (except the native-parity freshness check, which reads a `sqlite3.OperationalError` re-open or release read as `available`, while a resolver `SERVING_INDEX_UNREADABLE` stays 503), or post-open `sqlite3.Error`, `json.JSONDecodeError` or `DocumentError` (a stored release of an older schema) during index projection reads or current-binding verification returns `SERVING_INDEX_UNREADABLE` (503, retryable `Problem`, no raw exception text); connections always close. Artifact decoding failures retain their existing behavior. Parity report absent is `no_report` (200); malformed is `unavailable` (503). Legacy bundle: `LegacyBundleError` with a code, never coerced or dropped. |
 | Cache | `/releases/current` is `no-store` with a strong ETag over the complete response including `scope` (304 on match; a changed `scope` changes the ETag). `/releases/{id}`, event-scores and score detail are immutable with an ETag (304 on match). `/events`: current reads are `no-store` without an ETag; explicit-release reads are immutable with an ETag but never 304. A cursor bound to another release or filter set: `CURSOR_MISMATCH` (409). |
 | Retry | None inside serving: no read retries and no job is started by a GET. Callers retry only when `retryable`. Command POSTs pass through the configured callback's status and body (a queued job identity or typed refusal is the callback's contract); a callback exception is 500. |
 | Transaction | The serving index uses short `BEGIN IMMEDIATE` transactions; any error rolls back. A schema newer than the code, or an edited migration: `INTEGRITY_FAILED`. The operations analog read opens the index `mode=ro` and never migrates; the API opens it through `connect`, which applies pending migrations. |

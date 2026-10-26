@@ -50,7 +50,7 @@ command's tail output) on a real `npm ci`/`npm run build` failure rather
 than skipping:
 
 ```bash
-python3 -m pytest -q -p no:cacheprovider tests/test_v2_dashboard_browser.py tests/test_v2_dashboard_integration.py
+python3 -m pytest -q -p no:cacheprovider tests/v2/dashboard/test_v2_dashboard_browser.py tests/test_v2_dashboard_integration.py
 ```
 
 ## What is shipped

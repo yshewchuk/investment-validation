@@ -15,6 +15,13 @@ Replaces (§4.4): `paths.py`, `env.py`, `jsonio.py`, `audit.py`, `session arithm
 - Canonical JSON (RFC 8785) and content hashing, per contracts §2.2.
 - Path and environment resolution.
 - Session arithmetic: BMO/AMC anchoring, trading-day offsets.
+- The latest completed NYSE session at a serving clock's moment, including the
+  scheduled close (16:00 America/New_York, 13:00 on the three modelled
+  early-close days -- a session July 3, Black Friday and a session Christmas
+  Eve; exceptional exchange-announced half-days beyond these rules are not
+  covered and keep the 16:00 boundary) and scheduled holiday observations.
+- The shared `is_scheduled_session(date)` weekday/non-holiday predicate used by
+  projection, calendar validation and the serving clock.
 - Pure holiday-year sets are immutable and LRU-bounded to 128 years; supplied
   sessions and anchor requests are validated afresh on every call.
 - Causality primitives — the cutoff comparison every feature respects.
@@ -47,11 +54,13 @@ underscore convention, and an import of a name absent from this list fails
 | `artifact_reference` | The identity `ArtifactStore.publish_bytes` would give some bytes, computed without touching storage — so a worker or coordinator that already holds the exact bytes of a published artifact can recompute its `ArtifactRef` and agree with the store by construction. |
 | `safe_relative_path`, `ensure_directory`, `fsync_directory` | The path and durability primitives the store is built from. |
 | `score_population.population_key`, `score_population.population_difference` | Shared legacy score population identity and planned-versus-observed rule for ops and serving. |
+| `latest_completed_session` | The latest completed NYSE session at `now` (or a parseable snapshot `frozen_at`; `None`/`"unknown"` mean live), using `market_calendar.is_scheduled_session` and a private `market_schedule` close-hour rule (16:00 America/New_York, 13:00 on the three modelled early-close days -- a session July 3, Black Friday and a session Christmas Eve; the coverage limitation is documented in `ARCHITECTURE.md`). Any other empty, malformed or non-string `frozen_at` raises `ValueError` rather than using live time. |
+| `market_calendar.is_scheduled_session` | Public weekday/non-holiday session-day predicate shared by projection, calendar validation and the serving clock; pure and bounded by the holiday-year LRU. |
 | `market_horizon.trading_days_before_print`, `market_horizon.CalendarCoverageError` | Pure pre-print session distance and its distinct insufficient-coverage refusal; no calendar fetch or gap filling. |
 | `experiment_holdouts.ExperimentHoldouts`, `experiment_holdouts.calendar_date` | Canonical day validation and shared deterministic, versioned random/rolling membership; no final-read authority. |
 | `experiment_exits.valid_exit_recipe`, `experiment_exits.valid_threshold_units` | Pure, closed exit declaration/unit admission shared by planning, walking and the RUNUP request. |
 
-<!-- public-interface: experiment_exits, experiment_exits.valid_exit_recipe, experiment_exits.valid_threshold_units, final_holdout, final_holdout.declaration_from_document, final_holdout.request_from_document, final_holdout.request_from_registration, canonical_json, iter_canonical_json, content_hash, CONTENT_HASH_PREFIX, tag_nonfinite, untag_nonfinite, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, ArtifactStore, ArtifactError, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed, market_calendar, market_horizon, score_population, experiment_holdouts, experiment_holdouts.ExperimentHoldouts, experiment_holdouts.calendar_date -->
+<!-- public-interface: experiment_exits, experiment_exits.valid_exit_recipe, experiment_exits.valid_threshold_units, final_holdout, final_holdout.declaration_from_document, final_holdout.request_from_document, final_holdout.request_from_registration, canonical_json, iter_canonical_json, content_hash, CONTENT_HASH_PREFIX, tag_nonfinite, untag_nonfinite, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, is_scheduled_session, latest_completed_session, market_calendar.is_scheduled_session, ArtifactStore, ArtifactError, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed, market_calendar, market_horizon, market_schedule, score_population, experiment_holdouts, experiment_holdouts.ExperimentHoldouts, experiment_holdouts.calendar_date -->
 
 ## Consumers
 
@@ -67,7 +76,7 @@ failure rather than a stale sentence.
 - engine/v2/data — `DocumentError`, `from_document`, `parse_timestamp` for the strict document checks `engine.v2.foundation.typed` cannot express from annotations alone.
 - engine/v2/ops — content identity, safe artifact storage, typed decoding, clocks and `experiment_exits.valid_exit_recipe` plan admission.
 - engine/v2/ledger — canonical append-only payloads and durable export paths.
-- engine/v2/serving — safe immutable release paths and health timestamps.
+- engine/v2/serving — safe immutable release paths, health timestamps, and the latest completed scheduled session for `X-Expected-Session`.
 - engine/v2/models — `canonical_json`/`content_hash` (P5-4) to identify and
   verify payoff-calibration artifacts; `content_hash`, `to_document`/
   `from_document`, `fsync_directory` and `Clock`/`SystemClock`/

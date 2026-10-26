@@ -77,6 +77,47 @@ and, when a refresh root is configured, queued refresh job ids from
 `POST /actions/refresh`. Native parity has no dashboard preview route or
 launcher option; its application presentation belongs to React.
 
+### Operations shell freshness contract
+
+The legacy frame is pinned to one release for the browser session; a newer
+release never re-points it -- pin drift marks the board stale and offers a
+reload opt-in, and only an explicit reload opts into the newer published
+release. The shell shows a usable observation's `generated_at` age and
+health's `requested_session` and `resolved_session` (the resolved one is
+effective), ISO-date compared (producer `YYYY-MM-DD` or UI
+`eng-night-YYYY-MM-DD`) against the `X-Expected-Session` header
+`market_schedule` derives: 16:00 America/New_York, 13:00 on the three
+modelled early-close days (a session July 3, Black Friday, a session
+Christmas Eve); other half-days keep 16:00 and the shell applies none. The
+rows below are the full condition contract -- evidence failures (an
+unfetchable or unusable artifact keeps the offline frozen-at line), the
+24-hour and session staleness thresholds, typed `code_budgets` evidence and
+outcome wording, and the release-pin/published comparisons. Health is
+current only when every condition below passes; precedence **unknown >
+stale > degraded**; banner class `unknown`/`stale`/`degraded` or empty.
+
+| Condition | Visible outcome |
+|---|---|
+| Health fetch/parse failure, unsupported schema, or missing/malformed/future `generated_at` | unknown |
+| `withheld_release` missing, or present as anything other than `null` or a non-array object (empty string, `false`, `0`, arrays) | unknown |
+| `withheld_release` is a non-array object | degraded (release withheld; the outcome line qualifies a passing outcome to degraded) |
+| `generated_at` older than 24 hours | stale |
+| `requested_session` or `resolved_session` missing or malformed | unknown |
+| Expected session not yet observed, missing, or malformed | unknown |
+| Resolved session later than the expected or requested session | unknown |
+| Resolved session older than the expected session | stale |
+| `code_budgets` missing or mistyped (required types above; `latest` `null` only in the fresh no-observation shape) | unknown |
+| Engineering `ok` false, nonzero `consecutive_nights` | degraded outcome line (latest night failed; streak shown; when `latest_occurrence` shows only older rows missing, this wording stands and the banner is unknown) |
+| Engineering `ok` false with zero `consecutive_nights` (valid `latest`-null fresh no-observation shape; producers' unknown latest night) | unknown |
+| `unknown_occurrences` contains `latest_occurrence` (a field-less document conservatively reads any nonempty list this way) | unknown (latest outcome; streak evidence stays visible) |
+| `current_release.release_id` missing | unknown |
+| Health release differs from an available frame pin | stale |
+| Health release differs from an available published current | stale |
+| Frame pin unavailable (health release cannot be compared to a pin) | unknown |
+| Published current unavailable, or not yet observed | unknown |
+| Pin and published current differ | stale drift notice plus reload opt-in |
+| All evidence passes | current |
+
 ## Dependencies
 
 `only_imports=(7.0,)` (root doc §2): this package may import anything on

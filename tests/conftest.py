@@ -208,7 +208,7 @@ def pytest_runtest_teardown(item, nextitem):
 #   thread count of a real child process it just launched -- exactly the
 #   "bounded jobs pin from core 0" collision a concurrent sibling could
 #   step on. The file's other tests never touch a real subprocess.
-# - tests/test_v2_ops_serving_browser.py (whole file): drives a real
+# - tests/v2/serving/test_ops_serving_browser.py (whole file): drives a real
 #   Playwright browser.
 # - tests/test_v2_ops_coordinator_lease.py (whole file): lost-lease tests settle through
 #   the real `prove_ownership_gone` /proc scan; in parallel it quarantined the attempt.
@@ -250,7 +250,7 @@ def pytest_runtest_teardown(item, nextitem):
 
 # -- ui/ build fixtures -------------------------------------------------------
 #
-# tests/test_v2_dashboard_browser.py and tests/test_v2_dashboard_integration.py
+# tests/v2/dashboard/test_v2_dashboard_browser.py and tests/test_v2_dashboard_integration.py
 # both drive a real Playwright browser against a real `npm --prefix ui run
 # build` output. A fresh worktree has no `ui/node_modules` at all (it is
 # `.gitignore`d, per ui/README.md's "Allowlist" section), so the bare `npm
