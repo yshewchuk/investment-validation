@@ -12,9 +12,9 @@ import stat
 from datetime import date
 from pathlib import Path
 
-ADVANCING_MEMBERS = ("paired_residual_pool", "board_analog_matcher", "trailing_pnl_cutoff")
+from tools.phase5_prepare_release import MAX_STATE_BYTES
 
-MAX_STATE_BYTES = 512 * 1024 * 1024
+ADVANCING_MEMBERS = ("paired_residual_pool", "board_analog_matcher", "trailing_pnl_cutoff")
 
 
 class StageRefused(ValueError):
@@ -25,7 +25,7 @@ class StageRefused(ValueError):
         self.details = details or {}
 
 
-def _require_regular(path: Path, limit: int, what: str) -> None:
+def require_regular(path: Path, limit: int, what: str) -> None:
     """Refuse a missing, symlinked, non-regular or oversize file before it is read."""
     try:
         info = path.lstat()
@@ -49,7 +49,7 @@ def classify(root: Path, names) -> dict[str, dict[str, bytes]]:
     new: dict[str, dict[str, bytes]] = {}
     try:
         for name in names:
-            _require_regular(root / name, MAX_STATE_BYTES, "a bound state file")
+            require_regular(root / name, MAX_STATE_BYTES, "a bound state file")
             for member, objects in frozen_state_payloads(
                     [root / name], max_bytes=MAX_STATE_BYTES).items():
                 for object_name, data in objects.items():
@@ -90,7 +90,7 @@ def light_checks(release_root: Path, parameters, new_hashes: set[str]) -> None:
 
     release_id = parameters["release_id"]
     try:
-        _require_regular(rel.catalog_path(release_root, release_id), rel.MAX_CATALOG_BYTES,
+        require_regular(rel.catalog_path(release_root, release_id), rel.MAX_CATALOG_BYTES,
                          "the candidate catalog")
         body = rel.read_catalog(rel.catalog_path(release_root, release_id), release_id)
         if body is None:
@@ -132,8 +132,6 @@ def stage_candidate(parameters, root: Path) -> dict:
 
     release_root = Path(parameters["release_root"])
     cutoff = parameters["cutoff"]
-    new = classify(Path(root), parameters["state_files"])
-    check_trailing_months(new, cutoff)
     if parameters.get("mode", "carry") == "bootstrap":
         prior_class = classify_prior(release_root, parameters["prior_release_id"])
         if prior_class.kind == PRIOR_DAMAGED:
@@ -141,9 +139,11 @@ def stage_candidate(parameters, root: Path) -> dict:
         if prior_class.kind == PRIOR_USABLE:
             raise StageRefused("prior release already has a pool catalog",
                                {"code": "PRIOR_USABLE"})
-        # NONE and NO_POOL_CATALOG: the bootstrap assembly lands in a later #1102 slice.
-        raise StageRefused("bootstrap assembly is not available yet",
-                           {"code": "BOOTSTRAP_NOT_BUILT"})
+        from tools.phase5_state_bootstrap import bootstrap_candidate
+
+        return bootstrap_candidate(parameters, Path(root), prior_class)
+    new = classify(Path(root), parameters["state_files"])
+    check_trailing_months(new, cutoff)
     try:
         _, carried = prior_carry_set(release_root, parameters["prior_release_id"])
     except ReleaseAssemblyRefusal as exc:
