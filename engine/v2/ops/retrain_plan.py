@@ -46,8 +46,10 @@ def attach_retrain_chain(plan, requests, keys, implementation_ref, runtime, cont
     and ``contract`` its checkpoint contract (passed in so this module does not import
     ``nightly``)."""
     section = plan.get("retrain")
-    if not section:
+    if section is None:
         return requests
+    from engine.v2.ops.plans import check_retrain_section
+    check_retrain_section(section)
     session = plan["session"]
     ph = str(plan["plan_hash"])[:12]
     refresh = (keys["refresh"],) if "refresh" in keys else ()

@@ -353,6 +353,9 @@ def test_plan_retrain_section_is_detached_from_the_callers_dict():
     {"state": "bogus"},
     {"state": "due"},
     {"state": "due", "month": "2026-10", "m_end": "2026-10-31"},
+    {"state": "due", "month": "2026-13", "m_end": "2026-13-31", "base": "rel1"},
+    {"state": "due", "month": "2026-10", "m_end": "2026-10-15", "base": "rel1"},
+    {"state": "due", "month": "2026-09", "m_end": "2026-10-31", "base": "rel1"},
 ])
 def test_malformed_retrain_sections_are_invalid_requests(value):
     import engine.v2.ops.plans
@@ -440,3 +443,13 @@ def test_manual_nightly_plan_evaluates_the_retrain_decision(monkeypatch, tmp_pat
     explicit = {"state": "not_due", "reason": "explicit"}
     args = types.SimpleNamespace(as_of="2026-11-02", retrain=explicit)
     assert _retrain_section(args, tmp_path, conn) is explicit
+
+
+@pytest.mark.parametrize("section", [{"state": "bogus"}, {}])
+def test_chain_builder_refuses_malformed_sections(section):
+    plan = _plan()
+    plan["plan_hash"] = "a" * 64
+    plan["retrain"] = section
+    with pytest.raises(OpsError) as excinfo:
+        _requests(plan)
+    assert excinfo.value.problem.code == "INVALID_REQUEST"

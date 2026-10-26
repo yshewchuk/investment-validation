@@ -22,14 +22,23 @@ NIGHTLY_GRAPH = {
 }
 
 
-def _check_retrain(retrain):
+def check_retrain_section(retrain):
     """#805: a pinned retrain section is a mapping with a known state and, when due, the
     fields the chain keys need; anything else is an INVALID_REQUEST, never a builtin error."""
     if not isinstance(retrain, dict) or retrain.get("state") not in ("due", "not_due"):
         raise fail("INVALID_REQUEST", "retrain section must be a mapping with state due or not_due")
-    if retrain["state"] == "due" and not all(
-            isinstance(retrain.get(name), str) and retrain[name] for name in ("month", "m_end", "base")):
-        raise fail("INVALID_REQUEST", "a due retrain section needs month, m_end and base")
+    if retrain["state"] != "due":
+        return
+    from datetime import date, timedelta
+    try:
+        month, m_end = str(retrain["month"]), date.fromisoformat(str(retrain["m_end"]))
+        valid = (len(month) == 7 and month[4] == "-" and month == m_end.isoformat()[:7]
+                 and isinstance(retrain["base"], str) and retrain["base"]
+                 and (m_end + timedelta(days=1)).month != m_end.month)
+    except (KeyError, ValueError):
+        valid = False
+    if not valid:
+        raise fail("INVALID_REQUEST", "a due retrain section needs month YYYY-MM, its m_end and base")
 
 
 def _pin_refresh_mode(identity, plan, refresh_mode, refresh_plan, catalog_path=None,
@@ -50,7 +59,7 @@ def _pin_refresh_mode(identity, plan, refresh_mode, refresh_plan, catalog_path=N
     head at submission time; a caller-supplied plan remains a strict override.
     """
     if retrain is not None:  # #805 slice 2: the retrain_due.decide section, pinned into plan identity
-        _check_retrain(retrain)
+        check_retrain_section(retrain)
         identity.update(retrain=json.loads(json.dumps(retrain)))
         plan.update(retrain=json.loads(json.dumps(retrain)))
     if refresh_mode not in ("legacy", "native"):
