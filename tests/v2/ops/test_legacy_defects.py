@@ -22,7 +22,7 @@ from engine.v2.ops.fingerprints import environment_identity
 from engine.v2.ops.legacy_adapter import _action_score, _load_finality
 from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
 from engine.v2.ops.plans import nightly_plan
-from engine.v2.ops.profiles import DEFAULT_POLICY, GIB, POLICY_VERSION, profile_named
+from engine.v2.ops.profiles import DEFAULT_POLICY, GIB, MIB, POLICY_VERSION, profile_named
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit
 
@@ -215,6 +215,7 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
         assert profile.memory_bytes >= measured_peak_bytes
         assert profile.measured is False
     assert POLICY_VERSION == DEFAULT_POLICY.version == "ops_resources.2026-10-26.v12"
+    assert profile_named(DEFAULT_POLICY, "delivery").memory_bytes == 1536 * MIB
 
 
 # --------------------------------------------------------------------------

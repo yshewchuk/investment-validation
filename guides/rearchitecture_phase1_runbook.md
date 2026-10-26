@@ -181,8 +181,8 @@ Internal amounts are bytes; GiB below is 2**30. Policy constants: base reserve
 
 | Profile | Memory (GiB) | CPUs | Scratch (GiB) | Heavy | Disk-heavy | Measured |
 |---|---|---|---|---|---|---|
-| `io_fetch` | 0.5 | 1 | 2 | no | no | no |
-| `delivery` | 0.25 | 1 | 1 | no | no | no |
+| `io_fetch` | 1 | 1 | 2 | no | no | no |
+| `delivery` | 1.5 | 1 | 1 | no | no | no |
 | `projection` | 2 | 2 | 2 | no | no | no |
 | `validation` | 4 | 4 | 1 | yes | no | no |
 | `legacy_score` | 4 | 5 | 2 | yes | no | no |

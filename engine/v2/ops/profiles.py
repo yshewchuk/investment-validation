@@ -308,7 +308,8 @@ MIB = 1 << 20
 # v12 (issue #1393) raises io_fetch memory 512 MiB -> 1 GiB (measured peak 514
 # MiB) and delivery 256 MiB -> 1536 MiB (measured peak 1068 MiB over 14 days:
 # backup, publication, ledger_export, engineering_gate), so admission and
-# headroom reflect real use; reservations are not enforced caps.
+# headroom reflect real use; the reservation is the admission amount and the
+# executor watchdog / cgroup memory limit, so it must sit above the real peak.
 POLICY_VERSION = "ops_resources.2026-10-26.v12"
 
 DEFAULT_POLICY = ResourcePolicy(
