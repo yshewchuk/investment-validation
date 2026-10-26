@@ -155,6 +155,26 @@ def test_staged_manifest_hash_drift_refuses_before_receipt(tmp_path, monkeypatch
     assert not (attempt / "retrain_check_receipt.json").exists()
 
 
+@pytest.mark.parametrize("missing_id", ["candidate", "incumbent"])
+def test_missing_staged_manifest_refuses_before_receipt(tmp_path, monkeypatch, missing_id):
+    attempt, params, _ = _run(tmp_path, monkeypatch)
+    read_manifest = retrain_check.deployment.read_manifest
+
+    def read_manifest_with_missing(_root, release_id):
+        if release_id == missing_id:
+            return None
+        return read_manifest(_root, release_id)
+
+    monkeypatch.setattr(retrain_check.deployment, "read_manifest",
+                        read_manifest_with_missing)
+    with pytest.raises(OpsError) as excinfo:
+        retrain_check.run_retrain_check_worker(params, attempt)
+
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.problem.details["code"] == "RELEASE_NOT_STAGED"
+    assert not (attempt / "retrain_check_receipt.json").exists()
+
+
 @pytest.mark.parametrize(
     "parameters",
     [
