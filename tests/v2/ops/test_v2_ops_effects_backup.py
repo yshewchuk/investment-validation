@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import engine.v2.ops.backup as backup_module
-from engine.v2.foundation import ArtifactStore
+from engine.v2.foundation import ArtifactError, ArtifactStore
 from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
 from engine.v2.ops.effects_graph import backup_effect
 from engine.v2.ops.errors import fail, OpsError
@@ -628,7 +628,7 @@ def test_manifest_success_before_ack_is_idempotent_and_keys_are_safe(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
-    with pytest.raises(Exception, match="UNSAFE_PATH"):
+    with pytest.raises(ArtifactError, match="UNSAFE_PATH"):
         prepare_backup(conn, "../escape", {"evidence.bin": ref}, clock=clock)
     prepare_backup(conn, "b3", {"evidence.bin": ref}, clock=clock)
     backup = tmp_path / "backup"
@@ -796,3 +796,47 @@ def test_backup_coordinator_retry_after_delivery_before_commit_attempt_succeeds(
         assert (crashed["state"], crashed["process_state"]) == ("failed", "verified_dead")
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("damage", [b"", b"not sqlite"])
+def test_delivered_backup_replay_reject_damaged_database(tmp_path, damage):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    key = "replay-damaged"
+    prepare_backup(conn, key, {}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key=key, owner="worker", target=backup, clock=clock, store=store)
+    (backup / (key + ".sqlite")).write_bytes(damage)
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key=key, owner="worker", target=backup, clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.retryable is True
+
+
+@pytest.mark.parametrize("kind", ["database", "artifact"])
+def test_backup_refuses_files_over_max_bytes(tmp_path, kind, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    key = "max-bytes-" + kind
+
+    if kind == "database":
+        monkeypatch.setattr(backup_module, "MAX_BACKUP_BYTES", 1)
+        prepare_backup(conn, key, {}, clock=clock)
+    else:
+        catalog_bytes = conn.execute("PRAGMA page_count").fetchone()[0] * conn.execute(
+            "PRAGMA page_size").fetchone()[0]
+        monkeypatch.setattr(backup_module, "MAX_BACKUP_BYTES", catalog_bytes)
+        artifact_ref = store.publish_bytes(
+            b"x" * (catalog_bytes + 1), schema_ref="evidence.v1.0")
+        prepare_backup(conn, key, {"artifact.bin": artifact_ref}, clock=clock)
+
+        def fail_verify(ref):
+            raise AssertionError("verify should not be called")
+
+        monkeypatch.setattr(store, "verify", fail_verify)
+
+    backup = tmp_path / "backup"
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key=key, owner="worker", target=backup, clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.retryable is True
