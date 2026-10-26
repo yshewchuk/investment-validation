@@ -1220,6 +1220,7 @@ mutate = [
     "engine/v2/research/*.py",
 ]
 tests = [
+    "tests/v2/research/test_confirmed_metadata_reducer.py",
     "tests/v2/research/test_magnitude_search_request.py",
     "tests/v2/research/test_eligibility_policy.py",
     "tests/v2/research/test_magnitude_search_plan.py",
