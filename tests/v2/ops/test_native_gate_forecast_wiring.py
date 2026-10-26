@@ -60,20 +60,28 @@ def test_real_synthetic_fold_populates_gate_output(tmp_path):
         size_feature_names=("x",))
     staging = tmp_path / "staging"
     staging.mkdir()
-    event_doc = _event_doc()
-    event_doc["panel_row"]["x"] = 1.5
-    (staging / "events.json").write_text(json.dumps([event_doc]))
+    low_doc = _event_doc(event_id="evt-low")
+    low_doc["panel_row"]["x"] = 0.0
+    high_doc = _event_doc(event_id="evt-high")
+    high_doc["key"]["ticker"] = "TEST2"
+    high_doc["calendar_row"]["ticker"] = "TEST2"
+    high_doc["panel_row"]["x"] = 1.5
+    (staging / "events.json").write_text(json.dumps([low_doc, high_doc]))
 
     parameters = _worker_parameters(tmp_path, expected_ids=["native_score_batch"])
     parameters["feature_names"] = ["x"]
+    parameters["gate_policy"] = {"STR-THRU": {"threshold": 1.02}}
     native_score_batch.run_native_score_batch_worker(parameters, staging)
     records = json.loads((staging / "records.json").read_text())["records"]
-    record = records["TEST|STR-THRU|2026-01-15|am"]
-    gate_terms = record["gate_terms"]
+    low_terms = records["TEST|STR-THRU|2026-01-15|am"]["gate_terms"]
+    high_terms = records["TEST2|STR-THRU|2026-01-15|am"]["gate_terms"]
 
-    assert gate_terms["gate_score"] == 1.03, repr(record)
-    assert gate_terms["gate_threshold"] == 0.0
-    assert gate_terms["gate_pass"] is (gate_terms["gate_score"] >= 0.0)
+    assert low_terms["gate_score"] == 1.0
+    assert low_terms["gate_threshold"] == 1.02
+    assert low_terms["gate_pass"] is False
+    assert high_terms["gate_score"] == 1.03
+    assert high_terms["gate_threshold"] == 1.02
+    assert high_terms["gate_pass"] is True
 
 
 def test_missing_causal_fold_refuses_row_model_not_ready(tmp_path):
