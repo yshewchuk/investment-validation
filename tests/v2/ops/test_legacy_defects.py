@@ -214,7 +214,7 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
         profile = profile_named(DEFAULT_POLICY, name)
         assert profile.memory_bytes >= measured_peak_bytes
         assert profile.measured is False
-    assert POLICY_VERSION == DEFAULT_POLICY.version == "ops_resources.2026-10-24.v11"
+    assert POLICY_VERSION == DEFAULT_POLICY.version == "ops_resources.2026-10-26.v12"
 
 
 # --------------------------------------------------------------------------
@@ -248,7 +248,7 @@ def test_native_experiment_profile_preserves_production_reservations():
     assert admission.resources.scratch_limit_bytes == expected_scratch
     assert admission.resources.assigned_cpu_ids == (3,)
     assert admission.resources.thread_count == 1
-    assert admission.resources.resource_profile_version == "ops_resources.2026-10-24.v11"
+    assert admission.resources.resource_profile_version == "ops_resources.2026-10-26.v12"
 
 
 def test_scratch_admits_the_measured_read_set_for_every_staging_profile():
