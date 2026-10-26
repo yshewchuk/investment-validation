@@ -1344,12 +1344,17 @@ def main(argv=None):
                 raise fail("INVALID_REQUEST", "operations root must be initialized first")
             if args.command == "health":
                 catalog = root / "catalog.sqlite"
-                conn = sqlite3.connect(catalog.resolve().as_uri() + "?mode=ro", uri=True)
-                conn.row_factory = sqlite3.Row
+                conn = None
                 try:
+                    conn = sqlite3.connect(catalog.resolve().as_uri() + "?mode=ro", uri=True)
+                    conn.row_factory = sqlite3.Row
                     document = dispatch(args, root, conn, clock)
+                except sqlite3.Error:
+                    raise fail("INVALID_REQUEST",
+                               "health catalog is missing, locked, or unavailable") from None
                 finally:
-                    conn.close()
+                    if conn is not None:
+                        conn.close()
             else:
                 conn = open_catalog(root / "catalog.sqlite", clock=clock)
                 try:

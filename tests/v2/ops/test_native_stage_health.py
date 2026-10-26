@@ -74,6 +74,17 @@ def test_health_writer_refuses_when_mandatory_content_exceeds_cap(tmp_path):
     assert target.read_bytes() == b"prior"
 
 
+def test_health_cli_pre_migration_catalog_returns_invalid_request_json(tmp_path, capsys):
+    sqlite3.connect(tmp_path / "catalog.sqlite").close()
+
+    assert cli.main(["health", "--root", str(tmp_path)]) == 2
+
+    document = json.loads(capsys.readouterr().out)
+    assert document["code"] == "INVALID_REQUEST"
+    assert document["message"] == "health catalog is missing, locked, or unavailable"
+    assert "traceback" not in document
+
+
 def test_health_cli_opens_catalog_readonly_and_skips_backfill(tmp_path, monkeypatch):
     sqlite3.connect(tmp_path / "catalog.sqlite").close()
     observed = []
