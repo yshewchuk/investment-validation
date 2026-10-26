@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -501,6 +502,29 @@ def test_backup_manifest_read_error_is_typed_retryable(tmp_path, monkeypatch):
     assert conn.execute(
         "SELECT state FROM outbox WHERE kind='backup' AND logical_key=?", (key,)
     ).fetchone()[0] == "running"
+
+
+def test_delivered_backup_replay_rejects_same_size_database_hash_mismatch(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    key = "replay-hash-mismatch"
+    prepare_backup(conn, key, {}, clock=clock)
+    backup = tmp_path / "backup"
+    run_backup(conn, key=key, owner="worker", target=backup, clock=clock, store=store)
+    database = backup / (key + ".sqlite")
+    original_size = database.stat().st_size
+
+    copy = sqlite3.connect(database)
+    version = copy.execute("PRAGMA user_version").fetchone()[0]
+    copy.execute(f"PRAGMA user_version = {version + 1}")
+    copy.close()
+    assert database.stat().st_size == original_size
+
+    with pytest.raises(OpsError) as error:
+        run_backup(conn, key=key, owner="worker", target=backup, clock=clock, store=store)
+    assert error.value.code == "BACKUP_FAILED"
+    assert error.value.problem.message == "backup database copy hash mismatch"
+    assert error.value.problem.retryable is True
 
 
 def test_restore_reject_malformed_manifest_before_creating_destination(tmp_path):
