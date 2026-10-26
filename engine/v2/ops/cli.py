@@ -19,7 +19,7 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.ops import executor
-from engine.v2.ops.bootstrap import open_catalog
+from engine.v2.ops.bootstrap import open_catalog, require_compatible_catalog
 from engine.v2.ops.catalog import integrity_errors, transaction
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.diagnostics import process_family_liveness
@@ -1348,6 +1348,7 @@ def main(argv=None):
                 try:
                     conn = sqlite3.connect(catalog.resolve().as_uri() + "?mode=ro", uri=True)
                     conn.row_factory = sqlite3.Row
+                    require_compatible_catalog(conn)
                     document = dispatch(args, root, conn, clock)
                 except sqlite3.Error:
                     raise fail("INVALID_REQUEST",

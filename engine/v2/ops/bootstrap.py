@@ -15,9 +15,9 @@ from engine.v2.ledger.calibration import SCHEMA_V3
 from engine.v2.ledger.decisions import SCHEMA, SCHEMA_V2
 from engine.v2.ops import schema
 from engine.v2.ops.catalog import connect
-from engine.v2.ops.migrations import Migration, migrate
+from engine.v2.ops.migrations import Migration, migrate, require_current
 
-__all__ = ["open_catalog"]
+__all__ = ["open_catalog", "require_compatible_catalog"]
 
 #: engine.v2.data.schema declares its migrations as plain tuples, never
 #: engine.v2.ops.migrations.Migration objects (phase-2 guide §3.3: the data
@@ -47,3 +47,12 @@ def open_catalog(path: Path | str, *, clock: Clock) -> sqlite3.Connection:
         conn.close()
         raise
     return conn
+
+
+def require_compatible_catalog(conn: sqlite3.Connection) -> None:
+    """Refuse read-only operations on a catalog schema this code cannot support."""
+    require_current(conn, schema.OWNER, schema.MIGRATIONS)
+    require_current(conn, "ledger", (Migration(1, "decision_authority", SCHEMA),
+                                     Migration(2, "decision_generation_divergence", SCHEMA_V2),
+                                     Migration(3, "calibration_state", SCHEMA_V3)))
+    require_current(conn, data_schema.OWNER, _DATA_MIGRATIONS)

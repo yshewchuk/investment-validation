@@ -220,6 +220,7 @@ def test_doctor_and_health_report_the_undetermined_count(tmp_path, capsys):
     assert after_health["outcome_sessions"]["undetermined"] == 2
 
     assert cli.main(["--root", str(root), "init"]) == 0
+    capsys.readouterr()  # drop the init JSON so the health read below is one document
     after = cli.doctor(root, clock)
     assert after["outcome_sessions"]["backfill_applied"] is True
     assert after["outcome_sessions"]["undetermined"] == 1  # bad_row stays NULL

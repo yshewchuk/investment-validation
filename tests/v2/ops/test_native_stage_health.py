@@ -94,6 +94,8 @@ def test_health_projection_replaces_oversized_durable_failure_text(tmp_path):
         assert row["scope_hash"] == "scope"
         assert row["stage_id"] == "native_score_batch"
         assert row["status"] == "FAILED"
+        assert row["created_at"] == "2026-01-01T00:00:00Z"
+        assert row["updated_at"] == "2026-01-01T00:00:00Z"
         assert row["error_code"] == "RESOURCE_LIMIT_EXCEEDED"
         assert json.loads(row["problem_json"])["code"] == "RESOURCE_LIMIT_EXCEEDED"
     finally:
@@ -147,19 +149,48 @@ def test_health_writer_refuses_when_mandatory_content_exceeds_cap(tmp_path):
     assert target.read_bytes() == b"prior"
 
 
-def test_health_cli_pre_migration_catalog_returns_invalid_request_json(tmp_path, capsys):
+def test_health_cli_pre_migration_catalog_returns_integrity_failed_json(tmp_path, capsys):
     sqlite3.connect(tmp_path / "catalog.sqlite").close()
 
     assert cli.main(["health", "--root", str(tmp_path)]) == 2
 
     document = json.loads(capsys.readouterr().out)
-    assert document["code"] == "INVALID_REQUEST"
-    assert document["message"] == "health catalog is missing, locked, or unavailable"
+    assert document["code"] == "INTEGRITY_FAILED"
+    assert document["message"] == "ops schema is missing migrations"
     assert "traceback" not in document
 
 
+def test_health_cli_refuses_migration_checksum_mismatch_readonly(tmp_path, capsys):
+    conn = open_catalog(tmp_path / "catalog.sqlite", clock=SystemClock())
+    try:
+        owner, version = conn.execute(
+            "SELECT owner, version FROM schema_versions "
+            "ORDER BY owner, version LIMIT 1").fetchone()
+        conn.execute(
+            "UPDATE schema_versions SET checksum = ? WHERE owner = ? AND version = ?",
+            ("deliberate-mismatch", owner, version))
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert cli.main(["health", "--root", str(tmp_path)]) == 2
+
+    document = json.loads(capsys.readouterr().out)
+    assert document["code"] == "INTEGRITY_FAILED"
+    assert document["details"]["reason"] == "checksum_mismatch"
+
+    conn = sqlite3.connect(tmp_path / "catalog.sqlite")
+    try:
+        stored = conn.execute(
+            "SELECT checksum FROM schema_versions WHERE owner = ? AND version = ?",
+            (owner, version)).fetchone()[0]
+        assert stored == "deliberate-mismatch"
+    finally:
+        conn.close()
+
+
 def test_health_cli_opens_catalog_readonly_and_skips_backfill(tmp_path, monkeypatch):
-    sqlite3.connect(tmp_path / "catalog.sqlite").close()
+    open_catalog(tmp_path / "catalog.sqlite", clock=SystemClock()).close()
     observed = []
 
     def dispatch(args, root, conn, clock):
