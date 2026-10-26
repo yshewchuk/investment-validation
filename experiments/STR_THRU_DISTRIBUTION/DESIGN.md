@@ -6,7 +6,7 @@ Design-only proposal, 26 October 2026. No experiment is preregistered or activat
 
 Run this as a **conditional distribution experiment**, not as a replacement of a supposedly deterministic trading system. Start by changing only the forecast distribution, keeping the causal features, trade definition, payoff bridge and evaluation policy fixed. Test whether the new distribution improves calibrated probabilities and realized net results; do not assume it will.
 
-The most important limitation: **under a linear payoff bridge, improving distribution shape without changing its mean cannot generally improve expected profit.** It can improve probability of profit and risk estimates. A shape-driven expected-profit gain needs a nonlinear payoff, or a different risk-constrained selection rule. The experiment must identify which mechanism produced any gain.
+The most important limitation: **where the payoff bridge is linear and its clip is inactive, changing distribution shape at a fixed mean leaves expected profit unchanged.** The existing `max(0, …)` clip is nonlinear when active, so shape can then affect EV. Shape can also improve profit probabilities and risk estimates. Attribute any economic gain to a changed mean, active clipping, another nonlinear payoff or a different risk-constrained selection rule, not merely to having a histogram.
 
 This review delivers the design only. The first implementation slice is a source-free distribution/metric/payoff contract with synthetic tests. Do not train, open private data, consume holdouts, change legacy code or wire production scoring yet. Subsequent expensive runs remain the user's local runs after the required implementation merges and explicit run authorization.
 
@@ -141,16 +141,28 @@ At the final status read, train #1390 was `d8ecc917` with both #1375 and #1396; 
 
 **Frozen-gate baseline qualification:** open P1 #1423 reports that native `entry_cost_pct` uses decision-session close while legacy gate training uses the priced chain's spot. The owner reports 67 numeric mismatches plus 22 separate null/quote-availability differences; these private-artifact counts were not independently reproduced here. Before making gate-relative claims, require a stable staged chain-spot/validation contract and exact feature-source parity, or explicitly label the benchmark unqualified. Keep the decision about strike geometry's spot source separate. This is a dependency to its existing owner, not authorization to fix it or inspect private artifacts. [#1423][spotissue]
 
-| Slice | Deliverable and acceptance | Explicit exclusions |
-| --- | --- | --- |
-| 0 this review | Design, source/target/clock requirements, arm matrix, proposed policy/metric definitions and split list; below the 300-added-doc-line design budget. | No registration, private reads or training. |
-| 1 | Additive source-free distribution representation, bin/tail validation, CRPS/RPS/log/Brier metrics, mean-matched ablation and existing-bridge adapter; synthetic calibration/payoff tests. Split representation/metrics from bridge if needed. | No provider, real artifacts, native caller or production gate. |
-| 2 | Versioned native recipe/fold/feature adapter and explicit resource accounting; poisoned future/protected inputs, mismatch and replay tests. Use only admitted readers and clocks. | No claim that metadata admission authorizes payload reads; no hidden feature rebuild. |
-| 3 | Research-only histogram fitting and causal OOF residual/calibration pipeline; complete trial identities and bounded local-run plan. | No default private execution; Yuri runs authorized development locally. |
-| 4 | Frozen selection/net-cost/cash-book evaluator; matched-arms profitability report and coverage/capacity diagnostics. | No gate promotion or strategy/exit optimization. |
-| Later only if warranted | Nonlinear/joint exit-value or direct net-P&L distribution, then frozen confirmatory support and deployment design. | No automatic holdout opening, model release or live deployment. |
+Each row below is one proposed PR, with estimated **added code / test / documentation lines**. Estimates include owning README/ARCHITECTURE updates, are not run authority or delivery promises, and must be re-estimated/split before implementation if the bounds cannot hold. Existing SIZE/clock/spot dependencies are separately owned prerequisites, not hidden work in these estimates.
 
-New implementation PRs should fit the current repository's approximate 400-added-non-test-code/120-added-doc-line limits, with required owner README/ARCHITECTURE updates and tests under `tests/v2/`. Estimate and split before implementation; this is not a delivery-time promise. Standard sklearn/NumPy/stdlib cover the initial modeling and numerical work; no new optimization/distribution framework is needed. Count classifier trees, calibration/residual fits, storage, memory and wall time, and retain existing no-automatic-retry semantics and bounded progress logging.
+| Slice and dependency | Deliverable and acceptance | Added code / tests / docs |
+| --- | --- | --- |
+| 0 this review | Scientific design and discovery links only; no registration, private reads or training. | 0 / 0 / 180–220 |
+| 1a / reviewed design | Source-free distribution/bin/tail representation; support, normalization and refusal oracles. | 140–220 / 180–280 / 20–40 |
+| 1b / 1a | CRPS/RPS/log/Brier metrics and reconstruction sensitivity; independent synthetic score oracles. | 160–240 / 220–320 / 20–40 |
+| 1c / 1a | Frozen payoff adapter and mean-matched controls; linear invariance, clipping and nonlinear toy tests. | 140–220 / 220–320 / 25–45 |
+| 2a / 1a and qualified native sources | Versioned recipe/fold/feature admission; protected/future poisoning, identity and all-horizon tests. | 220–320 / 280–400 / 40–70 |
+| 2b / 2a | Resource/fit-count envelope and trial identity wiring; exact limits and failure/replay tests. | 120–200 / 180–280 / 25–45 |
+| 3a / 2a–2b | Fixed histogram and matched point-fitting adapters; absent classes, deterministic fits and receipts. | 180–280 / 240–360 / 35–60 |
+| 3b / 3a | Causal OOF mean/residual/calibration controls; strict inner-only provenance and zero-mean refusal. | 180–280 / 260–380 / 35–60 |
+| 3c / 1b–1c and 3b | Bounded local-run/report wiring; sealed requests and complete attempts, no default execution. | 160–260 / 240–360 / 40–70 |
+| 4a / frozen economics and 3c | Net-cost overlay and common selector; units, multipliers, fees and cutoff tests. | 160–240 / 220–340 / 30–50 |
+| 4b / 4a | Native cash-book/report integration; paired capital/coverage and missing-outcome diagnostics. | 180–280 / 260–380 / 35–60 |
+| 5a / useful development evidence only | Separate nonlinear/joint or direct-P&L follow-on design and its own implementation estimates. | 0 / 0 / 120–180 |
+| 5b / frozen winner only | Separate final-confirmation design, fixed reference and protected-read acceptance/implementation estimates. | 0 / 0 / 120–180 |
+| 5c / successful authorized confirmation only | Separate deployment design, including new release contracts and implementation estimates. | 0 / 0 / 120–180 |
+
+Slices 1–4 add research contracts only: no provider, private execution, production gate, strategy/exit optimization or automatic promotion. Metadata admission is not payload authority; no slice may hide a feature rebuild. Slices 5a–5c budget designs only, not unspecified future implementations. Real development remains explicitly authorized user-run local work; no final holdout, model release or deployment is authorized here.
+
+Implementation PRs stay within the current approximate 400-added-non-test-code/120-added-doc-line limits, with tests under `tests/v2/`. Standard sklearn/NumPy/stdlib cover the initial modeling and numerical work; no new optimization/distribution framework is needed. Count classifier trees, calibration/residual fits, storage, memory and wall time, and retain existing no-automatic-retry semantics and bounded progress logging.
 
 Synthetic acceptance includes exact bin boundaries/zero/tails, normalization/NaN/negative mass refusal, absent classes, deterministic replay, all-tail and no-tail cases, proper score oracles, identical-mean linear-EV invariance, nonlinear toy distinction, cost/multiplier accounting, no future fit/calibration, protected-event poisoning, all-horizon grouping, source identity mismatch, and no legacy runtime changes. Before any real run, require an explicit resource/coverage preflight and a sealed run budget; no expensive operation was performed for this plan.
 
