@@ -985,7 +985,7 @@ Detached qualified-column maps use native decoding for full TableContract/privat
 `_bounded_catalog_identity.reconstruct_catalog(payload, expected)` consumes an unmodified transfer through native decoders/builders, not a new hash recipe or public provenance token.
 B2 checks every contract/binding, ordered fragment/object membership, dataset count/hash/mode and snapshot field, then requires complete expected SnapshotRef equality. Empty/unselected tables participate; repeated ObjectRefs are deduplicated only after agreement checks. Output is native ResolvedSnapshot.
 Parent IDs/evidence remain values, never traversed. No referenced payload, object bytes, provider or ordinary resolver is read; B2 has no SQL/logging. Metadata proves no source, coverage, confirmation, PIT or execution property.
-Limits bound transfer, not SQLite CPU/RSS. Existing readers remain intact; no partial result, fallback, write or automatic retry. Caller owns read-view provenance/cleanup. Session lifetime/scanner wiring remain later work; see the [design](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md).
+Limits bound transfer, not SQLite CPU/RSS. Existing readers remain intact; no partial result, fallback, write or automatic retry. No cache; repeated transfers of the same read view return equal detached payloads. Caller owns read-view provenance/cleanup. Session lifetime/scanner wiring remain later work; see the [design](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md).
 
 | Condition | Refusal (fixed messages for new mappings only; no partial result) | Retryable |
 |---|---|---|

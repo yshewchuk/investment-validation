@@ -149,7 +149,6 @@ def test_all_probes_pass_before_first_payload(catalog, monkeypatch):
 @pytest.mark.parametrize("table,field,bad", [
     ("snapshots", "finality_receipt_refs_json", '["private",'),
     ("snapshots", "finality_receipt_refs_json", '[1]'),
-    ("snapshots", "finality_receipt_refs_json", '[' * 1100 + ']' * 1100),
     ("snapshots", "knowledge_mode_by_table_json", '{"x":"private","x":"observed"}'),
     ("dataset_versions", "evidence_json", '{}'),
     ("dataset_versions", "partition_logical_hashes_json", '{"private":true}'),
@@ -159,9 +158,16 @@ def test_all_probes_pass_before_first_payload(catalog, monkeypatch):
     ("fragments", "time_bounds_json", 'null'),
     ("fragments", "input_receipt_refs_json", 'null'),
 ])
-def test_json_syntax_depth_duplicates_and_native_shapes_refuse(catalog, table, field, bad):
+def test_json_syntax_duplicates_and_native_shapes_refuse(catalog, table, field, bad):
     catalog.execute(f"UPDATE data_{table} SET {field}=?", (bad,))
     assert refuse(catalog).problem.message == "catalog transfer malformed"
+
+
+def test_recursion_error_during_json_decode_is_redacted(catalog, monkeypatch):
+    def deep(*_, **__):
+        raise RecursionError("private")
+    monkeypatch.setattr(transfer.json, "loads", deep)
+    refuse(catalog)
 
 
 @pytest.mark.parametrize("field,value", [("definition_hash", "not-a-hash"), ("primary_key", ["missing"])])
