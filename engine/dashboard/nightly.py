@@ -293,6 +293,60 @@ def _remember_unknown_symbol(ticker: str) -> None:
         pass
 
 
+#: Chain fetches that failed transiently or were cut off mid-session by quota,
+#: per session date: {"<YYYY-MM-DD session>": ["TICK", ...]}. A skipped
+#: session stops re-buying the unheld tail, so without this a transient failure
+#: loses that date for the ticker once the session leaves the CHAIN_SESSIONS
+#: heal window. Definitive 404s are never recorded here — they have no chain.
+CHAIN_RETRY_PATH = paths.REPORTS / "orats_chain_retry.json"
+
+
+def _read_chain_retry() -> dict[str, set[str]]:
+    """The retry memo; a missing or invalid file is empty and never raises."""
+    try:
+        raw = json.loads(CHAIN_RETRY_PATH.read_text())
+        return {str(d): {str(t) for t in ts} for d, ts in raw.items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def _write_chain_retry(retry: dict[str, set[str]]) -> None:
+    try:
+        paths.assert_writable(CHAIN_RETRY_PATH).parent.mkdir(parents=True, exist_ok=True)
+        CHAIN_RETRY_PATH.write_text(
+            json.dumps({d: sorted(ts) for d, ts in sorted(retry.items())}, indent=1))
+    except OSError as exc:  # a lost memo costs a re-buy window, never a crashed nightly
+        print(f"[chains] could not write {CHAIN_RETRY_PATH.name}: {exc}", file=sys.stderr)
+
+
+def _persist_chain_retry(stamp: str, retry: set[str]) -> None:
+    """Replace one session's retry entry with this run's failed/cut names.
+
+    Entries older than 14 days behind ``stamp`` are pruned — past that the
+    session is far outside any heal window and the date is not coming back.
+    """
+    d = _read_chain_retry()
+    if not retry and stamp not in d:
+        return  # nothing owed and none recorded: leave the file alone
+    if retry:
+        d[stamp] = retry
+    else:
+        d.pop(stamp, None)
+    cutoff = pd.Timestamp(stamp) - pd.Timedelta(days=14)
+    kept: dict[str, set[str]] = {}
+    for k, v in d.items():
+        if k == stamp:
+            kept[k] = v
+            continue
+        try:
+            old = pd.Timestamp(k)
+        except ValueError:
+            continue
+        if old >= cutoff:
+            kept[k] = v
+    _write_chain_retry(kept)
+
+
 #: Market-context tickers the nightly's per-ticker history backfill keeps
 #: populated: SPY here only retains its ``daily_market`` history for the
 #: legacy market-wide read -- the v2 regime features never read it (they read
@@ -429,9 +483,11 @@ CHAIN_SESSIONS = 2
 #: Fraction of a session's wanted pairs already held past which the heal pass
 #: stops fetching that session. At or above it the unheld remainder is mostly
 #: names with no chain on file, so its batches cluster into all-404s (weekend
-#: runs 10-18/19: ~114 calls, almost all 404); a transient failure is possible
-#: among them and is not retried while the session stays skipped. A night that
-#: did not run leaves the newest session at ~0% held, so it is still healed.
+#: runs 10-18/19: ~114 calls, almost all 404). The skip is not total:
+#: transient failures and quota-cut names are still re-asked via
+#: :data:`CHAIN_RETRY_PATH`; only definitive 404s and names
+#: never-attempted-and-failed are dropped. A night that did not run leaves the
+#: newest session at ~0% held, so it is still healed.
 CHAIN_SKIP_HELD_FRACTION = 0.75
 
 
@@ -450,10 +506,11 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     calendar frontier that is the nightly universe (the endpoint is per
     (tradeDate, ticker-batch)); the second session is usually almost free
     because the previous run already got it, and a session that is at least
-    :data:`CHAIN_SKIP_HELD_FRACTION` held is skipped outright — the unheld
-    names left there are mostly ones with no chain on file (a transient
-    failure is possible and is not retried while the session stays skipped),
-    and re-buying that tail is ~114 calls of 404s per weekend run.
+    :data:`CHAIN_SKIP_HELD_FRACTION` held stops buying its unheld tail — the
+    names left there are mostly ones with no chain on file (transient failures
+    and quota-cut names are still re-asked via :data:`CHAIN_RETRY_PATH`; only
+    definitive 404s and never-attempted-and-failed names are dropped), and
+    re-buying that tail is ~114 calls of 404s per weekend run.
 
     Truncation is checked, not assumed: see :data:`CHAIN_BATCH`.
 
@@ -514,30 +571,45 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
 def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_held) -> None:
     """Fetch one trade date for whatever part of the universe still needs it.
 
-    A session that is already at least :data:`CHAIN_SKIP_HELD_FRACTION` held
-    is not fetched at all: the unheld names left are mostly ones with no chain
-    on file (a transient failure is possible and is not retried while the
-    session stays skipped). The decision is recorded, never silent.
+    A session already at least :data:`CHAIN_SKIP_HELD_FRACTION` held stops
+    buying its unheld tail — those names are mostly ones with no chain on
+    file — but it is not skipped outright: the names in :data:`CHAIN_RETRY_PATH`
+    that are still unheld (transient failures, quota-cut remainders) are
+    re-asked. A definitive 404 never enters that file, so 404s and
+    never-attempted-and-failed names are the only ones dropped. The decision
+    is recorded, never silent.
     """
     session_day = pd.Timestamp(stamp).normalize()
     if skip_held:
         wanted = [t for t in wanted_all if (t, session_day) not in held]
         out["skipped_held"] += len(wanted_all) - len(wanted)
-        if wanted_all and wanted:
+        if wanted:
             fraction = (len(wanted_all) - len(wanted)) / len(wanted_all)
             if fraction >= CHAIN_SKIP_HELD_FRACTION:
+                pending = sorted(_read_chain_retry().get(stamp, set()) & set(wanted))
+                if not pending:
+                    out.setdefault("sessions_skipped", []).append(
+                        {"session": stamp, "held_fraction": round(fraction, 3),
+                         "unheld": len(wanted)}
+                    )
+                    print(f"[chains] session {stamp}: {fraction:.0%} held, "
+                          f"skipping {len(wanted)} unheld pairs (mostly no chain "
+                          "on file; transient failures and quota-cut names are "
+                          "retried via the chain retry file)",
+                          file=sys.stderr)
+                    return
                 out.setdefault("sessions_skipped", []).append(
                     {"session": stamp, "held_fraction": round(fraction, 3),
-                     "unheld": len(wanted)}
+                     "unheld": len(wanted), "retried": len(pending)}
                 )
                 print(f"[chains] session {stamp}: {fraction:.0%} held, "
-                      f"skipping {len(wanted)} unheld pairs (mostly no chain "
-                      "on file; a transient failure is possible and is not "
-                      "retried while the session stays skipped)",
+                      f"skipping the unheld tail but re-asking {len(pending)} "
+                      "retry-file names (transient failures and quota cuts)",
                       file=sys.stderr)
-                return
+                wanted = pending
     else:
         wanted = list(wanted_all)
+    retry: set[str] = set()
     for start in range(0, len(wanted), batch):
         chunk = wanted[start : start + batch]
         params = {"ticker": ",".join(chunk), "tradeDate": stamp,
@@ -546,9 +618,21 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
             record = fetcher.fetch("orats", "hist/strikes", params,
                                    note="phase3 forward chains")
         except QuotaExhausted:
+            # This chunk and every later unasked one are still owed the date;
+            # without persisting before the raise the cut-off tail is lost.
+            retry.update(wanted[start:])
+            _persist_chain_retry(stamp, retry)
             raise
         except Exception as exc:  # noqa: BLE001 — reported, never swallowed
             out["failed"].append(f"{chunk[0]}..: {str(exc)[-40:]}")
+            if "HTTP 404" in str(exc):
+                # Definitive no-chain, like the 200-but-short response below:
+                # recorded as missing, never retried.
+                out["missing"].extend(chunk)
+            else:
+                # Transient (429, 502, transport): owed the date — retryable
+                # even after the session passes the skip threshold.
+                retry.update(chunk)
             continue
         out["calls"] += 0 if record.from_cache else 1
         out["cache_hits"] += 1 if record.from_cache else 0
@@ -564,6 +648,9 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
         # genuinely absent. Calling that "truncated" would have blamed the
         # batching for the data's own gap.
         out["missing"].extend(t for t in chunk if t not in got)
+    # A fetched-OK or 404 name drops out of this session's entry by not being
+    # re-added; only this run's transient failures and quota-cut remainder stay.
+    _persist_chain_retry(stamp, retry)
 
 
 def _market_wide_days(as_of: pd.Timestamp, lookback: int = 6) -> list:
@@ -2219,8 +2306,10 @@ def main(argv: Sequence[str] | None = None) -> int:
              "2 is the steady state (ORATS publishes around midnight, so tonight "
              "needs yesterday too); widen it once to heal a gap left by nights "
              "that did not run — a session is re-asked until held or the session "
-             "reaches CHAIN_SKIP_HELD_FRACTION held. Already-held pairs are "
-             "skipped, so a wider window costs only what is genuinely missing.",
+             "reaches the skip threshold, CHAIN_SKIP_HELD_FRACTION = 0.75 held, "
+             "after which only the chain retry file's failed/cut names are "
+             "re-asked. Already-held pairs are skipped, so a wider window costs "
+             "only what is genuinely missing.",
     )
     parser.add_argument("--max-staleness", type=int, default=MAX_STALENESS_DAYS)
     parser.add_argument("--json", default=None, help="write the run report to this path")
