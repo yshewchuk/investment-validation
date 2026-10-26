@@ -90,6 +90,7 @@ check defines missing-input and failure outcomes:
 | `.env` missing/empty (`check_files`) | CLI warns unless `--quiet` is set; current-value matching inactive; credential-pattern checks remain active; other checks continue |
 | No secret needles (`check_bundle`) | Record `no-secrets-loaded`; still check bundle files |
 | `repo_hygiene.py` scan | Clean: exit 0; violations: exit 1 |
+| `live_experiment_isolation.py` | Static import or path-root violations, unreadable source, or invalid Python refuse the CI check with exit 1; no partial scan or fallback is treated as clean |
 | Staged hygiene read failure | Default returns empty bytes; `strict=True` raises `CalledProcessError` |
 | Worktree hygiene read failure | Default returns empty bytes; `strict=True` raises `OSError`; missing non-symlink paths return empty bytes in either mode |
 | The pre-commit hook finds no `npx` | One-line install hint on stderr; commit blocked (fails closed) |
