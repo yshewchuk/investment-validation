@@ -166,13 +166,15 @@ inside function bodies):
   `nightly.py::_panel_staleness_flags`/`_recently_printed`/`run_nightly`/
   `validate_refresh`, `render.py::freshness_summary`); `engine.data.fetch`
   (`nightly.py::backfill_ticker_history`/`refresh_calendar_data`/
-  `refresh_forward_chains`/`run_nightly`); `engine.data.finality`
+  `refresh_forward_chains`/`_refresh_one_session`/`run_nightly`); `engine.data.finality`
   (`nightly.py::run_nightly`); `engine.data.pulls`
   (`nightly.py::run_nightly`, including `gspc_refresh::refresh_gspc_daily`);
   `engine.data.pulls.forward_calendar`
   (`nightly.py::refresh_calendar_data`); `engine.data.rebuild`
   (`nightly.py::refresh_calendar_data`/`run_nightly`/`mark_tiers_degraded`);
-  `engine.data.manifest` (`nightly.py::_write_flag_report`);
+  `engine.data.manifest` (`nightly.py::_write_flag_report`/
+  `_write_chain_retry`); `engine.replay`
+  (`nightly.py::refresh_forward_chains`);
   `engine.data.normalize.n_daily`
   (`nightly.py::run_nightly`); `engine.data.schemas`
   (`model_evidence.py::_replay_trades`); `engine.entry_rules`
@@ -240,6 +242,13 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   to cached data (staleness stays visible in `meta.json`) — except a rotated
   credential, which stops the run rather than burning retries against a dead
   key. `^GSPC` refresh failures use the typed refusal above.
+- **Forward-chain retry memo** — a heal session already ≥75% held stops
+  re-buying its unheld tail (recorded in `sessions_skipped`). Transient
+  (non-404) failures, non-JSON 200s and quota/abnormal-exit remainders are
+  saved to `reports/orats_chain_retry.json` and re-asked; definitive 404s are
+  not. The memo is read only if a regular file under 1 MB, written
+  atomically; a read or write problem logs to stderr and never stops the
+  refresh (a lost memo costs a re-buy window).
 - **Tier-4 gap repair** — with refresh and tiers on, at most one SNAPSHOT per run:
   on the repair path it is written after the Tier-4 gap check; a degraded
   tiers step writes its own (see table); a failed write keeps the previous
