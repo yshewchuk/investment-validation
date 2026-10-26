@@ -22,6 +22,7 @@ import pandas as pd
 import pytest
 
 from engine.dashboard import nightly
+from engine.data.fetch import CredentialRotated, FetchError
 from engine.data.throttle import QuotaExhausted
 
 AS_OF = "2026-09-02"
@@ -32,12 +33,15 @@ class _Fetcher:
     """A ``Fetcher`` stand-in that answers every batch with the whole chunk.
 
     ``fail(params)`` may return an exception to raise instead of a record.
+    ``bad_json(params)`` may return an exception for ``record.json()`` to
+    raise on an otherwise-successful (HTTP 200) call.
     """
 
-    def __init__(self, fail=None):
+    def __init__(self, fail=None, bad_json=None):
         self.asked = []
         self.asked_tickers = []
         self.fail = fail
+        self.bad_json = bad_json
 
     def fetch(self, source, endpoint, params, note=""):
         self.asked.append(params["tradeDate"])
@@ -45,12 +49,15 @@ class _Fetcher:
         exc = self.fail(params) if self.fail else None
         if exc is not None:
             raise exc
+        bad = self.bad_json(params) if self.bad_json else None
 
         class R:
             from_cache = False
 
             @staticmethod
             def json():
+                if bad is not None:
+                    raise bad
                 return {"data": [{"ticker": t}
                                  for t in params["ticker"].split(",")]}
 
@@ -207,6 +214,105 @@ def test_quota_cut_persists_the_unasked_remainder_then_reraises(monkeypatch, tmp
     assert f.asked_tickers[:10] == sorted(tickers)[:10]
     assert nightly._read_chain_retry() == {AS_OF: {t for t in tickers if t >= "TKR10"}}, \
         "the cut chunk plus all later unasked names are kept for retry"
+
+
+def test_credential_rotated_persists_the_debt_then_reraises(monkeypatch, tmp_path):
+    """A rotated key is a FetchError: the generic arm must not file it as
+    transient and keep buying against a dead credential. Like the quota cut,
+    the refused chunk and every later unasked name land in the retry file
+    before the raise (run_nightly turns it into a NightlyStop)."""
+    tickers = [f"TKR{i:02d}" for i in range(25)]
+
+    def fail(params):
+        if params["ticker"].split(",")[0] == "TKR10":
+            return CredentialRotated("orats: HTTP 401, credential rotated")
+        return None
+
+    _wire(monkeypatch, set(), tmp_path)
+    f = _Fetcher(fail=fail)
+
+    with pytest.raises(CredentialRotated):
+        nightly.refresh_forward_chains(tickers, AS_OF, fetcher=f, sessions=1)
+
+    assert f.asked == [AS_OF, AS_OF], "the loop stops at the refusal: no later batch"
+    assert "TKR20" not in f.asked_tickers, "no call is made after the raise"
+    assert nightly._read_chain_retry() == {AS_OF: {t for t in tickers if t >= "TKR10"}}, \
+        "the refused chunk plus all later unasked names are kept for retry"
+
+
+def test_non_json_200_is_transient_and_the_session_continues(monkeypatch, tmp_path):
+    """``record.json()`` raising ValueError on a 200 body must not abort the
+    session: the chunk is owed the date, reported in ``failed``, and the later
+    batches are still fetched."""
+    tickers = [f"TKR{i:02d}" for i in range(25)]
+    _wire(monkeypatch, set(), tmp_path)
+    f = _Fetcher(bad_json=lambda p: ValueError("no JSON object could be decoded")
+                 if p["ticker"].split(",")[0] == "TKR00" else None)
+
+    out = nightly.refresh_forward_chains(tickers, AS_OF, fetcher=f, sessions=1)
+
+    assert f.asked == [AS_OF, AS_OF, AS_OF], "the session continued past the bad body"
+    assert out["failed"] and "TKR00" in out["failed"][0], "the failure is still reported"
+    assert nightly._read_chain_retry() == {AS_OF: set(tickers[:10])}, \
+        "the bad-body chunk is owed the date; the OK batches are not"
+    assert out["returned"] == 15, "the two good batches still land their rows"
+
+
+def test_json_body_raising_a_base_exception_keeps_the_debt(monkeypatch, tmp_path):
+    """A KeyboardInterrupt surfacing from ``record.json()`` is not an
+    Exception: the wrapper must still bank the current chunk and the unasked
+    tail before the session unwinds, then re-raise."""
+    tickers = [f"TKR{i:02d}" for i in range(25)]
+    _wire(monkeypatch, set(), tmp_path)
+    f = _Fetcher(bad_json=lambda p: KeyboardInterrupt()
+                 if p["ticker"].split(",")[0] == "TKR10" else None)
+
+    with pytest.raises(KeyboardInterrupt):
+        nightly.refresh_forward_chains(tickers, AS_OF, fetcher=f, sessions=1)
+
+    assert f.asked == [AS_OF, AS_OF], "the loop died at the interrupting batch"
+    assert nightly._read_chain_retry() == {AS_OF: {t for t in tickers if t >= "TKR10"}}, \
+        "the interrupted chunk plus all later unasked names are kept for retry"
+
+
+@pytest.mark.parametrize("boom", [
+    pytest.param(KeyboardInterrupt, id="keyboard-interrupt"),
+    pytest.param(type("LoopDefect", (BaseException,), {}), id="other-base-exception"),
+])
+def test_abnormal_exit_keeps_the_retry_debt(monkeypatch, tmp_path, boom):
+    """ANY other BaseException out of the fetch call — the generic
+    ``except Exception`` arm never sees it — leaves the current chunk and
+    every later unasked one in the retry file before the exception
+    propagates; a lost debt is a silently unfetched date. (A plain Exception
+    from fetch is transient by design and stays on the old path.)"""
+    tickers = [f"TKR{i:02d}" for i in range(25)]
+
+    def fail(params):
+        if params["ticker"].split(",")[0] == "TKR10":
+            return boom()
+        return None
+
+    _wire(monkeypatch, set(), tmp_path)
+    f = _Fetcher(fail=fail)
+
+    with pytest.raises(boom):
+        nightly.refresh_forward_chains(tickers, AS_OF, fetcher=f, sessions=1)
+
+    assert nightly._read_chain_retry() == {AS_OF: {t for t in tickers if t >= "TKR10"}}, \
+        "the unasked remainder is persisted before the unwind"
+
+
+def test_generic_non_404_fetch_error_stays_transient(monkeypatch, tmp_path):
+    """A FetchError that is not CredentialRotated and not a 404 keeps the old
+    behaviour: reported, chunked into the retry file, session completes."""
+    _wire(monkeypatch, set(), tmp_path)
+    f = _Fetcher(fail=lambda p: FetchError("orats hist/strikes returned HTTP 503"))
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+
+    assert out["failed"], "the failure is reported"
+    assert nightly._read_chain_retry() == {AS_OF: set(TICKERS)}, \
+        "a plain FetchError is owed the date, not a stop-the-run signal"
 
 
 def test_old_entries_are_pruned_past_the_window(monkeypatch, tmp_path):

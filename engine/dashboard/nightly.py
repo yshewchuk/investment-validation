@@ -657,45 +657,74 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                 wanted = pending
     else:
         wanted = list(wanted_all)
+    from engine.data.fetch import CredentialRotated
+
     retry: set[str] = set()
-    for start in range(0, len(wanted), batch):
-        chunk = wanted[start : start + batch]
-        params = {"ticker": ",".join(chunk), "tradeDate": stamp,
-                  "dte": CHAIN_DTE, "fields": CHAIN_FIELDS}
-        try:
-            record = fetcher.fetch("orats", "hist/strikes", params,
-                                   note="phase3 forward chains")
-        except QuotaExhausted:
-            # This chunk and every later unasked one are still owed the date;
-            # without persisting before the raise the cut-off tail is lost.
+    # The loop cursor, pre-bound: an exit before the first chunk owes no tail.
+    start = len(wanted)
+    try:
+        for start in range(0, len(wanted), batch):
+            chunk = wanted[start : start + batch]
+            params = {"ticker": ",".join(chunk), "tradeDate": stamp,
+                      "dte": CHAIN_DTE, "fields": CHAIN_FIELDS}
+            try:
+                record = fetcher.fetch("orats", "hist/strikes", params,
+                                       note="phase3 forward chains")
+            except (QuotaExhausted, CredentialRotated):
+                # This chunk and every later unasked one are still owed the
+                # date; without persisting before the raise the cut-off tail
+                # is lost. CredentialRotated is a FetchError subclass: without
+                # this arm the generic arm below would treat a dead key as
+                # transient and keep the session buying against it. It stops
+                # the run instead — run_nightly turns it into a NightlyStop.
+                retry.update(wanted[start:])
+                _persist_chain_retry(stamp, retry)
+                raise
+            except Exception as exc:  # noqa: BLE001 — reported, never swallowed
+                out["failed"].append(f"{chunk[0]}..: {str(exc)[-40:]}")
+                if "HTTP 404" in str(exc):
+                    # Definitive no-chain, like the 200-but-short response below:
+                    # recorded as missing, never retried.
+                    out["missing"].extend(chunk)
+                else:
+                    # Transient (429, 502, transport): owed the date — retryable
+                    # even after the session passes the skip threshold.
+                    retry.update(chunk)
+                continue
+            out["calls"] += 0 if record.from_cache else 1
+            out["cache_hits"] += 1 if record.from_cache else 0
+            try:
+                payload = record.json()
+            except Exception as exc:  # noqa: BLE001 — reported, never swallowed
+                # A 200 whose body is not JSON is a transient bad answer, not
+                # a verdict on the chunk: owed the date, reported, and the
+                # session continues with the later batches rather than aborting.
+                out["failed"].append(f"{chunk[0]}..: {str(exc)[-40:]}")
+                retry.update(chunk)
+                continue
+            rows = payload.get("data") or []
+            out["rows"] += len(rows)
+            got = {r.get("ticker") for r in rows}
+            out["returned"] += len(got & set(chunk))
+            # A short response has TWO causes and they look identical: the
+            # endpoint truncating (it caps at 10 and returns HTTP 200
+            # regardless), or the ticker genuinely having no chain on this
+            # date. Both are recorded as `missing` rather than asserting one —
+            # a single-ticker retry is what distinguishes them, and on the
+            # first real board all 7 were 404s, i.e. genuinely absent. Calling
+            # that "truncated" would have blamed the batching for the data's
+            # own gap.
+            out["missing"].extend(t for t in chunk if t not in got)
+    except BaseException as exc:
+        # Any other exit — KeyboardInterrupt, or a defect in the bookkeeping
+        # below fetch — unwinds the whole session, so the current chunk and
+        # every later unasked one must be in the retry file before it does.
+        # The stop arms above already persisted and are re-raising: re-writing
+        # the same set would only be a second write.
+        if not isinstance(exc, (QuotaExhausted, CredentialRotated)):
             retry.update(wanted[start:])
             _persist_chain_retry(stamp, retry)
-            raise
-        except Exception as exc:  # noqa: BLE001 — reported, never swallowed
-            out["failed"].append(f"{chunk[0]}..: {str(exc)[-40:]}")
-            if "HTTP 404" in str(exc):
-                # Definitive no-chain, like the 200-but-short response below:
-                # recorded as missing, never retried.
-                out["missing"].extend(chunk)
-            else:
-                # Transient (429, 502, transport): owed the date — retryable
-                # even after the session passes the skip threshold.
-                retry.update(chunk)
-            continue
-        out["calls"] += 0 if record.from_cache else 1
-        out["cache_hits"] += 1 if record.from_cache else 0
-        rows = record.json().get("data") or []
-        out["rows"] += len(rows)
-        got = {r.get("ticker") for r in rows}
-        out["returned"] += len(got & set(chunk))
-        # A short response has TWO causes and they look identical: the endpoint
-        # truncating (it caps at 10 and returns HTTP 200 regardless), or the
-        # ticker genuinely having no chain on this date. Both are recorded as
-        # `missing` rather than asserting one — a single-ticker retry is what
-        # distinguishes them, and on the first real board all 7 were 404s, i.e.
-        # genuinely absent. Calling that "truncated" would have blamed the
-        # batching for the data's own gap.
-        out["missing"].extend(t for t in chunk if t not in got)
+        raise
     # A fetched-OK or 404 name drops out of this session's entry by not being
     # re-added; only this run's transient failures and quota-cut remainder stay.
     _persist_chain_retry(stamp, retry)
