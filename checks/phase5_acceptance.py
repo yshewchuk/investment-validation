@@ -18,13 +18,11 @@ Given a release root written by ``tools/phase5_prepare_release.py`` (layout:
    that swallows the exception is still caught), ``joblib.dump`` is rigged,
    and the watched directories are listed before and after. A planted fit
    and a planted cache write must both be detected, or the watch itself fails.
-4. **Rollback.** On a scratch copy of the deployment pointer state, promote
-   the candidate, roll back, and check the pointer resolves to the incumbent
-   again with byte-identical manifest bytes and untouched history. The
-   rehearsal copies the incumbent's existing durable record with the release
-   store and invents none: an incumbent whose record is missing, failed,
-   malformed or stale is left untouched and its refusal is the
-   ``P5_ROLLBACK_REFUSED`` finding, never a traceback.
+4. **Promote.** On a scratch copy of the deployment pointer state, promote the
+   candidate and check the pointer resolves exactly to it. Rollback is not
+   rehearsed (#805 D3: no rollback path). The incumbent's staging record is
+   never read; only the candidate's temporary record is bound in the scratch
+   copy.
 5. **Phase 4.** With ``--phase4-corpus``, every traced pair is verified by
    Phase 4's own trace verifier, its frozen model bindings are rebound by
    content hash to the staged release's objects, and it is scored with
@@ -97,10 +95,7 @@ CONSUMER_BLOCKED = "P5_CONSUMER_BLOCKED"
 RUNTIME_FIT = "P5_RUNTIME_FIT"
 MODEL_CACHE_WRITE = "P5_MODEL_CACHE_WRITE"
 GUARD_CONTROL_FAILED = "P5_GUARD_CONTROL_FAILED"
-ROLLBACK_NO_INCUMBENT = "P5_ROLLBACK_NO_INCUMBENT"
-ROLLBACK_CANDIDATE_LIVE = "P5_ROLLBACK_CANDIDATE_ALREADY_DEPLOYED"
-ROLLBACK_NOT_EXACT = "P5_ROLLBACK_NOT_EXACT"
-ROLLBACK_REFUSED = "P5_ROLLBACK_REFUSED"
+PROMOTE_NOT_EXACT = "P5_PROMOTE_NOT_EXACT"
 PROMOTE_REFUSED = "P5_PROMOTE_REFUSED"
 REPORT_INCOMPLETE = "P5_REPORT_INCOMPLETE"
 
@@ -110,8 +105,7 @@ FINDING_CODES = (
     MEMBER_IDENTITY, LINEAGE_INVALID,
     CONSUMER_UNRESOLVED, CONSUMER_NO_REFUSAL, CONSUMER_ERROR, CONSUMER_PENDING,
     CONSUMER_BLOCKED, RUNTIME_FIT, MODEL_CACHE_WRITE, GUARD_CONTROL_FAILED,
-    ROLLBACK_NO_INCUMBENT, ROLLBACK_CANDIDATE_LIVE, ROLLBACK_NOT_EXACT,
-    ROLLBACK_REFUSED, PROMOTE_REFUSED, *REPLAY_CODES, REPORT_INCOMPLETE,
+    PROMOTE_NOT_EXACT, PROMOTE_REFUSED, *REPLAY_CODES, REPORT_INCOMPLETE,
 )
 
 
@@ -511,13 +505,13 @@ def _scoring_pass(ctx, consumers, watch_dirs, findings) -> tuple[list[dict], dic
 
 
 # --------------------------------------------------------------------------
-# 4. promote -> rollback
+# 4. promote rehearsal
 # --------------------------------------------------------------------------
 
 
 def _copy_pointer_state(source: Path, dest: Path) -> None:
     """Manifests, staging-status records, pointer and history only: promotion
-    never reads objects, and the incumbent's durable success record travels
+    never reads objects, and the incumbent's durable record travels
     with its release directory."""
     for name in ("releases", "history"):
         if (source / name).is_dir():
@@ -526,80 +520,36 @@ def _copy_pointer_state(source: Path, dest: Path) -> None:
         shutil.copy2(source / "DEPLOYED", dest / "DEPLOYED")
 
 
-def _snapshot(root: Path) -> dict[str, bytes]:
-    return {str(p.relative_to(root)): p.read_bytes()
-            for p in sorted(root.rglob("*")) if p.is_file() and p.name != "DEPLOYED"}
-
-
-def _rollback_round_trip(release_root: Path, candidate: str, first_deployment: bool,
-                         findings: _Findings) -> dict:
-    with tempfile.TemporaryDirectory(prefix="p5-6-rollback-") as scratch:
+def _promote_rehearsal(release_root: Path, candidate: str, findings: _Findings) -> dict:
+    """Promote the candidate in a scratch copy and check the pointer resolves
+    exactly to it. Rollback is not rehearsed (#805 D3: no rollback path)."""
+    with tempfile.TemporaryDirectory(prefix="p5-6-promote-") as scratch:
         root = Path(scratch)
         _copy_pointer_state(deployment_root(release_root), root)
-        # The rehearsal's promote requires a staging-completion record. The
-        # incumbent's comes from the real store with the copied pointer state
-        # -- its own durable record exactly as found, and scratch invents
-        # none. Only the candidate's temporary record is bound here, inside
-        # this copy; the real release root is never written (the candidate's
-        # real record waits for `main`). An incumbent whose record is
-        # missing, failed, malformed or stale is left untouched: its
-        # rollback refuses with ROLLBACK_REFUSED in ``_round_trip``.
+        incumbent = deployment.current_pointer(root)
+        # Promotion requires a staging-completion record, and the incumbent's
+        # record is never consulted: only the candidate's temporary record is
+        # bound here, inside this copy; the real release root is never written
+        # (the candidate's real record waits for `main`).
         try:
             deployment.mark_staging_succeeded(root, candidate)
         except deployment.DeploymentError as exc:
-            findings.add(PROMOTE_REFUSED, "rollback", type(exc).__name__)
+            findings.add(PROMOTE_REFUSED, "promote", type(exc).__name__)
             return {"status": PROMOTE_REFUSED}
-        return _round_trip(root, candidate, first_deployment, findings)
-
-
-def _round_trip(root: Path, candidate: str, first_deployment: bool, findings) -> dict:
-    incumbent = deployment.current_pointer(root)
-    if incumbent is None and not first_deployment:
-        findings.add(ROLLBACK_NO_INCUMBENT, "rollback", "no DEPLOYED pointer to return to")
-        return {"status": ROLLBACK_NO_INCUMBENT}
-    if incumbent is not None and incumbent.release_id == candidate:
-        findings.add(ROLLBACK_CANDIDATE_LIVE, "rollback", candidate)
-        return {"status": ROLLBACK_CANDIDATE_LIVE}
-    before_files = _snapshot(root)
-    before_target = None if incumbent is None else to_document(
-        deployment.resolve_release(root, incumbent.release_id))
-    try:
-        promoted = deployment.promote(root, candidate)
-    except deployment.DeploymentError as exc:
-        findings.add(PROMOTE_REFUSED, "rollback", type(exc).__name__)
-        return {"status": PROMOTE_REFUSED}
-    live = deployment.current_release(root)
-    checks = {"promoted_resolves_candidate": promoted.release_id == candidate
-              and to_document(live) == to_document(deployment.resolve_release(root, candidate))}
-    if incumbent is None:
         try:
-            deployment.rollback(root)
-            checks["first_deployment_rollback_refused"] = False
-        except deployment.NoPriorRelease:
-            checks["first_deployment_rollback_refused"] = True
-        checks["pointer_unchanged_by_refusal"] = deployment.current_pointer(root) == promoted
-    else:
-        try:
-            back = deployment.rollback(root)
+            promoted = deployment.promote(root, candidate)
         except deployment.DeploymentError as exc:
-            findings.add(ROLLBACK_REFUSED, "rollback", type(exc).__name__)
-            return {"status": ROLLBACK_REFUSED}
-        after_files = _snapshot(root)
-        checks.update({
-            "pointer_release_id_restored": back.release_id == incumbent.release_id,
-            "target_release_byte_exact": to_document(deployment.resolve_release(
-                root, back.release_id)) == before_target,
-            "manifests_and_history_prefix_byte_exact": all(
-                after_files.get(path) == data for path, data in before_files.items()),
-            "history_appended_two": len(deployment.pointer_history(root))
-            == incumbent.sequence + 3,
-        })
-    for name, ok in checks.items():
-        if not ok:
-            findings.add(ROLLBACK_NOT_EXACT, "rollback", name)
-    return {"status": "ok" if all(checks.values()) else ROLLBACK_NOT_EXACT,
-            "first_deployment": incumbent is None, "checks": checks,
-            "incumbent": None if incumbent is None else incumbent.release_id}
+            findings.add(PROMOTE_REFUSED, "promote", type(exc).__name__)
+            return {"status": PROMOTE_REFUSED}
+        checks = {"promoted_resolves_candidate": promoted.release_id == candidate
+                  and to_document(deployment.current_release(root))
+                  == to_document(deployment.resolve_release(root, candidate))}
+        for name, ok in checks.items():
+            if not ok:
+                findings.add(PROMOTE_NOT_EXACT, "promote", name)
+        return {"status": "ok" if all(checks.values()) else PROMOTE_NOT_EXACT,
+                "checks": checks,
+                "incumbent": None if incumbent is None else incumbent.release_id}
 
 
 # --------------------------------------------------------------------------
@@ -645,7 +595,7 @@ def _report_rows(evidence: dict) -> dict[str, list[list[str]]]:
                       for r in evidence["consumers"]],
         "controls": [[name, "pass" if ok else "FAIL"] for name, ok in sorted(
             {**evidence["scoring_pass"].get("controls", {}),
-             **evidence["rollback"].get("checks", {}),
+             **evidence["promote"].get("checks", {}),
              "lineage_graph_valid": evidence["lineage"].get("status")
              in ("ok", "NOT_APPLICABLE")}.items())],
         "phase4": [[name, str(count)] for name, count in
@@ -675,7 +625,7 @@ def write_report(evidence: dict, report_dir: Path) -> Path:
                  "title": "Rearchitecture Phase 5 -- integrated model-release acceptance",
                  "type": "descriptive",
                  "hypothesis": "descriptive: is every member of the staged release present, "
-                               "hash-verified, consumed without fitting, and rolled back "
+                               "hash-verified, consumed without fitting, and promoted "
                                "exactly?"},
         "results": {"headline": {}, "stress": {}, "mc": {}},
         "headline": {}, "backtest": {}, "checklist": [],
@@ -692,7 +642,7 @@ def write_report(evidence: dict, report_dir: Path) -> Path:
             _section("Release members", ["member", "category", "status", "objects", "verdict"],
                      rows["members"]),
             _section("Score consumers", ["consumer", "members", "status"], rows["consumers"]),
-            _section("No-fit and rollback controls", ["control", "result"], rows["controls"]),
+            _section("No-fit and promote controls", ["control", "result"], rows["controls"]),
             _section("Phase 4 replay", ["disposition", "pairs"], rows["phase4"]),
             _section("Findings", ["code", "subject", "detail"], rows["findings"]),
         ],
@@ -702,7 +652,7 @@ def write_report(evidence: dict, report_dir: Path) -> Path:
 
 def _report_is_complete(text: str, evidence: dict) -> bool:
     headers = ("## 0. Verdict", "## 8. Provenance", "Release members", "Score consumers",
-               "No-fit and rollback controls", "Phase 4 replay", "Findings")
+               "No-fit and promote controls", "Phase 4 replay", "Findings")
     if not all(header in text for header in headers):
         return False
     return all("| " + " | ".join(row) + " |" in text
@@ -725,8 +675,7 @@ def build_evidence(release_root: Path, *, report_dir: Path | None = None,
                    phase4_checkpoint: Path | None = None,
                    watch_dirs: Iterable[Path] | None = None,
                    consumers: Mapping[str, Any] | None = None,
-                   state_specs: tuple[StateSpec, ...] = STATE_SPECS,
-                   first_deployment: bool = False) -> dict:
+                   state_specs: tuple[StateSpec, ...] = STATE_SPECS) -> dict:
     """Run every subject; ``consumers``/``state_specs``/``watch_dirs`` are test
     seams. Production passes none of them: the full catalog and the real
     consumer table, where a probe that does not exist yet is PENDING."""
@@ -735,7 +684,7 @@ def build_evidence(release_root: Path, *, report_dir: Path | None = None,
     findings = _Findings()
     evidence: dict[str, Any] = {"schema_version": PHASE5_EVIDENCE_SCHEMA,
                                 "release_root": str(release_root), "members": [],
-                                "consumers": [], "scoring_pass": {}, "rollback": {},
+                                "consumers": [], "scoring_pass": {}, "promote": {},
                                 "lineage": {"status": "NOT_RUN"},
                                 "phase4": {"status": "NOT_RUN"}}
     _progress("p5-accept", f"start release_root={release_root}", started)
@@ -770,15 +719,15 @@ def build_evidence(release_root: Path, *, report_dir: Path | None = None,
             ctx, active_consumers, dirs, findings)
         _progress("p5-accept", f"consumers: {len(evidence['consumers'])} scored", started)
 
-        # Fail closed on the incumbent's own durable record: the rehearsal
-        # copies whatever the real store holds and invents nothing. A missing,
-        # failed, malformed or stale incumbent record makes ``rollback`` refuse
-        # with ROLLBACK_REFUSED inside ``_round_trip``, never a traceback.
-        _progress("p5-accept", "rollback: running promote/rollback round trip", started)
-        evidence["rollback"] = _rollback_round_trip(
-            release_root, release_id, first_deployment, findings)
+        # The rehearsal consults no incumbent record: it binds only the
+        # candidate's temporary record in the scratch copy, so a missing,
+        # failed, malformed or stale incumbent record is never read and the
+        # real store is never written. A promote refusal is a
+        # PROMOTE_REFUSED finding, never a traceback.
+        _progress("p5-accept", "promote: rehearsing the candidate promote", started)
+        evidence["promote"] = _promote_rehearsal(release_root, release_id, findings)
         _progress("p5-accept",
-                  f"rollback: status={evidence['rollback'].get('status')}", started)
+                  f"promote: status={evidence['promote'].get('status')}", started)
 
     if phase4_corpus is None:
         _progress("p5-accept", "phase4: no --phase4-corpus given, NOT_RUN", started)
@@ -828,8 +777,6 @@ def main(argv=None) -> int:
                              "(same corpus only; a mismatched corpus_hash is discarded)")
     parser.add_argument("--watch-dir", type=Path, action="append",
                         help="extra model-cache dir to watch (default data/models + release)")
-    parser.add_argument("--first-deployment", action="store_true",
-                        help="no incumbent pointer exists; accept rollback-refusal instead")
     args = parser.parse_args(argv)
     watch = None
     if args.watch_dir:
@@ -837,8 +784,7 @@ def main(argv=None) -> int:
     try:
         evidence = build_evidence(args.release_root, report_dir=args.artifact_root,
                                   phase4_corpus=args.phase4_corpus,
-                                  phase4_checkpoint=args.phase4_checkpoint, watch_dirs=watch,
-                                  first_deployment=args.first_deployment)
+                                  phase4_checkpoint=args.phase4_checkpoint, watch_dirs=watch)
     except ReportPathError as exc:
         print(f"refusing to write report: {exc}", file=sys.stderr)
         return 2
