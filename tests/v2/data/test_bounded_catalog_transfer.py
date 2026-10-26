@@ -16,8 +16,13 @@ from tests.v2.data.test_bounded_catalog_probes import LIMITS, populate
 def build(path=":memory:", encoding="UTF-8"):
     conn = sqlite3.connect(path)
     conn.execute(f"PRAGMA encoding='{encoding}'")
+    conn.execute("PRAGMA automatic_index=OFF")
     conn.row_factory = sqlite3.Row
     populate(conn)
+    conn.execute("UPDATE data_snapshot_tables SET table_name=CASE table_name WHEN 'a' THEN 'z' ELSE 'a' END")
+    conn.execute("UPDATE data_version_fragments SET ordinal=1-ordinal")
+    conn.execute("UPDATE data_snapshots SET finality_receipt_refs_json=?,knowledge_mode_by_table_json=?",
+                 ('["synthetic-finality"]', '{"a":"reconstructed","z":"reconstructed"}'))
     conn.execute("UPDATE data_contracts SET definition_json=?",
                  (json.dumps(to_document(IV_CRUSH_CONTRACT)),))
     conn.execute('UPDATE data_dataset_versions SET evidence_json=?',
@@ -51,6 +56,8 @@ def refuse(conn, code="MANIFEST_CORRUPT", **changes):
                "IDENTITY_CONFLICT": "native"}[code]
     assert caught.value.problem == transfer.errors.make_problem(code, message)
     assert "private" not in str(caught.value) and caught.value.__cause__ is None
+    if code in {"MANIFEST_CORRUPT", "RESOURCE_UNAVAILABLE"}:
+        assert caught.value.__suppress_context__
     assert caught.value.problem.retryable == (code == "RESOURCE_UNAVAILABLE")
     assert conn.in_transaction
     return caught.value
@@ -69,6 +76,11 @@ def test_order_repeated_charges_detachment_no_resolver_or_objects(catalog, monke
     assert [r["t.table_name"] for r in result.tables] == ["a", "z"]
     assert [r["m.ordinal"] for r in result.fragments] == [0, 1, 0, 1]
     assert result.tables[0]["c.definition_json"] == IV_CRUSH_CONTRACT
+    assert result.snapshot["s.finality_receipt_refs_json"] == ("synthetic-finality",)
+    assert result.snapshot["s.knowledge_mode_by_table_json"] == {"a": "reconstructed", "z": "reconstructed"}
+    assert result.snapshot["s.parent_snapshot_id"] is None
+    assert all(row["d.parent_dataset_version_id"] is None for row in result.tables)
+    assert all(row["f.time_bounds_json"] is None for row in result.fragments)
     assert result.utf8_bytes == result.probe.stored_bytes - 14  # 2 table + 4*3 integer bytes.
     assert read(catalog, max_catalog_bytes=result.probe.stored_bytes) == result
     refuse(catalog, "RESULT_LIMIT_EXCEEDED", max_catalog_bytes=result.probe.stored_bytes - 1)

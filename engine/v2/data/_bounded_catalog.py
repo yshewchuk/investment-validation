@@ -1,7 +1,7 @@
 """Scalar-only catalog admission prerequisite; not a resolver or public factory.
 
-The future bounded-session caller owns the already-open read transaction and
-must still transfer/decode, enforce the UTF-8 counter, and verify native identity.
+The caller owns the already-open read transaction; _bounded_catalog_transfer
+adds transfer/decode and the UTF-8 counter. Neither module verifies native identity.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from engine.v2.data import errors
 
-# Fixed future transfer projection. Tokens ending in '?' permit SQL NULL;
+# Fixed shared transfer projection. Tokens ending in '?' permit SQL NULL;
 # '#' marks INTEGER, all other fields require TEXT. Never include storage_key,
 # registered_at or commit_receipt_ref. Parents/evidence are values, not walks.
 _SNAPSHOT = """s.snapshot_id s.parent_snapshot_id? s.manifest_hash s.calendar_version

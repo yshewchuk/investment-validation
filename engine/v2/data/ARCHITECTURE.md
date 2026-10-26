@@ -983,8 +983,8 @@ Integers charge BLOB-cast decimal text, not SQLite cell sizes. Probes return cou
 `_bounded_catalog_transfer.transfer_catalog` reuses those probes/projections in the same borrowed active read transaction; only SELECTs run, with no lifecycle/settings changes.
 Transfer requires an exact SQLite connection with Row/str factories; after all-table scalar admission it transfers incrementally in table-name/membership-ordinal order.
 Repeated type/count checks precede retention; every TEXT occurrence charges an independent UTF-8 cap before **any** JSON parsing. Only SQL charges integer text.
-Stdlib JSON uses the native duplicate-key hook; native strict document decoding validates the full contract and typed JSON-column shapes, retained in qualified column maps.
-No identity or binding/hash agreement is authenticated: reconstruction, public factory lifetime and scanner wiring remain separate prerequisites.
+Stdlib JSON uses the native duplicate-key hook; native decoding validates the full `TableContract` and private JSON-column shapes, retained in qualified column maps.
+The result does not validate `FragmentRecord` time semantics, `DatasetManifest` hash formats or identity/binding agreement; it offers no public session or scanning.
 Objects, providers, ordinary resolvers and parent/evidence payloads are not read. No source, coverage, confirmation, PIT or execution property is established.
 Limits bound transfer, not SQLite CPU/RSS. Existing readers stay intact; there is no partial result, fallback, write or automatic retry.
 The caller guarantees read-view provenance/cleanup. See the [bounded-session design](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md).
