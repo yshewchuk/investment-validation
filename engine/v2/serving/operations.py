@@ -20,7 +20,7 @@ from engine.v2.models.deployment import (
     resolve_release,
 )
 
-from . import analog_projection, derivation_projection, release_media
+from . import analog_projection, derivation_projection, health_file, release_media
 
 HTTPStatus = http.HTTPStatus
 
@@ -106,29 +106,18 @@ def _resolve_current_id(config) -> str:
     return name
 
 
-#: Maximum bytes a health artifact may hold. Both readers take this many
-#: bytes plus one, so an oversize artifact is refused as a ValueError instead
-#: of being streamed whole into memory on the shell's 30s poll path.
-_HEALTH_MAX_BYTES = 1_048_576
+_HEALTH_SCHEMAS = ("operations_health.v1.0", "operations_health.v1.1", "operations_health.v1.2")
 
 
-def _read_health_document_bytes(path: Path) -> bytes:
-    """Bounded raw health read shared by both readers: cap plus one byte."""
-    with path.open("rb") as handle:
-        raw = handle.read(_HEALTH_MAX_BYTES + 1)
-    if len(raw) > _HEALTH_MAX_BYTES:
-        raise ValueError("health artifact exceeds the size limit")
-    return raw
+def _canonical_health(document: dict) -> bytes:
+    return json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
 
 def _read_health(path: Path) -> bytes:
-    if path.is_symlink() or not path.is_file():
-        raise ValueError("health artifact is indirect")
-    document = json.loads(_read_health_document_bytes(path))
-    if not isinstance(document, dict) or document.get("schema_version") not in (
-            "operations_health.v1.0", "operations_health.v1.1", "operations_health.v1.2"):
+    document = health_file.read_document(path)
+    if document.get("schema_version") not in _HEALTH_SCHEMAS:
         raise ValueError("unsupported health artifact")
-    return json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    return _canonical_health(document)
 
 
 def _read_calibration_health(path: Path) -> bytes:
@@ -145,17 +134,11 @@ def _read_calibration_health(path: Path) -> bytes:
     serves either exported health file); anything else is refused, never served
     as empty JSON.
     """
-    if path.is_symlink() or not path.is_file():
-        raise ValueError("health artifact is indirect")
-    document = json.loads(_read_health_document_bytes(path))
-    if not isinstance(document, dict):
+    document = health_file.read_document(path)
+    if document.get("schema_version") not in _HEALTH_SCHEMAS and (
+            "generated_at" not in document or "n_scored" not in document):
         raise ValueError("unsupported health artifact")
-    if document.get("schema_version") in ("operations_health.v1.0", "operations_health.v1.1",
-                                           "operations_health.v1.2"):
-        return _read_health(path)
-    if "generated_at" not in document or "n_scored" not in document:
-        raise ValueError("unsupported health artifact")
-    return json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    return _canonical_health(document)
 
 
 def _shell_markup(frozen: str) -> str:

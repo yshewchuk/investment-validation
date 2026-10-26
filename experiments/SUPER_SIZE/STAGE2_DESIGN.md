@@ -273,7 +273,7 @@ Other core work and dependencies remain; P3a does not complete P3 or unblock a r
 
 Split add/wire further at repository limits; these are estimates, not waivers.
 Unchanged P1/P2 rows are coarse workstreams, not single-PR budgets; their remaining
-work requires bounded sub-slices, as the metadata/materializer checkpoint specifies.
+work must be split into bounded sub-slices, as the metadata/materializer checkpoint specifies.
 P1 tests pin all 14 mappings, exact 11/28/42 order and HMO quote position,
 derivation-policy identity changes, unchanged v1 outputs and cross-version refusal.
 P2 uses independent numeric oracles for abs/nulls and prior means, zero/null quote

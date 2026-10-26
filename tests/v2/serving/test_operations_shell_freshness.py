@@ -1065,3 +1065,20 @@ def test_latest_completed_session_now_overrides_valid_frozen_at():
     assert latest_completed_session(
         datetime(2026, 10, 5, 21, tzinfo=timezone.utc),
         frozen_at="2026-10-02T21:00:00Z") == "2026-10-05"
+
+
+def test_health_readers_refuse_symlink_and_fifo(tmp_path):
+    import os
+    from engine.v2.serving import operations
+
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps({"schema_version": "operations_health.v1.2"}))
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    fifo = tmp_path / "fifo.json"
+    os.mkfifo(fifo)
+    for reader in (operations._read_health, operations._read_calibration_health):
+        for bad in (link, fifo):
+            with pytest.raises(ValueError):
+                reader(bad)
+    assert json.loads(operations._read_health(real))["schema_version"] == "operations_health.v1.2"
