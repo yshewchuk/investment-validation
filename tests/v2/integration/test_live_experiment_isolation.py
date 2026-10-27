@@ -620,3 +620,108 @@ def test_catalog_overflow_refuses_instead_of_reading_unbounded_listing(monkeypat
     monkeypatch.setattr(isolation, "MAX_CATALOG_BYTES", 1)
     with pytest.raises(isolation.IsolationCheckError, match="exceeds 1 bytes"):
         isolation._git_catalog(isolation.ROOT)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"from engine.v2.scoring.release_bindings import "
+        b"resolve_production_release_binding\n",
+        b"from engine.v2.ops.pool_refresh import deployed_release_id\n",
+        b"import engine.v2.models.serving_fold_preflight\n",
+    ],
+)
+def test_experiment_facade_imports_are_refused(body):
+    findings = isolation.check_files({"experiments/facade.py": body})
+    assert _rules(findings) == {"forbidden-import"}
+    assert len(findings) == 1
+
+
+def test_experiment_module_chain_facade_call_is_refused():
+    findings = isolation.check_files({
+        "experiments/facade_chain.py": (
+            b"import engine.v2.scoring as scoring\n"
+            b"scoring.release_bindings.resolve_production_release_binding()\n"
+        ),
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert len(findings) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"import importlib\n"
+        b"load = importlib.import_module\n"
+        b"load('engine.v2.models.deployment')\n",
+        b"load = __import__\n"
+        b"load('engine.v2.ledger')\n",
+    ],
+)
+def test_importer_alias_dynamic_import_is_refused(body):
+    findings = isolation.check_files({"experiments/importer_alias.py": body})
+    assert _rules(findings) == {"forbidden-import"}
+    assert len(findings) == 1
+
+
+def test_parameter_shadowing_importer_alias_remains_clean():
+    assert isolation.check_files({
+        "experiments/shadowed_importer.py": (
+            b"import importlib\n"
+            b"load = importlib.import_module\n"
+            b"def run(load):\n"
+            b"    load('engine.v2.models.deployment')\n"
+        ),
+    }) == []
+
+
+def test_unlisted_root_calls_in_defaults_annotations_and_comprehension_are_enumerated():
+    findings = isolation.check_files({
+        "experiments/root_caller.py": (
+            b"from engine.v2.models import production_release_root as root\n"
+            b"def run(resolve=root): resolve()\n"
+            b"callback = lambda resolve=root: resolve()\n"
+            b"def annotated(value: root()): pass\n"
+            b"def returned() -> root(): pass\n"
+            b"[resolve() for resolve in (root,)]\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+    assert len(findings) == 5
+
+
+def test_tuple_alias_call_is_enumerated_but_attribute_and_lambda_are_clean():
+    findings = isolation.check_files({
+        "engine/v2/ops/new_job.py": (
+            b"from engine.v2.models import production_release_root as resolve\n"
+            b"service.resolve()\n"
+            b"first, second = resolve, lambda: None\n"
+            b"second()\n"
+            b"first()\n"
+        ),
+    })
+    assert _rules(findings) == {"unlisted-root-caller"}
+    assert [item.line for item in findings] == [5]
+
+
+def test_module_alias_chain_to_live_release_is_refused():
+    findings = isolation.check_files({
+        "experiments/module_chain.py": (
+            b"import engine.v2.models.no_fit\n"
+            b"m = engine.v2.models\n"
+            b"m2 = m\n"
+            b"m2.current_release(None)\n"
+        ),
+    })
+    assert _rules(findings) == {"forbidden-import"}
+    assert len(findings) == 1
+
+
+def test_module_alias_no_fit_member_call_remains_clean():
+    assert isolation.check_files({
+        "experiments/module_alias_no_fit.py": (
+            b"import engine.v2.models.no_fit\n"
+            b"m = engine.v2.models\n"
+            b"m.no_fit.prepare()\n"
+        ),
+    }) == []

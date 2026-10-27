@@ -43,7 +43,11 @@ EXPERIMENT_FORBIDDEN_IMPORTS = (
     "engine.v2.models.release_layout",
     "engine.v2.models.release_objects",
     "engine.v2.models.releases",
+    "engine.v2.models.serving_fold_loader",
+    "engine.v2.models.serving_fold_preflight",
     "engine.v2.models.inventory",
+    "engine.v2.scoring.release_bindings",
+    "engine.v2.ops.pool_refresh",
     "engine.ledger",
     "engine.paths.LEDGER",
 )
@@ -116,11 +120,21 @@ class _Scope:
         self.is_class = is_class
         self.bound: set[str] = set()
         self.symbols: dict[str, set[str]] = {}
+        self.dynamic_symbols: dict[str, str] = {}
+        self.module_symbols: dict[str, str] = {}
 
     def bind(self, name: str, symbols: set[str] | None = None) -> None:
         self.bound.add(name)
         if symbols:
             self.symbols.setdefault(name, set()).update(symbols)
+
+    def bind_dynamic(self, name: str, kind: str) -> None:
+        self.dynamic_symbols[name] = kind
+        self.bound.add(name)
+
+    def bind_module(self, name: str, path: str) -> None:
+        self.module_symbols[name] = path
+        self.bound.add(name)
 
     def resolve(self, name: str) -> set[str]:
         scope: _Scope | None = self
@@ -129,6 +143,30 @@ class _Scope:
                 return set(scope.symbols.get(name, ()))
             scope = scope.parent
         return set()
+
+    def resolve_dynamic(self, name: str) -> str | None:
+        scope: _Scope | None = self
+        while scope is not None:
+            if name in scope.bound:
+                return scope.dynamic_symbols.get(name)
+            scope = scope.parent
+        return None
+
+    def resolve_module(self, name: str) -> str | None:
+        scope: _Scope | None = self
+        while scope is not None:
+            if name in scope.bound:
+                return scope.module_symbols.get(name)
+            scope = scope.parent
+        return None
+
+    def is_bound(self, name: str) -> bool:
+        scope: _Scope | None = self
+        while scope is not None:
+            if name in scope.bound:
+                return True
+            scope = scope.parent
+        return False
 
     def attribute_scope(self) -> _Scope:
         scope: _Scope | None = self
@@ -150,6 +188,15 @@ def _dotted(node: ast.AST) -> str:
     return ""
 
 
+def _qualified_module(node: ast.AST | None, scope: _Scope) -> str:
+    if isinstance(node, ast.Name):
+        return scope.resolve_module(node.id) or ""
+    if isinstance(node, ast.Attribute):
+        base = _qualified_module(node.value, scope)
+        return f"{base}.{node.attr}" if base else ""
+    return ""
+
+
 def _target_keys(target: ast.AST) -> list[str]:
     key = _dotted(target)
     if key:
@@ -168,9 +215,57 @@ def _target_scope(scope: _Scope, name: str) -> _Scope:
     return scope.attribute_scope() if "." in name else scope
 
 
+def _dynamic_kind(value: ast.AST | None, scope: _Scope) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, ast.Name):
+        kind = scope.resolve_dynamic(value.id)
+        if kind is not None:
+            return kind
+        if value.id == "__import__" and not scope.is_bound("__import__"):
+            return "__import__"
+        return None
+    if isinstance(value, ast.Attribute):
+        if isinstance(value.value, ast.Name):
+            base = value.value.id
+            base_kind = scope.resolve_dynamic(base)
+            if base_kind == "importlib" and value.attr == "import_module":
+                return "import_module"
+            if base_kind == "builtins" and value.attr == "__import__":
+                return "__import__"
+            if base_kind is None and not scope.is_bound(base):
+                if base == "importlib" and value.attr == "import_module":
+                    return "import_module"
+                if base == "builtins" and value.attr == "__import__":
+                    return "__import__"
+        return None
+    return None
+
+
+def _target_symbol_bindings(
+    target: ast.AST, value: ast.AST | None, scope: _Scope
+) -> list[tuple[str, set[str]]]:
+    if (
+        isinstance(target, (ast.Tuple, ast.List))
+        and isinstance(value, (ast.Tuple, ast.List))
+        and len(target.elts) == len(value.elts)
+    ):
+        pairs: list[tuple[str, set[str]]] = []
+        for target_element, value_element in zip(target.elts, value.elts):
+            pairs.extend(
+                _target_symbol_bindings(target_element, value_element, scope)
+            )
+        return pairs
+    symbols = _resolver_symbols(value, scope)
+    return [(name, symbols) for name in _target_keys(target)]
+
+
 def _bind_target(scope: _Scope, target: ast.AST) -> None:
     for name in _target_keys(target):
-        _target_scope(scope, name).bind(name)
+        target_scope = _target_scope(scope, name)
+        target_scope.bind(name)
+        target_scope.dynamic_symbols.pop(name, None)
+        target_scope.module_symbols.pop(name, None)
 
 
 def _call_argument(
@@ -230,10 +325,14 @@ def _resolver_symbols(node: ast.AST | None, scope: _Scope) -> set[str]:
             symbols = scope.resolve(key)
             if symbols:
                 return symbols
-        symbols = scope.resolve(node.attr)
-        if symbols:
-            return symbols
-        return {node.attr} if node.attr in ROOT_CALLERS else set()
+        qualified = _qualified_module(node, scope)
+        parent, _, final = qualified.rpartition(".")
+        if (
+            parent in ("engine.v2.models", "engine.v2.models.deployment")
+            and final in ROOT_CALLERS
+        ):
+            return {final}
+        return set()
     if isinstance(node, ast.Call):
         return _getattr_symbols(node)
     if isinstance(node, ast.IfExp):
@@ -251,6 +350,7 @@ def _resolver_symbols(node: ast.AST | None, scope: _Scope) -> set[str]:
 
 def _dynamic_import_spec(
     node: ast.Call,
+    scope: _Scope,
     importlib_modules: set[str],
     import_module_names: set[str],
     builtins_modules: set[str],
@@ -259,28 +359,31 @@ def _dynamic_import_spec(
     function = node.func
     kind: str | None = None
     if isinstance(function, ast.Name):
-        if function.id == "__import__" or function.id in dunder_import_names:
-            kind = "__import__"
-        elif function.id in import_module_names:
-            kind = "import_module"
+        kind = scope.resolve_dynamic(function.id)
+        if kind is None and not scope.is_bound(function.id):
+            if function.id == "__import__":
+                kind = "__import__"
+            elif function.id in dunder_import_names:
+                kind = "__import__"
+            elif function.id in import_module_names:
+                kind = "import_module"
     elif isinstance(function, ast.Attribute):
-        dotted = _dotted(function)
-        if dotted == "importlib.import_module":
-            kind = "import_module"
-        elif (
-            isinstance(function.value, ast.Name)
-            and function.value.id in importlib_modules
-            and function.attr == "import_module"
-        ):
-            kind = "import_module"
-        elif dotted == "builtins.__import__":
-            kind = "__import__"
-        elif (
-            isinstance(function.value, ast.Name)
-            and function.value.id in builtins_modules
-            and function.attr == "__import__"
-        ):
-            kind = "__import__"
+        if isinstance(function.value, ast.Name):
+            base = function.value.id
+            base_kind = scope.resolve_dynamic(base)
+            if base_kind == "importlib" and function.attr == "import_module":
+                kind = "import_module"
+            elif base_kind == "builtins" and function.attr == "__import__":
+                kind = "__import__"
+            elif base_kind is None and not scope.is_bound(base):
+                if base == "importlib" and function.attr == "import_module":
+                    kind = "import_module"
+                elif base == "builtins" and function.attr == "__import__":
+                    kind = "__import__"
+                elif base in importlib_modules and function.attr == "import_module":
+                    kind = "import_module"
+                elif base in builtins_modules and function.attr == "__import__":
+                    kind = "__import__"
     if kind is None:
         return False, [], False, False
     name = _literal_str(_call_argument(node, 0, "name"))
@@ -348,14 +451,30 @@ def _scoped_nodes(
     bindings: list[tuple[_Scope, list[ast.AST], ast.AST | None]] = []
     calls: list[tuple[_Scope, ast.Call]] = []
     module_scope = _Scope(None)
+    experiment = _scope(path, EXPERIMENT_PATHS)
 
-    def bind_arguments(arguments: ast.arguments, scope: _Scope) -> None:
+    def bind_arguments(
+        arguments: ast.arguments, child: _Scope, enclosing: _Scope
+    ) -> None:
         for argument in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs):
-            scope.bind(argument.arg)
+            child.bind(argument.arg)
+        positional = (*arguments.posonlyargs, *arguments.args)
+        for argument, default in zip(
+            positional[len(positional) - len(arguments.defaults):],
+            arguments.defaults,
+        ):
+            symbols = _resolver_symbols(default, enclosing)
+            if symbols:
+                child.bind(argument.arg, symbols)
+        for argument, default in zip(arguments.kwonlyargs, arguments.kw_defaults):
+            if default is not None:
+                symbols = _resolver_symbols(default, enclosing)
+                if symbols:
+                    child.bind(argument.arg, symbols)
         if arguments.vararg is not None:
-            scope.bind(arguments.vararg.arg)
+            child.bind(arguments.vararg.arg)
         if arguments.kwarg is not None:
-            scope.bind(arguments.kwarg.arg)
+            child.bind(arguments.kwarg.arg)
 
     def visit(node: ast.AST, scope: _Scope) -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -364,8 +483,15 @@ def _scoped_nodes(
                          *(node.args.kw_defaults or ())):
                 if item is not None:
                     visit(item, scope)
+            for argument in (*node.args.posonlyargs, *node.args.args,
+                             *node.args.kwonlyargs, node.args.vararg,
+                             node.args.kwarg):
+                if argument is not None and argument.annotation is not None:
+                    visit(argument.annotation, scope)
+            if node.returns is not None:
+                visit(node.returns, scope)
             child = _Scope(scope)
-            bind_arguments(node.args, child)
+            bind_arguments(node.args, child, scope)
             for statement in node.body:
                 visit(statement, child)
             return
@@ -374,7 +500,7 @@ def _scoped_nodes(
                 if item is not None:
                     visit(item, scope)
             child = _Scope(scope)
-            bind_arguments(node.args, child)
+            bind_arguments(node.args, child, scope)
             visit(node.body, child)
             return
         if isinstance(node, ast.ClassDef):
@@ -388,21 +514,38 @@ def _scoped_nodes(
             return
         if isinstance(node, ast.Import):
             for alias in node.names:
+                name = alias.asname or alias.name.split(".")[0]
+                module_path = (
+                    alias.name if alias.asname else alias.name.split(".")[0]
+                )
                 if alias.name == "importlib":
                     importlib_modules.add(alias.asname or "importlib")
+                    scope.bind_dynamic(name, "importlib")
                 if alias.name == "builtins":
                     builtins_modules.add(alias.asname or "builtins")
-                scope.bind(alias.asname or alias.name.split(".")[0])
+                    scope.bind_dynamic(name, "builtins")
+                scope.bind(name)
+                if not (
+                    experiment and (
+                        alias.name == "engine.v2.models"
+                        or _under(alias.name, EXPERIMENT_FORBIDDEN_IMPORTS)
+                    )
+                ):
+                    scope.bind_module(name, module_path)
             return
         if isinstance(node, ast.ImportFrom):
             if (node.module or "") == "importlib":
                 for alias in node.names:
                     if alias.name == "import_module":
-                        import_module_names.add(alias.asname or alias.name)
+                        name = alias.asname or alias.name
+                        import_module_names.add(name)
+                        scope.bind_dynamic(name, "import_module")
             if (node.module or "") == "builtins":
                 for alias in node.names:
                     if alias.name == "__import__":
-                        dunder_import_names.add(alias.asname or alias.name)
+                        name = alias.asname or alias.name
+                        dunder_import_names.add(name)
+                        scope.bind_dynamic(name, "__import__")
             targets = _imports(node, path)
             if targets:
                 base = targets[0]
@@ -413,26 +556,54 @@ def _scoped_nodes(
                             scope.bind(alias.asname or alias.name, {alias.name})
             for alias in node.names:
                 if alias.name != "*":
-                    scope.bind(alias.asname or alias.name)
+                    name = alias.asname or alias.name
+                    scope.bind(name)
+                    if targets:
+                        candidate = f"{targets[0]}.{alias.name}"
+                        if not (
+                            experiment and (
+                                candidate == "engine.v2.models"
+                                or _under(candidate, EXPERIMENT_FORBIDDEN_IMPORTS)
+                            )
+                        ):
+                            scope.bind_module(name, candidate)
             return
         if isinstance(node, ast.Assign):
+            kind = _dynamic_kind(node.value, scope)
+            module_path = _qualified_module(node.value, scope)
             bindings.append((scope, list(node.targets), node.value))
             for target in node.targets:
                 _bind_target(scope, target)
+                if kind is not None and isinstance(target, ast.Name):
+                    _target_scope(scope, target.id).bind_dynamic(target.id, kind)
+                if module_path and isinstance(target, ast.Name):
+                    scope.bind_module(target.id, module_path)
                 visit(target, scope)
             visit(node.value, scope)
             return
         if isinstance(node, ast.AnnAssign):
+            kind = _dynamic_kind(node.value, scope)
+            module_path = _qualified_module(node.value, scope)
             bindings.append((scope, [node.target], node.value))
             _bind_target(scope, node.target)
+            if kind is not None and isinstance(node.target, ast.Name):
+                _target_scope(scope, node.target.id).bind_dynamic(node.target.id, kind)
+            if module_path and isinstance(node.target, ast.Name):
+                scope.bind_module(node.target.id, module_path)
             visit(node.target, scope)
             if node.value is not None:
                 visit(node.value, scope)
             visit(node.annotation, scope)
             return
         if isinstance(node, ast.NamedExpr):
+            kind = _dynamic_kind(node.value, scope)
+            module_path = _qualified_module(node.value, scope)
             bindings.append((scope, [node.target], node.value))
             _bind_target(scope, node.target)
+            if kind is not None and isinstance(node.target, ast.Name):
+                _target_scope(scope, node.target.id).bind_dynamic(node.target.id, kind)
+            if module_path and isinstance(node.target, ast.Name):
+                scope.bind_module(node.target.id, module_path)
             visit(node.target, scope)
             visit(node.value, scope)
             return
@@ -453,6 +624,23 @@ def _scoped_nodes(
             return
         if isinstance(node, ast.Call):
             calls.append((scope, node))
+        if isinstance(
+            node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+        ):
+            child = _Scope(scope)
+            for index, generator in enumerate(node.generators):
+                current = scope if index == 0 else child
+                visit(generator.iter, current)
+                bindings.append((child, [generator.target], generator.iter))
+                _bind_target(child, generator.target)
+                for condition in generator.ifs:
+                    visit(condition, child)
+            if isinstance(node, ast.DictComp):
+                visit(node.key, child)
+                visit(node.value, child)
+            else:
+                visit(node.elt, child)
+            return
         for child in ast.iter_child_nodes(node):
             visit(child, scope)
 
@@ -494,15 +682,16 @@ def check_files(files: dict[str, bytes]) -> list[Finding]:
         bindings, calls = _scoped_nodes(
             tree, path, importlib_modules, import_module_names,
             builtins_modules, dunder_import_names)
+        call_scopes = {call: scope for scope, call in calls}
         changed = True
         while changed:
             changed = False
             for scope, targets, value in bindings:
-                symbols = _resolver_symbols(value, scope)
-                if not symbols:
-                    continue
                 for target in targets:
-                    for name in _target_keys(target):
+                    for name, symbols in _target_symbol_bindings(
+                            target, value, scope):
+                        if not symbols:
+                            continue
                         target_scope = _target_scope(scope, name)
                         current = target_scope.symbols.setdefault(name, set())
                         if not symbols.issubset(current):
@@ -557,8 +746,9 @@ def check_files(files: dict[str, bytes]) -> list[Finding]:
                         f"{dotted} crosses the D7 isolation boundary",
                     )
             if (production or experiment) and isinstance(node, ast.Call):
+                scope = call_scopes[node]
                 recognized, targets, unresolved, wildcard = _dynamic_import_spec(
-                    node, importlib_modules, import_module_names,
+                    node, scope, importlib_modules, import_module_names,
                     builtins_modules, dunder_import_names)
                 if recognized and unresolved:
                     add_forbidden_import(
@@ -577,6 +767,14 @@ def check_files(files: dict[str, bytes]) -> list[Finding]:
                                 path, node.lineno,
                                 f"{target} crosses the D7 isolation boundary",
                             )
+        if experiment:
+            for scope, call in calls:
+                qualified = _qualified_module(call.func, scope)
+                if qualified and _under(qualified, EXPERIMENT_FORBIDDEN_IMPORTS):
+                    add_forbidden_import(
+                        path, call.lineno,
+                        f"{qualified} crosses the D7 isolation boundary",
+                    )
         if not path.startswith("tests/"):
             for scope, call in calls:
                 symbols = _resolver_symbols(call.func, scope)
@@ -584,9 +782,6 @@ def check_files(files: dict[str, bytes]) -> list[Finding]:
                     function = call.func
                     if isinstance(function, ast.Name) and function.id in ROOT_CALLERS:
                         symbols = {function.id}
-                    elif (isinstance(function, ast.Attribute)
-                          and function.attr in ROOT_CALLERS):
-                        symbols = {function.attr}
                 for symbol in symbols:
                     allowed = ROOT_CALLERS.get(symbol)
                     if allowed is not None and path not in allowed:
