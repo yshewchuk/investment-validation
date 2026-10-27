@@ -24,9 +24,11 @@ def _kwargs(**overrides):
         tier4_row={"pred_abs_move": 0.05, "pred_abs_move_fold_start": "2026-01-01"},
         quote_rows=[
             {"right": "C", "strike": 100.0, "expiry": "2026-01-16",
-             "bid": 1.0, "ask": 1.2, "observed_at": "2026-01-15"},
+             "bid": 1.0, "ask": 1.2, "observed_at": "2026-01-15",
+             "chain_spot": 100.0},
             {"right": "P", "strike": 100.0, "expiry": "2026-01-16",
-             "bid": 1.1, "ask": 1.3, "observed_at": "2026-01-15"},
+             "bid": 1.1, "ask": 1.3, "observed_at": "2026-01-15",
+             "chain_spot": 100.0},
         ],
         quote_status=None,
         feature_names=("signal", "pred_abs_move", "entry_cost_pct"),

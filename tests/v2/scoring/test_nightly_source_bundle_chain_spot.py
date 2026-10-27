@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import pytest
 
+from engine.v2.scoring.financial import financial_diagnostics
+from engine.v2.scoring.native_chooser import derive_chooser_columns
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
     assemble_nightly_source_bundle,
@@ -73,7 +75,12 @@ def test_chain_spot_drives_entry_cost_pct_while_calendar_spot_is_preserved():
     assert inputs.context["chain_spot"] == 87.5
     assert inputs.context["spot"] == _CALENDAR_CLOSE
     # entry_cost_pct uses the staged chain spot while `spot` remains the calendar close.
-    assert values["entry_cost_pct"] == pytest.approx((1.1 + 1.2) / 87.5 * 100.0)
+    expected_pct = (1.1 + 1.2) / 87.5 * 100.0
+    assert values["entry_cost_pct"] == pytest.approx(expected_pct)
+    assert financial_diagnostics(values)["entry_cost_pct"] == pytest.approx(expected_pct)
+    chooser = derive_chooser_columns({}, {}, "STR-THRU", values, {}, [])
+    assert chooser is not None
+    assert chooser["entry_cost_pct"] == pytest.approx(expected_pct)
 
 
 def test_missing_chain_spot_leaves_entry_cost_pct_absent():
@@ -83,7 +90,9 @@ def test_missing_chain_spot_leaves_entry_cost_pct_absent():
         build_native_score_inputs(bundle), strategy="STR-THRU")
 
     assert "chain_spot" not in bundle.context
+    assert values["entry_cost"] is not None
     assert values.get("entry_cost_pct") is None
+    assert financial_diagnostics(values)["entry_cost_pct"] is None
 
 
 def test_an_empty_slice_carries_no_chain_spot():

@@ -159,7 +159,7 @@ def _producers(block, facts) -> dict[str, float]:
 def _derive(block, facts, strategy, values, quotes, flags) -> dict[str, float]:
     out = chooser_direct_columns(strategy, values, flags)
     out["entry_cost_pct"] = columns.entry_cost_pct(values.get("entry_cost"),
-                                                   values.get("spot"))
+                                                   values.get("chain_spot"))
     m = _as_float(values.get("forecast_abs_move"))
     band = columns.size_band_columns(m, (block.get(FOLD_POOLS_FIELD) or {})
                                      .get("pred_abs_move"))
