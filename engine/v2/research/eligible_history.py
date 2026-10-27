@@ -298,6 +298,12 @@ def _materialize(repository, snapshot, **request):
             total_bytes += len(payload)
             if len(payload) > request["limits"]["max_object_bytes"] or total_bytes > request["limits"]["max_total_bytes"]:
                 raise fail("RESULT_LIMIT_EXCEEDED", "history output exceeds physical byte limits")
+            cap = request["limits"]["max_object_bytes"]
+            with pq.ParquetFile(pa.BufferReader(payload), thrift_string_size_limit=min(cap, 2**31 - 1),
+                    thrift_container_size_limit=min(cap, 2**31 - 1)) as parquet:
+                expanded = sum(parquet.metadata.row_group(i).total_byte_size for i in range(parquet.num_row_groups))
+            if expanded > cap:
+                raise fail("RESULT_LIMIT_EXCEEDED", "history output exceeds native uncompressed read limit")
             published = store.publish_bytes(payload, schema_ref="parquet_fragment.v1")
             obj = ObjectRef(kind="parquet_fragment", object_id=published.artifact_id,
                 content_hash=published.content_hash, byte_size=published.byte_size)

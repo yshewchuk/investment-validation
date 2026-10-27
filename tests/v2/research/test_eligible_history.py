@@ -556,3 +556,43 @@ def test_receipt_lookup_projects_bounded_identity_not_diagnostics(data, damage):
         assert caught.value.code == "IDENTITY_CONFLICT"
     finally:
         data.conn.set_authorizer(None)
+
+
+@pytest.mark.parametrize("offset", [-1, 0])
+def test_compressible_output_obeys_native_expanded_read_cap_before_publish(data, monkeypatch, offset):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from engine.v2.research import eligible_history as backend
+    original = backend._rows
+    def compressible_rows(*args):
+        for rows in original(*args):
+            for row in rows:
+                row["history_json"] += " " * (256 << 10)  # Valid JSON trailing whitespace, highly compressible.
+            yield rows
+    monkeypatch.setattr(backend, "_rows", compressible_rows)
+    prepared = backend._prepare(data.repository, data.snapshot, producer=history._producer(), **data.request)
+    rows = next(compressible_rows(data.snapshot, prepared))
+    schema = pa.schema([pa.field(c.name, backend.query.arrow_type_for(c.physical_type), nullable=c.nullable)
+        for c in CONTRACT.columns])
+    sink = pa.BufferOutputStream()
+    pq.write_table(pa.Table.from_pylist(rows, schema=schema), sink)
+    payload = sink.getvalue().to_pybytes()
+    with pq.ParquetFile(pa.BufferReader(payload)) as file:
+        expanded = sum(file.metadata.row_group(i).total_byte_size for i in range(file.num_row_groups))
+    assert len(payload) < expanded - 1
+    request = {**data.request, "limits": {**LIMITS, "max_object_bytes": expanded + offset}}
+    before = catalog_rows(data.conn)
+    if offset < 0:
+        def forbidden(*args, **kwargs):
+            raise AssertionError("unreadable output reached object publication")
+        monkeypatch.setattr(data.repository._store, "publish_bytes", forbidden)
+        with pytest.raises(DataError) as caught:
+            history.materialize(data.repository, data.snapshot, **request)
+        assert caught.value.code == "RESULT_LIMIT_EXCEEDED"
+        assert catalog_rows(data.conn) == before
+    else:
+        artifact = history.materialize(data.repository, data.snapshot, **request)
+        result = history.read(data.repository, data.snapshot, artifact["feature_snapshot"],
+            columns=list(FEATURES), **request)
+        assert len(result["rows"]) == 3
+        assert all((r["n_prior"], r["mean_prior_abs_move"]) == (3, 4) for r in result["rows"])
