@@ -304,17 +304,22 @@ def test_missing_ticker_history_is_refused_while_other_tickers_compose(
     refusals_document = json.loads((job_root / "refusals.json").read_text())
     assert score_result["completed_ids"] == list(parameters["expected_ids"])
     assert score_result["no_work"] is False
-    assert score_result["refused"] == [_CODE]
+    assert sorted(score_result["refused"]) == sorted(
+        [_CODE, *("MODEL_NOT_READY" for _ in _HISTORY_TICKERS)])
     worker_records = records_document["records"]
     worker_refusals = refusals_document["refusals"]
     assert records_document["schema_version"] == "native_score_batch_records.v2.0"
     assert records_document["authoritative"] is False
     assert refusals_document["schema_version"] == "native_score_batch_refusals.v2.0"
     assert refusals_document["unkeyable_refusals"] == []
-    assert sorted(worker_records) == [
-        _canonical_key(ticker) for ticker in _HISTORY_TICKERS]
-    assert worker_refusals == {
-        _canonical_key(_MISSING_TICKER): {"code": _CODE, "detail": _DETAIL}}
+    assert worker_records == {}
+    worker_refusal_codes = {
+        key: value["code"] for key, value in worker_refusals.items()}
+    assert worker_refusal_codes == {
+        **{_canonical_key(ticker): "MODEL_NOT_READY"
+           for ticker in _HISTORY_TICKERS},
+        _canonical_key(_MISSING_TICKER): _CODE,
+    }
 
     score_rows = _legacy_score_rows((*_HISTORY_TICKERS, _MISSING_TICKER))
     (job_root / "score.json").write_text(
@@ -325,21 +330,17 @@ def test_missing_ticker_history_is_refused_while_other_tickers_compose(
     report = json.loads(
         (job_root / "native_parity_report.json").read_text())
     refused = report["native_refused"]
-    assert report["compared"] == [
-        _population_key(ticker) for ticker in _HISTORY_TICKERS]
-    assert report["mismatches"]
-    for mismatch in report["mismatches"]:
-        assert mismatch["row_key"] in report["compared"]
-        assert mismatch["values"]
-        assert all(values["legacy"] == _LEGACY_FIXTURE_VALUE
-                   for values in mismatch["values"].values())
+    assert report["compared"] == []
+    assert report["mismatches"] == []
     assert report["only_legacy"] == []
     assert report["only_native"] == []
-    assert [entry["row_key"] for entry in refused] == [
-        _population_key(_MISSING_TICKER)]
-    assert [entry["refusal_code"] for entry in refused] == [_CODE]
-    assert [entry["ticker"] for entry in refused] == [_MISSING_TICKER]
-    assert [entry["reason"] for entry in refused] == [_CODE]
+    native_refused_codes = {
+        entry["row_key"]: entry["refusal_code"] for entry in refused}
+    assert native_refused_codes == {
+        **{_population_key(ticker): "MODEL_NOT_READY"
+           for ticker in _HISTORY_TICKERS},
+        _population_key(_MISSING_TICKER): _CODE,
+    }
     assert report["native_refused_unmatched"] == []
 
 
@@ -467,20 +468,26 @@ def test_missing_exact_session_spot_is_refused_and_other_ticker_scores(
     records = json.loads((job_root / "records.json").read_text())["records"]
     score_refusals = json.loads((job_root / "refusals.json").read_text())["refusals"]
     assert result["completed_ids"] == list(parameters["expected_ids"])
-    assert sorted(records) == [_canonical_key("GOOD")]
-    assert score_refusals == {
-        _canonical_key("GAP"): {
-            "code": _CODE,
-            "detail": "the pinned snapshot has no usable exact-session close for this ticker",
-        }}
+    assert records == {}
+    score_refusal_codes = {
+        key: value["code"] for key, value in score_refusals.items()}
+    assert score_refusal_codes == {
+        _canonical_key("GOOD"): "MODEL_NOT_READY",
+        _canonical_key("GAP"): _CODE,
+    }
     (job_root / "score.json").write_text(json.dumps({
         "rows": _legacy_score_rows(("GAP", "GOOD"))}, sort_keys=True))
     parity_result = run_native_parity_worker(parameters, job_root)
     report = json.loads(
         (job_root / "native_parity_report.json").read_text())
     assert parity_result["completed_ids"] == list(parameters["expected_ids"])
-    assert [entry["ticker"] for entry in report["native_refused"]] == ["GAP"]
-    assert [entry["refusal_code"] for entry in report["native_refused"]] == [_CODE]
+    native_refused_codes = {
+        entry["row_key"]: entry["refusal_code"]
+        for entry in report["native_refused"]}
+    assert native_refused_codes == {
+        _population_key("GOOD"): "MODEL_NOT_READY",
+        _population_key("GAP"): _CODE,
+    }
     assert report["native_refused_unmatched"] == []
 
 

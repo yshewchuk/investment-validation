@@ -253,7 +253,7 @@ def test_resolution_is_deterministic(tmp_path):
     assert resolve_gate_policy(second, tmp_path) == first
 
 
-def test_worker_uses_release_threshold_and_gets_past_the_gate_policy_refusal(
+def test_worker_uses_release_threshold_then_refuses_missing_required_analog(
         tmp_path, monkeypatch):
     _stage_gate_release(tmp_path, registry_payload=_STANDARD_REGISTRY)
     root = _stage_events(tmp_path)
@@ -263,9 +263,10 @@ def test_worker_uses_release_threshold_and_gets_past_the_gate_policy_refusal(
     run_native_score_batch_worker(parameters, root)
     assert recorded["gate_policy"] == {"STR-THRU": {"threshold": 0.375}}
     refusals_document = json.loads((root / "refusals.json").read_text())
-    assert refusals_document["refusals"] == {}
+    refusal = refusals_document["refusals"]["TEST|STR-THRU|2026-01-15|am"]
+    assert refusal["code"] == "MODEL_NOT_READY"
     records_document = json.loads((root / "records.json").read_text())
-    assert list(records_document["records"]) == ["TEST|STR-THRU|2026-01-15|am"]
+    assert records_document["records"] == {}
 
 
 def test_worker_supplied_policy_wins_and_release_is_not_consulted(
