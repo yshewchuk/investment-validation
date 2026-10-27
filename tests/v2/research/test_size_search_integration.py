@@ -278,3 +278,44 @@ def test_prepared_registration_byte_boundary_matches_reserve_and_verify(case, mo
         assert read_native_registration(case.conn, case.store, spec, max_evidence_bytes=budget) == prepared
         assert binding.prepare_plan(case.conn, case.store, prepared, case.request) == case.plan
     assert case.conn.total_changes == before
+
+
+@pytest.mark.parametrize("kind", ["execution", "terminal", "outer-forecasts", "comparison-terminal"])
+def test_report_native_absent_record_refuses_before_presentation(completed_case, monkeypatch, kind):
+    from experiments import magnitude_search_outer as outer
+    from experiments import magnitude_search_records as records
+    from experiments import magnitude_search_trials as trials
+    from experiments import size_comparison_run as comparison
+    from experiments import size_search_report as presentation
+    case = completed_case
+    group, candidate = case.plan["folds"][0], case.plan["candidates"][0]
+    identity = [case.plan["plan_id"], group["outer"]["year"]]
+    if kind in ("execution", "terminal"):
+        identity += [group["inner"][0]["year"], candidate["candidate_id"]]
+    elif kind == "comparison-terminal":
+        identity += ["comparison"]
+    target = kind + ":" + content_hash(identity)
+    native_read, seen = records.read_record, []
+    assert native_read(case.conn, case.store, case.registration.run_id, target) is not None
+    assert native_read(case.conn, case.store, case.registration.run_id, "never-published") is None
+    def read(conn, store, run_id, slot):
+        if slot == target:
+            seen.append(slot)
+            slot = "never-published"
+        return native_read(conn, store, run_id, slot)
+    def forbidden(*a, **k):
+        pytest.fail("read-only report performed work or reached unvalidated presentation")
+    for module in (outer, trials, comparison, presentation):
+        monkeypatch.setattr(module, "read_record", read)
+    for module in (outer, trials, comparison):
+        for name in ("run_fitted_trial", "publish_inputs"):
+            monkeypatch.setattr(module, name, forbidden)
+    monkeypatch.setattr(records, "transaction", forbidden)
+    monkeypatch.setattr(case.store, "publish_bytes", forbidden)
+    monkeypatch.setattr(presentation, "paired_report", forbidden)
+    before = case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0]
+    with pytest.raises(OpsError) as caught:
+        collect(*case.context)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert seen == [target]
+    assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before

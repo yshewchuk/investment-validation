@@ -121,3 +121,15 @@ def test_malformed_spec_decode_is_typed_but_not_general_typeerror(monkeypatch, c
     assert cli.main(args()) == 2
     assert json.loads(capsys.readouterr().out) == {"refused": "INVALID_EXPERIMENT_SPEC",
         "message": "INVALID_EXPERIMENT_SPEC: invalid SIZE specification metadata"}
+
+
+def test_native_data_error_uses_supported_code_property(monkeypatch, capsys):
+    from engine.v2.data.errors import DataError, fail
+    setup_cli(monkeypatch)
+    error = fail("INPUT_CHANGED", "native input changed")
+    assert type(error) is DataError
+    assert error.code == error.problem.code == "INPUT_CHANGED"
+    monkeypatch.setattr(cli, "Repository", lambda *a, **k: (_ for _ in ()).throw(error))
+    assert cli.main(args()) == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "refused": "INPUT_CHANGED", "message": str(error)}
