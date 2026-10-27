@@ -1,4 +1,5 @@
 """entry_rule_declarations: one entry-rule row's frozen inputs, synthetic only."""
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,13 @@ from engine.v2.models.residual_artifact import make_paired_residual_pool_artifac
 from engine.v2.models.trailing_cutoff_artifact import make_trailing_cutoff_artifact
 from engine.v2.ops.native_entry_rule_inputs import entry_rule_declarations
 from engine.v2.scoring.nightly_source_bundle import NightlySourceBundleRefusal
+from tests.v2.ops.test_native_score_batch_driver_alias import (
+    SIZE,
+    _assemble,
+    _event_inputs,
+    _stage,
+)
+from tests.v2.ops.test_native_score_batch_twin_registry import IV_CRUSH
 
 SIZE_MODEL = "m-move"
 CRUSH_MODEL = "m-crush"
@@ -98,7 +106,7 @@ def test_zero_paired_pools_is_refused():
 
 def test_two_matching_paired_pools_is_refused():
     _refused(_binding((_paired(value=1.0), _paired(value=9.0)), (_trailing(),)),
-             "one exact paired residual pool is required")
+             "more than one exact paired residual pool")
 
 
 def test_a_pool_of_another_crush_model_is_refused():
@@ -129,7 +137,7 @@ def test_a_trailing_cutoff_of_another_history_is_refused():
 
 def test_two_matching_trailing_cutoffs_is_refused():
     _refused(_binding((_paired(),), (_trailing(cutoff=0.5), _trailing(cutoff=9.0))),
-             "one exact trailing cutoff artifact is required")
+             "more than one exact trailing cutoff artifact")
 
 
 def test_an_unparsable_event_date_is_refused():
@@ -144,3 +152,44 @@ def test_an_unusable_mcap_is_refused(mcap_usd):
     _refused(_ready_binding(),
              "entry rule mcap_usd must be a finite number or None",
              mcap_usd=mcap_usd)
+
+
+_TWIN_SIZE_MODEL = "m-size-*"
+_TWIN_CRUSH_MODEL = "m-iv_crush-*"
+_TWIN_ROW_CUTOFF = "2026-01-10"  # min(as_of 2026-01-10, entry 2026-01-15)
+_TWIN_EVENT_MONTH = "2026-01-01"  # cutoff_month(event_date 2026-01-15)
+
+
+def _twin_pool(**overrides):
+    return _paired(move_model_id=_TWIN_SIZE_MODEL, crush_model_id=_TWIN_CRUSH_MODEL,
+                   cutoff=_TWIN_ROW_CUTOFF, **overrides)
+
+
+def _twin_cutoff(**overrides):
+    return _trailing(month=_TWIN_EVENT_MONTH, **overrides)
+
+
+@pytest.mark.parametrize("paired,trailing,expected_detail", [
+    ((), (_twin_cutoff(),),
+     "nightly_source_bundle refused: MODEL_NOT_READY: paired residual pool missing"),
+    ((_twin_pool(value=1.0), _twin_pool(value=9.0)), (_twin_cutoff(),),
+     "nightly_source_bundle refused: MODEL_NOT_READY: duplicate paired residual pool"),
+    ((_twin_pool(),), (),
+     "nightly_source_bundle refused: MODEL_NOT_READY: trailing cutoff artifact missing"),
+    ((_twin_pool(),), (_twin_cutoff(cutoff=0.5), _twin_cutoff(cutoff=9.0)),
+     "nightly_source_bundle refused: MODEL_NOT_READY: duplicate trailing cutoff artifact"),
+], ids=["pool-missing", "pool-duplicate", "cutoff-missing", "cutoff-duplicate"])
+def test_row_assembly_publishes_each_missing_and_duplicate_label(
+        tmp_path, paired, trailing, expected_detail):
+    # End-to-end through native_score_batch row assembly on a real promoted
+    # release: the families are replaced post-resolution because the release
+    # resolver itself refuses duplicate semantic keys release-wide. The
+    # published detail strings are typed here, never read from production.
+    binding = dataclasses.replace(
+        _stage(tmp_path, [SIZE, IV_CRUSH]),
+        paired_residual_artifacts=paired, trailing_cutoff_artifacts=trailing)
+    event = _event_inputs(strategy="TWIN-P")
+    assembled, refusals = _assemble(binding, [event])
+    assert assembled == {}
+    assert [(item.key, item.code, item.detail) for item in refusals] == [
+        (event.key, "MODEL_NOT_READY", expected_detail)]

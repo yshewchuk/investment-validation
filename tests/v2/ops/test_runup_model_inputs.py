@@ -44,9 +44,12 @@ def _build(binding, event=None, **kwargs):
     return rows, refusals, event
 
 
-def _labelled_refusal_detail(cause):
-    label = batch._RELEASE_ARTIFACT_REFUSAL_LABELS[("MODEL_NOT_READY", cause)]
-    return f"nightly_source_bundle refused: MODEL_NOT_READY: {label}"
+_SURFACE_MISSING_DETAIL = (
+    "nightly_source_bundle refused: MODEL_NOT_READY: RUNUP payoff surface missing")
+_SURFACE_UNUSABLE_DETAIL = (
+    "nightly_source_bundle refused: MODEL_NOT_READY: RUNUP payoff surface unusable")
+_SURFACE_DUPLICATE_DETAIL = (
+    "nightly_source_bundle refused: MODEL_NOT_READY: duplicate RUNUP payoff surface")
 
 
 def _assert_model_refusal(binding, detail="nightly_source_bundle refused: MODEL_NOT_READY: RUNUP champion pool missing or unusable"):
@@ -145,8 +148,7 @@ def test_nonempty_bucket_with_zero_floor_remains_usable(tmp_path):
 ])
 def test_hash_valid_but_unusable_surface_is_refused(tmp_path, changes):
     _assert_model_refusal(_binding(tmp_path, surfaces=[surface(**changes)]),
-                          detail=_labelled_refusal_detail(
-                              "RUNUP payoff surface is numerically unusable"))
+                          detail=_SURFACE_UNUSABLE_DETAIL)
 
 
 def _line():
@@ -166,15 +168,20 @@ def test_surface_selection_ignores_line_and_other_keys_regardless_of_order(tmp_p
     assert rows[event.key][1].model["payoff_artifact"] == selected
 
 
-@pytest.mark.parametrize("candidates", [
-    [_line()], [surface(alpha=0.6)], [surface(cutoff="2026-01-08")],
-    [surface(cutoff="2026-01-10")], [surface(cutoff=None)], [surface(strategy="STR-THRU")],
-    [surface(), surface(coefficients=(1.0,) * 6)], [surface(), surface()],
+@pytest.mark.parametrize("candidates,expected_detail", [
+    ([_line()], _SURFACE_MISSING_DETAIL),
+    ([surface(alpha=0.6)], _SURFACE_MISSING_DETAIL),
+    ([surface(cutoff="2026-01-08")], _SURFACE_MISSING_DETAIL),
+    ([surface(cutoff="2026-01-10")], _SURFACE_MISSING_DETAIL),
+    ([surface(cutoff=None)], _SURFACE_MISSING_DETAIL),
+    ([surface(strategy="STR-THRU")], _SURFACE_MISSING_DETAIL),
+    ([surface(), surface(coefficients=(1.0,) * 6)], _SURFACE_DUPLICATE_DETAIL),
+    ([surface(), surface()], _SURFACE_DUPLICATE_DETAIL),
 ])
-def test_missing_or_ambiguous_exact_surface_never_falls_back(tmp_path, candidates):
+def test_missing_or_ambiguous_exact_surface_never_falls_back(
+        tmp_path, candidates, expected_detail):
     _assert_model_refusal(_binding(tmp_path, surfaces=candidates),
-                          detail=_labelled_refusal_detail(
-                              "RUNUP requires one exact-key payoff surface"))
+                          detail=expected_detail)
 
 
 @pytest.mark.parametrize("as_of,entry,expected", [
