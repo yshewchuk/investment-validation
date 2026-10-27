@@ -76,9 +76,7 @@ NOT a first slice that can ride on #1424 alone.
 ## 4. Design
 
 **Members are scored once; DYN-SV selects.** The board universe's supported set
-includes the seven members (import-time assert in `native_board_universe.py`); today the batch worker refuses them as
-`UNSUPPORTED_STRATEGY` until the member-registration steps (#1424 and the ladder and
-CND-PS steps of #1157) register them. DYN-SV reuses those exact records instead of re-scoring them
+includes the seven members (import-time assert in `native_board_universe.py`); the batch worker registers all seven (#1157 steps 3-5); only DYN-SV itself is still refused as `UNSUPPORTED_STRATEGY`. DYN-SV reuses those exact records instead of re-scoring them
 (no second compute, no divergent copies). The post-pass runs in the worker after
 `score_batch`, per event, over the live `ScoreRecord` objects and the member refusals,
 keyed by `BoardRequest`. It runs before `to_document` serialises them

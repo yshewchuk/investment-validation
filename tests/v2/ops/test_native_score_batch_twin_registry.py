@@ -157,6 +157,7 @@ def test_twin_row_assembly_declares_entry_rule_and_planned_exit(tmp_path, monkey
 
     assembled, refusals = _assemble(binding, [event])
     assert refusals == ()
+    assert list(assembled) == [event.key]
     bundle = bundles[0]
     assert bundle.strategy == name
     assert bundle.gate_recipe == {"mode": "entry_rule", "mcap_usd": math.exp(25.0)}
@@ -172,6 +173,8 @@ def test_twin_row_without_iv_crush_role_is_refused_alone(tmp_path, name):
     binding = _stage(tmp_path, [SIZE])
     event = _event_inputs(strategy=name)
     assembled, refusals = _assemble(binding, [event])
+    assert assembled == {}
+    assert refusals[0].key == event.key
     assert len(refusals) == 1
     assert refusals[0].code == "RELEASE_MISSING_ROLE"
 
