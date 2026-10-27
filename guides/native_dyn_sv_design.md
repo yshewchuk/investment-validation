@@ -101,6 +101,16 @@ keyed by `BoardRequest`. It runs before `to_document` serialises them
 - R4 nothing eligible: DYN-SV gets a typed refusal `NO_CHOOSER_CANDIDATE` carrying the
   per-member codes. Legacy emits no row; native emits a refusal so the parity report
   can classify it. This is a documented difference in representation, not behaviour.
+  Serialization (slice 2 implements, slice 3 reads): `NativeScoreBatchRowRefusal`
+  keeps its single `code` and `detail` unchanged. It gains an optional
+  `member_codes`, a list of `{strategy, code}` objects in `DYNAMIC_MENU` order, one per
+  member including those that were not refused (`code: null`). `as_document` emits it
+  only when set, so existing documents are byte-identical. The keyed
+  `native_score_batch_refusals` schema tag is bumped for the added optional field
+  (`guides/component_contracts.md` §2.3 evolution rules). Slice 3's
+  `native_parity_report.apply_native_refusals` reads `member_codes` to classify a
+  DYN-SV refusal (all members refused vs. no finite score) and carries it into the
+  report entry; a document without the field is read as before.
 - R5 ties: broken by `DYNAMIC_MENU` order (stable sort); the selection says
   `status: tie`. Legacy is stable only on the `chooser_score` branch; its
   `exp_pnl_sim` fallback (`score.py:5223`) uses default quicksort, so fallback ties
@@ -134,7 +144,17 @@ because the champion contract defines it, not to match a report.
    release-binding selector for chooser state by cutoff, `chooser_recipe` declaration
    in `_assemble_one_event`. Typed `MODEL_NOT_READY` when state is missing. ~150
    code, ~120 test, ~40 doc. Member rows gain `chooser_score` and may now refuse
-   `MODEL_NOT_READY`; no DYN-SV row yet.
+   `MODEL_NOT_READY`; no DYN-SV row yet. Slice 1 also owns the feature schema: it
+   records the complete ordered chooser input list (every primitive input, its
+   position, and the function or artifact that supplies it) in
+   `native_chooser_features.py` and the scoring `ARCHITECTURE.md`, and adds a test
+   that this list equals the frozen `dyn_sv_chooser_v1_1` feature order. The 50
+   computed columns come from these groups (`native_chooser_features.py`):
+   `ANALOG_COLUMNS` (5, kNN analog pool), `BREAKEVEN_COLUMNS` (5) and `SHAPE_COLUMNS`
+   (8) from leg geometry, `SIZE_BAND_COLUMNS` (6, sizing forecast and served-fold
+   band) and `PRODUCER_COLUMNS` (7, the two other Tier-4 producers), plus the
+   remaining geometry, spread, depth and edge columns. Slice 1 pins the exact
+   order; this note does not duplicate it.
 2. **Selection post-pass** (add + wire): public record-level selector extracted from
    `_choose_dynamic`, worker fan-in using `validate_dynamic_menu`, DYN-SV record or
    `NO_CHOOSER_CANDIDATE` refusal in the output documents. ~200 code, ~180 test, ~50 doc.
