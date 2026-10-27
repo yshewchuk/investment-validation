@@ -410,6 +410,7 @@ def _numerical_independence_source() -> SourceBundle:
             "exit_date": "2026-09-17",
             "expiry": expiry,
             "spot": 100.0,
+            "chain_spot": 125.0,
         },
         raw_quotes=quotes,
         feature_vector={},
@@ -443,7 +444,8 @@ def _numerical_independence_source() -> SourceBundle:
         # closed-form:
         #   driver = 7.0 (forecast_recipes below), spot = 100.0
         #   exit_value = max(0, (0.02 + 0.004 * 7.0) * 100.0) = 4.8
-        #   entry_cost = 4.0 (see entry_cost_pct == 4.0 below)
+        #   entry_cost_pct = 5.0 / chain_spot 125.0 * 100.0 = 4.0
+        #   (not calendar spot 100.0)
         #   return = (4.8 - 4.0 + 0.0 * 100.0) / 4.0 = 0.2
         # exp_pnl_model == 0.2 and win_model == 1.0 for EVERY seed/draw_count.
         payoff_recipe={"min_trades": 2, "seed": 20260918, "draw_count": 8},
