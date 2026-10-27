@@ -344,11 +344,15 @@ def _release_artifact_declarations(
     if artifacts:
         cutoff = _row_cutoff(as_of, calendar_row)
         key = payoff_artifact_key(strategy, _SHADOW_FILL_ALPHA, cutoff)
-        for artifact in artifacts:
-            if artifact.key == key:
-                declarations["payoff_artifact"] = artifact
-                declarations["payoff_artifact_recipe"] = {"before": cutoff}
-                break
+        matches = [artifact for artifact in artifacts if artifact.key == key]
+        if len(matches) > 1:
+            raise NightlySourceBundleRefusal(
+                "MODEL_NOT_READY", "release carries duplicate exact-cutoff payoff artifacts")
+        if not matches:
+            raise NightlySourceBundleRefusal(
+                "MODEL_NOT_READY", "release lacks the exact-cutoff payoff artifact")
+        declarations["payoff_artifact"] = matches[0]
+        declarations["payoff_artifact_recipe"] = {"before": cutoff}
     return declarations
 
 
@@ -387,11 +391,14 @@ def _with_release_artifacts(
             declarations = _release_artifact_declarations(
                 binding, strategy, drivers[0].identity, as_of, calendar_row)
         analogs = binding.analog_artifacts.get(strategy) or ()
-        if analogs:
-            declarations.update(analog_declarations(
-                analogs, strategy, _SHADOW_FILL_ALPHA, _row_cutoff(as_of, calendar_row),
-                panel_row, snapshot_id,
-                score_request_key({**context, "ticker": key.ticker, "strategy": strategy})))
+        analog_declaration = analog_declarations(
+            analogs, strategy, _SHADOW_FILL_ALPHA, _row_cutoff(as_of, calendar_row),
+            panel_row, snapshot_id,
+            score_request_key({**context, "ticker": key.ticker, "strategy": strategy}))
+        if not analog_declaration:
+            raise NightlySourceBundleRefusal(
+                "MODEL_NOT_READY", "release lacks the exact-cutoff analog pool")
+        declarations.update(analog_declaration)
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
             key, exc.code, f"nightly_source_bundle refused: {exc.code}")

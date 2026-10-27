@@ -149,8 +149,9 @@ load-bearing entrypoints:
   **Nightly frozen analog declaration** (`native_analog_query.py`, pure).
   - *Selection:* the release's board analog pool whose
     `(strategy, fill alpha, cutoff)` key matches the row, pinned by its
-    `content_hash`; no match leaves the analog block undeclared, and more than
-    one match refuses the row (`MODEL_NOT_READY`), never a first-wins pick.
+    `content_hash`; no match or more than one match refuses the row
+    (`MODEL_NOT_READY`), never a first-wins pick or silent not-applicable
+    result.
   - *Query:* `mcap_bucket` and `implied_ratio` come from the panel row at
     bundle time; `dte_band` and `moneyness_band` are completed in the analog
     stage from the scorer-computed `dte_entry`, `strike` and `spot` with
@@ -689,6 +690,11 @@ request-supplied rows. If a present driver pool's `model_id` differs from the
 resolved driver identity, the row is refused with `MODEL_NOT_READY`. If no
 release resolves, `NoCurrentRelease` remains; a resolved binding missing
 required model roles keeps the native batch's existing per-row refusals.
+
+For STR-THRU, when the release contains a payoff family but no unique
+`payoff_line` with the row's exact `(strategy, alpha, cutoff)` key, native
+batch assembly refuses that row with `MODEL_NOT_READY`; it does not silently
+score a residual-only block or select an older cutoff.
 
 #### Paired residual and entry-rule declarations (issue #498)
 

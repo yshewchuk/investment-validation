@@ -47,9 +47,10 @@ def _bundle() -> SourceBundle:
         analog_recipe={}, gate_recipe={})
 
 
-def _declare(pools):
+def _declare(pools, payoff_artifacts=()):
     binding = SimpleNamespace(
-        analog_artifacts={"STR-THRU": tuple(pools)}, payoff_artifacts={},
+        analog_artifacts={"STR-THRU": tuple(pools)},
+        payoff_artifacts={"STR-THRU": tuple(payoff_artifacts)},
         driver_residual_artifacts={}, model_release="rel", frozen_inference="inf")
     return _with_release_artifacts(
         _bundle(), binding=binding, key=_KEY, strategy="STR-THRU",
@@ -79,17 +80,29 @@ def test_matching_pool_is_seeded_with_the_native_snapshot_and_request_key():
     assert result.analog_query == {"mcap_bucket": "1-10B", "implied_ratio": None}
 
 
-def test_pool_for_another_cutoff_leaves_the_block_undeclared():
+def test_pool_for_another_cutoff_refuses_the_row_without_fallback():
     result = _declare([_Pool(board_analog_pool_key("STR-THRU", 0.5, "2025-01-01"))])
-    assert result.analog_artifact is None
-    assert result.analog_artifact_recipe == {}
-    assert result.analog_query == {}
+    assert isinstance(result, NativeScoreBatchRowRefusal)
+    assert result.code == "MODEL_NOT_READY"
 
 
-def test_release_without_analog_pools_leaves_the_block_undeclared():
+def test_release_without_analog_pools_refuses_the_row():
     result = _declare([])
-    assert result.analog_artifact is None
-    assert result.analog_query == {}
+    assert isinstance(result, NativeScoreBatchRowRefusal)
+    assert result.code == "MODEL_NOT_READY"
+
+
+def test_payoff_family_without_one_exact_cutoff_refuses_the_row():
+    pool = _Pool(board_analog_pool_key("STR-THRU", 0.5, "2026-01-10"))
+    wrong_cutoff = SimpleNamespace(key=("STR-THRU", 0.5, "2025-01-01"))
+    result = _declare([pool], [wrong_cutoff])
+    assert isinstance(result, NativeScoreBatchRowRefusal)
+    assert result.code == "MODEL_NOT_READY"
+
+    exact = SimpleNamespace(key=("STR-THRU", 0.5, "2026-01-10"))
+    duplicate = _declare([pool], [exact, exact])
+    assert isinstance(duplicate, NativeScoreBatchRowRefusal)
+    assert duplicate.code == "MODEL_NOT_READY"
 
 
 def _real_pool(cutoff, strategy="STR-THRU"):
@@ -128,14 +141,14 @@ def test_assembly_builds_the_analog_query_from_the_panel_row(tmp_path):
     assert block["query_features"]["implied_ratio"] == pytest.approx(1.5)
 
 
-def test_assembly_ignores_a_pool_staged_for_another_strategy(tmp_path):
+def test_assembly_refuses_when_release_has_no_exact_strategy_pool(tmp_path):
     other = _real_pool("2026-01-08", strategy="STR-OTHER")
     binding = dataclasses.replace(
         _stage(tmp_path, [SIZE, GATE]), analog_artifacts={"STR-OTHER": (other,)})
     event = _panel_event(calendar_row=_calendar_row(entry_date="2026-01-08"))
     assembled, refusals = _assemble(binding, [event])
-    assert refusals == ()
-    assert "analog_artifact" not in assembled[event.key][1].analogs
+    assert assembled == {}
+    assert [r.code for r in refusals] == ["MODEL_NOT_READY"]
 
 
 def test_analog_only_release_with_null_entry_date_refuses_the_row(tmp_path):
