@@ -162,8 +162,14 @@ def test_size_comparison_uses_one_native_artifact(data):
         evaluation_years=["2024"], training_start="2023-01-01", history_start="2022-01-01",
         policy=POLICY, limits=LIMITS,
         event_ids=[data.events[1]["event_id"], data.events[5]["event_id"], data.events[-1]["event_id"]])
-    assert size.comparison_inputs(data.repository, data.snapshot, artifact) == size.comparison_inputs(
-        data.repository, data.snapshot, artifact)
+    result = size.comparison_inputs(data.repository, data.snapshot, artifact)
+    expected = {data.events[i]["event_id"]: values for i, values in
+        [(1, (1, -2, 2)), (5, (2, -3, 3)), (-1, (3, 0, 4))]}
+    assert {(r["event_id"], r["horizon_sessions"]) for r in result["rows"]} == {
+        (event_id, horizon) for event_id in expected for horizon in (1, 3, 5)}
+    assert len(result["rows"]) == 9
+    for row in result["rows"]:
+        assert (row["n_prior"], row["mean_prior_move"], row["mean_prior_abs_move"]) == expected[row["event_id"]]
     assert artifact["temporal_plan"]["fold_policy"]["kind"] == "expanding_event_year"
 
 

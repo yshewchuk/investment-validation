@@ -360,12 +360,21 @@ per horizon with `horizon_sessions`, `decision_date`, `source_session_ceiling`.
 Dates are canonical ISO calendar days. Producers must establish these bounds;
 missing bounds refuse. A caller's digest is not evidence of their truth.
 
-This is a metadata foundation only: no current runner uses it. Evaluation IDs
-are preserved, not authorized for reading. Existing v1 behavior is unchanged.
+The eligible-history builder below consumes this metadata policy. Evaluation IDs
+are preserved, not authorized for reading; annual development targets still need
+retained eligibility. Existing v1 behavior is unchanged.
 Integration sequencing belongs to the [stage-2 design](../../../experiments/SUPER_SIZE/STAGE2_DESIGN.md).
 
 ## Policy-qualified eligible history
 
+<!-- public-interface: eligible_history.admit_source, eligible_history.materialize, eligible_history.read, eligible_history_table.CONTRACT, eligible_history_table.FEATURES, eligible_history_table.admit_fields, eligible_history_table.recipe -->
+
+These are intentionally manual, research-only Python APIs, not production CLI,
+nightly or training entrypoints. A separately authorized research caller supplies
+the pinned source and explicit policy; this PR neither activates a data run nor
+wires production scoring. Synthetic tests are the only current invocations.
+The `experiments.eligible_history` adapter consumes backend admission/build/read;
+`experiments.magnitude_eligible_history` consumes its qualified H11 field list.
 Use `experiments.eligible_history.materialize/read` with explicit source snapshot,
 holdout month, grouped policy, target IDs, horizons `[1, 3, 5]`, history start and
 limits (`max_source_rows`, `max_fragments`, `max_object_bytes`, `max_total_bytes`,

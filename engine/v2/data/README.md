@@ -155,6 +155,11 @@ selected-table native scans. Synthetic lifetime tests poison later SQL; see the
 
 ## Source-date metadata for experiments
 
+<!-- public-interface: computed_move_bounds.CONTRACT, computed_move_bounds.TABLE, computed_move_bounds.source_bounds, source_session_indices -->
+
 `computed_move_bounds.CONTRACT` defines the optional metadata-only sibling of native
 computed moves. Actual pre/post source dates bind exact outcome objects; null means
 unavailable, not permission to guess dates. Existing outcome contracts are unchanged.
+`ops.computed_move_bounds_store` consumes `source_bounds` and the contract/table;
+research admission consumes the same contract/table. `computed_moves.source_session_indices`
+is the shared native bracket calculation used by source bounds and realized moves.

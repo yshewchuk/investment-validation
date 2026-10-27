@@ -758,13 +758,13 @@ It does not authenticate arbitrary rehashed calendars as builder-derived.
 Missing/changed receipt/pin refuses `IDENTITY_CONFLICT`, bad contract `CONTRACT_MISMATCH`, unprovable isolation `HOLDOUT_ACCESS_DENIED`.
 Its unlayered caller owns context derivation/registration; `experiments/magnitude_history_report.py` uses stored reads and target qualification. Both v1 consumers remain unchanged.
 
-**Eligible history:** `experiments.eligible_history` fingerprints installed source closure/environment for `eligible_history.materialize/read`; `experiments.magnitude_eligible_history` is SIZE's shared challenger/comparator consumer.
+**Eligible history:** manual research-only `experiments.eligible_history` fingerprints installed code/environment for backend build/read; SIZE's `experiments.magnitude_eligible_history` returns one shared input bundle. Only tests invoke them today; production wiring and actual research runs require separate authorization.
 The separate `research_eligible_history.v1` table binds exact source/bounds, policy/month/membership versions, history start, fixed 1/3/5 clocks, contributors and producer identity. Exact receipts replay; live/v1 aggregates never substitute.
 Full canonical metadata establishes protected windows. Native source-bound objects qualify labels before grouped eligibility and singleton outcome preflight; null historical bounds are omissions, missing required evidence refuses.
 All selection targets, including annual evaluation, require retained eligibility; protected confirmation is not this API. Read only eligible prior outcomes available by each ceiling; preserve native means/EMA/nulls.
 `eligible_history_table.admit_fields` accepts only the exact research contract/recipe/policy and known H11 fields; live/unknown provenance and unsupported aliases/derivations refuse before feature reads. Implied history remains separate.
 Limits cap decoded source rows, fragments and physical source bytes after native catalog resolution; output byte caps apply after per-target serialization, not peak allocations. Progress is bounded; failures publish no receipt, unreferenced objects use normal cleanup.
-Publication/schedule-as-known remain unverified reconstruction. Outcome object checks hash full bytes; protected outcome objects stay unopened. No production mutation, provider, fitting, registration or final-read authority is granted.
+Publication/schedule-as-known remain unverified reconstruction. Full admitted object bytes are hashed; protected outcomes stay unopened. Refusals: wrong bounds/fields `CONTRACT_MISMATCH`; unisolated outcomes/excluded targets/wrong artifact `HOLDOUT_ACCESS_DENIED`; limits `RESULT_LIMIT_EXCEEDED`; changed receipt `IDENTITY_CONFLICT`. Native errors propagate; no production/provider/fit/final-read authority.
 
 `magnitude_history_store.read_stored_for_events` is the projected search reader.
 Every call revalidates the complete receipt, isolation, metadata and feature content,
