@@ -18,6 +18,10 @@ import pytest
 
 from engine.data.sources.base import CredentialRotated, FetchError
 from engine.data.pulls.gspc_refresh import HEADER_LINES, refresh_gspc_daily
+from engine.data.pulls.price_refresh import (
+    COVERAGE_CLOSE_BUFFER,
+    _regular_market_close,
+)
 
 DATES = ["2026-08-25", "2026-08-26", "2026-08-27"]
 
@@ -263,6 +267,74 @@ def test_invalid_session_refuses_before_fetching(tmp_path, value):
                                 refetch_token="run-1", now=CEILING_NOW)
 
     assert result == {"ok": False, "reason": "invalid_session"}
+    assert fetcher.calls == []
+    assert not path.exists()
+
+
+def test_finality_is_strictly_after_close_plus_buffer(tmp_path):
+    """A stamp exactly AT the cutoff is not final; one second later is.
+
+    Coverage is strictly after the regular close plus the buffer, matching
+    price_refresh (a stamp exactly at the cutoff refetches).
+    """
+    path = tmp_path / "gspc_daily.csv"
+    cutoff = _regular_market_close(pd.Timestamp("2026-08-27")) + COVERAGE_CLOSE_BUFFER
+
+    fetcher = StubFetcher(body=_body(DATES))
+    result = refresh_gspc_daily(fetcher, path, session="2026-08-27",
+                                refetch_token="run-1", now=cutoff)
+
+    assert result == {"ok": False, "reason": "session_not_final"}
+    assert fetcher.calls == []
+    assert not path.exists()
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path,
+                                session="2026-08-27", refetch_token="run-2",
+                                now=cutoff + pd.Timedelta(seconds=1))
+
+    assert result == {"ok": True, "last_date": "2026-08-27", "rows": 3}
+    assert path.exists()
+
+
+def test_stored_row_after_the_session_is_refused_as_shrunk(tmp_path):
+    """The ceiling caps the fresh answer; it never deletes stored rows.
+
+    Stored D1..D4 with session D3: the capped series (D1..D3) lacks the
+    stored D4 date, so the refresh is refused ``shrunk`` — the stored bytes
+    stay, ``older_than_existing`` is not reached as the answer here.
+    """
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, CEIL_DATES)
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(CEIL_DATES)), path,
+                                session="2026-08-27", refetch_token="run-1",
+                                now=CEILING_NOW)
+
+    assert result == {"ok": False, "reason": "shrunk"}
+    assert path.read_bytes() == before
+
+
+def test_body_entirely_after_the_session_is_unparseable(tmp_path):
+    """A session before every fetched row leaves an empty series: unparseable."""
+    path = tmp_path / "gspc_daily.csv"
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path,
+                                session="2026-08-24", refetch_token="run-1",
+                                now=CEILING_NOW)
+
+    assert result == {"ok": False, "reason": "unparseable"}
+    assert not path.exists()
+
+
+def test_malformed_now_is_refused_before_fetching(tmp_path):
+    """An unparseable ``now`` is refused ``invalid_now`` with no fetch."""
+    path = tmp_path / "gspc_daily.csv"
+    fetcher = StubFetcher(body=_body(DATES))
+
+    result = refresh_gspc_daily(fetcher, path, session="2026-08-27",
+                                refetch_token="run-1", now="garbage")
+
+    assert result == {"ok": False, "reason": "invalid_now"}
     assert fetcher.calls == []
     assert not path.exists()
 

@@ -47,9 +47,12 @@ ever cached would answer forever.
 When the caller passes the run's ``session`` it is the refresh ceiling
 (#1491): rows dated after it are dropped from the parsed body before the
 cutoff check and every guard, so the file never ends after the session; if
-the session's regular 16:00 ET close plus the coverage buffer has not passed
-(``now``, UTC), the refresh is refused ``session_not_final`` before any
-fetch, and a malformed ``session`` is refused ``invalid_session``.
+``now`` (UTC) is not STRICTLY after the session's regular 16:00 ET close
+plus the coverage buffer, the refresh is refused ``session_not_final``
+before any fetch; a malformed ``session`` is refused ``invalid_session``
+and a malformed ``now`` ``invalid_now``. A stored row already dated after
+the session is NOT removed: the capped series lacks that stored date, so
+the refresh is refused ``shrunk`` (not ``older_than_existing``).
 """
 from __future__ import annotations
 
@@ -196,7 +199,7 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None,
     reason in ``fetch_failed`` / ``unparseable`` / ``stale_source`` /
     ``shrunk`` / ``older_than_existing`` / ``history_changed`` /
     ``unreadable`` / ``unwritable`` / ``invalid_cutoff`` /
-    ``session_not_final`` / ``invalid_session``. When
+    ``session_not_final`` / ``invalid_session`` / ``invalid_now``. When
     ``minimum_last_date`` is given, its type is validated before fetching and
     the fresh series' coverage is checked after parse; when a cutoff is
     supplied, the fetched coverage must contain the exact cutoff session and
@@ -210,13 +213,18 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None,
     ``session`` is the run's ceiling (#1491), validated the same way as
     ``minimum_last_date`` (a bad value returns ``invalid_session``). The
     session's bar is final only once ``now`` (default: UTC now; a naive
-    ``now`` is read as UTC) has passed the session's regular 16:00 ET close
-    plus ``COVERAGE_CLOSE_BUFFER``; before that the refresh is refused
+    ``now`` is read as UTC, an unparseable one returns ``invalid_now``) is
+    STRICTLY after the session's regular 16:00 ET close plus
+    ``COVERAGE_CLOSE_BUFFER`` (a stamp exactly at the cutoff refetches, as
+    in price_refresh coverage); before that the refresh is refused
     ``session_not_final``, both refusals landing before the fetch so nothing
     is written. Rows dated after the session are then dropped from the
     parsed body before the ``minimum_last_date`` check and every guard, so
     the file never ends after ``session``; a body left empty by that drop is
-    ``unparseable``. Existing history guards are unchanged.
+    ``unparseable``.     A stored row already dated after the session is NOT
+    removed: the capped series lacks that stored date, so the refresh is
+    refused ``shrunk``, never ``older_than_existing``. Existing history
+    guards are unchanged.
     """
     from engine.data.sources.base import CredentialRotated, FetchError
 
@@ -241,19 +249,25 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None,
         ceiling = _naive_timestamp(session)
         if ceiling is None:
             return _finish({"ok": False, "reason": "invalid_session"}, started)
-        # The session's own bar exists only after its regular close plus the
-        # coverage buffer (the same 16:00 ET + COVERAGE_CLOSE_BUFFER rule as
-        # daily coverage): refuse BEFORE the fetch so nothing of an unfinished
-        # session is ever written. A naive ``now`` is read as UTC.
+        # The session's own bar exists only once the clock is STRICTLY past
+        # its regular close plus the coverage buffer (the same 16:00 ET +
+        # COVERAGE_CLOSE_BUFFER rule as daily coverage, where a stamp exactly
+        # at the cutoff refetches): refuse BEFORE the fetch so nothing of an
+        # unfinished session is ever written. A naive ``now`` is read as UTC.
         from engine.data.pulls.price_refresh import (
             COVERAGE_CLOSE_BUFFER,
             _regular_market_close,
         )
-        stamp = (pd.Timestamp(now) if now is not None
-                 else pd.Timestamp.now(tz="UTC"))
+        if now is None:
+            stamp = pd.Timestamp.now(tz="UTC")
+        else:
+            try:
+                stamp = pd.Timestamp(now)
+            except (TypeError, ValueError):
+                return _finish({"ok": False, "reason": "invalid_now"}, started)
         if stamp.tz is None:
             stamp = stamp.tz_localize("UTC")
-        if stamp < _regular_market_close(ceiling) + COVERAGE_CLOSE_BUFFER:
+        if stamp <= _regular_market_close(ceiling) + COVERAGE_CLOSE_BUFFER:
             return _finish({"ok": False, "reason": "session_not_final"}, started)
 
     try:
