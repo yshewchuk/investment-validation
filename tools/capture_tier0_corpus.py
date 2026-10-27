@@ -1438,7 +1438,12 @@ def _captured_blocks(candidate: Mapping[str, Any],
     quote_domain = source.get("quote_domain")
     try:
         context["quotes"] = quote_domain_map(quote_domain, quote_status)
-        chain_spot = _staged_chain_spot(quote_domain)
+        staged_quote_domain = [
+            ({**row, "chain_spot": row["spot"]}
+             if "chain_spot" not in row and "spot" in row else row)
+            for row in quote_domain
+        ]
+        chain_spot = _staged_chain_spot(staged_quote_domain)
         if chain_spot is not None:
             context["chain_spot"] = chain_spot
     except ValueError as exc:

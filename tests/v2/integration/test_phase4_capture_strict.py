@@ -762,7 +762,8 @@ def test_captured_blocks_stage_chain_spot_from_quote_rows(tmp_path):
     checkpoint = candidate["legacy_trace"]["checkpoints"]["source_inputs"]
     source = checkpoint["value"]
     for row in source["quote_domain"]:
-        row["chain_spot"] = 125.0
+        row["spot"] = 125.0
+    assert all("chain_spot" not in row for row in source["quote_domain"])
     checkpoint["content_hash"] = content_hash(source)
 
     blocks = _captured_blocks(candidate, _request())
