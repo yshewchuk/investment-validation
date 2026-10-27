@@ -301,12 +301,17 @@ def _remember_unknown_symbol(ticker: str) -> None:
 #: heal window. Definitive 404s are never recorded here — they have no chain.
 #: The write protocol: a fetched session OWES THE WHOLE INTENDED LIST up
 #: front — filed before its first fetch, since nothing is proven until a body
-#: lands or a 404 says there is no chain — and every exit path replaces that
-#: entry with the run's real failures. A SIGKILL/OOM runs no handler at all,
-#: so the up-front entry is what survives a hard kill: the next run re-asks
-#: the entire attempted list even if the session then reads past the skip
+#: lands or a 404 says there is no chain — and every exit path MERGES the
+#: run's real failures into that entry: (names on file minus the ones this
+#: call attempted) plus this call's failures, so a filtered run never erases
+#: debt it did not attempt. A SIGKILL/OOM runs no handler at all, so the
+#: up-front entry is what survives a hard kill: the next run re-asks the
+#: entire attempted list even if the session then reads past the skip
 #: fraction. Dates outside the heal window but inside the 14-day retention
-#: are re-asked straight from this file by :func:`refresh_forward_chains`.
+#: are re-asked straight from this file by :func:`refresh_forward_chains`,
+#: and every memo re-ask is fetched with the run day as ``refetch_token``:
+#: the cached body may be the malformed 200 that filed the debt, and only a
+#: new key makes the retry a fresh provider call.
 CHAIN_RETRY_PATH = paths.REPORTS / "orats_chain_retry.json"
 
 #: Cap on the memo's on-disk size: a file this big is not a memo anyone wrote
@@ -404,15 +409,24 @@ def _canonical_chain_day(key: str) -> pd.Timestamp | None:
     return day
 
 
-def _persist_chain_retry(stamp: str, retry: set[str]) -> None:
-    """Replace one session's retry entry with the names this call owes it.
+def _persist_chain_retry(stamp: str, retry: set[str], attempted: set[str]) -> None:
+    """Merge one session's retry entry: (names on file - attempted) | retry.
+
+    Replacing the entry with only this call's failures silently dropped the
+    debt of every name this call never attempted: a filtered refresh — the
+    skip path's pending subset, an older pass's owed list — sees only part
+    of the entry, and its persist erased the rest. Merging keeps what the
+    call cannot speak for: attempted names take this call's verdict (a
+    fetched-OK or 404 name drops out by not being re-added), unattempted
+    names stay owed untouched, and an entry that merges to empty is deleted.
 
     Called twice on a fetched session: up front, before the first fetch, with
-    the WHOLE intended list — owed until proven fetched or 404, so a hard
-    kill (which runs no handler) leaves the next run re-asking everything
-    this one attempted — and on every exit path with the real failures,
-    which replace the up-front entry. A session that never reaches the fetch
-    loop writes nothing.
+    the WHOLE intended list as both retry and attempted — owed until proven
+    fetched or 404, so a hard kill (which runs no handler) leaves the next
+    run re-asking everything this one attempted plus whatever else was on
+    file — and on every exit path with the real failures, which replace this
+    call's attempted names inside the entry. A session that never reaches the
+    fetch loop writes nothing.
 
     Entries older than 14 days behind the reference are pruned — past that
     the session is far outside any heal window and the date is not coming
@@ -430,8 +444,9 @@ def _persist_chain_retry(stamp: str, retry: set[str]) -> None:
     d = _read_chain_retry()
     if not retry and stamp not in d:
         return  # nothing owed and none recorded: leave the file alone
-    if retry:
-        d[stamp] = retry
+    merged = (d.get(stamp, set()) - attempted) | retry
+    if merged:
+        d[stamp] = merged
     else:
         d.pop(stamp, None)
     days = {k: day for k in d if (day := _canonical_chain_day(k)) is not None}
@@ -666,9 +681,15 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     out = {"as_of": stamp, "sessions": stamps, "requested": len(wanted_all),
            "returned": 0, "rows": 0, "calls": 0, "cache_hits": 0,
            "skipped_held": 0, "missing": [], "failed": []}
+    # The run day names the refetch_token for every memo re-ask (see
+    # :func:`_refresh_one_session`): a malformed 200 IS cached, so the retry
+    # must not replay it. One value for the whole run => at most one fresh
+    # provider call per memo name per day.
+    refetch_day = str(pd.Timestamp.now(tz="UTC").date())
     for stamp in stamps:
         _refresh_one_session(
-            fetcher, wanted_all, stamp, held, batch=batch, out=out, skip_held=skip_held
+            fetcher, wanted_all, stamp, held, batch=batch, out=out, skip_held=skip_held,
+            refetch_day=refetch_day
         )
 
     if skip_held and stamps:
@@ -709,7 +730,7 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
                   file=sys.stderr)
             _refresh_one_session(fetcher, wanted_all, str(day.date()), held,
                                  batch=batch, out=out, skip_held=skip_held,
-                                 only=owed)
+                                 only=owed, refetch_day=refetch_day)
         if non_canonical:
             print(f"[chains] retry memo: ignored {non_canonical} "
                   f"non-canonical date key(s) (expected 'YYYY-MM-DD')",
@@ -718,7 +739,8 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
 
 
 def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_held,
-                         only: list[str] | None = None) -> None:
+                         only: list[str] | None = None,
+                         refetch_day: str | None = None) -> None:
     """Fetch one trade date for whatever part of the universe still needs it.
 
     A session already at least :data:`CHAIN_SKIP_HELD_FRACTION` held stops
@@ -732,8 +754,18 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
     computation outright (the held-fraction skip does not apply to a list
     already narrowed to the debt), and everything downstream — batching, the
     404-vs-transient split, the persist-on-any-exit protocol — is the same.
+
+    A name re-asked from the memo — ``only`` or the skip path's pending
+    subset — is fetched with ``refetch_day`` as its ``refetch_token``. The
+    cached body may be the malformed/wrong-shape 200 that filed the debt (a
+    2xx is cached whatever it holds; only non-2xx answers are not), so a
+    cache-first re-ask would replay the same bad bytes on every later run
+    forever; the token makes a distinct key, so the retry is a fresh provider
+    call — at most one per memo name per day, since the token is the run day.
+    First-time fetches pass no token: the ordinary cache-first path.
     """
     session_day = pd.Timestamp(stamp).normalize()
+    memo_reasked = only is not None
     if only is not None:
         wanted = list(only)
     elif skip_held:
@@ -763,20 +795,25 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                       "retry-file names (transient failures and quota cuts)",
                       file=sys.stderr)
                 wanted = pending
+                memo_reasked = True
     else:
         wanted = list(wanted_all)
     from engine.data.fetch import CredentialRotated
 
+    # Only a memo re-ask bypasses the cache (it may hold the very malformed
+    # body that filed the debt); a first fetch stays ordinary cache-first.
+    refetch_token = refetch_day if memo_reasked else None
     retry: set[str] = set()
+    attempted = set(wanted)
     if wanted:
         # Hard-kill safety: the whole intended list is owed the date BEFORE
         # the first fetch — nothing is proven until a body arrives or a 404
         # says there is no chain. A SIGKILL/OOM runs no handler, and without
         # this entry a session cut off mid-fetch leaves the next run reading
         # the date past the skip fraction and dropping pairs it never asked
-        # for. The persists on the exit paths below replace it with the real
-        # failures; a session with nothing to fetch files nothing.
-        _persist_chain_retry(stamp, set(wanted))
+        # for. The persists on the exit paths below merge the real failures
+        # into this entry; a session with nothing to fetch files nothing.
+        _persist_chain_retry(stamp, attempted, attempted)
     # The loop cursor, pre-bound: an exit before the first chunk owes every
     # name, exactly as the up-front persist filed them.
     start = 0
@@ -787,7 +824,8 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                       "dte": CHAIN_DTE, "fields": CHAIN_FIELDS}
             try:
                 record = fetcher.fetch("orats", "hist/strikes", params,
-                                       note="phase3 forward chains")
+                                       note="phase3 forward chains",
+                                       refetch_token=refetch_token)
             except (QuotaExhausted, CredentialRotated):
                 # This chunk and every later unasked one are still owed the
                 # date; without persisting before the raise the cut-off tail
@@ -800,7 +838,7 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                 # degrade arm, which records a degraded refresh and scores
                 # from cached data.
                 retry.update(wanted[start:])
-                _persist_chain_retry(stamp, retry)
+                _persist_chain_retry(stamp, retry, attempted)
                 raise
             except Exception as exc:  # noqa: BLE001 — reported, never swallowed
                 out["failed"].append(f"{chunk[0]}..: {str(exc)[-40:]}")
@@ -875,11 +913,11 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
         # the same set would only be a second write.
         if not isinstance(exc, (QuotaExhausted, CredentialRotated)):
             retry.update(wanted[start:])
-            _persist_chain_retry(stamp, retry)
+            _persist_chain_retry(stamp, retry, attempted)
         raise
     # A fetched-OK or 404 name drops out of this session's entry by not being
     # re-added; only this run's transient failures and quota-cut remainder stay.
-    _persist_chain_retry(stamp, retry)
+    _persist_chain_retry(stamp, retry, attempted)
 
 
 def _market_wide_days(as_of: pd.Timestamp, lookback: int = 6) -> list:

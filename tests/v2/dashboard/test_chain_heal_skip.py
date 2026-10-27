@@ -8,15 +8,15 @@ transiently or were cut off by quota are kept alive in ``CHAIN_RETRY_PATH``
 and ARE re-asked even in a skipped session. Only definitive 404s are
 dropped. A fresh (or unheld) session still is healed in full. The memo is
 also owed UP FRONT: a fetched session files its whole intended list before
-its first fetch and every exit path replaces it with the real failures, so
-a SIGKILL/OOM — which runs no handler — leaves the next run re-asking the
-whole attempted list. And memo dates past the two-session window but inside
-the 14-day retention are re-asked for exactly their owed unheld names. The memo is
-also owed UP FRONT: a fetched session files its whole intended list before
-its first fetch, so a SIGKILL/OOM — which runs no handler — leaves the next
-run re-asking the entire attempted list. And memo dates past the two-session
-heal window but inside the 14-day retention are re-asked, exactly their owed
-unheld names, before they age out.
+its first fetch, and every exit path MERGES the run's real failures into
+that entry — (names on file minus the ones this call attempted) plus this
+call's failures — so a filtered run never erases debt it did not attempt,
+and a SIGKILL/OOM — which runs no handler — leaves the next run re-asking
+the entire attempted list plus whatever else was on file. And memo dates
+past the two-session heal window but inside the 14-day retention are
+re-asked for exactly their owed unheld names, before they age out. Every
+memo re-ask is fetched with a non-None ``refetch_token`` (the cached body
+may be the malformed 200 that filed the debt); a first fetch passes none.
 
 Every dependency below the public signature — the fetcher, the store's held
 set, the trading calendar, the retry file — is a synthetic fake or a tmp_path
@@ -47,19 +47,22 @@ class _Fetcher:
     ``bad_json(params)`` may return an exception for ``record.json()`` to
     raise on an otherwise-successful (HTTP 200) call. ``body(params)`` may
     return a WRONG-SHAPE success body — a list, a string — in place of the
-    well-formed dict.
+    well-formed dict. Every call's ``refetch_token`` is recorded in
+    ``asked_tokens``, parallel to ``asked``.
     """
 
     def __init__(self, fail=None, bad_json=None, body=None):
         self.asked = []
         self.asked_tickers = []
+        self.asked_tokens = []
         self.fail = fail
         self.bad_json = bad_json
         self.body = body
 
-    def fetch(self, source, endpoint, params, note=""):
+    def fetch(self, source, endpoint, params, note="", refetch_token=None):
         self.asked.append(params["tradeDate"])
         self.asked_tickers.extend(params["ticker"].split(","))
+        self.asked_tokens.append(refetch_token)
         exc = self.fail(params) if self.fail else None
         if exc is not None:
             raise exc
@@ -90,9 +93,10 @@ class _MemoSpyFetcher(_Fetcher):
         super().__init__(**kw)
         self.memo_at_call: list[dict] = []
 
-    def fetch(self, source, endpoint, params, note=""):
+    def fetch(self, source, endpoint, params, note="", refetch_token=None):
         self.memo_at_call.append(nightly._read_chain_retry())
-        return super().fetch(source, endpoint, params, note=note)
+        return super().fetch(source, endpoint, params, note=note,
+                             refetch_token=refetch_token)
 
 
 class _Cal:
@@ -164,6 +168,32 @@ def test_a_retry_name_that_is_now_held_is_not_re_asked(monkeypatch, tmp_path):
     assert out["sessions_skipped"][0]["retried"] == 1
 
 
+def test_memo_driven_chunk_gets_refetch_token_first_fetch_does_not(
+        monkeypatch, tmp_path):
+    """The cached body may be the malformed 200 that filed the debt, so a memo
+    re-ask — here the skip path's pending subset — is fetched with a non-None
+    ``refetch_token``: a distinct cache key makes it a fresh provider call. An
+    ordinary first fetch of a 0%-held session is the cache-first path and
+    passes none."""
+    _wire(monkeypatch, {(t, pd.Timestamp(AS_OF)) for t in TICKERS[:8]}, tmp_path)
+    nightly.CHAIN_RETRY_PATH.write_text(json.dumps({AS_OF: ["TKR09"]}))
+    f1 = _Fetcher()
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f1, sessions=1)
+
+    assert f1.asked_tickers == ["TKR09"] and out["sessions_skipped"][0]["retried"] == 1
+    assert len(f1.asked_tokens) == 1, "one memo-driven chunk"
+    assert f1.asked_tokens[0] is not None, \
+        "the re-ask must not replay the cached body that filed the debt"
+
+    monkeypatch.setattr("engine.replay.available_chain_keys", lambda: set())
+    f2 = _Fetcher()
+    nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f2, sessions=1)
+
+    assert f2.asked == [AS_OF], "the unheld session is healed in full"
+    assert f2.asked_tokens == [None], "a first fetch gets no token"
+
+
 def test_a_memo_value_that_is_a_string_is_ignored(monkeypatch, tmp_path):
     """A value is a LIST of names: a bare string for a date would split into
     characters if iterated naively, so it is skipped for that date."""
@@ -210,7 +240,39 @@ def test_transient_failure_is_retried_on_a_later_skipped_run(monkeypatch, tmp_pa
 
     assert f2.asked_tickers == ["TKR08", "TKR09"], "the skipped session re-asks the retry set"
     assert out2["sessions_skipped"][0]["retried"] == 2
-    assert nightly._read_chain_retry() == {}, "the re-ask cleared it"
+    assert nightly._read_chain_retry() == {AS_OF: set(TICKERS[:8])}, \
+        "the merge cleared only the names this call attempted: the debt of " \
+        "the now-held names was never attempted and stays on file"
+
+
+def test_filtered_run_preserves_unattempted_owed_names(monkeypatch, tmp_path):
+    """A skipped session's memo subset is a FILTERED run: the persist merges
+    — (names on file − attempted) ∪ failures — it never replaces. A name owed
+    on that date but off this run's universe (BBB) is unattempted by the
+    pending intersection, so a clean re-ask of AAA leaves {BBB} and a
+    transient AAA failure leaves {AAA, BBB}: neither run erases debt it
+    cannot speak for."""
+    tickers = ["AAA"] + TICKERS[:9]  # 10 wanted, 9 held -> 90%, skip path
+    _wire(monkeypatch, {(t, pd.Timestamp(AS_OF)) for t in TICKERS[:9]}, tmp_path)
+    memo = json.dumps({AS_OF: ["AAA", "BBB"]})
+
+    nightly.CHAIN_RETRY_PATH.write_text(memo)
+    f = _Fetcher()
+    nightly.refresh_forward_chains(tickers, AS_OF, fetcher=f, sessions=1)
+
+    assert f.asked_tickers == ["AAA"], "only memo ∩ unheld-wanted is attempted"
+    assert "BBB" not in f.asked_tickers, "the off-universe name is never asked"
+    assert nightly._read_chain_retry() == {AS_OF: {"BBB"}}, \
+        "the OK verdict speaks only for AAA: unattempted BBB stays owed"
+
+    nightly.CHAIN_RETRY_PATH.write_text(memo)
+    f2 = _Fetcher(fail=lambda p: RuntimeError("orats hist/strikes: HTTP 502"))
+    out2 = nightly.refresh_forward_chains(tickers, AS_OF, fetcher=f2, sessions=1)
+
+    assert out2["failed"], "the transient failure is still reported"
+    assert f2.asked_tickers == ["AAA"]
+    assert nightly._read_chain_retry() == {AS_OF: {"AAA", "BBB"}}, \
+        "the failure re-files AAA and the merge never touched BBB"
 
 
 def test_a_404_exception_is_final_and_never_retried(monkeypatch, tmp_path):
@@ -414,6 +476,25 @@ def test_the_whole_intended_list_is_owed_before_the_first_fetch(monkeypatch, tmp
         "the first fetch is made with the whole unheld list already owed"
     assert nightly._read_chain_retry() == {AS_OF: {t for t in tickers if t >= "TKR10"}}, \
         "the unwind replaced the up-front debt with the unasked tail"
+
+
+def test_hard_kill_upfront_persist_keeps_unrelated_owed_names(monkeypatch, tmp_path):
+    """The up-front owed persist is a MERGE too: a run wanting only AAA that
+    dies on a BaseException from its very first fetch — the hard-kill
+    analogue, the exit-path bookkeeping below never runs — must leave on file
+    BOTH the debt it never attempted (ZZZ, off the universe) and the whole
+    attempted list (AAA), which the up-front persist filed beside ZZZ and the
+    unwind re-banked. Replace-on-persist would have erased ZZZ."""
+    _wire(monkeypatch, set(), tmp_path)
+    nightly.CHAIN_RETRY_PATH.write_text(json.dumps({AS_OF: ["ZZZ"]}))
+    f = _Fetcher(fail=lambda p: KeyboardInterrupt())
+
+    with pytest.raises(KeyboardInterrupt):
+        nightly.refresh_forward_chains(["AAA"], AS_OF, fetcher=f, sessions=1)
+
+    assert f.asked == [AS_OF], "the kill came at the first fetch"
+    assert nightly._read_chain_retry() == {AS_OF: {"AAA", "ZZZ"}}, \
+        "the up-front merge filed AAA beside ZZZ and the unwind kept both"
 
 
 def test_generic_non_404_fetch_error_stays_transient(monkeypatch, tmp_path):
@@ -747,8 +828,10 @@ def test_an_older_memo_date_is_re_asked_for_exactly_its_owed_names(
     """The heal window is two sessions but retention is fourteen days: a memo
     date in that gap is never touched by the session loop, so the pass after
     it re-asks it for exactly its owed unheld names — minus a name the store
-    already holds for that date, minus a dropped symbol — and clears the
-    entry on success. A 15-day-old entry is past the same cutoff the prune
+    already holds for that date, minus a dropped symbol — and merges those
+    attempted names out of the entry on success: the names this call never
+    attempted (the held one and the dropped symbol) stay owed until the prune
+    ages them out. A 15-day-old entry is past the same cutoff the prune
     uses and must not be asked at all."""
     older = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=12)).date())
     stale = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=15)).date())
@@ -769,8 +852,10 @@ def test_an_older_memo_date_is_re_asked_for_exactly_its_owed_names(
     err = capsys.readouterr().err
     assert err.count(f"[chains] session {older}:") == 1, "one stderr line per date"
     kept = nightly._read_chain_retry()
-    assert older not in kept, "a successful re-ask clears the entry"
-    assert kept == {stale: {"TKR07"}}, "the 15-day-old entry is neither asked nor cleared"
+    assert kept == {older: {"TKR08", "ZZZ9"}, stale: {"TKR07"}}, \
+        "the merge cleared the one attempted name: the held name and the " \
+        "dropped symbol were never attempted and stay owed, and the " \
+        "15-day-old entry is neither asked nor cleared"
 
 
 def test_non_canonical_memo_date_keys_are_ignored_with_one_stderr_line(
