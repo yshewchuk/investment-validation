@@ -300,11 +300,27 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
                 "CUTOFF_NOT_ADVANCED", "cutoffs do not advance the prior cutoffs")
         for member_id in MONTHLY_CARRIED_MEMBER_IDS:
             objects = prior_rows[member_id].get("objects")
-            by_member[member_id] = tuple(sorted(
-                (PoolOutput(member_id, item["name"], item["content_hash"], prior_cutoff,
-                            item["bytes"], carried=True)
-                 for item in objects),
-                key=lambda output: output.name))
+            if not isinstance(objects, list) or not objects:
+                raise ReleaseAssemblyRefusal(
+                    "PRIOR_MISMATCH", "a monthly carried member has no objects")
+            names: set[str] = set()
+            admitted = []
+            for item in objects:
+                if not isinstance(item, dict):
+                    raise ReleaseAssemblyRefusal(
+                        "PRIOR_MISMATCH", "a monthly carried member object is malformed")
+                output = PoolOutput(member_id, item.get("name"), item.get("content_hash"),
+                                    prior_cutoff, item.get("bytes"), carried=True)
+                _admit(output, "PRIOR_MISMATCH")
+                if not _content_hash_valid(output.content_hash):
+                    raise ReleaseAssemblyRefusal(
+                        "PRIOR_MISMATCH", "a monthly carried member hash is malformed")
+                if output.name in names:
+                    raise ReleaseAssemblyRefusal(
+                        "PRIOR_MISMATCH", "a monthly carried member name appears twice")
+                names.add(output.name)
+                admitted.append(output)
+            by_member[member_id] = tuple(sorted(admitted, key=lambda output: output.name))
     else:
         if cutoff_day <= prior_day:
             raise ReleaseAssemblyRefusal(

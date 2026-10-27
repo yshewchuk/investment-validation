@@ -358,6 +358,38 @@ def test_monthly_assembly_preserves_later_prior_pool_cutoff(tmp_path):
     assert body["sources"]["retrain_cutoff"] == "2026-11-01"
 
 
+@pytest.mark.parametrize("defect", ["empty", "duplicate"])
+def test_monthly_assembly_refuses_unadmitted_implicit_carries(tmp_path, defect):
+    from copy import deepcopy
+
+    _, prior_body = _stage_prior(tmp_path, prior_sources={
+        "pool_cutoff": "2026-11-10", "retrain_cutoff": "2026-10-01"})
+    rows = deepcopy(prior_body["members"])
+    paired = next(row for row in rows if row["member_id"] == "paired_residual_pool")
+    if defect == "empty":
+        paired["objects"] = []
+    else:
+        paired["objects"].append(deepcopy(paired["objects"][0]))
+    prior_body = phase5_release.manifest_body(
+        "prior1", prior_body["deployment_id"], rows, prior_body["sources"])
+
+    digest = phase5_release.sha256_bytes(b"new")
+    drivers = [assembly.PoolOutput(member_id, f"{member_id}|2026-11-01", digest,
+                                   "2026-11-01", len(b"new"))
+               for member_id in assembly.MONTHLY_DRIVER_MEMBER_IDS]
+    chooser = assembly.PoolOutput(
+        assembly.CHOOSER_MEMBER_ID, "chooser|2026-11-01", digest,
+        "2026-11-01", len(b"new"))
+
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(
+            prior_body, release_id="cand2", expected_prior_release_id="prior1",
+            outputs=drivers, chooser=chooser, cutoff="2026-11-10",
+            monthly=True, retrain_cutoff="2026-11-01")
+
+    assert err.value.code == "PRIOR_MISMATCH"
+
+
 def test_monthly_assembly_refuses_missing_implicit_carry(tmp_path):
     from dataclasses import replace
 
