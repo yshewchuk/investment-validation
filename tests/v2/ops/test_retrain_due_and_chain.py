@@ -125,6 +125,8 @@ def test_read_base_retrain_cutoff_rejects_invalid_legacy_pool_cutoff(tmp_path):
 
 
 def test_decide_for_deployed_base_validates_before_cutoff_and_decision(monkeypatch, tmp_path):
+    import types
+
     import engine.v2.models.deployment as deployment
     import engine.v2.ops.pool_refresh as pool_refresh
     import engine.v2.ops.retrain_due as retrain_due
@@ -133,6 +135,7 @@ def test_decide_for_deployed_base_validates_before_cutoff_and_decision(monkeypat
 
     def validate(*args):
         calls.append("validate")
+        return types.SimpleNamespace(kind="USABLE")
 
     def read(*args):
         calls.append("cutoff")
@@ -176,7 +179,7 @@ def test_validate_retrain_base_refuses_damaged_classification(monkeypatch, tmp_p
         pool_refresh.validate_retrain_base(tmp_path, "pools-bad")
 
 
-def test_validate_retrain_base_refuses_legacy_no_pool_catalog(monkeypatch, tmp_path):
+def test_validate_retrain_base_accepts_legacy_no_pool_catalog(monkeypatch, tmp_path):
     import types
 
     import engine.v2.ops.pool_refresh as pool_refresh
@@ -186,8 +189,33 @@ def test_validate_retrain_base_refuses_legacy_no_pool_catalog(monkeypatch, tmp_p
         lambda *args: types.SimpleNamespace(kind="NO_POOL_CATALOG"),
     )
 
-    with pytest.raises(ValueError, match="base release catalog could not be read"):
-        pool_refresh.validate_retrain_base(tmp_path, "legacy-release")
+    assert pool_refresh.validate_retrain_base(tmp_path, "legacy-release").kind == "NO_POOL_CATALOG"
+
+
+def test_decide_for_deployed_base_defers_without_monthly_capable_base(monkeypatch, tmp_path):
+    base_id = "legacy-release"
+
+    import types
+
+    import engine.v2.models.deployment as deployment
+    import engine.v2.ops.pool_refresh as pool_refresh
+    import engine.v2.ops.retrain_due as retrain_due
+    from engine.v2.ops.pool_refresh import decide_for_deployed_base
+
+    monkeypatch.setattr(pool_refresh, "deployed_release_id", lambda: base_id)
+    monkeypatch.setattr(
+        pool_refresh, "_classify_prior",
+        lambda *args: types.SimpleNamespace(kind="NO_POOL_CATALOG"),
+    )
+    monkeypatch.setattr(retrain_due, "decide", lambda *args: pytest.fail("decide called"))
+    monkeypatch.setattr(
+        retrain_due, "read_base_retrain_cutoff",
+        lambda *args: pytest.fail("read_base_retrain_cutoff called"),
+    )
+    monkeypatch.setattr(deployment, "production_release_root", lambda: tmp_path)
+
+    result = decide_for_deployed_base(_conn(), tmp_path, "2026-11-02")
+    assert result == {"state": "not_due", "reason": "base_pool_catalog_unavailable", "base": base_id}
 
 
 def test_validate_catalog_rejects_invalid_retrain_cutoffs():

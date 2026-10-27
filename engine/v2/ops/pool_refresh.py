@@ -132,11 +132,11 @@ def _classify_prior(release_root, prior_id):
 
 
 def validate_retrain_base(release_root, prior_id):
-    """Require a usable deployed base before its retrain cutoff affects planning."""
-    from tools.phase5_state_stage_job import PRIOR_USABLE
+    """Refuse a damaged deployed base before its retrain cutoff affects planning."""
+    from tools.phase5_state_stage_job import PRIOR_NO_POOL_CATALOG, PRIOR_USABLE
 
     prior = _classify_prior(release_root, prior_id)
-    if prior.kind != PRIOR_USABLE:
+    if prior.kind not in (PRIOR_NO_POOL_CATALOG, PRIOR_USABLE):
         raise ValueError("base release catalog could not be read")
     return prior
 
@@ -670,14 +670,19 @@ def deployed_release_id() -> str:
 
 
 def decide_for_deployed_base(conn, ops_root, session: str) -> dict:
-    """Build either nightly plan path's retrain decision from the deployed base."""
+    """Build the monthly retrain decision; a legacy base leaves nightly bootstrap open."""
     from engine.v2.ops import retrain_due
+    from tools.phase5_state_stage_job import PRIOR_NO_POOL_CATALOG
 
     base_release_id = deployed_release_id()
     base_retrain_cutoff = None
     if base_release_id != "none":
         release_root = deployment.production_release_root()
-        validate_retrain_base(release_root, base_release_id)
+        prior = validate_retrain_base(release_root, base_release_id)
+        if prior.kind == PRIOR_NO_POOL_CATALOG:
+            reason = "base_pool_catalog_unavailable"
+            _log(f"monthly retrain not scheduled: {reason} (base={base_release_id})")
+            return {"state": "not_due", "reason": reason, "base": base_release_id}
         base_retrain_cutoff = retrain_due.read_base_retrain_cutoff(
             release_root, base_release_id)
     return retrain_due.decide(
