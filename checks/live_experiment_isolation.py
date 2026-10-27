@@ -20,7 +20,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = ROOT / "checks/live_experiment_isolation_baseline.json"
+MAX_SOURCE_BYTES, MAX_BASELINE_BYTES = 8 * 1024 * 1024, 1024 * 1024
 
+
+def _read_bounded(path: Path, limit: int) -> bytes:
+    with path.open("rb") as stream: data = stream.read(limit + 1)
+    if len(data) > limit: raise ValueError(f"{path} exceeds {limit} bytes")
+    return data
 FORBIDDEN_ROOTS = (
     "experiments",
     "engine.v2.research",
@@ -35,6 +41,9 @@ def live_files(root: Path = ROOT) -> list[str]:
              for p in (root / "engine/v2/models").rglob("*.py")]
     paths += [p.relative_to(root).as_posix()
               for p in (root / "tools").glob("phase5_*.py")]
+    ops = root / "engine/v2/ops"
+    paths += [p.relative_to(root).as_posix()
+              for p in [ops / "training.py", *ops.glob("retrain_*.py")] if p.is_file()]
     return sorted(paths)
 
 
@@ -46,20 +55,34 @@ def _identity(v: dict) -> tuple:
     return (v["path"], v["line"], v["target"])
 
 
+def _from_module(node: ast.ImportFrom, rel: str) -> str:
+    if not node.level:
+        return node.module or ""
+    package = rel.split("/")[:-1]
+    keep = len(package) - (node.level - 1)
+    if keep <= 0:
+        return ""
+    base = ".".join(package[:keep])
+    if node.module:
+        return f"{base}.{node.module}" if base else node.module
+    return base
+
+
 def violations(root: Path = ROOT) -> list[dict]:
     found = []
     for rel in live_files(root):
-        tree = ast.parse((Path(root) / rel).read_text(), filename=rel)
+        tree = ast.parse(_read_bounded(Path(root) / rel, MAX_SOURCE_BYTES).decode("utf-8"), filename=rel)
         for node in ast.walk(tree):
             targets = []
             if isinstance(node, ast.Import):
                 targets = [a.name for a in node.names if _forbidden(a.name)]
-            elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
-                if _forbidden(node.module):
-                    targets = [node.module]
+            elif isinstance(node, ast.ImportFrom):
+                module = _from_module(node, rel)
+                if _forbidden(module):
+                    targets = [module]
                 else:
-                    targets = [f"{node.module}.{a.name}" for a in node.names
-                               if _forbidden(f"{node.module}.{a.name}")]
+                    targets = [f"{module}.{a.name}" for a in node.names
+                               if _forbidden(f"{module}.{a.name}")]
             for target in targets:
                 found.append({"path": rel, "line": node.lineno, "target": target})
     return sorted(found, key=_identity)
@@ -99,7 +122,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     current = violations()
     if args.write_baseline:
-        baseline = (json.loads(BASELINE_PATH.read_text())
+        baseline = (json.loads(_read_bounded(BASELINE_PATH, MAX_BASELINE_BYTES))
                     if BASELINE_PATH.exists() else None)
         if baseline is not None:
             added, _missing = compare(current, baseline)
@@ -115,7 +138,7 @@ def main(argv=None) -> int:
     if not BASELINE_PATH.exists():
         print(f"baseline missing: {BASELINE_PATH}", file=sys.stderr)
         return 1
-    added, missing = compare(current, json.loads(BASELINE_PATH.read_text()))
+    added, missing = compare(current, json.loads(_read_bounded(BASELINE_PATH, MAX_BASELINE_BYTES)))
     if added or missing:
         _print_category("added", added)
         _print_category("missing", missing)
