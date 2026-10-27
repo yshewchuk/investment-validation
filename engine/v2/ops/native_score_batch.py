@@ -517,7 +517,7 @@ def _with_release_artifacts(
             declarations.update(analog_declaration)
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
-            key, exc.code, f"nightly_source_bundle refused: {exc.code}: {exc.detail}")
+            key, exc.code, f"nightly_source_bundle refused: {exc.code}")
     except AmbiguousAnalogPool:
         return NativeScoreBatchRowRefusal(
             key, "MODEL_NOT_READY", "release carries more than one analog pool for the row key")
@@ -585,7 +585,7 @@ def _bundle_or_refusal(
         )
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
-            key, exc.code, f"nightly_source_bundle refused: {exc.code}: {exc.detail}")
+            key, exc.code, f"nightly_source_bundle refused: {exc.code}")
     except AnswerFieldsInSource as exc:
         # One row carrying a calculated answer field refuses that row only (#630).
         return _input_build_refusal(key, exc)
