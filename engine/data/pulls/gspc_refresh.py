@@ -221,7 +221,7 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None,
     is written. Rows dated after the session are then dropped from the
     parsed body before the ``minimum_last_date`` check and every guard, so
     the file never ends after ``session``; a body left empty by that drop is
-    ``unparseable``.     A stored row already dated after the session is NOT
+    ``unparseable``. A stored row already dated after the session is NOT
     removed: the capped series lacks that stored date, so the refresh is
     refused ``shrunk``, never ``older_than_existing``. Existing history
     guards are unchanged.
