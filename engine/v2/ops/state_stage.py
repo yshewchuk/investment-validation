@@ -50,8 +50,8 @@ def _identity_problems(params) -> list[str]:
         problems.append("expected_ids must be exactly ('phase5_state_stage',)")
     if not isinstance(params.release_root, str) or not params.release_root:
         problems.append("release_root must be a non-empty string")
-    if params.mode not in ("carry", "bootstrap"):
-        problems.append("mode must be 'carry' or 'bootstrap'")
+    if params.mode not in ("carry", "bootstrap", "monthly"):
+        problems.append("mode must be 'carry', 'bootstrap' or 'monthly'")
     elif params.mode == "bootstrap" and params.prior_release_id is None:
         if not _safe_id(params.release_id):
             problems.append("release_id must be a safe non-empty id")
@@ -141,8 +141,10 @@ def state_stage_plan(*, release_root, prior_release_id, release_id, cutoff, stat
     ``manifest_ref`` is the pinned ``legacy_input_manifest.v1.0`` artifact the supervisor's
     launch-time ``_pin_read_set`` stages as ``staging/legacy``. ``source_root`` is the code
     checkout the implementation fingerprint is taken from (the caller's code source).
-    ``mode`` is ``"carry"`` (default) or ``"bootstrap"`` (#1102); ``bootstrap`` carries the
-    bootstrap assembly inputs and is omitted from a carry plan's parameters."""
+    ``mode`` is ``"carry"`` (default), ``"bootstrap"`` (#1102) or ``"monthly"`` (#805); monthly
+    uses the supplied bound states to regenerate driver pools and chooser, and the worker
+    resolves the deployed base at stage time; ``bootstrap`` carries the bootstrap assembly inputs
+    only in bootstrap mode."""
     from engine.v2.foundation import content_hash
     from engine.v2.models import deployment
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest

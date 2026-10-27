@@ -473,6 +473,13 @@ def _read_state_catalog(release_root: Path, expected_release_id: str) -> Mapping
         raise ModelNotReady(_STATE_CATALOG_NAME, "manifest_hash does not match its own body")
     if body.get("release_id") != expected_release_id:
         raise ModelNotReady(_STATE_CATALOG_NAME, "release_id disagrees with the deployed pointer")
+    from engine.v2.models.release_layout import ReleaseLayoutError, validate_catalog
+
+    try:
+        validate_catalog(body, expected_release_id)
+    except ReleaseLayoutError as exc:
+        raise ModelNotReady(
+            _STATE_CATALOG_NAME, "cutoff metadata is invalid") from exc
     return body
 
 

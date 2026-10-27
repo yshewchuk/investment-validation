@@ -131,6 +131,20 @@ def _classify_prior(release_root, prior_id):
     return fn(Path(release_root), prior_id)
 
 
+def validate_retrain_base(release_root, prior_id):
+    """Refuse a damaged deployed base before its retrain cutoff affects planning."""
+    from tools.phase5_state_stage_job import PRIOR_NO_POOL_CATALOG, PRIOR_USABLE
+
+    prior = _classify_prior(release_root, prior_id)
+    if prior.kind not in (PRIOR_NO_POOL_CATALOG, PRIOR_USABLE):
+        raise fail(
+            "VALIDATION_FAILED",
+            "deployed base catalog is damaged (PRIOR_MISMATCH)",
+            details={"code": "PRIOR_MISMATCH", "cause": prior.reason},
+        )
+    return prior
+
+
 def _session_scope_from_stage_key(idempotency_key):
     """Recover ``(session, scope_hash)`` from a legacy ``finality`` or ``features``
     job's own idempotency key (``"nightly:<session>:<scope_hash>:<stage>"``).
@@ -657,3 +671,24 @@ def deployed_release_id() -> str:
     except deployment.MissingReleaseRoot:
         return "none"
     return "none" if pointer is None else pointer.release_id
+
+
+def decide_for_deployed_base(conn, ops_root, session: str) -> dict:
+    """Build the monthly retrain decision; a legacy base leaves nightly bootstrap open."""
+    from engine.v2.ops import retrain_due
+    from tools.phase5_state_stage_job import PRIOR_NO_POOL_CATALOG
+
+    base_release_id = deployed_release_id()
+    base_retrain_cutoff = None
+    if base_release_id != "none":
+        release_root = deployment.production_release_root()
+        prior = validate_retrain_base(release_root, base_release_id)
+        if prior.kind == PRIOR_NO_POOL_CATALOG:
+            reason = "base_pool_catalog_unavailable"
+            _log(f"monthly retrain not scheduled: {reason} (base={base_release_id})")
+            return {"state": "not_due", "reason": reason, "base": base_release_id}
+        base_retrain_cutoff = retrain_due.read_base_retrain_cutoff(
+            release_root, base_release_id)
+    return retrain_due.decide(
+        conn, ops_root, session, base_release_id,
+        base_retrain_cutoff=base_retrain_cutoff)

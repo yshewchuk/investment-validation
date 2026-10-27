@@ -25,6 +25,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
+from engine.v2.foundation import SystemClock  # noqa: E402
 from engine.v2.ops import nightly_trigger  # noqa: E402
 from engine.v2.ops.errors import OpsError, fail, make_problem  # noqa: E402
 from engine.v2.ops.nightly_trigger import (  # noqa: E402
@@ -918,9 +919,10 @@ class _DummyConn:
 
 
 @pytest.fixture(autouse=True)
-def _retrain_decision_not_under_test(monkeypatch):
+def _retrain_decision_not_under_test(monkeypatch, tmp_path):
     """#805 slice 2: these tests stand in a dummy catalog; the decision itself is covered in
     test_retrain_due_and_chain.py against a real catalog."""
+    _open_ops_catalog(tmp_path, SystemClock()).close()
     monkeypatch.setattr(nightly_trigger.retrain_due, "decide",
                         lambda conn, ops_root, session, base, **_: {
                             "state": "not_due", "reason": "test", "base": base})
@@ -2398,10 +2400,13 @@ def test_default_plan_passes_the_decided_keys_to_the_plan(tmp_path, monkeypatch)
 
 def test_default_plan_pins_the_retrain_decision(tmp_path, monkeypatch):
     captured = {}
-    from engine.v2.ops import bootstrap
+    from engine.v2.ops import bootstrap, pool_refresh
     from engine.v2.ops.workflows import commands
 
-    monkeypatch.setattr(nightly_trigger, "_base_release_id", lambda: "none")
+    monkeypatch.setattr(
+        pool_refresh, "decide_for_deployed_base",
+        lambda conn, root, session: {"state": "not_due", "reason": "test", "base": "none"},
+    )
     monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
     manifest_path = tmp_path / "captured_manifest.json"
     monkeypatch.setattr(nightly_trigger, "_capture_input_manifest",
