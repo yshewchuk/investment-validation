@@ -279,7 +279,7 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
             raise ReleaseAssemblyRefusal("CUTOFF_MISMATCH", "monthly requires retrain_cutoff")
         retrain_day = _parse_day(
             retrain_cutoff, "CUTOFF_MISMATCH", "retrain_cutoff is not an ISO date")
-        cutoff_day = max(cutoff_day, retrain_day)
+        cutoff_day = max(cutoff_day, retrain_day, prior_day)
         cutoff = cutoff_day.isoformat()
         for output in (*_all_outputs(by_member), *chooser_objects):
             if output.carried:
@@ -441,9 +441,10 @@ def _read_prior_payloads(store: Path, prior) -> dict[str, bytes]:
     return payloads
 
 
-def _verify_carried_rows(store: Path, prior_catalog: dict) -> None:
+def _verify_carried_rows(store: Path, prior_catalog: dict,
+                         *, replaced_member_ids=_REQUIRED_MEMBER_IDS) -> None:
     """Every untouched prior row that is STAGED must still have intact objects."""
-    replaced = set(_REQUIRED_MEMBER_IDS)
+    replaced = set(replaced_member_ids)
     for row in prior_catalog["members"]:
         if row.get("member_id") in replaced or row.get("status") != STAGED:
             continue
@@ -646,7 +647,10 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
         raise ReleaseAssemblyRefusal(
             "INVENTORY_MISMATCH", "inventory deployment id does not match the prior release")
     payloads = _read_prior_payloads(store, prior)
-    _verify_carried_rows(store, prior_catalog)
+    _verify_carried_rows(
+        store, prior_catalog,
+        replaced_member_ids=((*MONTHLY_DRIVER_MEMBER_IDS, CHOOSER_MEMBER_ID)
+                             if monthly else _REQUIRED_MEMBER_IDS))
     try:
         inventory_hashes = {member.content_hash for artifact in inventory.artifacts
                             for member in artifact.members}

@@ -224,7 +224,8 @@ def test_worker_stages_candidate_carrying_the_unadvanced_members(tmp_path, monke
 
 
 def test_monthly_stage_uses_the_deployed_pointer_as_prior(tmp_path, monkeypatch):
-    inventory, _ = _stage_prior(tmp_path, prior_sources={"pool_cutoff": "2026-10-30"})
+    inventory, _ = _stage_prior(tmp_path, prior_sources={
+        "pool_cutoff": "2026-11-10", "retrain_cutoff": "2026-10-01"})
     store = phase5_release.deployment_root(tmp_path)
     deployment.mark_staging_succeeded(store, "prior1")
     deployment.promote(store, "prior1")
@@ -271,7 +272,7 @@ def test_monthly_stage_uses_the_deployed_pointer_as_prior(tmp_path, monkeypatch)
     body = json.loads(phase5_release.catalog_path(tmp_path, "cand1").read_bytes())
     prior = json.loads(phase5_release.catalog_path(tmp_path, "prior1").read_bytes())
     assert body["sources"]["carried_from"] == "prior1"
-    assert body["sources"]["pool_cutoff"] == "2026-11-01"
+    assert body["sources"]["pool_cutoff"] == "2026-11-10"
     assert body["sources"]["retrain_cutoff"] == "2026-11-01"
     rows = {row["member_id"]: row for row in body["members"]}
     prior_rows = {row["member_id"]: row for row in prior["members"]}
@@ -335,6 +336,60 @@ def test_monthly_assembly_refuses_name_cutoff_that_disagrees(tmp_path):
             monthly=True, retrain_cutoff="2026-11-01")
 
     assert err.value.code == "CUTOFF_MISMATCH"
+
+
+def test_monthly_assembly_preserves_later_prior_pool_cutoff(tmp_path):
+    _, prior_body = _stage_prior(tmp_path, prior_sources={
+        "pool_cutoff": "2026-11-10", "retrain_cutoff": "2026-10-01"})
+    digest = phase5_release.sha256_bytes(b"new")
+    drivers = [assembly.PoolOutput(member_id, f"{member_id}|2026-11-01", digest,
+                                   "2026-11-01", len(b"new"))
+               for member_id in assembly.MONTHLY_DRIVER_MEMBER_IDS]
+    chooser = assembly.PoolOutput(
+        assembly.CHOOSER_MEMBER_ID, "chooser|2026-11-01", digest,
+        "2026-11-01", len(b"new"))
+
+    body = assembly.derive_catalog(
+        prior_body, release_id="cand2", expected_prior_release_id="prior1",
+        outputs=drivers, chooser=chooser, cutoff="2026-11-01",
+        monthly=True, retrain_cutoff="2026-11-01")
+
+    assert body["sources"]["pool_cutoff"] == "2026-11-10"
+    assert body["sources"]["retrain_cutoff"] == "2026-11-01"
+
+
+def test_monthly_assembly_refuses_missing_implicit_carry(tmp_path):
+    from dataclasses import replace
+
+    inventory, prior_body = _stage_prior(tmp_path, prior_sources={
+        "pool_cutoff": "2026-11-10", "retrain_cutoff": "2026-10-01"})
+    store = phase5_release.deployment_root(tmp_path)
+    deployment.mark_staging_succeeded(store, "prior1")
+    prior_rows = {row["member_id"]: row for row in prior_body["members"]}
+    carried = prior_rows["paired_residual_pool"]["objects"][0]
+    (store / phase5_release.object_relpath(carried["content_hash"])).unlink()
+
+    drivers = []
+    for member_id in assembly.MONTHLY_DRIVER_MEMBER_IDS:
+        payload = f"new-{member_id}".encode()
+        digest, _ = phase5_release.write_object(tmp_path, payload)
+        drivers.append(assembly.PoolOutput(
+            member_id, f"{member_id}|2026-11-01", digest,
+            "2026-11-01", len(payload)))
+    chooser_payload = b"new-chooser"
+    chooser_hash, _ = phase5_release.write_object(tmp_path, chooser_payload)
+    chooser = assembly.PoolOutput(
+        assembly.CHOOSER_MEMBER_ID, "chooser|2026-11-01", chooser_hash,
+        "2026-11-01", len(chooser_payload))
+
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.carry_forward_release(
+            tmp_path, prior_release_id="prior1", release_id="cand2",
+            inventory=replace(inventory, release_id="cand2"), outputs=drivers,
+            chooser=chooser, cutoff="2026-11-10", monthly=True,
+            retrain_cutoff="2026-11-01")
+
+    assert err.value.code == "PRIOR_MISMATCH"
 
 
 def test_monthly_stage_refuses_a_missing_deployed_base(tmp_path, monkeypatch):
