@@ -57,8 +57,10 @@ def admit_source(repository, snapshot, limits):
         raise fail("CONTRACT_MISMATCH", "unsupported source-bound contract")
 
 
-def _anchors(repository, snapshot, limits):
+def _anchors(repository, snapshot, limits, required_tickers=()):
     records = repository.fragment_records(snapshot, BOUNDS_TABLE)
+    if set(required_tickers) - {r.partition_key for r in records}:
+        raise fail("CONTRACT_MISMATCH", "required ticker is missing native source bounds")
     count = sum(r.row_count for r in records)
     if not count:
         return {}
@@ -84,7 +86,9 @@ def _bound(event, anchors, records):
     """Authenticate metadata to exact singleton object without opening that object."""
     key = event.ticker, event.event_date.date().isoformat()
     row, record = anchors.get(key), records.get(key)
-    if (row is None or record is None or record.row_count != 1
+    if row is None:
+        raise fail("CONTRACT_MISMATCH", "required event is missing native source bounds")
+    if (record is None or record.row_count != 1
             or record.primary_key_min != key or record.primary_key_max != key
             or record.partition_key != key[0] or record.time_min != key[1] or record.time_max != key[1]
             or row["outcome_object_id"] != record.object_ref.object_id
@@ -183,7 +187,7 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
 
 def _groups(repository, snapshot, selected, forecasts, event_ids, horizons, calendar, limits):
     """Source-derived label windows; missing evidence differs from null labels."""
-    anchors = _anchors(repository, snapshot, limits)
+    anchors = _anchors(repository, snapshot, limits, required_tickers=selected.ticker.unique())
     records = {}
     for record in repository.fragment_records(snapshot, "computed_moves"):
         key = record.primary_key_min

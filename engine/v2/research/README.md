@@ -384,6 +384,9 @@ holdout month, grouped policy, target IDs, horizons `[1, 3, 5]`, history start a
 limits (`max_source_rows`, `max_fragments`, `max_object_bytes`, `max_total_bytes`,
 `max_output_rows`). The separate `research_eligible_history` table requires native
 `computed_move_bounds`; missing/stale bindings refuse before outcomes.
+Missing bounds for selected target/history tickers or events are `CONTRACT_MISMATCH`;
+wrong outcome-object bindings/isolation remain `HOLDOUT_ACCESS_DENIED`. Unrelated
+tickers need no sidecar; full canonical metadata still defines protected windows.
 `experiments.magnitude_eligible_history.build/comparison_inputs` supplies SIZE's
 native folds and one shared clean-history input for challenger and comparator.
 SIZE admits only its frozen 30-day grouped policy on both build and read.

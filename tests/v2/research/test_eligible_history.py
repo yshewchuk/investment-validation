@@ -32,10 +32,14 @@ LIMITS = dict(max_source_rows=10000, max_fragments=100, max_object_bytes=1 << 20
 POLICY = eligibility_policy(version="grouped_ticker_embargo.v1", embargo_days=30)
 
 
-def source(tmp_path, *, null_day="2023-05-10", changes=None, days=None, values=None):
+def source(tmp_path, *, null_day="2023-05-10", changes=None, days=None, values=None, extra_ticker=False):
     days = days or ["2022-06-02", "2023-01-03", "2023-03-20", "2023-04-03", "2023-05-10", "2023-06-02", "2024-06-17"]
     events = [history_event(day, protected=day == "2023-04-03") for day in days]
     moves = [outcome_move(e, value) for e, value in zip(events, values or [-2., -4., 9999., 9999., 9999., 6., 8.])]
+    if extra_ticker:
+        extra = history_event("2023-06-02", ticker="OTHER")
+        events.insert(0, extra)
+        moves.insert(0, outcome_move(extra, 9.))
     for row in moves:
         if row["event_date"] == null_day:
             row.update(skipped=True, realized_move_pct=None, available_as_of_date=None)
@@ -43,8 +47,10 @@ def source(tmp_path, *, null_day="2023-05-10", changes=None, days=None, values=N
         days=calendar_sessions("2022-05-20", "2024-06-20").days)
     records = repository.fragment_records(original, "computed_moves")
     dates = sorted({str(e["event_date"].date() + timedelta(days=n)) for e in events for n in (0, 1)})
-    bounds = write_bounds(repository._store, moves, pd.DataFrame(events),
-        np.array(dates, dtype="datetime64[ns]"), records)
+    bounds = tuple(record for ticker in sorted({e["ticker"] for e in events})
+        for record in write_bounds(repository._store, [r for r in moves if r["ticker"] == ticker],
+            pd.DataFrame([e for e in events if e["ticker"] == ticker]),
+            np.array(dates, dtype="datetime64[ns]"), records))
     parent = repository.resolve_full(original.snapshot_id)
     tables = {name: list(repository.fragment_records(original, name)) for name in original.table_versions}
     tables[BOUNDS_TABLE] = list(bounds)
@@ -128,6 +134,59 @@ def test_missing_sidecar_refuses_before_any_outcome(data, monkeypatch):
         history.materialize(data.repository, data.original, **data.request)
 
 
+def test_partial_default_off_bounds_only_require_selected_tickers(tmp_path, monkeypatch):
+    from engine.v2.ops.computed_move_bounds_store import compose
+    data = source(tmp_path, extra_ticker=True)
+    try:
+        parent = data.repository.resolve_full(data.snapshot.snapshot_id)
+        tables = {name: list(data.repository.fragment_records(data.snapshot, name))
+            for name in data.snapshot.table_versions}
+        contracts = {name: data.repository.table_contract(data.snapshot, name) for name in tables}
+        # Actual default-off composition drops OTHER's bounds but retains its canonical metadata/outcome.
+        tables[BOUNDS_TABLE] = list(compose(parent, {"OTHER"}, None, {}))
+        partial = commit_tables(data.conn, SystemClock(), tables, contracts, scope="partial",
+            receipt_id="partial", attempt_id="partial", store=data.repository._store,
+            partition_logical_hashes={name: m.partition_logical_hashes for name, m in parent.table_manifests.items()
+                if name != BOUNDS_TABLE})
+        artifact = history.materialize(data.repository, partial, **data.request)
+        rows = history.read(data.repository, partial, artifact["feature_snapshot"],
+            columns=list(FEATURES), **data.request)["rows"]
+        assert len(rows) == 3
+        assert all((r["n_prior"], r["mean_prior_abs_move"]) == (3, 4) for r in rows)
+        poison_outcomes(monkeypatch, data.repository, partial, (), all_outcomes=True)
+        scan = data.repository.scan
+        def no_bounds_scan(query, *, table_name, **kwargs):
+            assert table_name != BOUNDS_TABLE, "missing partition must refuse before sidecar scan"
+            return scan(query, table_name=table_name, **kwargs)
+        monkeypatch.setattr(data.repository, "scan", no_bounds_scan)
+        with pytest.raises(DataError) as caught:
+            history.materialize(data.repository, partial,
+                **{**data.request, "event_ids": [data.events[0]["event_id"]]})
+        assert caught.value.code == "CONTRACT_MISMATCH"
+        assert "ticker" in str(caught.value)
+    finally:
+        data.conn.close()
+
+
+def test_missing_event_bound_refuses_with_partition_present_before_outcomes(data, monkeypatch):
+    poison_outcomes(monkeypatch, data.repository, data.snapshot, (), all_outcomes=True)
+    scan = data.repository.scan
+    def missing_row(query, *, table_name, **kwargs):
+        for batch in scan(query, table_name=table_name, **kwargs):
+            if table_name == BOUNDS_TABLE:
+                # Preserve row count/partition while replacing one required event with an unrelated date.
+                rows = batch.to_pylist()
+                rows[0]["event_date"] = "2021-01-01"
+                yield type(batch).from_pylist(rows, schema=batch.schema)
+            else:
+                yield batch
+    monkeypatch.setattr(data.repository, "scan", missing_row)
+    with pytest.raises(DataError) as caught:
+        history.materialize(data.repository, data.snapshot, **data.request)
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert "event" in str(caught.value)
+
+
 @pytest.mark.parametrize("limit", list(LIMITS))
 def test_caps_refuse_without_outcomes(data, monkeypatch, limit):
     poison_outcomes(monkeypatch, data.repository, data.snapshot, (), all_outcomes=True)
@@ -201,8 +260,9 @@ def test_source_anchor_coverage_missing_is_not_silently_empty_history(tmp_path, 
     data = source(tmp_path, changes=lambda tables, _: tables.update({BOUNDS_TABLE: []}))
     try:
         poison_outcomes(monkeypatch, data.repository, data.snapshot, (), all_outcomes=True)
-        with pytest.raises(DataError, match="exact isolated outcome"):
+        with pytest.raises(DataError, match="missing native source bounds") as caught:
             history.materialize(data.repository, data.snapshot, **data.request)
+        assert caught.value.code == "CONTRACT_MISMATCH"
     finally:
         data.conn.close()
 
@@ -319,8 +379,13 @@ def test_bound_rejects_stale_object_identity_and_malformed_dates_before_reader(d
                     {"session": "BMO"}, {"pre_close_date": None}, {"post_close_date": "bad"},
                     {"pre_close_date": "2022-01-01"}):
         malformed = {**anchors, key: {**anchors[key], **changes}}
-        with pytest.raises(DataError):
+        with pytest.raises(DataError) as caught:
             backend._bound(event, malformed, records)
+        assert caught.value.code == ("HOLDOUT_ACCESS_DENIED" if "outcome_object_id" in changes
+            or "outcome_content_hash" in changes else "CONTRACT_MISMATCH")
+    with pytest.raises(DataError) as caught:
+        backend._bound(event, anchors, {})
+    assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
 
 
 def test_nonfinite_aggregate_refuses_before_publication(tmp_path):
