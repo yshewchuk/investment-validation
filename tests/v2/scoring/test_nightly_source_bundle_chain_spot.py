@@ -4,6 +4,8 @@ consistent about it.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from engine.v2.foundation import DocumentError
@@ -197,3 +199,18 @@ def test_a_repeated_contract_still_merges_with_the_key_present():
     domain = quote_domain_map(rows, "recorded")
 
     assert domain["C:100.0:2026-01-16"]["observed_date"] == "2026-01-08"
+
+
+@pytest.mark.parametrize("spot", [True, "not-a-spot", 10**400])
+def test_direct_native_inputs_refuse_invalid_chain_spot(spot):
+    bundle = assemble_nightly_source_bundle(**_kwargs(quote_rows=_rows(chain_spot=87.5)))
+    inputs = build_native_score_inputs(bundle)
+    context = dict(inputs.context)
+    context["chain_spot"] = spot
+    bad_inputs = replace(inputs, context=context)
+
+    with pytest.raises(DocumentError) as excinfo:
+        assemble_native_values(bad_inputs, strategy="STR-THRU")
+
+    assert excinfo.value.code == "BAD_VALUE"
+    assert excinfo.value.path == "$.context.chain_spot"

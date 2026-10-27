@@ -21,7 +21,7 @@ from engine.v2.domain.generation import (
     price,
 )
 from engine.v2.domain.valuation import terminal_payoff
-from engine.v2.foundation import content_hash, to_document
+from engine.v2.foundation import DocumentError, content_hash, to_document
 from engine.v2.foundation.market_calendar import _rule_sessions
 from engine.v2.scoring import financial
 
@@ -810,6 +810,20 @@ def _is_planned(block: Mapping[str, Any]) -> bool:
         or block.get("residuals") is not None
         or PAIRED_ARTIFACT_FIELD in block
     )
+
+
+def _validate_chain_spot_context(context: Mapping[str, Any]) -> None:
+    if "chain_spot" not in context:
+        return
+    raw_spot = context["chain_spot"]
+    try:
+        chain_spot = None if isinstance(raw_spot, bool) else float(raw_spot)
+    except (TypeError, ValueError, OverflowError):
+        chain_spot = None
+    if chain_spot is None or not isfinite(chain_spot) or chain_spot <= 0.0:
+        raise DocumentError(
+            "BAD_VALUE", "$.context.chain_spot",
+            "expected a finite positive spot")
 
 
 def _validate_forecast_roles(inputs: NativeScoreInputs,
@@ -3119,6 +3133,7 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
     """Execute declared stages and return execution-owned values."""
     if not isinstance(inputs, NativeScoreInputs):
         raise TypeError("native stage assembly requires NativeScoreInputs")
+    _validate_chain_spot_context(inputs.context)
     is_compatibility = inputs.source_ref == "compatibility-input"
     flags: list[str] = []
     #: A champion driver/runup forecast refusal (see ``_execute_forecast_executor``)
