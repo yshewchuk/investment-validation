@@ -140,3 +140,14 @@ def test_generate_bounds_refusals_happen_before_any_write(source_root, workspace
     _refusal(lambda: prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow",
                                           as_of=_AS_OF), "INPUT_CHANGED")
     assert not (root / "size_prep").exists() and list(empty.iterdir()) == []
+
+
+def test_fetch_rehashes_served_bytes_and_manifest_rejects_padded_ticker(source_root):
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    _, fetch = prep.pinned_history_fetcher(source_root, manifest)
+    (source_root / "data/raw/fetch/yfinance/aa/aa02.body.gz").write_bytes(gzip.compress(_series_csv(1.0), mtime=0))
+    _refusal(lambda: fetch("AAAA"), "INPUT_CHANGED")
+    padded = deepcopy(manifest)
+    padded["entries"][0]["ticker"] = "AAAA "
+    padded["manifest_id"] = prep._identity(padded)
+    _refusal(lambda: prep.validate_manifest(padded), "INVALID_REQUEST")

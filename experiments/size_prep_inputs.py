@@ -74,6 +74,8 @@ def validate_manifest(manifest):
             raise fail("INVALID_REQUEST", "invalid Tier-1 history manifest entry")
         _retrieved(entry["fetched_at"])
     tickers = [e["ticker"] for e in manifest["entries"]]
+    if any(t != t.strip() for t in tickers):
+        raise fail("INVALID_REQUEST", "invalid Tier-1 history manifest entry")
     if tickers != sorted(set(tickers)) or manifest["manifest_id"] != _identity(manifest):
         raise fail("INVALID_REQUEST", "Tier-1 history manifest ordering or identity mismatch")
     return manifest
@@ -94,11 +96,16 @@ def pinned_history_fetcher(source_root, manifest):
             raise fail("INPUT_CHANGED", "a pinned Tier-1 history entry is missing or changed")
         cache[pinned["ticker"]] = entry
 
+    digests = {p["ticker"]: p["body_sha256"] for p in manifest["entries"]}
+
     def fetch(ticker):
         entry = cache.get(ticker)
         if entry is None:
             return b"", "legitimate_empty", {}, []
-        return entry.body(), "complete", {}, []
+        body = entry.body()
+        if hashlib.sha256(body).hexdigest() != digests[ticker]:
+            raise fail("INPUT_CHANGED", "a pinned Tier-1 history entry changed while being served")
+        return body, "complete", {}, []
 
     return cache, fetch
 
