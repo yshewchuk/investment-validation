@@ -571,18 +571,23 @@ def _check_wide_market(pricing: Pricing, flags: list[str]) -> None:
             return
 
 
-def _check_bad_quote(pricing: Pricing, flags: list[str]) -> None:
+def _check_bad_quote(pricing: Pricing, flags: list[str],
+                     chain_spot: Any = None) -> None:
     """BAD_QUOTE -- engine/score.py ``_price_entry`` (EXP-117).
 
     Mirrors legacy exactly: once the structure priced, and only when the
     spot is nonzero and the cost exists, ``entry_cost / spot * 100 >
-    BAD_QUOTE_COST_PCT`` flags the row. Legacy then leaves before the model,
+    BAD_QUOTE_COST_PCT`` flags the row. Legacy's denominator is the priced
+    chain spot (``result.spot = float(priced.spot)``, engine/score.py:2440),
+    so the threshold is measured against the staged ``chain_spot``; only
+    with none staged does the priced leg's own (calendar-close geometry)
+    spot stand. Legacy then leaves before the model,
     analog, gate and chooser layers (``Scorer.score``'s BAD_QUOTE exit);
     :func:`_append_late_stages` withholds the same layers.
     """
     if pricing.refusal is not None:
         return
-    spot = _finite(pricing.spot)
+    spot = _finite(pricing.spot if chain_spot is None else chain_spot)
     cost = _finite(pricing.entry_cost)
     if not spot or cost is None:
         return
@@ -3092,7 +3097,7 @@ def _check_pricing_boundary(
         if computed_dte is not None:
             values["dte_entry"] = computed_dte
     _check_wide_market(pricing, flags)
-    _check_bad_quote(pricing, flags)
+    _check_bad_quote(pricing, flags, values.get("chain_spot"))
     _check_extrapolated(geometry, pricing, flags)
     for refusal in (geometry.refusal, pricing.refusal):
         if refusal:
