@@ -734,6 +734,9 @@ def _facts(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> dict[str, An
     if computed_cost_pct is not None:
         facts["entry_cost_pct"] = computed_cost_pct
         facts["_native_stage_facts"]["entry_cost_pct"] = computed_cost_pct
+    elif values.get("chain_spot") is None:
+        facts["entry_cost_pct"] = None
+        facts["_native_stage_facts"]["entry_cost_pct"] = None
     return facts
 
 

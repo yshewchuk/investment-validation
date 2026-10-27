@@ -7,6 +7,7 @@ from engine import pnl_sim
 from tests.planned_exit_support import legacy_expected_pnl
 from engine.v2.contracts import ScoreRequest
 from engine.v2.domain.generation import generate, price
+from engine.v2.foundation import to_document
 from engine.v2.scoring import application
 from engine.v2.scoring.native_analog import source_population_hash
 from engine.v2.scoring.stages import (
@@ -141,9 +142,9 @@ def test_compatibility_receipts_exclude_filtered_chain_spot():
     }
     for stage, block in expected_by_stage.items():
         observation = next(item for item in seen if item.receipt.stage == stage)
-        assert observation.output_document == {
+        assert observation.output_document == to_document({
             key: value for key, value in block.items() if key != "chain_spot"
-        }
+        })
 
 
 def test_empty_compatibility_input_refuses_missing_essentials():
