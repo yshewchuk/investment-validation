@@ -44,6 +44,16 @@ from tests.v2.ops.state_stage_support import (
 )
 
 
+@pytest.mark.parametrize("monthly", ["false", 0])
+def test_classify_refuses_non_boolean_monthly_before_read(tmp_path, monthly):
+    from tools.phase5_state_stage_job import StageRefused, classify
+
+    with pytest.raises(StageRefused) as err:
+        classify(tmp_path, ("missing.json",), monthly=monthly)
+    assert str(err.value) == "monthly is not a bool"
+    assert err.value.details == {"code": "CUTOFF_MISMATCH"}
+
+
 def test_valid_parameters_have_no_problems():
     assert state_stage_parameter_problems(None, _params()) == []
 

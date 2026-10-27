@@ -65,6 +65,8 @@ def _validate_monthly_object_cutoffs(new: dict[str, dict[str, bytes]],
 
 def classify(root: Path, names, *, monthly: bool = False) -> dict[str, dict[str, bytes]]:
     """Load the bound state files; they must cover exactly the required members."""
+    if not isinstance(monthly, bool):
+        raise StageRefused("monthly is not a bool", {"code": "CUTOFF_MISMATCH"})
     from engine.v2.models.frozen_state import FrozenStateError
     from engine.v2.models.frozen_state_io import BoundedStateReadError
     from tools.phase5_prepare_release import frozen_state_payloads
