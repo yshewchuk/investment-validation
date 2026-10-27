@@ -334,3 +334,51 @@ def test_report_native_absent_record_refuses_before_presentation(completed_case,
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert seen == [target]
     assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
+
+
+@pytest.mark.parametrize("kind", ["inner", "outer"])
+def test_public_fold_inputs_accepts_exact_registered_fold(case, monkeypatch, kind):
+    poison_outcomes(monkeypatch, case.repository, case.panel_source, ["2023-03-20", "2023-04-03", "2023-05-15"])
+    group = case.plan["folds"][0]
+    fold = group["inner"][0] if kind == "inner" else {**group["outer"],
+        "evaluation_labels_before": case.registration.document["magnitude_execution"]["evaluation_labels_before"]}
+    inputs = binding.fold_inputs(case.repository, case.registration.document, fold)
+    training = {row["event_id"] for row in inputs["training"]}
+    assert training == set(fold["training_candidate_event_ids"])
+    assert training.isdisjoint(fold["evaluation_event_ids"])
+    assert {row["event_id"] for row in inputs["features"]} == training | set(fold["evaluation_event_ids"])
+
+
+@pytest.mark.parametrize("change", ["cutoff", "training", "evaluation", "order", "year", "evaluation_cutoff", "extra", "missing", "none", "evaluation_in_training"])
+def test_public_fold_inputs_refuses_caller_drift_before_dependent_reads(case, monkeypatch, change):
+    fold = {**deepcopy(case.plan["folds"][0]["outer"]),
+        "evaluation_labels_before": case.registration.document["magnitude_execution"]["evaluation_labels_before"]}
+    if change in ("cutoff", "evaluation_in_training"):
+        fold["training_labels_before"] = "2025-01-01"
+    if change in ("training", "evaluation_in_training"):
+        fold["training_candidate_event_ids"] += fold["evaluation_event_ids"]
+    elif change == "evaluation":
+        fold["evaluation_event_ids"] = fold["training_candidate_event_ids"][:1]
+    elif change == "order":
+        assert len(fold["training_candidate_event_ids"]) > 1
+        fold["training_candidate_event_ids"].reverse()
+    elif change == "year":
+        fold["year"] = "2025"
+    elif change == "evaluation_cutoff":
+        fold["evaluation_labels_before"] = "2026-01-01"
+    elif change == "extra":
+        fold["caller_authority"] = True
+    elif change == "missing":
+        del fold["training_labels_before"]
+    elif change == "none":
+        fold = None
+    def forbidden(*a, **k):
+        pytest.fail("unregistered fold reached dependent panel or outcome reads")
+    for name in ("_read_panel", "preflight_magnitude_targets", "qualify_magnitude_training_targets"):
+        monkeypatch.setattr(binding, name, forbidden)
+    before = case.conn.total_changes
+    with pytest.raises(OpsError) as caught:
+        binding.fold_inputs(case.repository, case.registration.document, fold)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.retryable is False
+    assert case.conn.total_changes == before

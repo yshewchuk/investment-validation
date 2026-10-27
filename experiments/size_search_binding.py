@@ -191,6 +191,9 @@ def fold_inputs(repository, binding, fold):
     """Revalidate installed producer before opening any training outcome."""
     from engine.v2.research.magnitude_panel_qualified_table import recipe
     verify_installation(binding)
+    _require(any(fold in group["inner"] or fold == {**group["outer"],
+        "evaluation_labels_before": binding["magnitude_execution"]["evaluation_labels_before"]}
+        for group in _folds(binding, binding["size_request"])))
     source = from_document(SnapshotRef, binding["snapshot"])
     panel = _read_panel(repository, source, binding["size_panel_request"], columns=recipe("HMO")["model_columns"])
     _require({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]} == binding["size_panel"])
