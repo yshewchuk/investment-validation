@@ -180,6 +180,93 @@ def test_numeric_minimum_last_date_is_refused(tmp_path, cutoff):
     assert not path.exists()
 
 
+#: Four body dates; the run session is D3, so D4 (2026-08-28) is past the
+#: ceiling (#1491). A ``now`` far later than D3's close keeps the finality
+#: check out of these ceiling tests.
+CEIL_DATES = ["2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28"]
+CEILING_NOW = pd.Timestamp("2026-09-01", tz="UTC")
+
+
+def test_session_ceiling_drops_rows_after_the_session(tmp_path):
+    """A body carrying a row past the session ends at the session instead."""
+    path = tmp_path / "gspc_daily.csv"
+    fetcher = StubFetcher(body=_body(CEIL_DATES))
+
+    result = refresh_gspc_daily(fetcher, path, session="2026-08-27",
+                                refetch_token="run-1", now=CEILING_NOW)
+
+    assert result == {"ok": True, "last_date": "2026-08-27", "rows": 3}
+    assert "2026-08-28" not in path.read_text()
+    raw = pd.read_csv(path, skiprows=3, header=None)
+    assert [str(v) for v in raw[0]] == CEIL_DATES[:3]
+    assert path.read_bytes() == _legacy_text(CEIL_DATES[:3]).encode("utf-8")
+
+
+def test_session_ceiling_keeps_the_stored_history_prefix(tmp_path):
+    """Stored rows D1,D2 come back out of the capped rewrite byte-for-byte."""
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, CEIL_DATES[:2])
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(CEIL_DATES)), path,
+                                session="2026-08-27", refetch_token="run-1",
+                                now=CEILING_NOW)
+
+    assert result == {"ok": True, "last_date": "2026-08-27", "rows": 3}
+    after = path.read_bytes()
+    assert after.startswith(before)  # rows D1,D2 unchanged, byte for byte
+    assert after == _legacy_text(CEIL_DATES[:3]).encode("utf-8")
+
+
+def test_unfinal_session_refuses_before_fetching(tmp_path):
+    """Before the session's close plus buffer nothing is fetched or written."""
+    path = tmp_path / "gspc_daily.csv"
+    fetcher = StubFetcher(body=_body(DATES))
+    # 15:00 America/New_York on the session day, expressed in UTC: an hour
+    # and a half BEFORE the 16:30 ET cutoff (close + COVERAGE_CLOSE_BUFFER).
+    now = pd.Timestamp("2026-08-27 15:00", tz="America/New_York").tz_convert("UTC")
+
+    result = refresh_gspc_daily(fetcher, path, session="2026-08-27",
+                                refetch_token="run-1", now=now)
+
+    assert result == {"ok": False, "reason": "session_not_final"}
+    assert fetcher.calls == []
+    assert not path.exists()
+
+    before = _write_legacy(path, DATES)
+    result = refresh_gspc_daily(fetcher, path, session="2026-08-27",
+                                refetch_token="run-2", now=now)
+
+    assert result == {"ok": False, "reason": "session_not_final"}
+    assert fetcher.calls == []
+    assert path.read_bytes() == before
+
+
+def test_session_final_after_the_buffer_refreshes(tmp_path):
+    """16:31 ET is past close plus the 30-minute buffer: the pull runs."""
+    path = tmp_path / "gspc_daily.csv"
+    now = pd.Timestamp("2026-08-27 16:31", tz="America/New_York").tz_convert("UTC")
+
+    result = refresh_gspc_daily(StubFetcher(body=_body(DATES)), path,
+                                session="2026-08-27", refetch_token="run-1",
+                                now=now)
+
+    assert result == {"ok": True, "last_date": "2026-08-27", "rows": 3}
+
+
+@pytest.mark.parametrize("value", ["garbage", 5])
+def test_invalid_session_refuses_before_fetching(tmp_path, value):
+    """An unparseable or numeric session is refused without a fetch."""
+    path = tmp_path / "gspc_daily.csv"
+    fetcher = StubFetcher(body=_body(DATES))
+
+    result = refresh_gspc_daily(fetcher, path, session=value,
+                                refetch_token="run-1", now=CEILING_NOW)
+
+    assert result == {"ok": False, "reason": "invalid_session"}
+    assert fetcher.calls == []
+    assert not path.exists()
+
+
 def test_identical_second_call_leaves_file_untouched(tmp_path):
     """Same bytes => no rewrite, so the panel's mtime-keyed cache stays warm."""
     path = tmp_path / "gspc_daily.csv"
@@ -597,7 +684,8 @@ def test_invoke_price_refresh_real_run_returns_gspc_daily(tmp_path, monkeypatch)
     Every seam is faked -- plan/run/Fetcher/refresh -- so this exercises only
     the adapter's own crossing: the new ``gspc_daily`` key next to the
     unchanged ``plan``/``report`` keys, one Fetcher shared by both calls, the
-    target under the supplied ``source_root``, and a unique refetch token per
+    target under the supplied ``source_root``, the run session threaded to
+    the refresh as its ceiling (#1491), and a unique refetch token per
     run (the ^GSPC cache key never varies on its own).
     """
     import engine.data.fetch as fetch_module
@@ -626,8 +714,8 @@ def test_invoke_price_refresh_real_run_returns_gspc_daily(tmp_path, monkeypatch)
     monkeypatch.setattr(price_refresh_module, "run_refresh",
                         lambda planned, fetcher: runs.append((planned, fetcher)) or report)
 
-    def fake_refresh(fetcher, path, *, refetch_token):
-        calls.append((fetcher, Path(path), refetch_token))
+    def fake_refresh(fetcher, path, *, refetch_token, session):
+        calls.append((fetcher, Path(path), refetch_token, session))
         return dict(outcome)
 
     monkeypatch.setattr(gspc_module, "refresh_gspc_daily", fake_refresh)
@@ -638,17 +726,19 @@ def test_invoke_price_refresh_real_run_returns_gspc_daily(tmp_path, monkeypatch)
     assert result == {"plan": plan, "report": report, "gspc_daily": outcome}
     assert runs == [(plan, constructed[0])]
     assert constructed[0].root == source_root / "data" / "raw" / "fetch"
-    fetcher, path, token = calls[0]
+    fetcher, path, token, passed_session = calls[0]
     assert fetcher is constructed[0]
     assert path == (source_root / "earnings_predictions" / "data" / "raw"
                     / "polygon" / "gspc_daily.csv")
     assert path.is_relative_to(source_root)
     assert isinstance(token, str) and token
+    assert passed_session == "2026-10-20"
 
     second = invoke_price_refresh("2026-10-20", planned_tickers=("AAA",),
                                   source_root=source_root)
     assert second["gspc_daily"] == outcome
     assert calls[1][2] != token
+    assert calls[1][3] == "2026-10-20"
 
 
 def test_invoke_price_refresh_source_root_without_planned_tickers_refuses(tmp_path):
