@@ -244,9 +244,12 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   key. `^GSPC` refresh failures use the typed refusal above.
 - **Forward-chain retry memo** — a heal session already ≥75% held stops
   re-buying its unheld tail (recorded in `sessions_skipped`). Transient
-  (non-404) failures, non-JSON 200s and quota/abnormal-exit remainders are
-  saved to `reports/orats_chain_retry.json` and re-asked; definitive 404s are
-  not. The memo is read only if a regular file under 1 MB, written
+  (non-404) failures, wrong-shape or non-JSON 200s and quota/abnormal-exit
+  remainders are saved to `reports/orats_chain_retry.json` and re-asked;
+  definitive 404s are not. A session's whole intended list is owed in the memo
+  before its first fetch (a hard kill leaves it owed) and replaced by the real
+  failures on exit; owed names on sessions that left the two-session window
+  are re-asked for 14 days (`older_retried`). The memo is read only if a regular file under 1 MB, written
   atomically; a read or write problem logs to stderr and never stops the
   refresh (a lost memo costs a re-buy window).
 - **Tier-4 gap repair** — with refresh and tiers on, at most one SNAPSHOT per run:

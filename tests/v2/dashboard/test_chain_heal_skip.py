@@ -6,7 +6,17 @@ came back all-404. Past ``CHAIN_SKIP_HELD_FRACTION`` the session is recorded
 in ``sessions_skipped`` and its tail is not bought; the names that failed
 transiently or were cut off by quota are kept alive in ``CHAIN_RETRY_PATH``
 and ARE re-asked even in a skipped session. Only definitive 404s are
-dropped. A fresh (or unheld) session still is healed in full.
+dropped. A fresh (or unheld) session still is healed in full. The memo is
+also owed UP FRONT: a fetched session files its whole intended list before
+its first fetch and every exit path replaces it with the real failures, so
+a SIGKILL/OOM — which runs no handler — leaves the next run re-asking the
+whole attempted list. And memo dates past the two-session window but inside
+the 14-day retention are re-asked for exactly their owed unheld names. The memo is
+also owed UP FRONT: a fetched session files its whole intended list before
+its first fetch, so a SIGKILL/OOM — which runs no handler — leaves the next
+run re-asking the entire attempted list. And memo dates past the two-session
+heal window but inside the 14-day retention are re-asked, exactly their owed
+unheld names, before they age out.
 
 Every dependency below the public signature — the fetcher, the store's held
 set, the trading calendar, the retry file — is a synthetic fake or a tmp_path
@@ -35,14 +45,17 @@ class _Fetcher:
 
     ``fail(params)`` may return an exception to raise instead of a record.
     ``bad_json(params)`` may return an exception for ``record.json()`` to
-    raise on an otherwise-successful (HTTP 200) call.
+    raise on an otherwise-successful (HTTP 200) call. ``body(params)`` may
+    return a WRONG-SHAPE success body — a list, a string — in place of the
+    well-formed dict.
     """
 
-    def __init__(self, fail=None, bad_json=None):
+    def __init__(self, fail=None, bad_json=None, body=None):
         self.asked = []
         self.asked_tickers = []
         self.fail = fail
         self.bad_json = bad_json
+        self.body = body
 
     def fetch(self, source, endpoint, params, note=""):
         self.asked.append(params["tradeDate"])
@@ -51,6 +64,7 @@ class _Fetcher:
         if exc is not None:
             raise exc
         bad = self.bad_json(params) if self.bad_json else None
+        custom = self.body(params) if self.body else None
 
         class R:
             from_cache = False
@@ -59,10 +73,26 @@ class _Fetcher:
             def json():
                 if bad is not None:
                     raise bad
+                if custom is not None:
+                    return custom
                 return {"data": [{"ticker": t}
                                  for t in params["ticker"].split(",")]}
 
         return R()
+
+
+class _MemoSpyFetcher(_Fetcher):
+    """Records the on-disk memo as each call sees it, so a test can assert
+    the session owes its debt BEFORE the first fetch, not only on an exit
+    path that a SIGKILL never reaches."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.memo_at_call: list[dict] = []
+
+    def fetch(self, source, endpoint, params, note=""):
+        self.memo_at_call.append(nightly._read_chain_retry())
+        return super().fetch(source, endpoint, params, note=note)
 
 
 class _Cal:
@@ -263,6 +293,31 @@ def test_non_json_200_is_transient_and_the_session_continues(monkeypatch, tmp_pa
     assert out["returned"] == 15, "the two good batches still land their rows"
 
 
+@pytest.mark.parametrize("shape", [
+    pytest.param(["TKR00", "TKR01"], id="list-body"),
+    pytest.param("<html>502 Bad Gateway</html>", id="string-body"),
+])
+def test_wrong_shape_json_is_transient_and_the_session_continues(monkeypatch, tmp_path,
+                                                                 shape):
+    """A 200 whose JSON parses but is not a dict with a list "data" must not
+    reach the AttributeError the row bookkeeping would raise on it: same
+    class as a non-JSON body — owed the date, reported in ``failed``, later
+    batches still fetched, and its names NOT filed under definitive
+    ``missing`` (a bad shape is no verdict on the chain)."""
+    tickers = [f"TKR{i:02d}" for i in range(25)]
+    _wire(monkeypatch, set(), tmp_path)
+    f = _Fetcher(body=lambda p: shape if p["ticker"].split(",")[0] == "TKR00" else None)
+
+    out = nightly.refresh_forward_chains(tickers, AS_OF, fetcher=f, sessions=1)
+
+    assert f.asked == [AS_OF, AS_OF, AS_OF], "the session continued past the wrong shape"
+    assert out["failed"] and "TKR00" in out["failed"][0], "the wrong shape is reported"
+    assert out["missing"] == [], "a bad shape says nothing about who has a chain"
+    assert out["returned"] == 15, "the two good batches still land their rows"
+    assert nightly._read_chain_retry() == {AS_OF: set(tickers[:10])}, \
+        "the wrong-shape chunk is owed the date; the OK batches are not"
+
+
 def test_json_body_raising_a_base_exception_keeps_the_debt(monkeypatch, tmp_path):
     """A KeyboardInterrupt surfacing from ``record.json()`` is not an
     Exception: the wrapper must still bank the current chunk and the unasked
@@ -305,6 +360,27 @@ def test_abnormal_exit_keeps_the_retry_debt(monkeypatch, tmp_path, boom):
 
     assert nightly._read_chain_retry() == {AS_OF: {t for t in tickers if t >= "TKR10"}}, \
         "the unasked remainder is persisted before the unwind"
+
+
+def test_the_whole_intended_list_is_owed_before_the_first_fetch(monkeypatch, tmp_path):
+    """Hard-kill safety: a SIGKILL/OOM runs no handler, so the session files
+    the ENTIRE intended list as owed before its first fetch — every exit
+    path below only ever replaces it with the real failures. Asserted from
+    inside the first fetch call: the memo must already carry the whole list
+    while the first chunk is in flight, and a BaseException mid-session must
+    leave the unasked tail there."""
+    tickers = [f"TKR{i:02d}" for i in range(25)]
+    _wire(monkeypatch, set(), tmp_path)
+    f = _MemoSpyFetcher(fail=lambda p: KeyboardInterrupt()
+                        if p["ticker"].split(",")[0] == "TKR10" else None)
+
+    with pytest.raises(KeyboardInterrupt):
+        nightly.refresh_forward_chains(tickers, AS_OF, fetcher=f, sessions=1)
+
+    assert f.memo_at_call[0] == {AS_OF: set(tickers)}, \
+        "the first fetch is made with the whole unheld list already owed"
+    assert nightly._read_chain_retry() == {AS_OF: {t for t in tickers if t >= "TKR10"}}, \
+        "the unwind replaced the up-front debt with the unasked tail"
 
 
 def test_generic_non_404_fetch_error_stays_transient(monkeypatch, tmp_path):
@@ -480,7 +556,9 @@ def test_the_memo_write_fsyncs_the_containing_directory(monkeypatch, tmp_path):
     dirs = [st for st in synced
             if stat.S_ISDIR(st.st_mode) and st.st_dev == parent.st_dev
             and st.st_ino == parent.st_ino]
-    assert len(dirs) == 1, "exactly one fsync, on an fd for the memo's parent dir"
+    assert len(dirs) == 2, \
+        "both persists sync the memo's parent dir: the up-front owed list, " \
+        "then the exit-path failures that replace it"
     assert nightly._read_chain_retry() == {AS_OF: set(TICKERS)}, "the memo still lands"
 
 
@@ -574,3 +652,52 @@ def test_two_sessions_newest_healed_older_skipped(monkeypatch, tmp_path):
         {"session": older, "held_fraction": 0.8, "unheld": 2}
     ]
     assert out["skipped_held"] == 8
+
+
+def test_an_older_memo_date_is_re_asked_for_exactly_its_owed_names(
+        monkeypatch, tmp_path, capsys):
+    """The heal window is two sessions but retention is fourteen days: a memo
+    date in that gap is never touched by the session loop, so the pass after
+    it re-asks it for exactly its owed unheld names — minus a name the store
+    already holds for that date, minus a dropped symbol — and clears the
+    entry on success. A 15-day-old entry is past the same cutoff the prune
+    uses and must not be asked at all."""
+    older = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=12)).date())
+    stale = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=15)).date())
+    held = {(t, pd.Timestamp(s)) for s in (AS_OF, "2026-09-01") for t in TICKERS}
+    held.add(("TKR08", pd.Timestamp(older)))
+    _wire(monkeypatch, held, tmp_path, stamps=["2026-09-01", AS_OF])
+    nightly.CHAIN_RETRY_PATH.write_text(
+        json.dumps({older: ["TKR08", "TKR09", "ZZZ9"], stale: ["TKR07"]}))
+    f = _Fetcher()
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=2)
+
+    assert f.asked == [older], "both window sessions were fully held; " \
+        "only the older memo date is fetched"
+    assert f.asked_tickers == ["TKR09"], "exactly the owed unheld names: not " \
+        "the one already held there, not the dropped symbol"
+    assert out["older_retried"] == [{"session": older, "names": 1}]
+    err = capsys.readouterr().err
+    assert err.count(f"[chains] session {older}:") == 1, "one stderr line per date"
+    kept = nightly._read_chain_retry()
+    assert older not in kept, "a successful re-ask clears the entry"
+    assert kept == {stale: {"TKR07"}}, "the 15-day-old entry is neither asked nor cleared"
+
+
+def test_skip_held_false_never_runs_the_older_pass(monkeypatch, tmp_path):
+    """The older-date re-ask belongs to the heal pass; a forced full refresh
+    re-buys everything for the window sessions anyway and must not spend the
+    memo's older dates."""
+    older = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=12)).date())
+    _wire(monkeypatch, set(), tmp_path, stamps=["2026-09-01", AS_OF])
+    nightly.CHAIN_RETRY_PATH.write_text(json.dumps({older: ["TKR09"]}))
+    f = _Fetcher()
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=2,
+                                         skip_held=False)
+
+    assert f.asked == [AS_OF, "2026-09-01"], "the window sessions, newest first"
+    assert "older_retried" not in out
+    assert nightly._read_chain_retry() == {older: {"TKR09"}}, \
+        "the older entry survives untouched — the memo writes go to the fetched stamps"

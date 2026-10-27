@@ -299,6 +299,14 @@ def _remember_unknown_symbol(ticker: str) -> None:
 #: session stops re-buying the unheld tail, so without this a transient failure
 #: loses that date for the ticker once the session leaves the CHAIN_SESSIONS
 #: heal window. Definitive 404s are never recorded here — they have no chain.
+#: The write protocol: a fetched session OWES THE WHOLE INTENDED LIST up
+#: front — filed before its first fetch, since nothing is proven until a body
+#: lands or a 404 says there is no chain — and every exit path replaces that
+#: entry with the run's real failures. A SIGKILL/OOM runs no handler at all,
+#: so the up-front entry is what survives a hard kill: the next run re-asks
+#: the entire attempted list even if the session then reads past the skip
+#: fraction. Dates outside the heal window but inside the 14-day retention
+#: are re-asked straight from this file by :func:`refresh_forward_chains`.
 CHAIN_RETRY_PATH = paths.REPORTS / "orats_chain_retry.json"
 
 #: Cap on the memo's on-disk size: a file this big is not a memo anyone wrote
@@ -378,10 +386,20 @@ def _write_chain_retry(retry: dict[str, set[str]]) -> None:
 
 
 def _persist_chain_retry(stamp: str, retry: set[str]) -> None:
-    """Replace one session's retry entry with this run's failed/cut names.
+    """Replace one session's retry entry with the names this call owes it.
+
+    Called twice on a fetched session: up front, before the first fetch, with
+    the WHOLE intended list — owed until proven fetched or 404, so a hard
+    kill (which runs no handler) leaves the next run re-asking everything
+    this one attempted — and on every exit path with the real failures,
+    which replace the up-front entry. A session that never reaches the fetch
+    loop writes nothing.
 
     Entries older than 14 days behind ``stamp`` are pruned — past that the
     session is far outside any heal window and the date is not coming back.
+    Dates inside that retention but outside the CHAIN_SESSIONS heal window
+    are re-asked from the memo before they age out (see
+    :func:`refresh_forward_chains`).
     """
     d = _read_chain_retry()
     if not retry and stamp not in d:
@@ -587,6 +605,14 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     This is a CONTENT check, not a cache-key check — `Fetcher.has` only
     recognises an identical ticker batch, and the board's ticker set changes
     nightly, so every key would miss.
+
+    **Memo dates past the ``sessions`` window are re-asked while they are in
+    retention.** A transient failure's session leaves the heal window after
+    two nights, but the retry file keeps the debt for 14 days, so after the
+    loop the memo's older in-retention dates are asked for directly — exactly
+    the owed names still unheld, minus dropped symbols (``only=``, bypassing
+    the held-fraction skip) — before the prune drops them and the pairs are
+    lost for good.
     """
     from engine.data.fetch import Fetcher
 
@@ -624,10 +650,40 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
         _refresh_one_session(
             fetcher, wanted_all, stamp, held, batch=batch, out=out, skip_held=skip_held
         )
+
+    if skip_held and stamps:
+        # The memo reaches past `sessions`: two nights of healing, fourteen
+        # days of retention. Dates in that gap are not touched by the loop
+        # above, so re-ask their owed unheld names once, from a single memo
+        # read, before the prune ages them out.
+        newest = pd.Timestamp(stamps[0])
+        cutoff = newest - pd.Timedelta(days=14)  # the same cutoff as the prune
+        memo = _read_chain_retry()
+        for d in sorted(memo):
+            if d in stamps:
+                continue  # the heal loop above already handled this session
+            try:
+                day = pd.Timestamp(d).normalize()
+            except ValueError:
+                continue  # not a date string: leave it for the prune
+            if day < cutoff or day >= newest:
+                continue  # past retention, or not older than this run
+            owed = sorted({t for t in memo[d] & set(wanted_all)
+                           if (t, day) not in held})
+            if not owed:
+                continue
+            out.setdefault("older_retried", []).append({"session": d, "names": len(owed)})
+            print(f"[chains] session {d}: past the heal window, re-asking "
+                  f"{len(owed)} retry-file names before they age out "
+                  "(transient failures and quota cuts)",
+                  file=sys.stderr)
+            _refresh_one_session(fetcher, wanted_all, d, held, batch=batch,
+                                 out=out, skip_held=skip_held, only=owed)
     return out
 
 
-def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_held) -> None:
+def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_held,
+                         only: list[str] | None = None) -> None:
     """Fetch one trade date for whatever part of the universe still needs it.
 
     A session already at least :data:`CHAIN_SKIP_HELD_FRACTION` held stops
@@ -636,9 +692,16 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
     that are still unheld (transient failures, quota-cut remainders) are
     re-asked. A definitive 404 never enters that file, so only definitive 404s
     are dropped. The decision is recorded, never silent.
+
+    ``only`` is an older memo date's owed list: it replaces the wanted
+    computation outright (the held-fraction skip does not apply to a list
+    already narrowed to the debt), and everything downstream — batching, the
+    404-vs-transient split, the persist-on-any-exit protocol — is the same.
     """
     session_day = pd.Timestamp(stamp).normalize()
-    if skip_held:
+    if only is not None:
+        wanted = list(only)
+    elif skip_held:
         wanted = [t for t in wanted_all if (t, session_day) not in held]
         out["skipped_held"] += len(wanted_all) - len(wanted)
         if wanted:
@@ -670,8 +733,18 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
     from engine.data.fetch import CredentialRotated
 
     retry: set[str] = set()
-    # The loop cursor, pre-bound: an exit before the first chunk owes no tail.
-    start = len(wanted)
+    if wanted:
+        # Hard-kill safety: the whole intended list is owed the date BEFORE
+        # the first fetch — nothing is proven until a body arrives or a 404
+        # says there is no chain. A SIGKILL/OOM runs no handler, and without
+        # this entry a session cut off mid-fetch leaves the next run reading
+        # the date past the skip fraction and dropping pairs it never asked
+        # for. The persists on the exit paths below replace it with the real
+        # failures; a session with nothing to fetch files nothing.
+        _persist_chain_retry(stamp, set(wanted))
+    # The loop cursor, pre-bound: an exit before the first chunk owes every
+    # name, exactly as the up-front persist filed them.
+    start = 0
     try:
         for start in range(0, len(wanted), batch):
             chunk = wanted[start : start + batch]
@@ -716,7 +789,19 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                 out["failed"].append(f"{chunk[0]}..: {str(exc)[-40:]}")
                 retry.update(chunk)
                 continue
-            rows = payload.get("data") or []
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(data, list):
+                # A well-formed answer is a dict with a list "data"; a bare
+                # list or a string body would crash the bookkeeping below on
+                # .get, and a missing or non-list "data" is the same
+                # unparseable shape. Same class as a non-JSON 200: a transient
+                # bad answer, not a verdict — owed the date, reported, and
+                # the session continues with the later batches.
+                out["failed"].append(f"{chunk[0]}..: response JSON is not a "
+                                     "dict with a list 'data'")
+                retry.update(chunk)
+                continue
+            rows = data
             out["rows"] += len(rows)
             got = {r.get("ticker") for r in rows}
             out["returned"] += len(got & set(chunk))
