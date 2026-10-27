@@ -20,7 +20,7 @@ import math
 import os
 import stat
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, TypeVar
@@ -278,7 +278,18 @@ class ChooserState:
 
 def _chooser_day(value: Any) -> str:
     try:
-        return date.fromisoformat(str(value)[:10]).isoformat()
+        if isinstance(value, datetime):
+            day = value.date()
+        elif isinstance(value, date):
+            day = value
+        elif isinstance(value, str):
+            if len(value) > 10 and value[10] in ("T", " "):
+                day = datetime.fromisoformat(value).date()
+            else:
+                day = date.fromisoformat(value)
+        else:
+            raise ValueError("unsupported chooser day type")
+        return day.isoformat()
     except (TypeError, ValueError, OverflowError):
         raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
 
@@ -359,6 +370,8 @@ def select_chooser_state(
     except (TypeError, ValueError, OverflowError):
         raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
     fold_start = min(event_month, decision_month).isoformat()
+    if date.fromisoformat(fold_start) >= date.fromisoformat(cutoff):
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable")
     cache_key = (id(binding), f"chooser:{fold_start}")
     fold_state = None if fold_cache is None else fold_cache.get(cache_key)
     if fold_state is None:

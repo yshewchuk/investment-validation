@@ -38,6 +38,28 @@ def test_chooser_selector_requires_exact_session_cutoff():
             binding, event_date="2026-10-27", as_of="2026-10-27")
 
 
+@pytest.mark.parametrize("bad_as_of", ["2026-10-27x", "2026-10-27garbage"])
+def test_chooser_selector_rejects_malformed_as_of_with_populated_cache(bad_as_of):
+    binding = _binding()
+    cache = {(id(binding), "chooser:2026-10-01"): object()}
+    with pytest.raises(ModelNotReady):
+        select_chooser_state(
+            binding, "2026-10-27", bad_as_of, fold_cache=cache)
+
+
+def test_chooser_selector_refuses_fold_starting_on_decision_session_before_cache():
+    binding = SimpleNamespace(
+        chooser_analog_artifacts=(SimpleNamespace(cutoff="2026-10-01"),),
+        chooser_admissible_artifacts=(
+            SimpleNamespace(key=(N_ADMISSIBLE_TABLE_ID, "v1")),
+        ),
+    )
+    cache = {(id(binding), "chooser:2026-10-01"): object()}
+    with pytest.raises(ModelNotReady):
+        select_chooser_state(
+            binding, "2026-10-01", "2026-10-01", fold_cache=cache)
+
+
 def test_missing_chooser_state_becomes_typed_member_refusal():
     binding = _binding()
     refusal = _chooser_bundle_or_refusal(
