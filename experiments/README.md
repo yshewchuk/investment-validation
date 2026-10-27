@@ -15,6 +15,8 @@ The owning modules expose these helpers to native experiment callers; no compati
 
 | Owner and public function | Inputs, result and effects |
 | --- | --- |
+| `size_panel.materialize(repository, source, **request)` | Explicit frozen-policy/history/source/price snapshot request and finite limits publish qualified H/HM/HMO rows and return context plus a feature SnapshotRef. Publishes through the native artifact/catalog path; exact replay reuses the admitted receipt. No fitting or production caller. |
+| `size_panel.read(repository, source, feature_snapshot, *, columns=None, **request)` | Same bound request re-admits the exact stored panel, returning serialized feature snapshot/context/rows with a closed projection. No rebuild or producer override; malformed shape/projection, changed source, incompatible artifact, protected access and exceeded limits retain typed data refusals. See the owning [architecture contract](ARCHITECTURE.md#qualified-size-panel-opt-in). |
 | `magnitude_candidate_recipe.candidate_recipe` | Exact family/parameter keys plus ordered columns and dictionary hash yield the existing closed family recipe; no training, source reads or admission proof. |
 | `magnitude_candidate_fit.fit_candidate` | Both no-fit guards precede inspection; exact schema/model dispatch delegates one horizon to the existing numeric fitter and preserves its complete result and native errors. No source qualification, selection, retry or I/O. |
 | `magnitude_report.magnitude_metrics` | Complete scored rows yield stable pooled RMSE, MAE and count; empty rows or nonfinite metrics refuse `EXPERIMENT_VARIANT_FAILED`. Fixed and history reporters, the search recorder and the outer evaluator (fold and aggregate metrics) share this scorer. |

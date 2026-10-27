@@ -36,9 +36,12 @@ def entry_rule_declarations(
              if artifact.move_model_id == size_identity.model_id
              and artifact.crush_model_id == crush_identity.model_id
              and artifact.cutoff == cutoff]
-    if len(pools) != 1:
+    if len(pools) == 0:
         raise NightlySourceBundleRefusal(
             "MODEL_NOT_READY", "one exact paired residual pool is required")
+    if len(pools) > 1:
+        raise NightlySourceBundleRefusal(
+            "MODEL_NOT_READY", "more than one exact paired residual pool")
     pool = pools[0]
     try:
         month = cutoff_month(event_date)
@@ -49,9 +52,12 @@ def entry_rule_declarations(
     key = trailing_cutoff_key(PNL_HISTORY_ID, month)
     cutoffs = [artifact for artifact in binding.trailing_cutoff_artifacts
                if artifact.key == key]
-    if len(cutoffs) != 1:
+    if len(cutoffs) == 0:
         raise NightlySourceBundleRefusal(
             "MODEL_NOT_READY", "one exact trailing cutoff artifact is required")
+    if len(cutoffs) > 1:
+        raise NightlySourceBundleRefusal(
+            "MODEL_NOT_READY", "more than one exact trailing cutoff artifact")
     if mcap_usd is not None:
         try:
             usable = not isinstance(mcap_usd, bool) and isfinite(mcap_usd)

@@ -38,9 +38,12 @@ def _surface(binding: ScoringReleaseBinding, cutoff: str, fill_alpha: float) -> 
     key = payoff_artifact_key("STR-RUNUP", fill_alpha, cutoff)
     matches = [artifact for artifact in binding.payoff_artifacts.get("STR-RUNUP", ())
                if isinstance(artifact, PayoffSurfaceArtifact) and artifact.key == key]
-    if len(matches) != 1:
+    if len(matches) == 0:
         raise NightlySourceBundleRefusal(
             "MODEL_NOT_READY", "RUNUP requires one exact-key payoff surface")
+    if len(matches) > 1:
+        raise NightlySourceBundleRefusal(
+            "MODEL_NOT_READY", "RUNUP has more than one exact-key payoff surface")
     surface = matches[0]
     if (len(surface.coefficients) != len(RUNUP_TERMS)
             or not all(map(isfinite, surface.coefficients))
