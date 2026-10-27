@@ -57,7 +57,9 @@ member is staged) and `chooser_analog_artifacts`/`chooser_admissible_artifacts`
 tuples, plus the `size_folds` descriptor index (`None` only for a hand-built binding), `paired_residual_artifacts` and `trailing_cutoff_artifacts` tuples (each empty independently when its family is absent), into one immutable
 `ScoringReleaseBinding`. Chooser tuples retain all distinct artifact keys;
 each declared chooser object must be a regular file no larger than 32 MiB.
-Request-specific selection and nightly chooser wiring are not performed here.
+`select_chooser_state` selects the exact-session chooser analog/table state and
+the causal producer folds for a request. The nightly member assembler declares
+that state for registered menu rows; DYN-SV selection remains a later slice.
 The reader raises
 `NoCurrentRelease`/`ModelNotReady` (never a legacy or cached fallback) when
 the pointer, catalog or a named member is not ready.
@@ -114,7 +116,7 @@ columns.
 is `DYNAMIC_MENU_REFUSAL_CODES`. These are pure preparatory accounting contracts,
 currently consumed only by focused tests. No runtime dispatcher uses them.
 
-<!-- public-interface: application, compatibility, dynamic_outcomes, DynamicMenuIdentity, DynamicCandidateOutcome, validate_dynamic_menu, DynamicMenuRefusal, DYNAMIC_MENU_REFUSAL_CODES, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, gate_fold_selection, SizeFoldCatalog, index_size_folds, select_gate_forecast_source, gate_forecast_source, GateForecastSource, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, resolve_release_binding, resolve_gate_policy, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
+<!-- public-interface: application, compatibility, dynamic_outcomes, DynamicMenuIdentity, DynamicCandidateOutcome, validate_dynamic_menu, DynamicMenuRefusal, DYNAMIC_MENU_REFUSAL_CODES, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, gate_fold_selection, SizeFoldCatalog, index_size_folds, select_gate_forecast_source, gate_forecast_source, GateForecastSource, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, ChooserState, select_chooser_state, resolve_release_binding, resolve_gate_policy, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
 
 ## Consumers
 

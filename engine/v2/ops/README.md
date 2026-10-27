@@ -157,7 +157,8 @@ contribute features, recipes, identities and request artifact references.
 STR-THRU, STR-RUNUP, TWIN-P, TWIN-P5, BFLY-P, BFLY-P5, CTR5, RAMP7 and CND-PS are registered (the seven entry-rule strategies are gate-less: entry-rule gate over a frozen paired pool and trailing cutoff). RUNUP requires both verified champion
 residual pools and a unique exact-key payoff surface; its model gate does not
 request separate simulation. Missing/unusable model artifacts refuse its row.
-There is no runtime registration API or chooser execution contract.
+There is no runtime registration API; registered menu members now declare
+chooser state, while DYN-SV selection remains in slice 2.
 
 `carried_set.CarriedTickerExclusion`, `carried_set.CarriedSetResolution`,
 `carried_set.resolve_carried_set`, and

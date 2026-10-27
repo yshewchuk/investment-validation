@@ -5,7 +5,8 @@ constructed ``FrozenInference``, and the frozen scoring state artifacts
 from a live ``deployment.current_pointer()`` -- the failure-semantics contract
 is ``engine/v2/scoring/ARCHITECTURE.md``'s ``release_bindings.py`` section (the
 "4c R1-R6 template"). Native batch and the supervisor's release-readiness
-check consume this reader; chooser state selection is not wired into nightly.
+check consume this reader; nightly selects exact-cutoff chooser state and
+causal producer folds for registered menu-member rows.
 
 Every refusal below is path-free by construction: a fixed message plus the
 exact ``member_id``/field name (and, where useful, a type name), never a raw
@@ -315,7 +316,7 @@ def _load_chooser_fold_state(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     size = select_gate_forecast_source(binding, event_date, as_of)
     pools = {"pred_abs_move": {
-        "pool_pred": size.pool_pred, "pool_res": size.pool_res,
+        "predictions": size.pool_pred, "residuals": size.pool_res,
         "interval_floor": size.interval_floor,
     }}
     producers = {}
@@ -332,7 +333,7 @@ def _load_chooser_fold_state(
         if not ref.release.bindings:
             raise ValueError("chooser producer binding missing")
         pools[descriptor.producer_output] = {
-            "pool_pred": ref.pool_pred, "pool_res": ref.pool_res,
+            "predictions": ref.pool_pred, "residuals": ref.pool_res,
             "interval_floor": descriptor.policy.interval_floor,
         }
         producers[descriptor.producer_output] = ref.release.bindings[0]

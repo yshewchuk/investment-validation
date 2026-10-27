@@ -50,38 +50,22 @@ def test_missing_chooser_state_becomes_typed_member_refusal():
 
 def test_chooser_selector_selects_folds_and_caches(monkeypatch):
     roles = {"implied_t1": "pred_im_t1_d14", "runup_move": "pred_runup_abs_move_d14"}
-    catalog = {
-        "members": [
-            {
-                "member_id": f"tier4_folds:{role}",
-                "status": "STAGED",
-                "objects": [
-                    {
-                        "serving_fold": {
-                            "policy": {"role": role},
-                            "fold_start": "2026-10-01",
-                        }
-                    }
-                ],
-            }
-            for role in roles
-        ]
-    }
+    catalog = {"members": [
+        {"member_id": f"tier4_folds:{role}", "status": "STAGED",
+         "objects": [{"serving_fold": {
+             "policy": {"role": role}, "fold_start": "2026-09-01"}}]}
+        for role in roles
+    ]}
     binding = SimpleNamespace(
         chooser_analog_artifacts=(
+            SimpleNamespace(cutoff="2026-10-26", pool_id="stale", content_hash="h-old"),
             SimpleNamespace(cutoff="2026-10-27", pool_id="analog", content_hash="h-a"),
         ),
-        chooser_admissible_artifacts=(
-            SimpleNamespace(
-                key=(N_ADMISSIBLE_TABLE_ID, "v1"),
-                table_id=N_ADMISSIBLE_TABLE_ID,
-                version="v1",
-                content_hash="h-t",
-            ),
-        ),
+        chooser_admissible_artifacts=(SimpleNamespace(
+            key=(N_ADMISSIBLE_TABLE_ID, "v1"), table_id=N_ADMISSIBLE_TABLE_ID,
+            version="v1", content_hash="h-t"),),
         chooser_fold_catalog_json=json.dumps(catalog),
-        chooser_parent_manifest=object(),
-        frozen_inference=object(),
+        chooser_parent_manifest=object(), frozen_inference=object(),
     )
     monkeypatch.setattr(
         release_bindings, "select_gate_forecast_source",
@@ -93,12 +77,9 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
         role = doc["policy"]["role"]
         return SimpleNamespace(
             policy=SimpleNamespace(role=role, interval_floor=0.2),
-            fold_start=doc["fold_start"],
-            producer_output=roles[role],
-        )
+            fold_start=doc["fold_start"], producer_output=roles[role])
 
     monkeypatch.setattr(release_bindings, "from_document", fake_from_document)
-
     loader_calls = []
 
     def fake_load_chooser_serving_fold(
@@ -107,31 +88,32 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
         role = descriptor.policy.role
         loader_calls.append(role)
         return SimpleNamespace(
-            pool_pred=f"{role}-pred",
-            pool_res=f"{role}-res",
+            pool_pred=f"{role}-pred", pool_res=f"{role}-res",
             release=SimpleNamespace(
-                bindings=(SimpleNamespace(binding_id=f"fold:{role}"),)
-            ),
-        )
+                bindings=(SimpleNamespace(binding_id=f"fold:{role}"),)))
 
     monkeypatch.setattr(
         release_bindings, "load_chooser_serving_fold", fake_load_chooser_serving_fold)
-
     cache = {}
     state = release_bindings.select_chooser_state(
-        binding, "2026-10-27", "2026-10-27", fold_cache=cache)
+        binding, "2026-09-27", "2026-10-27", fold_cache=cache)
 
     assert state.analog_pool.pool_id == "analog"
     assert state.admissible_table.table_id == N_ADMISSIBLE_TABLE_ID
-    assert "pred_abs_move" in state.fold_pools
-    assert "pred_im_t1_d14" in state.fold_pools
-    assert "pred_runup_abs_move_d14" in state.fold_pools
+    assert state.fold_pools["pred_abs_move"] == {
+        "predictions": "size-pred", "residuals": "size-res", "interval_floor": 0.1}
+    assert state.fold_pools["pred_im_t1_d14"] == {
+        "predictions": "implied_t1-pred", "residuals": "implied_t1-res",
+        "interval_floor": 0.2}
+    assert state.fold_pools["pred_runup_abs_move_d14"] == {
+        "predictions": "runup_move-pred", "residuals": "runup_move-res",
+        "interval_floor": 0.2}
     assert state.producer_bindings["pred_im_t1_d14"].binding_id == "fold:implied_t1"
     assert state.producer_bindings["pred_runup_abs_move_d14"].binding_id == "fold:runup_move"
     assert loader_calls == ["implied_t1", "runup_move"]
 
     release_bindings.select_chooser_state(
-        binding, "2026-10-27", "2026-10-27", fold_cache=cache)
+        binding, "2026-09-27", "2026-10-27", fold_cache=cache)
     assert len(loader_calls) == 2
 
 
@@ -179,11 +161,18 @@ def test_chooser_bundle_wires_producer_bindings_and_pools(monkeypatch):
         },
     )
 
-    result = native_score_batch._chooser_bundle_or_refusal(
-        bundle, object(), binding=binding, event_date="2026-10-27",
-        as_of="2026-10-27", fold_cache={})
+    result = native_score_batch._apply_declared_chooser(
+        bundle, object(), _STRATEGY_REGISTRY["TWIN-P"],
+        SimpleNamespace(calendar_row={"event_date": "2026-10-27"}),
+        binding=binding, as_of="2026-10-27", fold_cache={})
 
+    assert result.chooser_recipe["binding_id"] == "chooser:dynsv"
     assert result.chooser_recipe["producers"]["pred_im_t1_d14"]["binding_id"] == "fold:implied_t1"
     assert result.chooser_recipe["producers"]["pred_runup_abs_move_d14"]["binding_id"] == "fold:runup_move"
+    assert result.chooser_recipe["analog_pool"] == {
+        "pool_id": "analog", "cutoff": "2026-10-27", "content_hash": "h-a"}
+    assert result.chooser_recipe["admissible_table"] == {
+        "table_id": N_ADMISSIBLE_TABLE_ID, "version": "v1", "content_hash": "h-t"}
     assert result.model_release.bindings == (existing, implied, runup)
     assert result.chooser_fold_pools == {"fold": "pools"}
+    assert result.chooser_analog_pool.pool_id == "analog"

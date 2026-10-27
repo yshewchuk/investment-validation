@@ -194,6 +194,9 @@ exposes verified chooser pools/depth tables and selects the chooser state for
 the request's cutoff. Nightly declares a chooser block for registered member
 rows; missing required state refuses that member row with typed
 `MODEL_NOT_READY`. DYN-SV selection remains a separate slice.
+Missing, ambiguous or unusable exact-cutoff chooser state refuses only that
+member row as `MODEL_NOT_READY`; missing champion features remain the separate
+advisory `CHOOSER_MISSING_FEATURES` outcome.
 
 `application.score_event` requires the complete ordered `DYNAMIC_MENU`, scores
 its members and resolves DYN-SV over finite simulation-bearing candidates:
