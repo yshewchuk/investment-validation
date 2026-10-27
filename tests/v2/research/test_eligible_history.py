@@ -250,6 +250,47 @@ def test_changed_installed_producer_cannot_replay_previous_artifact(data, monkey
     poison_outcomes(monkeypatch, data.repository, data.snapshot, (), all_outcomes=True)
     with pytest.raises(DataError, match="exact eligible-history artifact"):
         read(data, artifact)
+    with pytest.raises(DataError) as caught:
+        size.comparison_inputs(data.repository, data.snapshot, {**artifact, "request": data.request})
+    assert caught.value.problem.code == "HOLDOUT_ACCESS_DENIED"
+
+
+def test_only_public_platform_admits_producer_identity(data, monkeypatch):
+    from engine.v2.research import eligible_history as backend
+    assert not hasattr(backend, "materialize")
+    assert not hasattr(backend, "read")
+    def forbidden(*args, **kwargs):
+        raise AssertionError("caller producer reached fingerprinting or source access")
+    monkeypatch.setattr(history, "_producer", forbidden)
+    monkeypatch.setattr(data.repository, "resolve", forbidden)
+    request = {**data.request, "producer": {"source_closure": {}, "environment": {}}}
+    calls = [
+        lambda: history.materialize(data.repository, data.snapshot, **request),
+        lambda: history.read(data.repository, data.snapshot, data.snapshot, columns=list(FEATURES), **request),
+        lambda: size.comparison_inputs(data.repository, data.snapshot,
+            {"request": request, "feature_snapshot": data.snapshot}),
+    ]
+    for call in calls:
+        with pytest.raises(DataError) as caught:
+            call()
+        assert caught.value.problem.code == "HOLDOUT_ACCESS_DENIED"
+    with pytest.raises(TypeError, match="producer"):
+        size.build(data.repository, data.snapshot, producer=request["producer"])
+
+
+def test_fabricated_internal_producer_is_not_publicly_replayable(data):
+    from engine.v2.research import eligible_history as backend
+    # Internal helpers are trusted orchestration, not an admitted API or Python sandbox.
+    fabricated = backend._materialize(data.repository, data.snapshot,
+        producer={"source_closure": {"old.py": "old"}, "environment": {}}, **data.request)
+    for call in [lambda: read(data, fabricated), lambda: size.comparison_inputs(
+            data.repository, data.snapshot, {**fabricated, "request": data.request})]:
+        with pytest.raises(DataError) as caught:
+            call()
+        assert caught.value.problem.code == "HOLDOUT_ACCESS_DENIED"
+    canonical = history.materialize(data.repository, data.snapshot, **data.request)
+    assert canonical["feature_snapshot"] != fabricated["feature_snapshot"]
+    assert canonical["context"]["producer"] == history._producer()
 
 
 def test_per_forecast_strict_prior_and_label_ceiling_do_not_backfill_earlier_rows(tmp_path, monkeypatch):

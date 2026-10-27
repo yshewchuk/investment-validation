@@ -367,13 +367,17 @@ Integration sequencing belongs to the [stage-2 design](../../../experiments/SUPE
 
 ## Policy-qualified eligible history
 
-<!-- public-interface: eligible_history.admit_source, eligible_history.materialize, eligible_history.read, eligible_history_table.CONTRACT, eligible_history_table.FEATURES, eligible_history_table.admit_fields, eligible_history_table.recipe -->
+<!-- public-interface: eligible_history.admit_source, eligible_history_table.CONTRACT, eligible_history_table.FEATURES, eligible_history_table.admit_fields, eligible_history_table.recipe -->
 
 These are intentionally manual, research-only Python APIs, not production CLI,
 nightly or training entrypoints. A separately authorized research caller supplies
 the pinned source and explicit policy; this PR neither activates a data run nor
 wires production scoring. Synthetic tests are the only current invocations.
-The `experiments.eligible_history` adapter consumes backend admission/build/read;
+The sole public build/read boundary is `experiments.eligible_history`; it rejects
+caller producer identities before source access and derives the installed identity.
+Its backend `_materialize`/`_read` helpers are trusted internal orchestration, not
+independent admitted APIs or a Python privacy/security boundary. The adapter consumes
+backend source admission and these helpers;
 `experiments.magnitude_eligible_history` consumes its qualified H11 field list.
 Use `experiments.eligible_history.materialize/read` with explicit source snapshot,
 holdout month, grouped policy, target IDs, horizons `[1, 3, 5]`, history start and

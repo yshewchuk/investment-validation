@@ -1,4 +1,8 @@
-"""Bounded, policy-qualified history built once and replayed from a separate table."""
+"""Internal history implementation; experiments.eligible_history owns public admission.
+
+Private build/read helpers trust orchestration's installed producer identity; they
+are not independent admitted APIs or a security boundary against Python callers.
+"""
 from datetime import date, timedelta
 
 import pyarrow as pa
@@ -255,7 +259,7 @@ def _rows(snapshot, prepared):
         yield rows
 
 
-def materialize(repository, snapshot, **request):
+def _materialize(repository, snapshot, **request):
     """Reconstruct admission, then publish/reuse one immutable bounded context."""
     with stage("eligible history admission", report_refusals=True):
         prepared = _prepare(repository, snapshot, **request)
@@ -314,7 +318,7 @@ def _stored_query(repository, feature_snapshot, context, columns, limits):
     return query_
 
 
-def read(repository, source, feature_snapshot, *, columns, **request):
+def _read(repository, source, feature_snapshot, *, columns, **request):
     """Only this committed policy-qualified table may supply experiment fields."""
     context = _prepare(repository, source, **request)[0]
     if (_existing(repository, context) != feature_snapshot or set(feature_snapshot.table_versions) != {TABLE}):
