@@ -75,6 +75,8 @@ def test_regular_run_fails_for_added_and_missing_inventory(tmp_path: Path, monke
     baseline = tmp_path / "baseline.json"
     baseline.write_text(json.dumps([item]))
     monkeypatch.setattr(guard, "BASELINE_PATH", baseline)
+    monkeypatch.setattr(guard, "violations", lambda: [item])
+    assert guard.main([]) == 1
     monkeypatch.setattr(guard, "violations", lambda: [item, extra])
     assert guard.main([]) == 1
     baseline.write_text(json.dumps([item, extra]))

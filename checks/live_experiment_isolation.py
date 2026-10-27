@@ -55,16 +55,10 @@ def _identity(v: dict) -> tuple: return (v["path"], v["line"], v["target"])
 
 
 def _from_module(node: ast.ImportFrom, rel: str) -> str:
-    if not node.level:
-        return node.module or ""
-    package = rel.split("/")[:-1]
-    keep = len(package) - (node.level - 1)
-    if keep <= 0:
-        return ""
-    base = ".".join(package[:keep])
-    if node.module:
-        return f"{base}.{node.module}" if base else node.module
-    return base
+    if not node.level: return node.module or ""
+    package = rel.split("/")[:-1]; keep = len(package) - (node.level - 1)
+    if keep <= 0: return ""
+    return ".".join(package[:keep] + ([node.module] if node.module else []))
 
 
 def violations(root: Path = ROOT) -> list[dict]:
@@ -122,6 +116,9 @@ def main(argv=None) -> int:
     if args.write_baseline:
         baseline = (json.loads(_read_bounded(BASELINE_PATH, MAX_BASELINE_BYTES))
                     if BASELINE_PATH.exists() else None)
+        if baseline:
+            print("refusing nonempty baseline: committed ceiling is empty", file=sys.stderr)
+            return 1
         if baseline is None and current:
             print(f"refusing to create {BASELINE_PATH.name}: current inventory nonempty", file=sys.stderr)
             _print_category("current", current)
@@ -139,7 +136,9 @@ def main(argv=None) -> int:
         return 0
     if not BASELINE_PATH.exists():
         print(f"baseline missing: {BASELINE_PATH}", file=sys.stderr); return 1
-    added, missing = compare(current, json.loads(_read_bounded(BASELINE_PATH, MAX_BASELINE_BYTES)))
+    baseline = json.loads(_read_bounded(BASELINE_PATH, MAX_BASELINE_BYTES))
+    if baseline: print("refusing nonempty baseline: committed ceiling is empty", file=sys.stderr); return 1
+    added, missing = compare(current, baseline)
     if added or missing:
         _print_category("added", added)
         _print_category("missing", missing)
