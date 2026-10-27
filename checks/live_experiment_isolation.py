@@ -36,23 +36,22 @@ FORBIDDEN_ROOTS = (
 
 
 def live_files(root: Path = ROOT) -> list[str]:
-    root = Path(root)
-    paths = [p.relative_to(root).as_posix()
-             for p in (root / "engine/v2/models").rglob("*.py")]
-    paths += [p.relative_to(root).as_posix()
-              for p in (root / "tools").glob("phase5_*.py")]
-    ops = root / "engine/v2/ops"
-    paths += [p.relative_to(root).as_posix()
-              for p in [ops / "training.py", *ops.glob("retrain_*.py")] if p.is_file()]
-    return sorted(paths)
+    root = Path(root); models = root / "engine/v2/models"
+    tools = root / "tools"; ops = root / "engine/v2/ops"
+    if any(not p.is_dir() for p in (models, tools, ops)):
+        raise ValueError("missing expected live scan root")
+    model = list(models.rglob("*.py")); phase5 = list(tools.glob("phase5_*.py"))
+    retrain = list(ops.glob("retrain_*.py")); training = ops / "training.py"
+    if not model or not phase5 or not retrain or not training.is_file():
+        raise ValueError("missing expected live scan files")
+    return sorted(p.relative_to(root).as_posix()
+                  for p in [*model, *phase5, training, *retrain])
 
 
-def _forbidden(target: str) -> bool:
-    return any(target == r or target.startswith(r + ".") for r in FORBIDDEN_ROOTS)
+def _forbidden(target: str) -> bool: return any(target == r or target.startswith(r + ".") for r in FORBIDDEN_ROOTS)
 
 
-def _identity(v: dict) -> tuple:
-    return (v["path"], v["line"], v["target"])
+def _identity(v: dict) -> tuple: return (v["path"], v["line"], v["target"])
 
 
 def _from_module(node: ast.ImportFrom, rel: str) -> str:
@@ -104,8 +103,7 @@ def compare(current: list[dict], baseline: list[dict]) -> tuple[list[dict], list
     return added, missing
 
 
-def _line(v: dict) -> str:
-    return f"{v['path']}:{v['line']}: {v['target']}"
+def _line(v: dict) -> str: return f"{v['path']}:{v['line']}: {v['target']}"
 
 
 def _print_category(name: str, items: list[dict]) -> None:
@@ -124,6 +122,10 @@ def main(argv=None) -> int:
     if args.write_baseline:
         baseline = (json.loads(_read_bounded(BASELINE_PATH, MAX_BASELINE_BYTES))
                     if BASELINE_PATH.exists() else None)
+        if baseline is None and current:
+            print(f"refusing to create {BASELINE_PATH.name}: current inventory nonempty", file=sys.stderr)
+            _print_category("current", current)
+            return 1
         if baseline is not None:
             added, _missing = compare(current, baseline)
             if added:
@@ -136,8 +138,7 @@ def main(argv=None) -> int:
             json.dumps(current, indent=2, sort_keys=True) + "\n")
         return 0
     if not BASELINE_PATH.exists():
-        print(f"baseline missing: {BASELINE_PATH}", file=sys.stderr)
-        return 1
+        print(f"baseline missing: {BASELINE_PATH}", file=sys.stderr); return 1
     added, missing = compare(current, json.loads(_read_bounded(BASELINE_PATH, MAX_BASELINE_BYTES)))
     if added or missing:
         _print_category("added", added)
@@ -146,5 +147,4 @@ def main(argv=None) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+if __name__ == "__main__": raise SystemExit(main())

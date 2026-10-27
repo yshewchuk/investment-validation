@@ -50,6 +50,16 @@ def test_violations_are_direct_ast_imports_in_live_roots(tmp_path: Path):
     ]
 
 
+def test_live_files_fails_when_expected_root_is_missing(tmp_path: Path):
+    with pytest.raises(ValueError, match="missing expected live scan root"):
+        guard.live_files(tmp_path)
+    for rel in ("engine/v2/models", "engine/v2/ops", "tools"):
+        (tmp_path / rel).mkdir(parents=True)
+    (tmp_path / "engine/v2/models/live.py").touch()
+    with pytest.raises(ValueError, match="missing expected live scan files"):
+        guard.live_files(tmp_path)
+
+
 def test_compare_requires_exact_inventory_and_counts_duplicate_occurrences():
     item = {"path": "engine/v2/models/a.py", "line": 1, "target": "experiments.x"}
     shifted = {**item, "line": 2}
@@ -76,6 +86,9 @@ def test_write_baseline_allows_shrink_and_refuses_growth(tmp_path: Path, monkeyp
     baseline = tmp_path / "baseline.json"
     original = [{"path": "engine/v2/models/a.py", "line": 1, "target": "experiments.x"}]
     monkeypatch.setattr(guard, "BASELINE_PATH", baseline)
+    monkeypatch.setattr(guard, "violations", lambda: original)
+    assert guard.main(["--write-baseline"]) == 1
+    assert not baseline.exists()
     monkeypatch.setattr(guard, "violations", lambda: [])
 
     assert guard.main(["--write-baseline"]) == 0
