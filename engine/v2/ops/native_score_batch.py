@@ -464,6 +464,34 @@ def _release_artifact_declarations(
     return declarations
 
 
+_RELEASE_ARTIFACT_REFUSAL_LABELS: Mapping[tuple[str, str], str] = {
+    ("MODEL_NOT_READY",
+     "driver residual pool model_id disagrees with the resolved driver identity"):
+        "driver residual pool identity mismatch",
+    ("MODEL_NOT_READY", "release carries duplicate exact-cutoff payoff artifacts"):
+        "duplicate exact-cutoff payoff artifact",
+    ("MODEL_NOT_READY", "release lacks the exact-cutoff payoff artifact"):
+        "exact-cutoff payoff artifact missing",
+    ("MODEL_NOT_READY", "release lacks the exact-cutoff analog pool"):
+        "exact-cutoff analog pool missing",
+}
+
+
+def _nightly_source_bundle_refusal_detail(exc: NightlySourceBundleRefusal) -> str:
+    """The safe published detail for one source-bundle refusal.
+
+    Only the four internal release-artifact causes above keep a fixed
+    distinguishing label; every other refusal publishes just its code. The
+    raw ``exc.detail`` is never interpolated or concatenated into the text.
+    """
+    fixed_label = None
+    if isinstance(exc.detail, str):
+        fixed_label = _RELEASE_ARTIFACT_REFUSAL_LABELS.get((exc.code, exc.detail))
+    if fixed_label is not None:
+        return f"nightly_source_bundle refused: {exc.code}: {fixed_label}"
+    return f"nightly_source_bundle refused: {exc.code}"
+
+
 def _with_release_artifacts(
     bundle: SourceBundle,
     *,
@@ -520,7 +548,7 @@ def _with_release_artifacts(
             declarations.update(analog_declaration)
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
-            key, exc.code, f"nightly_source_bundle refused: {exc.code}")
+            key, exc.code, _nightly_source_bundle_refusal_detail(exc))
     except AmbiguousAnalogPool:
         return NativeScoreBatchRowRefusal(
             key, "MODEL_NOT_READY", "release carries more than one analog pool for the row key")

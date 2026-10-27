@@ -90,6 +90,8 @@ def test_release_without_analog_pools_refuses_the_row():
     result = _declare([])
     assert isinstance(result, NativeScoreBatchRowRefusal)
     assert result.code == "MODEL_NOT_READY"
+    assert result.detail == (
+        "nightly_source_bundle refused: MODEL_NOT_READY: exact-cutoff analog pool missing")
 
 
 def test_payoff_family_without_one_exact_cutoff_refuses_the_row():
@@ -98,11 +100,15 @@ def test_payoff_family_without_one_exact_cutoff_refuses_the_row():
     result = _declare([pool], [wrong_cutoff])
     assert isinstance(result, NativeScoreBatchRowRefusal)
     assert result.code == "MODEL_NOT_READY"
+    assert result.detail == (
+        "nightly_source_bundle refused: MODEL_NOT_READY: exact-cutoff payoff artifact missing")
 
     exact = SimpleNamespace(key=("STR-THRU", 0.5, "2026-01-10"))
     duplicate = _declare([pool], [exact, exact])
     assert isinstance(duplicate, NativeScoreBatchRowRefusal)
     assert duplicate.code == "MODEL_NOT_READY"
+    assert duplicate.detail == (
+        "nightly_source_bundle refused: MODEL_NOT_READY: duplicate exact-cutoff payoff artifact")
 
 
 def _real_pool(cutoff, strategy="STR-THRU"):
@@ -228,3 +234,29 @@ def test_conflicting_pools_refuse_the_row_in_either_order(order):
     result = _declare([pools[i] for i in order])
     assert isinstance(result, NativeScoreBatchRowRefusal)
     assert result.code == "MODEL_NOT_READY"
+
+
+@pytest.mark.parametrize(
+    "source_detail,expected_label",
+    [
+        ("driver residual pool model_id disagrees with the resolved driver identity",
+         "driver residual pool identity mismatch"),
+        ("release carries duplicate exact-cutoff payoff artifacts",
+         "duplicate exact-cutoff payoff artifact"),
+        ("release lacks the exact-cutoff payoff artifact",
+         "exact-cutoff payoff artifact missing"),
+        ("release lacks the exact-cutoff analog pool",
+         "exact-cutoff analog pool missing"),
+    ],
+)
+def test_source_bundle_refusal_detail_maps_known_causes_to_safe_labels(
+        source_detail, expected_label):
+    exc = SimpleNamespace(code="MODEL_NOT_READY", detail=source_detail)
+    assert native_score_batch._nightly_source_bundle_refusal_detail(exc) == (
+        f"nightly_source_bundle refused: MODEL_NOT_READY: {expected_label}")
+
+
+def test_source_bundle_refusal_detail_never_leaks_unknown_source_detail():
+    exc = SimpleNamespace(code="MODEL_NOT_READY", detail="raw quote_status secret-value")
+    assert native_score_batch._nightly_source_bundle_refusal_detail(exc) == (
+        "nightly_source_bundle refused: MODEL_NOT_READY")
