@@ -381,6 +381,9 @@ Its backend `_materialize`/`_read` helpers are trusted internal orchestration, n
 independent admitted APIs or a Python privacy/security boundary. The adapter consumes
 backend source admission and these helpers;
 `experiments.magnitude_eligible_history` consumes its qualified H11 field list.
+Use pure `experiments.eligible_history.validate_request` for closed request shape only (not data admission).
+Public malformed requests/SIZE artifact envelopes refuse `CONTRACT_MISMATCH` before
+fingerprints or source access; a valid non-30-day SIZE policy still refuses `HOLDOUT_ACCESS_DENIED`.
 Use `experiments.eligible_history.materialize/read` with explicit source snapshot,
 holdout month, grouped policy, target IDs, horizons `[1, 3, 5]`, history start and
 limits (`max_source_rows`, `max_fragments`, `max_object_bytes`, `max_total_bytes`,

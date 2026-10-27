@@ -339,8 +339,9 @@ def test_only_public_platform_admits_producer_identity(data, monkeypatch):
         with pytest.raises(DataError) as caught:
             call()
         assert caught.value.problem.code == "HOLDOUT_ACCESS_DENIED"
-    with pytest.raises(TypeError, match="producer"):
+    with pytest.raises(DataError) as caught:
         size.build(data.repository, data.snapshot, producer=request["producer"])
+    assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
 
 
 def test_fabricated_internal_producer_is_not_publicly_replayable(data):
@@ -356,6 +357,90 @@ def test_fabricated_internal_producer_is_not_publicly_replayable(data):
     canonical = history.materialize(data.repository, data.snapshot, **data.request)
     assert canonical["feature_snapshot"] != fabricated["feature_snapshot"]
     assert canonical["context"]["producer"] == history._producer()
+
+
+def test_public_request_shape_matrix_refuses_before_fingerprints_or_sources(data, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("malformed public input reached fingerprinting or source access")
+
+    monkeypatch.setattr(history, "_producer", forbidden)
+    monkeypatch.setattr(history, "admit_source", forbidden)
+    monkeypatch.setattr(data.repository, "resolve", forbidden)
+    monkeypatch.setattr(data.repository, "scan", forbidden)
+    monkeypatch.setattr(data.repository._store, "publish_bytes", forbidden)
+    for invalid in (None, [], "request"):
+        with pytest.raises(DataError) as caught:
+            history.validate_request(invalid)
+        assert caught.value.code == "CONTRACT_MISMATCH"
+    bad_values = {
+        "as_of_month": [None, [], 202601, "2026-13", "2026-1"],
+        "history_start": [None, [], 2022, "2022-02-30", "20220101"],
+        "event_ids": [None, {}, "event", [], [None], [""], [" x"], ["x", "x"]],
+        "horizons": [None, {}, "1", [1], [True, 3, 5]],
+        "limits": [None, [], {}, {**LIMITS, "extra": 1},
+                   *[{**LIMITS, key: value} for key in LIMITS for value in (None, True, 0, "1")]],
+        "policy": [None, [], {}, {**POLICY, "extra": 1},
+                   *[{k: v for k, v in POLICY.items() if k != key} for key in POLICY],
+                   *[{**POLICY, key: None} for key in POLICY]],
+    }
+    invalid = [{k: v for k, v in data.request.items() if k != key} for key in data.request]
+    invalid += [{**data.request, "extra": None}]
+    invalid += [{**data.request, key: value} for key, values in bad_values.items() for value in values]
+    for request in invalid:
+        for call in (
+            lambda: history.materialize(data.repository, data.snapshot, **request),
+            lambda: history.read(data.repository, data.snapshot, data.snapshot,
+                                 columns=list(FEATURES), **request),
+            lambda: size.comparison_inputs(data.repository, data.snapshot,
+                {"request": request, "feature_snapshot": data.snapshot}),
+        ):
+            with pytest.raises(DataError) as caught:
+                call()
+            assert caught.value.code == "CONTRACT_MISMATCH"
+    build = {k: v for k, v in data.request.items() if k != "horizons"}
+    build.update(evaluation_years=["2024"], training_start="2023-01-01")
+    invalid_builds = [{k: v for k, v in build.items() if k != key}
+                     for key in build if key != "event_ids"]
+    invalid_builds += [{**build, "extra": 1}]
+    invalid_builds += [{**build, key: value} for key, values in bad_values.items() if key != "horizons"
+                      for value in values if key != "event_ids" or value is not None]
+    invalid_builds += [{**build, key: value} for key in ("evaluation_years", "training_start")
+                      for value in (None, {}, 2024, [], "bad")]
+    for request in invalid_builds:
+        with pytest.raises(DataError) as caught:
+            size.build(data.repository, data.snapshot, **request)
+        assert caught.value.code == "CONTRACT_MISMATCH"
+
+
+def test_public_artifact_columns_and_snapshot_shapes_refuse_without_io(data, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("malformed envelope reached installed fingerprint or source")
+
+    monkeypatch.setattr(history, "_producer", forbidden)
+    monkeypatch.setattr(history, "admit_source", forbidden)
+    artifact = {"request": data.request, "feature_snapshot": data.snapshot}
+    for invalid in (None, [], "artifact", {}, {"request": data.request},
+                    {"feature_snapshot": data.snapshot}, {**artifact, "extra": None},
+                    {**artifact, "context": None}, {**artifact, "temporal_plan": []},
+                    {**artifact, "request": None}, {**artifact, "request": []}):
+        with pytest.raises(DataError) as caught:
+            size.comparison_inputs(data.repository, data.snapshot, invalid)
+        assert caught.value.code == "CONTRACT_MISMATCH"
+    for columns in (None, [], {}, "n_prior", [None], ["n_prior", "n_prior"], ["live_mean"]):
+        with pytest.raises(DataError) as caught:
+            history.read(data.repository, data.snapshot, data.snapshot, columns=columns, **data.request)
+        assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
+    for invalid in (None, {}, "snap_invalid"):
+        for call in (
+            lambda: history.materialize(data.repository, invalid, **data.request),
+            lambda: history.read(data.repository, data.snapshot, invalid,
+                                 columns=list(FEATURES), **data.request),
+            lambda: size.comparison_inputs(data.repository, data.snapshot,
+                {**artifact, "feature_snapshot": invalid}),
+        ):
+            with pytest.raises(DataError) as caught:
+                call()
+            assert caught.value.code == "SNAPSHOT_UNRESOLVED"
 
 
 def test_per_forecast_strict_prior_and_label_ceiling_do_not_backfill_earlier_rows(tmp_path, monkeypatch):
