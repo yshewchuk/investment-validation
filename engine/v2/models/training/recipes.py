@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from engine.v2.foundation import content_hash
+from engine.v2.models.frozen_state_io import read_bounded_state
 
 __all__ = [
     "CLOCK_ID",
@@ -66,6 +67,7 @@ OWNER_TRAINING_JOB = "engine.v2.models.training.job"
 OWNER_P5_4 = "P5-4 frozen payoff/recalibration artifact"
 
 _REGISTRY_JSON = Path(__file__).resolve().parents[3] / "models" / "registry.json"
+_REGISTRY_MAX_BYTES = 16 * 1024 * 1024
 
 
 # --------------------------------------------------------------------------
@@ -296,7 +298,7 @@ _POST_PRINT_DAYS = 5
 
 
 def _registry_entries(path: Path | None) -> dict[str, dict]:
-    data = json.loads(Path(path or _REGISTRY_JSON).read_text())
+    data = json.loads(read_bounded_state(Path(path or _REGISTRY_JSON), _REGISTRY_MAX_BYTES).decode("utf-8"))
     models = data["models"]
     rows = models.values() if isinstance(models, dict) else models
     return {row["id"]: row for row in rows}

@@ -188,3 +188,31 @@ def test_returned_recipe_features_are_detached_and_preserve_identity():
         assert canonical_json(fresh) == expected
     finally:
         size_comparator.FEATURES[:] = original
+
+
+@pytest.mark.parametrize("kind,code", [("oversized", "RESOURCE_LIMIT_EXCEEDED"),
+                                      ("fifo", "RESOURCE_UNAVAILABLE")])
+def test_native_registry_bounded_refusal_before_decode_or_fit(tmp_path, monkeypatch, kind, code):
+    import os
+
+    from engine.v2.models.training import recipes
+    from engine.v2.ops.errors import OpsError
+
+    path = tmp_path / "registry.json"
+    if kind == "fifo":
+        os.mkfifo(path)
+    else:
+        path.write_bytes(b"{}")
+        monkeypatch.setattr(recipes, "_REGISTRY_MAX_BYTES", 1)
+    monkeypatch.setattr(recipes, "_REGISTRY_JSON", path)
+    monkeypatch.setattr(recipes.json, "loads", lambda *a, **k: pytest.fail("refused registry decoded"))
+    monkeypatch.setattr(comparator, "fit_recipe_estimator", lambda *a, **k: pytest.fail("refused registry fit"))
+    with pytest.raises(OpsError) as caught:
+        comparator.native_recipe()
+    assert caught.value.code == code
+
+
+def test_native_registry_programming_errors_are_not_resource_refusals(monkeypatch):
+    monkeypatch.setattr(comparator, "current_recipes", lambda: (_ for _ in ()).throw(ValueError("bug")))
+    with pytest.raises(ValueError, match="bug"):
+        comparator.native_recipe()

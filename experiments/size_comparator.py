@@ -6,8 +6,10 @@ import numpy as np
 from threadpoolctl import threadpool_limits
 
 from engine.v2.foundation import content_hash
+from engine.v2.models.frozen_state_io import BoundedStateReadError
 from engine.v2.models.training.estimators import fit_recipe_estimator
 from engine.v2.models.training.recipes import RecipeKey, current_recipes
+from engine.v2.ops.errors import fail
 
 FEATURES = ["has_implied_quote", "mean_prior_abs_move", "abs_dist_ema", "ema12r_abs",
     "mean_prior_move", "signed_streak", "dist_high", "dist_ema", "spy_vol20", "spy_dd252",
@@ -18,7 +20,11 @@ COLUMNS = list(dict.fromkeys(["n_prior", *[{'or_implied': 'implied_move',
 
 def native_recipe():
     """Refuse incumbent drift; reuse native constructors, not the live-panel loader."""
-    recipe = current_recipes()[RecipeKey("size", "*", "champion")]
+    try:
+        recipe = current_recipes()[RecipeKey("size", "*", "champion")]
+    except BoundedStateReadError as error:
+        raise fail("RESOURCE_LIMIT_EXCEEDED" if error.code == "SIZE_LIMIT" else "RESOURCE_UNAVAILABLE",
+                   "incumbent registry failed bounded admission") from None
     if (list(recipe.features) != FEATURES or recipe.estimator.kind != "ols_mlp_blend"
             or recipe.estimator.seeds != (20260829,) or recipe.folds.min_train_rows != 500
             or recipe.estimator.params != {"mlp": {"hidden_layer_sizes": [64, 32], "max_iter": 400,
