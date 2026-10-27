@@ -320,7 +320,10 @@ def _remember_unknown_symbol(ticker: str) -> None:
 #: ``misses`` counts, per ticker, how many consecutive runs asked for it and
 #: got a definitive no-chain answer (absent from a 200 body, or a 404); see
 #: :data:`CHAIN_MISS_SKIP_AFTER`. ``last`` is the anchor date of the run that
-#: recorded the newest miss. Entries at zero are dropped and entries older
+#: recorded the newest miss. The count moves ONCE per anchor date: a same-day
+#: rerun records no second miss. Skip age is ``(anchor - last).days`` clamped
+#: at zero, so a backdated run never re-probes a future-dated ``last``.
+#: Entries at zero are dropped and entries older
 #: than CHAIN_MISS_PRUNE_DAYS are pruned; a malformed entry is ignored, never
 #: raised. A flat ``{"<YYYY-MM-DD>": [...]}`` file — the format before the
 #: counts existed — still reads: its canonical-date keys are the ``owed``
@@ -425,11 +428,6 @@ def _parse_chain_ledger(raw) -> tuple[dict[str, set[str]], dict[str, dict[str, s
 def _read_chain_retry() -> dict[str, set[str]]:
     """The ``owed`` section alone; see :func:`_read_chain_ledger`."""
     return _read_chain_ledger()[0]
-
-
-def _read_chain_misses() -> dict[str, dict[str, str]]:
-    """The ``misses`` section alone; see :func:`_read_chain_ledger`."""
-    return _read_chain_ledger()[1]
 
 
 def _prune_chain_ledger(owed: dict[str, set[str]], misses: dict[str, dict[str, str]],
@@ -838,10 +836,14 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     owed_now, misses = _read_chain_ledger()
     owed_names = {t for names in owed_now.values() for t in names}
     wanted_set = set(wanted_all)
+    # The age is clamped at zero: a backdated run (anchor older than the
+    # entry's ``last``) reads a future ``last`` as age 0 — quiet, never a
+    # re-probe, and no negative-age arithmetic to trip on.
     skip = {t for t, e in misses.items()
             if t in wanted_set and t not in owed_names
             and e["n"] >= CHAIN_MISS_SKIP_AFTER
-            and (as_of - _canonical_chain_day(e["last"])).days < CHAIN_MISS_REPROBE_DAYS}
+            and max(0, (as_of - _canonical_chain_day(e["last"])).days)
+            < CHAIN_MISS_REPROBE_DAYS}
     ask_all = [t for t in wanted_all if t not in skip]
     ask_set = set(ask_all)
     # Pairs = the calls the skip actually saves this run: one per skipped name
@@ -930,9 +932,11 @@ def _finish_chain_ledger(anchor: str, verdicts: dict[str, str], held: set,
     in any response body this run, or already held for one of the sessions it
     needed — clears the count; a run in which EVERY ask of the name was a
     definitive no-chain (absent from a 200 body, or a 404) raises it by one and
-    stamps ``last`` with the run's anchor date; anything transient, wrong-shape
-    or quota-cut leaves the entry exactly as it was, because a call that never
-    answered says nothing about whether the name has a chain.
+    stamps ``last`` with the run's anchor date — ONCE per anchor date: a rerun
+    whose entry already carries this anchor leaves the count where it stands;
+    anything transient, wrong-shape or quota-cut leaves the entry exactly as it
+    was, because a call that never answered says nothing about whether the name
+    has a chain.
 
     The write carries the owed section through as read — the session persists
     already banked this run's debt — so this is the one place counts change,
@@ -951,6 +955,11 @@ def _finish_chain_ledger(anchor: str, verdicts: dict[str, str], held: set,
                 reset += 1  # a live count cleared by real data
             continue
         entry = misses.get(ticker)
+        if entry is not None and entry["last"] == anchor:
+            # Same-day rerun: the anchor date is already counted once; a
+            # second MISS verdict for the same anchor must not deepen the
+            # streak. DATA still took the reset branch above.
+            continue
         misses[ticker] = {"n": (entry["n"] if entry else 0) + 1, "last": anchor}
     owed, misses = _prune_chain_ledger(owed, misses, ref)
     _write_chain_retry(owed, misses)
