@@ -308,9 +308,9 @@ def _calendar_row_problem(key: BoardRequest, calendar_row: Any) -> tuple[str, st
       :func:`validated_as_of`; validating it here with the SAME helper
       returns the row-level ``CALENDAR_ROW_INVALID`` instead of the
       ``INVALID_DATE`` the cutoff helper would otherwise surface. A null
-      ``entry_date`` is left to that helper's own ``MISSING_STAGED_INPUT``
-      (or to no artifact cutoff when the release carries no payoff artifact),
-      so only malformed non-null values are caught here.
+      ``entry_date`` is left to downstream cutoff construction and its
+      ``MISSING_STAGED_INPUT`` refusal, including STR-THRU's required exact-
+      cutoff analog selection; only malformed non-null values are caught here.
     - ``ticker``/``event_date`` not matching ``key`` -- ``CALENDAR_ROW_KEY_
       MISMATCH``. Neither this module nor ``assemble_nightly_source_bundle``
       (which only checks ``panel_row`` against ``calendar_row``, never
@@ -427,10 +427,13 @@ def _release_artifact_declarations(
     The release is the SOLE source: the driver role's verified residual pool
     (slot ``driver``) with its causal recipe, and the strategy's payoff
     artifact selected by the canonical ``(strategy, fill alpha, cutoff)`` key
-    (``payoff_artifact_key``) with its ``before`` recipe. A member the release
-    does not carry leaves its declaration ABSENT -- never filled from
-    request/event/panel/Tier-4 rows. Malformed members never reach here: they
-    already refused ``resolve_release_binding`` with ``ModelNotReady``.
+    (``payoff_artifact_key``) with its ``before`` recipe. A missing driver pool
+    leaves its declaration absent. If a payoff family is present, exactly one
+    artifact must match the row's key or assembly refuses the row; when no
+    payoff family is present, the optional payoff declaration stays absent.
+    No member is filled from request/event/panel/Tier-4 rows. Malformed members
+    never reach here: they already refused ``resolve_release_binding`` with
+    ``ModelNotReady``.
     """
     pool = binding.driver_residual_artifacts.get(driver_identity.role)
     artifacts = binding.payoff_artifacts.get(strategy) or ()

@@ -1018,7 +1018,7 @@ Top-level imports, all strictly below this package's own layer (7.0):
 `DYNAMIC_MENU`), `engine.v2.scoring` (5.0 — `native_board_universe.py`'s
 `SUPPORTED_STRATEGIES`/`source_inputs`; `native_score_batch.py`'s
 `release_bindings`/`nightly_source_bundle`/`source_inputs`/`stages`/
-`identity`/`application`/`gate_fold_selection.select_gate_forecast_source`; `native_entry_rule_inputs.py`'s top-level `native_entry_rule.ENTRY_RULE_STRATEGIES`, `nightly_source_bundle.NightlySourceBundleRefusal` and `release_bindings.ModelIdentity`/`ScoringReleaseBinding`; and since #681 `native_analog_query.analog_declarations` plus `identity.score_request_key`, declaring the frozen board analog pool on each row whose release carries a matching one), `engine.v2.ledger` (6.0), `engine.v2.parity`
+`identity`/`application`/`gate_fold_selection.select_gate_forecast_source`; `native_entry_rule_inputs.py`'s top-level `native_entry_rule.ENTRY_RULE_STRATEGIES`, `nightly_source_bundle.NightlySourceBundleRefusal` and `release_bindings.ModelIdentity`/`ScoringReleaseBinding`; and since #681 `native_analog_query.analog_declarations` plus `identity.score_request_key`, requiring an exact-cutoff board analog pool for STR-THRU and declaring a matching pool for RUNUP when present), `engine.v2.ledger` (6.0), `engine.v2.parity`
 (6.5). `engine.v2.models` (3.5) permits top-level `payoff_artifact_key` in `native_score_batch` and `PayoffSurfaceArtifact`/`payoff_artifact_key`/`DriverResidualPoolArtifact` in `native_runup_inputs`, `trailing_cutoff_artifact`'s `PNL_HISTORY_ID`/`TrailingCutoffError`/`cutoff_month`/`trailing_cutoff_key` in `native_entry_rule_inputs`, and `engine.v2.models.deployment`/`frozen_state_io` in `pool_refresh`; `retrain_check` also imports `engine.v2.models.deployment` directly. Other direct model imports are lazy.
 `engine.v2.domain.generation` (4a, `Geometry`/`Pricing`) is lazy-only except the top-level `DISABLED` import in `native_board_universe.py` and `nightly_raw_row_producer.py`. Ops does not import the native experiment adapter; the executor selects a fixed child module.
 `engine.v2.domain.generation` supplies geometry to the rescore decoder
@@ -1173,7 +1173,7 @@ Per row (collected as a refusal, never sinks the batch):
 | Refusal code | Condition |
 |---|---|
 | `INVALID_KEY_FIELD` | the row's own key contains a reserved separator |
-| `MISSING_STAGED_INPUT` | the staged `calendar_row` has no non-empty string `event_id` |
+| `MISSING_STAGED_INPUT` | the staged `calendar_row` has no non-empty string `event_id`, or STR-THRU's required exact-cutoff analog declaration needs a cutoff and `entry_date` is null |
 | `CALENDAR_ROW_INVALID` | the staged calendar row is not a mapping, or its `event_date`, `expiry`, or non-null `entry_date` does not parse |
 | `CALENDAR_ROW_KEY_MISMATCH` | the staged row's ticker/event_date disagrees with the row's own key |
 | `UNSUPPORTED_STRATEGY` | the row's strategy has no `_STRATEGY_REGISTRY` entry; no bundle is built. The raw-row producer also emits it for `DISABLED` strategies (CAL-P, CND-P) |

@@ -693,10 +693,12 @@ resolved driver identity, the row is refused with `MODEL_NOT_READY`. If no
 release resolves, `NoCurrentRelease` remains; a resolved binding missing
 required model roles keeps the native batch's existing per-row refusals.
 
-For STR-THRU, when the release contains a payoff family but no unique
-`payoff_line` with the row's exact `(strategy, alpha, cutoff)` key, native
-batch assembly refuses that row with `MODEL_NOT_READY`; it does not silently
-score a residual-only block or select an older cutoff.
+For STR-THRU, absence of a payoff family leaves the optional declaration
+absent. When the release contains a payoff family, native batch assembly
+requires exactly one `payoff_line` with the row's exact `(strategy, alpha,
+cutoff)` key; zero or multiple matches refuse that row with
+`MODEL_NOT_READY`. It does not silently score a residual-only block or select
+an older cutoff.
 
 #### Paired residual and entry-rule declarations (issue #498)
 
