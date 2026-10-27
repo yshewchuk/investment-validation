@@ -244,7 +244,7 @@ tests = [
     "tests/v2/serving/test_score_population.py",
     "tests/v2/foundation/test_experiment_holdouts.py",
     "tests/test_phase4_analog_recipe_cache.py",
-    "tests/test_phase4_capture_strict.py",
+    "tests/v2/integration/test_phase4_capture_strict.py",
     "tests/test_phase4_checkpoints.py",
     "tests/test_phase4_frozen_resources.py",
     "tests/test_phase4_release_assembler.py",
@@ -321,7 +321,7 @@ tests = [
     "tests/test_phase4_planted_defect_control.py",
     "tests/test_phase4_numeric_negative_control_states.py",
     "tests/test_phase4_acceptance_independence.py",
-    "tests/test_v2_scoring_native_entry_rule.py",
+    "tests/v2/scoring/test_v2_scoring_native_entry_rule.py",
 ]
 
 [modules.data_store]
@@ -570,7 +570,7 @@ mutate = [
 ]
 tests = [
     "tests/v2/scoring/test_dynamic_outcomes.py",
-    "tests/test_phase4_capture_strict.py",
+    "tests/v2/integration/test_phase4_capture_strict.py",
     "tests/v2/models/test_phase4_chooser_trace.py",
     "tests/test_v2_models_chooser_analog_pool.py",
     "tests/v2/scoring/test_v2_scoring_native_chooser_features.py",
@@ -585,7 +585,7 @@ mutate = [
     "engine/v2/models/training/trailing_cutoff.py",
 ]
 tests = [
-    "tests/test_v2_scoring_native_entry_rule.py",
+    "tests/v2/scoring/test_v2_scoring_native_entry_rule.py",
     "tests/v2/models/test_checks_phase5_acceptance.py",
 ]
 
@@ -603,7 +603,7 @@ mutate = [
 tests = [
     "tests/v2/scoring/test_runup_raw_outputs.py",
     "tests/test_phase4_acceptance_independence.py",
-    "tests/test_phase4_capture_strict.py",
+    "tests/v2/integration/test_phase4_capture_strict.py",
     "tests/test_phase4_frozen_resources.py",
     "tests/test_phase4_release_assembler.py",
     "tests/test_phase4_trace_verifier.py",
@@ -643,8 +643,8 @@ tests = [
     "tests/v2/scoring/test_runup_calendar_horizon.py",
     "tests/v2/ops/test_runup_horizon_production.py",
     "tests/test_phase4_acceptance_independence.py",
-    "tests/test_phase4_capture_strict.py",
-    "tests/test_phase4_frozen_bridge_rows.py",
+    "tests/v2/integration/test_phase4_capture_strict.py",
+    "tests/v2/integration/test_phase4_frozen_bridge_rows.py",
     "tests/test_v2_models_p5_2_acceptance.py",
     "tests/test_v2_models_recalibration_artifact.py",
     "tests/test_v2_scoring_actionable_flags.py",

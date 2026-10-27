@@ -290,4 +290,4 @@ Synthetic only, no real data:
 
     timeout 600 python3 -m pytest -q -p no:xdist tests/v2/models/test_checks_phase5_acceptance.py \
         tests/v2/models/test_checks_phase5_phase4_replay.py tests/v2/models/test_phase5_calibration_keys.py \
-        tests/test_v2_scoring_native_entry_rule.py tests/v2/models/test_phase4_chooser_trace.py
+        tests/v2/scoring/test_v2_scoring_native_entry_rule.py tests/v2/models/test_phase4_chooser_trace.py

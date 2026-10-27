@@ -480,7 +480,7 @@ Details:
   spread and market-cap edges, a thin window and a missing history file.
   They also run a capture to `phase4_real` round trip, and
   a planted one-ulp cutoff is caught by `_compare_dimension`
-  (`tests/test_v2_scoring_native_entry_rule.py`).
+  (`tests/v2/scoring/test_v2_scoring_native_entry_rule.py`).
 - **Real data.** This job is light: it reads the small `pnl_sim_history`
   file. `tools/phase5_calibration_keys.py --phase4-corpus` lists the months
   (`trailing_cutoff_months`) and prints the job.

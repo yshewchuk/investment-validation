@@ -453,7 +453,7 @@ def _entry_rule_candidate(tmp_path, strategy, pnl_cutoff):
     (forecast = 2 x the strategy's width divisor, so every strike lands on the
     half-dollar put grid), a terminal simulation and ``gate_inputs`` kind
     entry_rule. No gate binding: legacy had no gate champion."""
-    from tests.test_phase4_capture_strict import _artifact, _full_strict_candidate
+    from tests.v2.integration.test_phase4_capture_strict import _artifact, _full_strict_candidate
 
     path, digest = _artifact(tmp_path)
     candidate = _full_strict_candidate(

@@ -444,7 +444,7 @@ def _numerical_independence_source() -> SourceBundle:
         # closed-form:
         #   driver = 7.0 (forecast_recipes below), spot = 100.0
         #   exit_value = max(0, (0.02 + 0.004 * 7.0) * 100.0) = 4.8
-        #   entry_cost_pct = 5.0 / chain_spot 125.0 * 100.0 = 4.0
+        #   entry_cost_pct = 4.0 / chain_spot 125.0 * 100.0 = 3.2
         #   (not calendar spot 100.0)
         #   return = (4.8 - 4.0 + 0.0 * 100.0) / 4.0 = 0.2
         # exp_pnl_model == 0.2 and win_model == 1.0 for EVERY seed/draw_count.
@@ -554,7 +554,7 @@ def _numerical_independence_control() -> dict[str, Any]:
         and expected.gate_terms == {"gate_score": 1.0,
                                     "gate_threshold": 0.0,
                                     "gate_pass": True}
-        and expected.financial_diagnostics.get("entry_cost_pct") == 4.0
+        and expected.financial_diagnostics.get("entry_cost_pct") == 3.2
         and math.isclose(expected.resolved_request.get("exp_pnl_model", float("nan")), 0.2, rel_tol=1e-9)
         and math.isclose(expected.resolved_request.get("win_model", float("nan")), 1.0, rel_tol=1e-9)
         and scored.validation_status == "refused"
