@@ -2,10 +2,13 @@
 
 ``scan_quote_rows`` carries the chain's own spot through for the later
 ``entry_cost_pct`` consumer: every row surviving the expiry filter gets a
-``chain_spot`` float, an unusable or disagreeing spot on a SURVIVING row is
-``CONTRACT_MISMATCH`` (the same class as an unusable bid/ask) and no partial
-tuple is returned, and an empty slice stays an empty ``QuoteRowInputs``. Rows
-for another expiry are never judged on it.
+``chain_spot`` float, and an unusable or disagreeing spot on a SURVIVING row is
+a typed per-row ``NativeScoreBatchRowRefusal`` with code
+``CHAIN_SPOT_UNAVAILABLE`` -- the producer refuses that key in place while
+other rows continue -- never a build-wide ``CONTRACT_MISMATCH`` (other
+chain-content errors, e.g. an unusable bid/ask or strike, still fail the
+build). No partial tuple is returned, an empty slice stays an empty
+``QuoteRowInputs``, and rows for another expiry are never judged on it.
 """
 from __future__ import annotations
 
@@ -13,8 +16,8 @@ from datetime import datetime
 
 import pytest
 
-from engine.v2.data.errors import DataError
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.native_score_batch_types import NativeScoreBatchRowRefusal
 from engine.v2.ops.nightly_quote_rows import QuoteRowInputs, scan_quote_rows
 from tests.v2.ops.chain_support import (
     SESSION as _SESSION,
@@ -78,23 +81,24 @@ def test_an_integer_or_numeric_string_spot_stages_as_a_float():
     None, float("nan"), float("inf"), -float("inf"), 0.0, -12.5, True, False,
     "not-a-spot", [], 10**400,
 ])
-def test_an_unusable_spot_on_a_surviving_row_is_contract_mismatch(spot):
-    with pytest.raises(DataError) as exc:
+def test_an_unusable_spot_on_a_surviving_row_is_a_per_row_refusal(spot):
+    with pytest.raises(NativeScoreBatchRowRefusal) as exc:
         _stage(_row(spot=spot))
-    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.code == "CHAIN_SPOT_UNAVAILABLE"
+    assert exc.value.key is _KEY
 
 
-def test_surviving_rows_that_disagree_on_the_spot_are_contract_mismatch():
-    with pytest.raises(DataError) as exc:
+def test_surviving_rows_that_disagree_on_the_spot_are_a_per_row_refusal():
+    with pytest.raises(NativeScoreBatchRowRefusal) as exc:
         _stage(_row(spot=100.0), _row(right="P", spot=100.01))
-    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.code == "CHAIN_SPOT_UNAVAILABLE"
 
 
 def test_the_spot_refusal_never_echoes_a_staged_value():
-    with pytest.raises(DataError) as exc:
+    with pytest.raises(NativeScoreBatchRowRefusal) as exc:
         _stage(_row(spot=1234.5678), _row(right="P", spot="not-a-spot"))
 
-    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.code == "CHAIN_SPOT_UNAVAILABLE"
     assert "1234.5678" not in str(exc.value)
     assert "not-a-spot" not in str(exc.value)
 
@@ -134,15 +138,15 @@ def test_the_per_key_scan_stages_the_spot_it_reads(tmp_path):
     assert [row["chain_spot"] for row in result.quote_rows] == [64.25, 64.25]
 
 
-def test_a_stored_null_spot_fails_the_per_key_scan(tmp_path):
+def test_a_stored_null_spot_refuses_the_key_in_place(tmp_path):
     repository, snapshot = _snapshot(
         tmp_path, price={"AAA": [_price_row("AAA", _SESSION)]},
         chains=[dict(_physical_chain_row("AAA", _OBS, _TARGET, 100.0, right="C"), spot=None)])
 
-    with pytest.raises(DataError) as exc:
+    with pytest.raises(NativeScoreBatchRowRefusal) as exc:
         scan_quote_rows(repository, snapshot, _KEY, expiry="2024-02-16",
                         decision_session=_SESSION)
-    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.code == "CHAIN_SPOT_UNAVAILABLE"
 
 
 def test_a_stored_null_spot_on_another_expiry_does_not_fail_the_scan(tmp_path):

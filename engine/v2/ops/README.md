@@ -109,9 +109,10 @@ returns `QuoteRowInputs` from a pinned `option_chains` snapshot for an exact
 `(ticker, decision_session)` request; an optional `chain_rows` supplies that
 ticker's rows from the batched read. Every row surviving the requested-expiry
 filter also carries `chain_spot` (the chain's own `spot` column), and an unusable
-or disagreeing spot on those rows is a `CONTRACT_MISMATCH`, exactly as an
-unusable bid/ask is. `nightly_raw_row_producer` is its production caller; see
-the component architecture contract.
+or disagreeing spot on those rows refuses that row in place with
+`CHAIN_SPOT_UNAVAILABLE` (other rows continue), unlike an unusable bid/ask,
+which is still a `CONTRACT_MISMATCH`. `nightly_raw_row_producer` is its
+production caller; see the component architecture contract.
 
 `nightly_chain_batch.scan_chain_slices`, `CHAIN_COLUMNS`, `CHAIN_TABLE`,
 `require_chain_rows` and `require_usable_fields` are the internal batched

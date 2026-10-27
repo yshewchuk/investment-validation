@@ -29,6 +29,7 @@ from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import fail
 from engine.v2.ops.native_board_universe import BoardRequest
+from engine.v2.ops.native_score_batch_types import NativeScoreBatchRowRefusal
 from engine.v2.ops.nightly_chain_batch import CHAIN_COLUMNS, require_chain_rows
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
@@ -40,6 +41,14 @@ __all__ = ["QuoteRowInputs", "scan_quote_rows"]
 _QUOTE_TABLE = "option_chains"
 _BATCH_CAP = 50_000
 _RESULT_CAP = 2_000_000
+#: The per-row refusal an unusable/disagreeing chain spot becomes, with its
+#: fixed public-safe detail (CWE-209): never a staged value.
+_CHAIN_SPOT_UNAVAILABLE = "CHAIN_SPOT_UNAVAILABLE"
+_CHAIN_SPOT_DETAIL = "the option chain carries no usable spot for the board request"
+
+
+class _UnusableChainSpot(ValueError):
+    """A surviving quote row's chain spot is unusable or disagrees with the slice."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,21 +92,22 @@ def _chain_spot(value: Any) -> float:
     """One surviving quote row's chain ``spot`` as a float.
 
     The chain spot is the legacy ``entry_cost_pct`` denominator, so an unusable
-    one is as fatal as an unusable bid/ask: ``None``, NaN, +/-inf, a
-    non-numeric or bool value, or a non-positive number is ``CONTRACT_MISMATCH``
-    with a fixed message that never echoes the staged value. Whether an
+    one is a per-row ``CHAIN_SPOT_UNAVAILABLE`` refusal, not a build failure:
+    ``None``, NaN, +/-inf, a non-numeric or bool value, or a non-positive number
+    raises ``_UnusableChainSpot`` with a fixed message that never echoes the
+    staged value, and ``scan_quote_rows`` turns it into that typed refusal. Whether an
     incomplete bid/ask makes the domain unusable stays
     ``nightly_source_bundle.quote_domain_map``'s own validation; only the spot
     is judged here.
     """
     if isinstance(value, bool):
-        raise data_fail("CONTRACT_MISMATCH", "option chain row has an unusable spot")
+        raise _UnusableChainSpot("option chain row has an unusable spot")
     try:
         spot = float(value)
     except (TypeError, ValueError, OverflowError):
-        raise data_fail("CONTRACT_MISMATCH", "option chain row has an unusable spot") from None
+        raise _UnusableChainSpot("option chain row has an unusable spot") from None
     if not math.isfinite(spot) or spot <= 0.0:
-        raise data_fail("CONTRACT_MISMATCH", "option chain row has an unusable spot")
+        raise _UnusableChainSpot("option chain row has an unusable spot")
     return spot
 
 
@@ -112,8 +122,8 @@ def _matching_quote_rows(rows: list[dict], expiry: str,
         if chain_spot is None:
             chain_spot = spot
         elif spot != chain_spot:
-            raise data_fail(
-                "CONTRACT_MISMATCH", "option chain rows disagree on the spot for one expiry")
+            raise _UnusableChainSpot(
+                "option chain rows disagree on the spot for one expiry")
         staged.append({
             "ticker": row["ticker"], "right": row["right"],
             "strike": float(row["strike"]), "expiry": expiry,
@@ -121,6 +131,39 @@ def _matching_quote_rows(rows: list[dict], expiry: str,
             "chain_spot": spot, "observed_at": decision_session,
         })
     return tuple(staged)
+
+
+def _scan_key_rows(repository: Repository, snapshot: SnapshotRef, ticker: str,
+                   session_day: str) -> list[Mapping[str, Any]]:
+    """One bounded ``option_chains`` scan of exactly ``(ticker, session_day)``.
+
+    The requested expiry is data, not a key predicate, so it is applied in
+    Python by the caller; a missing table is ``Repository.table_contract``'s
+    own typed ``CONTRACT_MISMATCH``.
+    """
+    contract = repository.table_contract(snapshot, _QUOTE_TABLE)
+    version = snapshot.table_versions[_QUOTE_TABLE]
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(ticker,)),
+                  KeyPredicate(column="obs_date", operator="eq", values=(session_day,)))
+    population_bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=_QUOTE_TABLE,
+        table_contract_ref=version.table_contract_ref,
+        key_filter=key_filter, time_interval=None)
+    max_result_rows = min(_RESULT_CAP, population_bound)
+    max_batch_rows = (min(contract.maximum_batch_rows, _BATCH_CAP, max_result_rows)
+                      if max_result_rows > 0
+                      else min(contract.maximum_batch_rows, _BATCH_CAP))
+    query = DataQuery(
+        snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
+        columns=CHAIN_COLUMNS,
+        key_filter=key_filter,
+        order_by=tuple(contract.primary_key),
+        max_batch_rows=max_batch_rows,
+        max_result_rows=max_result_rows)
+    rows = []
+    for batch in repository.scan(query, table_name=_QUOTE_TABLE):
+        rows.extend(batch.to_pylist())
+    return require_chain_rows(rows, ticker, session_day)
 
 
 def scan_quote_rows(
@@ -158,8 +201,13 @@ def scan_quote_rows(
     for another expiry or date with a null spot never fails the slice, because
     ``require_chain_rows`` checks presence, never value. A surviving row whose
     spot is ``None``, NaN, non-finite, non-numeric, bool or non-positive, or
-    surviving rows that disagree on it, raise ``CONTRACT_MISMATCH`` with a
-    fixed message (same class as an unusable bid/ask): no partial tuple.
+    surviving rows that disagree on it, make this call raise the typed per-row
+    ``NativeScoreBatchRowRefusal`` with code ``CHAIN_SPOT_UNAVAILABLE`` and a
+    fixed detail (no staged value) -- like the calendar reader's
+    ``PRICE_HISTORY_NOT_AVAILABLE``/``NO_RESOLVABLE_EXPIRY`` refusals, it
+    refuses this key in place while other rows continue; the raw-row producer
+    maps it to its refusal document. Unlike those, an unusable bid/ask or
+    strike still raises ``CONTRACT_MISMATCH`` and fails the build.
     """
     if not isinstance(key, BoardRequest) or any(
         not isinstance(value, str) or not value.strip()
@@ -175,30 +223,12 @@ def scan_quote_rows(
     if checked_rows is not None:
         rows = checked_rows
     else:
-        contract = repository.table_contract(snapshot, _QUOTE_TABLE)
-        version = snapshot.table_versions[_QUOTE_TABLE]
-        key_filter = (KeyPredicate(column="ticker", operator="eq", values=(key.ticker,)),
-                      KeyPredicate(column="obs_date", operator="eq", values=(session_day,)))
-        population_bound = repository.scan_population_bound(
-            snapshot.snapshot_id, table_name=_QUOTE_TABLE,
-            table_contract_ref=version.table_contract_ref,
-            key_filter=key_filter, time_interval=None)
-        max_result_rows = min(_RESULT_CAP, population_bound)
-        max_batch_rows = (min(contract.maximum_batch_rows, _BATCH_CAP, max_result_rows)
-                          if max_result_rows > 0
-                          else min(contract.maximum_batch_rows, _BATCH_CAP))
-        query = DataQuery(
-            snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
-            columns=CHAIN_COLUMNS,
-            key_filter=key_filter,
-            order_by=tuple(contract.primary_key),
-            max_batch_rows=max_batch_rows,
-            max_result_rows=max_result_rows)
-        rows = []
-        for batch in repository.scan(query, table_name=_QUOTE_TABLE):
-            rows.extend(batch.to_pylist())
-        rows = require_chain_rows(rows, key.ticker, session_day)
-    quote_rows = _matching_quote_rows(rows, expiry_day, session_day)
+        rows = _scan_key_rows(repository, snapshot, key.ticker, session_day)
+    try:
+        quote_rows = _matching_quote_rows(rows, expiry_day, session_day)
+    except _UnusableChainSpot:
+        raise NativeScoreBatchRowRefusal(
+            key, _CHAIN_SPOT_UNAVAILABLE, _CHAIN_SPOT_DETAIL) from None
     if not quote_rows:
         return QuoteRowInputs(quote_rows=(), quote_status="empty")
     return QuoteRowInputs(quote_rows=quote_rows, quote_status="recorded")
