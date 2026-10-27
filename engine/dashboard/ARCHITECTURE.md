@@ -250,8 +250,9 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   before its first fetch (a hard kill leaves it owed) and replaced by the real
   failures on exit; owed names on sessions that left the two-session window
   are re-asked for 14 days (`older_retried`). The memo is read only if a regular file under 1 MB, written
-  atomically; a read or write problem logs to stderr and never stops the
-  refresh (a lost memo costs a re-buy window).
+  atomically. A non-regular or oversized memo is ignored with a stderr line;
+  an unparseable memo reads as empty without a line; a write problem logs to
+  stderr. None of these stops the refresh (a lost memo costs a re-buy window).
 - **Tier-4 gap repair** — with refresh and tiers on, at most one SNAPSHOT per run:
   on the repair path it is written after the Tier-4 gap check; a degraded
   tiers step writes its own (see table); a failed write keeps the previous

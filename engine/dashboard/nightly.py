@@ -395,10 +395,14 @@ def _persist_chain_retry(stamp: str, retry: set[str]) -> None:
     which replace the up-front entry. A session that never reaches the fetch
     loop writes nothing.
 
-    Entries older than 14 days behind ``stamp`` are pruned — past that the
-    session is far outside any heal window and the date is not coming back.
-    Dates inside that retention but outside the CHAIN_SESSIONS heal window
-    are re-asked from the memo before they age out (see
+    Entries older than 14 days behind the reference are pruned — past that
+    the session is far outside any heal window and the date is not coming
+    back. The reference is the NEWER of ``stamp`` and the newest date key
+    already on file, so a persist at an old stamp (an older-memo re-ask that
+    failed again) can neither keep stale entries alive nor re-persist its
+    own date past 14 days behind a fresher debt the file carries. Dates
+    inside that retention but outside the CHAIN_SESSIONS heal window are
+    re-asked from the memo before they age out (see
     :func:`refresh_forward_chains`).
     """
     d = _read_chain_retry()
@@ -408,12 +412,17 @@ def _persist_chain_retry(stamp: str, retry: set[str]) -> None:
         d[stamp] = retry
     else:
         d.pop(stamp, None)
-    cutoff = pd.Timestamp(stamp) - pd.Timedelta(days=14)
+    ref = pd.Timestamp(stamp)
+    for k in d:
+        try:
+            kk = pd.Timestamp(k)
+        except ValueError:
+            continue
+        if kk > ref:
+            ref = kk  # NaT never compares greater; unparseables keep nothing
+    cutoff = ref - pd.Timedelta(days=14)
     kept: dict[str, set[str]] = {}
     for k, v in d.items():
-        if k == stamp:
-            kept[k] = v
-            continue
         try:
             old = pd.Timestamp(k)
         except ValueError:
@@ -655,17 +664,25 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
         # The memo reaches past `sessions`: two nights of healing, fourteen
         # days of retention. Dates in that gap are not touched by the loop
         # above, so re-ask their owed unheld names once, from a single memo
-        # read, before the prune ages them out.
+        # read, before the prune ages them out. Keys are canonicalised: a
+        # date is only re-asked when it is exactly its own "YYYY-MM-DD"
+        # string, so a hand-edited or corrupt key carrying a time part can
+        # never be passed through as a tradeDate or a persist stamp. They
+        # are ignored here and counted once on stderr.
         newest = pd.Timestamp(stamps[0])
         cutoff = newest - pd.Timedelta(days=14)  # the same cutoff as the prune
         memo = _read_chain_retry()
+        non_canonical = 0
         for d in sorted(memo):
             if d in stamps:
                 continue  # the heal loop above already handled this session
             try:
-                day = pd.Timestamp(d).normalize()
+                day = pd.Timestamp(d)
             except ValueError:
-                continue  # not a date string: leave it for the prune
+                continue  # not a date string at all: leave it for the prune
+            if pd.isna(day) or d != str(day.date()):
+                non_canonical += 1  # a time part, or not a date at all
+                continue
             if day < cutoff or day >= newest:
                 continue  # past retention, or not older than this run
             owed = sorted({t for t in memo[d] & set(wanted_all)
@@ -677,8 +694,13 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
                   f"{len(owed)} retry-file names before they age out "
                   "(transient failures and quota cuts)",
                   file=sys.stderr)
-            _refresh_one_session(fetcher, wanted_all, d, held, batch=batch,
-                                 out=out, skip_held=skip_held, only=owed)
+            _refresh_one_session(fetcher, wanted_all, str(day.date()), held,
+                                 batch=batch, out=out, skip_held=skip_held,
+                                 only=owed)
+        if non_canonical:
+            print(f"[chains] retry memo: ignored {non_canonical} "
+                  f"non-canonical date key(s) (expected 'YYYY-MM-DD')",
+                  file=sys.stderr)
     return out
 
 
@@ -802,8 +824,21 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                 retry.update(chunk)
                 continue
             rows = data
+            dict_rows = [r for r in rows if isinstance(r, dict)]
+            if len(dict_rows) != len(rows):
+                # Rows that are not objects (a bare string, a number, null)
+                # would crash `r.get` and take the whole session down: same
+                # class as a non-list "data" — a transient bad answer, not a
+                # verdict — owed the date, reported, and the session
+                # continues with the later batches. The chunk is retried as
+                # a unit: a partly-junk body says nothing about which names
+                # really have chains, so none of its rows are booked.
+                out["failed"].append(f"{chunk[0]}..: response 'data' rows are "
+                                     "not all objects")
+                retry.update(chunk)
+                continue
             out["rows"] += len(rows)
-            got = {r.get("ticker") for r in rows}
+            got = {r.get("ticker") for r in dict_rows}
             out["returned"] += len(got & set(chunk))
             # A short response has TWO causes and they look identical: the
             # endpoint truncating (it caps at 10 and returns HTTP 200

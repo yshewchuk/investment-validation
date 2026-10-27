@@ -318,6 +318,39 @@ def test_wrong_shape_json_is_transient_and_the_session_continues(monkeypatch, tm
         "the wrong-shape chunk is owed the date; the OK batches are not"
 
 
+@pytest.mark.parametrize("junk", [
+    pytest.param("TKR00", id="string-row"),
+    pytest.param(None, id="null-row"),
+    pytest.param(5, id="number-row"),
+])
+def test_non_dict_rows_in_a_200_are_wrong_shape_and_the_session_continues(
+        monkeypatch, tmp_path, junk):
+    """A 200 whose "data" rows include a non-object is the shape that makes
+    ``r.get`` raise AttributeError and take the whole session down: same
+    class as a non-list body — the chunk is owed the date, reported in
+    ``failed``, none of its rows booked, and the later batches are still
+    fetched."""
+    tickers = [f"TKR{i:02d}" for i in range(25)]
+
+    def body(p):
+        if p["ticker"].split(",")[0] == "TKR00":
+            return {"data": [{"ticker": "TKR00"}, junk]}
+        return None
+
+    _wire(monkeypatch, set(), tmp_path)
+    f = _Fetcher(body=body)
+
+    out = nightly.refresh_forward_chains(tickers, AS_OF, fetcher=f, sessions=1)
+
+    assert f.asked == [AS_OF, AS_OF, AS_OF], "the session continued past the junk row"
+    assert out["failed"] and "TKR00" in out["failed"][0], "the junk rows are reported"
+    assert "not all objects" in out["failed"][0]
+    assert out["rows"] == 15 and out["returned"] == 15, "the bad chunk books nothing"
+    assert out["missing"] == [], "a bad shape says nothing about who has a chain"
+    assert nightly._read_chain_retry() == {AS_OF: set(tickers[:10])}, \
+        "the junk-row chunk is owed the date; the OK batches are not"
+
+
 def test_json_body_raising_a_base_exception_keeps_the_debt(monkeypatch, tmp_path):
     """A KeyboardInterrupt surfacing from ``record.json()`` is not an
     Exception: the wrapper must still bank the current chunk and the unasked
@@ -428,6 +461,35 @@ def test_prune_keeps_exactly_14_days_and_drops_15(monkeypatch, tmp_path):
     assert kept[keep] == {"OLD1"}, "exactly 14 days old is still inside the window"
     assert drop not in kept, "15 days old is past it"
     assert kept[AS_OF] == set(TICKERS)
+
+
+def test_a_re_persisted_older_entry_cannot_outlive_the_newest_key(monkeypatch, tmp_path):
+    """The prune's reference is max(stamp, the newest key on file): an older
+    memo date re-asked by the older pass that fails again is re-persisted at
+    ITS OWN stamp, and pruning against that stamp alone kept it alive 14 days
+    behind a fresher debt the file carries. Here the newest key is 16 days
+    ahead of the failing re-ask: the stale entry drops out of its own
+    persist, while one exactly 14 days behind the newest key survives."""
+    older = str((pd.Timestamp("2026-09-10") - pd.Timedelta(days=16)).date())  # drops
+    keep = str((pd.Timestamp("2026-09-10") - pd.Timedelta(days=14)).date())  # stays
+    newest = "2026-09-10"  # newer than this run's session: asked never, prune ref
+    held = {(t, pd.Timestamp(AS_OF)) for t in TICKERS}
+    _wire(monkeypatch, held, tmp_path)
+    nightly.CHAIN_RETRY_PATH.write_text(
+        json.dumps({older: ["TKR08"], keep: ["TKR09"], newest: ["TKR00"]}))
+    f = _Fetcher(fail=lambda p: RuntimeError("HTTP 502"))
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+
+    assert f.asked == [older, keep], "the future key is inside neither the " \
+        "heal window's older-pass bound nor the fetch: prune reference only"
+    assert out["failed"], "both re-asks failed transiently"
+    kept = nightly._read_chain_retry()
+    assert older not in kept, \
+        "re-persisted 16 days behind the newest key: the debt ages out here, " \
+        "not 14 days behind its own stale stamp"
+    assert kept[keep] == {"TKR09"}, "exactly 14 behind the newest key is kept"
+    assert kept[newest] == {"TKR00"}, "the newest key itself is never pruned"
 
 
 def test_a_corrupt_memo_reads_empty_and_the_run_proceeds(monkeypatch, tmp_path):
@@ -683,6 +745,38 @@ def test_an_older_memo_date_is_re_asked_for_exactly_its_owed_names(
     kept = nightly._read_chain_retry()
     assert older not in kept, "a successful re-ask clears the entry"
     assert kept == {stale: {"TKR07"}}, "the 15-day-old entry is neither asked nor cleared"
+
+
+def test_non_canonical_memo_date_keys_are_ignored_with_one_stderr_line(
+        monkeypatch, tmp_path, capsys):
+    """A memo date is re-asked only when it is exactly its own "YYYY-MM-DD"
+    string: keys carrying a time part or a bare yyyymmdd parse to a real day
+    but must never reach the fetch as a tradeDate or the persist as a stamp —
+    they are skipped, counted on one stderr line, and left in the file for
+    the prune, while the canonical date is still asked by its canonical
+    stamp."""
+    canon = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=8)).date())  # 2026-08-25
+    with_time = f"{(pd.Timestamp(AS_OF) - pd.Timedelta(days=11)).date()} 10:00:00"
+    compact = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=9)).date()).replace("-", "")
+    held = {(t, pd.Timestamp(AS_OF)) for t in TICKERS}
+    _wire(monkeypatch, held, tmp_path)
+    nightly.CHAIN_RETRY_PATH.write_text(
+        json.dumps({canon: ["TKR08"], with_time: ["TKR09"], compact: ["TKR00"]}))
+    f = _Fetcher()
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+
+    assert f.asked == [canon], "only the canonical key is asked, by its " \
+        "canonical date; the time-part and compact keys never reach tradeDate"
+    assert f.asked_tickers == ["TKR08"]
+    assert out["older_retried"] == [{"session": canon, "names": 1}]
+    err = capsys.readouterr().err
+    assert err.count("non-canonical") == 1, "one counted line for the whole pass"
+    assert "ignored 2 non-canonical" in err, "both keys named by count, not silently"
+    kept = nightly._read_chain_retry()
+    assert canon not in kept, "the successful canonical re-ask cleared its entry"
+    assert kept == {with_time: {"TKR09"}, compact: {"TKR00"}}, \
+        "the ignored keys survive untouched for the prune to age out"
 
 
 def test_skip_held_false_never_runs_the_older_pass(monkeypatch, tmp_path):
