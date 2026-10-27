@@ -190,7 +190,10 @@ native pricing and simulation. Invalid declared frozen state flags
 `MODEL_NOT_READY`; missing/nonfinite champion inputs flag the advisory
 `CHOOSER_MISSING_FEATURES` and withhold `chooser_score`.
 Feature math never fits; frozen executors own model inference. `release_bindings`
-exposes verified chooser pools/depth tables; nightly declares no chooser block.
+exposes verified chooser pools/depth tables and selects the chooser state for
+the request's cutoff. Nightly declares a chooser block for registered member
+rows; missing required state refuses that member row with typed
+`MODEL_NOT_READY`. DYN-SV selection remains a separate slice.
 
 `application.score_event` requires the complete ordered `DYNAMIC_MENU`, scores
 its members and resolves DYN-SV over finite simulation-bearing candidates:

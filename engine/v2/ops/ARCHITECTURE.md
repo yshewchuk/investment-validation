@@ -83,10 +83,10 @@ may remain as untrusted residue. The worker job has five bounded attempts, with 
 Snapshot parameters raise `VALIDATION_FAILED` for an unsupported `producer_mode` or, in snapshot mode, a missing or incomplete `catalog_path`/`objects_root` pair.
 
 **DYN-SV batch boundary.** `board_requests` emits one DYN-SV key last per
-event, but the batch assembler refuses it with `UNSUPPORTED_STRATEGY` after
-key/calendar validation; earlier source refusals retain their own codes.
-The worker calls `score_batch`, not the separate menu resolver described in
-[scoring](../scoring/ARCHITECTURE.md#native-nightly-dyn-sv-boundary).
+event, but still refuses DYN-SV with `UNSUPPORTED_STRATEGY`; earlier source
+refusals keep their codes. Registered menu members declare cutoff-matched
+chooser state; missing state refuses that member row with `MODEL_NOT_READY`.
+The worker calls `score_batch`, not the separate menu resolver described in [scoring](../scoring/ARCHITECTURE.md#native-nightly-dyn-sv-boundary).
 Enumeration order does not establish a scoring dependency. Encodable meta
 refusals use the keyed output; invalid keys use `unkeyable_refusals`.
 
