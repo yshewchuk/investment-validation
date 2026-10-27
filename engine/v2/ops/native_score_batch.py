@@ -475,13 +475,25 @@ _RELEASE_ARTIFACT_REFUSAL_LABELS: Mapping[tuple[str, str], str] = {
         "exact-cutoff payoff artifact missing",
     ("MODEL_NOT_READY", "release lacks the exact-cutoff analog pool"):
         "exact-cutoff analog pool missing",
+    ("MODEL_NOT_READY", "one exact paired residual pool is required"):
+        "paired residual pool missing",
+    ("MODEL_NOT_READY", "one exact trailing cutoff artifact is required"):
+        "trailing cutoff artifact missing",
+    ("MODEL_NOT_READY", "event date is not a valid trailing cutoff month"):
+        "invalid trailing cutoff month",
+    ("MODEL_NOT_READY", "RUNUP champion residual pool is missing or unusable"):
+        "RUNUP champion pool missing or unusable",
+    ("MODEL_NOT_READY", "RUNUP requires one exact-key payoff surface"):
+        "RUNUP payoff surface missing",
+    ("MODEL_NOT_READY", "RUNUP payoff surface is numerically unusable"):
+        "RUNUP payoff surface unusable",
 }
 
 
 def _nightly_source_bundle_refusal_detail(exc: NightlySourceBundleRefusal) -> str:
     """The safe published detail for one source-bundle refusal.
 
-    Only the four internal release-artifact causes above keep a fixed
+    Only the ten internal release-artifact causes above keep a fixed
     distinguishing label; every other refusal publishes just its code. The
     raw ``exc.detail`` is never interpolated or concatenated into the text.
     """

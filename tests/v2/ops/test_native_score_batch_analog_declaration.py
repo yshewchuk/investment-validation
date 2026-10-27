@@ -247,6 +247,18 @@ def test_conflicting_pools_refuse_the_row_in_either_order(order):
          "exact-cutoff payoff artifact missing"),
         ("release lacks the exact-cutoff analog pool",
          "exact-cutoff analog pool missing"),
+        ("one exact paired residual pool is required",
+         "paired residual pool missing"),
+        ("one exact trailing cutoff artifact is required",
+         "trailing cutoff artifact missing"),
+        ("event date is not a valid trailing cutoff month",
+         "invalid trailing cutoff month"),
+        ("RUNUP champion residual pool is missing or unusable",
+         "RUNUP champion pool missing or unusable"),
+        ("RUNUP requires one exact-key payoff surface",
+         "RUNUP payoff surface missing"),
+        ("RUNUP payoff surface is numerically unusable",
+         "RUNUP payoff surface unusable"),
     ],
 )
 def test_source_bundle_refusal_detail_maps_known_causes_to_safe_labels(
