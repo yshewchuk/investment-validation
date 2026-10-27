@@ -105,6 +105,7 @@ FAILURE_CODES: dict[str, tuple[str, bool]] = {
     # promotion change can.
     "MODEL_NOT_READY": ("dependency", False),
     "VALIDATION_FAILED": ("validation", False),
+    "ACCEPTANCE_RULE_UNDEFINED": ("validation", False),
     "PUBLICATION_REFUSED": ("validation", False),
     "IDEMPOTENCY_CONFLICT": ("validation", False),
     "INVALID_REQUEST": ("validation", False),
