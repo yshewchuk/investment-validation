@@ -12,7 +12,7 @@
       "final_holdout", "nightly", "pool_refresh", "publication", "publication_submit", "retrain_due", "retrain_plan", "stages", "state_stage", "training"],
     "legacy": ["capture_inputs", "features_compare", "finality", "generation_binding", "ledger_history_import", "legacy_actions",
       "legacy_adapter", "materialization_worker", "render_inputs", "snapshot_roots", "snapshot_stages"],
-    "stores": ["calendar_moves_jobs", "computed_moves_store", "forward_calendar_store", "incremental_data", "massive_plan", "pinned_partition_reader",
+    "stores": ["calendar_moves_jobs", "computed_move_bounds_store", "computed_moves_store", "forward_calendar_store", "incremental_data", "massive_plan", "pinned_partition_reader",
       "price_history_store", "reclaim", "refresh_staging", "snapshot_import", "snapshot_planning", "snapshot_promotion", "snapshots", "stores",
       "native_registration", "stores.refresh_contracts", "stores.massive", "stores.massive.acquisition", "stores.massive.coverage", "stores.massive.journal", "stores.massive.pages", "stores.massive.pinned", "stores.massive.snapshot", "unit_receipts"],
     "native": ["carried_set", "native", "native.input_decoding", "native.parity_inputs", "native_board_universe", "native_entry_rule_inputs", "native_parity_report", "native_runup_inputs", "native_score_batch", "native_score_batch_types", "native_shadow_render", "nightly_calendar_inputs",
