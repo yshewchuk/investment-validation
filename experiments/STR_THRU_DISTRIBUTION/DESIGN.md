@@ -200,7 +200,7 @@ This document adds no runtime interface, dependency or data-access authority. Ex
 [exp173]: https://github.com/yshewchuk/investment-validation/blob/6aeae21e55920dd5771b2b7b5a94ddab6b033f69/experiments/EXP-173_size_surface_residual_distribution/spec.yaml
 [exp187]: https://github.com/yshewchuk/investment-validation/blob/6aeae21e55920dd5771b2b7b5a94ddab6b033f69/experiments/EXP-187_str_thru_gate_feature_threshold_decomposition/spec.yaml
 [holdouts]: https://github.com/yshewchuk/investment-validation/blob/6aeae21e55920dd5771b2b7b5a94ddab6b033f69/engine/v2/foundation/experiment_holdouts.py
-[finalcontract]: https://github.com/yshewchuk/investment-validation/blob/6aeae21e55920dd5771b2b7b5a94ddab6b033f69/engine/v2/foundation/final_holdout.py#L65-L90
+[finalcontract]: https://github.com/yshewchuk/investment-validation/blob/6aeae21e55920dd5771b2b7b5a94ddab6b033f69/engine/v2/foundation/final_holdout.py#L65-L89
 [finaleval]: https://github.com/yshewchuk/investment-validation/blob/6aeae21e55920dd5771b2b7b5a94ddab6b033f69/engine/v2/research/_final_evaluator.py
 [size2]: https://github.com/yshewchuk/investment-validation/blob/6aeae21e55920dd5771b2b7b5a94ddab6b033f69/experiments/SUPER_SIZE/STAGE2_DESIGN.md
 [population]: https://github.com/yshewchuk/investment-validation/pull/1403
