@@ -107,7 +107,11 @@ component architecture contract.
 `nightly_quote_rows.scan_quote_rows` is also an internal staging API. It
 returns `QuoteRowInputs` from a pinned `option_chains` snapshot for an exact
 `(ticker, decision_session)` request; an optional `chain_rows` supplies that
-ticker's rows from the batched read. `nightly_raw_row_producer` is its
+ticker's rows from the batched read. Every row surviving the requested-expiry
+filter also carries `chain_spot` (the chain's own `spot` column), and an unusable
+or disagreeing spot on those rows refuses that row in place with
+`CHAIN_SPOT_UNAVAILABLE` (other rows continue), unlike an unusable bid/ask,
+which is still a `CONTRACT_MISMATCH`. `nightly_raw_row_producer` is its
 production caller; see the component architecture contract.
 
 `nightly_chain_batch.scan_chain_slices`, `CHAIN_COLUMNS`, `CHAIN_TABLE`,
@@ -149,7 +153,7 @@ The internal `native_score_batch._STRATEGY_REGISTRY` declares each admitted
 row's ordered forecast outputs and exact/alias driver roles, gate, policy key,
 source-bundle strategy and optional driver-name override. All resolved drivers
 contribute features, recipes, identities and request artifact references.
-STR-THRU and STR-RUNUP are registered. RUNUP requires both verified champion
+STR-THRU, STR-RUNUP, TWIN-P, TWIN-P5, BFLY-P, BFLY-P5, CTR5 and RAMP7 are registered (the six entry-rule strategies are gate-less: entry-rule gate over a frozen paired pool and trailing cutoff). RUNUP requires both verified champion
 residual pools and a unique exact-key payoff surface; its model gate does not
 request separate simulation. Missing/unusable model artifacts refuse its row.
 There is no runtime registration API or chooser execution contract.

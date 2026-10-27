@@ -76,9 +76,9 @@ def test_scan_quote_rows_happy_path_returns_exact_rows(tmp_path):
     assert result == QuoteRowInputs(
         quote_rows=(
             {"ticker": "AAA", "right": "C", "strike": 100.0, "expiry": _EXPIRY,
-             "bid": 1.0, "ask": 1.2, "observed_at": _SESSION},
+             "bid": 1.0, "ask": 1.2, "chain_spot": 100.0, "observed_at": _SESSION},
             {"ticker": "AAA", "right": "P", "strike": 105.0, "expiry": _EXPIRY,
-             "bid": 2.0, "ask": 2.4, "observed_at": _SESSION},
+             "bid": 2.0, "ask": 2.4, "chain_spot": 100.0, "observed_at": _SESSION},
         ),
         quote_status="recorded",
     )
@@ -121,7 +121,7 @@ def test_scan_quote_rows_excludes_other_obs_dates(tmp_path):
 
     assert result.quote_rows == (
         {"ticker": "AAA", "right": "C", "strike": 100.0, "expiry": _EXPIRY,
-         "bid": 1.0, "ask": 1.2, "observed_at": _SESSION},
+         "bid": 1.0, "ask": 1.2, "chain_spot": 100.0, "observed_at": _SESSION},
     )
     assert result.quote_status == "recorded"
 
@@ -254,9 +254,9 @@ def test_scan_quote_rows_keeps_limit_when_population_bound_is_at_or_above_curren
     assert result.quote_status == "recorded"
     assert result.quote_rows == (
         {"ticker": "AAA", "right": "C", "strike": 100.0, "expiry": _EXPIRY,
-         "bid": 1.0, "ask": 1.2, "observed_at": _SESSION},
+         "bid": 1.0, "ask": 1.2, "chain_spot": 100.0, "observed_at": _SESSION},
         {"ticker": "AAA", "right": "P", "strike": 105.0, "expiry": _EXPIRY,
-         "bid": 2.0, "ask": 2.4, "observed_at": _SESSION},
+         "bid": 2.0, "ask": 2.4, "chain_spot": 100.0, "observed_at": _SESSION},
     )
     assert captured[0].max_result_rows == expected
     assert captured[0].max_batch_rows == min(
@@ -284,9 +284,9 @@ def test_scan_quote_rows_uses_smaller_selected_population_bound(tmp_path, monkey
     assert result.quote_status == "recorded"
     assert result.quote_rows == (
         {"ticker": "AAA", "right": "C", "strike": 100.0, "expiry": _EXPIRY,
-         "bid": 1.0, "ask": 1.2, "observed_at": _SESSION},
+         "bid": 1.0, "ask": 1.2, "chain_spot": 100.0, "observed_at": _SESSION},
         {"ticker": "AAA", "right": "P", "strike": 105.0, "expiry": _EXPIRY,
-         "bid": 2.0, "ask": 2.4, "observed_at": _SESSION},
+         "bid": 2.0, "ask": 2.4, "chain_spot": 100.0, "observed_at": _SESSION},
     )
     assert 0 < bound < existing_limit
     assert captured[0].max_result_rows == min(existing_limit, bound)

@@ -120,7 +120,10 @@ def quote_domain_map(rows: Any, quote_status: Any = None) -> dict[str, dict[str,
     quote row's observed_at calendar date and is omitted when the row has none
     or it is unparseable. A repeated contract must repeat bid/ask exactly (else
     INVALID_QUOTE_DOMAIN) and keeps the earliest observed_date. Pricing reads
-    the first leg's observed_date to measure dte_entry.
+    the first leg's observed_date to measure dte_entry. Row keys other than
+    right/strike/expiry/bid/ask/observed_at -- notably the staged
+    ``chain_spot`` ``nightly_quote_rows`` adds -- are ignored here and never
+    reach the returned domain; ``_staged_chain_spot`` is what reads them.
     """
     if quote_status in _EMPTY_QUOTE_STATUSES:
         if rows != []:
@@ -213,6 +216,49 @@ def _contract_quote(
         raise NightlySourceBundleRefusal(
             "INVALID_QUOTE_DOMAIN", f"quote_domain[{index}] is invalid")
     return right, strike, expiry, bid, ask
+
+
+def _staged_chain_spot(quote_rows: Sequence[Mapping[str, Any]]) -> float | None:
+    """The ``chain_spot`` the staged quote rows carry, or ``None`` when none do.
+
+    ``nightly_quote_rows.scan_quote_rows`` stages the chain's own ``spot`` (the
+    legacy ``entry_cost_pct`` denominator) onto every surviving quote row; this
+    is the one place the bundle decides what that optional row key means. It is
+    a presence-and-consistency rule, never a computation: nothing here reads the
+    value. When any row carries the key, every row must carry the SAME finite
+    positive number -- a partially-present, inconsistent, ``None``, NaN,
+    non-finite, non-numeric or bool spot is ``INVALID_QUOTE_DOMAIN`` (the same
+    class as an unusable bid/ask), so the caller gets no bundle -- whichever
+    order the rows come in. When no row carries it, ``None`` means "omit the
+    context key": callers that stage their own quote rows
+    (``tools/capture_tier0_corpus.py``) are unchanged. Called only after
+    ``_staged_observed_at`` has refused every row that is not a Mapping, so the
+    row key can be read directly.
+    """
+    found: float | None = None
+    missing_index: int | None = None
+    for index, row in enumerate(quote_rows):
+        if "chain_spot" not in row:
+            if missing_index is None:
+                missing_index = index
+            continue
+        value = row["chain_spot"]
+        try:
+            spot = None if isinstance(value, bool) else float(value)
+        except (TypeError, ValueError, OverflowError):
+            spot = None
+        if spot is None or not math.isfinite(spot) or spot <= 0.0:
+            raise NightlySourceBundleRefusal(
+                "INVALID_QUOTE_DOMAIN", "quote rows carry an unusable chain_spot")
+        if found is None:
+            found = spot
+        elif spot != found:
+            raise NightlySourceBundleRefusal(
+                "INVALID_QUOTE_DOMAIN", "quote rows disagree on chain_spot")
+    if found is not None and missing_index is not None:
+        raise NightlySourceBundleRefusal(
+            "INVALID_QUOTE_DOMAIN", f"quote_rows[{missing_index}] is missing chain_spot")
+    return found
 
 
 def _staged_observed_at(quote_rows: Sequence[Mapping[str, Any]]) -> list[tuple[int, Any]]:
@@ -565,13 +611,24 @@ def _runup_calendar_features(strategy: str, calendar_row: Mapping[str, Any]) -> 
     return {"days_before_print": int(value)}
 
 
-def _calendar_context(calendar_row: Mapping[str, Any], calendar_features: Mapping[str, int],
-                      as_of_ts: pd.Timestamp) -> dict[str, Any]:
-    """Stage calendar-owned context together with the validated decision date."""
+def _staged_context(calendar_row: Mapping[str, Any], calendar_features: Mapping[str, int],
+                    as_of_ts: pd.Timestamp, quote_rows: Sequence[Mapping[str, Any]]
+                    ) -> dict[str, Any]:
+    """Stage calendar-owned context, the validated decision date and the chain spot.
+
+    ``chain_spot`` joins the context only when the staged quote rows carry it
+    (``_staged_chain_spot`` decides presence, consistency and the refusal); the
+    rows are Mappings by then, because ``_staged_observed_at`` ran first in
+    ``assemble_nightly_source_bundle``. Nothing here reads the value: geometry
+    and strike selection keep using ``calendar_row["spot"]``, the close.
+    """
     context = {k: calendar_row[k] for k in sorted(_CALENDAR_REQUIRED_FIELDS)}
     context.update(calendar_features)
     # The decision date: stages._stage_days_to_print measures days_to_print from it.
     context["as_of"] = str(as_of_ts.date())
+    chain_spot = _staged_chain_spot(quote_rows)
+    if chain_spot is not None:
+        context["chain_spot"] = chain_spot
     return context
 
 
@@ -608,7 +665,8 @@ def assemble_nightly_source_bundle(
     quote_max_age_sessions unchanged (key omitted when None, kept when zero)
     plus quote_date and quote_latest_date -- the earliest and latest validated
     quote observed_at dates (YYYY-MM-DD) -- only when quote rows exist, so a
-    later put observation cannot hide behind an earlier call one. No I/O.
+    later put observation cannot hide behind an earlier call. context carries
+    ``chain_spot`` only when the quote rows carry it (see ``_staged_context``). No I/O.
     """
     feature_names = _validated_feature_names(feature_names)
     _require_staged_inputs_present(calendar_row, panel_row, tier4_row, quote_rows)
@@ -620,7 +678,7 @@ def assemble_nightly_source_bundle(
     _checked_against_as_of(calendar_row, observed, panel_anchor, as_of_ts)
     raw_quotes = quote_domain_map(list(quote_rows), quote_status)
     calendar_features = _runup_calendar_features(strategy, calendar_row)
-    context = _calendar_context(calendar_row, calendar_features, as_of_ts)
+    context = _staged_context(calendar_row, calendar_features, as_of_ts, quote_rows)
     if quote_max_age_sessions is not None:
         context["quote_max_age_sessions"] = quote_max_age_sessions
     if observed:

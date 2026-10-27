@@ -9,6 +9,7 @@ import numpy as np
 
 import pandas as pd
 import pytest
+from tests.v2.ops.analog_fixtures import with_synthetic_exact_analogs
 
 from engine.v2.contracts import ScoreRecord
 from tests.fixtures.size_serving_header import HEADER
@@ -194,8 +195,11 @@ def _event_inputs(strategy="STR-THRU", ticker="TEST",
 
 
 def _assemble(binding, events, **overrides):
+    events = tuple(events)
+    assembly_as_of = overrides.get("as_of", _AS_OF)
+    binding = with_synthetic_exact_analogs(binding, events, as_of=assembly_as_of)
     kwargs = dict(
-        as_of=_AS_OF, snapshot_id=_SNAPSHOT, calendar_revision=_CALENDAR_REVISION,
+        as_of=assembly_as_of, snapshot_id=_SNAPSHOT, calendar_revision=_CALENDAR_REVISION,
         binding=binding, events=events,
         feature_names=("signal", "pred_abs_move"), gate_policy=_GATE_POLICY,
     )
@@ -222,7 +226,7 @@ def test_happy_path_assembles_score_request_and_native_inputs(tmp_path):
 def test_unsupported_strategy_refuses_without_sinking_batch(tmp_path):
     binding = _stage_release(tmp_path)
     good = _event_inputs()
-    bad = _event_inputs(strategy="TWIN-P")
+    bad = _event_inputs(strategy="CND-PS")
     assembled, refusals = _assemble(binding, [good, bad])
     assert list(assembled) == [good.key]
     assert len(refusals) == 1
@@ -490,13 +494,13 @@ def _refusal_matches_key(document, canonical_key, expected_code) -> None:
 def test_planted_refusal_key_corruption_is_caught():
     """Proves _refusal_matches_key is not a tautology: it must fail on a
     corrupted serialized refusal code."""
-    good = {"refusals": {"TEST|TWIN-P|2026-01-15|am": {
+    good = {"refusals": {"TEST|BFLY-P|2026-01-15|am": {
         "code": "UNSUPPORTED_STRATEGY", "detail": "only STR-THRU is supported"}}}
-    _refusal_matches_key(good, "TEST|TWIN-P|2026-01-15|am", "UNSUPPORTED_STRATEGY")
-    corrupted = {"refusals": {"TEST|TWIN-P|2026-01-15|am": {
+    _refusal_matches_key(good, "TEST|BFLY-P|2026-01-15|am", "UNSUPPORTED_STRATEGY")
+    corrupted = {"refusals": {"TEST|BFLY-P|2026-01-15|am": {
         "code": "WRONG_CODE", "detail": "only STR-THRU is supported"}}}
     with pytest.raises(AssertionError):
-        _refusal_matches_key(corrupted, "TEST|TWIN-P|2026-01-15|am",
+        _refusal_matches_key(corrupted, "TEST|BFLY-P|2026-01-15|am",
                              "UNSUPPORTED_STRATEGY")
 
 
@@ -506,13 +510,13 @@ def test_planted_refusal_timestamp_key_corruption_is_caught():
     under a distinct expected key, with the refusal code identical between
     stored and expected lookups -- independent of the code-corruption test
     above."""
-    refusals = {"refusals": {"TEST|TWIN-P|2026-01-15T09:00:01|am": {
+    refusals = {"refusals": {"TEST|BFLY-P|2026-01-15T09:00:01|am": {
         "code": "INTRADAY_EVENT_NOT_ADMITTED",
         "detail": "intraday event not admitted to the midnight batch"}}}
-    _refusal_matches_key(refusals, "TEST|TWIN-P|2026-01-15T09:00:01|am",
+    _refusal_matches_key(refusals, "TEST|BFLY-P|2026-01-15T09:00:01|am",
                          "INTRADAY_EVENT_NOT_ADMITTED")
     with pytest.raises(KeyError):
-        _refusal_matches_key(refusals, "TEST|TWIN-P|2026-01-15T09:00:00|am",
+        _refusal_matches_key(refusals, "TEST|BFLY-P|2026-01-15T09:00:00|am",
                              "INTRADAY_EVENT_NOT_ADMITTED")
 
 
@@ -521,7 +525,7 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     root = tmp_path / "staging"
     root.mkdir()
     (root / "events.json").write_text(json.dumps(
-        [_event_doc(), _event_doc(strategy="TWIN-P", event_id="evt-2")]))
+        [_event_doc(), _event_doc(strategy="CND-PS", event_id="evt-2")]))
     result = run_native_score_batch_worker(
         _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
     assert result["completed_ids"] == ["native_score_batch"]
@@ -532,20 +536,18 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     # Issue #53 (fixed by #67): known_gaps is empty now that
     # assemble_nightly_source_bundle verifies panel_anchor itself.
     assert records_document["known_gaps"] == []
-    assert len(records_document["records"]) == 1
-    # CodeRabbit round 2 (PR #66): compare actual record CONTENT against an
-    # independently-known expected identity, not just the record count.
-    assert _record_matches_identity(
-        records_document["records"]["TEST|STR-THRU|2026-01-15|am"],
-        event_id="evt-1", strategy_version="STR-THRU", deployment_id="d1")
+    assert records_document["records"] == {}
     refusals_document = json.loads((root / "refusals.json").read_text())
     assert refusals_document["schema_version"] == "native_score_batch_refusals.v2.0"
-    assert len(refusals_document["refusals"]) == 1
+    assert len(refusals_document["refusals"]) == 2
     assert refusals_document["unkeyable_refusals"] == []
-    # CodeRabbit round 5 (PR #66): compare the refusal's fully serialized
+    # CodeRabbit round 5 (PR #66): compare each refusal's fully serialized
     # canonical key against an independently-known expected identity, not
-    # just its code.
-    _refusal_matches_key(refusals_document, "TEST|TWIN-P|2026-01-15|am",
+    # just its code. The worker fixture has no analog pool, so the
+    # STR-THRU row writes a MODEL_NOT_READY refusal and no record.
+    _refusal_matches_key(refusals_document, "TEST|STR-THRU|2026-01-15|am",
+                         "MODEL_NOT_READY")
+    _refusal_matches_key(refusals_document, "TEST|CND-PS|2026-01-15|am",
                          "UNSUPPORTED_STRATEGY")
 
 
@@ -566,11 +568,10 @@ def test_run_native_score_batch_worker_merges_producer_refusals_when_present(tmp
     run_native_score_batch_worker(
         _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
     records_document = json.loads((root / "records.json").read_text())
-    assert len(records_document["records"]) == 1
-    assert _record_matches_identity(
-        records_document["records"]["TEST|STR-THRU|2026-01-15|am"],
-        event_id="evt-1", strategy_version="STR-THRU", deployment_id="d1")
+    assert records_document["records"] == {}
     refusals_document = json.loads((root / "refusals.json").read_text())
+    _refusal_matches_key(refusals_document, "TEST|STR-THRU|2026-01-15|am",
+                         "MODEL_NOT_READY")
     _refusal_matches_key(refusals_document, "OTHER|STR-THRU|2026-01-20|am",
                          "EVENT_NOT_FOUND")
 
@@ -578,12 +579,14 @@ def test_run_native_score_batch_worker_merges_producer_refusals_when_present(tmp
 def test_run_native_score_batch_worker_preserves_intraday_producer_refusal_beside_midnight_record(
         tmp_path):
     """Regression: a producer_refusals.json row carrying the SAME
-    ticker/strategy/calendar-day/session as a scored events.json row, but a
+    ticker/strategy/calendar-day/session as a staged events.json row, but a
     full naive intraday ``event_date`` timestamp, must never collapse onto
-    that midnight record's ``YYYY-MM-DD`` identity. The midnight record keeps
-    its existing date-only key; the intraday refusal keeps its timestamp-
-    preserving wire value under a distinct key; neither is dropped,
-    overwritten, or flagged as a record/refusal collision. Fails against the
+    that midnight row's ``YYYY-MM-DD`` identity. The midnight row is staged
+    as a ``MODEL_NOT_READY`` refusal (the worker fixture has no analog
+    pool) under its existing date-only key; the intraday refusal keeps its
+    timestamp-preserving wire value under a distinct key; neither is
+    dropped, overwritten, or flagged as a refusal collision. Fails against
+    the
     current code because the decoder's ``YYYY-MM-DD``-only regex (and, if
     that were relaxed, ``_iso``/``as_document()``'s date-truncation) reject
     the timestamp-preserving wire form -- not because of a fixture error.
@@ -633,16 +636,13 @@ def test_run_native_score_batch_worker_preserves_intraday_producer_refusal_besid
     assert _board_request_key(intraday_request) == intraday_identity
 
     records_document = json.loads((root / "records.json").read_text())
-    assert midnight_identity in records_document["records"]
-    assert _record_matches_identity(
-        records_document["records"][midnight_identity],
-        event_id="evt-1", strategy_version="STR-THRU", deployment_id="d1")
-    assert len(records_document["records"]) == 1
+    assert records_document["records"] == {}
 
     refusals_document = json.loads((root / "refusals.json").read_text())
+    _refusal_matches_key(refusals_document, midnight_identity, "MODEL_NOT_READY")
     _refusal_matches_key(refusals_document, intraday_identity,
                          "INTRADAY_EVENT_NOT_ADMITTED")
-    assert len(refusals_document["refusals"]) == 1
+    assert len(refusals_document["refusals"]) == 2
     assert refusals_document["unkeyable_refusals"] == []
 
     assert NativeScoreBatchRowRefusal(
@@ -1017,13 +1017,15 @@ def test_invalid_key_field_ticker_delimiter_is_unkeyable(tmp_path):
     run_native_score_batch_worker(
         _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
     refusals_document = json.loads((root / "refusals.json").read_text())
-    assert refusals_document["refusals"] == {}
+    _refusal_matches_key(refusals_document, "TEST|STR-THRU|2026-01-15|am",
+                         "MODEL_NOT_READY")
+    assert len(refusals_document["refusals"]) == 1
     assert len(refusals_document["unkeyable_refusals"]) == 1
     unkeyable = refusals_document["unkeyable_refusals"][0]
     assert unkeyable["code"] == "INVALID_KEY_FIELD"
     assert unkeyable["key"]["ticker"] == "TE|ST"
     records_document = json.loads((root / "records.json").read_text())
-    assert len(records_document["records"]) == 1
+    assert records_document["records"] == {}
 
 
 def test_invalid_key_field_session_delimiter_is_unkeyable(tmp_path):
@@ -1045,13 +1047,16 @@ def test_invalid_key_field_session_delimiter_is_unkeyable(tmp_path):
     run_native_score_batch_worker(
         _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
     refusals_document = json.loads((root / "refusals.json").read_text())
-    assert refusals_document["refusals"] == {}
+    _refusal_matches_key(refusals_document, "TEST|STR-THRU|2026-01-15|am",
+                         "MODEL_NOT_READY")
+    assert len(refusals_document["refusals"]) == 1
     assert len(refusals_document["unkeyable_refusals"]) == 1
     unkeyable = refusals_document["unkeyable_refusals"][0]
+    # Keep the test-specific assertions on the unkeyable key field here.
     assert unkeyable["code"] == "INVALID_KEY_FIELD"
     assert unkeyable["key"]["session"] == "a|m"
     records_document = json.loads((root / "records.json").read_text())
-    assert len(records_document["records"]) == 1
+    assert records_document["records"] == {}
 
 
 def test_invalid_key_field_takes_priority_over_unsupported_strategy(tmp_path):

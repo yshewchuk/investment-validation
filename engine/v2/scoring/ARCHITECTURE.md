@@ -147,10 +147,16 @@ load-bearing entrypoints:
   gates, payoff-calibration/model layer and frozen residual-state reading.
   Each is pure arithmetic over declared inputs; none performs I/O.
   **Nightly frozen analog declaration** (`native_analog_query.py`, pure).
-  - *Selection:* the release's board analog pool whose
-    `(strategy, fill alpha, cutoff)` key matches the row, pinned by its
-    `content_hash`; no match leaves the analog block undeclared, and more than
-    one match refuses the row (`MODEL_NOT_READY`), never a first-wins pick.
+  - *Selection:* `analog_declarations` returns `{}` when no pool matches and
+    raises `AmbiguousAnalogPool` for multiple matches. The ops caller requires
+    the exact `(strategy, fill alpha, cutoff)` pool for STR-THRU and maps no
+    match or ambiguity to row-level `MODEL_NOT_READY`; it never picks the
+    first match or falls back to not-applicable. Other registered strategies
+    may declare one matching pool when present; an absent or nonmatching
+    optional pool leaves analogs not-applicable, while ambiguity refuses the
+    row with `MODEL_NOT_READY`. The selector's no-match result is `{}`; the
+    caller applies the strategy-specific required/optional policy. No strategy
+    uses a latest-cutoff fallback.
   - *Query:* `mcap_bucket` and `implied_ratio` come from the panel row at
     bundle time; `dte_band` and `moneyness_band` are completed in the analog
     stage from the scorer-computed `dte_entry`, `strike` and `spot` with
@@ -683,6 +689,13 @@ request-supplied rows. If a present driver pool's `model_id` differs from the
 resolved driver identity, the row is refused with `MODEL_NOT_READY`. If no
 release resolves, `NoCurrentRelease` remains; a resolved binding missing
 required model roles keeps the native batch's existing per-row refusals.
+
+For STR-THRU, absence of a payoff family leaves the optional declaration
+absent. When the release contains a payoff family, native batch assembly
+requires exactly one `payoff_line` with the row's exact `(strategy, alpha,
+cutoff)` key; zero or multiple matches refuse that row with
+`MODEL_NOT_READY`. It does not silently score a residual-only block or select
+an older cutoff.
 
 #### Paired residual and entry-rule declarations (issue #498)
 
