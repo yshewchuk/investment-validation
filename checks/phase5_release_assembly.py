@@ -48,6 +48,8 @@ POOL_MEMBER_IDS: tuple[str, ...] = (
     "board_analog_matcher",
 )
 CHOOSER_MEMBER_ID = "chooser_analog_pool"
+MONTHLY_DRIVER_MEMBER_IDS = ("driver_residual_pool:size", "driver_residual_pool:implied_t1", "driver_residual_pool:runup_move")
+MONTHLY_CARRIED_MEMBER_IDS = ("paired_residual_pool", "trailing_pnl_cutoff", "board_analog_matcher")
 _REFUSAL_CODES = (
     "PRIOR_MISMATCH", "POOL_SET_MISMATCH", "CUTOFF_MISMATCH", "CHOOSER_MISMATCH",
     "CUTOFF_NOT_ADVANCED", "OBJECT_UNVERIFIED", "ID_CONFLICT", "INVENTORY_MISMATCH",
@@ -145,7 +147,7 @@ def _all_outputs(by_member: dict[str, tuple[PoolOutput, ...]]) -> tuple[PoolOutp
     return tuple(output for member_outputs in by_member.values() for output in member_outputs)
 
 
-def _outputs_by_member(outputs: object) -> dict[str, tuple[PoolOutput, ...]]:
+def _outputs_by_member(outputs: object, *, monthly: bool = False) -> dict[str, tuple[PoolOutput, ...]]:
     if not isinstance(outputs, (list, tuple)):
         raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "outputs are not a sequence")
     by_member: dict[str, list[PoolOutput]] = {}
@@ -158,8 +160,10 @@ def _outputs_by_member(outputs: object) -> dict[str, tuple[PoolOutput, ...]]:
                 "POOL_SET_MISMATCH", "an object name appears twice within a member")
         names.add(output.name)
         by_member.setdefault(output.member_id, []).append(output)
-    if set(by_member) != set(POOL_MEMBER_IDS):
-        raise ReleaseAssemblyRefusal("POOL_SET_MISMATCH", "outputs are not exactly the six pool members")
+    expected = MONTHLY_DRIVER_MEMBER_IDS if monthly else POOL_MEMBER_IDS
+    if set(by_member) != set(expected):
+        raise ReleaseAssemblyRefusal(
+            "POOL_SET_MISMATCH", "outputs are not exactly the required pool members")
     for member_outputs in by_member.values():
         for output in member_outputs:
             if not _content_hash_valid(output.content_hash):
@@ -202,12 +206,14 @@ def _prior_pool_rows(members: object) -> None:
 
 
 def derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_release_id: str,
-                   outputs: object, chooser: object, cutoff: str) -> dict:
+                   outputs: object, chooser: object, cutoff: str,
+                   monthly: bool = False, retrain_cutoff: str | None = None) -> dict:
     """Return the pure candidate catalog body for carrying ``prior_catalog`` forward."""
     try:
         return _derive_catalog(prior_catalog, release_id=release_id,
                                expected_prior_release_id=expected_prior_release_id,
-                               outputs=outputs, chooser=chooser, cutoff=cutoff)
+                               outputs=outputs, chooser=chooser, cutoff=cutoff,
+                               monthly=monthly, retrain_cutoff=retrain_cutoff)
     except ReleaseAssemblyRefusal:
         raise
     except _STRAY_ERRORS as exc:
@@ -216,7 +222,12 @@ def derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_rel
 
 
 def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_release_id: str,
-                    outputs: object, chooser: object, cutoff: str) -> dict:
+                    outputs: object, chooser: object, cutoff: str,
+                    monthly: bool = False, retrain_cutoff: str | None = None) -> dict:
+    if not isinstance(monthly, bool):
+        raise ReleaseAssemblyRefusal("CUTOFF_MISMATCH", "monthly is not a bool")
+    if retrain_cutoff is not None and not monthly:
+        raise ReleaseAssemblyRefusal("CUTOFF_MISMATCH", "retrain_cutoff requires monthly")
     _require_safe_id(
         expected_prior_release_id, "PRIOR_MISMATCH", "prior release id is not a safe string")
     try:
@@ -229,6 +240,14 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
         raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "prior catalog has no string pool_cutoff")
     _prior_pool_rows(prior.get("members"))
     prior_day = _parse_day(prior_cutoff, "PRIOR_MISMATCH", "prior pool_cutoff is not an ISO date")
+    prior_retrain = sources.get("retrain_cutoff")
+    prior_retrain_day: date | None = None
+    if prior_retrain is not None:
+        prior_retrain_day = _parse_day(
+            prior_retrain, "PRIOR_MISMATCH", "prior retrain_cutoff is not an ISO date")
+        if prior_retrain_day > prior_day:
+            raise ReleaseAssemblyRefusal(
+                "PRIOR_MISMATCH", "prior retrain_cutoff exceeds prior pool_cutoff")
 
     _require_safe_id(
         release_id, "ID_CONFLICT", "candidate release id is not a safe new string")
@@ -242,7 +261,7 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
     for output in chooser_objects:
         _admit(output, "CHOOSER_MISMATCH")
     chooser_objects = tuple(sorted(chooser_objects, key=lambda output: output.name))
-    by_member = _outputs_by_member(outputs)
+    by_member = _outputs_by_member(outputs, monthly=monthly)
     chooser_names: set[str] = set()
     for output in chooser_objects:
         if not _content_hash_valid(output.content_hash):
@@ -255,13 +274,67 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
 
     cutoff_day = _parse_day(cutoff, "CUTOFF_MISMATCH", "cutoff is not an ISO date")
     prior_rows = {row["member_id"]: row for row in prior["members"]}
-    if cutoff_day <= prior_day:
-        raise ReleaseAssemblyRefusal("CUTOFF_NOT_ADVANCED", "cutoff is not after the prior pool_cutoff")
-    for output in (*_all_outputs(by_member), *chooser_objects):
-        if output.carried:
-            _check_carried(output, cutoff_day, prior_rows)
-        elif output.cutoff != cutoff:
-            raise ReleaseAssemblyRefusal("CUTOFF_MISMATCH", "an object cutoff disagrees with cutoff")
+    if monthly:
+        if retrain_cutoff is None:
+            raise ReleaseAssemblyRefusal("CUTOFF_MISMATCH", "monthly requires retrain_cutoff")
+        retrain_day = _parse_day(
+            retrain_cutoff, "CUTOFF_MISMATCH", "retrain_cutoff is not an ISO date")
+        cutoff_day = max(cutoff_day, retrain_day, prior_day)
+        cutoff = cutoff_day.isoformat()
+        for output in (*_all_outputs(by_member), *chooser_objects):
+            if output.carried:
+                raise ReleaseAssemblyRefusal(
+                    "CUTOFF_MISMATCH", "a supplied monthly object must not be carried")
+            if output.cutoff != retrain_cutoff:
+                raise ReleaseAssemblyRefusal(
+                    "CUTOFF_MISMATCH", "an object cutoff disagrees with retrain_cutoff")
+            # Driver pool names encode ``<model_id>|<fold>`` (fold may be None),
+            # not a cutoff date; only date-encoded names must end in retrain_cutoff.
+            if output.member_id not in MONTHLY_DRIVER_MEMBER_IDS:
+                if output.name.rsplit("|", 1)[-1] != retrain_cutoff:
+                    raise ReleaseAssemblyRefusal(
+                        "CUTOFF_MISMATCH",
+                        "an object name cutoff disagrees with retrain_cutoff")
+        if prior_retrain_day is not None and not retrain_day > prior_retrain_day:
+            raise ReleaseAssemblyRefusal(
+                "CUTOFF_NOT_ADVANCED", "retrain_cutoff does not advance the prior retrain_cutoff")
+        if not (cutoff_day > prior_day or prior_retrain_day is None
+                or retrain_day > prior_retrain_day):
+            raise ReleaseAssemblyRefusal(
+                "CUTOFF_NOT_ADVANCED", "cutoffs do not advance the prior cutoffs")
+        for member_id in MONTHLY_CARRIED_MEMBER_IDS:
+            objects = prior_rows[member_id].get("objects")
+            if not isinstance(objects, list) or not objects:
+                raise ReleaseAssemblyRefusal(
+                    "PRIOR_MISMATCH", "a monthly carried member has no objects")
+            names: set[str] = set()
+            admitted = []
+            for item in objects:
+                if not isinstance(item, dict):
+                    raise ReleaseAssemblyRefusal(
+                        "PRIOR_MISMATCH", "a monthly carried member object is malformed")
+                output = PoolOutput(member_id, item.get("name"), item.get("content_hash"),
+                                    prior_cutoff, item.get("bytes"), carried=True)
+                _admit(output, "PRIOR_MISMATCH")
+                if not _content_hash_valid(output.content_hash):
+                    raise ReleaseAssemblyRefusal(
+                        "PRIOR_MISMATCH", "a monthly carried member hash is malformed")
+                if output.name in names:
+                    raise ReleaseAssemblyRefusal(
+                        "PRIOR_MISMATCH", "a monthly carried member name appears twice")
+                names.add(output.name)
+                admitted.append(output)
+            by_member[member_id] = tuple(sorted(admitted, key=lambda output: output.name))
+    else:
+        if cutoff_day <= prior_day:
+            raise ReleaseAssemblyRefusal(
+                "CUTOFF_NOT_ADVANCED", "cutoff is not after the prior pool_cutoff")
+        for output in (*_all_outputs(by_member), *chooser_objects):
+            if output.carried:
+                _check_carried(output, cutoff_day, prior_rows)
+            elif output.cutoff != cutoff:
+                raise ReleaseAssemblyRefusal(
+                    "CUTOFF_MISMATCH", "an object cutoff disagrees with cutoff")
 
     all_by_member = {**by_member, CHOOSER_MEMBER_ID: chooser_objects}
     rows = copy.deepcopy(prior["members"])
@@ -276,6 +349,8 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
         rows[position[member_id]] = member_row(
             _SPEC_BY_ID[member_id], STAGED, objects, f"carried forward {cutoff}")
     carried = {**sources, "pool_cutoff": cutoff, "carried_from": expected_prior_release_id}
+    if monthly:
+        carried["retrain_cutoff"] = retrain_cutoff
     return manifest_body(release_id, prior["deployment_id"], rows, carried)
 
 
@@ -386,9 +461,10 @@ def _read_prior_payloads(store: Path, prior) -> dict[str, bytes]:
     return payloads
 
 
-def _verify_carried_rows(store: Path, prior_catalog: dict) -> None:
+def _verify_carried_rows(store: Path, prior_catalog: dict,
+                         *, replaced_member_ids=_REQUIRED_MEMBER_IDS) -> None:
     """Every untouched prior row that is STAGED must still have intact objects."""
-    replaced = set(_REQUIRED_MEMBER_IDS)
+    replaced = set(replaced_member_ids)
     for row in prior_catalog["members"]:
         if row.get("member_id") in replaced or row.get("status") != STAGED:
             continue
@@ -482,13 +558,17 @@ def classify_prior(release_root: Path, prior_release_id) -> PriorClass:
     return PriorClass(PRIOR_USABLE, "the prior catalog has a pool_cutoff")
 
 
-def prior_carry_set(release_root: Path, prior_release_id: str) -> tuple[str, tuple[PoolOutput, ...]]:
+def prior_carry_set(release_root: Path, prior_release_id: str, *,
+                    monthly: bool = False) -> tuple[str, tuple[PoolOutput, ...]]:
     """The prior ``sources.pool_cutoff`` and every prior pool/chooser object as ``carried`` outputs.
 
     Each object keeps the prior release's pool cutoff as its recorded cutoff.
     Malformed or missing prior input refuses ``PRIOR_MISMATCH``.
+    In monthly mode only the paired, trailing and board members are returned.
     """
     try:
+        if not isinstance(monthly, bool):
+            raise ReleaseAssemblyRefusal("PRIOR_MISMATCH", "monthly is not a bool")
         _require_safe_id(prior_release_id, "PRIOR_MISMATCH", "prior release id is not a safe string")
         prior = _load_catalog(catalog_path(Path(release_root), prior_release_id), prior_release_id,
                               "PRIOR_MISMATCH", "prior catalog could not be read or validated")
@@ -497,9 +577,10 @@ def prior_carry_set(release_root: Path, prior_release_id: str) -> tuple[str, tup
         _prior_pool_rows(prior.get("members"))
         pool_cutoff = prior["sources"]["pool_cutoff"]
         _parse_day(pool_cutoff, "PRIOR_MISMATCH", "prior pool_cutoff is not an ISO date")
+        member_ids = MONTHLY_CARRIED_MEMBER_IDS if monthly else _REQUIRED_MEMBER_IDS
         carried = []
         for row in prior["members"]:
-            if row.get("member_id") not in _REQUIRED_MEMBER_IDS:
+            if row.get("member_id") not in member_ids:
                 continue
             for item in row.get("objects", ()):
                 carried.append(PoolOutput(row["member_id"], item["name"], item["content_hash"],
@@ -513,7 +594,9 @@ def prior_carry_set(release_root: Path, prior_release_id: str) -> tuple[str, tup
 
 
 def carry_forward_release(release_root: Path, *, prior_release_id: str, release_id: str,
-                          inventory, outputs, chooser: object, cutoff: str) -> Path:
+                          inventory, outputs, chooser: object, cutoff: str,
+                          monthly: bool = False,
+                          retrain_cutoff: str | None = None) -> Path:
     """Verify, re-stage the prior model bindings and write the candidate catalog.
 
     Lock or filesystem failures are ``PUBLICATION_FAILED``; a conflicting or
@@ -522,7 +605,8 @@ def carry_forward_release(release_root: Path, *, prior_release_id: str, release_
     try:
         return _carry_forward_release(release_root, prior_release_id=prior_release_id,
                                       release_id=release_id, inventory=inventory, outputs=outputs,
-                                      chooser=chooser, cutoff=cutoff)
+                                      chooser=chooser, cutoff=cutoff, monthly=monthly,
+                                      retrain_cutoff=retrain_cutoff)
     except ReleaseAssemblyRefusal:
         raise
     except OSError as exc:
@@ -534,7 +618,9 @@ def carry_forward_release(release_root: Path, *, prior_release_id: str, release_
 
 
 def _carry_forward_release(release_root: Path, *, prior_release_id: str, release_id: str,
-                           inventory, outputs, chooser: object, cutoff: str) -> Path:
+                           inventory, outputs, chooser: object, cutoff: str,
+                           monthly: bool = False,
+                           retrain_cutoff: str | None = None) -> Path:
     _require_safe_id(
         prior_release_id, "PRIOR_MISMATCH", "prior release id is not a safe string")
     root = Path(release_root)
@@ -559,7 +645,8 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
 
     body = _derive_catalog(prior_catalog, release_id=release_id,
                            expected_prior_release_id=prior_release_id,
-                           outputs=outputs, chooser=chooser, cutoff=cutoff)
+                           outputs=outputs, chooser=chooser, cutoff=cutoff,
+                           monthly=monthly, retrain_cutoff=retrain_cutoff)
     if inventory.release_id != release_id:
         raise ReleaseAssemblyRefusal("ID_CONFLICT", "inventory release id does not match the candidate")
 
@@ -580,7 +667,10 @@ def _carry_forward_release(release_root: Path, *, prior_release_id: str, release
         raise ReleaseAssemblyRefusal(
             "INVENTORY_MISMATCH", "inventory deployment id does not match the prior release")
     payloads = _read_prior_payloads(store, prior)
-    _verify_carried_rows(store, prior_catalog)
+    _verify_carried_rows(
+        store, prior_catalog,
+        replaced_member_ids=((*MONTHLY_DRIVER_MEMBER_IDS, CHOOSER_MEMBER_ID)
+                             if monthly else _REQUIRED_MEMBER_IDS))
     try:
         inventory_hashes = {member.content_hash for artifact in inventory.artifacts
                             for member in artifact.members}

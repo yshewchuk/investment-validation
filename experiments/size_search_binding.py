@@ -1,0 +1,210 @@
+"""Explicit v2 SIZE source/fold binding; installed panel admission, no hidden builds."""
+import sys
+from datetime import date
+from hashlib import sha256
+from pathlib import Path
+
+from engine.v2.contracts import SnapshotRef
+from engine.v2.foundation import canonical_json, content_hash, from_document
+from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
+from engine.v2.ops.errors import fail
+from engine.v2.ops.fingerprints import environment_identity, source_closure
+from engine.v2.research.eligibility_policy import eligibility_policy
+from engine.v2.research.magnitude_inputs import (
+    preflight_magnitude_targets,
+    qualify_magnitude_training_targets,
+)
+from experiments.magnitude_candidate_recipe import candidate_recipe
+from experiments.magnitude_search_request_versions import compile_request
+from experiments.native_registration import (
+    MAX_NATIVE_EVIDENCE_BYTES,
+    NativeRegistration,
+    prepare_native_registration,
+    verify_native_registration,
+)
+from experiments.size_comparator import recipe as comparison_recipe
+
+SCHEMA = "native_experiment_registration.v1.6"
+
+
+def _require(condition):
+    if not condition:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE source/fold binding differs")
+
+
+def validate_panel_request(value):
+    """Closed local wire envelope only; installed readers retain source admission."""
+    try:
+        strings = {"feature_snapshot_id", "history_snapshot", "price_history_snapshot",
+                   "as_of_month", "history_start", "source_start"}
+        limits = {"limits": {"max_source_rows", "max_fragments", "max_object_bytes", "max_total_bytes", "max_output_rows"},
+            "metadata_limits": {"max_catalog_tables", "max_catalog_fragments", "max_catalog_bytes",
+                "max_fragments", "max_partitions", "max_tickers", "max_scan_rows", "max_object_bytes",
+                "max_total_object_bytes", "max_batch_rows", "max_retained_rows",
+                "max_retained_metadata_bytes", "max_proof_bytes"}}
+        if (type(value) is not dict or set(value) != strings | set(limits) | {"policy", "event_ids", "horizons"}
+                or any(type(value[k]) is not str or not value[k] or value[k] != value[k].strip() for k in strings)):
+            raise ValueError
+        for day in (value["history_start"], value["source_start"], value["as_of_month"] + "-01"):
+            if date.fromisoformat(day).isoformat() != day:
+                raise ValueError
+        events, horizons = value["event_ids"], value["horizons"]
+        if (type(events) is not list or not events or any(type(e) is not str or not e or e != e.strip() for e in events)
+                or len(set(events)) != len(events) or type(horizons) is not list or horizons != [1, 3, 5]
+                or any(type(h) is not int for h in horizons)
+                or type(value["policy"]) is not dict or type(value["policy"].get("embargo_days")) is not int
+                or value["policy"] != eligibility_policy(version="grouped_ticker_embargo.v1", embargo_days=30)):
+            raise ValueError
+        for key, fields in limits.items():
+            if (type(value[key]) is not dict or set(value[key]) != fields
+                    or any(type(n) is not int or not 0 < n < sys.maxsize for n in value[key].values())):
+                raise ValueError
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "invalid closed SIZE panel request") from None
+    return value
+
+
+def _read_panel(repository, source, request, *, columns):
+    from experiments.size_panel import read
+    args = dict(request)
+    feature = repository.resolve(args.pop("feature_snapshot_id"))
+    for name in ("history_snapshot", "price_history_snapshot"):
+        args[name] = repository.resolve(args[name])
+    return read(repository, source, feature, columns=columns, **args)
+
+
+def prepare(repository, spec, request, panel_request, *, scope, training_start, labels_before):
+    """Prepare a new development anchor; caller explicitly reserves it separately."""
+    from engine.v2.research.magnitude_panel_qualified_table import recipe
+    sources = _sources()
+    panel_request = validate_panel_request(panel_request)
+    schedule = compile_request(request)
+    if request["limits"]["child"]["memory_bytes"] > request["limits"]["parent"]["memory_bytes"]:
+        raise fail("INVALID_EXPERIMENT_SPEC", "child memory must not exceed inherited parent limit")
+    _require(request["feature_dictionary_hash"] == recipe("HMO")["dictionary_hash"])
+    _require(panel_request["feature_snapshot_id"] == request["feature_snapshot_id"]
+             and panel_request["history_snapshot"] == request["history_snapshot_id"]
+             and panel_request["horizons"] == [1, 3, 5])
+    base, spec = prepare_native_registration(repository, spec, code_root=Path(__file__).resolve().parents[1],
+        scope=scope, as_of_month=panel_request["as_of_month"], event_ids=panel_request["event_ids"],
+        magnitude_training_start=training_start, magnitude_labels_before=labels_before)
+    binding = base.document
+    _require(binding["execution_plan"]["runner"] == "experiments/size_search.py")
+    binding["source_closure"] = sources
+    _require(binding["magnitude_plan"]["evaluation_years"] == schedule["request"]["outer_years"])
+    panel = _read_panel(repository, from_document(SnapshotRef, binding["snapshot"]), panel_request,
+                        columns=recipe("HMO")["model_columns"])
+    context = panel["context"]
+    _require(set(binding["event_ids"]) == {e["event_id"] for e in context["target_events"]})
+    _require(request["eligibility_policy_ref"] == {"schema_ref": "group_eligibility_plan.v1",
+        "plan_id": context["eligibility_plan"]["plan_id"], "policy_id": context["eligibility_plan"]["policy"]["policy_id"]})
+    binding.update(schema_version=SCHEMA, size_request=schedule["request"], size_panel_request=panel_request,
+        size_panel={"context": context, "feature_snapshot": panel["feature_snapshot"]},
+        size_comparison=comparison_recipe())
+    payload = canonical_json(binding).encode()
+    if len(payload) > MAX_NATIVE_EVIDENCE_BYTES:
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration exceeds its UTF-8 byte budget",
+            details={"registration_bytes": len(payload), "max_registration_bytes": MAX_NATIVE_EVIDENCE_BYTES})
+    _folds(binding, schedule["request"])
+    return NativeRegistration(base.run_id, payload), spec
+
+
+def _source_files():
+    root = Path(__file__).resolve().parents[1]
+    registry = read_bounded_state(root / "engine/models/registry.json", 16 * 1024 * 1024)
+    return {**source_closure(root, ["experiments/size_search.py", "experiments/magnitude_search_worker.py"]), "engine/models/registry.json": "sha256:" + sha256(registry).hexdigest()}
+
+
+try:
+    _IMPORTED_SOURCES = _source_files()
+except (BoundedStateReadError, OSError):
+    _IMPORTED_SOURCES = None
+_IMPORTED_ENVIRONMENT = environment_identity(1)
+
+
+def _sources():
+    try:
+        current = _source_files()
+    except (BoundedStateReadError, OSError) as error:
+        raise fail("RESOURCE_LIMIT_EXCEEDED" if getattr(error, "code", None) == "SIZE_LIMIT" else "RESOURCE_UNAVAILABLE", "installed registry unavailable") from None
+    _require(current == _IMPORTED_SOURCES and environment_identity(1) == _IMPORTED_ENVIRONMENT)
+    return current
+
+
+def verify_installation(binding):
+    _require(binding["schema_version"] == SCHEMA and binding["environment"] == environment_identity(1)
+        and binding["source_closure"] == _sources())
+    _require(binding["size_comparison"] == comparison_recipe())
+
+
+def _folds(binding, request):
+    from experiments.magnitude_search_plan import _nested
+    context = binding["size_panel"]["context"]
+    events = {e["event_id"]: e for e in context["target_events"]}
+    folds = _nested(binding, request)
+    for group in folds:
+        for fold in [group["outer"], *group["inner"]]:
+            fold["training_candidate_event_ids"] = [e for e in fold["training_candidate_event_ids"]
+                if events[e]["label_end"] < fold["training_labels_before"]]
+            _require(bool(fold["training_candidate_event_ids"]))
+            cutoff = fold.get("evaluation_labels_before", binding["magnitude_execution"]["evaluation_labels_before"])
+            _require(all(events[e]["label_end"] < cutoff for e in fold["evaluation_event_ids"]))
+    return folds
+
+
+def prepare_plan(conn, store, registration, request):
+    """Expand the fixed dictionary grid into fully bound executable recipes."""
+    verify_native_registration(conn, store, registration, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
+    binding = registration.document
+    verify_installation(binding)
+    schedule = compile_request(request)
+    _require(schedule["request"] == binding["size_request"])
+    folds = _folds(binding, request)
+    candidates = []
+    source_binding_id = content_hash(binding["size_panel"])
+    for spec in schedule["candidate_specs"]:
+        recipe = candidate_recipe(spec["family"], spec["parameters"], columns=spec["feature_recipe"]["model_columns"],
+                                  feature_dictionary_hash=spec["feature_recipe"]["dictionary_hash"])
+        identity = {"recipe": recipe, "feature_recipe": spec["feature_recipe"],
+                    "source_binding_id": source_binding_id, "candidate_spec_id": spec["candidate_spec_id"]}
+        candidates.append({**identity, "candidate_id": content_hash(identity)})
+    identity = {"schema_version": "magnitude_search_plan.v2", "request": schedule["request"],
+        "anchor": {"run_id": registration.run_id, "variant_id": registration.variant_id},
+        "implementation": {"source_closure": binding["source_closure"], "environment": binding["environment"]},
+        "candidates": sorted(candidates, key=lambda c: c["candidate_id"]), "folds": folds,
+        "horizons": [5, 3, 1], "candidate_count": schedule["counts"]["candidates"],
+        "planned_fit_count": schedule["counts"]["search_fits"], "counts": schedule["counts"],
+        "selection": {"metric": "inner_pooled_rmse", "ties": "candidate_id_ascending", "retries": 0,
+                      "outer": "frozen_selected_only", "final_read_authority": "none"}}
+    return {**identity, "plan_id": content_hash(identity)}
+
+
+def execution_for_candidate(binding, candidate):
+    execution = {**binding["magnitude_execution"], "fit_recipe": candidate["recipe"]}
+    if binding.get("schema_version") == SCHEMA:
+        execution.update(schema_version="size_candidate_execution.v1", features=candidate["recipe"]["features"],
+                         model=candidate["recipe"]["model"])
+    return execution
+
+
+def fold_inputs(repository, binding, fold):
+    """Revalidate installed producer before opening any training outcome."""
+    from engine.v2.research.magnitude_panel_qualified_table import recipe
+    verify_installation(binding)
+    _require(any(fold in group["inner"] or fold == {**group["outer"],
+        "evaluation_labels_before": binding["magnitude_execution"]["evaluation_labels_before"]}
+        for group in _folds(binding, binding["size_request"])))
+    source = from_document(SnapshotRef, binding["snapshot"])
+    panel = _read_panel(repository, source, binding["size_panel_request"], columns=recipe("HMO")["model_columns"])
+    _require({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]} == binding["size_panel"])
+    participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
+    events = {e["event_id"]: e for e in panel["context"]["target_events"]}
+    _require(participants <= set(events) and all(events[e]["label_end"] < fold["training_labels_before"]
+             for e in fold["training_candidate_event_ids"]))
+    month = binding["holdouts"]["holdout_as_of_month"]
+    preflight = preflight_magnitude_targets(repository, source, as_of_month=month, event_ids=sorted(participants))
+    train = qualify_magnitude_training_targets(repository, source, as_of_month=month,
+        labels_before=fold["training_labels_before"], event_ids=fold["training_candidate_event_ids"])
+    return {"preflight": preflight, "stored_inputs_id": content_hash(binding["size_panel"]),
+        "training_inputs": dict(train.attrs), "training": train[["event_id", "absolute_move_pct"]].to_dict("records"),
+        "features": [r for r in panel["rows"] if r["event_id"] in participants]}

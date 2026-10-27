@@ -247,6 +247,24 @@ def test_conflicting_pools_refuse_the_row_in_either_order(order):
          "exact-cutoff payoff artifact missing"),
         ("release lacks the exact-cutoff analog pool",
          "exact-cutoff analog pool missing"),
+        ("one exact paired residual pool is required",
+         "paired residual pool missing"),
+        ("more than one exact paired residual pool",
+         "duplicate paired residual pool"),
+        ("one exact trailing cutoff artifact is required",
+         "trailing cutoff artifact missing"),
+        ("more than one exact trailing cutoff artifact",
+         "duplicate trailing cutoff artifact"),
+        ("event date is not a valid trailing cutoff month",
+         "invalid trailing cutoff month"),
+        ("RUNUP champion residual pool is missing or unusable",
+         "RUNUP champion pool missing or unusable"),
+        ("RUNUP requires one exact-key payoff surface",
+         "RUNUP payoff surface missing"),
+        ("RUNUP has more than one exact-key payoff surface",
+         "duplicate RUNUP payoff surface"),
+        ("RUNUP payoff surface is numerically unusable",
+         "RUNUP payoff surface unusable"),
     ],
 )
 def test_source_bundle_refusal_detail_maps_known_causes_to_safe_labels(
@@ -254,6 +272,15 @@ def test_source_bundle_refusal_detail_maps_known_causes_to_safe_labels(
     exc = SimpleNamespace(code="MODEL_NOT_READY", detail=source_detail)
     assert native_score_batch._nightly_source_bundle_refusal_detail(exc) == (
         f"nightly_source_bundle refused: MODEL_NOT_READY: {expected_label}")
+
+
+def test_source_bundle_refusal_detail_ignores_known_detail_under_another_code():
+    # The label table is keyed by (code, detail): a known detail under a
+    # different code publishes only that code, never the label or the detail.
+    exc = SimpleNamespace(code="MISSING_STAGED_INPUT",
+                          detail="one exact paired residual pool is required")
+    assert native_score_batch._nightly_source_bundle_refusal_detail(exc) == (
+        "nightly_source_bundle refused: MISSING_STAGED_INPUT")
 
 
 def test_source_bundle_refusal_detail_never_leaks_unknown_source_detail():

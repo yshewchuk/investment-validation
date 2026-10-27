@@ -22,7 +22,7 @@ def result():
     return SimpleNamespace(as_dict=lambda: {
         "ticker": "AAA", "strategy": "STR-THRU", "event_date": "2026-09-16",
         "entry_date": "2026-09-16", "exit_date": "2026-09-17", "expiry": "2026-09-18",
-        "spot": 100.0, "entry_cost": 5.0, "implied_move": 6.0,
+        "spot": 100.0, "chain_spot": 125.0, "entry_cost": 5.0, "implied_move": 6.0,
         "driver_name": "abs_move", "driver_prediction": 7.0, "legs": [], "flags": [], "model_inputs": {"x": 0.0},
         "gate_score": 0.7, "gate_threshold": 0.6, "gate_pass": True,
         "detail": "", "payoff": {}, "fill": 0.5,
@@ -37,7 +37,7 @@ def dynamic_result(strategy):
     return SimpleNamespace(as_dict=lambda: {
         "ticker": "AAA", "strategy": strategy, "event_date": "2026-09-16",
         "entry_date": "2026-09-16", "exit_date": "2026-09-17", "expiry": "2026-09-18",
-        "spot": 100.0, "entry_cost": 5.0, "implied_move": 6.0,
+        "spot": 100.0, "chain_spot": 125.0, "entry_cost": 5.0, "implied_move": 6.0,
         "driver_name": "abs_move", "driver_prediction": 7.0,
         "legs": [], "flags": [], "model_inputs": {}, "exp_pnl_sim": value,
         "chooser_score": value, "gate_score": 0.7, "gate_threshold": 0.6,
@@ -51,7 +51,7 @@ def test_single_and_batch_share_score_id(monkeypatch):
     single = application.score_one(request(), native)
     batch = application.score_many(((request(), native),))[0]
     assert single.score_id == batch.score_id
-    assert single.financial_diagnostics["entry_cost_pct"] == 5.0
+    assert single.financial_diagnostics["entry_cost_pct"] == 4.0
     assert single.financial_diagnostics["model_vs_market"] == 7.0 / (6.0 * 0.645)
     assert single.null_masks == {"x": False}
 

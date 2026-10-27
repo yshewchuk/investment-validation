@@ -20,7 +20,8 @@ def _text(value, field="metadata text"):
     return value
 
 
-def _tickers(tickers):
+def validate_tickers(tickers):
+    """Return sorted canonical ticker names; no source access or admission."""
     if type(tickers) is not list or not tickers:
         raise fail("CONTRACT_MISMATCH", "tickers must be a nonempty plain list")
     for ticker in tickers:
@@ -51,7 +52,9 @@ def _source_shape(events):
             raise fail("CONTRACT_MISMATCH", "metadata session must be scalar text or null")
 
 
-def _rows(events, tickers):
+def metadata_rows(events, *, tickers):
+    """Validate rows/tickers and detach evidence/reasons; no source or conflict proof."""
+    tickers = set(validate_tickers(tickers))
     _source_shape(events)
     reasons = classify_metadata(events)
     rows = []
@@ -106,8 +109,8 @@ def reduce_sequences(events: pd.DataFrame, *, tickers: list[str]) -> list[dict]:
     Caller owns allocation bounds and complete requested-ticker membership.
     No source identity, time cutoff, coverage or payload authority is accepted.
     """
-    tickers = _tickers(tickers)
-    rows, reasons = _rows(events, set(tickers))
+    tickers = validate_tickers(tickers)
+    rows, reasons = metadata_rows(events, tickers=tickers)
     _conflicts(rows)  # Unconfirmed rows can invalidate the entire view.
     selected = dict.fromkeys(tickers, 0)
     confirmed = {ticker: [] for ticker in tickers}

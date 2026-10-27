@@ -433,12 +433,12 @@ committed by `engine.v2.ops.computed_moves_store.py`/
 path or row value — not fully enforced today (Invariants). Strict document
 decoding can instead raise `DocumentError` directly.
 
-New native `computed_moves` captures publish singleton event objects within each
-ticker partition, with inspected key/time bounds and the existing streamed
-logical-partition hash. Row values and table contracts are unchanged; object
-layout changes physical version identity. Old pinned fragments remain unchanged.
-Repository predicates filter decoded rows, not arbitrary bytes within a surviving
-object: research must prove object isolation from metadata before reading labels.
+Native `computed_moves` uses singleton event objects with inspected key/time bounds and streamed logical hashes; old pins and row contracts stay unchanged.
+`computed_move_bounds.v1` is a separate metadata-only ticker-partitioned table: actual pre/post source dates, session, capture/source hashes and exact outcome object/hash.
+Its `source_bounds` shares native `source_session_indices`; finalized unavailable labels have null dates, never guessed calendar intervals.
+The opt-in ops writer checks post-close + one day against native label availability; this is reconstructed source dating, not publication-time evidence.
+Research validates this sibling before outcome admission; missing coverage refuses rather than reconstructing dates from unrelated price captures.
+Predicates filter decoded rows, not physical bytes: research proves event isolation before labels; checksum verification reads each admitted object's full bytes.
 
 **`computed_moves.v3` — point-in-time availability.** `available_as_of_date`
 is the calendar day following the close that made `realized_move_pct`

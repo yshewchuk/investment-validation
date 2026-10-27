@@ -184,7 +184,7 @@ tests = [
     "tests/test_v2_models_payoff_artifact.py",
     "tests/test_v2_models_residual_artifact.py",
     "tests/test_v2_models_recalibration_artifact.py",
-    "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/v2/scoring/test_v2_scoring_frozen_residuals.py",
     "tests/v2/scoring/test_driver_residual_array_cache.py",
 ]
 
@@ -194,7 +194,7 @@ mutate = ["engine/pnl_sim.py"]
 tests = [
     "tests/test_pnl_sim_evidence.py",
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
-    "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/v2/scoring/test_v2_scoring_frozen_residuals.py",
     "tests/v2/scoring/test_driver_residual_array_cache.py",
     "tests/test_v2_models_residual_artifact.py",
 ]
@@ -217,7 +217,7 @@ tests = [
     "tests/test_phase4_acceptance_independence.py",
     "tests/test_v2_scoring_runup_frozen.py",
     "tests/test_v2_scoring_actionable_flags.py",
-    "tests/test_v2_scoring_stage_ownership.py",
+    "tests/v2/scoring/test_v2_scoring_stage_ownership.py",
     "tests/test_v2_scoring_source_inputs.py",
 ]
 
@@ -244,7 +244,7 @@ tests = [
     "tests/v2/serving/test_score_population.py",
     "tests/v2/foundation/test_experiment_holdouts.py",
     "tests/test_phase4_analog_recipe_cache.py",
-    "tests/test_phase4_capture_strict.py",
+    "tests/v2/integration/test_phase4_capture_strict.py",
     "tests/test_phase4_checkpoints.py",
     "tests/test_phase4_frozen_resources.py",
     "tests/test_phase4_release_assembler.py",
@@ -278,15 +278,15 @@ tests = [
     "tests/test_v2_features_recipes.py",
     "tests/test_v2_native_structures.py",
     "tests/test_v2_registry_scoring.py",
-    "tests/test_v2_scoring_application_canonical.py",
-    "tests/test_v2_scoring_application_track_b.py",
-    "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/v2/scoring/test_v2_scoring_application_canonical.py",
+    "tests/v2/scoring/test_v2_scoring_application_track_b.py",
+    "tests/v2/scoring/test_v2_scoring_frozen_residuals.py",
     "tests/v2/scoring/test_driver_residual_array_cache.py",
     "tests/test_v2_scoring_planned_exit_bundle.py",
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
     "tests/test_v2_scoring_runup_frozen.py",
     "tests/test_v2_scoring_stage_observer.py",
-    "tests/test_v2_scoring_stage_ownership.py",
+    "tests/v2/scoring/test_v2_scoring_stage_ownership.py",
     "tests/test_v2_valuation.py",
 ]
 
@@ -321,7 +321,7 @@ tests = [
     "tests/test_phase4_planted_defect_control.py",
     "tests/test_phase4_numeric_negative_control_states.py",
     "tests/test_phase4_acceptance_independence.py",
-    "tests/test_v2_scoring_native_entry_rule.py",
+    "tests/v2/scoring/test_v2_scoring_native_entry_rule.py",
 ]
 
 [modules.data_store]
@@ -406,6 +406,7 @@ mutate = [
     "engine/v2/data/generic_streaming.py",
     "engine/v2/data/incremental_tables.py",
     "engine/v2/data/computed_moves.py",
+    "engine/v2/data/computed_move_bounds.py",
     "engine/v2/data/confirmed_event_metadata.py",
     "engine/v2/data/computed_moves_table.py",
     "engine/v2/data/iv_crush.py",
@@ -420,6 +421,7 @@ tests = [
     "tests/v2/ops/test_massive_accounting_hooks.py",
     "tests/v2/ops/test_massive_acquisition.py",
     "tests/v2/data/test_computed_moves.py",
+    "tests/v2/ops/test_computed_move_bounds_store.py",
     "tests/v2/data/test_confirmed_event_metadata.py",
     "tests/v2/data/test_computed_moves_table.py",
     "tests/v2/data/test_iv_crush.py",
@@ -490,7 +492,7 @@ tests = [
     "tests/test_v2_models_training_payoff.py",
     "tests/test_v2_models_training_recipes.py",
     "tests/v2/models/training/test_v2_models_training_recipe_fields.py",
-    "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/v2/scoring/test_v2_scoring_frozen_residuals.py",
     "tests/v2/scoring/test_driver_residual_array_cache.py",
     "tests/test_v2_scoring_native_payoff.py",
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
@@ -529,7 +531,7 @@ tests = [
     "tests/test_v2_models_residual_artifact.py",
     "tests/test_v2_scoring_frozen_executor.py",
     "tests/test_v2_scoring_frozen_recipes.py",
-    "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/v2/scoring/test_v2_scoring_frozen_residuals.py",
     "tests/v2/scoring/test_driver_residual_array_cache.py",
     "tests/test_v2_scoring_planned_exit_bundle.py",
     "tests/test_v2_scoring_r4_20_frozen_parity.py",
@@ -570,10 +572,10 @@ mutate = [
 ]
 tests = [
     "tests/v2/scoring/test_dynamic_outcomes.py",
-    "tests/test_phase4_capture_strict.py",
+    "tests/v2/integration/test_phase4_capture_strict.py",
     "tests/v2/models/test_phase4_chooser_trace.py",
     "tests/test_v2_models_chooser_analog_pool.py",
-    "tests/test_v2_scoring_native_chooser_features.py",
+    "tests/v2/scoring/test_v2_scoring_native_chooser_features.py",
     "tests/test_v2_scoring_source_inputs.py",
 ]
 
@@ -585,7 +587,7 @@ mutate = [
     "engine/v2/models/training/trailing_cutoff.py",
 ]
 tests = [
-    "tests/test_v2_scoring_native_entry_rule.py",
+    "tests/v2/scoring/test_v2_scoring_native_entry_rule.py",
     "tests/v2/models/test_checks_phase5_acceptance.py",
 ]
 
@@ -603,27 +605,27 @@ mutate = [
 tests = [
     "tests/v2/scoring/test_runup_raw_outputs.py",
     "tests/test_phase4_acceptance_independence.py",
-    "tests/test_phase4_capture_strict.py",
+    "tests/v2/integration/test_phase4_capture_strict.py",
     "tests/test_phase4_frozen_resources.py",
     "tests/test_phase4_release_assembler.py",
     "tests/test_phase4_trace_verifier.py",
     "tests/test_v2_contracts_scoring.py",
     "tests/test_v2_models_p5_2_acceptance.py",
     "tests/test_v2_scoring_actionable_flags.py",
-    "tests/test_v2_scoring_application.py",
-    "tests/test_v2_scoring_application_canonical.py",
-    "tests/test_v2_scoring_application_track_b.py",
+    "tests/v2/scoring/test_v2_scoring_application.py",
+    "tests/v2/scoring/test_v2_scoring_application_canonical.py",
+    "tests/v2/scoring/test_v2_scoring_application_track_b.py",
     "tests/test_v2_scoring_forecast_roles.py",
     "tests/test_v2_scoring_frozen_executor.py",
     "tests/test_v2_scoring_frozen_record.py",
-    "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/v2/scoring/test_v2_scoring_frozen_residuals.py",
     "tests/v2/scoring/test_driver_residual_array_cache.py",
     "tests/v2/scoring/test_gate_forecast_source.py",
     "tests/test_v2_scoring_no_score_status.py",
     "tests/test_v2_scoring_r4_20_frozen_parity.py",
     "tests/test_v2_scoring_runup_frozen.py",
     "tests/test_v2_scoring_stage_observer.py",
-    "tests/test_v2_scoring_stage_ownership.py",
+    "tests/v2/scoring/test_v2_scoring_stage_ownership.py",
 ]
 
 [modules.scoring_application]
@@ -643,19 +645,19 @@ tests = [
     "tests/v2/scoring/test_runup_calendar_horizon.py",
     "tests/v2/ops/test_runup_horizon_production.py",
     "tests/test_phase4_acceptance_independence.py",
-    "tests/test_phase4_capture_strict.py",
-    "tests/test_phase4_frozen_bridge_rows.py",
+    "tests/v2/integration/test_phase4_capture_strict.py",
+    "tests/v2/integration/test_phase4_frozen_bridge_rows.py",
     "tests/test_v2_models_p5_2_acceptance.py",
     "tests/test_v2_models_recalibration_artifact.py",
     "tests/test_v2_scoring_actionable_flags.py",
-    "tests/test_v2_scoring_application.py",
-    "tests/test_v2_scoring_application_canonical.py",
-    "tests/test_v2_scoring_application_track_b.py",
-    "tests/test_v2_scoring_financial.py",
+    "tests/v2/scoring/test_v2_scoring_application.py",
+    "tests/v2/scoring/test_v2_scoring_application_canonical.py",
+    "tests/v2/scoring/test_v2_scoring_application_track_b.py",
+    "tests/v2/scoring/test_v2_scoring_financial.py",
     "tests/test_v2_scoring_frozen_batch.py",
     "tests/test_v2_scoring_frozen_inputs.py",
     "tests/test_v2_scoring_frozen_recipes.py",
-    "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/v2/scoring/test_v2_scoring_frozen_residuals.py",
     "tests/v2/scoring/test_driver_residual_array_cache.py",
     "tests/test_v2_scoring_native_payoff.py",
     "tests/v2/scoring/test_nightly_source_bundle.py",
@@ -667,7 +669,7 @@ tests = [
     "tests/test_v2_scoring_source_inputs.py",
     "tests/v2/scoring/test_gate_fold_selection.py",
     "tests/v2/scoring/test_gate_forecast_source.py",
-    "tests/test_v2_scoring_stage_ownership.py",
+    "tests/v2/scoring/test_v2_scoring_stage_ownership.py",
 ]
 
 [modules.serving]
@@ -924,6 +926,7 @@ tests = [
 why = "Catalog-bound native registration verification and immutable user-only final-read spend: forged metadata or a duplicate act must never create authority."
 mutate = ["engine/v2/ops/native_registration.py", "engine/v2/ops/final_holdout.py"]
 tests = [
+    "tests/v2/research/test_size_search_integration.py",
     "tests/v2/research/test_magnitude_search_plan.py",
     "tests/v2/research/test_magnitude_search_trials.py",
     "tests/v2/research/test_magnitude_search_records.py",
@@ -1129,6 +1132,7 @@ mutate = [
     "engine/v2/ops/retrain_plan.py",
     "engine/v2/ops/unit_receipts.py",
     "engine/v2/ops/computed_moves_store.py",
+    "engine/v2/ops/computed_move_bounds_store.py",
     "engine/v2/ops/pinned_partition_reader.py",
     "engine/v2/ops/calendar_moves_jobs.py",
 ]
@@ -1170,6 +1174,7 @@ tests = [
     "tests/v2/ops/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_computed_moves_nightly_wiring.py",
     "tests/v2/ops/test_v2_ops_computed_moves_store.py",
+    "tests/v2/ops/test_computed_move_bounds_store.py",
     "tests/v2/ops/test_computed_moves_event_fragments.py",
     "tests/v2/ops/test_partition_consumer.py",
     "tests/test_v2_ops_coordinator_lease.py",
@@ -1234,6 +1239,8 @@ mutate = [
     "engine/v2/research/*.py",
 ]
 tests = [
+    "tests/v2/research/test_size_*.py",
+    "tests/v2/research/test_magnitude_confirmed_metadata.py",
     "tests/v2/research/test_confirmed_metadata_reducer.py",
     "tests/v2/research/test_magnitude_search_request.py",
     "tests/v2/research/test_magnitude_search_request_versions.py",
@@ -1265,8 +1272,10 @@ tests = [
     "tests/v2/research/test_magnitude_inputs.py",
     "tests/v2/research/test_magnitude_features.py",
     "tests/v2/research/test_magnitude_history_store.py",
+    "tests/v2/research/test_eligible_history.py",
     "tests/v2/research/test_magnitude_history_projection.py",
     "tests/v2/research/test_magnitude_panel_contract.py",
+    "tests/v2/research/test_magnitude_panel_qualified.py",
     "tests/v2/research/test_magnitude_panel_v2_policies.py",
     "tests/v2/research/test_magnitude_panel_v2_table.py",
     "tests/v2/research/test_magnitude_search_payload.py",

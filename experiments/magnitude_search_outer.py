@@ -25,6 +25,10 @@ from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import read_search_plan
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_trials import SearchTrials
+from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
+from experiments.size_fit_diagnostics import keys as diagnostic_keys
+from experiments.size_job_budget import resolved_limits
+from experiments.size_search_binding import execution_for_candidate
 
 
 def _conflict():
@@ -98,7 +102,8 @@ def _result(started, inputs, inputs_id, execution, forecasts, validation, fold, 
             row for row in predictions if row["horizon_sessions"] == horizon])} for horizon in horizons],
         "prospective_candidate_id": started["prospective_candidate_id"],
         "evaluation_authority": "selected_outer_fold_only", "final_read_authority": "none",
-        "holdout_results": {"random": "excluded; not evaluated", "rolling": "excluded; not evaluated"}}
+        "holdout_results": {"random": "excluded; not evaluated", "rolling": "excluded; not evaluated"},
+        **({"fit_diagnostics": execution["diagnostics"]} if "diagnostics" in execution else {})}
     return {**result, "result_id": content_hash(result)}
 
 
@@ -117,6 +122,10 @@ def _replay(read, store, started, fold, plan, execution):
         forecasts = _forecasts(read("forecasts"), fold, plan["horizons"])
         receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
                    "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
+        if execution.get("schema_version") == "size_candidate_execution.v1":
+            worker = read("worker-result")
+            _equal(worker["forecasts"], forecasts)
+            receipt.update(diagnostic_evidence(worker, execution, plan["horizons"]))
         _equal(read("execution"), receipt)
         for fit in fits:
             for state in ("started", "completed"):
@@ -163,12 +172,16 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         return read_record(conn, store, registration.run_id, "outer-" + slot + ":" + key)
     def append(slot, body):
         return append_record(conn, store, registration.run_id, "outer-" + slot + ":" + key, body, replay=False)
-    execution = {**binding["magnitude_execution"], "fit_recipe": candidate["recipe"]}
+    if binding.get("schema_version") == "native_experiment_registration.v1.6":
+        from experiments.size_comparison_run import execute as compare
+        _equal(limits, plan["request"]["limits"]["child"])
+        compare(conn, store, repository, registration, plan, fold, limits=limits, replay_only=replay_only)
+    execution = execution_for_candidate(binding, candidate)
     if replay_only or saved("terminal") is not None:
         return _replay(saved, store, started, fold, plan, execution)
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
-    resolved = execution_limits(limits)
+    resolved = resolved_limits(conn, store, registration, plan, limits) if binding.get("schema_version") == "native_experiment_registration.v1.6" else execution_limits(limits)
     append("start", started)
     inputs = _inputs(repository, binding, fold)
     manifest, inputs_id = publish_inputs(store, inputs)
@@ -187,14 +200,19 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         else:
             fits.append(pending.pop())
     source = {"manifest": manifest, "inputs_id": inputs_id, "store_root": str(store.root)}
+    if binding.get("schema_version") == "native_experiment_registration.v1.6":
+        resolved = resolved_limits(conn, store, registration, plan, limits)
     result = run_fitted_trial(source, fold, plan, execution, resolved, progress)
     succeeded = result.get("event") == "succeeded"
-    if ((succeeded and (pending or len(fits) != len(expected) or set(result) != {"event", "forecasts"}))
+    if ((succeeded and (pending or len(fits) != len(expected) or set(result) != {"event", "forecasts"} | diagnostic_keys(binding)))
             or (not succeeded and (result != {"event": "failed"} or len(pending) != 1))):
         raise _conflict()
     forecasts = _forecasts(result["forecasts"], fold, plan["horizons"]) if succeeded else None
     receipt = {"status": result["event"], "fits": fits, "fit_attempt_count": len(fits) + len(pending),
-               "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts) if succeeded else None}
+               "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts) if succeeded else None,
+               **diagnostic_evidence(result, execution, plan["horizons"])}
+    if diagnostic_keys(binding):
+        append("worker-result", result)
     append("execution", receipt)
     if not succeeded:
         raise fail("EXPERIMENT_VARIANT_FAILED", "selected outer candidate failed; replacement and retry are forbidden")

@@ -871,12 +871,15 @@ def _prepare_default_plan(root, as_of, tickers=(), context_tickers=(), clock=Non
                          expected_population=population_keys)
 
 
-def _base_release_id() -> str:
-    """The deployed release id the retrain keys are scoped to, or ``"none"`` when no release
-    root is configured or nothing was ever promoted. An unreadable pointer raises
-    ``VALIDATION_FAILED`` (not swallowed)."""
-    from engine.v2.ops.pool_refresh import deployed_release_id
-    return deployed_release_id()
+def _monthly_retrain_section(ops_root: Path, as_of: str):
+    """The monthly-retrain decision pinned into the plan (loud on error)."""
+    from engine.v2.ops import pool_refresh
+
+    decision_conn = retrain_due.open_catalog_readonly(ops_root / "catalog.sqlite")
+    try:
+        return pool_refresh.decide_for_deployed_base(decision_conn, ops_root, as_of)
+    finally:
+        decision_conn.close()
 
 
 def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=None, *,
@@ -949,8 +952,7 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
         refresh_plan=None, expected_snapshot_id=expected_shadow_snapshot_id)
     conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
     try:
-        # #805 slice 2: the monthly-retrain decision, pinned into the plan (loud on error).
-        plan_args.retrain = retrain_due.decide(conn, ops_root, as_of, _base_release_id())
+        plan_args.retrain = _monthly_retrain_section(ops_root, as_of)
         planned = commands._plan_command(plan_args, ops_root, conn, clock)
     finally:
         conn.close()

@@ -44,6 +44,16 @@ from tests.v2.ops.state_stage_support import (
 )
 
 
+@pytest.mark.parametrize("monthly", ["false", 0])
+def test_classify_refuses_non_boolean_monthly_before_read(tmp_path, monthly):
+    from tools.phase5_state_stage_job import StageRefused, classify
+
+    with pytest.raises(StageRefused) as err:
+        classify(tmp_path, ("missing.json",), monthly=monthly)
+    assert str(err.value) == "monthly is not a bool"
+    assert err.value.details == {"code": "CUTOFF_MISMATCH"}
+
+
 def test_valid_parameters_have_no_problems():
     assert state_stage_parameter_problems(None, _params()) == []
 
@@ -221,6 +231,296 @@ def test_worker_stages_candidate_carrying_the_unadvanced_members(tmp_path, monke
         assert rows[member_id]["objects"] == prior_rows[member_id]["objects"]
     names = {obj["name"] for obj in rows["board_analog_matcher"]["objects"]}
     assert names == {"prior.bin", "STR-THRU|0.5000|2026-10-01"}
+
+
+def test_monthly_stage_uses_the_deployed_pointer_as_prior(tmp_path, monkeypatch):
+    from engine.v2.models.chooser_analog_pool import make_chooser_analog_pool_artifact
+    from engine.v2.models.frozen_state import serialize_frozen_state
+    from engine.v2.models.lineage import Lineage
+    from tests.v2.ops.runup_helpers import pool
+
+    inventory, _ = _stage_prior(tmp_path, prior_sources={
+        "pool_cutoff": "2026-11-10", "retrain_cutoff": "2026-10-01"})
+    store = phase5_release.deployment_root(tmp_path)
+    deployment.mark_staging_succeeded(store, "prior1")
+    deployment.promote(store, "prior1")
+
+    staged = {
+        "driver_size.json": ("driver_residual_pool:size", "champion-size|None"),
+        "driver_implied_t1.json": ("driver_residual_pool:implied_t1",
+                                   "champion-implied_t1|None"),
+        "driver_runup_move.json": ("driver_residual_pool:runup_move",
+                                   "champion-runup_move|None"),
+        "chooser.json": ("chooser_analog_pool", "chooser|2026-11-01"),
+    }
+    payloads = {
+        "driver_size.json": serialize_frozen_state(
+            pool("size", model_id="champion-size", fold=None)),
+        "driver_implied_t1.json": serialize_frozen_state(
+            pool("implied_t1", model_id="champion-implied_t1", fold=None)),
+        "driver_runup_move.json": serialize_frozen_state(
+            pool("runup_move", model_id="champion-runup_move", fold=None)),
+        "chooser.json": serialize_frozen_state(make_chooser_analog_pool_artifact(
+            pool_id="chooser", cutoff="2026-11-01",
+            strategies={"STR-THRU": [["2026-10-30", 1.0, 0.5, 1.25, 2.0, 0.1, 0.02]]},
+            lineage=Lineage())),
+    }
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    for name, data in payloads.items():
+        (staging / name).write_bytes(data)
+
+    monkeypatch.setattr(inventory_module, "current_release_inventory",
+                        lambda *a, **k: (inventory, ()))
+    parameters = {"expected_ids": ["phase5_state_stage"], "release_root": str(tmp_path),
+                  "prior_release_id": "stale-plan-base", "release_id": "cand1",
+                  "cutoff": "2026-11-01", "mode": "monthly",
+                  "state_files": sorted(staged),
+                  "input_bindings": {**{name: f"job_x#training/{name}" for name in staged},
+                                     "legacy_manifest.json": "artifact_manifest"}}
+
+    result = run_state_stage_worker(parameters, staging)
+    assert result["completed_ids"] == ["phase5_state_stage"]
+    assert result["no_work"] is False
+    assert deployment.current_pointer(store).release_id == "prior1"
+    summary = json.loads((staging / "stage_result.json").read_text())
+    assert summary["release_id"] == "cand1"
+    assert summary["prior_release_id"] == "prior1"
+    assert summary["cutoff"] == "2026-11-01"
+    assert summary["n_new"] == 4 and summary["n_carried"] == 3
+
+    body = json.loads(phase5_release.catalog_path(tmp_path, "cand1").read_bytes())
+    prior = json.loads(phase5_release.catalog_path(tmp_path, "prior1").read_bytes())
+    assert body["sources"]["carried_from"] == "prior1"
+    assert body["sources"]["pool_cutoff"] == "2026-11-10"
+    assert body["sources"]["retrain_cutoff"] == "2026-11-01"
+    rows = {row["member_id"]: row for row in body["members"]}
+    prior_rows = {row["member_id"]: row for row in prior["members"]}
+    for name, (member, object_name) in staged.items():
+        digest = phase5_release.sha256_bytes((staging / name).read_bytes())
+        assert [(obj["name"], obj["content_hash"])
+                for obj in rows[member]["objects"]] == [(object_name, digest)]
+    for member in ("paired_residual_pool", "trailing_pnl_cutoff", "board_analog_matcher"):
+        assert rows[member]["objects"] == prior_rows[member]["objects"]
+    status = (phase5_release.deployment_root(tmp_path) / "releases" / "cand1"
+              / "staging-status.json")
+    assert json.loads(status.read_text())["state"] == "succeeded"
+
+    from engine.v2.models.loader import FrozenInference
+    from engine.v2.models.residual_artifact import residual_artifact_from_document
+    from engine.v2.ops.native_runup_inputs import runup_model_declarations
+    from engine.v2.scoring.release_bindings import ModelIdentity, ScoringReleaseBinding
+    from tests.v2.ops.runup_helpers import surface
+
+    store = phase5_release.deployment_root(tmp_path)
+    loaded = {}
+    identities = {}
+    for role in ("implied_t1", "runup_move"):
+        member = f"driver_residual_pool:{role}"
+        obj = rows[member]["objects"][0]
+        assert obj["name"] == f"champion-{role}|None"
+        artifact = residual_artifact_from_document(
+            json.loads((store / obj["path"]).read_bytes()))
+        assert artifact.role == role and artifact.model_id == f"champion-{role}"
+        assert artifact.fold is None
+        loaded[role] = artifact
+        identities["driver_prediction" if role == "implied_t1" else "runup_move_prediction"] = (
+            ModelIdentity(binding_id=f"{role}:*", model_id=artifact.model_id, role=role,
+                          strategy_id="*", decision_clock_id="entry-close",
+                          adapter="json-linear.v1", feature_order=("x",),
+                          output_names=("prediction",), artifact_hash=artifact.content_hash))
+    binding = ScoringReleaseBinding(
+        release_id="cand1", model_identity={}, model_artifact_refs={},
+        model_release=deployment.resolve_release(store, "cand1"),
+        frozen_inference=FrozenInference(store),
+        payoff_artifacts={"STR-RUNUP": (surface(cutoff="2026-11-01"),)},
+        recalibration_artifacts={}, analog_artifacts={},
+        driver_residual_artifacts=loaded)
+    declaration = runup_model_declarations(
+        binding, identities, cutoff="2026-11-01", fill_alpha=0.5)
+    for slot, role in (("driver", "implied_t1"), ("runup_move", "runup_move")):
+        assert declaration["model_residual_artifact_recipe"][slot] == {
+            "role": role, "model_id": f"champion-{role}", "fold": None,
+            "content_hash": loaded[role].content_hash}
+        assert declaration["model_residual_artifacts"][slot] == loaded[role]
+
+
+def test_monthly_retrain_cutoff_equal_to_the_prior_is_refused(tmp_path):
+    _, body = _stage_prior(tmp_path, prior_sources={
+        "pool_cutoff": "2026-11-02", "retrain_cutoff": "2026-11-01"})
+    digest = phase5_release.sha256_bytes(b"new")
+    drivers = [assembly.PoolOutput(member_id, f"{member_id}|2026-11-01", digest,
+                                   "2026-11-01", len(b"new"))
+               for member_id in assembly.MONTHLY_DRIVER_MEMBER_IDS]
+    chooser = assembly.PoolOutput(assembly.CHOOSER_MEMBER_ID, "chooser|2026-11-01", digest,
+                                  "2026-11-01", len(b"new"))
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(body, release_id="cand2", expected_prior_release_id="prior1",
+                                outputs=drivers, chooser=[chooser], cutoff="2026-11-03",
+                                monthly=True, retrain_cutoff="2026-11-01")
+    assert err.value.code == "CUTOFF_NOT_ADVANCED"
+
+
+def test_monthly_chooser_object_name_cutoff_must_match_the_retrain_cutoff():
+    from tools import phase5_state_stage_job as job
+
+    with pytest.raises(job.StageRefused) as err:
+        job._validate_monthly_object_cutoffs(
+            {"chooser_analog_pool": {"chooser|2026-10-31": b"x"}}, "2026-11-01")
+    assert err.value.details == {"code": "CUTOFF_MISMATCH"}
+
+
+@pytest.mark.parametrize("name", ["size|2026-10-31", "m-size-board-0|None"])
+def test_monthly_driver_object_name_keeps_the_model_id_and_fold_name(name):
+    from tools import phase5_state_stage_job as job
+
+    job._validate_monthly_object_cutoffs(
+        {"driver_residual_pool:size": {name: b"x"}}, "2026-11-01")
+
+
+def test_monthly_assembly_refuses_name_cutoff_that_disagrees(tmp_path):
+    _, prior_body = _stage_prior(
+        tmp_path, prior_sources={"pool_cutoff": "2026-11-02"})
+    digest = phase5_release.sha256_bytes(b"new")
+    drivers = [assembly.PoolOutput(member_id, f"{member_id}|2026-11-01", digest,
+                                   "2026-11-01", len(b"new"))
+               for member_id in assembly.MONTHLY_DRIVER_MEMBER_IDS]
+    drivers[0] = assembly.PoolOutput(
+        drivers[0].member_id, "m-size-board-0|None", digest,
+        "2026-11-01", len(b"new"))
+    chooser = assembly.PoolOutput(
+        assembly.CHOOSER_MEMBER_ID, "chooser|2026-10-31", digest,
+        "2026-11-01", len(b"new"))
+
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(
+            prior_body, release_id="cand2", expected_prior_release_id="prior1",
+            outputs=drivers, chooser=chooser, cutoff="2026-11-03",
+            monthly=True, retrain_cutoff="2026-11-01")
+
+    assert err.value.code == "CUTOFF_MISMATCH"
+
+
+def test_monthly_assembly_keeps_driver_names_that_are_not_cutoff_dates(tmp_path):
+    _, prior_body = _stage_prior(
+        tmp_path, prior_sources={"pool_cutoff": "2026-11-02"})
+    digest = phase5_release.sha256_bytes(b"new")
+    drivers = [assembly.PoolOutput(member_id, f"{member_id}|2026-11-01", digest,
+                                   "2026-11-01", len(b"new"))
+               for member_id in assembly.MONTHLY_DRIVER_MEMBER_IDS]
+    drivers[0] = assembly.PoolOutput(
+        drivers[0].member_id, "m-size-board-0|None", digest,
+        "2026-11-01", len(b"new"))
+    drivers[1] = assembly.PoolOutput(
+        drivers[1].member_id, "m-implied_t1-board-0|2026-10-31", digest,
+        "2026-11-01", len(b"new"))
+    chooser = assembly.PoolOutput(
+        assembly.CHOOSER_MEMBER_ID, "chooser|2026-11-01", digest,
+        "2026-11-01", len(b"new"))
+
+    body = assembly.derive_catalog(
+        prior_body, release_id="cand2", expected_prior_release_id="prior1",
+        outputs=drivers, chooser=chooser, cutoff="2026-11-03",
+        monthly=True, retrain_cutoff="2026-11-01")
+
+    rows = {row["member_id"]: row for row in body["members"]}
+    assert [obj["name"] for obj in rows["driver_residual_pool:size"]["objects"]] == [
+        "m-size-board-0|None"]
+    assert body["sources"]["retrain_cutoff"] == "2026-11-01"
+
+
+def test_monthly_assembly_preserves_later_prior_pool_cutoff(tmp_path):
+    _, prior_body = _stage_prior(tmp_path, prior_sources={
+        "pool_cutoff": "2026-11-10", "retrain_cutoff": "2026-10-01"})
+    digest = phase5_release.sha256_bytes(b"new")
+    drivers = [assembly.PoolOutput(member_id, f"{member_id}|2026-11-01", digest,
+                                   "2026-11-01", len(b"new"))
+               for member_id in assembly.MONTHLY_DRIVER_MEMBER_IDS]
+    chooser = assembly.PoolOutput(
+        assembly.CHOOSER_MEMBER_ID, "chooser|2026-11-01", digest,
+        "2026-11-01", len(b"new"))
+
+    body = assembly.derive_catalog(
+        prior_body, release_id="cand2", expected_prior_release_id="prior1",
+        outputs=drivers, chooser=chooser, cutoff="2026-11-01",
+        monthly=True, retrain_cutoff="2026-11-01")
+
+    assert body["sources"]["pool_cutoff"] == "2026-11-10"
+    assert body["sources"]["retrain_cutoff"] == "2026-11-01"
+
+
+@pytest.mark.parametrize("defect", ["empty", "duplicate"])
+def test_monthly_assembly_refuses_unadmitted_implicit_carries(tmp_path, defect):
+    from copy import deepcopy
+
+    _, prior_body = _stage_prior(tmp_path, prior_sources={
+        "pool_cutoff": "2026-11-10", "retrain_cutoff": "2026-10-01"})
+    rows = deepcopy(prior_body["members"])
+    paired = next(row for row in rows if row["member_id"] == "paired_residual_pool")
+    if defect == "empty":
+        paired["objects"] = []
+    else:
+        paired["objects"].append(deepcopy(paired["objects"][0]))
+    prior_body = phase5_release.manifest_body(
+        "prior1", prior_body["deployment_id"], rows, prior_body["sources"])
+
+    digest = phase5_release.sha256_bytes(b"new")
+    drivers = [assembly.PoolOutput(member_id, f"{member_id}|2026-11-01", digest,
+                                   "2026-11-01", len(b"new"))
+               for member_id in assembly.MONTHLY_DRIVER_MEMBER_IDS]
+    chooser = assembly.PoolOutput(
+        assembly.CHOOSER_MEMBER_ID, "chooser|2026-11-01", digest,
+        "2026-11-01", len(b"new"))
+
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(
+            prior_body, release_id="cand2", expected_prior_release_id="prior1",
+            outputs=drivers, chooser=chooser, cutoff="2026-11-10",
+            monthly=True, retrain_cutoff="2026-11-01")
+
+    assert err.value.code == "PRIOR_MISMATCH"
+
+
+def test_monthly_assembly_refuses_missing_implicit_carry(tmp_path):
+    from dataclasses import replace
+
+    inventory, prior_body = _stage_prior(tmp_path, prior_sources={
+        "pool_cutoff": "2026-11-10", "retrain_cutoff": "2026-10-01"})
+    store = phase5_release.deployment_root(tmp_path)
+    deployment.mark_staging_succeeded(store, "prior1")
+    prior_rows = {row["member_id"]: row for row in prior_body["members"]}
+    carried = prior_rows["paired_residual_pool"]["objects"][0]
+    (store / phase5_release.object_relpath(carried["content_hash"])).unlink()
+
+    drivers = []
+    for member_id in assembly.MONTHLY_DRIVER_MEMBER_IDS:
+        payload = f"new-{member_id}".encode()
+        digest, _ = phase5_release.write_object(tmp_path, payload)
+        drivers.append(assembly.PoolOutput(
+            member_id, f"{member_id}|2026-11-01", digest,
+            "2026-11-01", len(payload)))
+    chooser_payload = b"new-chooser"
+    chooser_hash, _ = phase5_release.write_object(tmp_path, chooser_payload)
+    chooser = assembly.PoolOutput(
+        assembly.CHOOSER_MEMBER_ID, "chooser|2026-11-01", chooser_hash,
+        "2026-11-01", len(chooser_payload))
+
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.carry_forward_release(
+            tmp_path, prior_release_id="prior1", release_id="cand2",
+            inventory=replace(inventory, release_id="cand2"), outputs=drivers,
+            chooser=chooser, cutoff="2026-11-10", monthly=True,
+            retrain_cutoff="2026-11-01")
+
+    assert err.value.code == "PRIOR_MISMATCH"
+
+
+def test_monthly_stage_refuses_a_missing_deployed_base(tmp_path, monkeypatch):
+    parameters, staging = _wire(tmp_path, monkeypatch, mode="monthly")
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert err.value.problem.details == {"code": "PRIOR_MISMATCH"}
 
 
 def test_successful_stage_publishes_the_staging_success_record(tmp_path, monkeypatch):
@@ -918,7 +1218,7 @@ def test_bootstrap_with_prior_equal_to_release_is_reported():
 
 def test_unknown_mode_is_reported():
     assert state_stage_parameter_problems(
-        None, _params(mode="sideways")) == ["mode must be 'carry' or 'bootstrap'"]
+        None, _params(mode="sideways")) == ["mode must be 'carry', 'bootstrap' or 'monthly'"]
 
 
 def test_carry_with_a_null_prior_is_reported():

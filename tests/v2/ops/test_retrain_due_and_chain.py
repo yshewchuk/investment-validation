@@ -14,6 +14,8 @@ from engine.v2.ops.pool_refresh import submit_pool_nightly_refresh_if_ready
 from engine.v2.ops.retrain_due import (
     chain_blocks_pool_sidecar,
     due_decision,
+    open_catalog_readonly,
+    read_base_retrain_cutoff,
     read_recorded,
     write_superseded,
 )
@@ -64,6 +66,193 @@ def test_due_decision():
 
     with pytest.raises(ValueError):
         due_decision("2026-13-01", None, recorded)
+
+
+def test_open_catalog_readonly_never_creates_or_writes(tmp_path):
+    catalog = tmp_path / "catalog.sqlite"
+    writer = sqlite3.connect(catalog)
+    writer.execute("CREATE TABLE jobs (namespace TEXT, idempotency_key TEXT)")
+    writer.execute("INSERT INTO jobs VALUES ('shadow', 'key')")
+    writer.commit()
+    writer.close()
+
+    conn = open_catalog_readonly(catalog)
+    try:
+        row = conn.execute("SELECT idempotency_key FROM jobs").fetchone()
+        assert row[0] == "key"
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("INSERT INTO jobs VALUES ('shadow', 'other')")
+    finally:
+        conn.close()
+
+    missing = tmp_path / "missing.sqlite"
+    with pytest.raises(sqlite3.OperationalError):
+        open_catalog_readonly(missing)
+    assert not missing.exists()
+
+
+def test_read_base_retrain_cutoff_handles_current_and_legacy_catalogs(tmp_path):
+    from engine.v2.models.release_layout import catalog_path, manifest_body, write_catalog
+
+    current_root = tmp_path / "current"
+    current = manifest_body(
+        "rel-current", "dep-1", [],
+        {"pool_cutoff": "2026-11-02", "retrain_cutoff": "2026-11-01"},
+    )
+    write_catalog(catalog_path(current_root, "rel-current"), current)
+    assert read_base_retrain_cutoff(current_root, "rel-current") == "2026-11-01"
+
+    legacy_root = tmp_path / "legacy"
+    legacy = manifest_body("rel-legacy", "dep-1", [], {"pool_cutoff": "2026-11-02"})
+    write_catalog(catalog_path(legacy_root, "rel-legacy"), legacy)
+    assert read_base_retrain_cutoff(legacy_root, "rel-legacy") is None
+
+
+def test_read_base_retrain_cutoff_handles_absent_legacy_and_current_catalogs(tmp_path):
+    from engine.v2.ops.errors import OpsError
+
+    assert read_base_retrain_cutoff(tmp_path, "rel-legacy-absent") is None
+    with pytest.raises(OpsError) as exc_info:
+        read_base_retrain_cutoff(tmp_path, "pools-current-absent")
+    assert exc_info.value.code == "VALIDATION_FAILED"
+    assert exc_info.value.problem.details["code"] == "PRIOR_MISMATCH"
+
+
+def test_read_base_retrain_cutoff_rejects_invalid_legacy_pool_cutoff(tmp_path):
+    from engine.v2.models.release_layout import catalog_path, manifest_body, write_catalog
+    from engine.v2.ops.errors import OpsError
+
+    root = tmp_path / "invalid"
+    body = manifest_body("rel-invalid", "dep-1", [], {"pool_cutoff": "2026-11-1"})
+    write_catalog(catalog_path(root, "rel-invalid"), body)
+    with pytest.raises(OpsError) as exc_info:
+        read_base_retrain_cutoff(root, "rel-invalid")
+    assert exc_info.value.code == "VALIDATION_FAILED"
+    assert exc_info.value.problem.details["code"] == "PRIOR_MISMATCH"
+
+
+def test_decide_for_deployed_base_validates_before_cutoff_and_decision(monkeypatch, tmp_path):
+    import types
+
+    import engine.v2.models.deployment as deployment
+    import engine.v2.ops.pool_refresh as pool_refresh
+    import engine.v2.ops.retrain_due as retrain_due
+
+    calls = []
+
+    def validate(*args):
+        calls.append("validate")
+        return types.SimpleNamespace(kind="USABLE")
+
+    def read(*args):
+        calls.append("cutoff")
+        return "2026-10-01"
+
+    def decide(*args, **kwargs):
+        calls.append("decide")
+        return "decision"
+
+    monkeypatch.setattr(pool_refresh, "deployed_release_id", lambda: "rel-base")
+    monkeypatch.setattr(deployment, "production_release_root", lambda: tmp_path / "release")
+    monkeypatch.setattr(pool_refresh, "validate_retrain_base", validate)
+    monkeypatch.setattr(retrain_due, "read_base_retrain_cutoff", read)
+    monkeypatch.setattr(retrain_due, "decide", decide)
+
+    result = pool_refresh.decide_for_deployed_base(_conn(), tmp_path, "2026-11-02")
+    assert result == "decision"
+    assert calls == ["validate", "cutoff", "decide"]
+
+
+def test_read_base_retrain_cutoff_refuses_non_mapping_sources(monkeypatch, tmp_path):
+    import engine.v2.ops.retrain_due as retrain_due
+    from engine.v2.ops.errors import OpsError
+
+    monkeypatch.setattr(retrain_due, "read_catalog", lambda *args: {"sources": []})
+
+    with pytest.raises(OpsError) as exc_info:
+        read_base_retrain_cutoff(tmp_path, "rel-base")
+    assert exc_info.value.code == "VALIDATION_FAILED"
+    assert exc_info.value.problem.details["code"] == "PRIOR_MISMATCH"
+    assert exc_info.value.problem.details["cause"] == "TypeError"
+
+
+def test_validate_retrain_base_refuses_damaged_classification(monkeypatch, tmp_path):
+    import types
+
+    import engine.v2.ops.pool_refresh as pool_refresh
+    from engine.v2.ops.errors import OpsError
+
+    monkeypatch.setattr(
+        pool_refresh, "_classify_prior",
+        lambda *args: types.SimpleNamespace(kind="DAMAGED", reason="catalog_invalid"),
+    )
+
+    with pytest.raises(OpsError) as exc_info:
+        pool_refresh.validate_retrain_base(tmp_path, "pools-bad")
+    assert exc_info.value.code == "VALIDATION_FAILED"
+    assert exc_info.value.problem.details["code"] == "PRIOR_MISMATCH"
+    assert exc_info.value.problem.details["cause"] == "catalog_invalid"
+
+
+def test_validate_retrain_base_accepts_legacy_no_pool_catalog(monkeypatch, tmp_path):
+    import types
+
+    import engine.v2.ops.pool_refresh as pool_refresh
+
+    monkeypatch.setattr(
+        pool_refresh, "_classify_prior",
+        lambda *args: types.SimpleNamespace(kind="NO_POOL_CATALOG"),
+    )
+
+    assert pool_refresh.validate_retrain_base(tmp_path, "legacy-release").kind == "NO_POOL_CATALOG"
+
+
+def test_decide_for_deployed_base_defers_without_monthly_capable_base(monkeypatch, tmp_path):
+    base_id = "legacy-release"
+
+    import types
+
+    import engine.v2.models.deployment as deployment
+    import engine.v2.ops.pool_refresh as pool_refresh
+    import engine.v2.ops.retrain_due as retrain_due
+    from engine.v2.ops.pool_refresh import decide_for_deployed_base
+
+    monkeypatch.setattr(pool_refresh, "deployed_release_id", lambda: base_id)
+    monkeypatch.setattr(
+        pool_refresh, "_classify_prior",
+        lambda *args: types.SimpleNamespace(kind="NO_POOL_CATALOG"),
+    )
+    monkeypatch.setattr(retrain_due, "decide", lambda *args: pytest.fail("decide called"))
+    monkeypatch.setattr(
+        retrain_due, "read_base_retrain_cutoff",
+        lambda *args: pytest.fail("read_base_retrain_cutoff called"),
+    )
+    monkeypatch.setattr(deployment, "production_release_root", lambda: tmp_path)
+
+    result = decide_for_deployed_base(_conn(), tmp_path, "2026-11-02")
+    assert result == {"state": "not_due", "reason": "base_pool_catalog_unavailable", "base": base_id}
+
+
+def test_validate_catalog_rejects_invalid_retrain_cutoffs():
+    from engine.v2.models.release_layout import (
+        ReleaseLayoutError,
+        manifest_body,
+        validate_catalog,
+    )
+
+    malformed = manifest_body(
+        "rel-malformed", "dep-1", [],
+        {"pool_cutoff": "2026-11-02", "retrain_cutoff": "2026-11-1"},
+    )
+    with pytest.raises(ReleaseLayoutError):
+        validate_catalog(malformed)
+
+    later_than_pool = manifest_body(
+        "rel-later-than-pool", "dep-1", [],
+        {"pool_cutoff": "2026-11-02", "retrain_cutoff": "2026-11-03"},
+    )
+    with pytest.raises(ReleaseLayoutError):
+        validate_catalog(later_than_pool)
 
 
 def test_read_recorded_and_chain(tmp_path):

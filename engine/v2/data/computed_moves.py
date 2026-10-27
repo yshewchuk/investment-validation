@@ -72,8 +72,8 @@ def _below_admission(computable: int) -> bool:
     return computable < ADMISSION_EVENTS
 
 
-def _session_move_indexed(sd, sc, t, session) -> tuple[float, np.datetime64] | None:
-    """Same computation as session_move, plus the measured close date (sd[j_post])."""
+def source_session_indices(sd, t, session):
+    """Actual source-date bracket shared by outcomes and metadata sidecars."""
     if session == "BMO":
         j_pre = int(np.searchsorted(sd, t, side="left")) - 1
         j_post = int(np.searchsorted(sd, t, side="left"))
@@ -84,6 +84,15 @@ def _session_move_indexed(sd, sc, t, session) -> tuple[float, np.datetime64] | N
         return None
     if (sd[j_post] - sd[j_pre]) / np.timedelta64(1, "D") > MAX_GAP_CALENDAR_DAYS:
         return None
+    return j_pre, j_post
+
+
+def _session_move_indexed(sd, sc, t, session) -> tuple[float, np.datetime64] | None:
+    """Same computation as session_move, plus the measured close date (sd[j_post])."""
+    indices = source_session_indices(sd, t, session)
+    if indices is None:
+        return None
+    j_pre, j_post = indices
     p, q = sc[j_pre], sc[j_post]
     if not np.isfinite(p) or not np.isfinite(q) or p <= 0:
         return None

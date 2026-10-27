@@ -4,8 +4,13 @@ consistent about it.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
+from engine.v2.foundation import DocumentError
+from engine.v2.scoring.financial import financial_diagnostics
+from engine.v2.scoring.native_chooser import derive_chooser_columns
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
     assemble_nightly_source_bundle,
@@ -64,15 +69,62 @@ def test_context_carries_the_staged_chain_spot():
     assert bundle.context["spot"] == _CALENDAR_CLOSE
 
 
-def test_the_chain_spot_reaches_native_inputs_without_entering_the_price():
+@pytest.mark.parametrize("spot", [
+    None, float("nan"), float("inf"), -float("inf"), 0.0, -10.0,
+    True, "not-a-spot", 10**400,
+])
+def test_source_bundle_builder_refuses_invalid_chain_spot(spot):
+    bundle = assemble_nightly_source_bundle(
+        **_kwargs(quote_rows=_rows(chain_spot=87.5)))
+    bundle.context["chain_spot"] = spot
+
+    with pytest.raises(DocumentError) as excinfo:
+        build_native_score_inputs(bundle)
+
+    assert excinfo.value.code == "BAD_VALUE"
+    assert excinfo.value.path == "$.context.chain_spot"
+    assert bundle.context["chain_spot"] is spot
+
+
+def test_source_bundle_builder_normalizes_chain_spot_without_mutating_bundle():
+    bundle = assemble_nightly_source_bundle(
+        **_kwargs(quote_rows=_rows(chain_spot=87.5)))
+    bundle.context["chain_spot"] = "64.25"
+
+    inputs = build_native_score_inputs(bundle)
+
+    assert inputs.context["chain_spot"] == 64.25
+    assert type(inputs.context["chain_spot"]) is float
+    assert bundle.context["chain_spot"] == "64.25"
+
+
+def test_chain_spot_drives_entry_cost_pct_while_calendar_spot_is_preserved():
     bundle = assemble_nightly_source_bundle(**_kwargs(quote_rows=_rows(chain_spot=87.5)))
 
     inputs = build_native_score_inputs(bundle)
     values = assemble_native_values(inputs, strategy="STR-THRU")
 
     assert inputs.context["chain_spot"] == 87.5
-    # entry_cost_pct still divides by the calendar close, never the chain spot.
-    assert values["entry_cost_pct"] == pytest.approx((1.1 + 1.2) / _CALENDAR_CLOSE * 100.0)
+    assert inputs.context["spot"] == _CALENDAR_CLOSE
+    # entry_cost_pct uses the staged chain spot while `spot` remains the calendar close.
+    expected_pct = (1.1 + 1.2) / 87.5 * 100.0
+    assert values["entry_cost_pct"] == pytest.approx(expected_pct)
+    assert financial_diagnostics(values)["entry_cost_pct"] == pytest.approx(expected_pct)
+    chooser = derive_chooser_columns({}, {}, "STR-THRU", values, {}, [])
+    assert chooser is not None
+    assert chooser["entry_cost_pct"] == pytest.approx(expected_pct)
+
+
+def test_missing_chain_spot_leaves_entry_cost_pct_absent():
+    bundle = assemble_nightly_source_bundle(**_kwargs())
+
+    values = assemble_native_values(
+        build_native_score_inputs(bundle), strategy="STR-THRU")
+
+    assert "chain_spot" not in bundle.context
+    assert values["entry_cost"] is not None
+    assert values.get("entry_cost_pct") is None
+    assert financial_diagnostics(values)["entry_cost_pct"] is None
 
 
 def test_an_empty_slice_carries_no_chain_spot():
@@ -147,3 +199,34 @@ def test_a_repeated_contract_still_merges_with_the_key_present():
     domain = quote_domain_map(rows, "recorded")
 
     assert domain["C:100.0:2026-01-16"]["observed_date"] == "2026-01-08"
+
+
+@pytest.mark.parametrize("spot", [True, "not-a-spot", 10**400])
+def test_direct_native_inputs_refuse_invalid_chain_spot(spot):
+    bundle = assemble_nightly_source_bundle(**_kwargs(quote_rows=_rows(chain_spot=87.5)))
+    inputs = build_native_score_inputs(bundle)
+    context = dict(inputs.context)
+    context["chain_spot"] = spot
+    bad_inputs = replace(inputs, context=context)
+
+    with pytest.raises(DocumentError) as excinfo:
+        assemble_native_values(bad_inputs, strategy="STR-THRU")
+
+    assert excinfo.value.code == "BAD_VALUE"
+    assert excinfo.value.path == "$.context.chain_spot"
+
+
+@pytest.mark.parametrize("block_name", ["features", "diagnostics", "chooser"])
+def test_assembly_keeps_context_chain_spot_authoritative(block_name):
+    bundle = assemble_nightly_source_bundle(
+        **_kwargs(quote_rows=_rows(chain_spot=87.5)),
+    )
+    inputs = build_native_score_inputs(bundle)
+    block = dict(getattr(inputs, block_name))
+    block["chain_spot"] = 250.0
+    inputs = replace(inputs, **{block_name: block})
+
+    values = assemble_native_values(inputs, strategy="STR-THRU")
+
+    assert values["chain_spot"] == 87.5
+    assert values["entry_cost_pct"] == pytest.approx((1.1 + 1.2) / 87.5 * 100)

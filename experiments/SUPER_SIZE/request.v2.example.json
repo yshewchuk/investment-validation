@@ -1,0 +1,15 @@
+{
+  "schema_version": "magnitude_search_request.v2",
+  "feature_snapshot_id": "snap_11111111111111111111111111111111",
+  "history_snapshot_id": "snap_22222222222222222222222222222222",
+  "feature_dictionary_hash": "sha256:a4d8f7f5c97c671fd27bf91f94e4845d98079072f2bd7e7cabf4369890485133",
+  "eligibility_policy_ref": {"plan_id": "sha256:3333333333333333333333333333333333333333333333333333333333333333", "policy_id": "sha256:dff629fde866872115a22f90305909b9f7176451439a3cc8f27e3e884c22376c", "schema_ref": "group_eligibility_plan.v1"},
+  "feature_sets": ["H", "HM", "HMO"],
+  "space": {"elasticnet": {"alpha": [0.01, 0.1, 1.0], "l1_ratio": [0.25, 0.75]}, "hgb": {"max_leaf_nodes": [7, 15]}, "ridge": {"alpha": [0.1, 1.0, 10.0]}},
+  "outer_years": ["2022", "2023", "2024"],
+  "inner_years": {"2022": ["2020", "2021"], "2023": ["2021", "2022"], "2024": ["2022", "2023"]},
+  "max_candidates": 33,
+  "max_fits": 603,
+  "comparison": {"max_component_fits": 18, "max_logical_fits": 9, "reference": "size_v1_4_causal_refit", "sanity_reference": "history_mean"},
+  "limits": {"build": {"memory_bytes": 3221225472, "wall_seconds": 600}, "child": {"cpu_seconds": 60, "memory_bytes": 2147483648, "wall_seconds": 120}, "job": {"wall_seconds": 3600}, "parent": {"memory_bytes": 3221225472, "wall_seconds": 3600}}
+}

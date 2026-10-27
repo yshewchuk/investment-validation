@@ -53,6 +53,7 @@ from engine.v2.data.computed_moves_table import (
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
+from engine.v2.ops import computed_move_bounds_store as source_bounds
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.generation_binding import record_price_history_lineage
@@ -658,7 +659,7 @@ def _generation_manifest(store, prior_manifest, kept, records_by_ticker):
 
 def _commit_generation(conn, store, scope, *, parent, parent_receipt_id, records_by_ticker,
                        attempts, clock, expected_head, generation, request_hash, as_of,
-                       staged_attempt_id=None, staged_fence=None):
+                       staged_attempt_id=None, staged_fence=None, bounds_by_ticker=None):
     prior_manifest = parent.table_manifests.get(COMPUTED_MOVES_TABLE_NAME)
     prior_records = tuple(record for record in parent.records
                           if record.table_contract_ref.contract_id
@@ -689,6 +690,7 @@ def _commit_generation(conn, store, scope, *, parent, parent_receipt_id, records
     table_manifests = {name: manifest_ for name, manifest_ in parent.table_manifests.items()
                        if name != COMPUTED_MOVES_TABLE_NAME}
     table_manifests[COMPUTED_MOVES_TABLE_NAME] = manifest
+    bounds_records = source_bounds.compose(parent, rewritten, bounds_by_ticker, table_manifests)
     snapshot = manifests.snapshot_ref(
         table_manifests, calendar_version=parent.snapshot.calendar_version,
         source_priority_version=parent.snapshot.source_priority_version,
@@ -700,9 +702,11 @@ def _commit_generation(conn, store, scope, *, parent, parent_receipt_id, records
                           != COMPUTED_MOVES_CONTRACT.contract_id
                           and not _is_other_computed_moves_contract(
                               record.table_contract_ref.contract_id))
-    all_records = other_records + new_records
+    all_records = tuple(r for r in other_records if r.table_contract_ref != source_bounds.REF) + new_records + bounds_records
     contracts = {item.contract_id: item for item in parent.contracts}
     contracts[COMPUTED_MOVES_CONTRACT.contract_id] = COMPUTED_MOVES_CONTRACT
+    if source_bounds.TABLE in table_manifests:
+        contracts[source_bounds.CONTRACT.contract_id] = source_bounds.CONTRACT
     all_objects = tuple({record.object_ref.object_id: record.object_ref
                          for record in all_records}.values())
     receipt_id = "receipt_cm_" + request_hash.removeprefix("sha256:")[:32]
@@ -994,7 +998,7 @@ def _select_and_plan(conn, repository, parent, parameters, document, *, as_of, a
 
 
 def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
-                               use_cached_receipts: bool = True) -> RefreshCallbackResult:
+                               use_cached_receipts: bool = True, include_source_bounds: bool = False) -> RefreshCallbackResult:
     """This job's own callback (spec s4b Change 3), called directly -- NOT
     bound to ``RefreshCallback`` via a bare ``functools.partial``: ``main``'s
     ``RefreshParameters`` has no ``as_of`` field, so ``as_of`` is an explicit,
@@ -1005,6 +1009,9 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
     identical inputs commit identical bytes. ``use_cached_receipts`` picks the
     plan's cache policy (``_plan_cached_outcomes``); the supervised default
     is unchanged."""
+    if type(include_source_bounds) is not bool:
+        raise fail("INVALID_REQUEST", "include_source_bounds must be boolean")
+    bounds_by_ticker = {} if include_source_bounds else None
     as_of_day = _as_of_day(as_of)  # validated before any I/O; a bad value raises
     _validate_job_identity(parameters)
     root = Path(root)
@@ -1032,10 +1039,10 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
             conn, store, plan, fetcher, clock,
             inputs=_TickerChunks(repository, parent.snapshot,
                                  [unit.expected_keys[0] for unit in plan.units], stats),
-            as_of_day=as_of_day)
+            as_of_day=as_of_day, bounds_by_ticker=bounds_by_ticker)
         _capture_below_bar(store, repository, parent.snapshot, stats, fragment_records,
                            attempts, as_of_day=as_of_day, created_at=clock.now().isoformat(),
-                           since=document.get("since"))
+                           since=document.get("since"), bounds_by_ticker=bounds_by_ticker)
         if not fragment_records:
             return _no_fragment_result(
                 conn, parameters, attempts, targets, document, parent, clock)
@@ -1045,6 +1052,7 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
             "base_snapshot_id": parent.snapshot.snapshot_id,
             "fragments": {ticker: [record.fragment_id for record in records]
                           for ticker, records in sorted(fragment_records.items())}})
+        request_hash = source_bounds.request_identity(request_hash, bounds_by_ticker)
         receipt = _commit_generation(
             conn, store, str(document["scope"]), parent=parent,
             parent_receipt_id=parameters.parent_receipt_id,
@@ -1052,7 +1060,8 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None,
             expected_head=document.get("expected_head_snapshot_id",
                                        parameters.parent_snapshot_id),
             generation=int(document["expected_head_generation"]), request_hash=request_hash,
-            staged_attempt_id=document.get("attempt_id"), staged_fence=document.get("fence"))
+            staged_attempt_id=document.get("attempt_id"), staged_fence=document.get("fence"),
+            bounds_by_ticker=bounds_by_ticker)
         if receipt.resulting_head_snapshot_id == parent.snapshot.snapshot_id:
             # The commit layer's own result decides: the candidate resolved
             # back to the parent snapshot, so the head did not move and
@@ -1197,7 +1206,7 @@ def _build_rows_typed(*args, **kwargs):
 
 
 def _capture_below_bar(store, repository, snapshot, stats: _SourceStats, fragment_records: dict,
-                       attempts: list, *, as_of_day: str, created_at: str, since=None) -> None:
+                       attempts: list, *, as_of_day: str, created_at: str, since=None, bounds_by_ticker=None) -> None:
     """Rows for tickers below the fetch bar: no prices loaded, no fetch, no unit.
 
     Every event of such a ticker is a ``ticker_too_few_events`` row (v5, #966), decided by
@@ -1242,6 +1251,9 @@ def _capture_below_bar(store, repository, snapshot, stats: _SourceStats, fragmen
                                      "capture_id": capture_id})
         fragment_records[ticker] = _write_ticker_fragments(store, ticker, rows,
                                                            request_hash=request_hash)
+        if bounds_by_ticker is not None:
+            bounds_by_ticker[ticker] = source_bounds.write_bounds(
+                store, rows, events, no_dates, fragment_records[ticker])
         written += 1
         attempts.append({"capture_id": capture_id, "ticker": ticker,
                          "created_at": created_at, "outcome": "below_bar"})
@@ -1280,7 +1292,7 @@ def _ticker_rows(unit, ticker: str, series, events: pd.DataFrame, daily: pd.Data
 
 
 def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks,
-                     as_of_day: str):
+                     as_of_day: str, bounds_by_ticker=None):
     """Acquire and stage event fragments per unit, fresh or cached, exactly once.
 
     The caller reaches this only when the plan has at least one fresh fetch, and
@@ -1337,6 +1349,9 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, inputs: _TickerChunks
                                      "capture_id": capture_id})
         fragment_records[ticker] = _write_ticker_fragments(store, ticker, rows,
                                                            request_hash=request_hash)
+        if bounds_by_ticker is not None:
+            bounds_by_ticker[ticker] = source_bounds.write_bounds(
+                store, rows, events[events["event_date"] < pd.Timestamp(as_of_day)], sd, fragment_records[ticker])
         attempts.append({"capture_id": capture_id, "ticker": ticker,
                          "created_at": created_at,
                          "outcome": ("no_history" if sd.size == 0

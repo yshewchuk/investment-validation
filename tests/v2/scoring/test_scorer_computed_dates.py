@@ -52,6 +52,7 @@ def _inputs(*, gate=None, quotes=None, quote_bid_ask=None,
                "quote_date": "2026-10-08" if quote_date is None else quote_date,
                "exit_date": "2026-10-27",
                "expiry": resolved_expiry, "strike": 100.0, "spot": 100.0,
+               "chain_spot": 100.0,
                "as_of": "2026-10-07",
                "quotes": quotes}
     if drop_decision:
@@ -217,10 +218,14 @@ def test_computed_days_to_print_overrides_captured_role_row(tmp_path):
 
 def test_facts_overlay_carries_priced_dte_entry_and_entry_cost_pct(tmp_path):
     gate = _frozen_gate(tmp_path, ("dte_entry", "entry_cost_pct"))
-    inputs = _inputs(gate=gate)
+    inputs = _inputs(gate=gate, context_overrides={"chain_spot": 80.0})
     values = assemble_native_values(inputs)
     facts = _facts(inputs, values)
     assert values["entry_cost_pct"] is not None
+    assert values["entry_cost_pct"] == pytest.approx(
+        values["entry_cost"] / 80.0 * 100.0)
+    assert values["entry_cost_pct"] != pytest.approx(
+        values["entry_cost"] / 100.0 * 100.0)
     assert facts["dte_entry"] == 43
     assert facts["_native_stage_facts"]["dte_entry"] == 43
     assert facts["_native_stage_facts"]["entry_cost_pct"] == values["entry_cost_pct"]

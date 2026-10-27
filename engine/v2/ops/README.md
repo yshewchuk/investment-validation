@@ -68,6 +68,7 @@ Stored history additionally exposes `native_registration.magnitude_history_reque
 `native_registration.magnitude_history_execution_document` and `native_registration.validate_magnitude_history_execution`
 seal/check v1.4. `native_registration.magnitude_fitted_execution_document` and `native_registration.validate_magnitude_fitted_execution`
 seal/check v1.5 recipes owned by registration, without importing training.
+`native_registration.verified_registration_bytes` also admits native v1.6 SIZE integrity envelopes for `experiments.size_search_binding`: request/context/snapshot cross-links only; existing byte caps/conflicts apply, with no read or fit authority.
 These constructors/validators do not grant read authority.
 They compose one resolved plan, source/environment binding and primary catalog
 reservation; the caller owns the transaction around the reservation helper.
@@ -153,7 +154,7 @@ The internal `native_score_batch._STRATEGY_REGISTRY` declares each admitted
 row's ordered forecast outputs and exact/alias driver roles, gate, policy key,
 source-bundle strategy and optional driver-name override. All resolved drivers
 contribute features, recipes, identities and request artifact references.
-STR-THRU, STR-RUNUP, TWIN-P, TWIN-P5, BFLY-P, BFLY-P5, CTR5 and RAMP7 are registered (the six entry-rule strategies are gate-less: entry-rule gate over a frozen paired pool and trailing cutoff). RUNUP requires both verified champion
+STR-THRU, STR-RUNUP, TWIN-P, TWIN-P5, BFLY-P, BFLY-P5, CTR5, RAMP7 and CND-PS are registered (the seven entry-rule strategies are gate-less: entry-rule gate over a frozen paired pool and trailing cutoff). RUNUP requires both verified champion
 residual pools and a unique exact-key payoff surface; its model gate does not
 request separate simulation. Missing/unusable model artifacts refuse its row.
 There is no runtime registration API or chooser execution contract.
@@ -538,3 +539,10 @@ check is never green). The green-path command is:
 python3 checks/v2_coverage_ratchet.py --profile phase1 --measure --output /tmp/coverage.json
 python3 checks/rearchitecture_phase1_gate.py --coverage /tmp/coverage.json
 ```
+
+## Optional source-bound capture
+
+`run_computed_moves_refresh(..., include_source_bounds=True)` adds the native
+`computed_move_bounds` sibling table without changing live outcome bytes. Default is
+false; rewritten tickers invalidate stale sidecars. Old snapshots need an explicitly
+authorized regeneration to gain bounds. This option does not authorize a data run.

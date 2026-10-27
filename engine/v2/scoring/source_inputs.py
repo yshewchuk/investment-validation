@@ -8,6 +8,7 @@ from math import isfinite
 from typing import Any, Mapping, Sequence
 
 from engine.v2.domain.generation import DISABLED, STRATEGIES
+from engine.v2.foundation import DocumentError
 from engine.v2.models.admissible_table import AdmissibleDepthTable
 from engine.v2.models.analog_artifact import BoardAnalogPoolArtifact
 from engine.v2.models.chooser_analog_pool import ChooserAnalogPoolArtifact
@@ -1218,7 +1219,19 @@ def build_native_score_inputs(bundle: SourceBundle) -> NativeScoreInputs:
         _reject_answers(name, values)
 
     quotes = _quote_block(bundle.raw_quotes)
-    context = {**dict(bundle.context), "strategy": strategy, "quotes": quotes}
+    context = dict(bundle.context)
+    if "chain_spot" in context:
+        raw_spot = context["chain_spot"]
+        try:
+            chain_spot = None if isinstance(raw_spot, bool) else float(raw_spot)
+        except (TypeError, ValueError, OverflowError):
+            chain_spot = None
+        if chain_spot is None or not isfinite(chain_spot) or chain_spot <= 0.0:
+            raise DocumentError(
+                "BAD_VALUE", "$.context.chain_spot",
+                "expected a finite positive spot")
+        context["chain_spot"] = chain_spot
+    context.update(strategy=strategy, quotes=quotes)
     features = {
         "model_inputs": dict(bundle.feature_vector),
         "missing_mask": dict(bundle.feature_missing_mask),

@@ -41,6 +41,7 @@ def _override_inputs():
         "exit_date": "2026-09-17",
         "expiry": "2026-09-18",
         "spot": 100.0,
+        "chain_spot": 125.0,
         "strike": 95.0,
     }
     features = {
@@ -104,7 +105,7 @@ def test_request_overrides_beat_context_features_and_reprice(
     assert {leg["strike"] for leg in record.legs} == {expected_strike}
     assert record.resolved_request["entry_cost"] == pytest.approx(expected_cost)
     assert record.financial_diagnostics["entry_cost_pct"] == pytest.approx(
-        expected_cost,
+        expected_cost / 125.0 * 100,
     )
 
 

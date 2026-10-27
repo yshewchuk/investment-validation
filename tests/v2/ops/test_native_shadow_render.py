@@ -61,7 +61,7 @@ from engine.v2.serving.native_shadow_render import (
     build_native_bundle_rows,
     shadow_serving_row_source,
 )
-from tests.test_phase4_capture_strict import _artifact, _full_strict_candidate
+from tests.v2.integration.test_phase4_capture_strict import _artifact, _full_strict_candidate
 from tests.test_v2_serving_projections import (
     _event_row,
     _events_snapshot,

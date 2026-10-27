@@ -19,7 +19,7 @@ def _matrix(indexed, event_ids, horizon, columns):
     return document, np.asarray(document["values"], dtype=float)
 
 
-def fitted_forecasts(indexed, train, fold, plan, execution, *, progress=None, strict_failures=False):
+def fitted_forecasts(indexed, train, fold, plan, execution, *, progress=None, strict_failures=False, diagnostics=None):
     """Freeze fresh fits and input digests before the caller opens evaluation labels."""
     predictions, evidence = {}, []
     train_ids, test_ids = train.event_id.tolist(), fold["evaluation_event_ids"]
@@ -35,7 +35,15 @@ def fitted_forecasts(indexed, train, fold, plan, execution, *, progress=None, st
         if progress is not None:
             progress("started", fit)
         try:
-            values = fit_magnitude_predictions(execution["fit_recipe"], matrix, labels.copy(), test_matrix)
+            if execution.get("schema_version") == "size_candidate_execution.v1":
+                from experiments.magnitude_candidate_fit import fit_candidate
+                result = fit_candidate(execution["fit_recipe"], matrix, labels.copy(), test_matrix,
+                                       columns=execution["features"])
+                values = result["predictions"]
+                if diagnostics is not None:
+                    diagnostics.append({"horizon_sessions": horizon, **{k: v for k, v in result.items() if k != "predictions"}})
+            else:
+                values = fit_magnitude_predictions(execution["fit_recipe"], matrix, labels.copy(), test_matrix)
             if (len(values) != len(test_ids) or any(isinstance(value, bool)
                     or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 for value in values)):
                 raise ValueError

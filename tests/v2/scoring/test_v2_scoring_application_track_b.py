@@ -26,7 +26,7 @@ def _native(strategy="STR-THRU", *, chooser_score=0.2, exp_pnl=0.1,
     context = {
         "ticker": "AAA", "strategy": strategy, "event_date": "2026-09-16",
         "entry_date": "2026-09-16", "exit_date": "2026-09-17",
-        "expiry": "2026-09-18", "spot": 100.0,
+        "expiry": "2026-09-18", "spot": 100.0, "chain_spot": 125.0,
     }
     forecast = {"driver_name": "abs_move", "driver_prediction": 7.0,
                 "forecast_abs_move": 7.0}
@@ -62,7 +62,8 @@ def _override_native(strategy="STR-THRU"):
     fields = {
         "ticker": "AAA", "strategy": strategy, "event_date": "2026-09-16",
         "entry_date": "2026-09-16", "exit_date": "2026-09-17",
-        "expiry": "2026-09-18", "spot": 100.0, "entry_cost": 3.0,
+        "expiry": "2026-09-18", "spot": 100.0, "chain_spot": 125.0,
+        "entry_cost": 3.0,
         "driver_name": "abs_move", "driver_prediction": 7.0,
         "forecast_abs_move": 7.0, "model_inputs": {}, "flags": (),
         # 2026-09-18 fix: a "scored" row needs a real exp_pnl_model/
@@ -151,7 +152,7 @@ def test_request_overrides_regenerate_and_reprice_selected_contracts(override_fi
 
     assert {leg["strike"] for leg in record.selected_contracts} == {105.0}
     assert {leg["strike"] for leg in record.legs} == {105.0}
-    assert record.financial_diagnostics["entry_cost_pct"] == pytest.approx(3.0)
+    assert record.financial_diagnostics["entry_cost_pct"] == pytest.approx(2.4)
     assert record.validation_status == "scored"
 
 
@@ -226,7 +227,7 @@ def test_dynamic_requires_simulation_before_ranking_and_preserves_flags():
 def test_score_one_executes_pricing_and_owns_refusal_lineage_and_receipts():
     record = application.score_one(_request(), _native(forged=True))
 
-    assert record.financial_diagnostics["entry_cost_pct"] == pytest.approx(3.0)
+    assert record.financial_diagnostics["entry_cost_pct"] == pytest.approx(2.4)
     assert {leg["name"] for leg in record.legs} == {"call", "put"}
     assert record.model_artifact_ids == ("model-a",)
     receipts = record.resolved_request["native_stage_receipts"]

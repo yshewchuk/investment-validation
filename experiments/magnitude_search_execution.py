@@ -14,6 +14,7 @@ from engine.v2.foundation import canonical_json
 from engine.v2.models.no_fit import forbid_fitting
 from engine.v2.ops.errors import fail
 from engine.v2.ops.executor import THREAD_VARIABLES
+from engine.v2.research.progress import decision
 from experiments.magnitude_search_records import MAX_BYTES
 
 
@@ -80,7 +81,8 @@ def _receive(child, wall_seconds, progress):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise fail("RESOURCE_LIMIT_EXCEEDED", "search execution exceeded its resource limits")
-            if not selector.select(min(remaining, 60.0)):
+            if not selector.select(min(remaining, 30.0)):
+                decision("search child", f"waiting; {wall_seconds - remaining:.0f}s elapsed; wall ceiling {wall_seconds}s")
                 continue
             chunk = os.read(child.stdout.fileno(), 65536)
             if not chunk:

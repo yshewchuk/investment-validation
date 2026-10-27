@@ -13,6 +13,8 @@ they live here rather than in the entry-point ``engine.v2.ops.cli``.
 """
 from __future__ import annotations
 
+from math import isfinite
+
 from engine.v2.foundation import DocumentError, from_document
 
 
@@ -69,8 +71,21 @@ def _load_native_score_inputs(doc: dict):
     geometry = from_document(Geometry, doc["geometry"]) if doc.get("geometry") is not None else None
     pricing = from_document(Pricing, doc["pricing"]) if doc.get("pricing") is not None else None
     receipts = tuple(from_document(StageReceipt, row) for row in doc["stage_receipts"])
+    context = doc["context"]
+    if isinstance(context, dict) and "chain_spot" in context:
+        raw_spot = context["chain_spot"]
+        try:
+            chain_spot = None if isinstance(raw_spot, bool) else float(raw_spot)
+        except (TypeError, ValueError, OverflowError):
+            chain_spot = None
+        if chain_spot is None or not isfinite(chain_spot) or chain_spot <= 0.0:
+            raise DocumentError(
+                "BAD_VALUE", "$.context.chain_spot",
+                "expected a finite positive spot")
+        context = dict(context)
+        context["chain_spot"] = chain_spot
     kwargs = dict(
-        context=doc["context"], features=doc["features"], forecast=doc["forecast"],
+        context=context, features=doc["features"], forecast=doc["forecast"],
         geometry=geometry, pricing=pricing, analogs=doc["analogs"], simulation=doc["simulation"],
         gate=doc["gate"], chooser=doc["chooser"], diagnostics=doc.get("diagnostics", {}),
         source_ref=doc["source_ref"], stage_receipts=receipts,
