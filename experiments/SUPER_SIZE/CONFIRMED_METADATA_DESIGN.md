@@ -304,8 +304,8 @@ execution authority and leaves B1b/P3a foundations and coverage design separate.
 | 1.M1: ticker conflict/sequence reducer / 1.M0; same-ticker siblings and empty states, no admission claim | 100–140 / 150–190 / 20–30 |
 | 1.M2: native ref/inventory admission / 1.B3b; exact contract and complete membership with pre-allocation caps | 100–140 / 150–190 / 20–30 |
 | 1.M3: bounded ticker scan and index composition / 1.M1/1.M2; exhaust once per partition, detached output and poisoned payload tests | 100–140 / 150–190 / 20–30 |
-| P.M1: native history/grouped-policy compatibility proof / 1.M3; contaminated histories refuse, no post-aggregate filtering | 100–140 / 150–190 / 20–30 |
-| 1.C0: availability/forecast/label qualification design / 1.M3; separate reference, payload and bound evidence before code | 0 / 0 / 120–160 |
+| P.M1/C0 replacement: reusable eligible-history platform, native source-date sibling, separate research table and strict SIZE admission; reconstruct contaminated history | One coherent implementation, approved 650 source / 120 docs |
+| Inline contract review replaces the separate C0 design PR; source-date metadata is required, unavailable historical publication proof is an accepted gap | Included above |
 | 1.C1: required availability-evidence admission / 1.C0; only evidence needed for causal availability, not source-wide population coverage | 90–130 / 150–190 / 20–30 |
 | 1.C2: forecast/label-bound admission / 1.C0; prove clocks independently of producer declarations | 100–140 / 150–190 / 20–30 |
 | 1.C3: closed v2 context declaration / P.M1,1.C1,1.C2; source-free shape/identity, no admission claim | 100–140 / 150–190 / 20–30 |
@@ -541,3 +541,19 @@ A concurrent second-connection commit between probes and transfer must not
 change the admitted view; no fixture may stand in for private source coverage.
 B1a/B1b/B2/B3a/B3b estimates top out at 360 combined lines; the packaging
 exceptions above use repository category caps. Index work waits for all five slices.
+
+### Approved eligible-history implementation amendment (2026-10-26)
+
+Supersedes the no-recompute P.M1 path and standalone C0 queue above: reconstruct
+eligible realized history once per source/policy context into a separate research
+table, using native H11 math and singleton outcome reads after full metadata admission.
+The native optional source-date sibling binds actual pre/post closes to outcome
+objects; it does not claim observed publication-time knowledge. Existing live
+outputs/readers stay unchanged; old snapshots need authorized regeneration.
+Exact installed producer/source/policy/month/cutoff/contributor identity gates reuse.
+Holdout-unaware aggregate sources are live-only at the new experiment boundary;
+aliases and derived requests cannot bypass its closed qualified field contract.
+SIZE shares this artifact across challenger/comparator; annual evaluation is still
+development. Implied-quote history and final confirmation remain separate work.
+The user approved 650 added source / 120 docs for this coherent implementation;
+review the inline contract before numerical code, not a separate design PR.
