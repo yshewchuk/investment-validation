@@ -372,7 +372,8 @@ def bundle(frozen, case, *, analog=None, table=None, size_pool=SIZE_POOL,
     return SourceBundle(
         source_ref="chooser67", strategy=case["strategy"],
         context={"ticker": "AAA", "event_date": EVENT, "entry_date": case["entry_date"],
-                 "exit_date": "2026-09-09", "expiry": EXPIRY, "spot": case["spot"] or 100.0},
+                 "exit_date": "2026-09-09", "expiry": EXPIRY, "spot": case["spot"] or 100.0,
+                 "chain_spot": case["spot"] or 100.0},
         raw_quotes=case["quotes"], feature_vector=dict(case["features"]),
         feature_missing_mask={name: False for name in case["features"]},
         model_identity={"size": {"model_id": "synthetic"}},
@@ -390,6 +391,7 @@ def bundle(frozen, case, *, analog=None, table=None, size_pool=SIZE_POOL,
 def native_frame(frozen, case, **declared) -> tuple[dict | None, list[str]]:
     inputs = build_native_score_inputs(bundle(frozen, case, **declared))
     values = {"legs": tuple(case["legs"]), "spot": case["spot"],
+              "chain_spot": case["spot"],
               "entry_cost": case["entry_cost"],
               "forecast_abs_move": case["forecast_abs_move"],
               "exp_pnl_sim": case["exp_pnl_sim"]}

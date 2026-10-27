@@ -612,7 +612,7 @@ def test_quote_domain_map_matches_capture_call_site():
 # The capture shim's message-fidelity regression
 # (tools.capture_tier0_corpus's real quote_domain_map call site preserving
 # .detail, not str(exc), through _captured_blocks) lives in
-# tests/test_phase4_capture_strict.py::test_probe_preserves_incomplete_quote_message,
+# tests/v2/integration/test_phase4_capture_strict.py::test_probe_preserves_incomplete_quote_message,
 # which exercises the real call site through native_inputs_from_capture. A
 # synthetic StrictTraceCaptureError built directly in this test file (as a
 # prior version of this test did) never executes that call site's own

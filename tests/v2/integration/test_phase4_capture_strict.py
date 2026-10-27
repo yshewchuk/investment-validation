@@ -1,3 +1,4 @@
+# packages: engine.v2.foundation, engine.v2.data, engine.v2.features, engine.v2.models, engine.v2.scoring, engine.v2.serving, engine.v2.ops, engine.v2.diagnosis, engine.v2.parity
 from __future__ import annotations
 
 import copy
@@ -752,6 +753,25 @@ def _full_strict_candidate(*, fixture_id, ticker, driver_vector, gate_vector,
     }
 
 
+def test_captured_blocks_stage_chain_spot_from_quote_rows(tmp_path):
+    path, digest = _artifact(tmp_path)
+    candidate = _full_strict_candidate(
+        fixture_id="case-0", ticker="AAA", driver_vector={"x": 2.0},
+        gate_vector={"x": 9.0, "n_prior": 5.0}, path=path, digest=digest,
+    )
+    checkpoint = candidate["legacy_trace"]["checkpoints"]["source_inputs"]
+    source = checkpoint["value"]
+    for row in source["quote_domain"]:
+        row["spot"] = 125.0
+    assert all("chain_spot" not in row for row in source["quote_domain"])
+    checkpoint["content_hash"] = content_hash(source)
+
+    blocks = _captured_blocks(candidate, _request())
+
+    assert blocks["context"]["spot"] == 100.0
+    assert blocks["context"]["chain_spot"] == 125.0
+
+
 def test_attach_strict_probe_traces_every_selected_candidate(tmp_path, monkeypatch):
     # attach_strict_probe resolves captured artifact paths beneath the data
     # root (engine.paths.ROOT); point it at this test's tmp_path instead of
@@ -1071,7 +1091,7 @@ import numpy as np  # noqa: E402
 
 import checks.phase4_stored_forecasts as phase4_stored_forecasts  # noqa: E402
 import engine.score as score_mod  # noqa: E402
-import tests.test_v2_scoring_native_chooser_features as cf  # noqa: E402
+import tests.v2.scoring.test_v2_scoring_native_chooser_features as cf  # noqa: E402
 import tests.test_v2_scoring_r4_20_frozen_parity as r4  # noqa: E402
 from checks.phase4_stored_forecasts import (  # noqa: E402
     StoredForecastError,
@@ -1823,7 +1843,8 @@ def _chooser_native(declared, case):
     bundle = SourceBundle(
         source_ref="capture-chooser", strategy=case["strategy"],
         context={"ticker": "AAA", "event_date": cf.EVENT, "entry_date": case["entry_date"],
-                 "exit_date": "2026-09-09", "expiry": cf.EXPIRY, "spot": case["spot"]},
+                 "exit_date": "2026-09-09", "expiry": cf.EXPIRY, "spot": case["spot"],
+                 "chain_spot": case["spot"]},
         raw_quotes=case["quotes"], feature_vector=dict(declared["feature_vector"]),
         feature_missing_mask=declared["feature_missing_mask"],
         model_identity={"size": {"model_id": "synthetic"}},

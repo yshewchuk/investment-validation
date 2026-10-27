@@ -3686,7 +3686,7 @@ def test_frozen_inputs_change_selects_chooser_via_the_checks_bridge():
     # The Opus-blocking counterexample THIS round fixes: the pre-fix rule
     # selected ONLY ['scoring_application'] for
     # engine/v2/scoring/frozen_inputs.py, because chooser's own test
-    # (tests/test_phase4_capture_strict.py) reaches frozen_inputs only
+    # (tests/v2/integration/test_phase4_capture_strict.py) reaches frozen_inputs only
     # through checks/phase4_frozen_bridge.py -- a file the old
     # engine/tests-only graph never parsed at all. checks/tools/experiments
     # are now graph nodes too, so the bridge closes the chain.

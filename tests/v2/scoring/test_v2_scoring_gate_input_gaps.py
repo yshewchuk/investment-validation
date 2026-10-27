@@ -16,6 +16,8 @@ gate stage in ``_append_late_stages`` had already run.
 import hashlib
 import json
 
+import pytest
+
 from engine.v2.models import FrozenInference, ModelBinding, ModelRelease
 from engine.v2.models.contracts import ArtifactMember
 from engine.v2.scoring.frozen_executor import FrozenStageExecutor
@@ -24,6 +26,7 @@ from engine.v2.scoring.stages import (
     NativeScoreInputs,
     STAGE_NAMES,
     StageReceipt,
+    _facts,
     assemble_native_values,
 )
 
@@ -46,8 +49,7 @@ def _inputs(*, source_features=None, model_inputs=None, gate=None, chooser=None,
         "entry_date": "2026-09-16",
         "exit_date": "2026-09-18",
         "expiry": "2026-09-18",
-        "strike": 100.0,
-        "spot": 100.0,
+        "strike": 100.0, "spot": 100.0, "chain_spot": 125.0,
         "quotes": dict(_QUOTES),
     }
     context.update(context_overrides or {})
@@ -211,4 +213,26 @@ def test_entry_cost_pct_available_to_the_gate(tmp_path):
     values = assemble_native_values(_inputs(gate=gate))
     assert "MISSING_FEATURES" not in values["flags"]
     assert values.get("gate_score") is not None
-    assert values.get("entry_cost_pct") is not None
+    assert values.get("entry_cost_pct") == pytest.approx(4.0 / 125.0 * 100)
+
+
+def test_stale_captured_entry_cost_pct_cannot_drive_gate_without_chain_spot(
+    tmp_path,
+):
+    """A replayed native input whose captured gate vector carries a stale
+    ``entry_cost_pct`` must not produce a gate decision when the CURRENT
+    context has no ``chain_spot``: the overlay stamps the unavailable value
+    into ``_native_stage_facts`` so the frozen executor refuses it as
+    MISSING_FEATURES instead of serving the captured number."""
+    gate = _frozen_gate(tmp_path, ("entry_cost_pct",),
+                        coefficients={"entry_cost_pct": 1.0})
+    inputs = _inputs(
+        gate=gate,
+        role_model_inputs={"gate": {"entry_cost_pct": 99.0}},
+    )
+    inputs.context.pop("chain_spot", None)
+    values = assemble_native_values(inputs)
+    facts = _facts(inputs, values)
+    assert facts["_native_stage_facts"]["entry_cost_pct"] is None
+    assert "MISSING_FEATURES" in values["flags"]
+    assert values.get("gate_score") is None

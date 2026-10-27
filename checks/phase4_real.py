@@ -410,6 +410,7 @@ def _numerical_independence_source() -> SourceBundle:
             "exit_date": "2026-09-17",
             "expiry": expiry,
             "spot": 100.0,
+            "chain_spot": 125.0,
         },
         raw_quotes=quotes,
         feature_vector={},
@@ -443,7 +444,8 @@ def _numerical_independence_source() -> SourceBundle:
         # closed-form:
         #   driver = 7.0 (forecast_recipes below), spot = 100.0
         #   exit_value = max(0, (0.02 + 0.004 * 7.0) * 100.0) = 4.8
-        #   entry_cost = 4.0 (see entry_cost_pct == 4.0 below)
+        #   entry_cost_pct = 4.0 / chain_spot 125.0 * 100.0 = 3.2
+        #   (not calendar spot 100.0)
         #   return = (4.8 - 4.0 + 0.0 * 100.0) / 4.0 = 0.2
         # exp_pnl_model == 0.2 and win_model == 1.0 for EVERY seed/draw_count.
         payoff_recipe={"min_trades": 2, "seed": 20260918, "draw_count": 8},
@@ -552,7 +554,7 @@ def _numerical_independence_control() -> dict[str, Any]:
         and expected.gate_terms == {"gate_score": 1.0,
                                     "gate_threshold": 0.0,
                                     "gate_pass": True}
-        and expected.financial_diagnostics.get("entry_cost_pct") == 4.0
+        and expected.financial_diagnostics.get("entry_cost_pct") == 3.2
         and math.isclose(expected.resolved_request.get("exp_pnl_model", float("nan")), 0.2, rel_tol=1e-9)
         and math.isclose(expected.resolved_request.get("win_model", float("nan")), 1.0, rel_tol=1e-9)
         and scored.validation_status == "refused"
@@ -713,6 +715,9 @@ def _simulation_acceptance_controls() -> dict[str, object]:
                 "event_date": "2026-09-17", "exit_date": exit_date,
                 "expiry": "2026-10-17", "pre_iv30": 40.0,
             }, source_ref)
+            base = replace(
+                base, context={**base.context, "chain_spot": 125.0},
+            )
             inputs = replace(
                 base, geometry=geometry, pricing=pricing,
                 forecast=forecast_recipe, simulation=simulation_recipe,
@@ -803,8 +808,8 @@ def _application_control_source() -> SourceBundle:
     on for every side control). Quotes are chosen so the real native
     straddle pricing lands on entry_cost=5.0 exactly: bid=2.0/ask=3.0 on
     both legs, alpha=0.5 -> fill = ask - alpha*(ask-bid) = 2.5 per leg,
-    both legs bought, entry_cost = 2.5 + 2.5 = 5.0 (spot=100 ->
-    entry_cost_pct=5.0). implied_move=6.0 and driver_prediction=7.0 (the
+    both legs bought, entry_cost = 2.5 + 2.5 = 5.0 (calendar spot=100.0,
+    chain_spot=125.0 -> entry_cost_pct=4.0). implied_move=6.0 and driver_prediction=7.0 (the
     forecast recipe's intercept, driver_name defaults to "abs_move") give
     model_vs_market = 7.0 / (6.0 * 0.645), matching financial.py's
     ORATS_EMOVE_FACTOR.
@@ -820,8 +825,8 @@ def _application_control_source() -> SourceBundle:
         context={
             "ticker": "PHASE4", "event_date": "2026-09-16",
             "entry_date": "2026-09-16", "exit_date": "2026-09-17",
-            "expiry": expiry, "spot": 100.0, "strike": strike,
-            "implied_move": 6.0,
+            "expiry": expiry, "spot": 100.0, "chain_spot": 125.0,
+            "strike": strike, "implied_move": 6.0,
         },
         raw_quotes=quotes,
         feature_vector={"zero": 0.0},
@@ -856,7 +861,7 @@ def _application_controls() -> dict[str, bool]:
             "fill_changes_identity": request_hash(request) != request_hash(altered),
             "zero_is_not_missing": one.null_masks == {"zero": False},
             "financial_values_owned": (
-                one.financial_diagnostics["entry_cost_pct"] == 5.0
+                one.financial_diagnostics["entry_cost_pct"] == 4.0
                 and one.financial_diagnostics["model_vs_market"] == 7.0 / (6.0 * 0.645)
             ),
             "batch_resource_profile": batch_elapsed_ms >= 0.0 and bool(many.score_id),
@@ -896,7 +901,7 @@ def _completion_controls(application_controls: dict[str, bool]) -> dict[str, boo
         "planned_exit_valuation_parity": planned_exit_label("2026-09-18", "2026-09-17") == "planned_exit",
         "terminal_payoff_parity": terminal_payoff(({"kind": "call", "strike": 100, "quantity": 1},), 110) == 10.0,
         "multi_expiry_refusal": multi_expiry_refusal(({"expiry": "2026-09-18"}, {"expiry": "2026-09-25"})) is not None,
-        "legacy_projection_owned": projected["financial_diagnostics"]["entry_cost_pct"] == 5.0,
+        "legacy_projection_owned": projected["financial_diagnostics"]["entry_cost_pct"] == 4.0,
         "supervised_batch_resource_profile": application_controls["batch_resource_profile"],
     }
 

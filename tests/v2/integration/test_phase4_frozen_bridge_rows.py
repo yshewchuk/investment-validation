@@ -1,3 +1,4 @@
+# packages: engine.v2.foundation, engine.v2.models, engine.v2.scoring, engine.v2.ops
 """The frozen bridge feeds each binding the row the capture fed it.
 
 ``checks/phase4_frozen_bridge._feature_rows`` used to build every binding's
@@ -28,7 +29,7 @@ from engine.v2.scoring.native_gate_features import (
 from engine.v2.models import ModelBinding
 from engine.v2.models.contracts import ArtifactMember
 from engine.v2.scoring import application
-from tests.test_phase4_capture_strict import _artifact, _full_strict_candidate
+from tests.v2.integration.test_phase4_capture_strict import _artifact, _full_strict_candidate
 from tools.capture_tier0_corpus import _hydrate_trace, attach_strict_probe
 
 CLOCK = "legacy.decision_offset.0"

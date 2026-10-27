@@ -23,7 +23,7 @@ import pandas as pd
 import pytest
 
 import engine.score as score_mod
-import tests.test_v2_scoring_native_chooser_features as cf
+import tests.v2.scoring.test_v2_scoring_native_chooser_features as cf
 from checks import phase4_real
 from checks.phase4_frozen_bridge import (
     FROZEN_CHOOSER_FIELD,
@@ -35,7 +35,7 @@ from engine.v2.foundation import content_hash, tag_nonfinite
 from engine.v2.models.chooser_analog_pool import ChooserAnalogPoolArtifact
 from engine.v2.scoring import application
 from engine.v2.scoring.source_inputs import SourceBundle, build_native_score_inputs
-from tests.test_phase4_capture_strict import (
+from tests.v2.integration.test_phase4_capture_strict import (
     _artifact,
     _candidate,
     _chooser_case,
@@ -100,7 +100,8 @@ def _native_with(plan, case, candidate):
     bundle = SourceBundle(
         source_ref="capture-chooser", strategy=case["strategy"],
         context={"ticker": "AAA", "event_date": cf.EVENT, "entry_date": case["entry_date"],
-                 "exit_date": "2026-09-09", "expiry": cf.EXPIRY, "spot": case["spot"]},
+                 "exit_date": "2026-09-09", "expiry": cf.EXPIRY, "spot": case["spot"],
+                 "chain_spot": case["spot"]},
         raw_quotes=case["quotes"], feature_vector=vector,
         feature_missing_mask={name: False for name in vector},
         model_identity={"size": {"model_id": "synthetic"}},

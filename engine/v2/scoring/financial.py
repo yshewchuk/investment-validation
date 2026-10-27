@@ -17,11 +17,14 @@ ORATS_EMOVE_FACTOR = 0.645
 def entry_cost_pct(cost: Any, spot: Any) -> float | None:
     """``entry_cost / spot * 100`` -- legacy's exact definition
     (``engine/score.py`` ``Scorer._features``, ~2562-2564: ``built[
-    "entry_cost_pct"] = entry_cost / spot_entry * 100``). ``None`` when
-    either input is missing or spot is zero: the same non-finite outcome a
-    gate's frozen feature check treats as MISSING_FEATURES either way, so
-    this stays the single source of the formula for both the pricing-time
-    gate feature (R4-20 gap) and the post-hoc display diagnostic below.
+    "entry_cost_pct"] = entry_cost / spot_entry * 100``). Every native
+    entry-cost consumer must pass the staged ORATS ``chain_spot`` as
+    ``spot``; the calendar close is not a fallback. ``None`` when either
+    input is missing or the denominator is zero: the same non-finite
+    outcome a gate's frozen feature check treats as MISSING_FEATURES either
+    way, so this stays the single source of the formula for both the
+    pricing-time gate feature (R4-20 gap) and the post-hoc display
+    diagnostic below.
     """
     if cost is None or spot is None or float(spot) == 0.0:
         return None
@@ -95,7 +98,7 @@ def _base(record: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _entry_cost(record: Mapping[str, Any], diagnostics: dict[str, Any]) -> None:
-    value = entry_cost_pct(record.get("entry_cost"), record.get("spot"))
+    value = entry_cost_pct(record.get("entry_cost"), record.get("chain_spot"))
     if value is not None:
         diagnostics["entry_cost_pct"] = value
 def _model_vs_market(record: Mapping[str, Any], diagnostics: dict[str, Any]) -> None:

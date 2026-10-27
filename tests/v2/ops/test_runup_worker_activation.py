@@ -111,7 +111,9 @@ def _event_document(horizon=7):
         },
         "panel_row": features, "panel_anchor": AS_OF, "tier4_row": {},
         "quote_rows": [{"right": right, "strike": 100.0, "expiry": "2026-01-16",
-                        "bid": 2.0, "ask": 2.0, "observed_at": AS_OF} for right in ("C", "P")],
+                        "bid": 2.0, "ask": 2.0, "observed_at": AS_OF,
+                        "chain_spot": 100.0}
+                       for right in ("C", "P")],
     }
 
 
