@@ -194,6 +194,29 @@ def test_memo_driven_chunk_gets_refetch_token_first_fetch_does_not(
     assert f2.asked_tokens == [None], "a first fetch gets no token"
 
 
+def test_below_threshold_full_fetch_token_is_per_chunk(monkeypatch, tmp_path):
+    """The refetch token is per CHUNK, not per session: a 0%-held session
+    (below the skip fraction, so the whole universe is fetched) whose memo
+    already owes TKR03 gets the run-day token only on the chunk containing
+    TKR03 — that name's cached body may be the malformed 200 that filed the
+    debt — and no token on the other chunk, which is all first fetches."""
+    _wire(monkeypatch, set(), tmp_path)
+    nightly.CHAIN_RETRY_PATH.write_text(json.dumps({AS_OF: ["TKR03"]}))
+    f = _Fetcher()
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1,
+                                         batch=5)
+
+    assert f.asked_tickers == TICKERS, "the whole universe is still fetched"
+    assert len(f.asked_tokens) == 2, "two chunks"
+    assert "TKR03" in f.asked_tickers[:5]
+    assert f.asked_tokens[0] is not None, \
+        "the chunk holding the memo-owed name must not replay the cached body"
+    assert f.asked_tokens[1] is None, \
+        "the all-first-fetch chunk stays ordinary cache-first"
+    assert "sessions_skipped" not in out, "the session was fetched, not skipped"
+
+
 def test_a_memo_value_that_is_a_string_is_ignored(monkeypatch, tmp_path):
     """A value is a LIST of names: a bare string for a date would split into
     characters if iterated naively, so it is skipped for that date."""

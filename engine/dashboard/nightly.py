@@ -681,10 +681,10 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     out = {"as_of": stamp, "sessions": stamps, "requested": len(wanted_all),
            "returned": 0, "rows": 0, "calls": 0, "cache_hits": 0,
            "skipped_held": 0, "missing": [], "failed": []}
-    # The run day names the refetch_token for every memo re-ask (see
-    # :func:`_refresh_one_session`): a malformed 200 IS cached, so the retry
-    # must not replay it. One value for the whole run => at most one fresh
-    # provider call per memo name per day.
+    # The run day names the refetch_token for every chunk that holds a
+    # memo-owed name (see :func:`_refresh_one_session`): a malformed 200 IS
+    # cached, so the retry must not replay it. One value for the whole run =>
+    # at most one fresh provider call per memo name per day.
     refetch_day = str(pd.Timestamp.now(tz="UTC").date())
     for stamp in stamps:
         _refresh_one_session(
@@ -755,17 +755,21 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
     already narrowed to the debt), and everything downstream — batching, the
     404-vs-transient split, the persist-on-any-exit protocol — is the same.
 
-    A name re-asked from the memo — ``only`` or the skip path's pending
-    subset — is fetched with ``refetch_day`` as its ``refetch_token``. The
-    cached body may be the malformed/wrong-shape 200 that filed the debt (a
-    2xx is cached whatever it holds; only non-2xx answers are not), so a
-    cache-first re-ask would replay the same bad bytes on every later run
-    forever; the token makes a distinct key, so the retry is a fresh provider
-    call — at most one per memo name per day, since the token is the run day.
-    First-time fetches pass no token: the ordinary cache-first path.
+    A name the memo already owes — ``only``, the skip path's pending subset,
+    or a below-threshold full fetch's intersection with the file — is fetched
+    with ``refetch_day`` as its chunk's ``refetch_token``. The memo is read
+    once per session, BEFORE this session's up-front persist, so the run's own
+    owe-list is never counted against it. The cached body of a memo name may
+    be the malformed/wrong-shape 200 that filed the debt (a 2xx is cached
+    whatever it holds; only non-2xx answers are not), so a cache-first re-ask
+    would replay the same bad bytes on every later run forever; the token
+    makes a distinct key, so the retry is a fresh provider call — at most one
+    per memo name per day, since the token is the run day. A chunk whose names
+    are all first fetches passes no token: the ordinary cache-first path.
     """
     session_day = pd.Timestamp(stamp).normalize()
-    memo_reasked = only is not None
+    owed: set[str] = set()
+    owed_read = False
     if only is not None:
         wanted = list(only)
     elif skip_held:
@@ -774,7 +778,9 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
         if wanted:
             fraction = (len(wanted_all) - len(wanted)) / len(wanted_all)
             if fraction >= CHAIN_SKIP_HELD_FRACTION:
-                pending = sorted(_read_chain_retry().get(stamp, set()) & set(wanted))
+                owed = _read_chain_retry().get(stamp, set())
+                owed_read = True
+                pending = sorted(owed & set(wanted))
                 if not pending:
                     out.setdefault("sessions_skipped", []).append(
                         {"session": stamp, "held_fraction": round(fraction, 3),
@@ -795,14 +801,15 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                       "retry-file names (transient failures and quota cuts)",
                       file=sys.stderr)
                 wanted = pending
-                memo_reasked = True
     else:
         wanted = list(wanted_all)
     from engine.data.fetch import CredentialRotated
 
-    # Only a memo re-ask bypasses the cache (it may hold the very malformed
-    # body that filed the debt); a first fetch stays ordinary cache-first.
-    refetch_token = refetch_day if memo_reasked else None
+    if not owed_read:
+        # The snapshot must happen BEFORE the up-front persist below: filed
+        # after it, the run's own whole-intended-list entry would make every
+        # chunk look memo-owed.
+        owed = _read_chain_retry().get(stamp, set())
     retry: set[str] = set()
     attempted = set(wanted)
     if wanted:
@@ -820,6 +827,10 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
     try:
         for start in range(0, len(wanted), batch):
             chunk = wanted[start : start + batch]
+            # Only a chunk holding a memo-owed name bypasses the cache (its
+            # cached body may be the very malformed one that filed the debt);
+            # an all-first-fetch chunk stays ordinary cache-first.
+            refetch_token = refetch_day if owed & set(chunk) else None
             params = {"ticker": ",".join(chunk), "tradeDate": stamp,
                       "dte": CHAIN_DTE, "fields": CHAIN_FIELDS}
             try:
