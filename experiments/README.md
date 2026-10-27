@@ -388,7 +388,7 @@ the 603-search-fit example has 204 children, even if every comparator abstains.
 
 Library-only helpers for preparing SIZE inputs inside a caller-supplied write root. They grant no data-run, registration, fitting or final-holdout authority; the user authorizes local runs separately. Holdout, embargo and fold-cutoff controls are never reimplemented here: they stay in `ExperimentHoldouts` (3% random plus rolling six months), `eligibility_policy` (`grouped_ticker_embargo.v1`, 30 days) and the registration's metadata folds, consumed by `eligible_history` and `size_panel`.
 
-**`tier1_history_manifest.v1`** `{schema_version, session_ceiling, entries, manifest_id}`; each entry is `{ticker, key, fetched_at, body_sha256}` (sorted by ticker, one per ticker). `manifest_id` is `content_hash` of the other fields. `build_manifest(source_root, *, session_ceiling, tickers)` pins, per explicit ticker, the entry the existing Tier-1 rule would pick (newest successful `yfinance` `history period=max`). `pinned_history_fetcher(source_root, manifest)` returns a no-network fetcher with the `tier1_yfinance_history_fetcher` shape; it serves only pinned entries and re-verifies on construction that each key still exists with the same `fetched_at`, status 200 and body hash, and `fetch` re-hashes the bytes it serves (`INPUT_CHANGED` on mismatch). Tickers outside the manifest are `legitimate_empty`, never newest-wins.
+**`tier1_history_manifest.v1`** `{schema_version, session_ceiling, entries, manifest_id}`; each entry is `{ticker, key, fetched_at, body_sha256}` (sorted by ticker, one per ticker). `manifest_id` is `content_hash` of the other fields. `build_manifest(source_root, *, session_ceiling, tickers)` pins, per explicit ticker, the entry the existing Tier-1 rule would pick (newest successful `yfinance` `history period=max`). `pinned_history_fetcher(source_root, manifest)` returns a no-network fetcher with the `tier1_yfinance_history_fetcher` shape; it serves only pinned entries and re-verifies on construction that each key still exists with the same `fetched_at`, status 200 and body hash, and `fetch` re-hashes the bytes it serves (`INPUT_CHANGED` on mismatch). Outside the manifest the default fetcher returns `legitimate_empty` (never newest-wins); `generate_bounds` uses `strict=True`, which refuses any unpinned refresh target instead, so no ticker silently commits as no-price history.
 
 **Two dates, never merged.** `session_ceiling` bounds the market sessions used: it must equal the refresh `as_of`, which truncates each series. `fetched_at` is the retrieval vintage of the pinned bytes and may be later than the ceiling. Close prices are split-adjusted as of retrieval, so a late `fetched_at` is reconstructed provenance, not a point-in-time vintage.
 
@@ -399,7 +399,9 @@ Library-only helpers for preparing SIZE inputs inside a caller-supplied write ro
 | Failure | Code |
 |---|---|
 | Malformed manifest, ceiling, ticker list, or `catalog.sqlite` not directly inside `write_root` | `INVALID_REQUEST` |
-| Requested ticker has no eligible Tier-1 entry at build | `SOURCE_NOT_FOUND` |
+| Requested ticker has no eligible Tier-1 entry at build; or, in `generate_bounds` (strict fetcher), a refresh target not pinned in the manifest (refused during capture, before any commit) | `SOURCE_NOT_FOUND` |
+| Cache body not a regular file (symlink, FIFO), or unreadable/corrupt gzip | `SOURCE_INVALID` |
+| Decompressed cache body above `MAX_BODY_BYTES` (64 MiB) | `RESOURCE_LIMIT_EXCEEDED` |
 | Pinned entry missing, `fetched_at`, status or body hash changed | `INPUT_CHANGED` |
 | `as_of` differs from `session_ceiling` | `INVALID_REQUEST` |
 | Another supervisor holds the write-root catalog | `RESOURCE_UNAVAILABLE` |

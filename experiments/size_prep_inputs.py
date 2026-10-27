@@ -1,6 +1,9 @@
 """Pinned Tier-1 history manifest, write-root bound-source generation and reconstructed provenance."""
 import hashlib
+import gzip
 import os
+import stat
+import zlib
 import sys
 import time
 from datetime import date, datetime, timezone
@@ -16,6 +19,21 @@ from engine.v2.ops.legacy_adapter import iter_raw_fetch_cache
 MANIFEST_VERSION = "tier1_history_manifest.v1"
 PROVENANCE_VERSION = "size_prep_provenance.v1"
 _ENTRY_KEYS = {"ticker", "key", "fetched_at", "body_sha256"}
+MAX_BODY_BYTES = 64 * 1024 * 1024
+
+
+def _body(entry):
+    """Decompressed cache body, read from a regular non-symlink file and refused above MAX_BODY_BYTES."""
+    try:
+        if not stat.S_ISREG(os.lstat(entry.path).st_mode):
+            raise fail("SOURCE_INVALID", "a Tier-1 cache body must be a regular file")
+        with gzip.open(entry.path, "rb") as handle:
+            body = handle.read(MAX_BODY_BYTES + 1)
+    except (OSError, EOFError, zlib.error):
+        raise fail("SOURCE_INVALID", "a Tier-1 cache body is unreadable or corrupt") from None
+    if len(body) > MAX_BODY_BYTES:
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "a Tier-1 cache body exceeds the decompressed size limit")
+    return body
 
 
 def _day(value):
@@ -56,7 +74,7 @@ def build_manifest(source_root, *, session_ceiling, tickers):
         fetched_at = entry.meta.get("fetched_at")
         _retrieved(fetched_at)
         entries.append({"ticker": ticker, "key": entry.key, "fetched_at": fetched_at,
-                        "body_sha256": hashlib.sha256(entry.body()).hexdigest()})
+                        "body_sha256": hashlib.sha256(_body(entry)).hexdigest()})
     manifest = {"schema_version": MANIFEST_VERSION, "session_ceiling": session_ceiling, "entries": entries}
     return {**manifest, "manifest_id": _identity(manifest)}
 
@@ -81,7 +99,7 @@ def validate_manifest(manifest):
     return manifest
 
 
-def pinned_history_fetcher(source_root, manifest):
+def pinned_history_fetcher(source_root, manifest, *, strict=False):
     """Return ``(cache, fetch)`` shaped like ``tier1_yfinance_history_fetcher``, serving only pinned entries."""
     validate_manifest(manifest)
     available = {entry.key: entry for entry in iter_raw_fetch_cache(source_root, "yfinance")}
@@ -92,7 +110,7 @@ def pinned_history_fetcher(source_root, manifest):
                 or str(entry.params.get("ticker")) != pinned["ticker"]
                 or str(entry.meta.get("status")) != "200"
                 or entry.meta.get("fetched_at") != pinned["fetched_at"]
-                or hashlib.sha256(entry.body()).hexdigest() != pinned["body_sha256"]):
+                or hashlib.sha256(_body(entry)).hexdigest() != pinned["body_sha256"]):
             raise fail("INPUT_CHANGED", "a pinned Tier-1 history entry is missing or changed")
         cache[pinned["ticker"]] = entry
 
@@ -101,8 +119,10 @@ def pinned_history_fetcher(source_root, manifest):
     def fetch(ticker):
         entry = cache.get(ticker)
         if entry is None:
+            if strict:
+                raise fail("SOURCE_NOT_FOUND", "a refresh target is not pinned in the Tier-1 manifest")
             return b"", "legitimate_empty", {}, []
-        body = entry.body()
+        body = _body(entry)
         if hashlib.sha256(body).hexdigest() != digests[ticker]:
             raise fail("INPUT_CHANGED", "a pinned Tier-1 history entry changed while being served")
         return body, "complete", {}, []
@@ -150,7 +170,7 @@ def generate_bounds(write_root, *, source_root, manifest, scope, as_of):
         raise fail("INVALID_REQUEST", "catalog.sqlite must exist directly inside the write root")
     started = time.monotonic()
     print("[size-prep] bounds start entries=" + str(len(manifest["entries"])), file=sys.stderr)
-    history = pinned_history_fetcher(source_root, manifest)
+    history = pinned_history_fetcher(source_root, manifest, strict=True)
     conn = connect(str(catalog), must_exist=True)
     try:
         before = _head(conn, scope)

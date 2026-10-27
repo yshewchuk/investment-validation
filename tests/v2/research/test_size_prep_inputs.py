@@ -151,3 +151,34 @@ def test_fetch_rehashes_served_bytes_and_manifest_rejects_padded_ticker(source_r
     padded["entries"][0]["ticker"] = "AAAA "
     padded["manifest_id"] = prep._identity(padded)
     _refusal(lambda: prep.validate_manifest(padded), "INVALID_REQUEST")
+
+
+def test_oversized_corrupt_and_symlinked_bodies_are_refused(source_root, monkeypatch):
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["BBBB"])
+    body = source_root / "data/raw/fetch/yfinance/bb/bb01.body.gz"
+    monkeypatch.setattr(prep, "MAX_BODY_BYTES", 10)
+    _refusal(lambda: prep.pinned_history_fetcher(source_root, manifest), "RESOURCE_LIMIT_EXCEEDED")
+    monkeypatch.undo()
+    original = body.read_bytes()
+    body.write_bytes(original[:20])
+    _refusal(lambda: prep.pinned_history_fetcher(source_root, manifest), "SOURCE_INVALID")
+    body.unlink()
+    target = source_root / "elsewhere.gz"
+    target.write_bytes(original)
+    body.symlink_to(target)
+    _refusal(lambda: prep.pinned_history_fetcher(source_root, manifest), "SOURCE_INVALID")
+
+
+def test_generate_bounds_refuses_unpinned_targets_without_committing(source_root, workspace, monkeypatch):
+    root, parent = workspace
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA", "CCCC"], {}))
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    _refusal(lambda: prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow",
+                                          as_of=_AS_OF), "SOURCE_NOT_FOUND")
+    conn = open_catalog(root / "catalog.sqlite", clock=FakeClock())
+    try:
+        assert _head_row(conn)["snapshot_id"] == parent
+    finally:
+        conn.close()
+    assert not (root / "size_prep").exists()
