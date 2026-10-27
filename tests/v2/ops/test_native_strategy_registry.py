@@ -14,9 +14,9 @@ from tests.v2.ops.test_native_score_batch_driver_alias import (
 )
 
 
-def test_registry_is_immutable_and_only_through_and_runup_are_enabled():
+def test_registry_is_immutable_and_twin_are_enabled():
     registry = batch._STRATEGY_REGISTRY
-    assert tuple(registry) == ("STR-THRU", "STR-RUNUP")
+    assert tuple(registry) == ("STR-THRU", "STR-RUNUP", "TWIN-P", "TWIN-P5")
     assert registry["STR-THRU"] == batch._StrategySpec(
         drivers=(batch._DriverSpec("driver_prediction", "driver:STR-THRU", "size:*"),),
         gate_role="gate:STR-THRU", gate_policy_key="STR-THRU",
@@ -30,14 +30,14 @@ def test_registry_is_immutable_and_only_through_and_runup_are_enabled():
 def test_unregistered_rows_are_all_retained_as_refusals(tmp_path):
     binding = _stage(tmp_path, [DRIVER, SIZE, GATE])
     unsupported = ["BFLY-P", "BFLY-P5", "CND-PS", "CTR5",
-                   "RAMP7", "TWIN-P", "TWIN-P5", "DYN-SV", "UNKNOWN"]
+                   "RAMP7", "DYN-SV", "UNKNOWN"]
     events = [_event_inputs(strategy=name) for name in ["STR-THRU", *unsupported]]
     assembled, refusals = _assemble(binding, events)
     assert list(assembled) == [events[0].key]
     assert [refusal.key for refusal in refusals] == [event.key for event in events[1:]]
-    assert [refusal.code for refusal in refusals] == ["UNSUPPORTED_STRATEGY"] * 9
+    assert [refusal.code for refusal in refusals] == ["UNSUPPORTED_STRATEGY"] * 7
     assert [refusal.detail for refusal in refusals] == [
-        f"only STR-THRU, STR-RUNUP is supported, got {name!r}" for name in unsupported]
+        f"only STR-THRU, STR-RUNUP, TWIN-P, TWIN-P5 is supported, got {name!r}" for name in unsupported]
 
 
 def test_admission_comes_from_registry_not_a_second_allowlist(tmp_path, monkeypatch):

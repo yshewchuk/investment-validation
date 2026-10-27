@@ -1,4 +1,5 @@
 """Synthetic exact-key board analog pools for native score assembly tests."""
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import date
 
@@ -20,12 +21,14 @@ def with_synthetic_exact_analogs(binding, events, *, as_of):
     analogs = {}
     seen_keys = set()
     for event in events:
+        if not isinstance(event.calendar_row, Mapping):
+            continue
         entry_date = event.calendar_row.get("entry_date")
         if not isinstance(entry_date, str):
             continue
         try:
             cutoff = min(date.fromisoformat(as_of), date.fromisoformat(entry_date)).isoformat()
-        except ValueError:
+        except (ValueError, TypeError):
             continue
         strategy = event.key.strategy
         if strategy != "STR-THRU":

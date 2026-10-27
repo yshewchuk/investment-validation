@@ -419,8 +419,12 @@ def test_worker_without_feature_names_gets_past_release_missing_role(tmp_path):
         _worker_parameters(tmp_path, expected_ids=["evt-1"], feature_names=[]), root)
     document = json.loads((root / "refusals.json").read_text())
     assert "RELEASE_MISSING_ROLE" not in json.dumps(document)
-    assert document["refusals"] == {}
+    row_key = "TEST|STR-THRU|2026-01-15|am"
+    assert set(document["refusals"]) == {row_key}
+    assert document["refusals"][row_key]["code"] == "MODEL_NOT_READY"
     assert document["unkeyable_refusals"] == []
+    records = json.loads((root / "records.json").read_text())
+    assert records["records"] == {}
 
 
 @pytest.mark.parametrize("bad", [0, {}, "signal", 1.5, False])

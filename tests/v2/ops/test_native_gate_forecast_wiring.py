@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from engine.v2.ops import native_score_batch
+from tests.v2.ops.analog_fixtures import with_synthetic_exact_analogs
 from tests.v2.ops.test_native_score_batch import (
     _assemble,
     _event_doc,
@@ -33,6 +34,8 @@ def test_str_thru_selector_receives_binding_event_date_and_as_of(
         lambda bundle: captured.append(bundle) or "native-inputs",
     )
 
+    binding = with_synthetic_exact_analogs(
+        binding, [event], as_of=pd.Timestamp(as_of).date().isoformat())
     assembled, refusals = _assemble(binding, [event], as_of=as_of)
 
     assert refusals == ()
@@ -55,7 +58,7 @@ def test_missing_event_id_refuses_before_missing_fold(tmp_path):
     assert refusals[0].detail == "calendar_row missing event_id"
 
 
-def test_real_synthetic_fold_populates_gate_output(tmp_path):
+def test_real_synthetic_fold_populates_gate_output(tmp_path, monkeypatch):
     binding = _stage_release(
         tmp_path, gate_output_name="gate_score", gate_feature_name="pred_abs_move",
         size_feature_names=("x",))
@@ -77,6 +80,16 @@ def test_real_synthetic_fold_populates_gate_output(tmp_path):
     parameters = _worker_parameters(tmp_path, expected_ids=["native_score_batch"])
     parameters["feature_names"] = ["x"]
     parameters["gate_policy"] = {"STR-THRU": {"threshold": 1.02}}
+    original_assemble = native_score_batch.assemble_score_batch_inputs
+
+    def assemble_with_analogs(*args, **kwargs):
+        kwargs["binding"] = with_synthetic_exact_analogs(
+            kwargs["binding"], kwargs["events"],
+            as_of=pd.Timestamp(kwargs["as_of"]).date().isoformat())
+        return original_assemble(*args, **kwargs)
+
+    monkeypatch.setattr(
+        native_score_batch, "assemble_score_batch_inputs", assemble_with_analogs)
     native_score_batch.run_native_score_batch_worker(parameters, staging)
     records = json.loads((staging / "records.json").read_text())["records"]
     assert all(
@@ -142,6 +155,8 @@ def test_gate_source_cache_reuses_only_same_causal_month(tmp_path, monkeypatch):
         lambda bundle: captured.append(bundle) or "native-inputs",
     )
 
+    binding = with_synthetic_exact_analogs(
+        binding, events, as_of=pd.Timestamp(as_of).date().isoformat())
     assembled, refusals = _assemble(binding, events, as_of=as_of)
 
     assert refusals == ()
