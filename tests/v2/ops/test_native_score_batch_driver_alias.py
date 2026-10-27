@@ -31,6 +31,7 @@ from engine.v2.ops.native_score_batch import (
 )
 from engine.v2.models.frozen_state import serialize_frozen_state
 from engine.v2.models.lineage import Lineage
+from tests.v2.ops.analog_fixtures import with_synthetic_exact_analogs
 from engine.v2.models.payoff_artifact import (
     make_payoff_line_artifact,
     serialize_payoff_artifact,
@@ -234,6 +235,8 @@ def _event_inputs(strategy="STR-THRU", ticker="TEST",
 
 
 def _assemble(binding, events, feature_names=(), **overrides):
+    events = tuple(events)
+    binding = with_synthetic_exact_analogs(binding, events, as_of=_AS_OF)
     kwargs = dict(
         as_of=_AS_OF, snapshot_id=_SNAPSHOT, calendar_revision=_CALENDAR_REVISION,
         binding=binding, events=events, feature_names=feature_names,

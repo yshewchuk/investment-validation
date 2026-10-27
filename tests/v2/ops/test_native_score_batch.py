@@ -9,6 +9,7 @@ import numpy as np
 
 import pandas as pd
 import pytest
+from tests.v2.ops.analog_fixtures import with_synthetic_exact_analogs
 
 from engine.v2.contracts import ScoreRecord
 from engine.v2.foundation import content_hash, to_document
@@ -219,6 +220,8 @@ def _event_inputs(strategy="STR-THRU", ticker="TEST",
 
 
 def _assemble(binding, events, **overrides):
+    events = tuple(events)
+    binding = with_synthetic_exact_analogs(binding, events, as_of=_AS_OF)
     kwargs = dict(
         as_of=_AS_OF, snapshot_id=_SNAPSHOT, calendar_revision=_CALENDAR_REVISION,
         binding=binding, events=events,
