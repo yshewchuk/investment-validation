@@ -1100,38 +1100,147 @@ def _baseline_entries(files: dict[str, bytes]) -> list[str]:
     return baseline_entries
 
 
+def _run_bounded_git(
+    command: list[str], root: Path, *, output_limit: int, operation: str
+) -> bytes:
+    """Run Git draining both pipes before the deadline with bounded stdout."""
+    deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
+    try:
+        selector = selectors.DefaultSelector()
+    except OSError as exc:
+        raise IsolationCheckError(
+            f"complete tracked-source scan refused: {operation} failed: {exc}"
+        ) from exc
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        try:
+            process = subprocess.Popen(
+                command, cwd=root,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        except OSError as exc:
+            raise IsolationCheckError(
+                f"complete tracked-source scan refused: {operation} failed: {exc}"
+            ) from exc
+        stdout = process.stdout
+        stderr = process.stderr
+        if stdout is None or stderr is None:
+            raise IsolationCheckError(
+                f"complete tracked-source scan refused: {operation} pipes unavailable"
+            )
+        os.set_blocking(stdout.fileno(), False)
+        os.set_blocking(stderr.fileno(), False)
+        selector.register(stdout, selectors.EVENT_READ)
+        selector.register(stderr, selectors.EVENT_READ)
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        stdout_size = 0
+        stderr_size = 0
+        open_streams = 2
+        while open_streams:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise IsolationCheckError(
+                    f"complete tracked-source scan refused: {operation} exceeded "
+                    f"{GIT_TIMEOUT_SECONDS}s"
+                )
+            for key, _ in selector.select(remaining):
+                stream = key.fileobj
+                try:
+                    if stream is stdout:
+                        read_limit = min(64 * 1024, output_limit - stdout_size + 1)
+                    else:
+                        read_limit = 64 * 1024
+                    chunk = os.read(stream.fileno(), read_limit)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    open_streams -= 1
+                    continue
+                if stream is stdout:
+                    if stdout_size + len(chunk) > output_limit:
+                        raise IsolationCheckError(
+                            f"complete tracked-source scan refused: {operation} "
+                            f"output exceeds {output_limit} bytes"
+                        )
+                    stdout_size += len(chunk)
+                    stdout_chunks.append(chunk)
+                elif stderr_size < MAX_CATALOG_STDERR_BYTES:
+                    keep = chunk[:MAX_CATALOG_STDERR_BYTES - stderr_size]
+                    stderr_chunks.append(keep)
+                    stderr_size += len(keep)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise IsolationCheckError(
+                f"complete tracked-source scan refused: {operation} exceeded "
+                f"{GIT_TIMEOUT_SECONDS}s"
+            )
+        try:
+            returncode = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            raise IsolationCheckError(
+                f"complete tracked-source scan refused: {operation} exceeded "
+                f"{GIT_TIMEOUT_SECONDS}s"
+            ) from exc
+        if returncode != 0:
+            diagnostic = b"".join(stderr_chunks).decode("utf-8", "replace").strip()
+            raise IsolationCheckError(
+                f"complete tracked-source scan refused: {operation} exited "
+                f"{returncode}: {diagnostic}"
+            )
+        return b"".join(stdout_chunks)
+    except (OSError, ValueError) as exc:
+        raise IsolationCheckError(
+            f"complete tracked-source scan refused: {operation} failed: {exc}"
+        ) from exc
+    finally:
+        try:
+            selector.close()
+        finally:
+            if process is not None:
+                try:
+                    if process.poll() is None:
+                        process.kill()
+                except OSError:
+                    pass
+                try:
+                    process.wait(timeout=GIT_TIMEOUT_SECONDS)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                for stream in (process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
+
+
 def _baseline_ceiling(root: Path) -> frozenset[str]:
     """Load the first committed baseline as the maximum allowed debt."""
+    history = _run_bounded_git(
+        [
+            "git", "log", "--reverse", "--diff-filter=A", "--format=%H",
+            "--", EXPERIMENT_BASELINE_PATH,
+        ],
+        root,
+        output_limit=MAX_CATALOG_BYTES,
+        operation="baseline history",
+    )
     try:
-        history = subprocess.run(
-            [
-                "git", "log", "--reverse", "--diff-filter=A", "--format=%H",
-                "--", EXPERIMENT_BASELINE_PATH,
-            ],
-            cwd=root,
-            capture_output=True,
-            check=True,
-            timeout=GIT_TIMEOUT_SECONDS,
-        )
-        commits = history.stdout.decode("ascii").splitlines()
-        if not commits:
-            raise IsolationCheckError(
-                "complete tracked-source scan refused: baseline has no committed origin"
-            )
-        seed = subprocess.run(
-            ["git", "show", f"{commits[0]}:{EXPERIMENT_BASELINE_PATH}"],
-            cwd=root,
-            capture_output=True,
-            check=True,
-            timeout=GIT_TIMEOUT_SECONDS,
-        )
-    except IsolationCheckError:
-        raise
-    except (OSError, UnicodeDecodeError, subprocess.SubprocessError) as exc:
+        commits = history.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
         raise IsolationCheckError(
-            f"complete tracked-source scan refused: cannot load baseline ceiling: {exc}"
+            f"complete tracked-source scan refused: invalid baseline history: {exc}"
         ) from exc
-    entries = _baseline_entries({EXPERIMENT_BASELINE_PATH: seed.stdout})
+    if not commits:
+        raise IsolationCheckError(
+            "complete tracked-source scan refused: baseline has no committed origin"
+        )
+    seed = _run_bounded_git(
+        ["git", "show", f"{commits[0]}:{EXPERIMENT_BASELINE_PATH}"],
+        root,
+        output_limit=MAX_SOURCE_BYTES,
+        operation="historical baseline",
+    )
+    entries = _baseline_entries({EXPERIMENT_BASELINE_PATH: seed})
     return frozenset(entries)
 
 

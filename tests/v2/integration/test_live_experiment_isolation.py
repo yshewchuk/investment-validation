@@ -30,6 +30,34 @@ def test_tracked_repository_passes_real_isolation_scan(monkeypatch):
     assert "experiments/lib.py" in observed
 
 
+def test_historical_baseline_oversize_refuses(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Isolation Test"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "isolation@example.com"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    baseline = tmp_path / isolation.EXPERIMENT_BASELINE_PATH
+    baseline.parent.mkdir(parents=True, exist_ok=True)
+    baseline.write_bytes(b"A" * (isolation.MAX_SOURCE_BYTES + 1))
+    subprocess.run(
+        ["git", "add", "--", isolation.EXPERIMENT_BASELINE_PATH],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "oversized baseline"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    with pytest.raises(
+        isolation.IsolationCheckError,
+        match="historical baseline output exceeds",
+    ):
+        isolation._baseline_ceiling(tmp_path)
+
+
 def test_production_training_cannot_import_holdout_or_research():
     files = {
         "engine/v2/models/retrain_job.py":
