@@ -99,6 +99,30 @@ class _MemoSpyFetcher(_Fetcher):
                              refetch_token=refetch_token)
 
 
+class _OldSignatureFetcher:
+    """A fetcher written before the ``refetch_token`` kwarg existed: the ``fetch``
+    signature is exactly ``(self, source, endpoint, params, note=None)``. A first
+    fetch must not hand it an unexpected keyword."""
+
+    def __init__(self):
+        self.asked_tickers = []
+        self.notes = []
+
+    def fetch(self, source, endpoint, params, note=None):
+        self.asked_tickers.extend(params["ticker"].split(","))
+        self.notes.append(note)
+
+        class R:
+            from_cache = False
+
+            @staticmethod
+            def json():
+                return {"data": [{"ticker": t}
+                                 for t in params["ticker"].split(",")]}
+
+        return R()
+
+
 class _Cal:
     """A small trading calendar; the real one reads the data root."""
 
@@ -215,6 +239,21 @@ def test_below_threshold_full_fetch_token_is_per_chunk(monkeypatch, tmp_path):
     assert f.asked_tokens[1] is None, \
         "the all-first-fetch chunk stays ordinary cache-first"
     assert "sessions_skipped" not in out, "the session was fetched, not skipped"
+
+
+def test_an_old_signature_fetcher_works_for_a_normal_first_fetch(monkeypatch, tmp_path):
+    """A first fetch of an unheld session is the all-cache-first path, so the
+    token kwarg is never passed — an injected fetcher whose ``fetch`` predates
+    ``refetch_token`` (``(self, source, endpoint, params, note=None)``) must not
+    be handed an unexpected keyword (no TypeError) and still fetches the chains."""
+    _wire(monkeypatch, set(), tmp_path)
+    f = _OldSignatureFetcher()
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+
+    assert f.asked_tickers == sorted(TICKERS), "the chains are fetched, no TypeError"
+    assert out["calls"] == 1
+    assert f.notes == ["phase3 forward chains"], "note is passed; refetch_token is not"
 
 
 def test_a_memo_value_that_is_a_string_is_ignored(monkeypatch, tmp_path):

@@ -830,13 +830,15 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
             # Only a chunk holding a memo-owed name bypasses the cache (its
             # cached body may be the very malformed one that filed the debt);
             # an all-first-fetch chunk stays ordinary cache-first.
-            refetch_token = refetch_day if owed & set(chunk) else None
+            kw = {"note": "phase3 forward chains"}
+            if owed & set(chunk):
+                # Added only for a memo-owed chunk: an old-signature injected
+                # fetcher (no refetch_token kwarg) is never handed one.
+                kw["refetch_token"] = refetch_day
             params = {"ticker": ",".join(chunk), "tradeDate": stamp,
                       "dte": CHAIN_DTE, "fields": CHAIN_FIELDS}
             try:
-                record = fetcher.fetch("orats", "hist/strikes", params,
-                                       note="phase3 forward chains",
-                                       refetch_token=refetch_token)
+                record = fetcher.fetch("orats", "hist/strikes", params, **kw)
             except (QuotaExhausted, CredentialRotated):
                 # This chunk and every later unasked one are still owed the
                 # date; without persisting before the raise the cut-off tail

@@ -246,15 +246,12 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   re-buying its unheld tail (recorded in `sessions_skipped`). Transient
   (non-404) failures, wrong-shape or non-JSON 200s and quota/abnormal-exit
   remainders are saved to `reports/orats_chain_retry.json` and re-asked;
-  definitive 404s are not. A session's whole intended list is owed in the memo
-  before its first fetch (a hard kill leaves it owed) and replaced by the real
-  failures on exit; owed names on sessions that left the two-session window
-  are re-asked for 14 days (`older_retried`); only canonical `YYYY-MM-DD`
-  keys count — others are skipped with one stderr line and dropped on the
-  next write, and a future-dated key never moves the 14-day cutoff. The memo is read only if a regular file under 1 MB, written
-  atomically. A non-regular or oversized memo is ignored with a stderr line;
-  an unparseable memo reads as empty without a line; a write problem logs to
-  stderr. None of these stops the refresh (a lost memo costs a re-buy window).
+  definitive 404s are not. Owed names survive a hard kill and are re-asked for
+  14 days, including after their session leaves the two-session window
+  (`older_retried`). A re-ask of an owed name is a fresh provider call (at
+  most one per name per day), never a replay of a cached bad body. A bad,
+  oversized or unwritable memo never stops the refresh (a lost memo costs a
+  re-buy window).
 - **Tier-4 gap repair** — with refresh and tiers on, at most one SNAPSHOT per run:
   on the repair path it is written after the Tier-4 gap check; a degraded
   tiers step writes its own (see table); a failed write keeps the previous
