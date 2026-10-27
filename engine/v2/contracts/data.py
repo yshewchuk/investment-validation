@@ -177,7 +177,7 @@ DATA_FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "INPUT_CHANGED": ("integrity", True),
     "OBJECT_CORRUPT": ("integrity", False),
     "MANIFEST_CORRUPT": ("integrity", False),
-    # Read-only snapshot closure verification (data/snapshot_closure.py): a required row, object,
+    # Read-only snapshot closure verification (ops/workspace/closure.py): a required row, object,
     # receipt or chain link of a pinned snapshot is missing or changed. `details["reason"]` names it.
     "SNAPSHOT_CLOSURE_BROKEN": ("integrity", False),
     "IDENTITY_CONFLICT": ("validation", False),

@@ -1115,6 +1115,7 @@ mutate = [
     "engine/v2/ops/native/*.py",
     "engine/v2/ops/core/*.py",
     "engine/v2/ops/stores/*.py",
+    "engine/v2/ops/workspace/*.py",
     "engine/v2/ops/carried_set.py",
     "engine/v2/ops/stages.py",
     "engine/v2/ops/plans.py",

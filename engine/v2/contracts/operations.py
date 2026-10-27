@@ -109,7 +109,7 @@ FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "PUBLICATION_REFUSED": ("validation", False),
     "IDEMPOTENCY_CONFLICT": ("validation", False),
     "INVALID_REQUEST": ("validation", False),
-    # Experiment research workspace (ops/research_workspace.py): a production root, a path or
+    # Experiment research workspace (ops/workspace/overlay.py, guard.py): a production root, a path or
     # symlink escape, a non-empty root, an identity mismatch, or execution from a workspace.
     # Never retryable: only a different request or root fixes it.
     "WORKSPACE_REFUSED": ("validation", False),

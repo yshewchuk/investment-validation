@@ -26,11 +26,11 @@ from pathlib import Path
 
 from engine.v2.data import errors as data_errors
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactStore
+from engine.v2.foundation import ArtifactError, ArtifactStore
 from engine.v2.ops.bootstrap import open_catalog, require_compatible_catalog
 from engine.v2.ops.catalog import dumps, register_artifact, transaction
 from engine.v2.ops.checkpoints import registered_artifact
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.workspace.closure import SnapshotClosure, verify_snapshot_closure
 from engine.v2.ops.workspace.guard import MARKER
 
@@ -41,6 +41,7 @@ SCHEMA_VERSION = "research_workspace.v1.0"
 PIN_SCHEMA_REF = "research_workspace_pin.v1.0"
 IDENTITY_FILE = "workspace.json"
 _DIRECTORIES = ("store", "scratch", "output")
+_MAX_METADATA_BYTES = 64 * 1024
 _IDENTITY_KEYS = ("schema_version", "snapshot_id", "manifest_hash", "identity_digest",
                   "production_catalog", "production_store", "pin_artifact_id")
 
@@ -97,6 +98,38 @@ class SnapshotOnlyRepository(Repository):
         raise data_errors.fail("SNAPSHOT_UNRESOLVED", "a workspace resolves by snapshot id only")
 
     resolve_pinned = resolve_full_pinned = latest_dataset_version = _by_head
+
+    def table_contract(self, snapshot_ref, table_name):
+        self._check(snapshot_ref.snapshot_id)
+        return super().table_contract(snapshot_ref, table_name)
+
+    def fragment_records(self, snapshot_ref, table_name):
+        self._check(snapshot_ref.snapshot_id)
+        return super().fragment_records(snapshot_ref, table_name)
+
+    def get_event(self, event_ref, snapshot_ref):
+        self._check(snapshot_ref.snapshot_id)
+        return super().get_event(event_ref, snapshot_ref)
+
+    def get_chain(self, query, snapshot_ref):
+        self._check(snapshot_ref.snapshot_id)
+        return super().get_chain(query, snapshot_ref)
+
+    def get_price_series(self, query, snapshot_ref):
+        self._check(snapshot_ref.snapshot_id)
+        return super().get_price_series(query, snapshot_ref)
+
+    def get_close(self, ticker, date, observation_ceiling, snapshot_ref):
+        self._check(snapshot_ref.snapshot_id)
+        return super().get_close(ticker, date, observation_ceiling, snapshot_ref)
+
+    def scan(self, query, *, table_name, max_object_bytes=None):
+        self._check(query.snapshot_id)
+        return super().scan(query, table_name=table_name, max_object_bytes=max_object_bytes)
+
+    def scan_population_bound(self, snapshot_id, **kwargs):
+        self._check(snapshot_id)
+        return super().scan_population_bound(snapshot_id, **kwargs)
 
 
 def _lstat(path: Path):
@@ -156,6 +189,8 @@ def _open_readonly(catalog: Path) -> sqlite3.Connection:
 
 def _read_identity(root: Path) -> dict:
     try:
+        if os.lstat(root / IDENTITY_FILE).st_size > _MAX_METADATA_BYTES:
+            raise ValueError
         identity = json.loads((root / IDENTITY_FILE).read_text(encoding="utf-8"))
         if not isinstance(identity, dict) or any(key not in identity for key in _IDENTITY_KEYS):
             raise ValueError
@@ -275,8 +310,14 @@ def open_workspace(root, *, production_catalog, production_store, clock,
             raise _changed("closure_changed", snapshot_id=identity["snapshot_id"])
         conn, store = open_catalog(paths.catalog, clock=clock), ArtifactStore(paths.store)
         snapshot = Repository(source_conn).resolve(identity["snapshot_id"])
-        pinned = store.read_verified(registered_artifact(conn, identity["pin_artifact_id"]))
-        if pinned != dumps(snapshot).encode("utf-8"):
+        expected = dumps(snapshot).encode("utf-8")
+        try:
+            ref = registered_artifact(conn, identity["pin_artifact_id"],
+                                      max_metadata_bytes=_MAX_METADATA_BYTES)
+            pinned = store.read_verified(ref) if ref.byte_size == len(expected) else None
+        except (ArtifactError, OpsError):
+            pinned = None
+        if pinned != expected:
             raise _changed("pin_mismatch", snapshot_id=identity["snapshot_id"])
     except BaseException:
         source_conn.close()
