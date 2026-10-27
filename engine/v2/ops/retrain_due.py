@@ -16,6 +16,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from engine.v2.models.release_layout import ReleaseLayoutError, catalog_path, read_catalog
+from engine.v2.ops.errors import fail
 
 STEPS = ("train", "stage", "accept", "check", "promote")
 #: Completed months examined when the base has a ``retrain_cutoff``.
@@ -75,8 +76,12 @@ def read_base_retrain_cutoff(release_root, release_id):
         if "retrain_cutoff" not in sources:
             return None
         return sources["retrain_cutoff"]
-    except (OSError, ValueError, TypeError, KeyError, ReleaseLayoutError):
-        raise ValueError("base release catalog could not be read") from None
+    except (OSError, ValueError, TypeError, KeyError, ReleaseLayoutError) as exc:
+        raise fail(
+            "VALIDATION_FAILED",
+            "base release catalog could not be read (PRIOR_MISMATCH)",
+            details={"code": "PRIOR_MISMATCH", "cause": type(exc).__name__},
+        ) from exc
 
 
 def due_decision(session: str, base_retrain_cutoff: str | None, recorded: frozenset,

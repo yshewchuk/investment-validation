@@ -109,19 +109,26 @@ def test_read_base_retrain_cutoff_handles_current_and_legacy_catalogs(tmp_path):
 
 
 def test_read_base_retrain_cutoff_handles_absent_legacy_and_current_catalogs(tmp_path):
+    from engine.v2.ops.errors import OpsError
+
     assert read_base_retrain_cutoff(tmp_path, "rel-legacy-absent") is None
-    with pytest.raises(ValueError, match="base release catalog could not be read"):
+    with pytest.raises(OpsError) as exc_info:
         read_base_retrain_cutoff(tmp_path, "pools-current-absent")
+    assert exc_info.value.code == "VALIDATION_FAILED"
+    assert exc_info.value.problem.details["code"] == "PRIOR_MISMATCH"
 
 
 def test_read_base_retrain_cutoff_rejects_invalid_legacy_pool_cutoff(tmp_path):
     from engine.v2.models.release_layout import catalog_path, manifest_body, write_catalog
+    from engine.v2.ops.errors import OpsError
 
     root = tmp_path / "invalid"
     body = manifest_body("rel-invalid", "dep-1", [], {"pool_cutoff": "2026-11-1"})
     write_catalog(catalog_path(root, "rel-invalid"), body)
-    with pytest.raises(ValueError, match="base release catalog could not be read"):
+    with pytest.raises(OpsError) as exc_info:
         read_base_retrain_cutoff(root, "rel-invalid")
+    assert exc_info.value.code == "VALIDATION_FAILED"
+    assert exc_info.value.problem.details["code"] == "PRIOR_MISMATCH"
 
 
 def test_decide_for_deployed_base_validates_before_cutoff_and_decision(monkeypatch, tmp_path):
@@ -158,25 +165,33 @@ def test_decide_for_deployed_base_validates_before_cutoff_and_decision(monkeypat
 
 def test_read_base_retrain_cutoff_refuses_non_mapping_sources(monkeypatch, tmp_path):
     import engine.v2.ops.retrain_due as retrain_due
+    from engine.v2.ops.errors import OpsError
 
     monkeypatch.setattr(retrain_due, "read_catalog", lambda *args: {"sources": []})
 
-    with pytest.raises(ValueError, match="base release catalog could not be read"):
+    with pytest.raises(OpsError) as exc_info:
         read_base_retrain_cutoff(tmp_path, "rel-base")
+    assert exc_info.value.code == "VALIDATION_FAILED"
+    assert exc_info.value.problem.details["code"] == "PRIOR_MISMATCH"
+    assert exc_info.value.problem.details["cause"] == "TypeError"
 
 
 def test_validate_retrain_base_refuses_damaged_classification(monkeypatch, tmp_path):
     import types
 
     import engine.v2.ops.pool_refresh as pool_refresh
+    from engine.v2.ops.errors import OpsError
 
     monkeypatch.setattr(
         pool_refresh, "_classify_prior",
-        lambda *args: types.SimpleNamespace(kind="DAMAGED"),
+        lambda *args: types.SimpleNamespace(kind="DAMAGED", reason="catalog_invalid"),
     )
 
-    with pytest.raises(ValueError, match="base release catalog could not be read"):
+    with pytest.raises(OpsError) as exc_info:
         pool_refresh.validate_retrain_base(tmp_path, "pools-bad")
+    assert exc_info.value.code == "VALIDATION_FAILED"
+    assert exc_info.value.problem.details["code"] == "PRIOR_MISMATCH"
+    assert exc_info.value.problem.details["cause"] == "catalog_invalid"
 
 
 def test_validate_retrain_base_accepts_legacy_no_pool_catalog(monkeypatch, tmp_path):

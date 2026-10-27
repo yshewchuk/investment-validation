@@ -137,7 +137,11 @@ def validate_retrain_base(release_root, prior_id):
 
     prior = _classify_prior(release_root, prior_id)
     if prior.kind not in (PRIOR_NO_POOL_CATALOG, PRIOR_USABLE):
-        raise ValueError("base release catalog could not be read")
+        raise fail(
+            "VALIDATION_FAILED",
+            "deployed base catalog is damaged (PRIOR_MISMATCH)",
+            details={"code": "PRIOR_MISMATCH", "cause": prior.reason},
+        )
     return prior
 
 
