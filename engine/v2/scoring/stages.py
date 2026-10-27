@@ -1297,7 +1297,10 @@ def _initial_values(
     if compatibility:
         values.update({key: value for key, value in inputs.forecast.items()
                        if key != "chain_spot"})
-        forecast_output = dict(inputs.forecast)
+        forecast_output = {
+            key: value for key, value in inputs.forecast.items()
+            if key != "chain_spot"
+        }
     else:
         forecast_output = _execute_forecast(
             inputs, values, flags, strategy, deferred,
@@ -2951,10 +2954,11 @@ def _append_late_stages(
             ("gate", inputs.gate), ("chooser", inputs.chooser),
             ("diagnostics", inputs.diagnostics),
         ):
-            values.update({key: value for key, value in block.items()
-                           if key != "chain_spot"})
+            output = {key: value for key, value in block.items()
+                      if key != "chain_spot"}
+            values.update(output)
             _emit_stage(
-                executed, stage, {"prior": executed[-1].output_hash}, block,
+                executed, stage, {"prior": executed[-1].output_hash}, output,
                 observer,
             )
     elif "BAD_QUOTE" in flags:

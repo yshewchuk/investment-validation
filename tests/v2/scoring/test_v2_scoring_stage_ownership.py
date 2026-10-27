@@ -13,6 +13,7 @@ from engine.v2.scoring.stages import (
     NativeScoreInputs,
     STAGE_NAMES,
     StageReceipt,
+    assemble_native_values,
 )
 
 
@@ -107,6 +108,32 @@ def test_fill_recomputes_owned_simulation_and_gate_outputs():
         item["output_hash"] != "declared-output"
         for item in worst.resolved_request["native_stage_receipts"]
     )
+
+
+def test_compatibility_receipts_exclude_filtered_chain_spot():
+    inputs = _native()
+    inputs = replace(
+        inputs,
+        source_ref="compatibility-input",
+        forecast={**inputs.forecast, "chain_spot": 99.0},
+        model={"chain_spot": 99.0},
+        analogs={"chain_spot": 99.0},
+        simulation={**inputs.simulation, "chain_spot": 99.0},
+        gate={**inputs.gate, "chain_spot": 99.0},
+        chooser={"chain_spot": 99.0},
+        diagnostics={**inputs.diagnostics, "chain_spot": 99.0},
+    )
+    seen = []
+
+    values = assemble_native_values(inputs, observer=seen.append)
+
+    assert values["chain_spot"] == 125.0
+    for stage in (
+        "forecast", "model", "analogs", "simulation", "gate", "chooser",
+        "diagnostics",
+    ):
+        observation = next(item for item in seen if item.receipt.stage == stage)
+        assert "chain_spot" not in observation.output_document
 
 
 def test_empty_compatibility_input_refuses_missing_essentials():
