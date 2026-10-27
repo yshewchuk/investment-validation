@@ -433,13 +433,17 @@ def _persist_chain_retry(stamp: str, retry: set[str], attempted: set[str]) -> No
     back — and non-canonical keys are dropped: a key the older-memo re-ask
     would never use (:func:`refresh_forward_chains` skips exactly those, via
     :func:`_canonical_chain_day`) is not debt worth carrying. The reference
-    is the max of ``stamp`` and the canonical keys on file, but NEVER later
-    than ``stamp`` itself: a future-dated key must not move the cutoff —
-    when it did, the first persist erased every in-retention debt behind it
-    before the older pass could re-ask any of them. The heal-session persists
-    and the older pass therefore cut at the same reference (the newest
-    session) minus 14 days, so nothing is pruned before the older pass could
-    re-ask it.
+    is the newest canonical key on file or ``stamp``, but NEVER later than
+    ``stamp`` itself — since ``stamp`` is always one of the candidates, that
+    clamp lands on ``stamp`` every time and the reference below is exactly
+    ``stamp``: keys on file sit behind it and a future-dated key can never
+    raise it. (It once did: with the reference following a future key, the
+    first persist erased every in-retention debt behind the moved cutoff
+    before the older pass could re-ask any of them.) The cutoff is that
+    reference minus 14 days, compared with ``>=`` so an entry exactly 14
+    days behind survives; the heal-session persists and the older pass cut
+    at the same reference (this session's stamp) minus 14 days, so nothing
+    is pruned before the older pass could re-ask it.
     """
     d = _read_chain_retry()
     if not retry and stamp not in d:
@@ -450,8 +454,10 @@ def _persist_chain_retry(stamp: str, retry: set[str], attempted: set[str]) -> No
     else:
         d.pop(stamp, None)
     days = {k: day for k in d if (day := _canonical_chain_day(k)) is not None}
-    # max(stamp, the canonical keys on file) clamped at stamp — which the
-    # clamp always achieves, since stamp itself is in the running.
+    # The reference is the newest canonical key on file or stamp, never
+    # later than stamp — the clamp lands on stamp every time, so it is just
+    # stamp here; a future-dated key never moves the cutoff. Cutoff:
+    # reference - 14 days, kept with >= (exactly 14 days behind survives).
     ref = pd.Timestamp(stamp)
     cutoff = ref - pd.Timedelta(days=14)
     kept = {k: v for k, v in d.items() if k in days and days[k] >= cutoff}
@@ -599,6 +605,13 @@ CHAIN_SESSIONS = 2
 #: :data:`CHAIN_RETRY_PATH`; only definitive 404s are dropped. A night that
 #: did not run leaves the newest session at ~0% held, so it is still healed.
 CHAIN_SKIP_HELD_FRACTION = 0.75
+
+#: P19 cadence for the chunk loop in :func:`_refresh_one_session`: a progress
+#: line at most every CHAIN_PROGRESS_SECONDS seconds AND at most every
+#: CHAIN_PROGRESS_CHUNKS chunks — a ~365-call session logs a handful of
+#: lines, never one per call.
+CHAIN_PROGRESS_SECONDS = 60
+CHAIN_PROGRESS_CHUNKS = 50
 
 
 def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_BATCH,
@@ -812,7 +825,32 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
         owed = _read_chain_retry().get(stamp, set())
     retry: set[str] = set()
     attempted = set(wanted)
+    total_chunks = (len(wanted) + batch - 1) // batch
+    t_start = time.monotonic()
+    last_progress_chunks = 0
+    last_progress_at = t_start
+    calls_in, failed_in, missing_in = out["calls"], len(out["failed"]), len(out["missing"])
+
+    def _log_chunk_progress(done: int) -> None:
+        # P19 bounded cadence: never a line per chunk — the time gate and
+        # the chunk gate must BOTH be met since the last progress line.
+        # The time gate keeps elapsed >= CHAIN_PROGRESS_SECONDS here, so
+        # the rate divides cleanly.
+        nonlocal last_progress_chunks, last_progress_at
+        now = time.monotonic()
+        if (done - last_progress_chunks < CHAIN_PROGRESS_CHUNKS
+                or now - last_progress_at < CHAIN_PROGRESS_SECONDS):
+            return
+        elapsed = now - t_start
+        rate = done / elapsed
+        print(f"[chains] {stamp}: {done}/{total_chunks} chunks, "
+              f"{rate:.1f} calls/s, ETA {(total_chunks - done) / rate:.0f}s",
+              file=sys.stderr)
+        last_progress_chunks, last_progress_at = done, now
+
     if wanted:
+        print(f"[chains] {stamp}: fetching {len(wanted)} names in {total_chunks} calls",
+              file=sys.stderr)
         # Hard-kill safety: the whole intended list is owed the date BEFORE
         # the first fetch — nothing is proven until a body arrives or a 404
         # says there is no chain. A SIGKILL/OOM runs no handler, and without
@@ -825,7 +863,9 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
     # name, exactly as the up-front persist filed them.
     start = 0
     try:
-        for start in range(0, len(wanted), batch):
+        for done, start in enumerate(range(0, len(wanted), batch)):
+            if done:
+                _log_chunk_progress(done)  # `done` chunks completed already
             chunk = wanted[start : start + batch]
             # Only a chunk holding a memo-owed name bypasses the cache (its
             # cached body may be the very malformed one that filed the debt);
@@ -931,6 +971,16 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
     # A fetched-OK or 404 name drops out of this session's entry by not being
     # re-added; only this run's transient failures and quota-cut remainder stay.
     _persist_chain_retry(stamp, retry, attempted)
+    if wanted:
+        # Stage end (P19): the counts are this session's own deltas — `out`
+        # is shared across the run's sessions and memo passes.
+        _log_chunk_progress(total_chunks)
+        elapsed = time.monotonic() - t_start
+        print(f"[chains] {stamp}: done in {elapsed:.1f}s, "
+              f"calls={out['calls'] - calls_in}, "
+              f"failed={len(out['failed']) - failed_in}, "
+              f"missing={len(out['missing']) - missing_in}, "
+              f"rss={memprobe.rss_bytes() / 1e9:.2f}G", file=sys.stderr)
 
 
 def _market_wide_days(as_of: pd.Timestamp, lookback: int = 6) -> list:

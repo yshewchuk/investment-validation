@@ -20,7 +20,10 @@ may be the malformed 200 that filed the debt); a first fetch passes none.
 
 Every dependency below the public signature — the fetcher, the store's held
 set, the trading calendar, the retry file — is a synthetic fake or a tmp_path
-patch, so this needs no data root and makes no provider call.
+patch, so this needs no data root and makes no provider call. The chunk loop
+carries P19 progress logging: one stage-start line, progress lines at a
+bounded cadence (never one per chunk) and one stage-end line naming the
+session's own counts and RSS.
 """
 from __future__ import annotations
 
@@ -967,3 +970,41 @@ def test_skip_held_false_never_runs_the_older_pass(monkeypatch, tmp_path):
     assert "older_retried" not in out
     assert nightly._read_chain_retry() == {older: {"TKR09"}}, \
         "the older entry survives untouched — the memo writes go to the fetched stamps"
+
+
+def test_the_chunk_loop_logs_bounded_progress_not_one_line_per_chunk(
+        monkeypatch, capsys, tmp_path):
+    """P19: a fetched session's chunk loop logs one stage-start line, progress
+    lines only at the bounded cadence (both gates: >= 60s AND >= 50 chunks
+    since the last one — never per chunk) and one stage-end line carrying the
+    session's own call/failure/missing counts and RSS. 120 wanted names at
+    batch=1 under a fake monotonic advancing 1s per read stay far below one
+    line per chunk."""
+    names = [f"TKR{i:04d}" for i in range(120)]
+    _wire(monkeypatch, set(), tmp_path)
+    clock = [0.0]
+
+    def fake_monotonic():
+        now = clock[0]
+        clock[0] += 1.0
+        return now
+
+    monkeypatch.setattr(nightly.time, "monotonic", fake_monotonic)
+    f = _Fetcher()
+
+    out = nightly.refresh_forward_chains(names, AS_OF, fetcher=f, sessions=1,
+                                         batch=1)
+
+    assert out["calls"] == 120, "the whole list was fetched"
+    err = capsys.readouterr().err
+    lines = [ln for ln in err.splitlines() if ln.startswith(f"[chains] {AS_OF}:")]
+    assert lines.count(f"[chains] {AS_OF}: fetching 120 names in 120 calls") == 1, \
+        "exactly one stage-start line"
+    progress = [ln for ln in lines if " chunks, " in ln and " calls/s" in ln]
+    assert 1 <= len(progress) < 12, \
+        f"bounded cadence, far fewer than 120: {progress}"
+    end = [ln for ln in lines if " done in " in ln]
+    assert len(end) == 1, "exactly one stage-end line"
+    assert f"calls={out['calls']}" in end[0] and "failed=0" in end[0] \
+        and "missing=0" in end[0] and end[0].endswith("G"), \
+        "the end line names this session's own counts and its RSS"

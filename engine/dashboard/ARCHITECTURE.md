@@ -251,7 +251,11 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   (`older_retried`). A re-ask of an owed name is a fresh provider call (at
   most one per name per day), never a replay of a cached bad body. A bad,
   oversized or unwritable memo never stops the refresh (a lost memo costs a
-  re-buy window).
+  re-buy window). Outcomes: transient or bad-body response → name stays owed;
+  HTTP 404 → name dropped; quota exhausted → remainder saved, run degrades
+  to cached data; credential rotated → remainder saved, run stops. The chain
+  loop logs a start line, bounded progress/ETA lines and an end line (calls,
+  failed, missing, RSS) to stderr.
 - **Tier-4 gap repair** — with refresh and tiers on, at most one SNAPSHOT per run:
   on the repair path it is written after the Tier-4 gap check; a degraded
   tiers step writes its own (see table); a failed write keeps the previous
