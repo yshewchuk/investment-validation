@@ -28,15 +28,16 @@ def _twin_identities(size_clock="clock", crush_clock="clock"):
             "iv_crush:*": _identity("m-crush", crush_clock, "iv_crush:*")}
 
 
-def test_registry_has_gateless_twin_specs():
-    for name in ("TWIN-P", "TWIN-P5"):
-        spec = _STRATEGY_REGISTRY[name]
-        assert (spec.gate_role, spec.gate_policy_key, spec.entry_rule) == (None, None, True)
-        assert [(d.output, d.role) for d in spec.drivers] == [
-            ("forecast_abs_move", "size:*"), ("pred_iv_crush_30", "iv_crush:*")]
-    for name in ("STR-THRU", "STR-RUNUP"):
-        spec = _STRATEGY_REGISTRY[name]
-        assert spec.gate_role is not None and spec.gate_policy_key is not None
+@pytest.mark.parametrize("name", ["TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7"])
+def test_registry_has_gateless_entry_rule_specs(name):
+    spec = _STRATEGY_REGISTRY[name]
+    assert (spec.gate_role, spec.gate_policy_key, spec.entry_rule) == (None, None, True)
+    assert spec.bundle_strategy == name
+    assert [(d.output, d.role) for d in spec.drivers] == [
+        ("forecast_abs_move", "size:*"), ("pred_iv_crush_30", "iv_crush:*")]
+    for gate_name in ("STR-THRU", "STR-RUNUP"):
+        gate_spec = _STRATEGY_REGISTRY[gate_name]
+        assert gate_spec.gate_role is not None and gate_spec.gate_policy_key is not None
 
 
 @pytest.mark.parametrize("kwargs,match", [
@@ -122,10 +123,11 @@ def test_entry_rule_declarations_or_refusal(monkeypatch):
         "cutoff": "2026-01-09", "pre_iv30": 45.0}
 
 
-def test_twin_row_assembly_declares_entry_rule_and_planned_exit(tmp_path, monkeypatch):
+@pytest.mark.parametrize("name", ["TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7"])
+def test_twin_row_assembly_declares_entry_rule_and_planned_exit(tmp_path, monkeypatch, name):
     binding = _stage(tmp_path, [SIZE, IV_CRUSH])
     event = _event_inputs(
-        strategy="TWIN-P",
+        strategy=name,
         panel_row={"date": "2026-01-15", "signal": 1.5, "mcap_log": 25.0, "iv30": 45.0},
     )
 
@@ -156,18 +158,29 @@ def test_twin_row_assembly_declares_entry_rule_and_planned_exit(tmp_path, monkey
     assembled, refusals = _assemble(binding, [event])
     assert refusals == ()
     bundle = bundles[0]
-    assert bundle.strategy == "TWIN-P"
+    assert bundle.strategy == name
     assert bundle.gate_recipe == {"mode": "entry_rule", "mcap_usd": math.exp(25.0)}
     assert bundle.residual_recipe == {"mode": "planned_exit"}
     assert bundle.paired_residual_recipe["pre_iv30"] == 45.0
     assert set(bundle.forecast_recipes) == {"forecast_abs_move", "pred_iv_crush_30"}
     assert not any(key.startswith("gate:") for key in bundle.model_identity)
-    assert recorded["strategy"] == "TWIN-P"
+    assert recorded["strategy"] == name
 
 
-def test_twin_row_without_iv_crush_role_is_refused_alone(tmp_path):
+@pytest.mark.parametrize("name", ["TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7"])
+def test_twin_row_without_iv_crush_role_is_refused_alone(tmp_path, name):
     binding = _stage(tmp_path, [SIZE])
-    event = _event_inputs(strategy="TWIN-P")
+    event = _event_inputs(strategy=name)
     assembled, refusals = _assemble(binding, [event])
     assert len(refusals) == 1
     assert refusals[0].code == "RELEASE_MISSING_ROLE"
+
+
+@pytest.mark.parametrize("name", ["CND-PS", "DYN-SV"])
+def test_unsupported_rows_are_refused(tmp_path, name):
+    binding = _stage(tmp_path, [SIZE])
+    event = _event_inputs(strategy=name)
+    assembled, refusals = _assemble(binding, [event])
+    assert assembled == {}
+    assert len(refusals) == 1
+    assert refusals[0].code == "UNSUPPORTED_STRATEGY"
