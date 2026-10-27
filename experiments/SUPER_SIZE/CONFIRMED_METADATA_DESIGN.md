@@ -256,12 +256,15 @@ elapsed/rate/ETA, refusals and stage RSS; no per-event logging or extra scans.
 | Unsupported exact contract/ref | UNSUPPORTED_CONTRACT |
 | Explicit cap exceeded | RESULT_LIMIT_EXCEEDED |
 | Semantic duplicate/date/cluster conflict | IDENTITY_CONFLICT |
-| Native integrity/query/object/availability failure | Preserve native DataError code and retryability; no relabeling as empty. |
+| Native integrity/query/object/availability failure | Preserve the complete native DataError envelope; no relabeling as empty. |
 
 Native duplicate-primary-key detection can raise MANIFEST_CORRUPT before the
 semantic conflict check; preserve it. Do not catch all native errors as generic
-CONTRACT_MISMATCH. Every failure is all-or-nothing, with redacted messages and no
-values, paths, partial index, artifact/catalog writes or contributor claims.
+CONTRACT_MISMATCH. Every failure is all-or-nothing: no partial index, artifact/
+catalog writes or contributor claims. Newly mapped failures use fixed messages;
+existing native DataErrors retain code, category, retryability, stage, message
+and details, including identity-builder diagnostics. Credentials/tokens must
+never enter logs; this diagnostic rule does not relax publication hygiene.
 
 ## Acceptance and small implementation sequence
 
@@ -277,6 +280,25 @@ Packaging amendment: existing 1.B1b and P3a foundations may share one PR under
 the repository's separate non-test-code and documentation caps instead of the
 combined-line target above. Contracts, dependencies and acceptance tests remain
 unchanged; this does not enable execution or B2. 1.M1 remains separately reviewed.
+B2 likewise uses the repository separate non-test-code/documentation caps, not
+the combined-line estimate, to keep identity checks and synthetic oracles in one
+review unit. Scientific scope, acceptance and later session/scanner work stay unchanged.
+B3a/B3b share one session/scanner PR under separate non-test-code/documentation
+caps to reduce review-queue overhead. Factory lifecycle and native scanner
+wiring remain distinct acceptance areas; scientific/acceptance semantics and
+all later index/coverage dependencies are unchanged.
+B2, B3a and B3b may also share one identity/session/scanner review unit under
+the same separate category caps. Each acceptance boundary remains mandatory;
+this packaging-only consolidation changes no runtime, scientific semantics or
+execution authority and leaves B1b/P3a foundations and coverage design separate.
+M2/M3 may share one admission/index-composition PR under the same separate
+non-test-code/documentation caps. Exact native inventory and exhausted-scan
+acceptance remain distinct; the independently reviewed M1 reducer is unchanged.
+This is packaging only, not a coverage/scientific-policy amendment.
+Canonical partition syntax does not override native candidate completeness,
+object integrity or timestamp representability; a syntactically valid low year
+still refuses if native scanning cannot exhaust its membership. No empty proof
+may replace that refusal, and existing native partition semantics stay unchanged.
 
 | Sub-slice / dependency and acceptance | Added code / tests / docs |
 | --- | --- |
@@ -290,8 +312,8 @@ unchanged; this does not enable execution or B2. 1.M1 remains separately reviewe
 | 1.M1: ticker conflict/sequence reducer / 1.M0; same-ticker siblings and empty states, no admission claim | 100–140 / 150–190 / 20–30 |
 | 1.M2: native ref/inventory admission / 1.B3b; exact contract and complete membership with pre-allocation caps | 100–140 / 150–190 / 20–30 |
 | 1.M3: bounded ticker scan and index composition / 1.M1/1.M2; exhaust once per partition, detached output and poisoned payload tests | 100–140 / 150–190 / 20–30 |
-| P.M1: native history/grouped-policy compatibility proof / 1.M3; contaminated histories refuse, no post-aggregate filtering | 100–140 / 150–190 / 20–30 |
-| 1.C0: availability/forecast/label qualification design / 1.M3; separate reference, payload and bound evidence before code | 0 / 0 / 120–160 |
+| P.M1/C0 replacement: reusable eligible-history platform, native source-date sibling, separate research table and strict SIZE admission; reconstruct contaminated history | One coherent implementation, approved 650 source / 120 docs |
+| Inline contract review replaces the separate C0 design PR; source-date metadata is required, unavailable historical publication proof is an accepted gap | Included above |
 | 1.C1: required availability-evidence admission / 1.C0; only evidence needed for causal availability, not source-wide population coverage | 90–130 / 150–190 / 20–30 |
 | 1.C2: forecast/label-bound admission / 1.C0; prove clocks independently of producer declarations | 100–140 / 150–190 / 20–30 |
 | 1.C3: closed v2 context declaration / P.M1,1.C1,1.C2; source-free shape/identity, no admission claim | 100–140 / 150–190 / 20–30 |
@@ -497,13 +519,15 @@ research admit_snapshot translates it to SNAPSHOT_UNRESOLVED (engine/v2/research
 The index's exact earnings-contract allowlist still refuses UNSUPPORTED_CONTRACT;
 the generic session authenticates catalog identity, not that research allowlist.
 
-Preserve an existing native DataError first. For new catalog sqlite3.Error,
+Preserve an existing native DataError unchanged, including its code, category,
+retryability, stage, message and details; do not add a B2 redaction wrapper.
+For new catalog sqlite3.Error,
 test a present numeric primary result code (extended code & 255) against the
 resource row first; absent codes use the remaining-error row, never message text.
 Missing required schema/join partners are malformed catalog, not an absent
 snapshot or empty membership. New mappings never flatten scanner DataErrors.
 
-| Failure boundary | Outcome (fixed redacted message; admission returns no partial session) |
+| Failure boundary | Outcome (fixed messages for newly mapped failures only; no partial session) |
 | --- | --- |
 | Factory invalid holder/table name/configuration/limits or active transaction; facade binding/lifetime guards above | CONTRACT_MISMATCH, nonretryable; excludes every factory snapshot-reference failure below and native DataQuery/scan-cap validation. |
 | Factory: missing/malformed SnapshotRef, missing requested snapshot or supplied ref differs | SNAPSHOT_UNRESOLVED, nonretryable. |
@@ -511,7 +535,7 @@ snapshot or empty membership. New mappings never flatten scanner DataErrors.
 | Any explicit count or either byte counter exceeds cap | RESULT_LIMIT_EXCEEDED, nonretryable; no cap relaxation. |
 | Catalog SQLite primary BUSY/LOCKED/IOERR/CANTOPEN/FULL/NOMEM (including extended variants) | RESOURCE_UNAVAILABLE, retryable by registry only; no automatic retry. |
 | Catalog: broken join/type/JSON/Unicode/native identity, including DocumentError from stored catalog decoding; SQLite errors excluding the preceding resource codes, including code-less TEXT decode failure | MANIFEST_CORRUPT, nonretryable. |
-| Native DataError from identity/query/object checks | Preserve code and retryability; do not blanket-wrap. |
+| Native DataError from identity/query/object checks | Preserve the complete native envelope unchanged; do not blanket-wrap. |
 
 Synthetic acceptance must prove cap equality/one-over, huge unrelated payloads
 and IDs rejected before text transfer, repeated memberships charged, missing
@@ -523,5 +547,21 @@ nonselected object reads. Verify deep mutation isolation, fresh reopen, failure
 cleanup, early/never-started generator closure and exact bound/scan parity.
 A concurrent second-connection commit between probes and transfer must not
 change the admitted view; no fixture may stand in for private source coverage.
-B1a/B1b/B2/B3a/B3b estimates top out at 360 combined lines, within the <=400 ceiling;
-re-estimate/split if tests exceed them. Index work waits for all five slices.
+B1a/B1b/B2/B3a/B3b estimates top out at 360 combined lines; the packaging
+exceptions above use repository category caps. Index work waits for all five slices.
+
+### Approved eligible-history implementation amendment (2026-10-26)
+
+Supersedes the no-recompute P.M1 path and standalone C0 queue above: reconstruct
+eligible realized history once per source/policy context into a separate research
+table, using native H11 math and singleton outcome reads after full metadata admission.
+The native optional source-date sibling binds actual pre/post closes to outcome
+objects; it does not claim observed publication-time knowledge. Existing live
+outputs/readers stay unchanged; old snapshots need authorized regeneration.
+Exact installed producer/source/policy/month/cutoff/contributor identity gates reuse.
+Holdout-unaware aggregate sources are live-only at the new experiment boundary;
+aliases and derived requests cannot bypass its closed qualified field contract.
+SIZE shares this artifact across challenger/comparator; annual evaluation is still
+development. Implied-quote history and final confirmation remain separate work.
+The user approved 650 added source / 120 docs for this coherent implementation;
+review the inline contract before numerical code, not a separate design PR.

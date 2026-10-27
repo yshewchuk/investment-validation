@@ -31,6 +31,7 @@ from engine.v2.ops.native_score_batch import (
 )
 from engine.v2.models.frozen_state import serialize_frozen_state
 from engine.v2.models.lineage import Lineage
+from tests.v2.ops.analog_fixtures import with_synthetic_exact_analogs
 from engine.v2.models.payoff_artifact import (
     make_payoff_line_artifact,
     serialize_payoff_artifact,
@@ -234,6 +235,8 @@ def _event_inputs(strategy="STR-THRU", ticker="TEST",
 
 
 def _assemble(binding, events, feature_names=(), **overrides):
+    events = tuple(events)
+    binding = with_synthetic_exact_analogs(binding, events, as_of=_AS_OF)
     kwargs = dict(
         as_of=_AS_OF, snapshot_id=_SNAPSHOT, calendar_revision=_CALENDAR_REVISION,
         binding=binding, events=events, feature_names=feature_names,
@@ -416,8 +419,12 @@ def test_worker_without_feature_names_gets_past_release_missing_role(tmp_path):
         _worker_parameters(tmp_path, expected_ids=["evt-1"], feature_names=[]), root)
     document = json.loads((root / "refusals.json").read_text())
     assert "RELEASE_MISSING_ROLE" not in json.dumps(document)
-    assert document["refusals"] == {}
+    row_key = "TEST|STR-THRU|2026-01-15|am"
+    assert set(document["refusals"]) == {row_key}
+    assert document["refusals"][row_key]["code"] == "MODEL_NOT_READY"
     assert document["unkeyable_refusals"] == []
+    records = json.loads((root / "records.json").read_text())
+    assert records["records"] == {}
 
 
 @pytest.mark.parametrize("bad", [0, {}, "signal", 1.5, False])
@@ -503,30 +510,15 @@ def test_release_backed_bundle_declares_driver_pool_and_payoff_artifact(tmp_path
     assert native_inputs.simulation == {}
 
 
-def test_null_entry_date_with_pool_but_no_payoff_declares_no_cutoff(tmp_path):
-    """The payoff cutoff runs only when the resolved binding actually has
-    payoff artifacts: a release carrying a valid driver pool but no payoff
-    member assembles a row with a null ``entry_date`` (the "no entry_date"
-    case -- a key literally absent would refuse at the bundle's staged-input
-    check before the release declarations run). :func:`_row_cutoff`, which
-    would refuse a null entry date with ``MISSING_STAGED_INPUT``, and
-    ``payoff_artifact_key`` are never evaluated -- the model block declares
-    the release's pool with its recipe, nothing payoff-related, and the
-    simulation mapping stays empty."""
-    driver, driver_row = _staged_driver_pool(tmp_path)
+def test_null_entry_date_refuses_required_str_thru_analog_without_cutoff(tmp_path):
+    """STR-THRU needs an exact analog key; a null entry date cannot form it."""
+    _, driver_row = _staged_driver_pool(tmp_path)
     binding = _stage(tmp_path, [SIZE, GATE], rows=[driver_row])
     event = _event_inputs(calendar_row=_calendar_row(entry_date=None))
     assembled, refusals = _assemble(binding, [event])
-    assert refusals == ()
-    _, native_inputs = assembled[event.key]
-    model = native_inputs.model
-    assert model["model_residual_artifacts"] == {"driver": driver}
-    assert model["model_residual_artifact_recipe"] == {"driver": {
-        "role": "size", "model_id": "m-size-*", "fold": None,
-        "content_hash": driver.content_hash}}
-    assert "payoff_artifact" not in model
-    assert "payoff_recipe" not in model
-    assert native_inputs.simulation == {}
+    assert assembled == {}
+    assert [(item.key, item.code) for item in refusals] == [
+        (event.key, "MISSING_STAGED_INPUT")]
 
 
 def test_release_without_artifacts_ignores_row_markers(tmp_path):

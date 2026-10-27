@@ -3,6 +3,12 @@
 These unlayered entrypoints compose the v2 platform. See [ARCHITECTURE.md](ARCHITECTURE.md)
 for registration, single-arm evaluation and staged sweep contracts.
 
+## Proposed research designs
+
+[STR-THRU distribution forecasts](STR_THRU_DISTRIBUTION/DESIGN.md) proposes an
+isolated conditional-distribution and net-profit comparison, reusing SIZE's causal
+boundaries. Design only: no registered experiment, runnable recipe or read authority.
+
 ## Shared APIs
 
 The owning modules expose these helpers to native experiment callers; no compatibility aliases are provided.

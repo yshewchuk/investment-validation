@@ -4,8 +4,9 @@ Turns one ``ScoringReleaseBinding`` (PR-1, ``engine/v2/scoring/
 release_bindings.py``) plus per-event staged inputs (PR-2, ``engine/v2/
 scoring/nightly_source_bundle.py``) into ``{BoardRequest: (ScoreRequest,
 NativeScoreInputs)}``, admitting only registered strategies (currently
-``STR-THRU`` and ``STR-RUNUP``): batch-level malformed
-input raises, every per-row gap is a collected
+``STR-THRU``, ``STR-RUNUP`` and the gate-less entry-rule ``TWIN-P``,
+``TWIN-P5``, ``BFLY-P``, ``BFLY-P5``, ``CTR5``, ``RAMP7`` and ``CND-PS``):
+batch-level malformed input raises, every per-row gap is a collected
 :class:`NativeScoreBatchRowRefusal`, and ``run_native_score_batch_worker``
 scores the assembled batch under ``no_fit_guard``. Production reaches this
 worker via the supervisor's native shadow sidecar -- see
@@ -14,6 +15,7 @@ worker via the supervisor's native shadow sidecar -- see
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -25,6 +27,7 @@ from engine.v2.contracts import ScoreBatch, ScoreRequest
 from engine.v2.foundation import canonical_json, content_hash, to_document
 from engine.v2.models.payoff_artifact import payoff_artifact_key
 from engine.v2.ops.native_board_universe import BoardRequest
+from engine.v2.ops.native_entry_rule_inputs import entry_rule_declarations
 from engine.v2.ops.native_runup_inputs import runup_model_declarations
 from engine.v2.ops.native_score_batch_types import (
     NativeScoreBatchRowRefusal,
@@ -75,12 +78,20 @@ class _DriverSpec:
 
 @dataclass(frozen=True, slots=True)
 class _StrategySpec:
-    """Ordered drivers and release/bundle keys; registration alone admits rows."""
+    """Ordered drivers and release/bundle keys; registration alone admits rows.
+
+    A spec with both ``gate_role`` and ``gate_policy_key`` ``None`` is gate-less
+    (the entry-rule strategies); ``entry_rule`` selects that contract. Missing
+    size/iv_crush role, clock mismatch, or no/ambiguous paired pool or trailing
+    cutoff refuses only that row; missing/non-finite mcap leaves the mcap term
+    undetermined; missing panel ``iv30`` is a stage flag. No retries, caches or fallbacks.
+    """
 
     drivers: tuple[_DriverSpec, ...]
-    gate_role: str
-    gate_policy_key: str
     bundle_strategy: str
+    entry_rule: bool = False
+    gate_role: str | None = None
+    gate_policy_key: str | None = None
     driver_name: str | None = None
 
     def __post_init__(self) -> None:
@@ -89,6 +100,18 @@ class _StrategySpec:
             raise ValueError("strategy drivers must be a nonempty tuple of driver specs")
         if len({driver.output for driver in self.drivers}) != len(self.drivers):
             raise ValueError("strategy driver outputs must be unique")
+        if (self.gate_role is None) != (self.gate_policy_key is None):
+            raise ValueError("gate_role and gate_policy_key must be both None or both set")
+        if self.gate_role is None and not self.entry_rule:
+            raise ValueError("gate-less strategies must use the entry_rule path")
+        if self.entry_rule:
+            if self.gate_role is not None:
+                raise ValueError("entry_rule strategies must be gate-less")
+            if len(self.drivers) != 2 or (
+                    self.drivers[0].output != "forecast_abs_move"
+                    or self.drivers[1].output != "pred_iv_crush_30"):
+                raise ValueError(
+                    "entry_rule drivers must be forecast_abs_move then pred_iv_crush_30")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +128,15 @@ _RUNUP_SPEC = _StrategySpec(
     gate_role="gate:STR-RUNUP", gate_policy_key="STR-RUNUP",
     bundle_strategy="STR-RUNUP", driver_name="im_t1")
 
+# Entry-rule strategies: gate-less, size then iv_crush drivers.
+_ENTRY_RULE_SPECS = {
+    name: _StrategySpec(
+        drivers=(_DriverSpec("forecast_abs_move", "size:*"),
+                 _DriverSpec("pred_iv_crush_30", "iv_crush:*")),
+        bundle_strategy=name, entry_rule=True)
+    for name in ("TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7", "CND-PS")
+}
+
 # Code-owned admission, not a runtime registration API or chooser contract.
 _STRATEGY_REGISTRY: Mapping[str, _StrategySpec] = MappingProxyType({
     "STR-THRU": _StrategySpec(
@@ -112,6 +144,7 @@ _STRATEGY_REGISTRY: Mapping[str, _StrategySpec] = MappingProxyType({
         gate_role="gate:STR-THRU", gate_policy_key="STR-THRU",
         bundle_strategy="STR-THRU"),
     "STR-RUNUP": _RUNUP_SPEC,
+    **_ENTRY_RULE_SPECS,
 })
 
 
@@ -169,15 +202,18 @@ def _iso(value: Any) -> str | None:
 def _matched_decision_clock(
     model_identity: Mapping[str, ModelIdentity],
     spec: _StrategySpec,
-) -> tuple[str | None, str | None, tuple[tuple[_ResolvedDriver, ...], ModelIdentity] | None]:
+) -> tuple[str | None, str | None,
+           tuple[tuple[_ResolvedDriver, ...], ModelIdentity | None] | None]:
     """Resolve every declared driver and gate, then require one decision clock.
 
     Returns ``(code, detail, None)`` for the first missing role (drivers in
     declaration order, then gate) or clock mismatch; otherwise returns
-    ``(None, None, (drivers, gate_identity))``. Each exact role wins over its
-    optional alias. Actual identity keys and every forecast output survive;
-    missing roles or conflicting clocks never produce a partial declaration.
-    The caller attaches the row key to each refusal.
+    ``(None, None, (drivers, gate_identity))``. A gate-less spec returns
+    ``gate_identity=None`` after requiring every driver to share the first
+    driver's clock. Each exact role wins over its optional alias. Actual
+    identity keys and every forecast output survive; missing roles or
+    conflicting clocks never produce a partial declaration. The caller
+    attaches the row key to each refusal.
     """
     drivers = []
     for declaration in spec.drivers:
@@ -189,6 +225,14 @@ def _matched_decision_clock(
         if identity is None:
             return ("RELEASE_MISSING_ROLE", declaration.role, None)
         drivers.append(_ResolvedDriver(declaration.output, identity_key, identity))
+    if spec.gate_role is None:
+        reference_clock = drivers[0].identity.decision_clock_id
+        for declaration, driver in zip(spec.drivers, drivers, strict=True):
+            if driver.identity.decision_clock_id != reference_clock:
+                return ("AMBIGUOUS_DECISION_CLOCK",
+                        f"{declaration.role}={driver.identity.decision_clock_id!r} "
+                        f"{spec.drivers[0].role}={reference_clock!r}", None)
+        return (None, None, (tuple(drivers), None))
     gate_identity = model_identity.get(spec.gate_role)
     if gate_identity is None:
         return ("RELEASE_MISSING_ROLE", spec.gate_role, None)
@@ -265,9 +309,9 @@ def _calendar_row_problem(key: BoardRequest, calendar_row: Any) -> tuple[str, st
       :func:`validated_as_of`; validating it here with the SAME helper
       returns the row-level ``CALENDAR_ROW_INVALID`` instead of the
       ``INVALID_DATE`` the cutoff helper would otherwise surface. A null
-      ``entry_date`` is left to that helper's own ``MISSING_STAGED_INPUT``
-      (or to no artifact cutoff when the release carries no payoff artifact),
-      so only malformed non-null values are caught here.
+      ``entry_date`` is left to downstream cutoff construction and its
+      ``MISSING_STAGED_INPUT`` refusal, including STR-THRU's required exact-
+      cutoff analog selection; only malformed non-null values are caught here.
     - ``ticker``/``event_date`` not matching ``key`` -- ``CALENDAR_ROW_KEY_
       MISMATCH``. Neither this module nor ``assemble_nightly_source_bundle``
       (which only checks ``panel_row`` against ``calendar_row``, never
@@ -310,6 +354,68 @@ def _row_cutoff(as_of: Any, calendar_row: Mapping[str, Any]) -> str:
     return min(as_of_ts, entry_ts).date().isoformat()
 
 
+def _mcap_usd(panel_row: Mapping[str, Any]) -> float | None:
+    """The row's log-market-cap as dollars, or ``None`` when undetermined.
+
+    ``mcap_log`` must be a finite real number (never a ``bool`` or a string);
+    an absent, non-finite or overflowing value leaves the mcap term
+    undetermined rather than inventing a floor.
+    """
+    value = panel_row.get("mcap_log")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        if not math.isfinite(value):
+            return None
+        return math.exp(value)
+    except (OverflowError, TypeError):
+        return None
+
+
+def _pre_iv30(panel_row: Mapping[str, Any]) -> float | None:
+    """The row's positive pre-event 30-day implied vol (panel ``iv30``), or ``None`` when absent."""
+    value = panel_row.get("iv30")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        if not math.isfinite(value) or value <= 0:
+            return None
+    except (OverflowError, TypeError):
+        return None
+    return float(value)
+
+
+def _entry_rule_declarations_or_refusal(
+    binding: ScoringReleaseBinding,
+    *,
+    strategy: str,
+    entry_rule_ids: tuple[ModelIdentity, ModelIdentity],
+    as_of: Any,
+    calendar_row: Mapping[str, Any],
+    panel_row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """One entry-rule row's paired-pool, cutoff and gate declarations.
+
+    ``entry_rule_declarations`` owns the exact-key checks (unique paired pool,
+    event month's trailing cutoff, usable mcap); this only adds the planned-
+    exit recipe and, when the row carries one, its ``iv30`` (recipe key ``pre_iv30``). Its
+    ``NightlySourceBundleRefusal`` is re-wrapped per-row by the caller.
+    """
+    size_identity, crush_identity = entry_rule_ids
+    declarations = entry_rule_declarations(
+        binding, strategy=strategy, size_identity=size_identity,
+        crush_identity=crush_identity,
+        cutoff=_row_cutoff(as_of, calendar_row),
+        event_date=calendar_row["event_date"],
+        mcap_usd=_mcap_usd(panel_row))
+    declarations["residual_recipe"] = {"mode": "planned_exit"}
+    pre_iv30 = _pre_iv30(panel_row)
+    if pre_iv30 is not None:
+        declarations["paired_residual_recipe"] = {
+            **declarations["paired_residual_recipe"], "pre_iv30": pre_iv30}
+    return declarations
+
+
 def _release_artifact_declarations(
     binding: ScoringReleaseBinding,
     strategy: str,
@@ -322,10 +428,13 @@ def _release_artifact_declarations(
     The release is the SOLE source: the driver role's verified residual pool
     (slot ``driver``) with its causal recipe, and the strategy's payoff
     artifact selected by the canonical ``(strategy, fill alpha, cutoff)`` key
-    (``payoff_artifact_key``) with its ``before`` recipe. A member the release
-    does not carry leaves its declaration ABSENT -- never filled from
-    request/event/panel/Tier-4 rows. Malformed members never reach here: they
-    already refused ``resolve_release_binding`` with ``ModelNotReady``.
+    (``payoff_artifact_key``) with its ``before`` recipe. A missing driver pool
+    leaves its declaration absent. If a payoff family is present, exactly one
+    artifact must match the row's key or assembly refuses the row; when no
+    payoff family is present, the optional payoff declaration stays absent.
+    No member is filled from request/event/panel/Tier-4 rows. Malformed members
+    never reach here: they already refused ``resolve_release_binding`` with
+    ``ModelNotReady``.
     """
     pool = binding.driver_residual_artifacts.get(driver_identity.role)
     artifacts = binding.payoff_artifacts.get(strategy) or ()
@@ -344,12 +453,44 @@ def _release_artifact_declarations(
     if artifacts:
         cutoff = _row_cutoff(as_of, calendar_row)
         key = payoff_artifact_key(strategy, _SHADOW_FILL_ALPHA, cutoff)
-        for artifact in artifacts:
-            if artifact.key == key:
-                declarations["payoff_artifact"] = artifact
-                declarations["payoff_artifact_recipe"] = {"before": cutoff}
-                break
+        matches = [artifact for artifact in artifacts if artifact.key == key]
+        if len(matches) > 1:
+            raise NightlySourceBundleRefusal(
+                "MODEL_NOT_READY", "release carries duplicate exact-cutoff payoff artifacts")
+        if not matches:
+            raise NightlySourceBundleRefusal(
+                "MODEL_NOT_READY", "release lacks the exact-cutoff payoff artifact")
+        declarations["payoff_artifact"] = matches[0]
+        declarations["payoff_artifact_recipe"] = {"before": cutoff}
     return declarations
+
+
+_RELEASE_ARTIFACT_REFUSAL_LABELS: Mapping[tuple[str, str], str] = {
+    ("MODEL_NOT_READY",
+     "driver residual pool model_id disagrees with the resolved driver identity"):
+        "driver residual pool identity mismatch",
+    ("MODEL_NOT_READY", "release carries duplicate exact-cutoff payoff artifacts"):
+        "duplicate exact-cutoff payoff artifact",
+    ("MODEL_NOT_READY", "release lacks the exact-cutoff payoff artifact"):
+        "exact-cutoff payoff artifact missing",
+    ("MODEL_NOT_READY", "release lacks the exact-cutoff analog pool"):
+        "exact-cutoff analog pool missing",
+}
+
+
+def _nightly_source_bundle_refusal_detail(exc: NightlySourceBundleRefusal) -> str:
+    """The safe published detail for one source-bundle refusal.
+
+    Only the four internal release-artifact causes above keep a fixed
+    distinguishing label; every other refusal publishes just its code. The
+    raw ``exc.detail`` is never interpolated or concatenated into the text.
+    """
+    fixed_label = None
+    if isinstance(exc.detail, str):
+        fixed_label = _RELEASE_ARTIFACT_REFUSAL_LABELS.get((exc.code, exc.detail))
+    if fixed_label is not None:
+        return f"nightly_source_bundle refused: {exc.code}: {fixed_label}"
+    return f"nightly_source_bundle refused: {exc.code}"
 
 
 def _with_release_artifacts(
@@ -364,22 +505,32 @@ def _with_release_artifacts(
     calendar_row: Mapping[str, Any],
     quote_max_age_sessions: Any,
     panel_row: Mapping[str, Any],
+    entry_rule_ids: tuple[ModelIdentity, ModelIdentity] | None = None,
 ) -> SourceBundle | NativeScoreBatchRowRefusal:
     """Declare the release-backed artifacts on a bundle, or re-wrap a refusal.
 
     Split out of :func:`_assemble_one_event` to keep it under its line budget.
     The cutoff's own date refusal (:func:`_row_cutoff`) is a source-bundle
-    refusal like any other and is re-wrapped with the row's key. The frozen
-    board analog pool, when the release carries one for this row's
-    ``(strategy, fill alpha, cutoff)``, is declared with the NATIVE snapshot id
-    and the row's native request key as its bootstrap-seed identity (#681);
-    otherwise the analog block stays undeclared.
+    refusal like any other and is re-wrapped with the row's key. An entry-rule
+    row declares its paired pool, trailing cutoff, planned-exit recipe and gate
+    recipe from :func:`_entry_rule_declarations_or_refusal` instead of the
+    driver-residual/payoff path. STR-THRU requires the board analog pool for the
+    exact ``(strategy, fill alpha, cutoff)`` key; absence refuses the row. Other
+    strategies keep their optional analog behavior: the frozen board analog
+    pool, when the release carries one for this row's ``(strategy, fill alpha,
+    cutoff)``, is declared with the NATIVE snapshot id and the row's native
+    request key as its bootstrap-seed identity (#681); otherwise the analog
+    block stays undeclared and remains not-applicable.
     """
     context = {**bundle.context,
                **_identity_context(as_of, snapshot_id, calendar_row,
                                    quote_max_age_sessions=quote_max_age_sessions)}
     try:
-        if strategy == "STR-RUNUP":
+        if entry_rule_ids is not None:
+            declarations = _entry_rule_declarations_or_refusal(
+                binding, strategy=strategy, entry_rule_ids=entry_rule_ids,
+                as_of=as_of, calendar_row=calendar_row, panel_row=panel_row)
+        elif strategy == "STR-RUNUP":
             declarations = runup_model_declarations(
                 binding, {driver.output: driver.identity for driver in drivers},
                 cutoff=_row_cutoff(as_of, calendar_row), fill_alpha=_SHADOW_FILL_ALPHA)
@@ -387,14 +538,18 @@ def _with_release_artifacts(
             declarations = _release_artifact_declarations(
                 binding, strategy, drivers[0].identity, as_of, calendar_row)
         analogs = binding.analog_artifacts.get(strategy) or ()
-        if analogs:
-            declarations.update(analog_declarations(
+        if analogs or strategy == "STR-THRU":
+            analog_declaration = analog_declarations(
                 analogs, strategy, _SHADOW_FILL_ALPHA, _row_cutoff(as_of, calendar_row),
                 panel_row, snapshot_id,
-                score_request_key({**context, "ticker": key.ticker, "strategy": strategy})))
+                score_request_key({**context, "ticker": key.ticker, "strategy": strategy}))
+            if not analog_declaration and strategy == "STR-THRU":
+                raise NightlySourceBundleRefusal(
+                    "MODEL_NOT_READY", "release lacks the exact-cutoff analog pool")
+            declarations.update(analog_declaration)
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
-            key, exc.code, f"nightly_source_bundle refused: {exc.code}")
+            key, exc.code, _nightly_source_bundle_refusal_detail(exc))
     except AmbiguousAnalogPool:
         return NativeScoreBatchRowRefusal(
             key, "MODEL_NOT_READY", "release carries more than one analog pool for the row key")
@@ -420,7 +575,7 @@ def _bundle_or_refusal(
     binding: ScoringReleaseBinding,
     spec: _StrategySpec,
     drivers: tuple[_ResolvedDriver, ...],
-    gate_identity: ModelIdentity,
+    gate_identity: ModelIdentity | None,
     gate_policy: Mapping[str, Mapping[str, Any]],
     as_of: Any,
     feature_names: Sequence[str],
@@ -434,8 +589,16 @@ def _bundle_or_refusal(
     CWE-209): it can itself echo staged input (e.g. ``quote_domain_map``
     embeds an invalid ``quote_status`` string into some refusals) --
     ``exc.code`` is a closed, module-controlled vocabulary and is safe to
-    publish unchanged; the free-text detail is not.
+    publish unchanged; the free-text detail is not. A gate-less spec declares
+    neither the gate identity nor a gate recipe.
     """
+    model_identity = {driver.identity_key: to_document(driver.identity)
+                      for driver in drivers}
+    gate_recipe = None
+    if gate_identity is not None:
+        model_identity[spec.gate_role] = to_document(gate_identity)
+        gate_recipe = {**gate_policy[spec.gate_policy_key],
+                       "binding_id": gate_identity.binding_id}
     try:
         bundle = assemble_nightly_source_bundle(
             source_ref=f"native-score-batch:{key.ticker}:{_iso(key.event_date)}:{key.strategy}",
@@ -446,14 +609,11 @@ def _bundle_or_refusal(
             quote_status=event.quote_status, feature_names=feature_names,
             quote_max_age_sessions=event.quote_max_age_sessions,
             driver_name=spec.driver_name if spec.driver_name is not None else driver_name,
-            model_identity={**{driver.identity_key: to_document(driver.identity)
-                               for driver in drivers},
-                            spec.gate_role: to_document(gate_identity)},
+            model_identity=model_identity,
             model_artifact_refs={driver.output: driver.identity.artifact_hash for driver in drivers},
             forecast_recipes={driver.output: {"binding_id": driver.identity.binding_id}
                               for driver in drivers},
-            gate_recipe={**gate_policy[spec.gate_policy_key],
-                         "binding_id": gate_identity.binding_id},
+            gate_recipe=gate_recipe,
         )
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
@@ -504,13 +664,41 @@ def _gate_source_or_refusal(
     return source
 
 
-def _score_artifact_refs(drivers, gate_identity, bundle) -> tuple[str, ...]:
+def _score_artifact_refs(drivers, gate_identity: ModelIdentity | None, bundle) -> tuple[str, ...]:
     refs = [driver.identity.artifact_hash for driver in drivers]
-    refs.append(gate_identity.artifact_hash)
+    if gate_identity is not None:
+        refs.append(gate_identity.artifact_hash)
     gate_source = bundle.gate_forecast_source
     if gate_source is not None:
         refs.append(gate_source.artifact_hash)
     return tuple(dict.fromkeys(refs))
+
+
+def _gate_policy_and_feature_names(
+    key: BoardRequest,
+    spec: _StrategySpec,
+    gate_policy: Mapping[str, Mapping[str, Any]],
+    feature_names: Sequence[str],
+    drivers: Sequence[_ResolvedDriver],
+    gate_identity: ModelIdentity | None,
+) -> tuple[Sequence[str], NativeScoreBatchRowRefusal | None]:
+    """Gate-policy check plus explicit/derived feature names for one row.
+
+    Returns ``(feature_names, None)`` when the row may proceed, or
+    ``((), refusal)`` with the same ``GATE_POLICY_NOT_STAGED`` or
+    ``RELEASE_MISSING_FEATURE_ORDER`` refusal the caller would build itself.
+    """
+    if spec.gate_policy_key is not None and spec.gate_policy_key not in gate_policy:
+        return (), NativeScoreBatchRowRefusal(
+            key, "GATE_POLICY_NOT_STAGED",
+            f"no gate policy staged for {key.strategy!r}")
+    identities = [driver.identity for driver in drivers]
+    if gate_identity is not None:
+        identities.append(gate_identity)
+    feature_names, problem = _feature_names_or_refusal(feature_names, *identities)
+    if problem is not None:
+        return (), NativeScoreBatchRowRefusal(key, *problem)
+    return feature_names, None
 
 
 def _assemble_one_event(
@@ -550,13 +738,10 @@ def _assemble_one_event(
         return NativeScoreBatchRowRefusal(key, code, detail)
     drivers, gate_identity = pair
     driver_identity = drivers[0].identity
-    if spec.gate_policy_key not in gate_policy:
-        return NativeScoreBatchRowRefusal(
-            key, "GATE_POLICY_NOT_STAGED", f"no gate policy staged for {strategy!r}")
-    feature_names, problem = _feature_names_or_refusal(
-        feature_names, *(driver.identity for driver in drivers), gate_identity)
-    if problem is not None:
-        return NativeScoreBatchRowRefusal(key, *problem)
+    feature_names, refusal = _gate_policy_and_feature_names(
+        key, spec, gate_policy, feature_names, drivers, gate_identity)
+    if refusal is not None:
+        return refusal
     bundle = _bundle_or_refusal(
         key, event, binding=binding, spec=spec, drivers=drivers,
         gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,
@@ -573,7 +758,9 @@ def _assemble_one_event(
         drivers=drivers, as_of=as_of, snapshot_id=snapshot_id,
         calendar_row=event.calendar_row,
         quote_max_age_sessions=event.quote_max_age_sessions,
-        panel_row=event.panel_row)
+        panel_row=event.panel_row,
+        entry_rule_ids=((drivers[0].identity, drivers[1].identity)
+                        if spec.entry_rule else None))
     if isinstance(bundle, NativeScoreBatchRowRefusal):
         return bundle
     try:

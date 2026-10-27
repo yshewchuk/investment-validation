@@ -56,6 +56,25 @@ write path.
 
 ## Public interface
 
+`magnitude_distribution.recipe`, `histogram`, `validate_distribution` and `bin_index`
+provide a source-free absolute-magnitude histogram format and numerical refusals.
+`histogram([1.0] + [0.0] * 80)` returns a detached document with an explicit unresolved tail;
+`tail_excesses=[0.0, 2.0]` declares conditional excesses relative to 20 (zero means exactly 20).
+No sample is fitted/admitted. Consumers are the source-free magnitude math/payoff helpers
+and synthetic tests, including `tests/v2/research/test_magnitude_distribution.py`.
+
+`magnitude_distribution_math` exposes `components`, `cdf`, `mean`, `crps`,
+`empirical_crps`, `bin_scores` and `brier`: pure magnitude-family scores and
+uniform/lower/upper finite-bin sensitivity. Full-law calls require a declared
+empirical tail; bin scores alone allow unresolved tails. Arithmetic normalizes
+only the admitted 1e-12 mass roundoff, without modifying the document.
+`magnitude_distribution_payoff.bridge_summary`, `empirical_bridge_summary` and
+`mean_matched_control` supply frozen-bridge/mean-control diagnostics, preserving
+zero atoms and negative post-residual exit values. Fixed per-share spot/cost
+inputs are decision-quote proxies, not realized net-profit or execution claims.
+Only these helpers and their matching `tests/v2/research/test_magnitude_distribution*.py`
+tests consume the new interfaces; there is no data, fit or production wiring.
+
 `eligibility_policy.eligibility_policy` validates an explicit version/width;
 `eligibility_policy.plan_eligibility` returns the opt-in metadata-only plan described below.
 `experiment_population.canonical_events` reads the six canonical metadata columns
@@ -95,9 +114,12 @@ modules (`_snapshot`, `_pricing`, `_plan`, `_chains`, `_trades_table`,
 `_trades_revisions`, `_trades_publish`, `_replay_run`, `_build_run`) are
 internal too.
 
-`_confirmed_metadata.reduce_sequences` is internal synthetic-only metadata reduction,
+`confirmed_metadata.reduce_sequences` is public pure metadata reduction,
 not a public index builder. It returns detached per-ticker sequences from a complete
 caller-supplied seven-column view, using data's public confirmation/sequence primitives.
+`confirmed_metadata.validate_tickers` sorts canonical names without rewriting them;
+`confirmed_metadata.metadata_rows(events, *, tickers)` validates/detaches rows/reasons,
+not source completeness or cross-row conflicts (the full reducer checks conflicts).
 It proves neither source completeness nor coverage/eligibility and performs no I/O.
 
 The replay half: `replay.replay`, `replay.replay_one`, `replay.ALPHA_GRID`,
@@ -228,7 +250,7 @@ and dictionary hashes are distinct. Synthetic tests and the source-free versione
 no v2 context, reader, source qualification, fit or search activation exists.
 Resolved source snapshots must be bound separately by later native admission.
 
-<!-- public-interface: magnitude_panel_v2_table.CONTRACT, magnitude_panel_v2_table.feature_dictionary, magnitude_panel_v2_table.recipe, magnitude_panel_v2_policies.policy_definitions, magnitude_panel_daily.build_daily_blocks, eligibility_policy.eligibility_policy, eligibility_policy.plan_eligibility, experiment_population.canonical_events, experiment_trades.classify_events, snapshot_inputs.snapshot_reference, snapshot_inputs.admit_snapshot, progress.Progress, progress.stage, progress.decision, iv_crush_inputs.load_iv_crush_targets, iv_crush_inputs.preflight_iv_crush_targets, event_history.plan_event_targets, event_history.plan_with_reader, event_history.POPULATION_CONTEXT_COLUMNS, replay.clean_chain_rows, _pricing.MIN_MEANINGFUL_COST, _pricing.ChainSnapshot, _pricing.FillModel, _pricing.StructureError, _pricing.price_structure, signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ReplayResult, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _chains.read_chains_for_years, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label, experiment_exits.PositionLeg, experiment_exits.EnteredPosition, experiment_exits.ExitDecision, experiment_exits.walk_fixed_day, experiment_exits.walk_exit, experiment_exits.exit_report_frame, experiment_population.load_population, prediction_inputs.load_prediction_targets, event_history.load_event_history, magnitude_inputs.magnitude_recipe, magnitude_inputs.forecast_cutoff, magnitude_inputs.load_magnitude_targets, magnitude_inputs.preflight_magnitude_targets, magnitude_inputs.qualify_magnitude_training_targets, magnitude_features.load_magnitude_history, magnitude_folds.plan_magnitude_folds, magnitude_folds.magnitude_window, magnitude_folds.annual_fold, magnitude_history_store.build_context, magnitude_history_store.materialize, magnitude_history_store.read_stored, magnitude_history_store.preflight_stored, magnitude_history_store.read_stored_for_events, magnitude_history_inputs.admit_stored, magnitude_panel_table.CONTRACT, magnitude_panel_table.feature_dictionary, magnitude_panel_table.recipe, magnitude_panel_table.validate_rows, magnitude_panel_plan.build_context, magnitude_panel_plan.preflight_context, magnitude_panel_plan.validate_context, magnitude_panel_table.canonical_day, magnitude_history_store.validate_context_identity, magnitude_history_store.validate_event_forecasts, magnitude_history_store.preflight_source, magnitude_history_store.validate_features, magnitude_features.calendar_input, magnitude_inputs.target_object_identity -->
+<!-- public-interface: magnitude_confirmed_metadata.build_index, confirmed_metadata.reduce_sequences, confirmed_metadata.validate_tickers, confirmed_metadata.metadata_rows, magnitude_distribution_math.components, magnitude_distribution_math.cdf, magnitude_distribution_math.mean, magnitude_distribution_math.crps, magnitude_distribution_math.empirical_crps, magnitude_distribution_math.bin_scores, magnitude_distribution_math.brier, magnitude_distribution_payoff.bridge_summary, magnitude_distribution_payoff.empirical_bridge_summary, magnitude_distribution_payoff.mean_matched_control, magnitude_distribution.recipe, magnitude_distribution.histogram, magnitude_distribution.validate_distribution, magnitude_distribution.bin_index, magnitude_panel_v2_table.CONTRACT, magnitude_panel_v2_table.feature_dictionary, magnitude_panel_v2_table.recipe, magnitude_panel_v2_policies.policy_definitions, magnitude_panel_daily.build_daily_blocks, eligibility_policy.eligibility_policy, eligibility_policy.plan_eligibility, experiment_population.canonical_events, experiment_trades.classify_events, snapshot_inputs.snapshot_reference, snapshot_inputs.admit_snapshot, progress.Progress, progress.stage, progress.decision, iv_crush_inputs.load_iv_crush_targets, iv_crush_inputs.preflight_iv_crush_targets, event_history.plan_event_targets, event_history.plan_with_reader, event_history.POPULATION_CONTEXT_COLUMNS, replay.clean_chain_rows, _pricing.MIN_MEANINGFUL_COST, _pricing.ChainSnapshot, _pricing.FillModel, _pricing.StructureError, _pricing.price_structure, signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ReplayResult, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _chains.read_chains_for_years, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label, experiment_exits.PositionLeg, experiment_exits.EnteredPosition, experiment_exits.ExitDecision, experiment_exits.walk_fixed_day, experiment_exits.walk_exit, experiment_exits.exit_report_frame, experiment_population.load_population, prediction_inputs.load_prediction_targets, event_history.load_event_history, magnitude_inputs.magnitude_recipe, magnitude_inputs.forecast_cutoff, magnitude_inputs.load_magnitude_targets, magnitude_inputs.preflight_magnitude_targets, magnitude_inputs.qualify_magnitude_training_targets, magnitude_features.load_magnitude_history, magnitude_folds.plan_magnitude_folds, magnitude_folds.magnitude_window, magnitude_folds.annual_fold, magnitude_history_store.build_context, magnitude_history_store.materialize, magnitude_history_store.read_stored, magnitude_history_store.preflight_stored, magnitude_history_store.read_stored_for_events, magnitude_history_inputs.admit_stored, magnitude_panel_table.CONTRACT, magnitude_panel_table.feature_dictionary, magnitude_panel_table.recipe, magnitude_panel_table.validate_rows, magnitude_panel_plan.build_context, magnitude_panel_plan.preflight_context, magnitude_panel_plan.validate_context, magnitude_panel_table.canonical_day, magnitude_history_store.validate_context_identity, magnitude_history_store.validate_event_forecasts, magnitude_history_store.preflight_source, magnitude_history_store.validate_features, magnitude_features.calendar_input, magnitude_inputs.target_object_identity -->
 
 ## Consumers
 
@@ -360,6 +382,63 @@ per horizon with `horizon_sessions`, `decision_date`, `source_session_ceiling`.
 Dates are canonical ISO calendar days. Producers must establish these bounds;
 missing bounds refuse. A caller's digest is not evidence of their truth.
 
-This is a metadata foundation only: no current runner uses it. Evaluation IDs
-are preserved, not authorized for reading. Existing v1 behavior is unchanged.
+The eligible-history builder below consumes this metadata policy. Evaluation IDs
+are preserved, not authorized for reading; annual development targets still need
+retained eligibility. Existing v1 behavior is unchanged.
 Integration sequencing belongs to the [stage-2 design](../../../experiments/SUPER_SIZE/STAGE2_DESIGN.md).
+
+## Confirmed metadata index (synthetic only)
+
+`magnitude_confirmed_metadata.build_index(repository, snapshot, *, tickers, limits)`
+opens a factory-owned bounded native earnings view, preflights all partitions,
+exhausts one capped scan per year and composes the unchanged M1 sequence reducer.
+The detached `magnitude_confirmed_metadata.v1` proof retains complete native
+source membership, selected/confirmed counts and a canonical `index_id`.
+All 13 limits are mandatory; native failures remain intact and no partial proof
+escapes. No coverage/PIT/numerical admission follows from dataset membership.
+See [the frozen contract](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md).
+
+## Policy-qualified eligible history
+
+<!-- public-interface: eligible_history.admit_source, eligible_history_table.CONTRACT, eligible_history_table.FEATURES, eligible_history_table.admit_fields, eligible_history_table.recipe -->
+
+These are intentionally manual, research-only Python APIs, not production CLI,
+nightly or training entrypoints. A separately authorized research caller supplies
+the pinned source and explicit policy; this PR neither activates a data run nor
+wires production scoring. Synthetic tests are the only current invocations.
+The sole public build/read boundary is `experiments.eligible_history`; it rejects
+caller producer identities before source access and derives the installed identity.
+An immutable import-time source/environment baseline refuses later disk drift with
+`INPUT_CHANGED`; restart from a fixed code tree. This is not bytecode attestation.
+Its backend `_materialize`/`_read` helpers are trusted internal orchestration, not
+independent admitted APIs or a Python privacy/security boundary. The adapter consumes
+backend source admission and these helpers;
+`experiments.magnitude_eligible_history` consumes its qualified H11 field list.
+Use pure `experiments.eligible_history.validate_request` for closed request shape only (not data admission).
+Public malformed requests/SIZE artifact envelopes refuse `CONTRACT_MISMATCH` before
+fingerprints or source access; a valid non-30-day SIZE policy still refuses `HOLDOUT_ACCESS_DENIED`.
+Use `experiments.eligible_history.materialize/read` with explicit source snapshot,
+holdout month, grouped policy, target IDs, horizons `[1, 3, 5]`, history start and
+limits (`max_source_rows`, `max_fragments`, `max_object_bytes`, `max_total_bytes`,
+`max_output_rows`). The separate `research_eligible_history` table requires native
+`computed_move_bounds`; missing/stale bindings refuse before outcomes.
+Missing bounds for selected target/history tickers or events are `CONTRACT_MISMATCH`;
+wrong outcome-object bindings/isolation remain `HOLDOUT_ACCESS_DENIED`. Unrelated
+tickers need no sidecar; full canonical metadata still defines protected windows.
+History selection uses each target ticker's own latest ceiling, retaining explicit
+targets. Receipt lookup compares identity in SQL and returns only a bounded native
+snapshot ID, never unused diagnostics; conflicting evidence is `IDENTITY_CONFLICT`.
+Before object publication, output also obeys the native reader's summed uncompressed
+Parquet row-group cap, alongside compressed-object/total caps; no peak-allocation guarantee.
+`experiments.magnitude_eligible_history.build/comparison_inputs` supplies SIZE's
+native folds and one shared clean-history input for challenger and comparator.
+SIZE admits only its frozen 30-day grouped policy on both build and read.
+This is a causal research refit, not production-byte parity. Annual evaluation
+remains development and must pass embargo admission. No final-confirmation API.
+Installed code/environment, source, policy/month, cutoffs and contributors bind
+replay. Live-only aggregates, unknown fields and unapproved aliases/derivations
+are not accepted experiment sources; v1 readers and production tables stay unchanged.
+Each preparation revalidates clocks once per distinct date/session/horizon against
+its fixed calendar, sharing a local memo across targets/contributors, never across reads.
+The artifact contains native H11 means/EMAs only, not implied-quote history.
+Historical publication and schedule knowledge remain unverified reconstruction.

@@ -51,7 +51,7 @@ def _build(binding, event=None, **kwargs):
 
 
 def test_runup_descriptor_is_frozen_and_registered():
-    assert tuple(batch._STRATEGY_REGISTRY) == ("STR-THRU", "STR-RUNUP")
+    assert tuple(batch._STRATEGY_REGISTRY) == ("STR-THRU", "STR-RUNUP", "TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7", "CND-PS")
     spec = batch._RUNUP_SPEC
     assert batch._STRATEGY_REGISTRY["STR-RUNUP"] is spec
     assert spec.drivers == (
@@ -78,7 +78,7 @@ def test_driver_output_name_is_declarative_without_enabling_another_strategy():
     spec = replace(batch._STRATEGY_REGISTRY["STR-THRU"],
                    drivers=(batch._DriverSpec("forecast_abs_move", "size:*"),))
     assert spec.drivers[0].output == "forecast_abs_move"
-    assert tuple(batch._STRATEGY_REGISTRY) == ("STR-THRU", "STR-RUNUP")
+    assert tuple(batch._STRATEGY_REGISTRY) == ("STR-THRU", "STR-RUNUP", "TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7", "CND-PS")
 
 
 @pytest.mark.parametrize("exact,driver_key,expected", [

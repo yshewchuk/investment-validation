@@ -252,9 +252,10 @@ def test_native_score_batch_and_native_parity_keys_agree_end_to_end(tmp_path):
         _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
     records_document = json.loads((root / "records.json").read_text())
     refusals_document = json.loads((root / "refusals.json").read_text())
-    native_rows, _, _ = _native_rows_and_refusals(records_document, refusals_document)
+    native_rows, native_refusals, _ = _native_rows_and_refusals(records_document, refusals_document)
     legacy_rows = legacy_parity_rows({"rows": [{
         "ticker": "ABC", "strategy": "STR-THRU",
         "event_date": "2026-01-15", "other_field": 1}]})
-    assert len(native_rows) == 1
-    assert set(native_rows) == set(legacy_rows)
+    assert native_rows == {}
+    assert native_refusals["ABC|STR-THRU|2026-01-15"] == "MODEL_NOT_READY"
+    assert len(legacy_rows) == 1
