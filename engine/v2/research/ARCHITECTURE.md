@@ -8,9 +8,7 @@ Offline analysis CLIs cover real-fill quality, cross-sectional screening, the re
 
 ## Source-free magnitude distributions
 
-`magnitude_distribution.recipe`, `histogram`, `validate_distribution` and `bin_index` are source-free numerical APIs, consumed only by the research math/payoff helpers below and synthetic tests; no runtime/source admission exists.
-The closed plain-JSON `research_magnitude_distribution.v1` represents absolute simple-return percentage points: quarter-point half-open bins through 20, then uncapped overflow; finite-bin interpolation is uniform, with no zero atom.
-`histogram(probabilities, tail_excesses=None)` and `validate_distribution(document)` return detached documents; 81 finite masses in [0, 1] must sum to one within absolute 1e-12, without repair/smoothing.
+`magnitude_distribution.recipe`, `histogram`, `validate_distribution` and `bin_index` are source-free numerical APIs, consumed only by the research math/payoff helpers below and synthetic tests; no runtime/source admission exists. The closed plain-JSON `research_magnitude_distribution.v1` represents absolute simple-return percentage points: quarter-point half-open bins through 20, then uncapped overflow; finite-bin interpolation is uniform, with no zero atom. `histogram(probabilities, tail_excesses=None)` and `validate_distribution(document)` return detached documents; 81 finite masses in [0, 1] must sum to one within absolute 1e-12, without repair/smoothing.
 Tail policy is `unresolved` (zero samples) or `empirical_excess` (nonempty equal-weight nonnegative excesses relative to 20); duplicates, order and explicit `sample_count` are retained. Zero excess means exactly 20; a supplied tail is retained even with zero forecast overflow mass. Samples are not authenticated training evidence.
 `bin_index(magnitude)` accepts plain `int`/`float` (not bool/subclasses), finite after float conversion and nonnegative; exact boundaries go right, including 20 to overflow. The same numeric rules apply to histogram masses/edges/excesses. No caller value is echoed in refusals.
 Stdlib numeric/list operations plus native errors suffice. Validation costs O(81 + n) time/detached space for n tail samples, with no hard sample cap, I/O, partial results, cache, retry, writes or transaction.
@@ -34,7 +32,9 @@ No source/fold/calibration envelope, fitting, holdout access or production wirin
 
 ## Stage-2 magnitude panel foundation
 
-`_confirmed_metadata.reduce_sequences` is internal/synthetic-only: a pure seven-column DataFrame reducer of a complete caller-supplied view, not evidence of completeness. Strict naive `datetime64[ns]` types precede public `confirmed_event_metadata.classify_metadata`; public `event_sequence(warmup=4)` counts all supplied confirmed rows from zero; no date cutoff applies. All rows participate in duplicate ID, ticker/day, date-conflict and ticker/cluster refusal, including unconfirmed siblings; equal clusters across tickers are independent. Detached sequences retain exact empty states/counts/seven-field evidence. Work is O(n log n + t log t), state O(n + t) for n rows/t tickers; no hard cap or RSS bound exists here. No partial output, I/O, cache, retry, transaction, index identity, source admission, coverage, holdout/value eligibility or runtime integration exists.
+`magnitude_confirmed_metadata.build_index(repository, snapshot, *, tickers, limits)` is synthetic-only complete pinned-view admission. It owns a data `bounded_snapshot` session, exact `snapshot_inputs` admission and the frozen earnings contract allowlist; native `query` plans exhaust every canonical-year partition before scans. All inventory row/object caps precede any object open; one native scan per partition projects seven metadata fields with mandatory object caps. Retained rows/canonical bytes are bounded before retention; every stream must exhaust before the algorithm-preserving public `confirmed_metadata` reducer and detached content-hashed proof return. All catalog/request/retention/proof limits are explicit, with no defaults, retries, cache, fallback SQL or durable writes. This is not an RSS guarantee. Native diagnostic envelopes propagate unchanged; malformed shapes/incomplete inventory refuse CONTRACT_MISMATCH, unknown contracts UNSUPPORTED_CONTRACT, caps RESULT_LIMIT_EXCEEDED and semantic conflicts IDENTITY_CONFLICT. Receipt references stay unopened. Complete pinned membership proves neither expected-population coverage, observed-PIT knowledge nor protected/numerical eligibility; no production caller exists. Work is bounded by admitted catalog/partition scans and retained-row reduction; progress emits aggregate stage/RSS/counts at bounded cadence without source diagnostics or secrets.
+
+`confirmed_metadata.reduce_sequences` is public pure reduction: a pure seven-column DataFrame reducer of a complete caller-supplied view, not evidence of completeness. Strict naive `datetime64[ns]` types precede public `confirmed_event_metadata.classify_metadata`; public `event_sequence(warmup=4)` counts all supplied confirmed rows from zero; no date cutoff applies. All rows participate in duplicate ID, ticker/day, date-conflict and ticker/cluster refusal, including unconfirmed siblings; equal clusters across tickers are independent. Detached sequences retain exact empty states/counts/seven-field evidence. Work is O(n log n + t log t), state O(n + t) for n rows/t tickers; no hard cap or RSS bound exists here. No partial output, I/O, cache, retry, transaction, index identity, source admission, coverage, holdout/value eligibility or runtime integration exists.
 
 `magnitude_panel_table` uses native `TableContract`/`ColumnContract`, JSON and canonical hashing. Its immutable v1 event/context/horizon key has ordered H/HM/HMO dictionaries, excluding learned Tier4 outputs/current-event outcomes. Rows require exact cohort coverage, finite typed values, missing/quote status and per-observation date, knowledge mode, row/fragment identity and canonical SHA-256 `content_hash`. Contexts are reconstructed-only, never relabeled observed; pure validation checks digest syntax/binding, not source membership or value equality.
 
@@ -42,15 +42,15 @@ No source/fold/calibration envelope, fitting, holdout access or production wirin
 
 Panel boundaries require plain JSON (nested history before normalization); detached refusals use `CONTRACT_MISMATCH`, native refusals propagate.
 
-`magnitude_panel_v2_policies.policy_definitions()` supplies detached source/derivation/quote/missing policies to `magnitude_panel_v2_table`.
-The [parity design](https://github.com/yshewchuk/investment-validation/blob/26b5958d868afc5189611aa77ec1774a9e246d71/experiments/SUPER_SIZE/STAGE2_DESIGN.md#incumbent-parity-amendment-october-24-design-only) policies use JSON copying and public eligibility declarations, not a registry/parser or computations.
-The additive v2 table exports `CONTRACT`, `feature_dictionary(subset)` and `recipe(subset)`; explicit H/HM/HMO have 11/28/42 ordered numeric descriptors.
-Uniform inline source/derivation policies change all dictionary hashes (including H); v1 APIs, contracts, hashes and eleven H numeric values/order remain unchanged.
-Recipes own 11/28/43 raw model columns: HMO alone appends `has_implied_quote`, outside the numeric table; learned missing indicators remain family-owned.
-Native contract and dictionary hashes are distinct; neither admits sources/snapshots/rows. The source-free versioned compiler consumes recipes; no v2 context, reader, model or runtime activation exists.
+`magnitude_panel_v2_policies.policy_definitions()` supplies detached source/derivation/quote/missing policies to `magnitude_panel_v2_table`. The [parity design](https://github.com/yshewchuk/investment-validation/blob/26b5958d868afc5189611aa77ec1774a9e246d71/experiments/SUPER_SIZE/STAGE2_DESIGN.md#incumbent-parity-amendment-october-24-design-only) policies use JSON copying and public eligibility declarations, not a registry/parser or computations. The additive v2 table exports `CONTRACT`, `feature_dictionary(subset)` and `recipe(subset)`; explicit H/HM/HMO have 11/28/42 ordered numeric descriptors. Uniform inline source/derivation policies change all dictionary hashes (including H); v1 APIs, contracts, hashes and eleven H numeric values/order remain unchanged. Recipes own 11/28/43 raw model columns: HMO alone appends `has_implied_quote`, outside the numeric table; learned missing indicators remain family-owned. Native contract and dictionary hashes are distinct; neither admits sources/snapshots/rows. The source-free versioned compiler consumes recipes; no v2 context, reader, model or runtime activation exists.
 
 | Condition | Outcome |
 | --- | --- |
+| Index malformed request/row/partition, incomplete inventory, or unsupported holder/session | Nonretryable `CONTRACT_MISMATCH`; no partial index |
+| Index missing/nonexact/unresolvable native snapshot | `SNAPSHOT_UNRESOLVED`; no object access or index |
+| Index unsupported exact earnings contract; explicit cap exceeded; semantic conflict | `UNSUPPORTED_CONTRACT`; `RESULT_LIMIT_EXCEEDED`; `IDENTITY_CONFLICT`, respectively; no partial index |
+| Index native catalog/query/object failure | Same exception/code/category/retryability/stage/message/details; no retry or partial index |
+| Index success after every partition exhausts | Detached plain-JSON proof; mutating it cannot alter admitted/caller state; membership is not numerical/PIT eligibility |
 | Malformed reducer request/frame/row, including unrequested ticker | `CONTRACT_MISMATCH`; no partial sequence |
 | Reducer duplicate ID, ticker/day, date-conflict or ticker/cluster conflict | `IDENTITY_CONFLICT`; no partial sequence |
 | Reducer native failure | Existing `DataError` code/retryability unchanged; no partial sequence |
@@ -658,7 +658,7 @@ This bounds retained unmatched rows, not total process RSS.
 ## Dependencies
 
 `engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `incremental_tables`,
-`catalog`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`, `computed_move_bounds`, `confirmed_event_metadata`, `event_history`,
+`bounded_snapshot`, `catalog`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`, `computed_move_bounds`, `confirmed_event_metadata`, `event_history`,
 `iv_crush_table`, `price_history_query`, `price_history_table`), `engine.v2.contracts` (`RevisionCandidate`, `CompletedCoverage`,
 `CoverageKey`, `CoverageOutcome`, `TimeInterval`), `engine.v2.contracts.data`
 (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`, `ObjectRef`,
@@ -931,7 +931,7 @@ an uncaught traceback instead.
   bypasses chain reads. `_build_run.run` creates an independent replay
   for each strategy.
 - **R3, retry.** No scan automatically retries. `SNAPSHOT_NOT_READY` and
-  `SNAPSHOT_CONFLICT` are the only two retryable codes this package can raise;
+  `SNAPSHOT_CONFLICT` and propagated `RESOURCE_UNAVAILABLE` are retryable;
   an operator may rerun after the missing head appears or a conflicting
   writer finishes. Limit and integrity refusals, including
   `RESULT_LIMIT_EXCEEDED` and `MANIFEST_CORRUPT`, are not retried.
