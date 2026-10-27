@@ -44,8 +44,18 @@ def object_cutoff(member: str, name: str, cutoff: str) -> str:
 
 def _validate_monthly_object_cutoffs(new: dict[str, dict[str, bytes]],
                                     retrain_cutoff: str) -> None:
-    """Every monthly object name must record exactly the retrain cutoff."""
+    """Every monthly object name must record exactly the retrain cutoff.
+
+    Champion driver pools are named ``<model_id>|<fold>`` by
+    ``frozen_state_payloads`` (the fold may be ``None``, not a date), so the
+    driver members are exempt from the name-suffix rule; their cutoff is
+    stamped on the ``PoolOutput`` instead. The chooser's names stay strict.
+    """
+    from checks.phase5_release_assembly import MONTHLY_DRIVER_MEMBER_IDS
+
     for member, objects in new.items():
+        if member in MONTHLY_DRIVER_MEMBER_IDS:
+            continue
         for name in objects:
             if object_cutoff(member, name, retrain_cutoff) != retrain_cutoff:
                 raise StageRefused(
@@ -134,6 +144,7 @@ def _stage_monthly_candidate(parameters, root: Path) -> dict:
     from engine.v2.models import release_layout as rel
     from checks.phase5_release_assembly import (
         CHOOSER_MEMBER_ID,
+        MONTHLY_DRIVER_MEMBER_IDS,
         PRIOR_USABLE,
         PoolOutput,
         ReleaseAssemblyRefusal,
@@ -212,7 +223,9 @@ def _stage_monthly_candidate(parameters, root: Path) -> dict:
         for member, objects in new.items():
             for name, data in sorted(objects.items()):
                 digest, _relpath = rel.write_object(release_root, data)
-                outputs.append(PoolOutput(member, name, digest, retrain_cutoff,
+                cutoff_value = (retrain_cutoff if member in MONTHLY_DRIVER_MEMBER_IDS
+                                else object_cutoff(member, name, retrain_cutoff))
+                outputs.append(PoolOutput(member, name, digest, cutoff_value,
                                           len(data)))
         n_new = len(outputs)
         new_hashes = {output.content_hash for output in outputs}

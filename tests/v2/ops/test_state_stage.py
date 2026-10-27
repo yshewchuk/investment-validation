@@ -224,6 +224,11 @@ def test_worker_stages_candidate_carrying_the_unadvanced_members(tmp_path, monke
 
 
 def test_monthly_stage_uses_the_deployed_pointer_as_prior(tmp_path, monkeypatch):
+    from engine.v2.models.chooser_analog_pool import make_chooser_analog_pool_artifact
+    from engine.v2.models.frozen_state import serialize_frozen_state
+    from engine.v2.models.lineage import Lineage
+    from tests.v2.ops.runup_helpers import pool
+
     inventory, _ = _stage_prior(tmp_path, prior_sources={
         "pool_cutoff": "2026-11-10", "retrain_cutoff": "2026-10-01"})
     store = phase5_release.deployment_root(tmp_path)
@@ -231,25 +236,29 @@ def test_monthly_stage_uses_the_deployed_pointer_as_prior(tmp_path, monkeypatch)
     deployment.promote(store, "prior1")
 
     staged = {
-        "driver_size.json": ("driver_residual_pool:size", "size|2026-11-01"),
-        "driver_implied_t1.json": ("driver_residual_pool:implied_t1", "implied_t1|2026-11-01"),
-        "driver_runup_move.json": ("driver_residual_pool:runup_move", "runup_move|2026-11-01"),
+        "driver_size.json": ("driver_residual_pool:size", "m-size-*|None"),
+        "driver_implied_t1.json": ("driver_residual_pool:implied_t1",
+                                   "m-implied_t1-*|None"),
+        "driver_runup_move.json": ("driver_residual_pool:runup_move",
+                                   "m-runup_move-*|None"),
         "chooser.json": ("chooser_analog_pool", "chooser|2026-11-01"),
+    }
+    payloads = {
+        "driver_size.json": serialize_frozen_state(pool("size", fold=None)),
+        "driver_implied_t1.json": serialize_frozen_state(
+            pool("implied_t1", fold=None)),
+        "driver_runup_move.json": serialize_frozen_state(
+            pool("runup_move", fold=None)),
+        "chooser.json": serialize_frozen_state(make_chooser_analog_pool_artifact(
+            pool_id="chooser", cutoff="2026-11-01",
+            strategies={"STR-THRU": [["2026-10-30", 1.0, 0.5, 1.25, 2.0, 0.1, 0.02]]},
+            lineage=Lineage())),
     }
     staging = tmp_path / "staging"
     staging.mkdir()
-    for name in staged:
-        (staging / name).write_bytes(f"new-{name}".encode())
+    for name, data in payloads.items():
+        (staging / name).write_bytes(data)
 
-    def fake_payloads(paths, max_bytes=None):
-        from tools import phase5_state_stage_job
-
-        assert max_bytes == phase5_state_stage_job.MAX_STATE_BYTES
-        name = Path(paths[0]).name
-        member, object_name = staged[name]
-        return {member: {object_name: Path(paths[0]).read_bytes()}}
-
-    monkeypatch.setattr(phase5_prepare_release, "frozen_state_payloads", fake_payloads)
     monkeypatch.setattr(inventory_module, "current_release_inventory",
                         lambda *a, **k: (inventory, ()))
     parameters = {"expected_ids": ["phase5_state_stage"], "release_root": str(tmp_path),
@@ -286,6 +295,86 @@ def test_monthly_stage_uses_the_deployed_pointer_as_prior(tmp_path, monkeypatch)
               / "staging-status.json")
     assert json.loads(status.read_text())["state"] == "succeeded"
 
+    from engine.v2.models.loader import FrozenInference
+    from engine.v2.models.residual_artifact import residual_artifact_from_document
+    from engine.v2.ops.native_runup_inputs import runup_model_declarations
+    from engine.v2.scoring.release_bindings import ModelIdentity, ScoringReleaseBinding
+    from tests.v2.ops.runup_helpers import surface
+
+    store = phase5_release.deployment_root(tmp_path)
+    loaded = {}
+    identities = {}
+    for role in ("implied_t1", "runup_move"):
+        member = f"driver_residual_pool:{role}"
+        obj = rows[member]["objects"][0]
+        assert obj["name"] == f"champion-{role}|None"
+        artifact = residual_artifact_from_document(
+            json.loads((store / obj["path"]).read_bytes()))
+        assert artifact.role == role and artifact.model_id == f"champion-{role}"
+        assert artifact.fold is None
+        loaded[role] = artifact
+        identities["driver_prediction" if role == "implied_t1" else "runup_move_prediction"] = (
+            ModelIdentity(binding_id=f"{role}:*", model_id=artifact.model_id, role=role,
+                          strategy_id="*", decision_clock_id="entry-close",
+                          adapter="json-linear.v1", feature_order=("x",),
+                          output_names=("prediction",), artifact_hash=artifact.content_hash))
+    binding = ScoringReleaseBinding(
+        release_id="cand1", model_identity={}, model_artifact_refs={},
+        model_release=deployment.resolve_release(store, "cand1"),
+        frozen_inference=FrozenInference(store),
+        payoff_artifacts={"STR-RUNUP": (surface(cutoff="2026-11-01"),)},
+        recalibration_artifacts={}, analog_artifacts={},
+        driver_residual_artifacts=loaded)
+    declaration = runup_model_declarations(
+        binding, identities, cutoff="2026-11-01", fill_alpha=0.5)
+    for slot, role in (("driver", "implied_t1"), ("runup_move", "runup_move")):
+        assert declaration["model_residual_artifact_recipe"][slot] == {
+            "role": role, "model_id": f"champion-{role}", "fold": None,
+            "content_hash": loaded[role].content_hash}
+        assert declaration["model_residual_artifacts"][slot] == loaded[role]
+
+    from engine.v2.models.residual_artifact import residual_artifact_from_document
+    from engine.v2.ops import native_runup_inputs as batch
+    from tests.v2.ops.runup_helpers import stage_model_release, state_row, surface
+    from tests.v2.ops.test_native_driver_declarations import IMPLIED, MOVE, RUNUP_GATE
+    from tests.v2.scoring.test_v2_scoring_release_bindings import (
+        _obj, _row, _write_object)
+
+    models = tmp_path / "models"
+    candidate: dict[str, bytes] = {}
+    model_rows = []
+    for role in ("implied_t1", "runup_move"):
+        obj = rows[f"driver_residual_pool:{role}"]["objects"][0]
+        payload = (store / obj["path"]).read_bytes()
+        assert phase5_release.sha256_bytes(payload) == obj["content_hash"]
+        candidate[role] = payload
+        model_rows.append(_row(
+            f"driver_residual_pool:{role}",
+            [_obj(_write_object(models / "deployment", payload), obj["content_hash"])]))
+    model_rows.append(state_row(
+        models, "payoff_surface:STR-RUNUP", [surface(cutoff="2026-11-01", alpha=0.5)]))
+    binding = stage_model_release(models, [IMPLIED, MOVE, RUNUP_GATE], rows=model_rows)
+    declarations = batch.runup_model_declarations(
+        binding,
+        {"driver_prediction": binding.model_identity["implied_t1:*"],
+         "runup_move_prediction": binding.model_identity["runup_move:*"]},
+        cutoff="2026-11-01", fill_alpha=0.5)
+
+    identity = binding.model_identity
+    champions = declarations["model_residual_artifacts"]
+    assert set(champions) == {"driver", "runup_move"}
+    for role, slot in (("implied_t1", "driver"), ("runup_move", "runup_move")):
+        champion = champions[slot]
+        assert champion is binding.driver_residual_artifacts[role]
+        assert champion == residual_artifact_from_document(json.loads(candidate[role]))
+        assert (champion.role, champion.model_id, champion.fold) == (
+            role, identity[f"{role}:*"].model_id, None)
+        assert declarations["model_residual_artifact_recipe"][slot] == {
+            "role": role, "model_id": champion.model_id, "fold": None,
+            "content_hash": champion.content_hash}
+    assert declarations["payoff_artifact_recipe"] == {"before": "2026-11-01"}
+    assert declarations["residual_recipe"] == {"mode": "not_applicable"}
+
 
 def test_monthly_retrain_cutoff_equal_to_the_prior_is_refused(tmp_path):
     _, body = _stage_prior(tmp_path, prior_sources={
@@ -303,16 +392,21 @@ def test_monthly_retrain_cutoff_equal_to_the_prior_is_refused(tmp_path):
     assert err.value.code == "CUTOFF_NOT_ADVANCED"
 
 
-@pytest.mark.parametrize("member,name", [
-    ("driver_residual_pool:size", "size|2026-10-31"),
-    ("chooser_analog_pool", "chooser|2026-10-31"),
-])
-def test_monthly_object_name_cutoff_must_match_the_retrain_cutoff(member, name):
+def test_monthly_chooser_object_name_cutoff_must_match_the_retrain_cutoff():
     from tools import phase5_state_stage_job as job
 
     with pytest.raises(job.StageRefused) as err:
-        job._validate_monthly_object_cutoffs({member: {name: b"x"}}, "2026-11-01")
+        job._validate_monthly_object_cutoffs(
+            {"chooser_analog_pool": {"chooser|2026-10-31": b"x"}}, "2026-11-01")
     assert err.value.details == {"code": "CUTOFF_MISMATCH"}
+
+
+@pytest.mark.parametrize("name", ["size|2026-10-31", "m-size-board-0|None"])
+def test_monthly_driver_object_name_keeps_the_model_id_and_fold_name(name):
+    from tools import phase5_state_stage_job as job
+
+    job._validate_monthly_object_cutoffs(
+        {"driver_residual_pool:size": {name: b"x"}}, "2026-11-01")
 
 
 def test_monthly_assembly_refuses_name_cutoff_that_disagrees(tmp_path):
@@ -323,10 +417,10 @@ def test_monthly_assembly_refuses_name_cutoff_that_disagrees(tmp_path):
                                    "2026-11-01", len(b"new"))
                for member_id in assembly.MONTHLY_DRIVER_MEMBER_IDS]
     drivers[0] = assembly.PoolOutput(
-        drivers[0].member_id, f"{drivers[0].member_id}|2026-10-31", digest,
+        drivers[0].member_id, "m-size-board-0|None", digest,
         "2026-11-01", len(b"new"))
     chooser = assembly.PoolOutput(
-        assembly.CHOOSER_MEMBER_ID, "chooser|2026-11-01", digest,
+        assembly.CHOOSER_MEMBER_ID, "chooser|2026-10-31", digest,
         "2026-11-01", len(b"new"))
 
     with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
@@ -336,6 +430,34 @@ def test_monthly_assembly_refuses_name_cutoff_that_disagrees(tmp_path):
             monthly=True, retrain_cutoff="2026-11-01")
 
     assert err.value.code == "CUTOFF_MISMATCH"
+
+
+def test_monthly_assembly_keeps_driver_names_that_are_not_cutoff_dates(tmp_path):
+    _, prior_body = _stage_prior(
+        tmp_path, prior_sources={"pool_cutoff": "2026-11-02"})
+    digest = phase5_release.sha256_bytes(b"new")
+    drivers = [assembly.PoolOutput(member_id, f"{member_id}|2026-11-01", digest,
+                                   "2026-11-01", len(b"new"))
+               for member_id in assembly.MONTHLY_DRIVER_MEMBER_IDS]
+    drivers[0] = assembly.PoolOutput(
+        drivers[0].member_id, "m-size-board-0|None", digest,
+        "2026-11-01", len(b"new"))
+    drivers[1] = assembly.PoolOutput(
+        drivers[1].member_id, "m-implied_t1-board-0|2026-10-31", digest,
+        "2026-11-01", len(b"new"))
+    chooser = assembly.PoolOutput(
+        assembly.CHOOSER_MEMBER_ID, "chooser|2026-11-01", digest,
+        "2026-11-01", len(b"new"))
+
+    body = assembly.derive_catalog(
+        prior_body, release_id="cand2", expected_prior_release_id="prior1",
+        outputs=drivers, chooser=chooser, cutoff="2026-11-03",
+        monthly=True, retrain_cutoff="2026-11-01")
+
+    rows = {row["member_id"]: row for row in body["members"]}
+    assert [obj["name"] for obj in rows["driver_residual_pool:size"]["objects"]] == [
+        "m-size-board-0|None"]
+    assert body["sources"]["retrain_cutoff"] == "2026-11-01"
 
 
 def test_monthly_assembly_preserves_later_prior_pool_cutoff(tmp_path):
