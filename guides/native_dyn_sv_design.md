@@ -1,9 +1,16 @@
 # Native DYN-SV: design (issue #1157 step 6)
 
 Contract-level design only. No code in this PR. Steps 1-2 are merged (#1164, #1209);
-step 3 (#1424, gate-less `_StrategySpec` + TWIN-P/TWIN-P5) is in review; steps 4-5
-register the other five menu members. This note says what DYN-SV adds on top of
-them, so that its slices can be built one at a time after they land.
+step 3 (#1424, gate-less `_StrategySpec` + TWIN-P/TWIN-P5) was in review when this
+was written (check its status before slice 1); the next steps register the other
+five menu members. This note says what DYN-SV adds on top of them, so that its slices
+can be built one at a time after they land.
+
+**Acceptance.** This note is accepted when it (a) cites legacy behaviour with file:line,
+(b) says which native pieces exist and what is missing, (c) states the failure
+semantics of the new post-pass, and (d) gives a split list with estimates.
+**Out of scope:** any code, the member-registration steps, changing legacy, and
+measuring refusal counts (a later parity report does that).
 
 ## 1. What legacy does
 
@@ -18,8 +25,9 @@ them, so that its slices can be built one at a time after they land.
   `DYN-SV` and adds `chosen_strategy`, `chosen_margin`, `menu_size`, `detail`.
 - Ranking runs over ATM rows only (`strike_offset` null; ladder rows never compete):
   highest `chooser_score` among members with a non-null `exp_pnl_sim` (native
-  `_choose_dynamic` requires it to be finite; non-finite values are a negligible
-  difference to be confirmed by slice 2's tests). If no
+  `_choose_dynamic` requires it to be finite). This is a known divergence: legacy
+  keeps a `+inf` simulation, native excludes it. Native follows the finite rule; slice
+  2 counts how many real rows differ before claiming parity. If no
   member has a chooser score, rank on `exp_pnl_sim`. A mixed event ranks on the
   scores that exist. Nothing finite: no DYN-SV row ("no opinion").
 - The winner keeps its own entry-rule/gate verdict; the chooser does not re-gate.
@@ -53,7 +61,8 @@ over seven independently scored member rows.
    position (`_native_score_batch_documents`). DYN-SV is a fan-in over seven other
    rows of the same event, so it cannot be a registry entry or a per-row pair.
 3. **A public, record-level selector.** `_choose_dynamic` is private to
-   `application.py` (slice 2 migrates the replay tool's private import) and returns a re-labelled `ScoreRecord`; the batch worker needs
+   `application.py` (slice 2 migrates the private imports in `tools/phase4_targeted_replay.py` and
+   `checks/phase4_real.py`) and returns a re-labelled `ScoreRecord`; the batch worker needs
    it (and the menu accounting) over records and refusals it already holds.
 4. **Output and pairing.** `ScoreRecord` already declares `chooser_candidates` and
    `chooser_selection`, and `to_document` serialises them, so slice 2 populates
@@ -66,8 +75,8 @@ NOT a first slice that can ride on #1424 alone.
 
 ## 4. Design
 
-**Members are scored once; DYN-SV selects.** The nightly universe lists all
-seven members as board rows; today the batch worker refuses them as
+**Members are scored once; DYN-SV selects.** The board universe's supported set
+includes the seven members (import-time assert in `native_board_universe.py`); today the batch worker refuses them as
 `UNSUPPORTED_STRATEGY` until the member-registration steps (#1424 and the ladder and
 CND-PS steps of #1157) register them. DYN-SV reuses those exact records instead of re-scoring them
 (no second compute, no divergent copies). The post-pass runs in the worker after
@@ -75,7 +84,7 @@ CND-PS steps of #1157) register them. DYN-SV reuses those exact records instead 
 keyed by `BoardRequest`. It runs before `to_document` serialises them
 (`records_by_key` is serialised dictionaries and is not an input).
 
-**Failure semantics (R1-R7).** The labels are this note's own, not the 4c template's.
+**Failure semantics (R1-R7).** The R labels are this note's own.
 
 - R1 inputs: the seven member results of the event: each member's `ScoreRecord`
   (it carries `exp_pnl_sim`, `chooser_score`, status) or its typed refusal, plus
@@ -101,10 +110,15 @@ keyed by `BoardRequest`. It runs before `to_document` serialises them
   §9.4 requires preserving the actual baseline tie behaviour, so `DYNAMIC_MENU`
   order is only the default: slice 2 measures the baseline tie order on real events
   and pins native to it, and a mismatch is a slice 2 finding, not a design choice.
-- R7 identity for refusal-only events: when every member refused there is no record
-  to carry the event identity, so the post-pass builds `DynamicMenuIdentity` from the
-  event context (calendar row, snapshot, release) the worker already holds, never
-  from a member record.
+- R7 identity and refusal-only events: `validate_dynamic_menu` and
+  `DynamicMenuIdentity` apply only to an event whose calendar row passed validation
+  (valid `event_id`, calendar, snapshot and release context the worker holds, never
+  taken from a member record). An event refused before any calendar row exists
+  (`CALENDAR_ROW_INVALID`, `PRICE_HISTORY_NOT_AVAILABLE`, `PANEL_HISTORY_NOT_AVAILABLE`
+  carry only a `BoardRequest`) has no valid identity: skip menu validation and refuse
+  DYN-SV with `NO_CHOOSER_CANDIDATE`, carrying the per-member codes, keyed by the
+  DYN-SV `BoardRequest` alone. All members refused with a valid calendar row follows
+  R4 under a normal identity.
 - R6 determinism and no state: pure function of the seven outcomes; DYN-SV never
   mutates a member record, never writes, never retries. The winner's gate verdict is
   copied verbatim.
