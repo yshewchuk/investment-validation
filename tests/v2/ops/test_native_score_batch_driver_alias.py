@@ -506,30 +506,15 @@ def test_release_backed_bundle_declares_driver_pool_and_payoff_artifact(tmp_path
     assert native_inputs.simulation == {}
 
 
-def test_null_entry_date_with_pool_but_no_payoff_declares_no_cutoff(tmp_path):
-    """The payoff cutoff runs only when the resolved binding actually has
-    payoff artifacts: a release carrying a valid driver pool but no payoff
-    member assembles a row with a null ``entry_date`` (the "no entry_date"
-    case -- a key literally absent would refuse at the bundle's staged-input
-    check before the release declarations run). :func:`_row_cutoff`, which
-    would refuse a null entry date with ``MISSING_STAGED_INPUT``, and
-    ``payoff_artifact_key`` are never evaluated -- the model block declares
-    the release's pool with its recipe, nothing payoff-related, and the
-    simulation mapping stays empty."""
-    driver, driver_row = _staged_driver_pool(tmp_path)
+def test_null_entry_date_refuses_required_str_thru_analog_without_cutoff(tmp_path):
+    """STR-THRU needs an exact analog key; a null entry date cannot form it."""
+    _, driver_row = _staged_driver_pool(tmp_path)
     binding = _stage(tmp_path, [SIZE, GATE], rows=[driver_row])
     event = _event_inputs(calendar_row=_calendar_row(entry_date=None))
     assembled, refusals = _assemble(binding, [event])
-    assert refusals == ()
-    _, native_inputs = assembled[event.key]
-    model = native_inputs.model
-    assert model["model_residual_artifacts"] == {"driver": driver}
-    assert model["model_residual_artifact_recipe"] == {"driver": {
-        "role": "size", "model_id": "m-size-*", "fold": None,
-        "content_hash": driver.content_hash}}
-    assert "payoff_artifact" not in model
-    assert "payoff_recipe" not in model
-    assert native_inputs.simulation == {}
+    assert assembled == {}
+    assert [(item.key, item.code) for item in refusals] == [
+        (event.key, "MISSING_STAGED_INPUT")]
 
 
 def test_release_without_artifacts_ignores_row_markers(tmp_path):
