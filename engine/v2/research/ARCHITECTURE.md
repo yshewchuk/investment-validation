@@ -74,20 +74,9 @@ Panel boundaries require plain JSON (nested history before normalization); detac
 
 ## Partial daily-market blocks
 
-`magnitude_panel_daily.build_daily_blocks` is an opt-in library-only reader; only synthetic tests call it.
-Inputs are pinned source/history/price_history snapshots, the unchanged metadata-only v1 plan,
-plain-JSON producer metadata, grouped eligibility declarations and explicit source/event/byte bounds.
-Output has a distinct versioned context and detached daily-market/regime blocks, never stored-panel admission.
-The context binds the parent, bounds, policy, exclusions, snapshot fragment inventory and producer.
-Producer and label bounds are declarations, not installed-code attestation or verified outcome intervals.
-Protected evaluation membership confers no reads; grouped exclusions retain or remove all event horizons.
+`magnitude_panel_daily.build_daily_blocks` is an opt-in library-only reader; only synthetic tests call it. Inputs are pinned source/history/price_history snapshots, the unchanged metadata-only v1 plan, plain-JSON producer metadata, grouped eligibility declarations and explicit source/event/byte bounds. Output has a distinct versioned context and detached daily-market/regime blocks, never stored-panel admission. The context binds the parent, bounds, policy, exclusions, snapshot fragment inventory and producer. Producer and label bounds are declarations, not installed-code attestation or verified outcome intervals. Protected evaluation membership confers no reads; grouped exclusions retain or remove all event horizons.
 
-The fixed thirteen daily fields and nine `spy_*` regime values use each forecast's source ceiling.
-Nine `spy_*` names are historical: their close is the pinned `price_history` `REGIME_TICKER` (`^GSPC`) series
-via `get_price_series`, never a `daily_market` SPY spot; its snapshot identity binds the context hash. Read budget:
-one bounded ticker/year scan per event ticker plus one regime-series read as of the latest ceiling, both row-capped.
-Daily anchors require an IV surface; the regime block uses all admitted closes. No publication/finality stamps
-(reconstructed, never observed-PIT/fit-admissible); fragment inventory stays separate, regime source dates retained.
+The thirteen daily fields and nine historical `spy_*` values obey each forecast's source ceiling. Regime closes come from pinned `price_history` `REGIME_TICKER` (`^GSPC`) via `get_price_series`, never daily SPY spot; that snapshot binds the context. Reads are row-capped: one ticker/year scan per event ticker plus one regime-series read at the latest ceiling. Daily anchors require IV surfaces; regime uses admitted closes. Availability is reconstructed, not observed-PIT/fit-admissible; fragment inventory and regime source dates remain explicit.
 Row bounds apply across years per ticker; event bounds apply before exclusions. No cross-call cache/retry.
 A required context-bound `max_object_bytes` bounds new value scans through native byte/footer/expansion limits;
 it does not change inherited metadata-preflight scans.
@@ -1022,3 +1011,13 @@ flowchart LR
     Commit -->|ok| NewVersion["new trades\ndataset version"]
     Commit -->|"head moved"| Conflict["SNAPSHOT_CONFLICT"]
 ```
+
+### Qualified SIZE panel composition
+
+`experiments.size_panel` is the installed public boundary over internal composition/storage helpers. Its v3 dictionary binds eligible history without changing v1/v2 identities; complete metadata, independent quote groups and daily/runup/^GSPC inputs preserve projection-independent source admission. Native clocks/outcome guards, exact versioned anchors and ticker/year/date fragment membership bind lineage; date-only quote windows do not attest computed-outcome capture. Native immutable catalog/Parquet storage enforces physical/expanded limits and exact bounded receipt/context replay. Fitting authority belongs to the execution/fold consumer; see the stage-2 contract for reconstruction limits and synthetic-only verification.
+
+| Qualified panel admission condition | Outcome before dependent reads |
+| --- | --- |
+| Missing/extra/malformed request or empty required source inventory | `CONTRACT_MISMATCH` |
+| Caller producer override or incompatible frozen SIZE policy | `HOLDOUT_ACCESS_DENIED` |
+| Non-native snapshot reference shape | `SNAPSHOT_UNRESOLVED` |

@@ -195,7 +195,8 @@ is zero. Do not apply the incumbent's current-quote [0,60] mask to historical
 quotes or their mean. Observable stored source-contract violations refuse, not
 silently winsorize; an ingest-masked null does not expose its original violation.
 Reuse `strict_prior_mean(..., population="admitted")` on the complete ordinal sequence, masking every
-noncontributor's quote to null without reading it. Append the target with a null
+noncontributor's quote to null without an event contribution lookup (see the
+October 27 raw-decoding amendment below). Append the target with a null
 quote and take that target's returned mean/count, so the final eligible prior
 event is included. The aggregate does not further mask source-preserved zeros;
 normalized nulls remain null. A resulting
@@ -764,3 +765,74 @@ Publish this design amendment before implementation. A clean replacement for
 work. Actual execution still needs P3b, the admitted causal context/materializer,
 protected-history and qualified ^GSPC-close evidence, full recipe/source/fold
 bindings, matched comparison and separately approved real-data budgets/registration.
+
+## Approved final implementation bundles and shared contract (October 27)
+
+The owner approved two remaining coherent PRs, each capped at 1,000 added
+source/inventory lines and 160 documentation lines; tests are excluded. Bundle 1
+owns qualified feature production/stored admission; bundle 2 owns comparator,
+search execution and matched reporting. This is implementation authorization,
+not authority for private-data/provider/training/final-holdout runs or merging.
+Use native catalogs, Arrow/Parquet, pandas and existing feature arithmetic rather
+than a new storage format, scheduler, generic holdout framework or production rewrite.
+
+Shared boundary: `experiments.size_panel.materialize/read`; the public wrapper
+rejects caller producer identities and binds installed code/environment. Internal
+research helpers trust this orchestration, not arbitrary Python callers.
+Materialize takes repository/source plus exact history and price snapshots,
+holdout month, frozen grouped 30-day policy, explicit events, horizons `[1,3,5]`,
+history/source starts, five eligible-history limits and separate metadata-index
+limits. Read takes the same request plus exact stored snapshot and closed columns;
+it rederives admission before returning context, serialized snapshot and rows.
+All horizons are qualified independently of feature projection.
+
+`research_magnitude_panel.v3` / `magnitude_panel_context.v3` explicitly replace
+v2's incompatible `stored_magnitude_history.v1` source policy with
+`eligible_history_features.v1`. Numeric names/order/units remain 11/28/42;
+new dictionary hashes preserve old v1/v2 identities. This is source compatibility,
+not another search axis: the existing 33-candidate plan remains fixed.
+Context exposes source/history/price snapshots, admitted history context,
+unaltered native `eligibility_plan` (policy ID under `policy`), and `target_events` with actual
+computed-outcome label_start/label_end anchors. Execution must enforce fitting
+cutoffs separately; stored selection admission is not fit permission.
+
+Rows retain existing panel metadata and canonical block lineage, all 42 numeric
+fields, `current_quote_status` and `has_implied_quote`. Reader projections always
+include metadata; unknown aliases/live aggregates refuse. Current positive quote
+means indicator 1, otherwise 0. Status zero distinguishes a source-preserved zero
+from absent/unavailable; it does not recover zero from normalized null. Optional
+missing values stay null without cohort deletion. The comparator maps implied_move
+to or_implied and rvol30 to or_rvol30, preserving its own masks/abstentions.
+No target label is a panel feature. Both arms consume the same qualified table.
+
+Signed streak rereads the exact admitted contributor union once through the guarded
+native reader: history envelopes carry identities but not signed values. H11 stays
+native expanding signed/absolute means and EMA spans 2/4/8/12, not truncation.
+Daily/^GSPC blocks reuse existing math additively; partial daily materializations
+remain partial, never relabeled complete. Runup uses adjusted event-ticker prices.
+
+Historical implied history has an independent quote population. Complete pinned
+confirmed metadata establishes original ordinals and protected windows before
+value selection. Metadata-only price-date/version/tombstone projection and native
+source-bracket arithmetic establish its own label windows; these are NOT proof
+of a missing/different computed-outcome capture's dates. Exact price snapshot,
+source fragments, calendar and policy are bound. Missing realized labels alone
+never remove a quote. Missing required source brackets refuse, never invent dates.
+Reconstructed latest-pinned retrieval does not claim observed historical publication;
+value calculations enforce each source/event ceiling. Metadata projection may
+hash backing objects; it is not a promise that excluded bytes are never touched.
+The October 27 owner-approved amendment permits the native reader to decode
+selected raw daily-market columns for a whole yearly fragment, then filter dates.
+This supersedes the earlier prohibition on decoding excluded raw quotes, NOT the
+prohibition on their contribution: full eligibility is established before decoding,
+and excluded events retain ordinals without quote lookup or aggregation. No
+realized-label columns are selected; protected outcome objects remain forbidden.
+One ticker/year scan replaces repeated per-anchor scans; all file/byte caps remain.
+Daily quote coverage starts at the first dated fragment in the complete pinned
+source inventory, independent of caller price warmup/source_start. History_start
+limits contributing events, not their last prior quote dates; truncation cannot
+silently manufacture missing historical quotes. The derived start is context-bound.
+Strict-prior native arithmetic includes preserved zeros, appends
+the target null and counts actual nonnull contributions, without incumbent masks.
+Synthetic fixtures establish local behavior only, not source-wide completeness,
+real experiment execution, coverage or statistical conclusions.
