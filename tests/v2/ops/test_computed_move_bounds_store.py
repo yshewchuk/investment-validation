@@ -108,6 +108,25 @@ def test_source_dates_follow_actual_missing_bar_sequence(session, expected):
     assert session_move(sd, np.array([100., 110., 121.]), np.datetime64("2024-01-08"), session) == pytest.approx(10.)
 
 
+@pytest.mark.parametrize("event,session", [
+    ("2024-01-08", None), ("2024-01-08", "TYPO"), ("2024-01-08", []),
+    ("2024-01-08", pd.NA), ("bad", "AMC"), (None, "BMO"), ([], "AMC"),
+    ("2024-02-30", "BMO"), ("20240108", "AMC"), ("NaT", "AMC"),
+    ("2024-01-08T00:00:00", "BMO"), ("0001-01-01", "AMC"),
+])
+def test_source_bounds_refuses_invalid_scalars_before_bracket_lookup(event, session, monkeypatch):
+    from engine.v2.data import computed_move_bounds
+    from engine.v2.data.errors import DataError
+
+    def forbidden(*args):
+        pytest.fail("invalid scalar reached native calendar lookup")
+
+    monkeypatch.setattr(computed_move_bounds, "source_session_indices", forbidden)
+    with pytest.raises(DataError) as error:
+        source_bounds(object(), event, session)
+    assert error.value.code == "CONTRACT_MISMATCH"
+
+
 @pytest.mark.parametrize("days,event,session", [
     (["2024-01-01", "2024-01-10"], "2024-01-10", "BMO"),
     (["2024-01-01", "2024-01-02"], "2024-01-01", "BMO"),

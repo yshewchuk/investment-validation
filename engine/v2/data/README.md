@@ -163,3 +163,6 @@ unavailable, not permission to guess dates. Existing outcome contracts are uncha
 `ops.computed_move_bounds_store` consumes `source_bounds` and the contract/table;
 research admission consumes the same contract/table. `computed_moves.source_session_indices`
 is the shared native bracket calculation used by source bounds and realized moves.
+`source_bounds` requires BMO/AMC and a canonical ISO day representable in native
+nanosecond dates; invalid scalars refuse with `CONTRACT_MISMATCH`. Its sorted native
+date array is caller-validated once, not rescanned or hashed for each event.
