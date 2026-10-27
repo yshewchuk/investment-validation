@@ -157,10 +157,9 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
     for target in targets.itertuples(index=False):
         ceilings[target.ticker] = max(ceilings.get(target.ticker, ""),
             *(c["source_session_ceiling"] for c in forecasts[target.event_id]))
-    ceiling = max(ceilings.values())
     days = population.event_date.dt.strftime("%Y-%m-%d")
     selected = population[(population.ticker.isin(targets.ticker)) & (days >= start.isoformat())
-        & ((days < ceiling) | population.event_id.isin(event_ids))]
+        & ((days < population.ticker.map(ceilings)) | population.event_id.isin(event_ids))]
     groups, unavailable, qualified = _groups(repository, snapshot, selected, forecasts,
         event_ids, horizons, calendar, clocks, limits)
     metadata = {"schema_version": "event_group_bounds.v1", "source_snapshot": to_document(snapshot),
@@ -231,13 +230,17 @@ def _slot(context):
 def _existing(repository, context):
     slot = _slot(context)
     row = catalog_connection(repository).execute(
-        "SELECT * FROM data_import_receipts WHERE receipt_id=?", (slot,)).fetchone()
+        """SELECT CASE WHEN scope=? AND source_manifest_hash=? AND attempt_id=?
+        AND fence=1 AND status='committed' AND length(result_snapshot_id)=37
+        AND substr(result_snapshot_id,1,5)='snap_'
+        AND substr(result_snapshot_id,6) NOT GLOB '*[^0-9a-f]*'
+        THEN result_snapshot_id END AS snapshot_id FROM data_import_receipts WHERE receipt_id=?""",
+        (slot, context["context_id"], slot, slot)).fetchone()
     if row is None:
         return None
-    if ((row["scope"], row["source_manifest_hash"], row["attempt_id"], row["fence"], row["status"])
-            != (slot, context["context_id"], slot, 1, "committed")):
+    if row["snapshot_id"] is None:
         raise fail("IDENTITY_CONFLICT", "eligible history receipt differs")
-    return repository.resolve(row["result_snapshot_id"])
+    return repository.resolve(row["snapshot_id"])
 
 
 def _rows(snapshot, prepared):
