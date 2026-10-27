@@ -5,7 +5,7 @@ release_bindings.py``) plus per-event staged inputs (PR-2, ``engine/v2/
 scoring/nightly_source_bundle.py``) into ``{BoardRequest: (ScoreRequest,
 NativeScoreInputs)}``, admitting only registered strategies (currently
 ``STR-THRU``, ``STR-RUNUP`` and the gate-less entry-rule ``TWIN-P``,
-``TWIN-P5``, ``BFLY-P``, ``BFLY-P5``, ``CTR5`` and ``RAMP7``):
+``TWIN-P5``, ``BFLY-P``, ``BFLY-P5``, ``CTR5``, ``RAMP7`` and ``CND-PS``):
 batch-level malformed input raises, every per-row gap is a collected
 :class:`NativeScoreBatchRowRefusal`, and ``run_native_score_batch_worker``
 scores the assembled batch under ``no_fit_guard``. Production reaches this
@@ -134,7 +134,7 @@ _ENTRY_RULE_SPECS = {
         drivers=(_DriverSpec("forecast_abs_move", "size:*"),
                  _DriverSpec("pred_iv_crush_30", "iv_crush:*")),
         bundle_strategy=name, entry_rule=True)
-    for name in ("TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7")
+    for name in ("TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7", "CND-PS")
 }
 
 # Code-owned admission, not a runtime registration API or chooser contract.
