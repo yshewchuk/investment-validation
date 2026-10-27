@@ -1,23 +1,23 @@
 # `engine/v2/research` — architecture
 
-Layer 7.0 in both `checks/layer_map.py` and the root `/ARCHITECTURE.md` layer table.
-Native snapshot-reading counterparts to `tools/signal_screen.py`, `tools/fill_quality.py`, `engine/data/pulls/polygon_fills.py`'s read path,
-`engine/replay.py` (over a committed snapshot) and `engine/build_trades.py`'s v2 write path. The legacy modules themselves are untouched and keep
-publishing exactly as before; this package adds parallel `tools/v2_*` CLIs that read a pinned v2 snapshot instead.
+Layer 7.0 in both `checks/layer_map.py` and the root `/ARCHITECTURE.md` layer table. Native snapshot-reading counterparts to `tools/signal_screen.py`, `tools/fill_quality.py`, `engine/data/pulls/polygon_fills.py`'s read path, `engine/replay.py` (over a committed snapshot) and `engine/build_trades.py`'s v2 write path. The legacy modules themselves are untouched and keep publishing exactly as before; this package adds parallel `tools/v2_*` CLIs that read a pinned v2 snapshot instead.
 
-`tools/log_diagnostics.py` is deliberately **not** moved here: it reads only
-a local transactions-log CSV (plus an optional sibling `metrics_*.json`), never the Tier-2 store, so it needs no snapshot-pinned counterpart.
+`tools/log_diagnostics.py` is deliberately **not** moved here: it reads only a local transactions-log CSV (plus an optional sibling `metrics_*.json`), never the Tier-2 store, so it needs no snapshot-pinned counterpart.
 
 ## Purpose
 
-Offline research analysis CLIs — real-fill quality, a cross-sectional signal screen, the real-trade pull's universe plan,
-deterministic as-of replay, and the trade table that replay publishes — reading exactly one resolved, named snapshot per run
-instead of the legacy mutable Tier-2 store. It produces measured tables and reports for a person to read; it never decides a
-research conclusion, never fetches from a network provider, and never mutates the legacy trades ledger. `experiment_trades.load_trades`
-extends this same one-snapshot-per-read contract to the v2 experiment platform: read the committed `trades` version `tools/v2_build_trades.py`
-published, never the legacy mutable store. Completed experiments need not remain runnable; their historical wrappers are not a supported experiment execution boundary.
+Offline research analysis CLIs — real-fill quality, a cross-sectional signal screen, the real-trade pull's universe plan, deterministic as-of replay, and the trade table that replay publishes — reading exactly one resolved, named snapshot per run instead of the legacy mutable Tier-2 store. It produces measured tables and reports for a person to read; it never decides a research conclusion, never fetches from a network provider, and never mutates the legacy trades ledger. `experiment_trades.load_trades` extends this same one-snapshot-per-read contract to the v2 experiment platform: read the committed `trades` version `tools/v2_build_trades.py` published, never the legacy mutable store. Completed experiments need not remain runnable; their historical wrappers are not a supported experiment execution boundary.
 
 ## Stage-2 magnitude panel foundation
+
+`magnitude_confirmed_metadata.build_index(repository, snapshot, *, tickers, limits)` is synthetic-only complete pinned-view admission.
+It owns a data `bounded_snapshot` session, exact `snapshot_inputs` admission and the frozen earnings contract allowlist; native `query` plans exhaust every canonical-year partition before scans.
+All inventory row/object caps precede any object open; one native scan per partition projects seven metadata fields with mandatory object caps.
+Retained rows/canonical bytes are bounded before retention; every stream must exhaust before the unchanged `_confirmed_metadata` reducer and detached content-hashed proof return.
+All catalog/request/retention/proof limits are explicit, with no defaults, retries, cache, fallback SQL or durable writes. This is not an RSS guarantee.
+Native diagnostic envelopes propagate unchanged; malformed shapes/incomplete inventory refuse CONTRACT_MISMATCH, unknown contracts UNSUPPORTED_CONTRACT, caps RESULT_LIMIT_EXCEEDED and semantic conflicts IDENTITY_CONFLICT.
+Receipt references stay unopened. Complete pinned membership proves neither expected-population coverage, observed-PIT knowledge nor protected/numerical eligibility; no production caller exists.
+Work is bounded by admitted catalog/partition scans and retained-row reduction; progress emits aggregate stage/RSS/counts at bounded cadence without source diagnostics or secrets.
 
 `_confirmed_metadata.reduce_sequences` is internal/synthetic-only: a pure seven-column DataFrame reducer of a complete caller-supplied view, not evidence of completeness.
 Strict naive `datetime64[ns]` types precede public `confirmed_event_metadata.classify_metadata`; public `event_sequence(warmup=4)` counts all supplied confirmed rows from zero; no date cutoff applies.

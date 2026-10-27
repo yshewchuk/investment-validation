@@ -365,6 +365,17 @@ are preserved, not authorized for reading; annual development targets still need
 retained eligibility. Existing v1 behavior is unchanged.
 Integration sequencing belongs to the [stage-2 design](../../../experiments/SUPER_SIZE/STAGE2_DESIGN.md).
 
+## Confirmed metadata index (synthetic only)
+
+`magnitude_confirmed_metadata.build_index(repository, snapshot, *, tickers, limits)`
+opens a factory-owned bounded native earnings view, preflights all partitions,
+exhausts one capped scan per year and composes the unchanged M1 sequence reducer.
+The detached `magnitude_confirmed_metadata.v1` proof retains complete native
+source membership, selected/confirmed counts and a canonical `index_id`.
+All 13 limits are mandatory; native failures remain intact and no partial proof
+escapes. No coverage/PIT/numerical admission follows from dataset membership.
+See [the frozen contract](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md).
+
 ## Policy-qualified eligible history
 
 <!-- public-interface: eligible_history.admit_source, eligible_history_table.CONTRACT, eligible_history_table.FEATURES, eligible_history_table.admit_fields, eligible_history_table.recipe -->
