@@ -8,7 +8,7 @@ import pytest
 from engine.v2.contracts import Problem
 from engine.v2.data import computed_moves
 from engine.v2.data.errors import DataError, fail
-from engine.v2.research import _confirmed_metadata as reducer
+from engine.v2.research import confirmed_metadata as reducer
 
 
 def frame(rows=None):
@@ -25,6 +25,47 @@ def refused(events, code="CONTRACT_MISMATCH", tickers=None):
         reducer.reduce_sequences(events, tickers=["A"] if tickers is None else tickers)
     assert caught.value.code == code
     assert caught.value.problem.retryable is False
+
+
+def test_public_ticker_validation_returns_sorted_detached_list():
+    request = ["Z", "A"]
+    result = reducer.validate_tickers(request)
+    assert result == ["A", "Z"] and request == ["Z", "A"]
+    result.clear()
+    assert request == ["Z", "A"]
+
+
+@pytest.mark.parametrize("tickers", [[], ("A",), {"A"}, ["A", "A"], [" A"], [None]])
+def test_public_helpers_validate_ticker_request(tickers):
+    for call in (lambda: reducer.validate_tickers(tickers),
+                 lambda: reducer.metadata_rows(frame(), tickers=tickers)):
+        with pytest.raises(DataError) as caught:
+            call()
+        assert caught.value.code == "CONTRACT_MISMATCH"
+    with pytest.raises(TypeError):
+        reducer.metadata_rows(frame(), ["A"])
+
+
+def test_public_metadata_rows_detached_evidence_reasons_without_conflict_proof():
+    events = frame([("same", "A", "2000-01-01", "AMC", False, "cluster", True),
+                    ("same", "A", "2000-01-01", None, False, "cluster", True),
+                    ("other", "A", "2001-01-01", "BMO", True, None, False)])
+    before = events.copy(deep=True)
+    rows, reasons = reducer.metadata_rows(events, tickers=["A"])
+    expected = [dict(event_id="same", ticker="A", event_date="2000-01-01", session="AMC",
+                     date_conflict=False, event_cluster_id="cluster", src_orats=True),
+                dict(event_id="same", ticker="A", event_date="2000-01-01", session=None,
+                     date_conflict=False, event_cluster_id="cluster", src_orats=True),
+                dict(event_id="other", ticker="A", event_date="2001-01-01", session="BMO",
+                     date_conflict=True, event_cluster_id=None, src_orats=False)]
+    assert rows == expected and reasons == (None, "no_session", "not_orats")
+    pd.testing.assert_frame_equal(events, before)
+    # Validated rows alone deliberately do not bless cross-row identity/conflicts.
+    refused(events, "IDENTITY_CONFLICT")
+    rows[0]["event_id"] = "mutated output"
+    pd.testing.assert_frame_equal(events, before)
+    events.iloc[1, 0] = "mutated input"
+    assert rows[1] == expected[1]
 
 
 def test_exact_states_evidence_warmup_order_and_detachment():
@@ -126,7 +167,7 @@ def test_exact_repeats_refuse_and_cross_ticker_clusters_are_independent():
 @pytest.mark.parametrize("tickers", [[], (), ("A",), "A", {"A"}, iter(["A"]), ["A", "A"],
     [None], [1], [""], [" A"], ["A "], ["A\0"], ["\ud800"], [np.str_("A")]])
 def test_bad_requests_refuse_before_frame_access(tickers, monkeypatch):
-    monkeypatch.setattr(reducer, "_rows", lambda *args: pytest.fail("invalid request reached metadata"))
+    monkeypatch.setattr(reducer, "metadata_rows", lambda *args, **kwargs: pytest.fail("invalid request reached metadata"))
     refused(frame(), tickers=tickers)
 
 
