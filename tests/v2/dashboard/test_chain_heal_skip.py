@@ -26,9 +26,11 @@ passes none.
 Every dependency below the public signature — the fetcher, the store's held
 set, the trading calendar, the ledger file — is a synthetic fake or a tmp_path
 patch, so this needs no data root and makes no provider call. The chunk loop
-carries P19 progress logging: one stage-start line, progress lines at a
-bounded cadence (never one per chunk) and one stage-end line naming the
-session's own counts and RSS.
+carries P19 progress logging: one stage-start line (with RSS), progress lines
+at a bounded ELAPSED-TIME cadence (>= 60s since the last one, whatever the
+chunk count — never per chunk) and one stage-end line — printed on every
+exit, tagged exit=, naming the session's own requests (every attempt), billed
+calls, cache hits, failures, missing count and RSS.
 """
 from __future__ import annotations
 
@@ -1001,12 +1003,12 @@ def test_skip_held_false_never_runs_the_older_pass(monkeypatch, tmp_path):
 
 def test_the_chunk_loop_logs_bounded_progress_not_one_line_per_chunk(
         monkeypatch, capsys, tmp_path):
-    """P19: a fetched session's chunk loop logs one stage-start line, progress
-    lines only at the bounded cadence (both gates: >= 60s AND >= 50 chunks
-    since the last one — never per chunk) and one stage-end line carrying the
-    session's own call/failure/missing counts and RSS. 120 wanted names at
-    batch=1 under a fake monotonic advancing 1s per read stay far below one
-    line per chunk."""
+    """P19: a fetched session's chunk loop logs one stage-start line (with its
+    RSS), progress lines only on the elapsed-time gate (>= 60s since the last
+    one or the loop start, whatever the chunk count — never per chunk) and one
+    stage-end line carrying the session's own requests/calls/cache/failure/
+    missing counts, exit kind and RSS. 120 wanted names at batch=1 under a
+    fake monotonic advancing 1s per read stay far below one line per chunk."""
     names = [f"TKR{i:04d}" for i in range(120)]
     _wire(monkeypatch, set(), tmp_path)
     clock = [0.0]
@@ -1022,16 +1024,93 @@ def test_the_chunk_loop_logs_bounded_progress_not_one_line_per_chunk(
     out = nightly.refresh_forward_chains(names, AS_OF, fetcher=f, sessions=1,
                                          batch=1)
 
-    assert out["calls"] == 120, "the whole list was fetched"
+    assert out["calls"] == 120 and out["requests"] == 120, "the whole list was fetched"
     err = capsys.readouterr().err
     lines = [ln for ln in err.splitlines() if ln.startswith(f"[chains] {AS_OF}:")]
-    assert lines.count(f"[chains] {AS_OF}: fetching 120 names in 120 calls") == 1, \
-        "exactly one stage-start line"
-    progress = [ln for ln in lines if " chunks, " in ln and " calls/s" in ln]
+    start = [ln for ln in lines if ln.startswith(f"[chains] {AS_OF}: fetching 120 names")]
+    assert len(start) == 1 and "rss=" in start[0] and start[0].endswith("G"), \
+        "exactly one stage-start line, and it carries the RSS"
+    progress = [ln for ln in lines if " chunks, " in ln and " req/s" in ln]
     assert 1 <= len(progress) < 12, \
         f"bounded cadence, far fewer than 120: {progress}"
+    assert all("1.0 req/s" in ln for ln in progress), \
+        "the progress rate is requests/s, not billed calls/s"
     end = [ln for ln in lines if " done in " in ln]
     assert len(end) == 1, "exactly one stage-end line"
-    assert f"calls={out['calls']}" in end[0] and "failed=0" in end[0] \
-        and "missing=0" in end[0] and end[0].endswith("G"), \
-        "the end line names this session's own counts and its RSS"
+    assert f"exit=ok, requests={out['requests']}" in end[0] \
+        and f"calls={out['calls']}" in end[0] and "cache_hits=0" in end[0] \
+        and "failed=0" in end[0] and "missing=0" in end[0] \
+        and "rss=" in end[0] and end[0].endswith("G"), \
+        "the end line names the exit, the attempts, the billed calls and the RSS"
+
+
+def test_a_progress_line_fires_on_elapsed_time_alone_with_only_three_chunks(
+        monkeypatch, capsys, tmp_path):
+    """The chunk count is NOT a gate: three chunks (far under the old
+    50-chunk AND-condition) under a fake monotonic jumping 61s per read must
+    still produce a progress line, while the never-per-chunk ceiling holds —
+    at most one progress call per chunk boundary plus the stage-end one."""
+    names = ["TKR00", "TKR01", "TKR02"]
+    _wire(monkeypatch, set(), tmp_path)
+    clock = [0.0]
+
+    def fake_monotonic():
+        now = clock[0]
+        clock[0] += 61.0
+        return now
+
+    monkeypatch.setattr(nightly.time, "monotonic", fake_monotonic)
+    f = _Fetcher()
+
+    out = nightly.refresh_forward_chains(names, AS_OF, fetcher=f, sessions=1,
+                                         batch=1)
+
+    assert out["calls"] == 3
+    err = capsys.readouterr().err
+    progress = [ln for ln in err.splitlines()
+                if " chunks, " in ln and " req/s" in ln]
+    assert progress, "elapsed time alone emits the line, whatever the chunk count"
+    assert len(progress) <= len(names) + 1, \
+        f"never more than one per chunk boundary: {progress}"
+
+
+def test_requests_counts_every_attempt_so_a_session_of_404s_shows_requests(
+        monkeypatch, capsys, tmp_path):
+    """Diagnostics count ATTEMPTS, not successes: three 404 chunks — nothing
+    billed, nothing owed — still print requests=3 on the end line alongside
+    calls=0, cache_hits=0 and the missing tally."""
+    names = ["TKR00", "TKR01", "TKR02"]
+    _wire(monkeypatch, set(), tmp_path)
+    f = _Fetcher(fail=lambda p: RuntimeError("orats hist/strikes returned HTTP 404"))
+
+    out = nightly.refresh_forward_chains(names, AS_OF, fetcher=f, sessions=1,
+                                         batch=1)
+
+    assert out["requests"] == 3 and out["calls"] == 0 and out["cache_hits"] == 0
+    assert set(out["missing"]) == set(names), "404s are definitive: all missing"
+    end = [ln for ln in capsys.readouterr().err.splitlines() if " done in " in ln]
+    assert len(end) == 1, "exactly one stage-end line"
+    assert "exit=ok" in end[0] and "requests=3" in end[0] and "calls=0" in end[0] \
+        and "cache_hits=0" in end[0] and "failed=3" in end[0] \
+        and "missing=3" in end[0] and end[0].endswith("G"), \
+        "a session of 404s shows requests>0: attempts, not just successes"
+    assert nightly._read_chain_retry() == {}, "counting attempts owes nothing: 404s stay final"
+
+
+def test_the_end_line_prints_when_a_base_exception_escapes(
+        monkeypatch, capsys, tmp_path):
+    """The stage-end line lives in a finally: a non-quota BaseException that
+    unwinds the loop still gets it, tagged exit=error, with the attempt it
+    already made counted — and the line itself never masks the raise."""
+    _wire(monkeypatch, set(), tmp_path)
+    f = _Fetcher(fail=lambda p: KeyboardInterrupt())
+
+    with pytest.raises(KeyboardInterrupt):
+        nightly.refresh_forward_chains(["TKR00"], AS_OF, fetcher=f, sessions=1,
+                                       batch=1)
+
+    end = [ln for ln in capsys.readouterr().err.splitlines() if " done in " in ln]
+    assert len(end) == 1, "the escaping BaseException still gets its stage-end line"
+    assert "exit=error" in end[0] and "requests=1" in end[0] and "calls=0" in end[0]
+    kept = nightly._read_chain_retry()
+    assert kept.get(AS_OF) == {"TKR00"}, "the unwind path files the debt before the line"

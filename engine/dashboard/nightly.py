@@ -311,10 +311,11 @@ CHAIN_RETRY_MAX_BYTES = 1_000_000
 def _read_chain_retry() -> dict[str, set[str]]:
     """The ledger's ``owed`` section; a missing or invalid file is empty.
 
-    Never raises: the fd-based open (``O_NOFOLLOW`` | ``O_NONBLOCK``) plus
-    fstat is race-free, and unreadable, over-cap or junk content is
-    announced once on stderr and ignored. A flat legacy file reads as the
-    owed section.
+    Never raises. The fd-based open (``O_NOFOLLOW`` | ``O_NONBLOCK``) plus
+    fstat is race-free; a failed open, a non-regular file and an over-cap
+    file are announced once on stderr and ignored, and every other invalid
+    content (junk JSON, wrong shapes, read errors) is ignored silently.
+    A flat legacy file reads as the owed section.
     """
     try:
         fd = os.open(CHAIN_RETRY_PATH,
@@ -549,11 +550,9 @@ CHAIN_DTE = "1,75"
 CHAIN_SESSIONS = 2
 
 #: P19 cadence for the chunk loop in :func:`_refresh_one_session`: a progress
-#: line at most every CHAIN_PROGRESS_SECONDS seconds AND at most every
-#: CHAIN_PROGRESS_CHUNKS chunks — a ~365-call session logs a handful of
-#: lines, never one per call.
+#: line at most every CHAIN_PROGRESS_SECONDS seconds, whatever the chunk
+#: count — a ~365-call session logs a handful of lines, never one per call.
 CHAIN_PROGRESS_SECONDS = 60
-CHAIN_PROGRESS_CHUNKS = 50
 
 
 def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_BATCH,
@@ -591,6 +590,10 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     Memo dates past the ``sessions`` window but inside the ledger's 14-day
     retention (the owed names still unheld) are re-asked after the loop
     (``only=``) before the prune drops them for good.
+
+    Failure verdicts: a 404 is a definitive no-chain — the chunk's names are
+    counted ``missing``, never owed; any other failure (429, 502, transport,
+    a bad body) is transient — the chunk is owed the date in the ledger.
     """
     from engine.data.fetch import Fetcher
 
@@ -622,7 +625,7 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
             held = set()
 
     out = {"as_of": stamp, "sessions": stamps, "requested": len(wanted_all),
-           "returned": 0, "rows": 0, "calls": 0, "cache_hits": 0,
+           "returned": 0, "rows": 0, "calls": 0, "requests": 0, "cache_hits": 0,
            "skipped_held": 0, "missing": [], "failed": []}
     # The retry memo, read once for the older-date pass below; owed names
     # are still asked by the ordinary heal like any other unheld pair.
@@ -704,35 +707,36 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
     attempted = set(wanted)
     total_chunks = (len(wanted) + batch - 1) // batch
     t_start = time.monotonic()
-    last_progress_chunks = 0
     last_progress_at = t_start
     calls_in, failed_in, missing_in = out["calls"], len(out["failed"]), len(out["missing"])
+    requests_in, cache_in = out["requests"], out["cache_hits"]
 
     def _log_chunk_progress(done: int) -> None:
-        # P19 bounded cadence: never a line per chunk — BOTH the time gate
-        # and the chunk gate must be passed since the last line; the time
-        # gate keeps elapsed >= CHAIN_PROGRESS_SECONDS, so the rate divides.
-        nonlocal last_progress_chunks, last_progress_at
+        # P19 bounded cadence: never a line per chunk — the ONLY gate is that
+        # >= CHAIN_PROGRESS_SECONDS passed since the last progress line (or
+        # the loop start), whatever the chunk count; that gate keeps elapsed
+        # >= CHAIN_PROGRESS_SECONDS, so the rate divides.
+        nonlocal last_progress_at
         now = time.monotonic()
-        if (done - last_progress_chunks < CHAIN_PROGRESS_CHUNKS
-                or now - last_progress_at < CHAIN_PROGRESS_SECONDS):
+        if now - last_progress_at < CHAIN_PROGRESS_SECONDS:
             return
         elapsed = now - t_start
-        rate = done / elapsed
+        rate = (out["requests"] - requests_in) / elapsed
         print(f"[chains] {stamp}: {done}/{total_chunks} chunks, "
-              f"{rate:.1f} calls/s, ETA {(total_chunks - done) / rate:.0f}s",
+              f"{rate:.1f} req/s, ETA {(total_chunks - done) / rate:.0f}s",
               file=sys.stderr)
-        last_progress_chunks, last_progress_at = done, now
+        last_progress_at = now
 
     if wanted:
-        print(f"[chains] {stamp}: fetching {len(wanted)} names in {total_chunks} calls",
-              file=sys.stderr)
+        print(f"[chains] {stamp}: fetching {len(wanted)} names in {total_chunks} "
+              f"calls, rss={memprobe.rss_bytes() / 1e9:.2f}G", file=sys.stderr)
         # Hard-kill safety: the whole intended list is owed the date BEFORE
         # the first fetch; the exit-path persists below merge the failures in.
         _persist_chain_retry(stamp, attempted, attempted)
     # The loop cursor, pre-bound: an exit before the first chunk owes every
     # name, exactly as the up-front persist filed them.
     start = 0
+    exit_kind = "error"
     try:
         for done, start in enumerate(range(0, len(wanted), batch)):
             if done:
@@ -745,6 +749,9 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                 kw["refetch_token"] = refetch_day
             params = {"ticker": ",".join(chunk), "tradeDate": stamp,
                       "dte": CHAIN_DTE, "fields": CHAIN_FIELDS}
+            # Every chunk asks exactly once: the attempt is counted before the
+            # call, so 404s, exceptions and bad bodies all land in `requests`.
+            out["requests"] += 1
             try:
                 record = fetcher.fetch("orats", "hist/strikes", params, **kw)
             except (QuotaExhausted, CredentialRotated):
@@ -807,6 +814,10 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
             # that "truncated" would have blamed the batching for the data's
             # own gap.
             out["missing"].extend(t for t in chunk if t not in got)
+        # A fetched-OK or 404 name drops out of this session's entry by not being
+        # re-added; only this run's transient failures and quota-cut remainder stay.
+        _persist_chain_retry(stamp, retry, attempted)
+        exit_kind = "ok"
     except BaseException as exc:
         # Any other exit unwinds the session: put the current chunk and every
         # later unasked one in the retry file first; the raise arms above
@@ -815,19 +826,24 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
             retry.update(wanted[start:])
             _persist_chain_retry(stamp, retry, attempted)
         raise
-    # A fetched-OK or 404 name drops out of this session's entry by not being
-    # re-added; only this run's transient failures and quota-cut remainder stay.
-    _persist_chain_retry(stamp, retry, attempted)
-    if wanted:
-        # Stage end (P19): the counts are this session's own deltas (`out`
-        # is shared across sessions and memo passes).
-        _log_chunk_progress(total_chunks)
-        elapsed = time.monotonic() - t_start
-        print(f"[chains] {stamp}: done in {elapsed:.1f}s, "
-              f"calls={out['calls'] - calls_in}, "
-              f"failed={len(out['failed']) - failed_in}, "
-              f"missing={len(out['missing']) - missing_in}, "
-              f"rss={memprobe.rss_bytes() / 1e9:.2f}G", file=sys.stderr)
+    finally:
+        # Stage end (P19), on EVERY exit (ok, quota/credential re-raise, any
+        # escaping BaseException): this session's own deltas (`out` is shared
+        # across sessions and memo passes). Guarded so it can never raise out
+        # of the finally and mask the exit it is reporting.
+        if wanted:
+            try:
+                _log_chunk_progress(total_chunks)
+                elapsed = time.monotonic() - t_start
+                print(f"[chains] {stamp}: done in {elapsed:.1f}s, exit={exit_kind}, "
+                      f"requests={out['requests'] - requests_in}, "
+                      f"calls={out['calls'] - calls_in}, "
+                      f"cache_hits={out['cache_hits'] - cache_in}, "
+                      f"failed={len(out['failed']) - failed_in}, "
+                      f"missing={len(out['missing']) - missing_in}, "
+                      f"rss={memprobe.rss_bytes() / 1e9:.2f}G", file=sys.stderr)
+            except Exception:  # noqa: BLE001 — diagnostics never mask the exit
+                pass
 
 
 def _market_wide_days(as_of: pd.Timestamp, lookback: int = 6) -> list:
