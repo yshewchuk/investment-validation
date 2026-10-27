@@ -314,6 +314,29 @@ def test_monthly_object_name_cutoff_must_match_the_retrain_cutoff(member, name):
     assert err.value.details == {"code": "CUTOFF_MISMATCH"}
 
 
+def test_monthly_assembly_refuses_name_cutoff_that_disagrees(tmp_path):
+    _, prior_body = _stage_prior(
+        tmp_path, prior_sources={"pool_cutoff": "2026-11-02"})
+    digest = phase5_release.sha256_bytes(b"new")
+    drivers = [assembly.PoolOutput(member_id, f"{member_id}|2026-11-01", digest,
+                                   "2026-11-01", len(b"new"))
+               for member_id in assembly.MONTHLY_DRIVER_MEMBER_IDS]
+    drivers[0] = assembly.PoolOutput(
+        drivers[0].member_id, f"{drivers[0].member_id}|2026-10-31", digest,
+        "2026-11-01", len(b"new"))
+    chooser = assembly.PoolOutput(
+        assembly.CHOOSER_MEMBER_ID, "chooser|2026-11-01", digest,
+        "2026-11-01", len(b"new"))
+
+    with pytest.raises(assembly.ReleaseAssemblyRefusal) as err:
+        assembly.derive_catalog(
+            prior_body, release_id="cand2", expected_prior_release_id="prior1",
+            outputs=drivers, chooser=chooser, cutoff="2026-11-03",
+            monthly=True, retrain_cutoff="2026-11-01")
+
+    assert err.value.code == "CUTOFF_MISMATCH"
+
+
 def test_monthly_stage_refuses_a_missing_deployed_base(tmp_path, monkeypatch):
     parameters, staging = _wire(tmp_path, monkeypatch, mode="monthly")
     with pytest.raises(OpsError) as err:

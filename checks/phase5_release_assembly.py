@@ -288,6 +288,9 @@ def _derive_catalog(prior_catalog: object, *, release_id: str, expected_prior_re
             if output.cutoff != retrain_cutoff:
                 raise ReleaseAssemblyRefusal(
                     "CUTOFF_MISMATCH", "an object cutoff disagrees with retrain_cutoff")
+            if output.name.rsplit("|", 1)[-1] != retrain_cutoff:
+                raise ReleaseAssemblyRefusal(
+                    "CUTOFF_MISMATCH", "an object name cutoff disagrees with retrain_cutoff")
         if prior_retrain_day is not None and not retrain_day > prior_retrain_day:
             raise ReleaseAssemblyRefusal(
                 "CUTOFF_NOT_ADVANCED", "retrain_cutoff does not advance the prior retrain_cutoff")
