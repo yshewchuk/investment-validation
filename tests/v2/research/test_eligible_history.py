@@ -32,7 +32,8 @@ LIMITS = dict(max_source_rows=10000, max_fragments=100, max_object_bytes=1 << 20
 POLICY = eligibility_policy(version="grouped_ticker_embargo.v1", embargo_days=30)
 
 
-def source(tmp_path, *, null_day="2023-05-10", changes=None, days=None, values=None, extra_ticker=False):
+def source(tmp_path, *, null_day="2023-05-10", changes=None, days=None, values=None, extra_ticker=False,
+           extra_events=(), missing_bounds=()):
     days = days or ["2022-06-02", "2023-01-03", "2023-03-20", "2023-04-03", "2023-05-10", "2023-06-02", "2024-06-17"]
     events = [history_event(day, protected=day == "2023-04-03") for day in days]
     moves = [outcome_move(e, value) for e, value in zip(events, values or [-2., -4., 9999., 9999., 9999., 6., 8.])]
@@ -40,6 +41,8 @@ def source(tmp_path, *, null_day="2023-05-10", changes=None, days=None, values=N
         extra = history_event("2023-06-02", ticker="OTHER")
         events.insert(0, extra)
         moves.insert(0, outcome_move(extra, 9.))
+    events.extend(extra_events)
+    moves.extend(outcome_move(e, 7.) for e in extra_events)
     for row in moves:
         if row["event_date"] == null_day:
             row.update(skipped=True, realized_move_pct=None, available_as_of_date=None)
@@ -48,7 +51,8 @@ def source(tmp_path, *, null_day="2023-05-10", changes=None, days=None, values=N
     records = repository.fragment_records(original, "computed_moves")
     dates = sorted({str(e["event_date"].date() + timedelta(days=n)) for e in events for n in (0, 1)})
     bounds = tuple(record for ticker in sorted({e["ticker"] for e in events})
-        for record in write_bounds(repository._store, [r for r in moves if r["ticker"] == ticker],
+        for record in write_bounds(repository._store, [r for r in moves if r["ticker"] == ticker
+            and (r["ticker"], r["event_date"]) not in missing_bounds],
             pd.DataFrame([e for e in events if e["ticker"] == ticker]),
             np.array(dates, dtype="datetime64[ns]"), records))
     parent = repository.resolve_full(original.snapshot_id)
@@ -308,11 +312,12 @@ def test_changed_installed_producer_cannot_replay_previous_artifact(data, monkey
     producer["source_closure"]["engine/v2/features/panel_math.py"] = "sha256:" + "0" * 64
     monkeypatch.setattr(history, "_producer", lambda: producer)
     poison_outcomes(monkeypatch, data.repository, data.snapshot, (), all_outcomes=True)
-    with pytest.raises(DataError, match="exact eligible-history artifact"):
+    with pytest.raises(DataError, match="drifted since import") as caught:
         read(data, artifact)
+    assert caught.value.code == "INPUT_CHANGED"
     with pytest.raises(DataError) as caught:
         size.comparison_inputs(data.repository, data.snapshot, {**artifact, "request": data.request})
-    assert caught.value.problem.code == "HOLDOUT_ACCESS_DENIED"
+    assert caught.value.problem.code == "INPUT_CHANGED"
 
 
 def test_only_public_platform_admits_producer_identity(data, monkeypatch):
@@ -469,3 +474,85 @@ def test_clock_memo_scales_with_distinct_keys_and_returns_detached_values(monkey
         assert caught.value.code == "CONTRACT_MISMATCH"
     assert len(calls) == 11  # Failed validation is neither cached nor turned into a clock.
     assert len(memo) == 9
+
+
+@pytest.mark.parametrize("protected", [False, True])
+def test_each_ticker_uses_its_own_history_ceiling_but_full_protected_metadata(tmp_path, protected):
+    later = history_event("2023-06-20" if protected else "2024-04-02", ticker="OTHER", protected=protected)
+    data = source(tmp_path, extra_ticker=True, extra_events=[later],
+        missing_bounds=[("OTHER", later["event_date"].date().isoformat())])
+    try:
+        request = {**data.request, "event_ids": [data.events[0]["event_id"], data.events[-2]["event_id"]]}
+        if protected:
+            with pytest.raises(DataError) as caught:
+                history.materialize(data.repository, data.snapshot, **request)
+            assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
+        else:
+            artifact = history.materialize(data.repository, data.snapshot, **request)
+            result = history.read(data.repository, data.snapshot, artifact["feature_snapshot"],
+                columns=list(FEATURES), **request)
+            assert len(result["rows"]) == 6
+            assert {r["event_id"] for r in result["rows"]} == set(request["event_ids"])
+            assert later["event_id"] not in {g["event_id"] for g in artifact["context"]["eligibility"]["groups"]}
+    finally:
+        data.conn.close()
+
+
+def test_on_disk_source_drift_after_import_refuses_before_source_access(data, tmp_path, monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    root = Path(history.__file__).resolve().parents[1]
+    copied = tmp_path / "code"
+    for relative in history._producer()["source_closure"]:
+        target = copied / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((root / relative).read_bytes())
+    spec = importlib.util.spec_from_file_location("isolated_history_api", copied / "experiments/eligible_history.py")
+    api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(api)
+    artifact = api.materialize(data.repository, data.snapshot, **data.request)
+    dependency = copied / "engine/v2/features/panel_math.py"
+    dependency.write_text(dependency.read_text() + "\n# changed after API import\n")
+    def forbidden(*args, **kwargs):
+        raise AssertionError("source drift reached repository")
+    monkeypatch.setattr(data.repository, "resolve", forbidden)
+    for call in [lambda: api.materialize(data.repository, data.snapshot, **data.request),
+            lambda: api.read(data.repository, data.snapshot, artifact["feature_snapshot"],
+                columns=list(FEATURES), **data.request)]:
+        with pytest.raises(DataError) as caught:
+            call()
+        assert caught.value.code == "INPUT_CHANGED"
+
+
+@pytest.mark.parametrize("damage", ["scope", "failed", "snapshot"])
+def test_receipt_lookup_projects_bounded_identity_not_diagnostics(data, damage):
+    import sqlite3
+    from engine.v2.research import eligible_history as backend
+    artifact = history.materialize(data.repository, data.snapshot, **data.request)
+    slot = backend._slot(artifact["context"])
+    # Deliberately damage this synthetic catalog; production immutability remains unchanged.
+    data.conn.execute("DROP TRIGGER data_import_receipts_no_update")
+    # Large diagnostic must never cross the read boundary even in a damaged catalog.
+    problem = '{"message":"' + "x" * (1 << 20) + '"}'
+    if damage == "scope":
+        data.conn.execute("UPDATE data_import_receipts SET scope=?,problem_json=? WHERE receipt_id=?",
+            ("x" * (1 << 20), problem, slot))
+    elif damage == "failed":
+        data.conn.execute("UPDATE data_import_receipts SET status='failed',result_snapshot_id=NULL,problem_json=? WHERE receipt_id=?",
+            (problem, slot))
+    else:
+        data.conn.commit()
+        data.conn.execute("PRAGMA foreign_keys=OFF")
+        data.conn.execute("UPDATE data_import_receipts SET result_snapshot_id=?,problem_json=? WHERE receipt_id=?",
+            ("snap_" + "g" * 32, problem, slot))
+    def authorizer(action, table, column, *rest):
+        if action == sqlite3.SQLITE_READ and table == "data_import_receipts" and column in {"problem_json", "registered_at"}:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+    data.conn.set_authorizer(authorizer)
+    try:
+        with pytest.raises(DataError) as caught:
+            backend._existing(data.repository, artifact["context"])
+        assert caught.value.code == "IDENTITY_CONFLICT"
+    finally:
+        data.conn.set_authorizer(None)

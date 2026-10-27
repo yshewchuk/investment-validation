@@ -375,6 +375,8 @@ the pinned source and explicit policy; this PR neither activates a data run nor
 wires production scoring. Synthetic tests are the only current invocations.
 The sole public build/read boundary is `experiments.eligible_history`; it rejects
 caller producer identities before source access and derives the installed identity.
+An immutable import-time source/environment baseline refuses later disk drift with
+`INPUT_CHANGED`; restart from a fixed code tree. This is not bytecode attestation.
 Its backend `_materialize`/`_read` helpers are trusted internal orchestration, not
 independent admitted APIs or a Python privacy/security boundary. The adapter consumes
 backend source admission and these helpers;
@@ -387,6 +389,9 @@ limits (`max_source_rows`, `max_fragments`, `max_object_bytes`, `max_total_bytes
 Missing bounds for selected target/history tickers or events are `CONTRACT_MISMATCH`;
 wrong outcome-object bindings/isolation remain `HOLDOUT_ACCESS_DENIED`. Unrelated
 tickers need no sidecar; full canonical metadata still defines protected windows.
+History selection uses each target ticker's own latest ceiling, retaining explicit
+targets. Receipt lookup compares identity in SQL and returns only a bounded native
+snapshot ID, never unused diagnostics; conflicting evidence is `IDENTITY_CONFLICT`.
 `experiments.magnitude_eligible_history.build/comparison_inputs` supplies SIZE's
 native folds and one shared clean-history input for challenger and comparator.
 SIZE admits only its frozen 30-day grouped policy on both build and read.
