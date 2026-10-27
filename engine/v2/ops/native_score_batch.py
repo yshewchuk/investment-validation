@@ -309,9 +309,9 @@ def _calendar_row_problem(key: BoardRequest, calendar_row: Any) -> tuple[str, st
       :func:`validated_as_of`; validating it here with the SAME helper
       returns the row-level ``CALENDAR_ROW_INVALID`` instead of the
       ``INVALID_DATE`` the cutoff helper would otherwise surface. A null
-      ``entry_date`` is left to that helper's own ``MISSING_STAGED_INPUT``
-      (or to no artifact cutoff when the release carries no payoff artifact),
-      so only malformed non-null values are caught here.
+      ``entry_date`` is left to downstream cutoff construction and its
+      ``MISSING_STAGED_INPUT`` refusal, including STR-THRU's required exact-
+      cutoff analog selection; only malformed non-null values are caught here.
     - ``ticker``/``event_date`` not matching ``key`` -- ``CALENDAR_ROW_KEY_
       MISMATCH``. Neither this module nor ``assemble_nightly_source_bundle``
       (which only checks ``panel_row`` against ``calendar_row``, never
@@ -428,10 +428,13 @@ def _release_artifact_declarations(
     The release is the SOLE source: the driver role's verified residual pool
     (slot ``driver``) with its causal recipe, and the strategy's payoff
     artifact selected by the canonical ``(strategy, fill alpha, cutoff)`` key
-    (``payoff_artifact_key``) with its ``before`` recipe. A member the release
-    does not carry leaves its declaration ABSENT -- never filled from
-    request/event/panel/Tier-4 rows. Malformed members never reach here: they
-    already refused ``resolve_release_binding`` with ``ModelNotReady``.
+    (``payoff_artifact_key``) with its ``before`` recipe. A missing driver pool
+    leaves its declaration absent. If a payoff family is present, exactly one
+    artifact must match the row's key or assembly refuses the row; when no
+    payoff family is present, the optional payoff declaration stays absent.
+    No member is filled from request/event/panel/Tier-4 rows. Malformed members
+    never reach here: they already refused ``resolve_release_binding`` with
+    ``ModelNotReady``.
     """
     pool = binding.driver_residual_artifacts.get(driver_identity.role)
     artifacts = binding.payoff_artifacts.get(strategy) or ()
@@ -450,12 +453,44 @@ def _release_artifact_declarations(
     if artifacts:
         cutoff = _row_cutoff(as_of, calendar_row)
         key = payoff_artifact_key(strategy, _SHADOW_FILL_ALPHA, cutoff)
-        for artifact in artifacts:
-            if artifact.key == key:
-                declarations["payoff_artifact"] = artifact
-                declarations["payoff_artifact_recipe"] = {"before": cutoff}
-                break
+        matches = [artifact for artifact in artifacts if artifact.key == key]
+        if len(matches) > 1:
+            raise NightlySourceBundleRefusal(
+                "MODEL_NOT_READY", "release carries duplicate exact-cutoff payoff artifacts")
+        if not matches:
+            raise NightlySourceBundleRefusal(
+                "MODEL_NOT_READY", "release lacks the exact-cutoff payoff artifact")
+        declarations["payoff_artifact"] = matches[0]
+        declarations["payoff_artifact_recipe"] = {"before": cutoff}
     return declarations
+
+
+_RELEASE_ARTIFACT_REFUSAL_LABELS: Mapping[tuple[str, str], str] = {
+    ("MODEL_NOT_READY",
+     "driver residual pool model_id disagrees with the resolved driver identity"):
+        "driver residual pool identity mismatch",
+    ("MODEL_NOT_READY", "release carries duplicate exact-cutoff payoff artifacts"):
+        "duplicate exact-cutoff payoff artifact",
+    ("MODEL_NOT_READY", "release lacks the exact-cutoff payoff artifact"):
+        "exact-cutoff payoff artifact missing",
+    ("MODEL_NOT_READY", "release lacks the exact-cutoff analog pool"):
+        "exact-cutoff analog pool missing",
+}
+
+
+def _nightly_source_bundle_refusal_detail(exc: NightlySourceBundleRefusal) -> str:
+    """The safe published detail for one source-bundle refusal.
+
+    Only the four internal release-artifact causes above keep a fixed
+    distinguishing label; every other refusal publishes just its code. The
+    raw ``exc.detail`` is never interpolated or concatenated into the text.
+    """
+    fixed_label = None
+    if isinstance(exc.detail, str):
+        fixed_label = _RELEASE_ARTIFACT_REFUSAL_LABELS.get((exc.code, exc.detail))
+    if fixed_label is not None:
+        return f"nightly_source_bundle refused: {exc.code}: {fixed_label}"
+    return f"nightly_source_bundle refused: {exc.code}"
 
 
 def _with_release_artifacts(
@@ -479,10 +514,13 @@ def _with_release_artifacts(
     refusal like any other and is re-wrapped with the row's key. An entry-rule
     row declares its paired pool, trailing cutoff, planned-exit recipe and gate
     recipe from :func:`_entry_rule_declarations_or_refusal` instead of the
-    driver-residual/payoff path. The frozen board analog pool, when the release
-    carries one for this row's ``(strategy, fill alpha, cutoff)``, is declared
-    with the NATIVE snapshot id and the row's native request key as its
-    bootstrap-seed identity (#681); otherwise the analog block stays undeclared.
+    driver-residual/payoff path. STR-THRU requires the board analog pool for the
+    exact ``(strategy, fill alpha, cutoff)`` key; absence refuses the row. Other
+    strategies keep their optional analog behavior: the frozen board analog
+    pool, when the release carries one for this row's ``(strategy, fill alpha,
+    cutoff)``, is declared with the NATIVE snapshot id and the row's native
+    request key as its bootstrap-seed identity (#681); otherwise the analog
+    block stays undeclared and remains not-applicable.
     """
     context = {**bundle.context,
                **_identity_context(as_of, snapshot_id, calendar_row,
@@ -500,14 +538,18 @@ def _with_release_artifacts(
             declarations = _release_artifact_declarations(
                 binding, strategy, drivers[0].identity, as_of, calendar_row)
         analogs = binding.analog_artifacts.get(strategy) or ()
-        if analogs:
-            declarations.update(analog_declarations(
+        if analogs or strategy == "STR-THRU":
+            analog_declaration = analog_declarations(
                 analogs, strategy, _SHADOW_FILL_ALPHA, _row_cutoff(as_of, calendar_row),
                 panel_row, snapshot_id,
-                score_request_key({**context, "ticker": key.ticker, "strategy": strategy})))
+                score_request_key({**context, "ticker": key.ticker, "strategy": strategy}))
+            if not analog_declaration and strategy == "STR-THRU":
+                raise NightlySourceBundleRefusal(
+                    "MODEL_NOT_READY", "release lacks the exact-cutoff analog pool")
+            declarations.update(analog_declaration)
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
-            key, exc.code, f"nightly_source_bundle refused: {exc.code}")
+            key, exc.code, _nightly_source_bundle_refusal_detail(exc))
     except AmbiguousAnalogPool:
         return NativeScoreBatchRowRefusal(
             key, "MODEL_NOT_READY", "release carries more than one analog pool for the row key")

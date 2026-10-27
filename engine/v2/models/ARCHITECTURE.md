@@ -429,7 +429,7 @@ The pointer is re-read before each phase submit; if its class or id changed sinc
 | R2 cache | no stage-level cache; pointer, catalog, panel and bound files are re-read each call (the artifact loaders keep their per-loader content-hash cache, and `load_bytes` verifies the caller's bytes before consulting it) |
 | R3 retry | one attempt; a refusal is terminal for the cycle until an operator acts (#154) |
 | R4 transaction | objects and the staged manifest are content-addressed and idempotent; the candidate catalog is written last, atomically, under the pointer write lease; `DEPLOYED` is untouched |
-| R5 partial failure | orphan objects, a staged manifest without a catalog, or (after a failed read-back or staging-success write) a published candidate catalog may remain, never promoted; the incumbent stays deployed, so native analog and simulation fields stay null (#681) and STR-RUNUP stays `MODEL_NOT_READY` (#782) until a bootstrap promotes |
+| R5 partial failure | orphan objects, a staged manifest without a catalog, or (after a failed read-back or staging-success write) a published candidate catalog may remain, never promoted; the incumbent stays deployed, so STR-THRU rows without the required exact analog pool refuse with `MODEL_NOT_READY` (#681), while model simulation fields remain unavailable; STR-RUNUP stays `MODEL_NOT_READY` (#782) until a bootstrap promotes |
 | R6 idempotency | same inputs give the same catalog (a rerun republishes the staging-success record); a different catalog under the same id is `ID_CONFLICT` |
 
 **Progress logging.** Stage start and end with elapsed time, member and object counts and RSS go to stderr; the prior class and reason are logged once.
