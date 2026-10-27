@@ -101,16 +101,22 @@ keyed by `BoardRequest`. It runs before `to_document` serialises them
 - R4 nothing eligible: DYN-SV gets a typed refusal `NO_CHOOSER_CANDIDATE` carrying the
   per-member codes. Legacy emits no row; native emits a refusal so the parity report
   can classify it. This is a documented difference in representation, not behaviour.
-  Serialization (slice 2 implements, slice 3 reads): `NativeScoreBatchRowRefusal`
-  keeps its single `code` and `detail` unchanged. It gains an optional
-  `member_codes`, a list of `{strategy, code}` objects in `DYNAMIC_MENU` order, one per
-  member including those that were not refused (`code: null`). `as_document` emits it
-  only when set, so existing documents are byte-identical. The keyed
-  `native_score_batch_refusals` schema tag is bumped for the added optional field
-  (`guides/component_contracts.md` §2.3 evolution rules). Slice 3's
-  `native_parity_report.apply_native_refusals` reads `member_codes` to classify a
-  DYN-SV refusal (all members refused vs. no finite score) and carries it into the
-  report entry; a document without the field is read as before.
+  Serialization (slice 2 writes it and lands the schema bump with every reader of the
+  tag; slice 3 uses it): `NativeScoreBatchRowRefusal` keeps its single `code` and
+  `detail` unchanged. It gains an optional `member_codes`, a list of
+  `{strategy, code}` objects in `DYNAMIC_MENU` order, one per member including those
+  that were not refused (`code: null`). `as_document` emits it only when set. The keyed
+  `native_score_batch_refusals` tag is bumped for the added optional field
+  (`guides/component_contracts.md` §2.3), so documents are not byte-identical across
+  the bump. The tag check is exact in `nightly._native_score_batch_document_schema_ok`
+  and in `run_native_parity_worker`; slice 2 updates both to accept the new tag, else
+  new batches are rejected between merges. Metadata path: `native_score_batch.py`
+  builds keyed refusals directly from `code`/`detail` (it calls `as_document` only for
+  `INVALID_KEY_FIELD`), so slice 2 routes DYN-SV refusals through `as_document`; and
+  `native_parity_report.py` reduces keyed refusals to code strings before
+  `apply_native_refusals`, so slice 2 widens that input to carry `member_codes` per
+  key. Slice 3 reads it to classify a DYN-SV refusal (all members refused vs. no
+  finite score) and carries it into the report entry.
 - R5 ties: broken by `DYNAMIC_MENU` order (stable sort); the selection says
   `status: tie`. Legacy is stable only on the `chooser_score` branch; its
   `exp_pnl_sim` fallback (`score.py:5223`) uses default quicksort, so fallback ties
@@ -143,7 +149,7 @@ because the champion contract defines it, not to match a report.
 1. **Chooser state on member rows** (wire): chooser field in the strategy spec,
    release-binding selector for chooser state by cutoff, `chooser_recipe` declaration
    in `_assemble_one_event`. Typed `MODEL_NOT_READY` when state is missing. ~150
-   code, ~120 test, ~40 doc. Member rows gain `chooser_score` and may now refuse
+   code, ~150 test, ~60 doc (includes the feature list and its order test). Member rows gain `chooser_score` and may now refuse
    `MODEL_NOT_READY`; no DYN-SV row yet. Slice 1 also owns the feature schema: it
    records the complete ordered chooser input list (every primitive input, its
    position, and the function or artifact that supplies it) in
@@ -157,7 +163,8 @@ because the champion contract defines it, not to match a report.
    order; this note does not duplicate it.
 2. **Selection post-pass** (add + wire): public record-level selector extracted from
    `_choose_dynamic`, worker fan-in using `validate_dynamic_menu`, DYN-SV record or
-   `NO_CHOOSER_CANDIDATE` refusal in the output documents. ~200 code, ~180 test, ~50 doc.
+   `NO_CHOOSER_CANDIDATE` refusal in the output documents, `member_codes` field, schema
+   tag bump with both readers. ~220 code, ~200 test, ~60 doc.
 3. **Parity pairing and report** (wire): pair DYN-SV by key, surface
    `chosen_strategy` and margin in the comparison. ~80 code, ~70 test, ~20 doc.
 
