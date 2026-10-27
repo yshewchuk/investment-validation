@@ -98,6 +98,7 @@ from engine.v2.ops.store_barrier import (
     verified_write_in,
 )
 from engine.v2.ops.worker_progress import STEPS_FILENAME, _rss_bytes, read_new_records
+from engine.v2.ops.workspace.guard import refuse_workspace_execution
 
 #: Kinds whose coordinator effect does real, non-idempotent catalog/outbox/
 #: filesystem work every attempt — the generic checkpoint-reuse shortcut
@@ -488,6 +489,7 @@ class LeaseRenewer:
 class Service:
     def __init__(self, conn, root, registry, policy, *, clock, code_source, store_root=None,
                  materialization_base=None):
+        refuse_workspace_execution(root, code_source, store_root, materialization_base)
         self.conn, self.root, self.registry, self.policy = conn, Path(root), registry, policy
         self.clock, self.code_source = clock, Path(code_source)
         self.store_root = Path(store_root) if store_root is not None else self.code_source
