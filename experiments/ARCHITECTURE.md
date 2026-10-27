@@ -2,30 +2,19 @@
 
 ## Native preregistration
 
-`native_registration.register_native` explicitly registers one resolved arm
-before evaluation; `require_native_registration` is its read-only admission check.
-Both pin the current scope head once and read canonical event metadata
-through the shared holdout population reader, never outcomes or prior results.
-The stable registration key is experiment ID plus primary arm. Its immutable
-binding includes the full resolved plan, detached spec hash, exact snapshot,
-static source closure, numerical environment and declared single-thread policy,
-scope, eligible event IDs and versioned holdout context. External input files and non-Python runner paths are refused.
+`native_registration.register_native` explicitly registers one resolved arm before evaluation; `require_native_registration` is its read-only admission check.
+Both pin the current scope head once and read canonical event metadata through the shared holdout population reader, never outcomes or prior results.
+The stable registration key is experiment ID plus primary arm. Its immutable binding includes the full resolved plan, detached spec hash, exact snapshot,
+static source closure, numerical environment and declared single-thread policy, scope, eligible event IDs and versioned holdout context. External input files and non-Python runner paths are refused.
 The caller supplies the checkout root used for source fingerprinting.
 
-`read_native_registration` uses the ops bounded verifier with the existing native
-16 MiB UTF-8 default evidence/object budget: one SQL snapshot caps evidence transfer
-(twice the budget for UTF-16, followed by UTF-8 admission), then validates the registration
-reference size before the verified object read. Missing registration remains R1;
-malformed/conflicting evidence and oversized catalog evidence remain R6. Raw
-storage exceptions propagate. This bounds transferred/serialized bytes, not
-SQLite internals or decoded-object overhead. It loads v1.0–v1.5 without rewriting
-saved bindings; current-source admission still requires a matching closure.
-Larger legitimate registrations can supply `max_evidence_bytes`, also exposed as
-`--max-registration-bytes` by the gate, prediction, search-plan and serial-search CLIs; magnitude
-history binds its temporal plan twice, so 16 MiB is not a universal population bound (nor a feature-matrix cap).
-The pure `valid_registration_read_budget` predicate admits only built-in integer
-budgets in `[1, 2**62 - 1]`, leaving SQLite headroom for UTF-16. The loader and all
-five CLI parsers (including RUNUP's evidence-budget flag) and `register_native` share it; None cannot disable either public boundary.
+`read_native_registration` uses the ops bounded verifier with the existing native 16 MiB UTF-8 default evidence/object budget: one SQL snapshot caps evidence transfer
+(twice the budget for UTF-16, followed by UTF-8 admission), then validates the registration reference size before the verified object read. Missing registration remains R1;
+malformed/conflicting evidence and oversized catalog evidence remain R6. Raw storage exceptions propagate. This bounds transferred/serialized bytes, not
+SQLite internals or decoded-object overhead. It loads v1.0–v1.5 without rewriting saved bindings; current-source admission still requires a matching closure.
+Larger legitimate registrations can supply `max_evidence_bytes`, also exposed as `--max-registration-bytes` by the gate, prediction, search-plan and serial-search CLIs; magnitude
+history binds its temporal plan twice, so 16 MiB is not a universal population bound (nor a feature-matrix cap). The pure `valid_registration_read_budget` predicate admits only built-in integer
+budgets in `[1, 2**62 - 1]`, leaving SQLite headroom for UTF-16. The loader and all five CLI parsers (including RUNUP's evidence-budget flag) and `register_native` share it; None cannot disable either public boundary.
 `register_native` defaults to 16 MiB; prediction/gate register forward their flag to the same bounded reservation used by RUNUP.
 The cap is serialized UTF-8 bytes checked after preparation but before binding publication/catalog reservation, not construction memory/RSS.
 Public require/magnitude admission forward finite bounds through both rechecks; low-level optional admission/outcome APIs retain their policies. Changed source fingerprints require fresh preregistration, never seal migration.
@@ -1012,3 +1001,14 @@ Each invocation revalidates bindings/evidence; there is no cross-call admission 
 | CLI typed `OpsError`/`DataError`; unexpected builtin failure | Preserve the complete typed `Problem` in one refusal document, exit 2; unexpected builtin errors propagate. An opened connection closes in either case. |
 | Output exceeds the byte budget or output staging fails with an artifact, filesystem or SQLite error | Report bytes are discarded; only the refusal document reaches stdout, emitting `RESOURCE_LIMIT_EXCEEDED` or sanitized `RESOURCE_UNAVAILABLE`. Other staging errors are unexpected builtin failures and propagate. Prior journal commits remain. |
 | Stdout write or flush failure | The original stream error propagates with no retry and no second document; downstream may have received a prefix, and stdout remains caller-owned. |
+
+### Qualified SIZE panel (opt-in)
+
+`size_panel.materialize(repository, source, **request)` composes public eligible-history admission with research qualification, publishing immutable rows and returning context plus a feature SnapshotRef.
+`size_panel.read(repository, source, feature_snapshot, *, columns=None, **request)` re-admits that exact artifact, returning context, serialized feature snapshot and projected rows; no rebuild.
+Both require explicit month, frozen 30-day policy, event IDs, all 1/3/5 horizons, history start/limits, history and price snapshots, source start and metadata limits; no caller producer override.
+Malformed requests/projections refuse before dependent reads; changed installed source gives `INPUT_CHANGED`; incompatible contracts, protected membership and exceeded limits retain typed data refusals.
+Anchors are invocation-local, source-version-qualified detached cache values; each public call freshly admits installed/source identities. Exact committed context reuses its snapshot; incompatible receipts refuse `IDENTITY_CONFLICT`.
+Native immutable objects publish before catalog commit; interruption before commit can leave unreferenced objects, not a committed receipt. Caller retry repeats admission without relaxing checks or repairing incompatible artifacts.
+This opt-in library API has no production caller, fitting or final-holdout authority. It depends on eligible-history admission plus research, data, foundation and ops fingerprints; installed-root discovery selects code only, never caller data roots.
+[Research architecture](../engine/v2/research/ARCHITECTURE.md) owns the v3 dictionary, reconstructed quote decoding/contribution boundary and stored-row contract.

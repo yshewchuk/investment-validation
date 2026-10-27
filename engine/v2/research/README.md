@@ -442,3 +442,42 @@ Each preparation revalidates clocks once per distinct date/session/horizon again
 its fixed calendar, sharing a local memo across targets/contributors, never across reads.
 The artifact contains native H11 means/EMAs only, not implied-quote history.
 Historical publication and schedule knowledge remain unverified reconstruction.
+
+## Complete qualified SIZE panel
+
+<!-- public-interface: magnitude_panel_qualified_table.CONTRACT, magnitude_panel_qualified_table.FEATURES, magnitude_panel_qualified_table.METADATA, magnitude_panel_qualified_table.TABLE, magnitude_panel_qualified_table.admit_columns, magnitude_panel_qualified_table.feature_dictionary, magnitude_panel_qualified_table.recipe -->
+
+`experiments.size_panel.materialize/read` is the installed-identity public boundary;
+`magnitude_panel_qualified` and `_magnitude_panel_*` helpers are internal only.
+Supply exact source/history/price snapshots, `as_of_month`, frozen 30-day `policy`,
+`event_ids`, `horizons=[1,3,5]`, `history_start`, `source_start`, eligible-history
+`limits` and confirmed-index `metadata_limits`; no defaults imply unbounded reads.
+Materialize returns a native feature_snapshot and context; read additionally takes
+that snapshot and explicit columns, returning metadata plus projected features.
+The v3 recipe preserves numeric order but has new eligible-history source hashes;
+old v1/v2 helpers and partial daily artifacts are unchanged. H/HM/HMO are 11/28/42
+numeric columns; only HMO uses the appended quote indicator. Rows include quote
+status, cutoff/context IDs, per-block anchors/missingness and a canonical row hash.
+The independent historical-quote population preserves full metadata ordinals even
+when realized history is absent. Its price-date brackets are not computed-capture
+attestations. Source-publication knowledge remains reconstructed/unverified.
+This API publishes no labels, performs no fit and grants no final-holdout access.
+Bounds cover explicit records/bytes/results, not total Python allocation or RSS.
+
+Raw daily-market access explicitly permits selected-column decoding of yearly
+fragments before date filtering; it never admits excluded event contributions.
+Eligibility precedes decoding; one scan per required ticker/year preserves native
+file/byte limits. Realized-outcome objects remain separately protected.
+The SIZE wrapper compares a fresh source/environment fingerprint to its immutable
+import-time baseline before admission; drift requires restart (`INPUT_CHANGED`).
+It obtains history only through public `experiments.eligible_history.read`, never
+by treating the raw private history fingerprint as an admission capability.
+Panel publication bounds compressed bytes and the native all-column uncompressed
+row-group sum before storing each fragment, preserving same-budget bounded replay.
+Lineage anchor indexes/caches are invocation-local and version-keyed; returned
+anchors are detached. Receipt reuse projects only a syntax-admitted snapshot ID.
+Malformed/missing/unknown request fields refuse before fingerprinting or source
+access. Empty required source inventories refuse `CONTRACT_MISMATCH`, not an
+unbounded query or builtin error; snapshot shape failures remain `SNAPSHOT_UNRESOLVED`.
+Daily quote lineage uses native ticker/year/date fragment membership planning;
+yearly files pruned for other tickers are not reported as consumed quote sources.

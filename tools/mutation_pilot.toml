@@ -1273,6 +1273,7 @@ tests = [
     "tests/v2/research/test_eligible_history.py",
     "tests/v2/research/test_magnitude_history_projection.py",
     "tests/v2/research/test_magnitude_panel_contract.py",
+    "tests/v2/research/test_magnitude_panel_qualified.py",
     "tests/v2/research/test_magnitude_panel_v2_policies.py",
     "tests/v2/research/test_magnitude_panel_v2_table.py",
     "tests/v2/research/test_magnitude_search_payload.py",
