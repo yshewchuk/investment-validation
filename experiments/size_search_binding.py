@@ -1,10 +1,12 @@
 """Explicit v2 SIZE source/fold binding; installed panel admission, no hidden builds."""
 import sys
 from datetime import date
+from hashlib import sha256
 from pathlib import Path
 
 from engine.v2.contracts import SnapshotRef
 from engine.v2.foundation import canonical_json, content_hash, from_document
+from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import environment_identity, source_closure
 from engine.v2.research.eligibility_policy import eligibility_policy
@@ -77,7 +79,8 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     sources = _sources()
     panel_request = validate_panel_request(panel_request)
     schedule = compile_request(request)
-    _require(request["limits"]["child"]["memory_bytes"] <= request["limits"]["parent"]["memory_bytes"])
+    if request["limits"]["child"]["memory_bytes"] > request["limits"]["parent"]["memory_bytes"]:
+        raise fail("INVALID_EXPERIMENT_SPEC", "child memory must not exceed inherited parent limit")
     _require(request["feature_dictionary_hash"] == recipe("HMO")["dictionary_hash"])
     _require(panel_request["feature_snapshot_id"] == request["feature_snapshot_id"]
              and panel_request["history_snapshot"] == request["history_snapshot_id"]
@@ -107,23 +110,31 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
 
 
 def _source_files():
-    return source_closure(Path(__file__).resolve().parents[1], ["experiments/size_search.py", "experiments/magnitude_search_worker.py", "engine/models/registry.json"])
+    root = Path(__file__).resolve().parents[1]
+    registry = read_bounded_state(root / "engine/models/registry.json", 16 * 1024 * 1024)
+    return {**source_closure(root, ["experiments/size_search.py", "experiments/magnitude_search_worker.py"]), "engine/models/registry.json": "sha256:" + sha256(registry).hexdigest()}
 
 
-_IMPORTED_SOURCES = _source_files()
+try:
+    _IMPORTED_SOURCES = _source_files()
+except (BoundedStateReadError, OSError):
+    _IMPORTED_SOURCES = None
 _IMPORTED_ENVIRONMENT = environment_identity(1)
 
 
 def _sources():
-    current = _source_files()
+    try:
+        current = _source_files()
+    except (BoundedStateReadError, OSError) as error:
+        raise fail("RESOURCE_LIMIT_EXCEEDED" if getattr(error, "code", None) == "SIZE_LIMIT" else "RESOURCE_UNAVAILABLE", "installed registry unavailable") from None
     _require(current == _IMPORTED_SOURCES and environment_identity(1) == _IMPORTED_ENVIRONMENT)
     return current
 
 
 def verify_installation(binding):
-    _require(binding["size_comparison"] == comparison_recipe())
     _require(binding["schema_version"] == SCHEMA and binding["environment"] == environment_identity(1)
         and binding["source_closure"] == _sources())
+    _require(binding["size_comparison"] == comparison_recipe())
 
 
 def _folds(binding, request):

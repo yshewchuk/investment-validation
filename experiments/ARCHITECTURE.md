@@ -262,11 +262,11 @@ in verified receipts. Only inner scores select; outer outcomes cannot choose mod
 `size_comparison_run` admits the exact sealed plan/fold before a fresh comparator
 claim, checks both no-fit guards first, and freezes forecasts before outer labels.
 `size_comparator` uses fourteen causal inputs, complete-row/n_prior>=4 training,
-500-row minimum, fixed target/predictor masks and native OLS+MLP construction.
+500-row minimum, fixed target/predictor masks and native OLS+MLP construction. Comparator fit markers bind filtered ordered 14-column training/prediction arrays and training labels; `fit_eligible` distinguishes the 500-row threshold, not estimator entry. Full admitted inputs remain separately bound; terminal fit details count actual logical/component fits.
 Missing inputs (including source-zero quotes stored as null) abstain; no quote reconstruction. Raw negative blends stay negative. Its history
 mean reference uses the same admitted history, not live aggregates or new weights.
 Completed CLI replay verifies outer/comparison journals read-only without an execution deadline; interrupted claims
-cannot restart. Source, registry, policy, limits or context drift refuses.
+cannot restart. Source, registry, policy, limits or context drift refuses before recipe evaluation; registry fingerprints use bounded raw bytes. Failed startup capture cannot become a trusted baseline after file repair: admission refuses until a fresh process.
 
 `size_search_report` verifies complete journals, then `size_paired_report` matches
 whole three-horizon events, retains all coverage/label exclusions and broad sanity
@@ -281,7 +281,7 @@ actual label windows, holdout union and source ceilings are still mandatory.
 | --- | --- |
 | Malformed closed panel request or mismatched request/anchor version | `INVALID_EXPERIMENT_SPEC` before reservation/execution. |
 | Changed binding/hash/environment, driver seal or replay receipt | `EXPERIMENT_IDENTITY_CONFLICT`; no replacement, new fit or replay write. Native admission failures retain their own codes. |
-| Prepared/stored registration over 16 MiB; new work beyond original deadline | `RESOURCE_LIMIT_EXCEEDED`; preserve existing evidence, no retry or automatic cap increase. |
+| Prepared/stored registration or installed registry over 16 MiB; new work beyond original deadline | `RESOURCE_LIMIT_EXCEEDED`; preserve existing evidence, no retry or automatic cap increase. |
 | Read-only collection: complete expired replay; missing terminal | Verified read-only report remains available; missing evidence refuses before work, never invokes a mutable fallback. |
 | CLI malformed reference/spec; raw storage failure; unexpected programming error | Typed `INVALID_EXPERIMENT_SPEC`; sanitized `RESOURCE_UNAVAILABLE`; unexpected errors propagate. |
 

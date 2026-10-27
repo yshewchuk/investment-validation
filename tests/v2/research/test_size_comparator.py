@@ -8,7 +8,6 @@ import pytest
 from threadpoolctl import threadpool_limits
 
 from experiments import size_comparator as comparator
-from experiments.magnitude_search_evidence import fit_evidence
 
 
 def row(event="test", horizon=1, **changes):
@@ -85,7 +84,7 @@ def test_complete_input_training_masks_and_raw_negative_predictions(monkeypatch)
     assert all(r["predicted_absolute_move_pct"] == -2.0 for r in result["forecasts"])
     assert all(r["component_fits"] == 2 and r["logical_fits"] == 1 for r in result["fit_details"])
     inputs = {"features": list(indexed.values()), "training": train.to_dict("records")}
-    expected = fit_evidence(inputs, fold, plan, execution)
+    expected = comparator.fit_evidence(inputs, fold, plan)
     assert progress == [(state, fit) for fit in expected for state in ("started", "completed")]
     assert indexed == original
 
@@ -216,3 +215,78 @@ def test_native_registry_programming_errors_are_not_resource_refusals(monkeypatc
     monkeypatch.setattr(comparator, "current_recipes", lambda: (_ for _ in ()).throw(ValueError("bug")))
     with pytest.raises(ValueError, match="bug"):
         comparator.native_recipe()
+
+
+@pytest.mark.parametrize("integers", [False, True])
+def test_filtered_receipt_hashes_actual_ordered_fourteen_column_fit_arrays(monkeypatch, integers):
+    from engine.v2.foundation import content_hash
+
+    indexed, train, fold, plan, execution = case(505)
+    train.loc[0, "absolute_move_pct"], train.loc[1, "absolute_move_pct"] = 201, -1
+    train = train.sample(frac=1, random_state=7).reset_index(drop=True)
+    fold["evaluation_event_ids"] = ["missing", "second", "test"]
+    columns = ["has_implied_quote", "mean_prior_abs_move", "abs_dist_ema", "ema12r_abs",
+        "mean_prior_move", "signed_streak", "dist_high", "dist_ema", "spy_vol20", "spy_dd252",
+        "mean_prior_or_implied", "or_implied", "or_rvol30", "mcap_log"]
+    for h in plan["horizons"]:
+        for i in range(505):
+            indexed[f"train{i}", h].update(mean_prior_move=i / 100., dist_ema=h / 10.)
+        indexed["train2", h]["implied_move"] = None
+        indexed["train3", h]["n_prior"] = 3
+        indexed["train4", h]["implied_move"] = 70
+        indexed["missing", h] = row("missing", h, implied_move=None)
+        indexed["second", h] = row("second", h, dist_ema=9.)
+    if integers:
+        for values in indexed.values():
+            for name, value in values.items():
+                if isinstance(value, (int, float)):
+                    values[name] = int(value)
+    captured, predicted, progress = [], [], []
+    def fit(native, X, y):
+        captured.append((X.copy(), y.copy()))
+        def predict(X):
+            predicted.append(X.copy())
+            return np.full(len(X), 2.)
+        return SimpleNamespace(predict=predict)
+    monkeypatch.setattr(comparator, "fit_recipe_estimator", fit)
+    result = comparator.forecasts(indexed, train, fold, plan, execution,
+        progress=lambda state, receipt: progress.append((state, receipt)))
+    ids = [e for e in train.event_id if e not in {f"train{i}" for i in range(5)}]
+    labels = dict(zip(train.event_id, train.absolute_move_pct))
+    for i, h in enumerate(plan["horizons"]):
+        X, y = captured[i]
+        assert X.dtype == predicted[i].dtype == np.dtype(float)
+        raw_names = ["implied_move" if c == "or_implied" else "rvol30" if c == "or_rvol30" else c for c in columns]
+        np.testing.assert_array_equal(X, [[indexed[e, h][c] for c in raw_names] for e in ids])
+        np.testing.assert_array_equal(y, [labels[e] for e in ids])
+        np.testing.assert_array_equal(predicted[i], [[indexed[e, h][c] for c in raw_names] for e in ["second", "test"]])
+        documents = [{"columns": columns, "row_keys": [[e, "context", h] for e in events], "values": values.tolist()}
+            for events, values in ((ids, X), (["second", "test"], predicted[i]))]
+        documents[0]["absolute_move_pct"] = y.tolist()
+        receipt = {"horizon_sessions": h, "matrix_scope": "eligible_incumbent_arrays", "fit_eligible": True,
+            "training_event_ids": ids, "evaluation_event_ids": ["second", "test"],
+            "training_matrix_id": content_hash(documents[0]), "prediction_matrix_id": content_hash(documents[1])}
+        assert progress[2*i:2*i+2] == [("started", receipt), ("completed", receipt)]
+        assert result["fit_details"][i]["training_event_ids"] == ids
+    assert len(captured) == len(predicted) == 3
+    inputs = {"features": list(indexed.values()), "training": train.to_dict("records")}
+    original = comparator.fit_evidence(inputs, fold, plan)
+    admitted_id = content_hash(inputs)
+    for h in plan["horizons"]:
+        indexed["train0", h]["mcap_log"] = 987.
+    assert content_hash(inputs) != admitted_id
+    assert comparator.fit_evidence(inputs, fold, plan) == original
+
+
+def test_zero_fit_receipts_bind_eligible_arrays_not_estimator_entry(monkeypatch):
+    indexed, train, fold, plan, execution = case(499)
+    for h in plan["horizons"]:
+        indexed["test", h]["implied_move"] = None
+    monkeypatch.setattr(comparator, "fit_recipe_estimator", lambda *a, **k: pytest.fail("zero-fit constructor"))
+    progress = []
+    result = comparator.forecasts(indexed, train, fold, plan, execution,
+        progress=lambda state, receipt: progress.append((state, receipt)))
+    assert len(progress) == 6
+    assert all(not fit["fit_eligible"] and len(fit["training_event_ids"]) == 499
+        and fit["evaluation_event_ids"] == [] for _, fit in progress)
+    assert all(f["logical_fits"] == f["component_fits"] == 0 for f in result["fit_details"])

@@ -133,3 +133,129 @@ def test_native_data_error_uses_supported_code_property(monkeypatch, capsys):
     assert cli.main(args()) == 2
     assert json.loads(capsys.readouterr().out) == {
         "refused": "INPUT_CHANGED", "message": str(error)}
+
+
+@pytest.mark.parametrize("headroom", [-1, 0, 1])
+def test_prepare_and_cli_memory_admission_have_identical_refusal(monkeypatch, headroom):
+    from tests.v2.research.test_magnitude_search_request import request as request_fixture
+    from tests.v2.research.test_size_review_contract import panel_request
+
+    from engine.v2.research.magnitude_panel_qualified_table import recipe
+
+    request = request_fixture()
+    request["feature_dictionary_hash"] = recipe("HMO")["dictionary_hash"]
+    panel = panel_request()
+    panel.update(feature_snapshot_id=request["feature_snapshot_id"], history_snapshot=request["history_snapshot_id"])
+    request["limits"]["child"]["memory_bytes"] = request["limits"]["parent"]["memory_bytes"] + headroom
+    monkeypatch.setattr(binding, "_sources", lambda: {})
+    monkeypatch.setattr(binding, "prepare_native_registration", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("admitted limits")))
+    monkeypatch.setattr(cli, "resource", SimpleNamespace(RLIM_INFINITY=-1, RLIMIT_AS=0,
+        getrlimit=lambda *a: (-1, -1), setrlimit=lambda *a: None))
+    monkeypatch.setattr(cli, "signal", SimpleNamespace(SIGALRM=14, signal=lambda *a: None, alarm=lambda *a: None))
+    def prepare():
+        binding.prepare(None, None, request, panel, scope="test",
+            training_start="2020-01-01", labels_before="2025-01-01")
+    if headroom <= 0:
+        cli._contain(request)
+        with pytest.raises(RuntimeError, match="admitted limits"):
+            prepare()
+    else:
+        for call in (lambda: cli._contain(request), prepare):
+            with pytest.raises(OpsError) as caught:
+                call()
+            assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+            assert caught.value.problem.message == "child memory must not exceed inherited parent limit"
+
+
+def test_bounded_registry_hash_preserves_exact_valid_source_identity(monkeypatch):
+    from pathlib import Path
+
+    from engine.v2.foundation import canonical_json
+    from engine.v2.ops import fingerprints
+
+    root = Path(binding.__file__).resolve().parents[1]
+    assert len(binding.read_bounded_state(root / "engine/models/registry.json", 16 * 1024 * 1024)) < 16 * 1024 * 1024
+    expected = fingerprints.source_closure(root, ["experiments/size_search.py",
+        "experiments/magnitude_search_worker.py", "engine/models/registry.json"])
+    monkeypatch.setattr(fingerprints, "file_hash", lambda *a, **k: pytest.fail("uncapped registry fingerprint"))
+    assert canonical_json(binding._source_files()) == canonical_json(expected)
+
+
+def startup_probe(monkeypatch, path):
+    import importlib.util
+
+    from engine.v2.models import frozen_state_io
+
+    native_read = frozen_state_io.read_bounded_state
+    def registry_read(requested, limit):
+        assert requested.name == "registry.json" and limit == 16 * 1024 * 1024
+        return native_read(path, limit)
+    monkeypatch.setattr(frozen_state_io, "read_bounded_state", registry_read)
+    spec = importlib.util.spec_from_file_location("size_binding_startup_probe", binding.__file__)
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    return probe
+
+
+@pytest.mark.parametrize("kind,code", [("oversized", "RESOURCE_LIMIT_EXCEEDED"), ("missing", "RESOURCE_UNAVAILABLE"),
+                                      ("fifo", "RESOURCE_UNAVAILABLE")])
+def test_failed_real_module_startup_then_cli_refuses_and_never_rebases(monkeypatch, tmp_path, capsys, kind, code):
+    import os
+    from pathlib import Path
+
+    from tests.v2.research.test_magnitude_search_request import request as request_fixture
+    from tests.v2.research.test_size_review_contract import panel_request
+
+    valid = (Path(binding.__file__).resolve().parents[1] / "engine/models/registry.json").read_bytes()
+    path = tmp_path / "registry.json"
+    if kind == "oversized":
+        with path.open("wb") as stream:
+            stream.truncate(16 * 1024 * 1024 + 1)
+    elif kind == "fifo":
+        os.mkfifo(path)
+    probe = startup_probe(monkeypatch, path)
+    assert probe._IMPORTED_SOURCES is None
+    setup_cli(monkeypatch)
+    monkeypatch.setattr(cli, "_read_document", lambda p: panel_request() if p == "panel" else request_fixture())
+    monkeypatch.setattr(cli, "prepare", probe.prepare)
+    monkeypatch.setattr(probe, "comparison_recipe", lambda: pytest.fail("recipe before source admission"))
+    monkeypatch.setattr(probe, "prepare_native_registration", lambda *a, **k: pytest.fail("source failure admitted native data"))
+    argv = args("preflight") + ["--panel-request", "panel", "--scope", "test",
+        "--training-start", "2020-01-01", "--labels-before", "2025-01-01"]
+    assert cli.main(argv) == 2
+    refusal = json.loads(capsys.readouterr().out)
+    assert refusal["refused"] == code and str(path) not in refusal["message"]
+    path.unlink(missing_ok=True)
+    path.write_bytes(valid)
+    assert cli.main(argv) == 2
+    assert json.loads(capsys.readouterr().out)["refused"] == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert probe._IMPORTED_SOURCES is None
+
+
+def test_registry_migration_refuses_before_recipe_and_exact_restoration_replays(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    valid = (Path(binding.__file__).resolve().parents[1] / "engine/models/registry.json").read_bytes()
+    path = tmp_path / "registry.json"
+    path.write_bytes(valid)
+    probe = startup_probe(monkeypatch, path)
+    original = dict(probe._IMPORTED_SOURCES)
+    document = {"schema_version": probe.SCHEMA, "environment": probe._IMPORTED_ENVIRONMENT,
+        "source_closure": original, "size_comparison": {"original": True}}
+    monkeypatch.setattr(probe, "comparison_recipe", lambda: pytest.fail("migrated recipe constructed before identity check"))
+    assert b"20260829" in valid
+    path.write_bytes(valid.replace(b"20260829", b"20260830"))
+    with pytest.raises(OpsError) as caught:
+        probe.verify_installation(document)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    path.write_bytes(valid)
+    calls = []
+    monkeypatch.setattr(probe, "comparison_recipe", lambda: calls.append("recipe") or {"original": True})
+    probe.verify_installation(document)
+    assert calls == ["recipe"] and probe._IMPORTED_SOURCES == original
+
+
+def test_fingerprint_programming_error_remains_visible(monkeypatch):
+    monkeypatch.setattr(binding, "_source_files", lambda: (_ for _ in ()).throw(TypeError("bug")))
+    with pytest.raises(TypeError, match="bug"):
+        binding._sources()

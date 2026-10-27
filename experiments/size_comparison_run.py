@@ -7,11 +7,10 @@ from engine.v2.foundation import canonical_json, content_hash
 from engine.v2.models.no_fit import forbid_fitting
 from engine.v2.ops.errors import fail
 from engine.v2.ops.migrations import require_current
-from experiments.magnitude_search_evidence import fit_evidence
 from experiments.magnitude_search_execution import run_fitted_trial
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
-from experiments.size_comparator import COLUMNS, _values, recipe
+from experiments.size_comparator import COLUMNS, _values, fit_evidence, recipe
 from experiments.size_job_budget import resolved_limits
 from experiments.size_search_binding import fold_inputs, prepare_plan
 
@@ -80,7 +79,7 @@ def execute(conn, store, repository, registration, plan, fold, *, limits, replay
         forbid_legacy_fitting("size_comparison.execute")
         resolved_limits(conn, store, registration, plan, limits)
     inputs = fold_inputs(repository, registration.document, fold)
-    expected = fit_evidence(inputs, fold, plan, execution)
+    expected = fit_evidence(inputs, fold, plan)
     if terminal is not None:
         _equal(sorted(terminal) if isinstance(terminal, dict) else None, ["inputs_id", "result"])
         _equal(read("start"), started)

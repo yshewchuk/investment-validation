@@ -392,8 +392,10 @@ def test_panel_contract_sources_and_tests_select_research_mutations():
     paths = ["engine/v2/research/magnitude_panel_table.py", "engine/v2/research/magnitude_panel_plan.py",
              "tests/v2/research/test_magnitude_panel_contract.py"]
     assert paths[-1] in config["modules"]["research"]["tests"]
+    graph = mutation_pilot.build_import_graph()
     for path in paths:
-        assert mutation_pilot.changed_modules(config, names, [path]) == ["research"]
+        expected = ["research"] if path.startswith("tests/") else ["ops_cli", "ops_final_holdout", "research"]
+        assert mutation_pilot.changed_modules(config, names, [path], graph=graph) == expected
     assert mutation_pilot.changed_modules(config, names, ["README.md"]) == []
     assert mutation_pilot.changed_modules(config, names, []) == []
 

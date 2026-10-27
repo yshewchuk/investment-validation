@@ -65,6 +65,25 @@ def _values(row):
     return [values[name] for name in FEATURES], None
 
 
+def fit_evidence(inputs, fold, plan):
+    """Bind eligible numeric arrays; markers do not prove estimator entry."""
+    indexed = {(r["event_id"], r["horizon_sessions"]): r for r in inputs["features"]}
+    result = []
+    for horizon in plan["horizons"]:
+        groups = [[(r["event_id"], _values(indexed[r["event_id"], horizon])[0], float(r["absolute_move_pct"]))
+                   for r in inputs["training"] if 0 <= r["absolute_move_pct"] <= 200],
+                  [(event, _values(indexed[event, horizon])[0], None) for event in fold["evaluation_event_ids"]]]
+        groups = [[item for item in group if item[1] is not None] for group in groups]
+        documents = [{"columns": FEATURES, "row_keys": [[e, indexed[e, horizon]["context_id"], horizon]
+            for e, _, _ in group], "values": [[float(v) for v in values] for _, values, _ in group]} for group in groups]
+        documents[0]["absolute_move_pct"] = [label for _, _, label in groups[0]]
+        result.append({"horizon_sessions": horizon, "matrix_scope": "eligible_incumbent_arrays",
+            "fit_eligible": len(groups[0]) >= 500, "training_event_ids": [e for e, _, _ in groups[0]],
+            "evaluation_event_ids": [e for e, _, _ in groups[1]], "training_matrix_id": content_hash(documents[0]),
+            "prediction_matrix_id": content_hash(documents[1])})
+    return result
+
+
 def forecasts(indexed, train, fold, plan, execution, *, progress):
     """Preserve abstention and negative blends; never apply target masks to evaluation."""
     if execution["fit_recipe"] != recipe():
@@ -73,14 +92,8 @@ def forecasts(indexed, train, fold, plan, execution, *, progress):
     train_ids, test_ids = train.event_id.tolist(), fold["evaluation_event_ids"]
     labels = train.absolute_move_pct.to_numpy(dtype=float)
     fallback = mean(labels.tolist())
-    for horizon in plan["horizons"]:
-        documents = [{"columns": execution["features"], "row_keys": [[event, indexed[event, horizon]["context_id"], horizon]
-            for event in ids], "values": [[indexed[event, horizon][name] for name in execution["features"]]
-            for event in ids]} for ids in (train_ids, test_ids)]
-        documents[0]["absolute_move_pct"] = labels.tolist()
-        fit = {"horizon_sessions": horizon, "training_event_ids": train_ids,
-            "evaluation_event_ids": test_ids, "training_matrix_id": content_hash(documents[0]),
-            "prediction_matrix_id": content_hash(documents[1])}
+    evidence = fit_evidence({"features": list(indexed.values()), "training": train.to_dict("records")}, fold, plan)
+    for horizon, fit in zip(plan["horizons"], evidence):
         progress("started", fit)
         training = [(event, _values(indexed[event, horizon])[0], label) for event, label in zip(train_ids, labels)]
         training = [(event, values, label) for event, values, label in training if values is not None and 0 <= label <= 200]
@@ -88,11 +101,11 @@ def forecasts(indexed, train, fold, plan, execution, *, progress):
         model = None
         if len(training) >= 500:
             with threadpool_limits(limits=1):
-                model = fit_recipe_estimator(native_recipe(), np.array([v for _, v, _ in training]),
+                model = fit_recipe_estimator(native_recipe(), np.array([v for _, v, _ in training], dtype=float),
                                             np.array([y for _, _, y in training]))
         complete = [(event, values) for event, values, reason in evaluated if reason is None]
         estimates = {} if model is None or not complete else dict(zip([e for e, _ in complete],
-            model.predict(np.array([v for _, v in complete]))))
+            model.predict(np.array([v for _, v in complete], dtype=float))))
         for event, values, reason in evaluated:
             reason = reason or ("insufficient_training" if model is None else None)
             value = None if reason else float(estimates[event])
