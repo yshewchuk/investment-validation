@@ -363,6 +363,16 @@ def _write_chain_retry(retry: dict[str, set[str]]) -> None:
         write_text_atomic(
             CHAIN_RETRY_PATH,
             json.dumps({d: sorted(ts) for d, ts in sorted(retry.items())}, indent=1))
+        # write_text_atomic fsyncs the temp FILE, but the memo's name lands via
+        # os.replace — a rename recorded in the containing directory. Without
+        # syncing that directory the swap itself can be lost on power failure.
+        # A failed sync is the same lost-memo class as a failed write (the
+        # bytes are on disk either way), so it shares the handler below.
+        fd = os.open(CHAIN_RETRY_PATH.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
     except OSError as exc:  # a lost memo costs a re-buy window, never a crashed nightly
         print(f"[chains] could not write {CHAIN_RETRY_PATH.name}: {exc}", file=sys.stderr)
 
@@ -675,8 +685,12 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                 # date; without persisting before the raise the cut-off tail
                 # is lost. CredentialRotated is a FetchError subclass: without
                 # this arm the generic arm below would treat a dead key as
-                # transient and keep the session buying against it. It stops
-                # the run instead — run_nightly turns it into a NightlyStop.
+                # transient and keep the session buying against it. Both are
+                # re-raised here after the remainder is saved, and only
+                # CredentialRotated stops the run: run_nightly turns it into a
+                # NightlyStop, while QuotaExhausted reaches run_nightly's
+                # degrade arm, which records a degraded refresh and scores
+                # from cached data.
                 retry.update(wanted[start:])
                 _persist_chain_retry(stamp, retry)
                 raise
@@ -719,7 +733,7 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
         # Any other exit — KeyboardInterrupt, or a defect in the bookkeeping
         # below fetch — unwinds the whole session, so the current chunk and
         # every later unasked one must be in the retry file before it does.
-        # The stop arms above already persisted and are re-raising: re-writing
+        # The raise arms above already persisted and are re-raising: re-writing
         # the same set would only be a second write.
         if not isinstance(exc, (QuotaExhausted, CredentialRotated)):
             retry.update(wanted[start:])

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import threading
 
 import pandas as pd
@@ -197,7 +198,9 @@ def test_a_404_exception_is_final_and_never_retried(monkeypatch, tmp_path):
 
 def test_quota_cut_persists_the_unasked_remainder_then_reraises(monkeypatch, tmp_path):
     """QuotaExhausted mid-loop must not swallow the tail: the cut chunk and
-    every later unasked chunk land in the retry file before the raise."""
+    every later unasked chunk land in the retry file before it is re-raised
+    out of refresh_forward_chains — run_nightly records a degraded refresh
+    and scores from cached data (only CredentialRotated stops the run)."""
     tickers = [f"TKR{i:02d}" for i in range(25)]
 
     def fail(params):
@@ -220,7 +223,9 @@ def test_credential_rotated_persists_the_debt_then_reraises(monkeypatch, tmp_pat
     """A rotated key is a FetchError: the generic arm must not file it as
     transient and keep buying against a dead credential. Like the quota cut,
     the refused chunk and every later unasked name land in the retry file
-    before the raise (run_nightly turns it into a NightlyStop)."""
+    before the raise — but only this one stops the run: run_nightly turns a
+    CredentialRotated into a NightlyStop, where QuotaExhausted degrades the
+    refresh and scoring proceeds on cached data."""
     tickers = [f"TKR{i:02d}" for i in range(25)]
 
     def fail(params):
@@ -451,6 +456,56 @@ def test_a_memo_write_failure_is_announced_not_raised(monkeypatch, capsys, tmp_p
 
     assert out["failed"] and out["calls"] == 0, "the run completes despite the lost memo"
     assert "could not write orats_chain_retry.json" in capsys.readouterr().err
+
+
+def test_the_memo_write_fsyncs_the_containing_directory(monkeypatch, tmp_path):
+    """Atomic is not durable: write_text_atomic fsyncs the temp FILE, but the
+    memo's name arrives via os.replace — a directory entry. So once the write
+    succeeds the writer opens CHAIN_RETRY_PATH.parent and fsyncs that fd."""
+    _wire(monkeypatch, set(), tmp_path)
+    real_fsync = os.fsync
+    synced: list[os.stat_result] = []
+
+    def spy(fd):
+        synced.append(os.fstat(fd))  # stat while the fd is still open
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", spy)
+    f = _Fetcher(fail=lambda p: RuntimeError("HTTP 502"))
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+
+    assert out["failed"], "a real persist ran — the 502 owes the date"
+    parent = tmp_path.stat()
+    dirs = [st for st in synced
+            if stat.S_ISDIR(st.st_mode) and st.st_dev == parent.st_dev
+            and st.st_ino == parent.st_ino]
+    assert len(dirs) == 1, "exactly one fsync, on an fd for the memo's parent dir"
+    assert nightly._read_chain_retry() == {AS_OF: set(TICKERS)}, "the memo still lands"
+
+
+def test_an_fsync_failure_is_announced_not_raised(monkeypatch, capsys, tmp_path):
+    """The sync is a durability courtesy, not a gate: an OSError from the
+    directory fsync prints on stderr exactly like the write failure it shares
+    a handler with, and the refresh finishes normally."""
+    _wire(monkeypatch, set(), tmp_path)
+    real_fsync = os.fsync
+
+    def refuse_dirs(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("fsync refused on the directory")
+        return real_fsync(fd)  # write_text_atomic's own file fsync stays real
+
+    monkeypatch.setattr(os, "fsync", refuse_dirs)
+    f = _Fetcher(fail=lambda p: RuntimeError("HTTP 502"))
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+
+    assert out["failed"] and out["calls"] == 0, "the run completes despite the failed sync"
+    err = capsys.readouterr().err
+    assert "could not write orats_chain_retry.json" in err, \
+        "the fsync OSError is announced with the same prefix as a write failure"
+    assert "fsync refused" in err
 
 
 def test_skip_held_false_fetches_regardless(monkeypatch, tmp_path):
