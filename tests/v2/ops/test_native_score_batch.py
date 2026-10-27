@@ -12,11 +12,12 @@ import pytest
 from tests.v2.ops.analog_fixtures import with_synthetic_exact_analogs
 
 from engine.v2.contracts import ScoreRecord
-from engine.v2.foundation import content_hash, to_document
-from engine.v2.models.serving_fold_preflight import describe_size_fold
-from engine.v2.models.serving_folds import SizeFoldPolicy
 from tests.fixtures.size_serving_header import HEADER
-from tests.v2.models.serving_fold_support import fold_bytes, fold_name, release_inputs
+from tests.v2.models.serving_fold_support import (
+    release_inputs,
+    staged_fold_object,
+    write_catalog,
+)
 from engine.v2.models import (
     ArtifactInventoryMember,
     ArtifactMember,
@@ -78,18 +79,6 @@ def _size_cache(*, fold_start="2026-01-01"):
     cache.update(estimator=_SyntheticSizeEstimator(), pool_pred=np.array([0.1, 0.2]),
                  pool_res=np.array([-0.01, 0.02]), fold_start=fold_start)
     return cache
-
-
-def _write_empty_catalog(root, release_id: str, fold_object=None) -> None:
-    """Write the required catalog, optionally with one synthetic size fold."""
-    members = ([] if fold_object is None else [{
-        "member_id": "tier4_folds:size", "status": "STAGED", "objects": [fold_object],
-    }])
-    body = {"schema_version": "phase5_staged_release.v1.0", "release_id": release_id,
-            "deployment_id": "d1", "members": members, "sources": {}}
-    body["manifest_hash"] = content_hash(
-        {k: v for k, v in body.items() if k != "manifest_hash"})
-    (root / "phase5_release.json").write_text(json.dumps(body, sort_keys=True))
 
 
 def _stage_release(tmp_path, *, roles=("driver", "gate"),
@@ -162,23 +151,9 @@ def _stage_release(tmp_path, *, roles=("driver", "gate"),
     manifest = deployment.stage_release(dep_root, release, inventory, payloads)
     deployment.mark_staging_succeeded(dep_root, release_id)
     deployment.promote(dep_root, release_id)
-    fold_object = None
-    if cache is not None:
-        raw = fold_bytes(cache)
-        policy = SizeFoldPolicy(
-            model_id=cache["model_id"], feature_order=tuple(cache["features"]),
-            panel_sha256=cache["tier3_snapshot"], interval_floor=0.0)
-        descriptor = describe_size_fold(raw, fold_name(cache), policy, manifest)
-        path = dep_root / descriptor.estimator.path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(raw)
-        fold_object = {
-            "path": descriptor.estimator.path,
-            "content_hash": descriptor.estimator.content_hash,
-            "name": fold_name(cache), "bytes": len(raw),
-            "serving_fold": to_document(descriptor),
-        }
-    _write_empty_catalog(tmp_path, release_id, fold_object)
+    fold_object = (None if cache is None
+                   else staged_fold_object(cache, manifest, dep_root))
+    write_catalog(tmp_path, release_id, fold_object)
     return resolve_release_binding(tmp_path)
 
 
