@@ -18,6 +18,7 @@ NIGHTLY_GRAPH = {
     "model_evidence": ("features",), "export": ("decision_commit",),
     "projection": ("export", "model_evidence"), "selfcheck": ("projection",),
     "engineering": (), "publication": ("selfcheck", "engineering"),
+    "serving_projection": ("publication",),
     "delivery": ("publication",), "backup": ("decision_commit",),
 }
 

@@ -233,6 +233,14 @@ class MaterializeParameters:
     scratch_estimate_bytes: int = 0
 
 
+@dataclass(frozen=True)
+class ServingProjectionParameters(LegacyParameters):
+    snapshot_id: str = ""
+    requested_as_of: str = ""
+    resolved_as_of: str = ""
+    bundle_format: str = "legacy"
+
+
 #: Kinds whose complete reads ``LEGACY_SCORE_READ_PLAN_V1`` declares
 #: (``FeatureContext.load`` + ``Scorer`` + ``score_calendar(alt_strikes=0)``).
 #: ``legacy_render``/``legacy_selfcheck`` (real shadow nightly attempt 19 fix)
@@ -465,6 +473,13 @@ def registry():
             retry=RetryPolicy("bounded", 3, (5, 30)),
             checkpoint_contract="effect_receipt.v1.0",
             namespaces=frozenset({"shadow", "smoke"})))
+    kinds.append(JobKind(
+        name="serving_projection", worker="serving_projection",
+        parameters=ServingProjectionParameters,
+        resource_classes=frozenset({"projection"}), effects=("staged",),
+        retry=RetryPolicy("bounded", 2, (5, 30)),
+        checkpoint_contract="serving_projection_result.v1.0",
+        namespaces=frozenset({"shadow", "smoke"})))
     kinds.append(JobKind(
         name="retrain_step", worker="retrain_step", parameters=RetrainStepParameters,
         resource_classes=frozenset({"delivery"}), effects=("staged",),
