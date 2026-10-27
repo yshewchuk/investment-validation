@@ -229,6 +229,14 @@ def test_invalid_decoded_chain_spot_is_refused(tmp_path, chain_spot):
     assert "not-a-spot" not in str(excinfo.value)
 
 
+def test_decoded_input_without_chain_spot_keeps_field_absent(tmp_path):
+    doc = _serialized_native_doc(tmp_path, {})
+
+    loaded = _load_native_score_inputs(doc)
+
+    assert "chain_spot" not in loaded.context
+
+
 def test_decoded_numeric_chain_spot_is_normalized_without_mutating_document(tmp_path):
     doc = _serialized_native_doc(tmp_path, {})
     doc["context"]["chain_spot"] = "64.25"

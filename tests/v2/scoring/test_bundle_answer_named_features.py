@@ -25,10 +25,10 @@ def _kwargs(**overrides):
         quote_rows=[
             {"right": "C", "strike": 100.0, "expiry": "2026-01-16",
              "bid": 1.0, "ask": 1.2, "observed_at": "2026-01-15",
-             "chain_spot": 100.0},
+             "chain_spot": 95.0},
             {"right": "P", "strike": 100.0, "expiry": "2026-01-16",
              "bid": 1.1, "ask": 1.3, "observed_at": "2026-01-15",
-             "chain_spot": 100.0},
+             "chain_spot": 95.0},
         ],
         quote_status=None,
         feature_names=("signal", "pred_abs_move", "entry_cost_pct"),
@@ -47,8 +47,8 @@ def test_calculated_answer_name_in_feature_order_builds_and_scorer_computes_it()
     assert set(bundle.feature_missing_mask) == {"signal", "pred_abs_move"}
     values = assemble_native_values(
         build_native_score_inputs(bundle), strategy="STR-THRU")
-    # Independent expectation: mid(call)=1.1 plus mid(put)=1.2 over spot 100.
-    assert values["entry_cost_pct"] == pytest.approx((1.1 + 1.2) / 100.0 * 100.0)
+    # Chain spot differs from the calendar close, so a close fallback fails.
+    assert values["entry_cost_pct"] == pytest.approx((1.1 + 1.2) / 95.0 * 100.0)
 
 
 def test_answer_name_staged_in_a_source_row_is_still_refused_with_paths():

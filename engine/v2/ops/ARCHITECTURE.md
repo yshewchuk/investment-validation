@@ -39,7 +39,7 @@ The operator interface is the versioned command protocol exposed by `engine/v2/o
   `promote` takes `--release-root`, `--release-id` and `--expected-previous-release-id`;
   `rollback` takes `--release-root` and refuses `--release-id`. It pins the rollback target at plan time; only `NoPriorRelease` leaves the target unset. A submitted rollback with an incumbent but no pinned target is refused as typed `VALIDATION_FAILED` before pointer or history mutation. Other resolver errors become typed `VALIDATION_FAILED`.
 - `submit --plan --idempotency-key`
-- `rescore --request --native-inputs` — read-only, no provider pulls or fitting; decoding validates optional `context.chain_spot` before scoring: a supplied value must coerce to a finite positive float (booleans excluded), is normalized to float, and otherwise refuses as `DocumentError(BAD_VALUE)` at `$.context.chain_spot`; absent remains absent
+- `rescore --request --native-inputs` — read-only, no provider pulls or fitting; native-input decoding and the public `build_native_score_inputs` builder validate optional `context.chain_spot` before scoring: a supplied value must coerce to a finite positive float (booleans excluded), is normalized to float, and otherwise refuses as `DocumentError(BAD_VALUE)` at `$.context.chain_spot`; absent remains absent
 - `capture-inputs --as-of --tickers --context-tickers --year-start --year-end --source-root --output`
 - `reconcile <job_id> --expected-attempt`; `reclaim [--apply]` (dry run by default; see "Attempt staging reclaim")
 - `provider-account --account --remaining --live-reserve`

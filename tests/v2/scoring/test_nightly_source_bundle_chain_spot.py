@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 
+from engine.v2.foundation import DocumentError
 from engine.v2.scoring.financial import financial_diagnostics
 from engine.v2.scoring.native_chooser import derive_chooser_columns
 from engine.v2.scoring.nightly_source_bundle import (
@@ -64,6 +65,35 @@ def test_context_carries_the_staged_chain_spot():
     assert bundle.context["chain_spot"] == 87.5
     assert isinstance(bundle.context["chain_spot"], float)
     assert bundle.context["spot"] == _CALENDAR_CLOSE
+
+
+@pytest.mark.parametrize("spot", [
+    None, float("nan"), float("inf"), -float("inf"), 0.0, -10.0,
+    True, "not-a-spot", 10**400,
+])
+def test_source_bundle_builder_refuses_invalid_chain_spot(spot):
+    bundle = assemble_nightly_source_bundle(
+        **_kwargs(quote_rows=_rows(chain_spot=87.5)))
+    bundle.context["chain_spot"] = spot
+
+    with pytest.raises(DocumentError) as excinfo:
+        build_native_score_inputs(bundle)
+
+    assert excinfo.value.code == "BAD_VALUE"
+    assert excinfo.value.path == "$.context.chain_spot"
+    assert bundle.context["chain_spot"] is spot
+
+
+def test_source_bundle_builder_normalizes_chain_spot_without_mutating_bundle():
+    bundle = assemble_nightly_source_bundle(
+        **_kwargs(quote_rows=_rows(chain_spot=87.5)))
+    bundle.context["chain_spot"] = "64.25"
+
+    inputs = build_native_score_inputs(bundle)
+
+    assert inputs.context["chain_spot"] == 64.25
+    assert type(inputs.context["chain_spot"]) is float
+    assert bundle.context["chain_spot"] == "64.25"
 
 
 def test_chain_spot_drives_entry_cost_pct_while_calendar_spot_is_preserved():
