@@ -727,7 +727,10 @@ def _parse_source_trees(
 
 
 def check_files(
-    files: dict[str, bytes], *, transitive_baseline: frozenset[str] | None = None
+    files: dict[str, bytes],
+    *,
+    transitive_baseline: frozenset[str] | None = None,
+    transitive_baseline_ceiling: frozenset[str] | None = None,
 ) -> list[Finding]:
     """Return every static violation; syntax and encoding errors are findings."""
     findings: list[Finding] = []
@@ -877,6 +880,15 @@ def check_files(
             if not stripped or stripped.startswith("#"):
                 continue
             baseline_lines.setdefault(stripped, line_number)
+
+    if transitive_baseline_ceiling is not None:
+        for entry in sorted(baseline - transitive_baseline_ceiling):
+            findings.append(Finding(
+                EXPERIMENT_BASELINE_PATH,
+                baseline_lines.get(entry, 1),
+                "transitive-baseline-growth",
+                f"baseline entry exceeds initial ceiling: {entry}",
+            ))
 
     for key in sorted(chains):
         if key not in baseline:
@@ -1088,6 +1100,41 @@ def _baseline_entries(files: dict[str, bytes]) -> list[str]:
     return baseline_entries
 
 
+def _baseline_ceiling(root: Path) -> frozenset[str]:
+    """Load the first committed baseline as the maximum allowed debt."""
+    try:
+        history = subprocess.run(
+            [
+                "git", "log", "--reverse", "--diff-filter=A", "--format=%H",
+                "--", EXPERIMENT_BASELINE_PATH,
+            ],
+            cwd=root,
+            capture_output=True,
+            check=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+        commits = history.stdout.decode("ascii").splitlines()
+        if not commits:
+            raise IsolationCheckError(
+                "complete tracked-source scan refused: baseline has no committed origin"
+            )
+        seed = subprocess.run(
+            ["git", "show", f"{commits[0]}:{EXPERIMENT_BASELINE_PATH}"],
+            cwd=root,
+            capture_output=True,
+            check=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except IsolationCheckError:
+        raise
+    except (OSError, UnicodeDecodeError, subprocess.SubprocessError) as exc:
+        raise IsolationCheckError(
+            f"complete tracked-source scan refused: cannot load baseline ceiling: {exc}"
+        ) from exc
+    entries = _baseline_entries({EXPERIMENT_BASELINE_PATH: seed.stdout})
+    return frozenset(entries)
+
+
 def scan_repository(root: Path = ROOT) -> list[Finding]:
     """Read every tracked Python source; refuse if any part of the scan fails."""
     files = _load_sources(root)
@@ -1096,8 +1143,12 @@ def scan_repository(root: Path = ROOT) -> list[Finding]:
             f"complete tracked-source scan refused: missing baseline "
             f"{EXPERIMENT_BASELINE_PATH}"
         )
+    baseline = frozenset(_baseline_entries(files))
+    ceiling = _baseline_ceiling(root)
     return check_files(
-        files, transitive_baseline=frozenset(_baseline_entries(files))
+        files,
+        transitive_baseline=baseline,
+        transitive_baseline_ceiling=ceiling,
     )
 
 

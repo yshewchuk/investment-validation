@@ -763,8 +763,32 @@ def test_transitive_import_chain_without_baseline_is_reported():
 
 def test_exact_transitive_baseline_chain_passes():
     assert isolation.check_files(
-        _transitive_graph(), transitive_baseline=frozenset({_TRANSITIVE_CHAIN})
+        _transitive_graph(),
+        transitive_baseline=frozenset({_TRANSITIVE_CHAIN}),
+        transitive_baseline_ceiling=frozenset({_TRANSITIVE_CHAIN}),
     ) == []
+
+
+def test_new_live_chain_in_baseline_beyond_ceiling_is_reported():
+    files = _transitive_graph()
+    files["experiments/other.py"] = b"import engine.v2.ops.helper\n"
+    new_chain = (
+        "experiments/other.py -> experiments.other -> "
+        "engine.v2.ops.helper -> engine.v2.ledger"
+    )
+    findings = isolation.check_files(
+        files,
+        transitive_baseline=frozenset({_TRANSITIVE_CHAIN, new_chain}),
+        transitive_baseline_ceiling=frozenset({_TRANSITIVE_CHAIN}),
+    )
+    assert _rules(findings) == {"transitive-baseline-growth"}
+    assert [item.path for item in findings] == [
+        "checks/live_experiment_isolation.baseline"
+    ]
+    assert [item.line for item in findings] == [1]
+    assert [item.detail for item in findings] == [
+        f"baseline entry exceeds initial ceiling: {new_chain}"
+    ]
 
 
 def test_stale_transitive_baseline_entry_is_reported():
