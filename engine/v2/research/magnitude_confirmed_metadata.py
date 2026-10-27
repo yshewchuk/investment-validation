@@ -7,7 +7,7 @@ from engine.v2.contracts.data import DataQuery, KeyPredicate, TableContractRef
 from engine.v2.data import bounded_snapshot, manifests, query
 from engine.v2.data.errors import fail
 from engine.v2.foundation import content_hash, iter_canonical_json, to_document
-from engine.v2.research import _confirmed_metadata as reducer
+from engine.v2.research import confirmed_metadata as reducer
 from engine.v2.research import progress
 from engine.v2.research.snapshot_inputs import admit_snapshot
 
@@ -35,7 +35,7 @@ def _request(tickers, limits):
     if type(tickers) is not list:
         raise fail("CONTRACT_MISMATCH", "tickers must be a nonempty plain list")
     _cap(len(tickers), limits, "max_tickers")
-    return reducer._tickers(tickers), dict(limits)
+    return reducer.validate_tickers(tickers), dict(limits)
 
 
 def _bytes(document, limit):
@@ -103,18 +103,19 @@ def _inventory(session, snapshot, tickers, limits):
 
 def _scan(session, plans, tickers, limits, counts):
     frames, retained_rows, retained_bytes = [], 0, 0
-    meter = progress.Progress("confirmed metadata selected rows", counts["candidate_rows"])
+    meter = progress.Progress("confirmed metadata partitions", len(plans), min_items=0)
     for plan in plans:
         for batch in session.scan(plan, table_name=_TABLE,
                                   max_object_bytes=limits["max_object_bytes"]):
             _cap(retained_rows + batch.num_rows, limits, "max_retained_rows")
             frame = batch.to_pandas()
-            rows, _ = reducer._rows(frame, set(tickers))
+            rows, _ = reducer.metadata_rows(frame, tickers=tickers)
             for row in rows:
                 retained_bytes += _bytes(row, limits["max_retained_metadata_bytes"] - retained_bytes)
             retained_rows += len(rows)
             frames.append(frame)
-            meter.tick(len(rows))
+            meter.tick(0)  # Bounded heartbeat while the partition is still provisional.
+        meter.tick()
     empty = pd.DataFrame(columns=_COLUMNS)
     empty["event_date"] = pd.Series(dtype="datetime64[ns]")
     events = pd.concat(frames, ignore_index=True) if frames else empty
@@ -136,7 +137,9 @@ def build_index(repository, snapshot, *, tickers, limits):
                 limits={k: limits[k] for k in _CATALOG_LIMITS}) as session:
             source, plans, counts = _inventory(session, snapshot, tickers, limits)
             progress.decision("confirmed metadata index",
-                f"{len(plans)} partitions; {counts['candidate_rows']} candidate rows")
+                f"{len(plans)} partitions; {counts['candidate_rows']} candidate rows; "
+                f"effective batch rows {min((p.max_batch_rows for p in plans), default=0)}"
+                f"..{max((p.max_batch_rows for p in plans), default=0)}")
             sequences = _scan(session, plans, tickers, limits, counts)
         document = {"schema_version": "magnitude_confirmed_metadata.v1",
             "policy": {"confirmation": "src_orats_and_session.v1", "warmup_events": 4,

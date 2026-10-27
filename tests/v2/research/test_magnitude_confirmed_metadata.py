@@ -5,6 +5,7 @@ import sys
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime
+from itertools import count
 from types import SimpleNamespace
 
 import pytest
@@ -106,6 +107,59 @@ def refused(code, call):
 
 def forbidden(*_, **__):
     pytest.fail("forbidden source access")
+
+
+def capture_progress(monkeypatch):
+    """Exercise real progress formatting with deterministic elapsed time."""
+    meters = {}
+    native = index.progress.Progress
+    def progress(name, total, **kwargs):
+        ticks = count(0, 31)
+        meter = native(name, total, clock=lambda: next(ticks), **kwargs)
+        meters[name] = meter
+        return meter
+    monkeypatch.setattr(index.progress, "Progress", progress)
+    return meters
+
+
+def assert_diagnostic(actual, expected):
+    assert actual.problem.code == expected.problem.code
+    assert actual.problem.category == expected.problem.category
+    assert actual.problem.retryable is expected.problem.retryable
+    assert actual.problem.stage == expected.problem.stage
+    assert actual.problem.message == expected.problem.message
+    assert actual.problem.details == expected.problem.details
+    assert str(actual) == str(expected)
+
+
+@pytest.mark.parametrize("batch, effective", [(1, "1..1"), (3, "2..3"), (100_000, "2..4")])
+def test_progress_counts_exhausted_partitions_not_selected_rows(source, monkeypatch, capsys, batch, effective):
+    fixture = source()
+    meters = capture_progress(monkeypatch)
+    scan = bounded_snapshot.BoundedSnapshot.scan
+    completed = []
+    def provisional(session, query, **kwargs):
+        position = len(completed)
+        for item in scan(session, query, **kwargs):
+            assert meters["confirmed metadata partitions"].done == position
+            yield item
+            assert meters["confirmed metadata partitions"].done == position
+        completed.append(query)
+    monkeypatch.setattr(bounded_snapshot.BoundedSnapshot, "scan", provisional)
+    result = build(fixture, limits=dict(LIMITS, max_batch_rows=batch))
+    assert result["counts"]["candidate_rows"] == 8
+    assert result["counts"]["selected_rows"] == 7
+    assert set(meters) == {"confirmed metadata preflight", "confirmed metadata partitions"}
+    assert all(meter.done == meter.total == 3 for meter in meters.values())
+    assert len(completed) == 3
+    logged = capsys.readouterr()
+    assert logged.out == ""
+    assert "[confirmed metadata index] start" in logged.err
+    assert "[confirmed metadata index] done in" in logged.err
+    assert f"3 partitions; 8 candidate rows; effective batch rows {effective}" in logged.err
+    assert "[confirmed metadata partitions] 3/3," in logged.err
+    assert "elapsed" in logged.err and "/s, ETA" in logged.err and "peak RSS" in logged.err
+    assert "7/8" not in logged.err
 
 
 def test_native_complete_proof_exact_shape_source_and_ordinal_history(source):
@@ -240,8 +294,9 @@ def test_retained_counts_bytes_and_full_proof_caps(source):
 
 
 @pytest.mark.parametrize("groups", [[], [("2020", [])]])
-def test_empty_snapshot_and_zero_population_partition(source, monkeypatch, groups):
+def test_empty_snapshot_and_zero_population_partition(source, monkeypatch, capsys, groups):
     fixture = source(groups, unrelated=False)
+    meters = capture_progress(monkeypatch)
     requests = []
     native = bounded_snapshot.BoundedSnapshot.scan
     def scan(session, query, **kwargs):
@@ -254,6 +309,15 @@ def test_empty_snapshot_and_zero_population_partition(source, monkeypatch, group
     assert all(sequence["status"] == "absent_in_snapshot" for sequence in result["sequences"])
     assert len(requests) == len(groups)
     assert all(query.max_result_rows == 0 and query.max_batch_rows == 1 for query in requests)
+    assert all(meter.done == meter.total == len(groups) for meter in meters.values())
+    logged = capsys.readouterr()
+    effective = "1..1" if groups else "0..0"
+    assert f"{len(groups)} partitions; 0 candidate rows; effective batch rows {effective}" in logged.err
+    assert "[confirmed metadata index] start" in logged.err
+    assert "[confirmed metadata index] done in" in logged.err
+    assert logged.out == ""
+    if groups:
+        assert "[confirmed metadata partitions] 1/1," in logged.err
 
 
 def test_same_columns_different_exact_contract_refuses_without_objects(source, monkeypatch):
@@ -282,6 +346,7 @@ def test_canonical_year_native_candidate_mismatch_refuses_without_partial_proof(
 
 def test_late_native_failure_preserves_full_envelope_and_closes_session(source, monkeypatch, capsys):
     fixture = source()
+    meters = capture_progress(monkeypatch)
     native = bounded_snapshot.BoundedSnapshot.scan
     primary = errors.fail("RESOURCE_UNAVAILABLE", "synthetic complete native diagnostic",
         stage="synthetic-stage", details={"why": ["synthetic-secret-not-for-logs", 3]})
@@ -297,12 +362,26 @@ def test_late_native_failure_preserves_full_envelope_and_closes_session(source, 
                 closed.append(True)
         return stream()
     monkeypatch.setattr(bounded_snapshot.BoundedSnapshot, "scan", scan)
-    assert refused("RESOURCE_UNAVAILABLE", lambda: build(fixture)) is primary
+    actual = refused("RESOURCE_UNAVAILABLE", lambda: build(fixture))
+    assert actual is primary
+    assert_diagnostic(actual, primary)
+    assert actual.problem.message == "synthetic complete native diagnostic"
+    assert str(actual) == "RESOURCE_UNAVAILABLE: synthetic complete native diagnostic"
+    assert actual.problem.category == "resource" and actual.problem.retryable is True
+    assert actual.problem.stage == "synthetic-stage"
+    assert actual.problem.details == {"why": ["synthetic-secret-not-for-logs", 3]}
     assert len(sessions) == len(closed) == 3
     refused("CONTRACT_MISMATCH", lambda: sessions[0].resolve(fixture.snapshot.snapshot_id))
     assert not fixture.conn.in_transaction
     logged = capsys.readouterr()
+    assert "[confirmed metadata index] start" in logged.err
+    assert "[confirmed metadata index] failed after" in logged.err
+    assert "; refused RESOURCE_UNAVAILABLE" in logged.err
+    assert "[confirmed metadata index] done in" not in logged.err
+    assert meters["confirmed metadata partitions"].done == 2
+    assert meters["confirmed metadata partitions"].total == 3
     assert "synthetic-secret-not-for-logs" not in logged.err + logged.out
+    assert primary.problem.message not in logged.err + logged.out
 
 
 @pytest.mark.parametrize("kind", ["id", "cluster", "date_conflict", "day"])
@@ -333,13 +412,31 @@ def test_equal_opaque_clusters_across_tickers_are_not_siblings(source):
 
 def test_exact_snapshot_ref_required_and_mutation_detachment(source):
     fixture = source()
-    expected = build(fixture)
+    original_snapshot = deepcopy(fixture.snapshot)
+    actual = build(fixture)
+    expected = json.loads(canonical_json(actual))
     for invalid in (None, fixture.snapshot.snapshot_id,
                     replace(fixture.snapshot, calendar_version="other")):
         refused("SNAPSHOT_UNRESOLVED", lambda: index.build_index(fixture.holder, invalid,
             tickers=["A"], limits=dict(LIMITS)))
-    copied = deepcopy(expected)
-    copied["source"]["fragment_records"][0]["input_receipt_refs"].clear()
+    actual["source"]["snapshot"]["table_versions"].clear()
+    actual["source"]["snapshot"]["knowledge_mode_by_table"].clear()
+    actual["source"]["dataset_manifest"]["partition_logical_hashes"]["changed"] = "changed"
+    actual["source"]["dataset_manifest"]["coverage_receipt_refs"].append("changed")
+    actual["source"]["dataset_manifest"]["dataset_version_ref"]["table_contract_ref"]["definition_hash"] = "changed"
+    actual["source"]["fragment_records"][0]["input_receipt_refs"].append("changed")
+    actual["source"]["fragment_records"][0]["object_ref"]["byte_size"] = -1
+    actual["sequences"][0]["events"][0]["event_id"] = "changed"
+    actual["sequences"][0]["events"].append({"changed": True})
+    assert fixture.snapshot == original_snapshot
+    catalog_limits = {key: LIMITS[key] for key in ("max_catalog_tables", "max_catalog_fragments",
+        "max_catalog_bytes", "max_fragments", "max_partitions")}
+    with bounded_snapshot.open_bounded_snapshot(fixture.holder, original_snapshot,
+            table_name=TABLE, limits=catalog_limits) as session:
+        resolved = session.resolve_full(original_snapshot.snapshot_id)
+        assert to_document(resolved.snapshot) == expected["source"]["snapshot"]
+        assert to_document(resolved.table_manifests[TABLE]) == expected["source"]["dataset_manifest"]
+        assert [to_document(record) for record in session.fragment_records(original_snapshot, TABLE)] == expected["source"]["fragment_records"]
     assert build(fixture) == expected
 
 
@@ -381,7 +478,7 @@ def test_utf8_retention_bytes_not_character_count(source):
         limits=dict(LIMITS, max_retained_metadata_bytes=encoded - 1)))
 
 
-def test_native_catalog_integrity_error_not_relabelled(source, monkeypatch):
+def test_native_catalog_integrity_error_not_relabelled(source, monkeypatch, capsys):
     fixture = source()
     fixture.conn.execute("DROP TRIGGER data_objects_no_update")
     fixture.conn.execute("UPDATE data_objects SET byte_size=byte_size+1 WHERE object_id=?",
@@ -394,8 +491,23 @@ def test_native_catalog_integrity_error_not_relabelled(source, monkeypatch):
                 table_name=TABLE, limits=catalog_limits):
             pytest.fail("corrupt unrelated identity admitted")
     monkeypatch.setattr(objects, "read_verified_bytes", forbidden)
+    raised = []
+    reconstruct = bounded_snapshot.identity.reconstruct_catalog
+    def capture(*args, **kwargs):
+        try:
+            return reconstruct(*args, **kwargs)
+        except errors.DataError as exc:
+            raised.append(exc)
+            raise
+    monkeypatch.setattr(bounded_snapshot.identity, "reconstruct_catalog", capture)
     actual = refused(native.value.code, lambda: build(fixture))
+    assert raised == [actual] and actual is raised[0]
+    assert_diagnostic(actual, native.value)
     assert actual.problem == native.value.problem
+    logged = capsys.readouterr()
+    assert "[confirmed metadata index] failed after" in logged.err
+    assert f"; refused {actual.code}" in logged.err
+    assert actual.problem.message not in logged.err + logged.out
 
 
 def test_no_caller_admission_substitute(source):
