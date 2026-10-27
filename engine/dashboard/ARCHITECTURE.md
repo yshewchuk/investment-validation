@@ -242,25 +242,18 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   to cached data (staleness stays visible in `meta.json`) — except a rotated
   credential, which stops the run rather than burning retries against a dead
   key. `^GSPC` refresh failures use the typed refusal above.
-- **Forward-chain miss skip and retry ledger** — a ticker absent from the
-  chain response (HTTP 404 or missing from a 200) on 4 consecutive runs stops
-  being asked, except one re-probe every 7 days; data resets its count. The
-  skip is logged and reported (`miss_skipped`, with the estimated weekly call
-  saving), never silent; transient, bad-body, quota and credential failures
-  never count as misses. Counts and owed names live in
-  `reports/orats_chain_retry.json`. Transient
-  (non-404) failures, wrong-shape or non-JSON 200s and quota/abnormal-exit
-  remainders are saved there and re-asked.
-  Owed names survive a hard kill and are re-asked for
-  14 days, including after their session leaves the two-session window
-  (`older_retried`). A re-ask of an owed name is a fresh provider call (at
-  most one per name per day), never a replay of a cached bad body. A bad,
-  oversized or unwritable memo never stops the refresh (a lost memo costs a
-  re-buy window). Outcomes: transient or bad-body response → name stays owed;
-  HTTP 404 → name counted as a miss, not owed; quota exhausted → remainder saved, run degrades
-  to cached data; credential rotated → remainder saved, run stops. The chain
-  loop logs a start line, bounded progress/ETA lines and an end line (calls,
-  failed, missing, RSS) to stderr.
+- **Forward-chain retry ledger** — transient (non-404) failures, wrong-shape
+  or non-JSON 200s and quota/abnormal-exit remainders are saved to
+  `reports/orats_chain_retry.json` and re-asked for 14 days, including after
+  their session leaves the two-session window (`older_retried`); a re-ask is
+  a fresh provider call, never a replay of a cached bad body. Nothing is
+  skipped because of earlier misses. A bad, oversized or unwritable ledger
+  never stops the refresh (a lost ledger costs a re-buy window). Outcomes:
+  transient or bad-body response → name stays owed; HTTP 404 → not owed;
+  quota exhausted → remainder saved, run degrades to cached data; credential
+  rotated → remainder saved, run stops. The chain loop logs a start line,
+  bounded progress/ETA lines and an end line (calls, failed, missing, RSS)
+  to stderr.
 - **Tier-4 gap repair** — with refresh and tiers on, at most one SNAPSHOT per run:
   on the repair path it is written after the Tier-4 gap check; a degraded
   tiers step writes its own (see table); a failed write keeps the previous

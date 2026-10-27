@@ -294,89 +294,61 @@ def _remember_unknown_symbol(ticker: str) -> None:
         pass
 
 
-#: The chain ledger, one file, two sections:
-#: ``{"owed": {"<YYYY-MM-DD session>": ["TICK", ...]},``
-#: ``"misses": {"TICK": {"n": int, "last": "YYYY-MM-DD"}}}``.
+#: The chain retry ledger: ``{"owed": {"<YYYY-MM-DD session>": ["TICK", ...]}}``.
 #:
 #: ``owed`` is the retry memo: chain fetches that failed transiently or were
 #: cut off mid-session by quota, per session date. Without it a transient
-#: failure loses that date for the ticker once the session leaves the
-#: CHAIN_SESSIONS heal window. Definitive 404s are never recorded here — they
-#: have no chain. The write protocol: a fetched session OWES THE WHOLE
-#: INTENDED LIST up front — filed before its first fetch, since nothing is
-#: proven until a body lands or a 404 says there is no chain — and every exit
-#: path MERGES the run's real failures into that entry: (names on file minus
-#: the ones this call attempted) plus this call's failures, so a filtered run
-#: never erases debt it did not attempt. A SIGKILL/OOM runs no handler at all,
-#: so the up-front entry is what survives a hard kill: the next run re-asks
-#: the entire attempted list. Dates outside the heal window but inside the
-#: 14-day retention are re-asked straight from this file by
-#: :func:`refresh_forward_chains`, and every memo re-ask is fetched with the
-#: run day as ``refetch_token``: the cached body may be the malformed 200 that
-#: filed the debt, and only a new key makes the retry a fresh provider call.
-#: An owed name is never dropped by the per-ticker miss skip below: transient
-#: debt is not evidence of no chain.
-#:
-#: ``misses`` counts, per ticker, how many consecutive runs asked for it and
-#: got a definitive no-chain answer (absent from a 200 body, or a 404); see
-#: :data:`CHAIN_MISS_SKIP_AFTER`. ``last`` is the anchor date of the run that
-#: recorded the newest miss. The count moves ONCE per anchor date: a same-day
-#: rerun records no second miss. Skip age is ``(anchor - last).days`` clamped
-#: at zero, so a backdated run never re-probes a future-dated ``last``.
-#: Entries at zero are dropped and entries older
-#: than CHAIN_MISS_PRUNE_DAYS are pruned; a malformed entry is ignored, never
-#: raised. A flat ``{"<YYYY-MM-DD>": [...]}`` file — the format before the
-#: counts existed — still reads: its canonical-date keys are the ``owed``
-#: section and there are no counts.
+#: failure loses that date once the session leaves the CHAIN_SESSIONS heal
+#: window. Definitive 404s are never recorded here — they have no chain.
+#: The write protocol: a fetched session OWES THE WHOLE INTENDED LIST up
+#: front — filed before its first fetch, since nothing is proven until a
+#: body lands or a 404 says there is no chain — and every exit path MERGES
+#: the run's real failures into that entry, so a SIGKILL/OOM (which runs
+#: no handler) leaves the next run re-asking the entire attempted list.
+#: Dates past the heal window but in the 14-day retention are re-asked
+#: from this file by :func:`refresh_forward_chains`, fetched with the run
+#: day as ``refetch_token``: the cached body may be the malformed 200 that
+#: filed the debt, and only a new key makes the retry a fresh provider
+#: call. A flat ``{"<YYYY-MM-DD>": [...]}`` legacy file still reads as the
+#: owed section.
 CHAIN_RETRY_PATH = paths.REPORTS / "orats_chain_retry.json"
 
 #: Cap on the ledger's on-disk size: a file this big is not a memo anyone
 #: wrote deliberately, and parsing it would stall the refresh for no reason.
 CHAIN_RETRY_MAX_BYTES = 1_000_000
 
-#: A ``misses`` entry whose ``last`` run is this many days behind the current
-#: run's anchor is pruned: a ticker nobody has asked about for two months has
-#: no live count, and the re-probe (every :data:`CHAIN_MISS_REPROBE_DAYS`) is
-#: moot once it is not in the universe at all.
-CHAIN_MISS_PRUNE_DAYS = 60
 
+def _read_chain_retry() -> dict[str, set[str]]:
+    """The ledger's ``owed`` section; a missing or invalid file is empty.
 
-def _read_chain_ledger() -> tuple[dict[str, set[str]], dict[str, dict[str, str]]]:
-    """The ledger as ``(owed, misses)``; a missing or invalid file is empty.
-
-    Never raises. Race-free by construction: the open itself rejects symlinks
+    Never raises. Race-free by construction: the open rejects symlinks
     (``O_NOFOLLOW``) and never blocks on a FIFO (``O_NONBLOCK``), and the
-    fstat + read happen on the fd, so the inode checked is the inode read —
-    a swap of the path mid-read cannot slip a huge file past the cap. A
-    non-regular file (a symlink target aside — the path itself) or one over
-    :data:`CHAIN_RETRY_MAX_BYTES` is announced once on stderr and ignored;
-    so is an ``OSError`` at open except a missing file (ENOENT), the common
-    case of nothing owed.
-
-    ``owed`` values must be lists of names — anything else (a bare string,
-    say) is skipped for that date, not split apart. ``misses`` values must be
-    objects with a positive int ``n`` and a canonical ``YYYY-MM-DD`` ``last``;
-    anything else for a ticker is ignored for that ticker, never a crash and
-    never a partial entry: an unusable count is no evidence to skip on.
+    fstat + read happen on the fd, so the inode checked is the inode read.
+    A non-regular or over-cap file is announced once on stderr and ignored,
+    as is any ``OSError`` at open except a missing file (ENOENT) — the
+    common case of nothing owed. The top level is the section dict or the
+    legacy flat shape whose top level IS the section; values must be lists
+    of names (a bare string would split into characters, so it is skipped
+    for that date); anything else is junk, ignored, never a crash.
     """
     try:
         fd = os.open(CHAIN_RETRY_PATH,
                      os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        return {}, {}  # missing: the common case — nothing owed, nothing to say
+        return {}  # missing: the common case — nothing owed
     except OSError as exc:  # ELOOP on a symlink, ENOTDIR, EACCES, EISDIR...
         print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: {exc}", file=sys.stderr)
-        return {}, {}
+        return {}
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: not a regular file",
                   file=sys.stderr)
-            return {}, {}
+            return {}
         if st.st_size > CHAIN_RETRY_MAX_BYTES:
             print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: {st.st_size} bytes "
                   f"over the {CHAIN_RETRY_MAX_BYTES}-byte cap", file=sys.stderr)
-            return {}, {}
+            return {}
         # closefd=False: the fd stays ours to close in the finally; reading
         # one past the cap detects a file that grew between fstat and read.
         with os.fdopen(fd, "rb", closefd=False) as fh:
@@ -385,86 +357,32 @@ def _read_chain_ledger() -> tuple[dict[str, set[str]], dict[str, dict[str, str]]
             print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: grew past the "
                   f"{CHAIN_RETRY_MAX_BYTES}-byte cap while being read",
                   file=sys.stderr)
-            return {}, {}
+            return {}
         raw = json.loads(data)
-        return _parse_chain_ledger(raw)
+        if not isinstance(raw, dict):
+            return {}
+        owed_raw = raw["owed"] if "owed" in raw else raw  # legacy flat shape
+        if not isinstance(owed_raw, dict):
+            return {}
+        return {str(d): {str(t) for t in ts}
+                for d, ts in owed_raw.items() if isinstance(ts, list)}
     except (OSError, ValueError, TypeError, AttributeError):
-        return {}, {}
+        return {}
     finally:
         os.close(fd)
 
 
-def _parse_chain_ledger(raw) -> tuple[dict[str, set[str]], dict[str, dict[str, str]]]:
-    """Split a parsed ledger into ``(owed, misses)``, ignoring what is junk.
-
-    New format: ``{"owed": {date: [names]}, "misses": {ticker: {...}}}``.
-    A flat ``{date: [names]}`` file — the format the memo had before the miss
-    counts existed — has no section keys, so its top level IS the owed
-    section, and nothing is counted yet.
-    """
-    if not isinstance(raw, dict):
-        return {}, {}
-    if "owed" in raw or "misses" in raw:
-        owed_raw, miss_raw = raw.get("owed"), raw.get("misses")
-    else:
-        owed_raw, miss_raw = raw, None
-    owed = ({str(d): {str(t) for t in ts}
-            for d, ts in owed_raw.items() if isinstance(ts, list)}
-            if isinstance(owed_raw, dict) else {})
-    misses: dict[str, dict[str, str]] = {}
-    if isinstance(miss_raw, dict):
-        for ticker, entry in miss_raw.items():
-            if not isinstance(ticker, str) or not isinstance(entry, dict):
-                continue  # a junk entry is no evidence to skip on
-            n, last = entry.get("n"), entry.get("last")
-            if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
-                continue  # a zero (or junk) count is dropped, per the schema
-            if _canonical_chain_day(last) is None:
-                continue  # not a canonical "YYYY-MM-DD" run date
-            misses[ticker] = {"n": int(n), "last": str(last)}
-    return owed, misses
-
-
-def _read_chain_retry() -> dict[str, set[str]]:
-    """The ``owed`` section alone; see :func:`_read_chain_ledger`."""
-    return _read_chain_ledger()[0]
-
-
-def _prune_chain_ledger(owed: dict[str, set[str]], misses: dict[str, dict[str, str]],
-                        ref: pd.Timestamp) -> tuple[dict[str, set[str]],
-                                                    dict[str, dict[str, str]]]:
-    """Drop what the ledger no longer means, referenced on ``ref``.
-
-    ``owed``: non-canonical date keys go (a key the older-memo re-ask would
-    never use is not debt worth carrying) and anything past the 14-day
-    retention — ``>=`` so an entry exactly 14 days behind survives.
-    ``misses``: a zero count goes, and a count whose last miss is older than
-    :data:`CHAIN_MISS_PRUNE_DAYS` goes with it.
-    """
-    owed_kept = {k: v for k, v in owed.items()
-                 if (day := _canonical_chain_day(k)) is not None
-                 and day >= ref - pd.Timedelta(days=14)}
-    misses_kept = {t: e for t, e in misses.items()
-                   if e["n"] > 0
-                   and (last := _canonical_chain_day(e["last"])) is not None
-                   and last >= ref - pd.Timedelta(days=CHAIN_MISS_PRUNE_DAYS)}
-    return owed_kept, misses_kept
-
-
-def _write_chain_retry(owed: dict[str, set[str]],
-                       misses: dict[str, dict[str, str]]) -> None:
+def _write_chain_retry(owed: dict[str, set[str]]) -> None:
     from engine.data.manifest import write_text_atomic
 
-    ledger = {"owed": {d: sorted(ts) for d, ts in sorted(owed.items())},
-              "misses": {t: {"n": e["n"], "last": e["last"]} for t, e in sorted(misses.items())}}
+    ledger = {"owed": {d: sorted(ts) for d, ts in sorted(owed.items())}}
     try:
         paths.assert_writable(CHAIN_RETRY_PATH).parent.mkdir(parents=True, exist_ok=True)
         write_text_atomic(CHAIN_RETRY_PATH, json.dumps(ledger, indent=1))
-        # write_text_atomic fsyncs the temp FILE, but the ledger's name lands via
-        # os.replace — a rename recorded in the containing directory. Without
-        # syncing that directory the swap itself can be lost on power failure.
-        # A failed sync is the same lost-memo class as a failed write (the
-        # bytes are on disk either way), so it shares the handler below.
+        # write_text_atomic fsyncs the temp FILE, but the ledger's name lands
+        # via os.replace — a rename recorded in the containing directory;
+        # without syncing that dir the swap can be lost on power failure.
+        # A failed sync shares the lost-memo handler below.
         fd = os.open(CHAIN_RETRY_PATH.parent, os.O_RDONLY)
         try:
             os.fsync(fd)
@@ -478,12 +396,11 @@ def _canonical_chain_day(key) -> pd.Timestamp | None:
     """The day behind a canonical ``YYYY-MM-DD`` key, else None.
 
     A key counts as canonical only when it is exactly the ISO date string of
-    the day it parses to, so a time part, a compact yyyymmdd, a bare non-date
-    or a non-string never becomes a tradeDate, a persist stamp, a prune
-    reference or a miss entry's ``last``. Never raises. Shared by the ledger
-    parse (:func:`_parse_chain_ledger`), the prune in
-    :func:`_prune_chain_ledger` and the older-memo re-ask in
-    :func:`refresh_forward_chains`, so all three agree on what a date key is.
+    the day it parses to, so a time part, a compact yyyymmdd, a bare
+    non-date or a non-string never becomes a tradeDate or a persist stamp.
+    Never raises. Shared by the prune in :func:`_persist_chain_retry` and
+    the older-memo re-ask in :func:`refresh_forward_chains`, so both agree
+    on what a date key is.
     """
     try:
         day = pd.Timestamp(key)
@@ -495,48 +412,32 @@ def _canonical_chain_day(key) -> pd.Timestamp | None:
 
 
 def _persist_chain_retry(stamp: str, retry: set[str], attempted: set[str]) -> None:
-    """Merge one session's owed entry: (names on file - attempted) | retry.
+    """Merge one session's owed entry and write the whole ledger.
 
-    Replacing the entry with only this call's failures silently dropped the
-    debt of every name this call never attempted: a filtered refresh — an
-    older pass's owed list, or a run whose universe left the chronically
-    absent names out — sees only part of the entry, and its persist erased the
-    rest. Merging keeps what the call cannot speak for: attempted names take
-    this call's verdict (a fetched-OK or 404 name drops out by not being
-    re-added), unattempted names stay owed untouched, and an entry that merges
-    to empty is deleted.
+    The merge is (names on file - attempted) | retry: replacing the entry
+    with only this call's failures would silently drop the debt of every
+    name the call never attempted — an older pass's owed list is exactly
+    such a filtered run. Attempted names take this call's verdict (a
+    fetched-OK or 404 name drops out by not being re-added), unattempted
+    names stay owed untouched, and an entry that merges to empty is deleted.
 
-    Called twice on a fetched session: up front, before the first fetch, with
-    the WHOLE intended list as both retry and attempted — owed until proven
-    fetched or 404, so a hard kill (which runs no handler) leaves the next
-    run re-asking everything this one attempted plus whatever else was on
-    file — and on every exit path with the real failures, which replace this
-    call's attempted names inside the entry. A session that never reaches the
-    fetch loop writes nothing.
+    Called twice on a fetched session: up front, before the first fetch,
+    with the WHOLE intended list as both retry and attempted — the
+    hard-kill survivor, owed until proven fetched or 404 — and on every
+    exit path with the real failures, which replace this call's attempted
+    names inside the entry. A session that never reaches the loop writes
+    nothing.
 
-    The write is the WHOLE ledger: this function owns the ``owed`` section and
-    carries the ``misses`` section through as read, so a session persist can
-    never lose a count an earlier run recorded. Only
-    :func:`_finish_chain_ledger` changes counts, once, at the end of the run.
-
-    Entries older than 14 days behind the reference are pruned — past that
-    the session is far outside any heal window and the date is not coming
-    back — and non-canonical keys are dropped: a key the older-memo re-ask
-    would never use (:func:`refresh_forward_chains` skips exactly those, via
-    :func:`_canonical_chain_day`) is not debt worth carrying. The reference
-    is the newest canonical key on file or ``stamp``, but NEVER later than
-    ``stamp`` itself — since ``stamp`` is always one of the candidates, that
-    clamp lands on ``stamp`` every time and the reference below is exactly
-    ``stamp``: keys on file sit behind it and a future-dated key can never
-    raise it. (It once did: with the reference following a future key, the
-    first persist erased every in-retention debt behind the moved cutoff
-    before the older pass could re-ask any of them.) The cutoff is that
-    reference minus 14 days, compared with ``>=`` so an entry exactly 14
-    days behind survives; the heal-session persists and the older pass cut
-    at the same reference (this session's stamp) minus 14 days, so nothing
-    is pruned before the older pass could re-ask it.
+    Prune on the way out: non-canonical date keys go (a key the older-memo
+    re-ask would never use is not debt worth carrying) and anything past
+    the 14-day retention — ``>=`` so an entry exactly 14 days behind
+    survives. The reference is ``stamp``, never moved by a future-dated key
+    on file: when it once followed one, the first persist erased every
+    in-retention debt behind the moved cutoff before the older pass could
+    re-ask any of it. The older pass cuts at this same reference minus 14
+    days, so nothing is pruned before it could be re-asked.
     """
-    owed, misses = _read_chain_ledger()
+    owed = _read_chain_retry()
     if not retry and stamp not in owed:
         return  # nothing owed and none recorded: leave the file alone
     merged = (owed.get(stamp, set()) - attempted) | retry
@@ -544,13 +445,10 @@ def _persist_chain_retry(stamp: str, retry: set[str], attempted: set[str]) -> No
         owed[stamp] = merged
     else:
         owed.pop(stamp, None)
-    # The reference is the newest canonical key on file or stamp, never
-    # later than stamp — the clamp lands on stamp every time, so it is just
-    # stamp here; a future-dated key never moves the cutoff. Prune cutoffs:
-    # owed at reference - 14 days (kept with >=, so exactly 14 behind
-    # survives), counts at reference - CHAIN_MISS_PRUNE_DAYS.
-    owed_kept, misses_kept = _prune_chain_ledger(owed, misses, pd.Timestamp(stamp))
-    _write_chain_retry(owed_kept, misses_kept)
+    cutoff = pd.Timestamp(stamp) - pd.Timedelta(days=14)
+    _write_chain_retry({k: v for k, v in owed.items()
+                        if (day := _canonical_chain_day(k)) is not None
+                        and day >= cutoff})
 
 
 #: Market-context tickers the nightly's per-ticker history backfill keeps
@@ -681,40 +579,9 @@ CHAIN_DTE = "1,75"
 #: Trading sessions the nightly refreshes, counting back from ``as_of``.
 #: Two, because ORATS publishes a session around midnight: a run in the evening
 #: cannot get today, so it must also ask for yesterday or it acquires nothing.
-#: It also heals a night that did not run — a session is re-asked for every
-#: wanted name it does not already hold (a name that stays absent is dropped
-#: per ticker, not per session, by :data:`CHAIN_MISS_SKIP_AFTER`), and
-#: `skip_held` makes an already-held pair free.
+#: It also heals a night that did not run — a session is re-asked until it is
+#: actually held, and `skip_held` makes an already-held one free.
 CHAIN_SESSIONS = 2
-
-#: Consecutive runs a ticker may come back with no chain for before the heal
-#: pass stops asking for it. PER TICKER, not per session: the session-level
-#: version of this (skip a session once ~75% of its pairs were held) threw away
-#: the late recoveries with the chronic tail, because a mostly-held session
-#: still has an unheld tail worth asking for.
-#:
-#: N = 4 is MEASURED on the fetch log (``data/raw/fetch/fetch_log.csv``, the
-#: phase3 forward-chain calls, 2026-10-14..2026-10-26; pair = ticker+session,
-#: "recovered" = the pair is now in `option_chains`): a pair that had taken
-#: 1, 2 or 3 batch 404s went on to be held 9.4% / 14% / 22% of the time
-#: (298/3156, 271/1899, 240/1107) — recovery gets likelier the more times the
-#: name has come back, so those keeps are exactly what the per-ticker rule must
-#: not cut. But of the 521 pairs that reached a 4th 404, ZERO were ever held.
-#: The chronic tail is where the money is, and it starts at 4. (Late
-#: recoveries of that kind — 10-20 brought back 13 of 40 — land within the
-#: first three misses, which are still asked.)
-#:
-#: A skipped ticker is not forgotten: it is re-probed every
-#: :data:`CHAIN_MISS_REPROBE_DAYS`, a probe that returns data clears the count,
-#: and transient debt in :data:`CHAIN_RETRY_PATH` is never skipped by this rule.
-CHAIN_MISS_SKIP_AFTER = 4
-
-#: Days a skipped ticker stays skipped before it is asked again anyway. Chains
-#: do appear late (a new listing, an expiry added, ORATS backfilling), and 7
-#: days is one probe per name per week — the schedule the measured recoveries
-#: (9.4%-22% within three misses) need to keep finding, at 1/7th the cost of
-#: asking every night.
-CHAIN_MISS_REPROBE_DAYS = 7
 
 #: P19 cadence for the chunk loop in :func:`_refresh_one_session`: a progress
 #: line at most every CHAIN_PROGRESS_SECONDS seconds AND at most every
@@ -722,24 +589,6 @@ CHAIN_MISS_REPROBE_DAYS = 7
 #: lines, never one per call.
 CHAIN_PROGRESS_SECONDS = 60
 CHAIN_PROGRESS_CHUNKS = 50
-
-
-#: Per-run, per-ticker chain outcomes for the miss counts, strongest first:
-#: a name that answered with data anywhere in the run is DATA whatever else
-#: this run saw for it; a run that never got a definitive answer for it is
-#: UNSETTLED and its count stands; only a run whose every ask came back a
-#: definitive no-chain is a MISS. See :func:`_finish_chain_ledger`.
-_CHAIN_DATA, _CHAIN_UNSETTLED, _CHAIN_MISS = "data", "unsettled", "miss"
-_CHAIN_RANK = {_CHAIN_MISS: 0, _CHAIN_UNSETTLED: 1, _CHAIN_DATA: 2}
-
-
-def _record_chain_verdicts(verdicts: dict[str, str] | None, names, outcome: str) -> None:
-    """Note what this run saw for ``names``, keeping only the strongest outcome."""
-    if verdicts is None:
-        return
-    for ticker in names:
-        if _CHAIN_RANK[outcome] > _CHAIN_RANK.get(verdicts.get(ticker, ""), -1):
-            verdicts[ticker] = outcome
 
 
 def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_BATCH,
@@ -753,16 +602,9 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     the only pullers that touched it were the strategy backtest scripts pulling
     HISTORY.
 
-    Cost is ~365 calls for the newest session against the ~3,600-ticker
-    calendar frontier that is the nightly universe (the endpoint is per
-    (tradeDate, ticker-batch)); the second session is usually almost free
-    because the previous run already got it, and a name that has come back with
-    no chain for :data:`CHAIN_MISS_SKIP_AFTER` consecutive runs stops being
-    asked at all until its weekly re-probe. That skip is PER TICKER, every
-    other pair in the session still asked: the session-level version of it (stop
-    buying a session once ~75% of its pairs were held) was measured to cut the
-    late recoveries along with the chronic tail, and the recoveries are the
-    whole point of healing.
+    Cost is ~18 calls a night for a 176-ticker board, against a 20,000/month
+    budget — the endpoint is per (tradeDate, ticker-batch), so the whole board's
+    chains for one session cost less than a rounding error.
 
     Truncation is checked, not assumed: see :data:`CHAIN_BATCH`.
 
@@ -770,33 +612,22 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     ORATS publishes a session's chains around midnight, so a run in the evening
     that asks only for today gets nothing back — silently, because an
     unpublished date and a name with no chain look identical. Asking for the
-    previous session too acquires the names the newest one does not have. It
-    heals a gap left by a night that did not run: every session is asked for
-    again for every wanted name it does not already hold.
+    previous session too means the run always acquires something, and it heals
+    a gap left by a night that did not run: each session is asked for again
+    until it is actually held.
 
     **A pair already in the store is never re-bought** (``skip_held``). Without
     it, covering several sessions would multiply the nightly cost; with it the
     second session is usually free, because the previous run already got it.
     This is a CONTENT check, not a cache-key check — `Fetcher.has` only
     recognises an identical ticker batch, and the board's ticker set changes
-    nightly, so every key would miss. ``skip_held=False`` forces that check
-    only; the per-ticker miss skip is a cost decision, not a cache one, and
-    still applies.
+    nightly, so every key would miss.
 
-    **Memo dates past the ``sessions`` window are re-asked while they are in
-    retention.** A transient failure's session leaves the heal window after
-    two nights, but the ledger keeps the debt for 14 days, so after the loop
-    the memo's older in-retention dates are asked for directly — exactly the
-    owed names still unheld, minus dropped symbols (``only=``) — before the
-    prune drops them and the pairs are lost for good. An owed name is never
-    dropped by the per-ticker miss skip: transient debt is no evidence of no
-    chain.
-
-    **Every ticker asked this run gets one verdict applied to its count**, at
-    the end of the run, in the same atomic write as the owed section: data in
-    any response body (or a pair already held) clears the count, a run whose
-    every ask of the name came back a definitive no-chain raises it by one, and
-    a transient/bad-body/quota answer leaves it alone.
+    **Memo dates past the ``sessions`` window are re-asked while in
+    retention.** The ledger keeps transient debt 14 days after the session
+    left the heal window, so after the loop those older in-retention dates
+    are re-asked directly (``only=``) — exactly the owed names still unheld,
+    minus dropped symbols — before the prune drops them for good.
     """
     from engine.data.fetch import Fetcher
 
@@ -830,175 +661,83 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     out = {"as_of": stamp, "sessions": stamps, "requested": len(wanted_all),
            "returned": 0, "rows": 0, "calls": 0, "cache_hits": 0,
            "skipped_held": 0, "missing": [], "failed": []}
-    # One ledger read for the skip decision; the owed names in it are exempt
-    # (transient debt is not a no-chain verdict) and the counts decide which
-    # chronic no-chain names this run stops paying for.
-    owed_now, misses = _read_chain_ledger()
-    owed_names = {t for names in owed_now.values() for t in names}
+    # The retry memo, read once for the older-date pass below; owed names
+    # are still asked by the ordinary heal like any other unheld pair.
+    owed_now = _read_chain_retry()
     wanted_set = set(wanted_all)
-    # The age is clamped at zero: a backdated run (anchor older than the
-    # entry's ``last``) reads a future ``last`` as age 0 — quiet, never a
-    # re-probe, and no negative-age arithmetic to trip on.
-    skip = {t for t, e in misses.items()
-            if t in wanted_set and t not in owed_names
-            and e["n"] >= CHAIN_MISS_SKIP_AFTER
-            and max(0, (as_of - _canonical_chain_day(e["last"])).days)
-            < CHAIN_MISS_REPROBE_DAYS}
-    ask_all = [t for t in wanted_all if t not in skip]
-    ask_set = set(ask_all)
-    # Pairs = the calls the skip actually saves this run: one per skipped name
-    # per session it was not already held for. Seven runs a week, `batch`
-    # names per call.
-    pairs = sum(1 for t in skip for s in stamps if (t, pd.Timestamp(s)) not in held)
-    out["miss_skipped"] = {"tickers": len(skip), "pairs": pairs,
-                           "est_weekly_calls_saved": round(pairs / batch * 7, 1)}
-    if skip:
-        print(f"[chains] skipping {len(skip)} tickers after {CHAIN_MISS_SKIP_AFTER} "
-              f"consecutive misses (re-probe every {CHAIN_MISS_REPROBE_DAYS}d): "
-              f"{pairs} pairs, ~{out['miss_skipped']['est_weekly_calls_saved']} "
-              "calls/week saved", file=sys.stderr)
-    # The run day names the refetch_token for every chunk that holds a
-    # memo-owed name (see :func:`_refresh_one_session`): a malformed 200 IS
-    # cached, so the retry must not replay it. One value for the whole run =>
-    # at most one fresh provider call per memo name per day.
+    # The run day is the refetch_token for every chunk holding a memo-owed
+    # name (see :func:`_refresh_one_session`): one value per run => at most
+    # one fresh provider call per memo name per day.
     refetch_day = str(pd.Timestamp.now(tz="UTC").date())
-    verdicts: dict[str, str] = {}
-    try:
-        for session in stamps:
-            _refresh_one_session(
-                fetcher, ask_all, session, held, batch=batch, out=out,
-                skip_held=skip_held, refetch_day=refetch_day, verdicts=verdicts
-            )
+    for session in stamps:
+        _refresh_one_session(
+            fetcher, wanted_all, session, held, batch=batch, out=out,
+            skip_held=skip_held, refetch_day=refetch_day
+        )
 
-        if skip_held and stamps:
-            # The memo reaches past `sessions`: two nights of healing, fourteen
-            # days of retention. Dates in that gap are not touched by the loop
-            # above, so re-ask their owed unheld names once, from a single memo
-            # read, before the prune drops them and the pairs are lost for good.
-            # The reference and cutoff are the SAME as the prune's (see
-            # :func:`_persist_chain_retry`): stamps[0] — no key on file moves it
-            # — minus 14 days, so nothing is pruned before this pass could
-            # re-ask it. Keys go through :func:`_canonical_chain_day`, the same
-            # rule the prune applies: a date is only re-asked when it is exactly
-            # its own "YYYY-MM-DD" string, so a hand-edited or corrupt key
-            # carrying a time part can never be passed through as a tradeDate or
-            # a persist stamp. They are ignored here and counted once on stderr;
-            # the next persist drops them from the file.
-            newest = pd.Timestamp(stamps[0])
-            cutoff = newest - pd.Timedelta(days=14)  # the same cutoff as the prune
-            non_canonical = 0
-            for d in sorted(owed_now):
-                if d in stamps:
-                    continue  # the heal loop above already handled this session
-                day = _canonical_chain_day(d)
-                if day is None:
-                    non_canonical += 1  # a time part, or not a date at all
-                    continue
-                if day < cutoff or day >= newest:
-                    continue  # past retention, or not older than this run
-                owed = sorted({t for t in owed_now[d] & ask_set
-                               if (t, day) not in held})
-                if not owed:
-                    continue
-                out.setdefault("older_retried", []).append({"session": d, "names": len(owed)})
-                print(f"[chains] session {d}: past the heal window, re-asking "
-                      f"{len(owed)} retry-file names before they age out "
-                      "(transient failures and quota cuts)",
-                      file=sys.stderr)
-                _refresh_one_session(fetcher, ask_all, str(day.date()), held,
-                                     batch=batch, out=out, skip_held=skip_held,
-                                     only=owed, refetch_day=refetch_day,
-                                     verdicts=verdicts)
-            if non_canonical:
-                print(f"[chains] retry memo: ignored {non_canonical} "
-                      f"non-canonical date key(s) (expected 'YYYY-MM-DD')",
-                      file=sys.stderr)
-    finally:
-        # One read-modify-write for the whole run, and it happens on the
-        # exception paths too (a quota cut, a KeyboardInterrupt): persist
-        # whatever this run learned. A hard kill loses at most this run's
-        # counts — the next run re-asks and re-learns them — which is safe.
-        out["miss_counts"] = _finish_chain_ledger(
-            stamp, verdicts, held, stamps, at_threshold=len(skip))
+    if skip_held and stamps:
+        # The memo reaches past `sessions`: two nights of healing, fourteen
+        # days of retention. Re-ask the gap's owed unheld names once, from
+        # this single read, before the prune drops them for good. The
+        # cutoff is the SAME as the prune's (see :func:`_persist_chain_retry`):
+        # stamps[0] minus 14 days, so nothing is pruned before this pass
+        # could re-ask it. Keys go through :func:`_canonical_chain_day`,
+        # the prune's own rule: a corrupt key with a time part never
+        # reaches tradeDate or a persist stamp — ignored here, counted once
+        # on stderr, dropped by the next persist.
+        newest = pd.Timestamp(stamps[0])
+        cutoff = newest - pd.Timedelta(days=14)  # the same cutoff as the prune
+        non_canonical = 0
+        for d in sorted(owed_now):
+            if d in stamps:
+                continue  # the heal loop above already handled this session
+            day = _canonical_chain_day(d)
+            if day is None:
+                non_canonical += 1  # a time part, or not a date at all
+                continue
+            if day < cutoff or day >= newest:
+                continue  # past retention, or not older than this run
+            owed = sorted({t for t in owed_now[d] & wanted_set
+                           if (t, day) not in held})
+            if not owed:
+                continue
+            out.setdefault("older_retried", []).append({"session": d, "names": len(owed)})
+            print(f"[chains] session {d}: past the heal window, re-asking "
+                  f"{len(owed)} retry-file names before they age out "
+                  "(transient failures and quota cuts)",
+                  file=sys.stderr)
+            _refresh_one_session(fetcher, wanted_all, str(day.date()), held,
+                                 batch=batch, out=out, skip_held=skip_held,
+                                 only=owed, refetch_day=refetch_day)
+        if non_canonical:
+            print(f"[chains] retry memo: ignored {non_canonical} "
+                  f"non-canonical date key(s) (expected 'YYYY-MM-DD')",
+                  file=sys.stderr)
     return out
-
-
-def _finish_chain_ledger(anchor: str, verdicts: dict[str, str], held: set,
-                         sessions: list[str], *, at_threshold: int) -> dict[str, int]:
-    """Apply this run's per-ticker verdicts to the counts and write the ledger.
-
-    ``verdicts`` holds what the run saw per ticker it ASKED (never a skipped
-    name: an unasked name has no evidence and its count stands). DATA — a name
-    in any response body this run, or already held for one of the sessions it
-    needed — clears the count; a run in which EVERY ask of the name was a
-    definitive no-chain (absent from a 200 body, or a 404) raises it by one and
-    stamps ``last`` with the run's anchor date — ONCE per anchor date: a rerun
-    whose entry already carries this anchor leaves the count where it stands;
-    anything transient, wrong-shape or quota-cut leaves the entry exactly as it
-    was, because a call that never answered says nothing about whether the name
-    has a chain.
-
-    The write carries the owed section through as read — the session persists
-    already banked this run's debt — so this is the one place counts change,
-    and both sections land in one atomic write with the same prune
-    (:func:`_prune_chain_ledger`) the session persists apply.
-    """
-    owed, misses = _read_chain_ledger()
-    ref = pd.Timestamp(anchor)
-    days = [pd.Timestamp(s).normalize() for s in sessions]
-    reset = 0
-    for ticker, outcome in verdicts.items():
-        if outcome == _CHAIN_UNSETTLED:
-            continue  # no answer this run is no evidence either way
-        if outcome == _CHAIN_DATA or any((ticker, day) in held for day in days):
-            if misses.pop(ticker, None) is not None:
-                reset += 1  # a live count cleared by real data
-            continue
-        entry = misses.get(ticker)
-        if entry is not None and entry["last"] == anchor:
-            # Same-day rerun: the anchor date is already counted once; a
-            # second MISS verdict for the same anchor must not deepen the
-            # streak. DATA still took the reset branch above.
-            continue
-        misses[ticker] = {"n": (entry["n"] if entry else 0) + 1, "last": anchor}
-    owed, misses = _prune_chain_ledger(owed, misses, ref)
-    _write_chain_retry(owed, misses)
-    return {"tracked": len(misses), "at_threshold": at_threshold, "reset": reset}
 
 
 def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_held,
                          only: list[str] | None = None,
-                         refetch_day: str | None = None,
-                         verdicts: dict[str, str] | None = None) -> None:
+                         refetch_day: str | None = None) -> None:
     """Fetch one trade date for whatever part of the universe still needs it.
 
-    Every wanted name this session does not already hold is asked — the
-    chronic-no-chain names are already out of ``wanted_all`` (see
-    :func:`refresh_forward_chains`), and a name the ledger still owes is never
-    dropped that way, so a transient failure or a quota cut is re-asked here
-    like any other unheld pair.
+    Every wanted name this session does not already hold is asked, so a
+    transient failure or a quota cut is re-asked like any other unheld pair
+    while the retry ledger keeps its debt meanwhile.
 
     ``only`` is an older memo date's owed list: it replaces the wanted
     computation outright (a list already narrowed to the debt needs no held
-    check), and everything downstream — batching, the 404-vs-transient split,
-    the persist-on-any-exit protocol — is the same.
+    check); batching, the 404-vs-transient split and the persist-on-any-exit
+    protocol are the same.
 
-    A name the memo already owes — ``only``, or an intersection with a full
-    fetch's list — is fetched with ``refetch_day`` as its chunk's
-    ``refetch_token``. The memo is read once per session, BEFORE this session's
-    up-front persist, so the run's own owe-list is never counted against it.
-    The cached body of a memo name may be the malformed/wrong-shape 200 that
-    filed the debt (a 2xx is cached whatever it holds; only non-2xx answers are
-    not), so a cache-first re-ask would replay the same bad bytes on every
-    later run forever; the token makes a distinct key, so the retry is a fresh
-    provider call — at most one per memo name per day, since the token is the
-    run day. A chunk whose names are all first fetches passes no token: the
-    ordinary cache-first path.
-
-    ``verdicts`` (see :func:`_record_chain_verdicts`) collects this run's
-    per-ticker outcomes for the miss counts: a chunk that answered records
-    every name in it, a chunk that never answered records them UNSETTLED, and a
-    chunk the run never reached records nothing.
+    A chunk containing a name the memo already owes — ``only``, or an
+    intersection with a full fetch's list — is fetched with ``refetch_day``
+    as its ``refetch_token``: its cached body may be the malformed 200 that
+    filed the debt, and only a new key makes the retry a fresh provider
+    call — at most one per memo name per day. The memo is read BEFORE this
+    session's up-front persist, so the run's own owe-list never counts
+    against it. An all-first-fetch chunk passes no token: the ordinary
+    cache-first path.
     """
     session_day = pd.Timestamp(stamp).normalize()
     if only is not None:
@@ -1010,9 +749,8 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
         wanted = list(wanted_all)
     from engine.data.fetch import CredentialRotated
 
-    # The snapshot must happen BEFORE the up-front persist below: filed
-    # after it, the run's own whole-intended-list entry would make every
-    # chunk look memo-owed.
+    # Snapshot BEFORE the up-front persist below: filed after it, the run's
+    # own whole-intended-list entry would make every chunk look memo-owed.
     owed = _read_chain_retry().get(stamp, set())
     retry: set[str] = set()
     attempted = set(wanted)
@@ -1023,10 +761,9 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
     calls_in, failed_in, missing_in = out["calls"], len(out["failed"]), len(out["missing"])
 
     def _log_chunk_progress(done: int) -> None:
-        # P19 bounded cadence: never a line per chunk — the time gate and
-        # the chunk gate must BOTH be met since the last progress line.
-        # The time gate keeps elapsed >= CHAIN_PROGRESS_SECONDS here, so
-        # the rate divides cleanly.
+        # P19 bounded cadence: never a line per chunk — BOTH the time gate
+        # and the chunk gate must be passed since the last line; the time
+        # gate keeps elapsed >= CHAIN_PROGRESS_SECONDS, so the rate divides.
         nonlocal last_progress_chunks, last_progress_at
         now = time.monotonic()
         if (done - last_progress_chunks < CHAIN_PROGRESS_CHUNKS
@@ -1043,12 +780,9 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
         print(f"[chains] {stamp}: fetching {len(wanted)} names in {total_chunks} calls",
               file=sys.stderr)
         # Hard-kill safety: the whole intended list is owed the date BEFORE
-        # the first fetch — nothing is proven until a body arrives or a 404
-        # says there is no chain. A SIGKILL/OOM runs no handler, and without
-        # this entry a session cut off mid-fetch leaves the next run's ledger
-        # without the pairs it never asked for. The persists on the exit paths
-        # below merge the real failures into this entry; a session with nothing
-        # to fetch files nothing.
+        # the first fetch — nothing is proven until a body lands or a 404
+        # says there is no chain, and a SIGKILL/OOM runs no handler. The
+        # exit-path persists below merge the real failures into this entry.
         _persist_chain_retry(stamp, attempted, attempted)
     # The loop cursor, pre-bound: an exit before the first chunk owes every
     # name, exactly as the up-front persist filed them.
@@ -1058,13 +792,12 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
             if done:
                 _log_chunk_progress(done)  # `done` chunks completed already
             chunk = wanted[start : start + batch]
-            # Only a chunk holding a memo-owed name bypasses the cache (its
-            # cached body may be the very malformed one that filed the debt);
-            # an all-first-fetch chunk stays ordinary cache-first.
+            # Only a memo-owed chunk bypasses the cache (its cached body may
+            # be the very malformed one that filed the debt); an all-first-
+            # fetch chunk stays ordinary cache-first — and an old-signature
+            # injected fetcher is never handed the new kwarg.
             kw = {"note": "phase3 forward chains"}
             if owed & set(chunk):
-                # Added only for a memo-owed chunk: an old-signature injected
-                # fetcher (no refetch_token kwarg) is never handed one.
                 kw["refetch_token"] = refetch_day
             params = {"ticker": ",".join(chunk), "tradeDate": stamp,
                       "dte": CHAIN_DTE, "fields": CHAIN_FIELDS}
@@ -1075,29 +808,22 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                 # date; without persisting before the raise the cut-off tail
                 # is lost. CredentialRotated is a FetchError subclass: without
                 # this arm the generic arm below would treat a dead key as
-                # transient and keep the session buying against it. Both are
-                # re-raised here after the remainder is saved, and only
-                # CredentialRotated stops the run: run_nightly turns it into a
-                # NightlyStop, while QuotaExhausted reaches run_nightly's
-                # degrade arm, which records a degraded refresh and scores
-                # from cached data. This chunk WAS asked and never answered,
-                # so it is no evidence for the miss count either.
-                _record_chain_verdicts(verdicts, chunk, _CHAIN_UNSETTLED)
+                # transient and keep buying against it. Both re-raise after
+                # saving the remainder; only CredentialRotated stops the run
+                # (QuotaExhausted reaches run_nightly's degrade arm, which
+                # records a degraded refresh and scores from cached data).
                 retry.update(wanted[start:])
                 _persist_chain_retry(stamp, retry, attempted)
                 raise
             except Exception as exc:  # noqa: BLE001 — reported, never swallowed
                 out["failed"].append(f"{chunk[0]}..: {str(exc)[-40:]}")
                 if "HTTP 404" in str(exc):
-                    # Definitive no-chain, like the 200-but-short response below:
-                    # recorded as missing, never retried — and a miss for the
-                    # per-ticker count, because the provider answered.
+                    # Definitive no-chain, like the 200-but-short response
+                    # below: recorded as missing, never retried.
                     out["missing"].extend(chunk)
-                    _record_chain_verdicts(verdicts, chunk, _CHAIN_MISS)
                 else:
-                    # Transient (429, 502, transport): owed the date — retried
-                    # from the ledger no matter what the count says.
-                    _record_chain_verdicts(verdicts, chunk, _CHAIN_UNSETTLED)
+                    # Transient (429, 502, transport): owed the date —
+                    # retried from the ledger.
                     retry.update(chunk)
                 continue
             out["calls"] += 0 if record.from_cache else 1
@@ -1109,7 +835,6 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                 # a verdict on the chunk: owed the date, reported, and the
                 # session continues with the later batches rather than aborting.
                 out["failed"].append(f"{chunk[0]}..: {str(exc)[-40:]}")
-                _record_chain_verdicts(verdicts, chunk, _CHAIN_UNSETTLED)
                 retry.update(chunk)
                 continue
             data = payload.get("data") if isinstance(payload, dict) else None
@@ -1122,7 +847,6 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                 # the session continues with the later batches.
                 out["failed"].append(f"{chunk[0]}..: response JSON is not a "
                                      "dict with a list 'data'")
-                _record_chain_verdicts(verdicts, chunk, _CHAIN_UNSETTLED)
                 retry.update(chunk)
                 continue
             rows = data
@@ -1142,7 +866,6 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                 # its rows are booked.
                 out["failed"].append(f"{chunk[0]}..: response 'data' rows are "
                                      "not all objects with a string 'ticker'")
-                _record_chain_verdicts(verdicts, chunk, _CHAIN_UNSETTLED)
                 retry.update(chunk)
                 continue
             out["rows"] += len(rows)
@@ -1157,18 +880,13 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
             # that "truncated" would have blamed the batching for the data's
             # own gap.
             out["missing"].extend(t for t in chunk if t not in got)
-            _record_chain_verdicts(verdicts, (t for t in chunk if t in got), _CHAIN_DATA)
-            _record_chain_verdicts(verdicts, (t for t in chunk if t not in got),
-                                   _CHAIN_MISS)
     except BaseException as exc:
         # Any other exit — KeyboardInterrupt, or a defect in the bookkeeping
         # below fetch — unwinds the whole session, so the current chunk and
         # every later unasked one must be in the retry file before it does.
-        # The raise arms above already persisted and are re-raising: re-writing
-        # the same set would only be a second write.
+        # The raise arms above already persisted: re-writing the same set
+        # would only be a second write.
         if not isinstance(exc, (QuotaExhausted, CredentialRotated)):
-            _record_chain_verdicts(verdicts, wanted[start:start + batch],
-                                   _CHAIN_UNSETTLED)
             retry.update(wanted[start:])
             _persist_chain_retry(stamp, retry, attempted)
         raise
@@ -1176,8 +894,8 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
     # re-added; only this run's transient failures and quota-cut remainder stay.
     _persist_chain_retry(stamp, retry, attempted)
     if wanted:
-        # Stage end (P19): the counts are this session's own deltas — `out`
-        # is shared across the run's sessions and memo passes.
+        # Stage end (P19): the counts are this session's own deltas (`out`
+        # is shared across sessions and memo passes).
         _log_chunk_progress(total_chunks)
         elapsed = time.monotonic() - t_start
         print(f"[chains] {stamp}: done in {elapsed:.1f}s, "
@@ -2839,12 +2557,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="trading sessions of chains to refresh, counting back from --as-of. "
              "2 is the steady state (ORATS publishes around midnight, so tonight "
              "needs yesterday too); widen it once to heal a gap left by nights "
-             "that did not run — every session is asked for each wanted name it "
-             "does not already hold, except a name with "
-             f"CHAIN_MISS_SKIP_AFTER = {CHAIN_MISS_SKIP_AFTER} consecutive "
-             f"no-chain runs, which waits for its every-"
-             f"{CHAIN_MISS_REPROBE_DAYS}-day re-probe. Already-held pairs are "
-             "skipped, so a wider window costs only what is genuinely missing.",
+             "that did not run. Already-held pairs are skipped, so a wider "
+             "window costs only what is genuinely missing.",
     )
     parser.add_argument("--max-staleness", type=int, default=MAX_STALENESS_DAYS)
     parser.add_argument("--json", default=None, help="write the run report to this path")

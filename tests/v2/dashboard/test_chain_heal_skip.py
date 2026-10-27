@@ -1,36 +1,27 @@
-"""The chain heal pass: per-ticker skipping of chronic no-chain names.
+"""The chain heal pass: the retry ledger for transient failures, plus the
+P19 progress logging of the chunk loop.
 
-Weekend runs 10-18/19 spent ~114 calls healing sessions that were already
-mostly held, because the unheld names left were mostly ones with no chain on
-file. The first fix skipped the whole session past a held fraction, which also
-skipped the late recoveries sitting in the same tail. The rule now is PER
-TICKER: every session is asked for every wanted name it does not hold, except
-a name that has come back with no chain — absent from a 200 body, or a 404 —
-for CHAIN_MISS_SKIP_AFTER consecutive runs. Such a name waits for its
-every-CHAIN_MISS_REPROBE_DAYS re-probe; a probe that returns data clears the
-count, one that misses buys another week of quiet. The streak counts ONCE per
-anchor date — a same-day rerun does not deepen it — and the skip age is clamped
-at zero, so a backdated rerun never re-probes a future-dated ``last``. The
-skip is never silent: it is in the report (``miss_skipped``, ``miss_counts``)
-and on stderr.
+Every session is asked for every wanted name it does not already hold — no
+skipping of any kind: no per-ticker miss rule, no held-fraction rule. A name
+that keeps coming back absent is simply asked again, like any other unheld
+pair. What makes a gap night cheap to heal is that already-held PAIRS are
+free (``skip_held``) and that transient debt is remembered, not dropped.
 
-Transient debt is not evidence of no chain, so a name the ledger owes is never
-skipped by the count, and a transient, wrong-shape, non-JSON, quota or
-abnormal-exit ask leaves the count untouched — only a definitive answer moves
-it. The ledger is one file with two sections, ``owed`` (per session date, the
-retry memo) and ``misses`` (per ticker, the counts); a flat
-``{"<date>": [names]}`` file — the format before counts existed — still reads.
-
-The memo protocol is unchanged and is tested here too: a fetched session OWES
-THE WHOLE INTENDED LIST before its first fetch, and every exit path MERGES the
-run's real failures into that entry — (names on file minus the ones this call
-attempted) plus this call's failures — so a filtered run never erases debt it
-did not attempt, and a SIGKILL/OOM — which runs no handler — leaves the next
-run re-asking the entire attempted list plus whatever else was on file. Memo
-dates past the two-session heal window but inside the 14-day retention are
-re-asked for exactly their owed unheld names, before they age out. Every memo
-re-ask is fetched with a non-None ``refetch_token`` (the cached body may be
-the malformed 200 that filed the debt); a first fetch passes none.
+The ledger is one file, ``{"owed": {"<YYYY-MM-DD session>": [names]}}``;
+a flat ``{"<date>": [names]}`` file — the format before the section key —
+still reads. Its protocol: a fetched session OWES THE WHOLE INTENDED LIST
+before its first fetch, and every exit path MERGES the run's real failures
+into that entry — (names on file minus the ones this call attempted) plus
+this call's failures — so a filtered run never erases debt it did not
+attempt, and a SIGKILL/OOM — which runs no handler — leaves the next run
+re-asking the entire attempted list plus whatever else was on file. A
+definitive 404 is never owed; a wrong-shape or non-JSON 200 is transient and
+is owed. QuotaExhausted and CredentialRotated persist the remainder, then
+re-raise. Memo dates past the two-session heal window but inside the 14-day
+retention are re-asked for exactly their owed unheld names, before they age
+out. Every memo re-ask is fetched with a non-None ``refetch_token`` (the
+cached body may be the malformed 200 that filed the debt); a first fetch
+passes none.
 
 Every dependency below the public signature — the fetcher, the store's held
 set, the trading calendar, the ledger file — is a synthetic fake or a tmp_path
@@ -62,13 +53,12 @@ def _days(before: int, *, of: str = AS_OF) -> str:
     return str((pd.Timestamp(of) - pd.Timedelta(days=before)).date())
 
 
-def _seed_ledger(*, owed: dict | None = None, misses: dict | None = None,
-                 legacy: bool = False) -> None:
-    """Write the ledger directly, in the new shape or the legacy flat one."""
+def _seed_ledger(*, owed: dict | None = None, legacy: bool = False) -> None:
+    """Write the ledger directly, in the sectioned shape or the legacy flat one."""
     if legacy:
         payload = owed or {}
     else:
-        payload = {"owed": owed or {}, "misses": misses or {}}
+        payload = {"owed": owed or {}}
     nightly.CHAIN_RETRY_PATH.write_text(json.dumps(payload))
 
 
@@ -179,10 +169,9 @@ def _wire(monkeypatch, held, tmp_path, stamps=(AS_OF,)):
 
 def test_a_mostly_held_session_is_still_fetched_for_its_unheld_names(
         monkeypatch, capsys, tmp_path):
-    """8 of 10 held: the old rule skipped the whole session here and lost the
-    recoveries sitting in that tail. Now the session is fetched for exactly its
-    two unheld names and nothing else — the held accounting still lands in
-    ``skipped_held``, but a held PAIR is the only thing that goes unasked."""
+    """8 of 10 held: nothing about a held fraction skips anything. The session
+    is fetched for exactly its two unheld names — the held accounting lands in
+    ``skipped_held``, and a held PAIR is the only thing that goes unasked."""
     _wire(monkeypatch, {(t, pd.Timestamp(AS_OF)) for t in TICKERS[:8]}, tmp_path)
     f = _Fetcher()
 
@@ -191,8 +180,6 @@ def test_a_mostly_held_session_is_still_fetched_for_its_unheld_names(
     assert f.asked == [AS_OF], "the unheld tail is bought, not skipped"
     assert f.asked_tickers == ["TKR08", "TKR09"], "exactly the two unheld names"
     assert out["skipped_held"] == 8
-    assert out["miss_skipped"]["tickers"] == 0, "nothing was skipped on the count"
-    assert "skipping" not in capsys.readouterr().err, "no skip line without a skip"
 
 
 def test_a_memo_name_that_is_now_held_is_not_re_asked(monkeypatch, tmp_path):
@@ -210,24 +197,6 @@ def test_a_memo_name_that_is_now_held_is_not_re_asked(monkeypatch, tmp_path):
         "the held memo name must not be re-asked; the unheld ones are"
     assert nightly._read_chain_retry() == {AS_OF: {"TKR00"}}, \
         "the OK fetch cleared TKR09 and left the debt it never attempted"
-
-
-def test_an_owed_name_is_never_skipped_by_the_miss_rule(monkeypatch, tmp_path):
-    """The count skips a chronic no-chain name, but transient debt is not
-    evidence of no chain: TKR09 is at the threshold AND owes the date (a 502,
-    never a verdict), and is asked anyway; TKR08 is at the threshold with no
-    debt and is not."""
-    _wire(monkeypatch, set(), tmp_path)
-    at_threshold = {"n": nightly.CHAIN_MISS_SKIP_AFTER, "last": AS_OF}
-    _seed_ledger(owed={AS_OF: ["TKR09"]},
-                  misses={"TKR08": at_threshold, "TKR09": dict(at_threshold)})
-    f = _Fetcher()
-
-    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
-
-    assert "TKR08" not in f.asked_tickers, "the chronic name is skipped"
-    assert "TKR09" in f.asked_tickers, "an owed name is re-asked whatever its count says"
-    assert out["miss_skipped"]["tickers"] == 1, "the owed name is not counted as a saving"
 
 
 def test_memo_driven_chunk_gets_refetch_token_first_fetch_does_not(
@@ -308,7 +277,6 @@ def test_a_memo_value_that_is_a_string_is_ignored(monkeypatch, tmp_path):
     assert nightly._read_chain_retry() == {}, "the string is dropped, not char-split"
     assert f.asked_tickers == ["TKR08", "TKR09"], \
         "no character of it was asked, and the session's unheld names were"
-    assert nightly._read_chain_ledger()[1] == {}, "a junk memo value is no verdict either"
 
 
 def test_a_zero_held_session_is_still_healed(monkeypatch, tmp_path):
@@ -321,14 +289,12 @@ def test_a_zero_held_session_is_still_healed(monkeypatch, tmp_path):
     assert out["calls"] == 1  # 10 tickers at CHAIN_BATCH=10 -> one call
     assert f.asked == [AS_OF]
     assert f.asked_tickers == sorted(TICKERS), "the heal asks the whole unheld set"
-    assert out["miss_skipped"] == {"tickers": 0, "pairs": 0,
-                                   "est_weekly_calls_saved": 0.0}
 
 
 def test_transient_failure_is_retried_on_the_next_run(monkeypatch, tmp_path):
     """A non-404 exception puts the chunk in the retry file, and the next run
-    re-asks exactly those names: an owed name is never dropped by the miss
-    count, and it is still unheld, so the ordinary heal asks for it."""
+    re-asks exactly those names: they are still unheld, so the ordinary heal
+    asks for them whatever else it asks."""
     _wire(monkeypatch, set(), tmp_path)
     f1 = _Fetcher(fail=lambda p: RuntimeError("orats hist/strikes: connection reset"))
 
@@ -347,7 +313,6 @@ def test_transient_failure_is_retried_on_the_next_run(monkeypatch, tmp_path):
     assert nightly._read_chain_retry() == {AS_OF: set(TICKERS[:8])}, \
         "the merge cleared only the names this call attempted: the debt of " \
         "the now-held names was never attempted and stays on file"
-    assert nightly._read_chain_ledger()[1] == {}, "a call that never answered is no miss"
 
 
 def test_filtered_run_preserves_unattempted_owed_names(monkeypatch, tmp_path):
@@ -380,8 +345,6 @@ def test_filtered_run_preserves_unattempted_owed_names(monkeypatch, tmp_path):
     assert f2.asked_tickers == ["AAA"]
     assert nightly._read_chain_retry() == {older: {"AAA", "BBB"}}, \
         "the failure re-files AAA and the merge never touched BBB"
-    assert nightly._read_chain_ledger()[1] == {}, \
-        "and the 502 counts as no miss for AAA, whatever its ledger said"
 
 
 def test_a_404_exception_is_final_and_never_retried(monkeypatch, tmp_path):
@@ -395,8 +358,23 @@ def test_a_404_exception_is_final_and_never_retried(monkeypatch, tmp_path):
     assert out["missing"] == sorted(TICKERS)
     assert out["failed"], "the existing failed reporting is unchanged by the 404 split"
     assert nightly._read_chain_retry() == {}, "a 404 has no chain; retrying cannot help"
-    assert nightly._read_chain_ledger()[1] == {t: {"n": 1, "last": AS_OF} for t in TICKERS}, \
-        "the 404 IS a verdict: every name in the chunk is one miss deeper"
+
+
+def test_a_404_chunk_files_every_name_in_it_as_missing_and_owes_none(
+        monkeypatch, tmp_path):
+    """The 404 arm files the WHOLE chunk as a definitive no-chain — every
+    name in it, not just the first — while the chunks that answered stay out
+    of ``missing``, and nothing lands in the owed memo."""
+    tickers = [f"TKR{i:02d}" for i in range(25)]
+    _wire(monkeypatch, set(), tmp_path)
+    f = _Fetcher(fail=lambda p: RuntimeError("orats hist/strikes returned HTTP 404")
+                 if p["ticker"].split(",")[0] == "TKR10" else None)
+
+    out = nightly.refresh_forward_chains(tickers, AS_OF, fetcher=f, sessions=1)
+
+    missed = {t for t in tickers if "TKR10" <= t <= "TKR19"}
+    assert set(out["missing"]) == missed, "the 404 chunk is the whole missing set"
+    assert nightly._read_chain_retry() == {}, "a 404 is still never owed"
 
 
 def test_quota_cut_persists_the_unasked_remainder_then_reraises(monkeypatch, tmp_path):
@@ -656,15 +634,15 @@ def test_prune_keeps_exactly_14_days_and_drops_15(monkeypatch, tmp_path):
 
 
 def test_a_future_dated_key_does_not_move_the_prune_cutoff(monkeypatch, tmp_path):
-    """The prune's reference is max(stamp, the canonical keys on file) but
-    NEVER later than the persist's own stamp: a hand-edited key past this run
-    used to move the cutoff years forward and the FIRST persist (the
-    up-front owed list) erased every in-retention debt behind it before the
-    older pass even read the memo, so that debt was never re-asked. Here the
-    newest key is 8 days past the run; the entries 16 and 14 days behind it
-    are 8 and 6 behind the run — inside retention — so they survive every
-    persist and reach the older pass. The future key is kept but inert: it is
-    not a past session, so it is never fetched."""
+    """The prune's reference is the persist's own stamp: a hand-edited key
+    past this run must not move the cutoff years forward — the bug did, and
+    the FIRST persist (the up-front owed list) erased every in-retention debt
+    behind the moved cutoff before the older pass even read the memo, so that
+    debt was never re-asked. Here the newest key is 8 days past the run; the
+    entries 16 and 14 days behind it are 8 and 6 behind the run — inside
+    retention — so they survive every persist and reach the older pass. The
+    future key is kept but inert: it is not a past session, so it is never
+    fetched."""
     older = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=8)).date())   # 2026-08-25
     keep = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=6)).date())    # 2026-08-27
     future = "2026-09-10"  # later than this run's newest session
@@ -708,6 +686,26 @@ def test_exactly_14_days_behind_is_kept_by_the_prune_and_re_asked(
     kept = nightly._read_chain_retry()
     assert kept[edge] == {"TKR08"}, "exactly 14 behind is inside both cutoffs"
     assert kept[AS_OF] == {t for t in TICKERS if t >= "TKR05"}
+
+
+def test_a_legacy_flat_ledger_reads_as_owed(monkeypatch, tmp_path):
+    """The format the memo had before the section key existed still loads:
+    its top-level date keys ARE the owed section, and the older of the two
+    dates still reaches the older-memo re-ask. The next write puts the whole
+    ledger back in the sectioned shape."""
+    _wire(monkeypatch, set(), tmp_path, stamps=[AS_OF])
+    older = _days(3)
+    _seed_ledger(owed={AS_OF: ["TKR09"], older: ["TKR08"]}, legacy=True)
+
+    assert nightly._read_chain_retry() == {AS_OF: {"TKR09"}, older: {"TKR08"}}
+
+    f = _Fetcher()
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+
+    assert "TKR09" in f.asked_tickers, "the heal session still re-asks its debt"
+    assert out["older_retried"] == [{"session": older, "names": 1}], \
+        "and the date past the window is re-asked from the same legacy file"
+    assert json.loads(nightly.CHAIN_RETRY_PATH.read_text()) == {"owed": {}}
 
 
 def test_a_corrupt_memo_reads_empty_and_the_run_proceeds(monkeypatch, tmp_path):
@@ -836,9 +834,9 @@ def test_the_memo_write_fsyncs_the_containing_directory(monkeypatch, tmp_path):
     dirs = [st for st in synced
             if stat.S_ISDIR(st.st_mode) and st.st_dev == parent.st_dev
             and st.st_ino == parent.st_ino]
-    assert len(dirs) == 3, \
-        "every persist syncs the ledger's parent dir: the up-front owed list, " \
-        "the exit-path failures that replace it, then the end-of-run counts"
+    assert len(dirs) == 2, \
+        "every persist syncs the ledger's parent dir: the up-front owed list " \
+        "and the exit-path failures that replace it"
     assert nightly._read_chain_retry() == {AS_OF: set(TICKERS)}, "the memo still lands"
 
 
@@ -868,8 +866,7 @@ def test_an_fsync_failure_is_announced_not_raised(monkeypatch, capsys, tmp_path)
 
 def test_skip_held_false_fetches_regardless(monkeypatch, tmp_path):
     """The held check belongs to the heal pass only; an explicit full refresh
-    re-buys every pair, even at 100% held. Nothing in the ledger is on the
-    count here, so there is no per-ticker skip to make."""
+    re-buys every pair, even at 100% held."""
     _wire(monkeypatch, {(t, pd.Timestamp(AS_OF)) for t in TICKERS}, tmp_path)
     f = _Fetcher()
 
@@ -879,30 +876,11 @@ def test_skip_held_false_fetches_regardless(monkeypatch, tmp_path):
     assert out["calls"] == 1
     assert f.asked == [AS_OF]
     assert f.asked_tickers == sorted(TICKERS)
-    assert out["miss_skipped"]["tickers"] == 0
     assert out["skipped_held"] == 0
 
 
-def test_a_forced_refresh_still_drops_the_chronic_names(monkeypatch, tmp_path):
-    """``skip_held=False`` forces the HELD check, not the count: a chronic
-    no-chain name stays out of a forced refresh too, because the skip is a cost
-    decision rather than a cache one."""
-    _wire(monkeypatch, {(t, pd.Timestamp(AS_OF)) for t in TICKERS}, tmp_path)
-    _seed_ledger(misses={"TKR09": {"n": nightly.CHAIN_MISS_SKIP_AFTER, "last": AS_OF}})
-    f = _Fetcher()
-
-    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1,
-                                         skip_held=False)
-
-    assert f.asked_tickers == [t for t in TICKERS if t != "TKR09"], \
-        "every pair but the chronic one is re-bought"
-    assert out["skipped_held"] == 0, "the held check is off, and only that"
-    assert out["miss_skipped"] == {"tickers": 1, "pairs": 1,
-                                   "est_weekly_calls_saved": 0.7}
-
-
 def test_a_mostly_held_session_requests_only_its_unheld_names(monkeypatch, tmp_path):
-    """No held fraction skips anything now: 74 of 100 held is fetched, and the
+    """No held fraction skips anything: 74 of 100 held is fetched, and the
     request names the 26 unheld tickers and nothing already held. The pair, not
     the session, is the unit of the heal."""
     tickers = [f"TKR{i:03d}" for i in range(100)]
@@ -943,9 +921,9 @@ def test_an_older_memo_date_is_re_asked_for_exactly_its_owed_names(
     it re-asks it for exactly its owed unheld names — minus a name the store
     already holds for that date, minus a dropped symbol — and merges those
     attempted names out of the entry on success: the names this call never
-    attempted (the held one and the dropped symbol) stay owed until the prune
-    ages them out. A 15-day-old entry is past the same cutoff the prune
-    uses and must not be asked at all."""
+    attempted (the held one and the dropped symbol) stay owed. A 15-day-old
+    entry is past the same cutoff the prune uses and must not be asked at
+    all; it ages out of the file on the next persist behind a newer stamp."""
     older = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=12)).date())
     stale = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=15)).date())
     held = {(t, pd.Timestamp(s)) for s in (AS_OF, "2026-09-01") for t in TICKERS}
@@ -965,11 +943,12 @@ def test_an_older_memo_date_is_re_asked_for_exactly_its_owed_names(
     err = capsys.readouterr().err
     assert err.count(f"[chains] session {older}:") == 1, "one stderr line per date"
     kept = nightly._read_chain_retry()
-    assert kept == {older: {"TKR08", "ZZZ9"}}, \
+    assert kept[older] == {"TKR08", "ZZZ9"}, \
         "the merge cleared the one attempted name: the held name and the " \
-        "dropped symbol were never attempted and stay owed. The 15-day-old " \
-        "entry was neither asked (past the same cutoff the prune uses) nor " \
-        "re-askable, and the run's final ledger write ages it out"
+        "dropped symbol were never attempted and stay owed"
+    assert "TKR07" in kept.get(stale, set()), \
+        "the 15-day entry was not asked (past the same cutoff the prune " \
+        "uses) and no persist of this run references a newer stamp"
 
 
 def test_non_canonical_memo_date_keys_are_ignored_with_one_stderr_line(
@@ -977,9 +956,8 @@ def test_non_canonical_memo_date_keys_are_ignored_with_one_stderr_line(
     """A memo date is re-asked only when it is exactly its own "YYYY-MM-DD"
     string: keys carrying a time part or a bare yyyymmdd parse to a real day
     but must never reach the fetch as a tradeDate or the persist as a stamp —
-    they are skipped, counted on one stderr line, and left in the file for
-    the prune, while the canonical date is still asked by its canonical
-    stamp."""
+    they are skipped, counted on one stderr line, and dropped by the next
+    persist, while the canonical date is still asked by its canonical stamp."""
     canon = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=8)).date())  # 2026-08-25
     with_time = f"{(pd.Timestamp(AS_OF) - pd.Timedelta(days=11)).date()} 10:00:00"
     compact = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=9)).date()).replace("-", "")
@@ -1057,355 +1035,3 @@ def test_the_chunk_loop_logs_bounded_progress_not_one_line_per_chunk(
     assert f"calls={out['calls']}" in end[0] and "failed=0" in end[0] \
         and "missing=0" in end[0] and end[0].endswith("G"), \
         "the end line names this session's own counts and its RSS"
-
-
-# -- the per-ticker miss skip ------------------------------------------------
-
-def test_three_consecutive_misses_keep_asking_and_the_fourth_skips_it(
-        monkeypatch, capsys, tmp_path):
-    """The threshold is the measured one: pairs at 1, 2 or 3 batch 404s went on
-    to be held 9.4% / 14% / 22% of the time, so those names stay asked. Of the
-    pairs that reached a 4th, none ever were: the 5th run stops paying for it
-    and says so, in the report and on stderr. Consecutive means consecutive
-    ANCHOR DATES — a same-day rerun counts once, not twice (see the next
-    test)."""
-    _wire(monkeypatch, set(), tmp_path)
-    threshold = nightly.CHAIN_MISS_SKIP_AFTER
-    anchors = [str((pd.Timestamp(AS_OF) + pd.Timedelta(days=i)).date())
-               for i in range(threshold + 1)]
-
-    for run, anchor in enumerate(anchors[:threshold], start=1):
-        f = _Fetcher(absent={"TKR09"})
-        out = nightly.refresh_forward_chains(TICKERS, anchor, fetcher=f, sessions=1)
-        assert "TKR09" in f.asked_tickers, f"miss {run} of {threshold} is still asked"
-        assert out["miss_skipped"]["tickers"] == 0
-        assert nightly._read_chain_ledger()[1] == {"TKR09": {"n": run, "last": anchor}}
-
-    f = _Fetcher(absent={"TKR09"})
-    out = nightly.refresh_forward_chains(TICKERS, anchors[threshold], fetcher=f,
-                                         sessions=1)
-
-    assert "TKR09" not in f.asked_tickers, "the run after the 4th miss does not ask"
-    assert "TKR08" in f.asked_tickers, "and it asks every other name all the same"
-    assert out["requested"] == len(TICKERS), "requested counts the universe, not the ask"
-    assert out["miss_skipped"] == {"tickers": 1, "pairs": 1,
-                                   "est_weekly_calls_saved": 0.7}
-    assert out["miss_counts"] == {"tracked": 1, "at_threshold": 1, "reset": 0}
-    err = capsys.readouterr().err
-    assert ("[chains] skipping 1 tickers after 4 consecutive misses "
-            "(re-probe every 7d): 1 pairs, ~0.7 calls/week saved") in err, \
-        "any skip is in the report and on stderr, never silent"
-    assert nightly._read_chain_ledger()[1] == {
-        "TKR09": {"n": threshold, "last": anchors[threshold - 1]}}, \
-        "a run that never asked the name leaves its count exactly where it was"
-
-
-def test_two_runs_on_the_same_anchor_date_count_one_miss(monkeypatch, tmp_path):
-    """A rerun is not a new night: when the ledger's ``last`` is already the
-    run's anchor date, a MISS verdict does not deepen the streak. Only the
-    next anchor date takes it to the next count — the same day rerunning the
-    nightly twice must not push a name toward the skip twice as fast."""
-    _wire(monkeypatch, set(), tmp_path)
-
-    for run in (1, 2):
-        f = _Fetcher(absent={"TKR09"})
-        nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
-        assert "TKR09" in f.asked_tickers
-        assert nightly._read_chain_ledger()[1] == {"TKR09": {"n": 1, "last": AS_OF}}, \
-            f"rerun {run} on the entry's own anchor date counts once per day"
-
-    next_anchor = str((pd.Timestamp(AS_OF) + pd.Timedelta(days=1)).date())
-    f = _Fetcher(absent={"TKR09"})
-    nightly.refresh_forward_chains(TICKERS, next_anchor, fetcher=f, sessions=1)
-
-    assert nightly._read_chain_ledger()[1] == {"TKR09": {"n": 2, "last": next_anchor}}, \
-        "the next anchor date is the second miss"
-
-
-def test_a_same_anchor_rerun_still_clears_on_data(monkeypatch, tmp_path):
-    """The once-per-day rule guards increments only: a rerun whose answer is
-    data still wipes the entry, whatever its ``last`` says."""
-    _wire(monkeypatch, set(), tmp_path)
-    _seed_ledger(misses={"TKR09": {"n": 2, "last": AS_OF}})
-    f = _Fetcher()
-
-    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
-
-    assert nightly._read_chain_ledger()[1] == {}, "DATA still resets on a rerun"
-    assert out["miss_counts"] == {"tracked": 0, "at_threshold": 0, "reset": 1}
-
-
-def test_a_backdated_anchor_reads_a_future_last_as_age_zero(monkeypatch, tmp_path):
-    """The skip age is clamped at zero: a rerun anchored BEFORE the entry's
-    ``last`` (a backdated replay, or a hand-edited future date) computes a
-    negative age, which must never re-probe and never raise — a future ``last``
-    is age 0, so the chronic name keeps its quiet."""
-    _wire(monkeypatch, set(), tmp_path)
-    future = str((pd.Timestamp(AS_OF) + pd.Timedelta(days=3)).date())
-    entry = {"n": nightly.CHAIN_MISS_SKIP_AFTER, "last": future}
-    _seed_ledger(misses={"TKR09": entry})
-    f = _Fetcher(absent={"TKR09"})
-
-    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
-
-    assert "TKR09" not in f.asked_tickers, "a negative age is age 0: no re-probe"
-    assert out["miss_skipped"]["tickers"] == 1
-    assert nightly._read_chain_ledger()[1] == {"TKR09": entry}, \
-        "the unasked name's count and its future last both stand"
-
-
-def test_data_clears_the_count_and_removes_the_entry(monkeypatch, tmp_path):
-    """One name that answers with a chain wipes its whole streak: the entry is
-    gone, not zeroed, and the report counts the reset."""
-    _wire(monkeypatch, set(), tmp_path)
-    _seed_ledger(misses={"TKR09": {"n": nightly.CHAIN_MISS_SKIP_AFTER - 1,
-                                   "last": AS_OF}})
-    f = _Fetcher()
-
-    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
-
-    assert "TKR09" in f.asked_tickers, "three misses is under the threshold: keep asking"
-    assert nightly._read_chain_ledger()[1] == {}, "the entry is dropped, not zeroed"
-    assert out["miss_counts"] == {"tracked": 0, "at_threshold": 0, "reset": 1}
-
-
-def test_a_name_held_for_one_session_is_data_not_a_miss(monkeypatch, tmp_path):
-    """A pair already in the store IS a chain. Absent from the session the run
-    asked for but held for the other one, the name is DATA and its streak
-    clears — otherwise a name that lost a single night's chain would be skipped
-    whole, which is the mistake the session-level rule made."""
-    older = "2026-09-01"
-    _wire(monkeypatch, {("TKR09", pd.Timestamp(older))}, tmp_path,
-          stamps=[older, AS_OF])
-    _seed_ledger(misses={"TKR09": {"n": nightly.CHAIN_MISS_SKIP_AFTER - 1,
-                                   "last": AS_OF}})
-    f = _Fetcher(absent={"TKR09"})
-
-    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=2)
-
-    assert f.asked == [AS_OF, older], "the held pair is not bought; the rest is"
-    assert f.asked_tickers.count("TKR09") == 1, "asked once, for the unheld session"
-    assert nightly._read_chain_ledger()[1] == {}, "held elsewhere is a chain, not a miss"
-    assert out["miss_counts"]["reset"] == 1
-
-
-@pytest.mark.parametrize("kind", ["transient", "fetch-error", "bad-json",
-                                  "wrong-shape", "junk-row"])
-def test_a_call_that_never_answered_is_never_a_miss(monkeypatch, tmp_path, kind):
-    """The count moves only on a definitive answer. A transport reset, a plain
-    FetchError, a 200 that is not JSON, a 200 whose shape is wrong and a 200
-    with junk rows all leave the streak exactly where it was, and the name
-    stays owed the date."""
-    kw = {
-        "transient": {"fail": lambda p: RuntimeError("orats: connection reset")},
-        "fetch-error": {"fail": lambda p: FetchError("orats hist/strikes: HTTP 503")},
-        "bad-json": {"bad_json": lambda p: ValueError("no JSON object could be decoded")},
-        "wrong-shape": {"body": lambda p: ["not", "a", "dict"]},
-        "junk-row": {"body": lambda p: {"data": [{"ticker": "TKR00"}, 5]}},
-    }[kind]
-    _wire(monkeypatch, set(), tmp_path)
-    before = {"TKR09": {"n": nightly.CHAIN_MISS_SKIP_AFTER - 1, "last": _days(1)}}
-    _seed_ledger(misses=before)
-    f = _Fetcher(**kw)
-
-    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
-
-    assert out["failed"], f"{kind} is still reported"
-    assert nightly._read_chain_ledger()[1] == before, \
-        f"a {kind} answer is no evidence of no chain: the count stands"
-    assert out["miss_counts"]["tracked"] == 1, "one entry tracked, unmoved"
-    assert out["miss_counts"]["reset"] == 0
-    assert out["miss_skipped"]["tickers"] == 0, "and a name short of the bar is asked"
-    assert nightly._read_chain_retry() == {AS_OF: set(TICKERS)}, \
-        "and every name of the unanswered chunk stays owed the date"
-
-
-def test_a_quota_cut_is_never_a_miss(monkeypatch, tmp_path):
-    """QuotaExhausted re-raises out of the run, but the end-of-run persist is a
-    finally: it still writes the ledger, and what it learned is nothing — the
-    chunk it refused was asked and never answered, and the names past it were
-    never asked at all."""
-    _wire(monkeypatch, set(), tmp_path)
-    before = {"TKR09": {"n": nightly.CHAIN_MISS_SKIP_AFTER - 1, "last": AS_OF}}
-    _seed_ledger(misses=before)
-    f = _Fetcher(fail=lambda p: QuotaExhausted("orats daily quota below the reserve floor"))
-
-    with pytest.raises(QuotaExhausted):
-        nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
-
-    assert nightly._read_chain_ledger()[1] == before, "the refused chunk counts as nothing"
-    assert nightly._read_chain_retry() == {AS_OF: set(TICKERS)}, \
-        "and the whole intended list stays owed, count or no count"
-
-
-def test_a_skip_drops_only_that_name_from_the_heal_pass(monkeypatch, tmp_path):
-    """Why the session-level rule went: a mostly-dead session still has
-    partners that come back late. TKR09 is chronic and out of the batch; TKR08
-    missed once, is asked beside its neighbours, and recovers on this run."""
-    _wire(monkeypatch, set(), tmp_path)
-    _seed_ledger(misses={"TKR09": {"n": nightly.CHAIN_MISS_SKIP_AFTER, "last": AS_OF},
-                         "TKR08": {"n": 1, "last": AS_OF}})
-    f = _Fetcher(absent={"TKR09"})
-
-    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
-
-    assert f.asked_tickers == [t for t in TICKERS if t != "TKR09"], \
-        "the batch is the universe minus the one skipped name"
-    assert out["calls"] == 1 and out["miss_skipped"]["tickers"] == 1
-    assert nightly._read_chain_ledger()[1] == {
-        "TKR09": {"n": nightly.CHAIN_MISS_SKIP_AFTER, "last": AS_OF}}, \
-        "TKR08's recovery cleared it; the skipped name's count did not move"
-
-
-@pytest.mark.parametrize(("age", "asked"), [
-    pytest.param(3, False, id="3-days-quiet"),
-    pytest.param(6, False, id="6-days-quiet"),
-    pytest.param(7, True, id="7-days-reprobe"),
-    pytest.param(8, True, id="8-days-reprobe"),
-])
-def test_the_reprobe_window_is_seven_days(monkeypatch, tmp_path, age, asked):
-    """The skip is a week of quiet, not a ban: (anchor - last) >= 7 days asks
-    the name again, anything younger leaves it alone."""
-    _wire(monkeypatch, set(), tmp_path)
-    entry = {"n": nightly.CHAIN_MISS_SKIP_AFTER, "last": _days(age)}
-    _seed_ledger(misses={"TKR09": entry})
-    f = _Fetcher(absent={"TKR09"})
-
-    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
-
-    assert ("TKR09" in f.asked_tickers) is asked, f"last {age} days old"
-    assert out["miss_skipped"]["tickers"] == (0 if asked else 1)
-    if asked:
-        assert nightly._read_chain_ledger()[1] == {"TKR09": {
-            "n": nightly.CHAIN_MISS_SKIP_AFTER + 1, "last": AS_OF}}, \
-            "a probe that missed counts and re-stamps: another week of quiet"
-    else:
-        assert nightly._read_chain_ledger()[1] == {"TKR09": entry}, "the quiet stands"
-
-
-def test_a_reprobe_that_returns_data_clears_the_count(monkeypatch, tmp_path):
-    """The other half of the probe: a late chain resets the streak to nothing,
-    however long it was."""
-    _wire(monkeypatch, set(), tmp_path)
-    _seed_ledger(misses={"TKR09": {"n": 9, "last": _days(8)}})
-    f = _Fetcher()
-
-    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
-
-    assert "TKR09" in f.asked_tickers, "eight days old is past the re-probe window"
-    assert nightly._read_chain_ledger()[1] == {}
-    assert out["miss_counts"] == {"tracked": 0, "at_threshold": 0, "reset": 1}
-
-
-def test_a_count_older_than_the_prune_window_is_dropped(monkeypatch, tmp_path):
-    """A streak nobody has touched for two months is not a live count. A name
-    still in the universe is re-probed long before that — every 7 days — and so
-    either clears or re-stamps; the CHAIN_MISS_PRUNE_DAYS window is what drops
-    the entries left behind when a ticker leaves the calendar frontier and is
-    never asked again. Exactly 60 days is still inside it."""
-    _wire(monkeypatch, set(), tmp_path)
-    _seed_ledger(misses={"GONE1": {"n": nightly.CHAIN_MISS_SKIP_AFTER, "last": _days(61)},
-                         "GONE2": {"n": nightly.CHAIN_MISS_SKIP_AFTER, "last": _days(60)},
-                         "TKR09": {"n": nightly.CHAIN_MISS_SKIP_AFTER, "last": _days(30)}})
-    f = _Fetcher(absent={"TKR09"})
-
-    nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
-
-    assert "TKR09" in f.asked_tickers, "30 days old is past the 7-day window: re-probed"
-    kept = nightly._read_chain_ledger()[1]
-    assert "GONE1" not in kept, "a count 61 days behind the run is dropped"
-    assert kept["GONE2"] == {"n": nightly.CHAIN_MISS_SKIP_AFTER, "last": _days(60)}, \
-        "exactly 60 days is still inside the window"
-    assert kept["TKR09"] == {"n": nightly.CHAIN_MISS_SKIP_AFTER + 1, "last": AS_OF}, \
-        "and the probe that missed re-stamped rather than aged out"
-
-
-def test_a_legacy_flat_ledger_reads_as_owed(monkeypatch, tmp_path):
-    """The format the memo had before counts existed still loads: its top-level
-    date keys ARE the owed section, nothing is skipped on no counts, and the
-    older of the two dates still reaches the older-memo re-ask. The next write
-    puts it in the new shape."""
-    _wire(monkeypatch, set(), tmp_path, stamps=[AS_OF])
-    older = _days(3)
-    _seed_ledger(owed={AS_OF: ["TKR09"], older: ["TKR08"]}, legacy=True)
-
-    assert nightly._read_chain_retry() == {AS_OF: {"TKR09"}, older: {"TKR08"}}
-    assert nightly._read_chain_ledger()[1] == {}, "a flat file has no counts yet"
-
-    f = _Fetcher()
-    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
-
-    assert "TKR09" in f.asked_tickers, "the heal session still re-asks its debt"
-    assert out["older_retried"] == [{"session": older, "names": 1}], \
-        "and the date past the window is re-asked from the same legacy file"
-    assert json.loads(nightly.CHAIN_RETRY_PATH.read_text()) == {"owed": {}, "misses": {}}
-
-
-def test_a_malformed_miss_entry_is_ignored(monkeypatch, tmp_path):
-    """A count the run cannot read is no evidence to skip on: a junk entry is
-    dropped for that ticker, never raised, never half-read — and the one
-    readable entry still does its job."""
-    junk = [f"JUNK{i}" for i in range(6)]
-    broken = dict(zip(junk, [
-        "not-a-dict",                       # a bare string
-        {"last": AS_OF},                    # no count at all
-        {"n": "4", "last": AS_OF},          # a count that is not an int
-        {"n": 0, "last": AS_OF},            # a zero count (dropped by the schema)
-        {"n": 4},                           # no run date
-        {"n": 4, "last": AS_OF.replace("-", "")},  # a non-canonical date
-    ]))
-    universe = TICKERS + ["GOOD"] + junk
-    _wire(monkeypatch, set(), tmp_path)
-    _seed_ledger(owed={AS_OF: ["TKR00"]},
-                 misses={**broken,
-                         "GOOD": {"n": nightly.CHAIN_MISS_SKIP_AFTER, "last": AS_OF}})
-    f = _Fetcher()
-
-    out = nightly.refresh_forward_chains(universe, AS_OF, fetcher=f, sessions=1)
-
-    assert f.asked_tickers == [t for t in sorted(universe) if t != "GOOD"], \
-        "a junk count asks its ticker like any other name"
-    assert out["miss_skipped"] == {"tickers": 1, "pairs": 1,
-                                   "est_weekly_calls_saved": 0.7}
-    assert nightly._read_chain_ledger()[1] == {
-        "GOOD": {"n": nightly.CHAIN_MISS_SKIP_AFTER, "last": AS_OF}}, \
-        "the unreadable entries are gone; the readable one is untouched"
-
-
-def test_a_404_chunk_is_a_miss_for_every_name_in_it(monkeypatch, tmp_path):
-    """The 404 arm already files the whole chunk as a definitive no-chain; the
-    count follows exactly those names — not the chunks that answered, which are
-    data — and the name still never enters the owed memo."""
-    tickers = [f"TKR{i:02d}" for i in range(25)]
-    _wire(monkeypatch, set(), tmp_path)
-    f = _Fetcher(fail=lambda p: RuntimeError("orats hist/strikes returned HTTP 404")
-                 if p["ticker"].split(",")[0] == "TKR10" else None)
-
-    out = nightly.refresh_forward_chains(tickers, AS_OF, fetcher=f, sessions=1)
-
-    missed = {t for t in tickers if "TKR10" <= t <= "TKR19"}
-    assert set(out["missing"]) == missed, "the 404 chunk is the whole missing set"
-    assert nightly._read_chain_ledger()[1] == {t: {"n": 1, "last": AS_OF} for t in missed}, \
-        "every name in it is one miss deeper and no other name is"
-    assert nightly._read_chain_retry() == {}, "a 404 is still never owed"
-
-
-def test_a_name_with_data_in_one_session_and_a_404_in_another_is_data(
-        monkeypatch, tmp_path):
-    """The run's outcome is the STRONGEST answer it saw, not the last one: a
-    name that 404s for the older session and answers for the newest is DATA, so
-    its streak clears and the pair it holds stays held."""
-    older = "2026-09-01"
-    _wire(monkeypatch, set(), tmp_path, stamps=[older, AS_OF])
-    _seed_ledger(misses={"TKR09": {"n": nightly.CHAIN_MISS_SKIP_AFTER - 1,
-                                   "last": AS_OF}})
-    f = _Fetcher(fail=lambda p: RuntimeError("orats hist/strikes returned HTTP 404")
-                 if p["tradeDate"] == older else None)
-
-    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=2)
-
-    assert f.asked == [AS_OF, older]
-    assert out["missing"] == sorted(TICKERS), "the older session's 404 is still filed"
-    assert nightly._read_chain_ledger()[1] == {}, \
-        "data anywhere in the run wins: nothing is counted, the streak clears"
-    assert out["miss_counts"] == {"tracked": 0, "at_threshold": 0, "reset": 1}
