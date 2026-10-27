@@ -1,10 +1,12 @@
 """Native source dates, without outcomes, for policy admission before value reads."""
 from dataclasses import replace
+from datetime import date
 
 import numpy as np
 
 from engine.v2.contracts.data import ColumnContract, TableContract
 from engine.v2.data.computed_moves import source_session_indices
+from engine.v2.data.errors import fail
 from engine.v2.data.manifests import table_contract_hash
 
 TABLE = "computed_move_bounds"
@@ -13,8 +15,18 @@ COLUMNS = ("ticker", "event_date", "session", "pre_close_date", "post_close_date
 
 
 def source_bounds(sd, event_day, session):
-    """Return the actual native price-date bracket, never a guessed market calendar."""
-    indices = source_session_indices(sd, np.datetime64(event_day, "ns"), session)
+    """Actual bracket over a caller-validated sorted native datetime64[ns] array."""
+    if not isinstance(session, str) or session not in ("BMO", "AMC"):
+        raise fail("CONTRACT_MISMATCH", "source bounds require BMO or AMC session")
+    try:
+        if not isinstance(event_day, str) or date.fromisoformat(event_day).isoformat() != event_day:
+            raise ValueError
+        day = np.datetime64(event_day, "ns")
+        if str(day.astype("datetime64[D]")) != event_day:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        raise fail("CONTRACT_MISMATCH", "source bounds require a representable canonical ISO day") from None
+    indices = source_session_indices(sd, day, session)
     return ((None, None) if indices is None else
             tuple(str(sd[index].astype("datetime64[D]")) for index in indices))
 
