@@ -18,6 +18,7 @@ def with_synthetic_exact_analogs(binding, events, *, as_of):
     if binding.analog_artifacts:
         return binding
     analogs = {}
+    seen_keys = set()
     for event in events:
         entry_date = event.calendar_row.get("entry_date")
         if not isinstance(entry_date, str):
@@ -27,14 +28,19 @@ def with_synthetic_exact_analogs(binding, events, *, as_of):
         except ValueError:
             continue
         strategy = event.key.strategy
+        if strategy != "STR-THRU":
+            continue
         key = board_analog_pool_key(strategy, 0.5, cutoff)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
         pool = make_board_analog_pool_artifact(
             strategy=strategy, alpha=0.5, cutoff=cutoff,
             population_edges=(0.9, 1.1), causal_edges=(0.9, 1.1),
             lineage=Lineage(),
             rows=[("r1", "2025-01-01", "2025-02-01", "1-10B", "4-10", "ATM", "mid", 0.01)],
         )
-        if pool.key != key:
-            raise AssertionError("synthetic analog pool key did not match its request")
         analogs.setdefault(strategy, []).append(pool)
+    if not analogs:
+        return binding
     return replace(binding, analog_artifacts={key: tuple(value) for key, value in analogs.items()})

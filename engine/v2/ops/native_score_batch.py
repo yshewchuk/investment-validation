@@ -373,11 +373,11 @@ def _with_release_artifacts(
 
     Split out of :func:`_assemble_one_event` to keep it under its line budget.
     The cutoff's own date refusal (:func:`_row_cutoff`) is a source-bundle
-    refusal like any other and is re-wrapped with the row's key. The frozen
-    board analog pool, when the release carries one for this row's
-    ``(strategy, fill alpha, cutoff)``, is declared with the NATIVE snapshot id
-    and the row's native request key as its bootstrap-seed identity (#681);
-    otherwise the analog block stays undeclared.
+    refusal like any other and is re-wrapped with the row's key. STR-THRU
+    requires the board analog pool for the exact ``(strategy, fill alpha,
+    cutoff)`` key; absence refuses the row. Other strategies declare a matching
+    pool with the NATIVE snapshot id and native request key (#681) when present;
+    an absent optional analog block remains not-applicable.
     """
     context = {**bundle.context,
                **_identity_context(as_of, snapshot_id, calendar_row,
@@ -391,14 +391,15 @@ def _with_release_artifacts(
             declarations = _release_artifact_declarations(
                 binding, strategy, drivers[0].identity, as_of, calendar_row)
         analogs = binding.analog_artifacts.get(strategy) or ()
-        analog_declaration = analog_declarations(
-            analogs, strategy, _SHADOW_FILL_ALPHA, _row_cutoff(as_of, calendar_row),
-            panel_row, snapshot_id,
-            score_request_key({**context, "ticker": key.ticker, "strategy": strategy}))
-        if not analog_declaration:
-            raise NightlySourceBundleRefusal(
-                "MODEL_NOT_READY", "release lacks the exact-cutoff analog pool")
-        declarations.update(analog_declaration)
+        if analogs or strategy == "STR-THRU":
+            analog_declaration = analog_declarations(
+                analogs, strategy, _SHADOW_FILL_ALPHA, _row_cutoff(as_of, calendar_row),
+                panel_row, snapshot_id,
+                score_request_key({**context, "ticker": key.ticker, "strategy": strategy}))
+            if not analog_declaration and strategy == "STR-THRU":
+                raise NightlySourceBundleRefusal(
+                    "MODEL_NOT_READY", "release lacks the exact-cutoff analog pool")
+            declarations.update(analog_declaration)
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
             key, exc.code, f"nightly_source_bundle refused: {exc.code}")

@@ -147,11 +147,13 @@ load-bearing entrypoints:
   gates, payoff-calibration/model layer and frozen residual-state reading.
   Each is pure arithmetic over declared inputs; none performs I/O.
   **Nightly frozen analog declaration** (`native_analog_query.py`, pure).
-  - *Selection:* the release's board analog pool whose
+  - *Selection:* STR-THRU requires the release's board analog pool whose
     `(strategy, fill alpha, cutoff)` key matches the row, pinned by its
-    `content_hash`; no match or more than one match refuses the row
+    `content_hash`; no match or more than one match refuses that row
     (`MODEL_NOT_READY`), never a first-wins pick or silent not-applicable
-    result.
+    result. Other registered strategies may declare a matching pool when
+    present; an absent or nonmatching optional pool leaves analogs
+    not-applicable. No strategy uses a latest-cutoff fallback.
   - *Query:* `mcap_bucket` and `implied_ratio` come from the panel row at
     bundle time; `dte_band` and `moneyness_band` are completed in the analog
     stage from the scorer-computed `dte_entry`, `strike` and `spot` with
