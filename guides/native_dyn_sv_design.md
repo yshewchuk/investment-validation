@@ -37,7 +37,7 @@ over seven independently scored member rows.
 | Chooser block from a bundle (`chooser_recipe`, fold pools, analog pool, admissible table) | `engine/v2/scoring/chooser_inputs.py` (`chooser_block`, line ~85) |
 | Frozen state: `admissible_table:dyn_sv`, `chooser_analog_pool` | `engine/v2/scoring/release_bindings.py:75-76,164-165` (resolved, not consumed by the nightly) |
 | Menu accounting: one outcome per member, record or typed refusal, `INVALID_CHOOSER_MENU` / `CHOOSER_MENU_INCOMPLETE` | `engine/v2/scoring/dynamic_outcomes.py` |
-| Selection over scored records (`_choose_dynamic`: chooser_score else exp_pnl_sim, margin, tie, `NO_CHOOSER_CANDIDATE`) | `engine/v2/scoring/application.py:1439`; called by `score_event` and, as a private import, `tools/phase4_targeted_replay.py:661` (via `phase4_real.application`) |
+| Selection over scored records (`_choose_dynamic`: chooser_score else exp_pnl_sim, margin, tie, `NO_CHOOSER_CANDIDATE`) | `engine/v2/scoring/application.py:1439`; called by `score_event` and, as a private import, `tools/phase4_targeted_replay.py:661` (via `phase4_real.application`) and `checks/phase4_real.py` (`_replayed_chooser`, `_chooser_controls`) |
 | Geometry, size tables, entry-rule gate for the members | steps 1-5 |
 
 ## 3. What is missing
@@ -71,7 +71,9 @@ seven members as board rows; today the batch worker refuses them as
 `UNSUPPORTED_STRATEGY` until the member-registration steps (#1424 and the ladder and
 CND-PS steps of #1157) register them. DYN-SV reuses those exact records instead of re-scoring them
 (no second compute, no divergent copies). The post-pass runs in the worker after
-`score_batch`, per event, over `records_by_key` and the member refusals.
+`score_batch`, per event, over the live `ScoreRecord` objects and the member refusals,
+keyed by `BoardRequest`. It runs before `to_document` serialises them
+(`records_by_key` is serialised dictionaries and is not an input).
 
 **Failure semantics (R1-R7).** The labels are this note's own, not the 4c template's.
 
