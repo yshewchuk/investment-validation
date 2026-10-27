@@ -7,6 +7,7 @@ scan is clean.
 """
 from __future__ import annotations
 
+import argparse
 import ast
 import os
 import selectors
@@ -14,6 +15,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,6 +25,7 @@ PRODUCTION_PATHS = (
     "engine/v2/ops/training.py", "engine/v2/scoring/release_bindings.py",
 )
 EXPERIMENT_PATHS = ("engine/v2/research/", "experiments/")
+EXPERIMENT_BASELINE_PATH = "checks/live_experiment_isolation.baseline"
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_CATALOG_BYTES = 16 * 1024 * 1024
@@ -649,10 +652,67 @@ def _scoped_nodes(
     return bindings, calls
 
 
-def check_files(files: dict[str, bytes]) -> list[Finding]:
-    """Return every static violation; syntax and encoding errors are findings."""
+def _transitive_import_chains(trees: dict[str, ast.Module]) -> dict[str, str]:
+    """Return a shortest chain per experiment source and forbidden boundary."""
+    module_map = {_module_path(path): path for path in trees}
+    imports_by_module: dict[str, set[str]] = {}
+    for path, tree in trees.items():
+        targets: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                targets.update(_static_import_targets(node, path))
+        imports_by_module[_module_path(path)] = targets
+
+    graph: dict[str, set[str]] = {module: set() for module in module_map}
+    for module, targets in imports_by_module.items():
+        for target in targets:
+            parts = target.split(".")
+            for i in range(1, len(parts) + 1):
+                prefix = ".".join(parts[:i])
+                if prefix in module_map:
+                    graph[module].add(prefix)
+
+    chains: dict[str, str] = {}
+    for path in sorted(trees):
+        if not _scope(path, EXPERIMENT_PATHS):
+            continue
+        start = _module_path(path)
+        direct: set[str] = set()
+        for target in imports_by_module.get(start, ()):
+            parts = target.split(".")
+            for i in range(1, len(parts) + 1):
+                prefix = ".".join(parts[:i])
+                if prefix in module_map:
+                    direct.add(prefix)
+        visited = {start}
+        found_roots: set[str] = set()
+        queue = deque([(start, [start])])
+        while queue:
+            current, chain = queue.popleft()
+            roots = [
+                root for root in EXPERIMENT_FORBIDDEN_IMPORTS
+                if current != start and _under(current, (root,))
+            ]
+            if roots:
+                root = max(roots, key=len)
+                if current not in direct and root not in found_roots:
+                    canonical_chain = chain if current == root else [*chain[:-1], root]
+                    key = f"{path} -> {' -> '.join(canonical_chain)}"
+                    chains[key] = " -> ".join(canonical_chain)
+                    found_roots.add(root)
+                continue
+            for target in sorted(graph.get(current, ())):
+                if target not in visited:
+                    visited.add(target)
+                    queue.append((target, chain + [target]))
+    return chains
+
+
+def _parse_source_trees(
+    files: dict[str, bytes],
+) -> tuple[dict[str, ast.Module], list[Finding]]:
+    """Parse tracked Python sources; syntax and encoding errors become findings."""
     findings: list[Finding] = []
-    finding_keys: set[tuple[str, int, str]] = set()
     trees: dict[str, ast.Module] = {}
     for path, content in sorted(files.items()):
         if not path.endswith(".py"):
@@ -663,6 +723,17 @@ def check_files(files: dict[str, bytes]) -> list[Finding]:
         except (UnicodeDecodeError, SyntaxError) as exc:
             line = getattr(exc, "lineno", 1) or 1
             findings.append(Finding(path, line, "source-invalid", str(exc)))
+    return trees, findings
+
+
+def check_files(
+    files: dict[str, bytes], *, transitive_baseline: frozenset[str] | None = None
+) -> list[Finding]:
+    """Return every static violation; syntax and encoding errors are findings."""
+    findings: list[Finding] = []
+    finding_keys: set[tuple[str, int, str]] = set()
+    trees, parse_findings = _parse_source_trees(files)
+    findings.extend(parse_findings)
 
     def add_forbidden_import(path: str, line: int, detail: str) -> None:
         key = (path, line, "forbidden-import")
@@ -790,6 +861,40 @@ def check_files(files: dict[str, bytes]) -> list[Finding]:
                             f"{symbol} caller must be reviewed and added to ROOT_CALLERS",
                         ))
                         break
+
+    chains = _transitive_import_chains(trees)
+    baseline = transitive_baseline if transitive_baseline is not None else frozenset()
+    baseline_lines: dict[str, int] = {}
+    if transitive_baseline is not None and EXPERIMENT_BASELINE_PATH in files:
+        try:
+            baseline_text = files[EXPERIMENT_BASELINE_PATH].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise IsolationCheckError(
+                "invalid UTF-8 transitive import baseline"
+            ) from exc
+        for line_number, line in enumerate(baseline_text.splitlines(), 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            baseline_lines.setdefault(stripped, line_number)
+
+    for key in sorted(chains):
+        if key not in baseline:
+            findings.append(Finding(
+                key.split(" -> ", 1)[0],
+                1,
+                "transitive-forbidden-import",
+                f"{key}: {chains[key]}",
+            ))
+
+    for key in sorted(baseline):
+        if key not in chains:
+            findings.append(Finding(
+                EXPERIMENT_BASELINE_PATH,
+                baseline_lines.get(key, 1),
+                "transitive-baseline-stale",
+                key,
+            ))
     return findings
 
 
@@ -833,7 +938,7 @@ def _git_catalog(root: Path) -> bytes:
         ) from exc
     try:
         process = subprocess.Popen(
-            ["git", "ls-files", "-z", "--", "*.py"], cwd=root,
+            ["git", "ls-files", "-z", "--", "*.py", EXPERIMENT_BASELINE_PATH], cwd=root,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
     except OSError as exc:
@@ -928,7 +1033,7 @@ def _git_catalog(root: Path) -> bytes:
                     stream.close()
 
 
-def scan_repository(root: Path = ROOT) -> list[Finding]:
+def _load_sources(root: Path = ROOT) -> dict[str, bytes]:
     """Read every tracked Python source; refuse if any part of the scan fails."""
     try:
         catalog = _git_catalog(root)
@@ -955,10 +1060,148 @@ def scan_repository(root: Path = ROOT) -> list[Finding]:
             files[path] = content
     except (OSError, UnicodeDecodeError, subprocess.SubprocessError) as exc:
         raise IsolationCheckError(f"complete tracked-source scan refused: {exc}") from exc
-    return check_files(files)
+    return files
 
 
-def main() -> int:
+def _baseline_entries(files: dict[str, bytes]) -> list[str]:
+    """Parse and validate committed baseline lines; refuse malformed baselines."""
+    try:
+        baseline_text = files[EXPERIMENT_BASELINE_PATH].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise IsolationCheckError(
+            f"complete tracked-source scan refused: invalid UTF-8 baseline: {exc}"
+        ) from exc
+    baseline_entries: list[str] = []
+    for line in baseline_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        baseline_entries.append(stripped)
+    if len(baseline_entries) != len(set(baseline_entries)):
+        raise IsolationCheckError(
+            "complete tracked-source scan refused: duplicate baseline entries"
+        )
+    if baseline_entries != sorted(baseline_entries):
+        raise IsolationCheckError(
+            "complete tracked-source scan refused: unsorted baseline entries"
+        )
+    return baseline_entries
+
+
+def scan_repository(root: Path = ROOT) -> list[Finding]:
+    """Read every tracked Python source; refuse if any part of the scan fails."""
+    files = _load_sources(root)
+    if EXPERIMENT_BASELINE_PATH not in files:
+        raise IsolationCheckError(
+            f"complete tracked-source scan refused: missing baseline "
+            f"{EXPERIMENT_BASELINE_PATH}"
+        )
+    return check_files(
+        files, transitive_baseline=frozenset(_baseline_entries(files))
+    )
+
+
+BASELINE_COMMENT = (
+    "# Existing transitive import-chain debt; this baseline can only shrink. "
+    "Burn-down issue: #1466."
+)
+
+
+def write_baseline(root: Path = ROOT) -> None:
+    """Create a fresh baseline; refuse if it exists or the scan is not clean."""
+    target = root / EXPERIMENT_BASELINE_PATH
+    if os.path.lexists(target):
+        raise IsolationCheckError(
+            f"baseline write refused: {EXPERIMENT_BASELINE_PATH} already exists"
+        )
+    files = _load_sources(root)
+    trees, parse_findings = _parse_source_trees(files)
+    if parse_findings:
+        details = "; ".join(
+            f"{item.path}:{item.line}: {item.detail}" for item in parse_findings
+        )
+        raise IsolationCheckError(
+            f"baseline write refused: source reading failed: {details}"
+        )
+    chains = _transitive_import_chains(trees)
+    findings = check_files(files, transitive_baseline=frozenset(chains))
+    blocking = [item for item in findings if not item.rule.startswith("transitive-")]
+    if blocking:
+        details = "; ".join(
+            f"{item.path}:{item.line}: [{item.rule}] {item.detail}"
+            for item in blocking
+        )
+        raise IsolationCheckError(
+            f"baseline write refused: non-transitive isolation findings: {details}"
+        )
+    lines = [BASELINE_COMMENT, *sorted(chains)]
+    content = ("\n".join(lines) + "\n").encode("utf-8")
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | no_follow
+    try:
+        fd = os.open(target, flags, 0o644)
+    except FileExistsError as exc:
+        raise IsolationCheckError(
+            f"baseline write refused: {EXPERIMENT_BASELINE_PATH} already exists"
+        ) from exc
+    except OSError as exc:
+        raise IsolationCheckError(
+            f"baseline write refused: cannot create "
+            f"{EXPERIMENT_BASELINE_PATH}: {exc}"
+        ) from exc
+    try:
+        handle = os.fdopen(fd, "wb")
+    except OSError as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+        raise IsolationCheckError(
+            f"baseline write refused: cannot write "
+            f"{EXPERIMENT_BASELINE_PATH}: {exc}"
+        ) from exc
+    try:
+        with handle:
+            handle.write(content)
+            handle.flush()
+    except OSError as exc:
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+        raise IsolationCheckError(
+            f"baseline write refused: cannot write "
+            f"{EXPERIMENT_BASELINE_PATH}: {exc}"
+        ) from exc
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = sys.argv[1:] if argv is None else argv
+    parser = argparse.ArgumentParser(description="Check live experiment isolation.")
+    parser.add_argument(
+        "--write-baseline",
+        action="store_true",
+        help="discover and exclusively create the current transitive debt baseline",
+    )
+    try:
+        options = parser.parse_args(arguments)
+    except SystemExit as exc:
+        return int(exc.code)
+    if options.write_baseline:
+        try:
+            write_baseline()
+        except IsolationCheckError as exc:
+            print(f"live experiment isolation refused: {exc}", file=sys.stderr)
+            return 1
+        print(
+            f"live experiment isolation: wrote baseline "
+            f"{EXPERIMENT_BASELINE_PATH}"
+        )
+        return 0
     try:
         findings = scan_repository()
     except IsolationCheckError as exc:

@@ -90,7 +90,7 @@ check defines missing-input and failure outcomes:
 | `.env` missing/empty (`check_files`) | CLI warns unless `--quiet` is set; current-value matching inactive; credential-pattern checks remain active; other checks continue |
 | No secret needles (`check_bundle`) | Record `no-secrets-loaded`; still check bundle files |
 | `repo_hygiene.py` scan | Clean: exit 0; violations: exit 1 |
-| `live_experiment_isolation.py` | Its always-run PR integration test executes the tracked-source scan and CLI; forbidden imports/root callers, invalid Python, unsafe/oversized source or source corpus, and Git listing failure/timeout/oversized catalog refuse with exit 1; no partial scan or fallback is clean |
+| `live_experiment_isolation.py` | Its always-run PR integration test executes the tracked-source scan and CLI; forbidden direct or transitive imports, root callers, invalid Python, unsafe/oversized source or source corpus, and Git listing failure/timeout/oversized catalog refuse with exit 1. Normal scan requires a sorted, unique committed shrink-only baseline and refuses new or stale boundary chains. `--write-baseline` discovers the complete current closure and exclusively creates the baseline; an existing target, incomplete scan, or other isolation finding refuses with exit 1. Unknown CLI arguments are argparse errors (exit 2). No partial scan or fallback is clean |
 | Staged hygiene read failure | Default returns empty bytes; `strict=True` raises `CalledProcessError` |
 | Worktree hygiene read failure | Default returns empty bytes; `strict=True` raises `OSError`; missing non-symlink paths return empty bytes in either mode |
 | The pre-commit hook finds no `npx` | One-line install hint on stderr; commit blocked (fails closed) |

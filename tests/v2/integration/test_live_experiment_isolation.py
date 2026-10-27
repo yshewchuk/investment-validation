@@ -19,9 +19,9 @@ def test_tracked_repository_passes_real_isolation_scan(monkeypatch):
     original = isolation.check_files
     observed = {}
 
-    def check_actual_sources(files):
+    def check_actual_sources(files, **kwargs):
         observed.update(files)
-        return original(files)
+        return original(files, **kwargs)
 
     monkeypatch.setattr(isolation, "check_files", check_actual_sources)
     assert isolation.scan_repository(Path(__file__).resolve().parents[3]) == []
@@ -560,13 +560,13 @@ def test_known_production_root_caller_is_allowed():
 
 
 def test_cli_main_returns_success_for_the_tracked_repository():
-    assert isolation.main() == 0
+    assert isolation.main([]) == 0
 
 
 def test_cli_main_returns_failure_when_scan_finds_a_violation(monkeypatch, capsys):
     finding = isolation.Finding("experiments/run.py", 1, "forbidden-import", "blocked")
     monkeypatch.setattr(isolation, "scan_repository", lambda: [finding])
-    assert isolation.main() == 1
+    assert isolation.main([]) == 1
     assert "forbidden-import" in capsys.readouterr().err
 
 
@@ -725,3 +725,138 @@ def test_module_alias_no_fit_member_call_remains_clean():
             b"m.no_fit.prepare()\n"
         ),
     }) == []
+
+
+_TRANSITIVE_CHAIN = (
+    "experiments/run.py -> experiments.run -> "
+    "engine.v2.ops.helper -> engine.v2.ledger"
+)
+_SECOND_CHAIN = (
+    "experiments/zeta.py -> experiments.zeta -> "
+    "engine.v2.ops.helper -> engine.v2.ledger"
+)
+_STALE_CHAIN = (
+    "experiments/run.py -> experiments.run -> "
+    "engine.v2.ops.old -> engine.v2.ledger"
+)
+
+
+def _transitive_graph():
+    return {
+        "experiments/run.py": b"import engine.v2.ops.helper\n",
+        "engine/v2/ops/helper.py": b"from engine.v2.ledger import rows\n",
+        "engine/v2/ledger/rows.py": b"pass\n",
+    }
+
+
+def test_transitive_import_chain_without_baseline_is_reported():
+    findings = isolation.check_files(_transitive_graph())
+    assert _rules(findings) == {"transitive-forbidden-import"}
+    assert [(item.path, item.line) for item in findings] == [
+        ("experiments/run.py", 1)
+    ]
+    assert findings[0].detail == (
+        f"{_TRANSITIVE_CHAIN}: "
+        "experiments.run -> engine.v2.ops.helper -> engine.v2.ledger"
+    )
+
+
+def test_exact_transitive_baseline_chain_passes():
+    assert isolation.check_files(
+        _transitive_graph(), transitive_baseline=frozenset({_TRANSITIVE_CHAIN})
+    ) == []
+
+
+def test_stale_transitive_baseline_entry_is_reported():
+    findings = isolation.check_files(
+        _transitive_graph(),
+        transitive_baseline=frozenset({_TRANSITIVE_CHAIN, _STALE_CHAIN}),
+    )
+    assert _rules(findings) == {"transitive-baseline-stale"}
+    assert [item.path for item in findings] == [isolation.EXPERIMENT_BASELINE_PATH]
+    assert [item.detail for item in findings] == [_STALE_CHAIN]
+
+
+def test_transitive_discovery_reports_each_forbidden_boundary():
+    files = {
+        "experiments/run.py": (
+            b"import engine.v2.ops.ledger_bridge\n"
+            b"import engine.v2.ops.release_bridge\n"
+        ),
+        "engine/v2/ops/ledger_bridge.py": b"import engine.v2.ledger\n",
+        "engine/v2/ops/release_bridge.py": (
+            b"import engine.v2.models.deployment\n"
+        ),
+        "engine/v2/ledger/__init__.py": b"pass\n",
+        "engine/v2/models/deployment.py": b"pass\n",
+    }
+    ledger_chain = (
+        "experiments/run.py -> experiments.run -> "
+        "engine.v2.ops.ledger_bridge -> engine.v2.ledger"
+    )
+    deployment_chain = (
+        "experiments/run.py -> experiments.run -> "
+        "engine.v2.ops.release_bridge -> engine.v2.models.deployment"
+    )
+    findings = isolation.check_files(
+        files, transitive_baseline=frozenset({ledger_chain})
+    )
+    assert _rules(findings) == {"transitive-forbidden-import"}
+    assert len(findings) == 1
+    assert findings[0].detail.startswith(deployment_chain + ":")
+
+
+def test_write_baseline_writes_sorted_discovered_chains(monkeypatch, tmp_path):
+    files = _transitive_graph()
+    files["experiments/zeta.py"] = b"import engine.v2.ops.helper\n"
+    monkeypatch.setattr(isolation, "_load_sources", lambda root: files)
+    (tmp_path / "checks").mkdir()
+    isolation.write_baseline(tmp_path)
+    text = (tmp_path / isolation.EXPERIMENT_BASELINE_PATH).read_text()
+    lines = text.splitlines()
+    assert lines == [
+        isolation.BASELINE_COMMENT,
+        *sorted([_TRANSITIVE_CHAIN, _SECOND_CHAIN]),
+    ]
+    assert "debt" in lines[0] and "#1466" in lines[0]
+    assert text.endswith("\n")
+
+
+def test_write_baseline_refuses_to_overwrite_existing_target(monkeypatch, tmp_path):
+    target = tmp_path / isolation.EXPERIMENT_BASELINE_PATH
+    target.parent.mkdir()
+    target.write_text("existing\n")
+    monkeypatch.setattr(isolation, "_load_sources", lambda root: _transitive_graph())
+    with pytest.raises(isolation.IsolationCheckError, match="already exists"):
+        isolation.write_baseline(tmp_path)
+    assert target.read_text() == "existing\n"
+
+
+def test_write_baseline_refuses_direct_findings_without_creating_a_file(
+    monkeypatch, tmp_path
+):
+    files = {
+        "experiments/run.py": b"import engine.v2.ledger.rows\n",
+        "engine/v2/ledger/rows.py": b"pass\n",
+    }
+    monkeypatch.setattr(isolation, "_load_sources", lambda root: files)
+    target = tmp_path / isolation.EXPERIMENT_BASELINE_PATH
+    target.parent.mkdir()
+    with pytest.raises(
+        isolation.IsolationCheckError, match="non-transitive isolation findings"
+    ):
+        isolation.write_baseline(tmp_path)
+    assert not target.exists()
+
+
+def test_main_write_baseline_dispatches_to_writer(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(isolation, "write_baseline", lambda: calls.append(True))
+    assert isolation.main(["--write-baseline"]) == 0
+    assert calls == [True]
+    assert "wrote baseline" in capsys.readouterr().out
+
+
+def test_main_refuses_unknown_arguments(capsys):
+    assert isolation.main(["--unknown"]) == 2
+    assert "unrecognized arguments" in capsys.readouterr().err

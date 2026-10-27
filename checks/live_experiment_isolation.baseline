@@ -1,0 +1,125 @@
+# Existing transitive import-chain debt; this baseline can only shrink. Burn-down issue: #1466.
+experiments/EXP-114_size_v2_0_step_5_learn_the_error_scale_i/run.py -> experiments.EXP-114_size_v2_0_step_5_learn_the_error_scale_i.run -> engine.dashboard -> engine.dashboard.render -> engine.ledger
+experiments/EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline/run.py -> experiments.EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline.run -> experiments.common_v2 -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/EXP-147_str_thru_gate_promotion_confirmatory_val/run.py -> experiments.EXP-147_str_thru_gate_promotion_confirmatory_val.run -> experiments.common_v2 -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/EXP-186_menu7prime_twinp_candidates_v2/run.py -> experiments.EXP-186_menu7prime_twinp_candidates_v2.run -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/common_v2.py -> experiments.common_v2 -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/magnitude_candidate_fit.py -> experiments.magnitude_candidate_fit -> engine.v2.models -> engine.v2.models.deployment
+experiments/magnitude_candidate_fit.py -> experiments.magnitude_candidate_fit -> engine.v2.models -> engine.v2.models.inventory
+experiments/magnitude_candidate_fit.py -> experiments.magnitude_candidate_fit -> engine.v2.models -> engine.v2.models.releases
+experiments/magnitude_candidate_recipe.py -> experiments.magnitude_candidate_recipe -> engine.v2.models -> engine.v2.models.deployment
+experiments/magnitude_candidate_recipe.py -> experiments.magnitude_candidate_recipe -> engine.v2.models -> engine.v2.models.inventory
+experiments/magnitude_candidate_recipe.py -> experiments.magnitude_candidate_recipe -> engine.v2.models -> engine.v2.models.releases
+experiments/magnitude_fitted.py -> experiments.magnitude_fitted -> engine.v2.models -> engine.v2.models.deployment
+experiments/magnitude_fitted.py -> experiments.magnitude_fitted -> engine.v2.models -> engine.v2.models.inventory
+experiments/magnitude_fitted.py -> experiments.magnitude_fitted -> engine.v2.models -> engine.v2.models.releases
+experiments/magnitude_history_inputs.py -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/magnitude_history_report.py -> experiments.magnitude_history_report -> experiments.magnitude_fitted -> engine.v2.models -> engine.v2.models.deployment
+experiments/magnitude_history_report.py -> experiments.magnitude_history_report -> experiments.magnitude_fitted -> engine.v2.models -> engine.v2.models.inventory
+experiments/magnitude_history_report.py -> experiments.magnitude_history_report -> experiments.magnitude_fitted -> engine.v2.models -> engine.v2.models.releases
+experiments/magnitude_history_report.py -> experiments.magnitude_history_report -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/magnitude_history_store.py -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/magnitude_inputs.py -> experiments.magnitude_inputs -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/magnitude_search_evidence.py -> experiments.magnitude_search_evidence -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/magnitude_search_execution.py -> experiments.magnitude_search_execution -> engine.v2.models -> engine.v2.models.deployment
+experiments/magnitude_search_execution.py -> experiments.magnitude_search_execution -> engine.v2.models -> engine.v2.models.inventory
+experiments/magnitude_search_execution.py -> experiments.magnitude_search_execution -> engine.v2.models -> engine.v2.models.releases
+experiments/magnitude_search_execution.py -> experiments.magnitude_search_execution -> engine.v2.ops.executor -> engine.v2.ops.refresh_staging -> engine.v2.ops.calendar_moves_jobs -> engine.v2.ops.computed_moves_store -> engine.v2.ops.legacy_adapter -> engine.ledger
+experiments/magnitude_search_outer.py -> experiments.magnitude_search_outer -> engine.v2.models -> engine.v2.models.deployment
+experiments/magnitude_search_outer.py -> experiments.magnitude_search_outer -> engine.v2.models -> engine.v2.models.inventory
+experiments/magnitude_search_outer.py -> experiments.magnitude_search_outer -> engine.v2.models -> engine.v2.models.releases
+experiments/magnitude_search_outer.py -> experiments.magnitude_search_outer -> experiments.magnitude_search_evidence -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/magnitude_search_outer.py -> experiments.magnitude_search_outer -> experiments.magnitude_search_execution -> engine.v2.ops.executor -> engine.v2.ops.refresh_staging -> engine.v2.ops.calendar_moves_jobs -> engine.v2.ops.computed_moves_store -> engine.v2.ops.legacy_adapter -> engine.ledger
+experiments/magnitude_search_plan.py -> experiments.magnitude_search_plan -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/magnitude_search_request.py -> experiments.magnitude_search_request -> experiments.magnitude_search_execution -> engine.v2.models -> engine.v2.models.deployment
+experiments/magnitude_search_request.py -> experiments.magnitude_search_request -> experiments.magnitude_search_execution -> engine.v2.models -> engine.v2.models.inventory
+experiments/magnitude_search_request.py -> experiments.magnitude_search_request -> experiments.magnitude_search_execution -> engine.v2.models -> engine.v2.models.releases
+experiments/magnitude_search_request.py -> experiments.magnitude_search_request -> experiments.magnitude_search_execution -> engine.v2.ops.executor -> engine.v2.ops.refresh_staging -> engine.v2.ops.calendar_moves_jobs -> engine.v2.ops.computed_moves_store -> engine.v2.ops.legacy_adapter -> engine.ledger
+experiments/magnitude_search_request_versions.py -> experiments.magnitude_search_request_versions -> experiments.magnitude_search_request -> experiments.magnitude_search_execution -> engine.v2.models -> engine.v2.models.deployment
+experiments/magnitude_search_request_versions.py -> experiments.magnitude_search_request_versions -> experiments.magnitude_search_request -> experiments.magnitude_search_execution -> engine.v2.models -> engine.v2.models.inventory
+experiments/magnitude_search_request_versions.py -> experiments.magnitude_search_request_versions -> experiments.magnitude_search_request -> experiments.magnitude_search_execution -> engine.v2.models -> engine.v2.models.releases
+experiments/magnitude_search_request_versions.py -> experiments.magnitude_search_request_versions -> experiments.magnitude_search_request -> experiments.magnitude_search_execution -> engine.v2.ops.executor -> engine.v2.ops.refresh_staging -> engine.v2.ops.calendar_moves_jobs -> engine.v2.ops.computed_moves_store -> engine.v2.ops.legacy_adapter -> engine.ledger
+experiments/magnitude_search_trials.py -> experiments.magnitude_search_trials -> engine.v2.models -> engine.v2.models.deployment
+experiments/magnitude_search_trials.py -> experiments.magnitude_search_trials -> engine.v2.models -> engine.v2.models.inventory
+experiments/magnitude_search_trials.py -> experiments.magnitude_search_trials -> engine.v2.models -> engine.v2.models.releases
+experiments/magnitude_search_trials.py -> experiments.magnitude_search_trials -> experiments.magnitude_search_evidence -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/magnitude_search_trials.py -> experiments.magnitude_search_trials -> experiments.magnitude_search_execution -> engine.v2.ops.executor -> engine.v2.ops.refresh_staging -> engine.v2.ops.calendar_moves_jobs -> engine.v2.ops.computed_moves_store -> engine.v2.ops.legacy_adapter -> engine.ledger
+experiments/magnitude_search_worker.py -> experiments.magnitude_search_worker -> experiments.magnitude_fitted -> engine.v2.models -> engine.v2.models.deployment
+experiments/magnitude_search_worker.py -> experiments.magnitude_search_worker -> experiments.magnitude_fitted -> engine.v2.models -> engine.v2.models.inventory
+experiments/magnitude_search_worker.py -> experiments.magnitude_search_worker -> experiments.magnitude_fitted -> engine.v2.models -> engine.v2.models.releases
+experiments/native_gate_entrypoint.py -> experiments.native_gate_entrypoint -> engine.v2.ops.worker -> engine.v2.models -> engine.v2.models.deployment
+experiments/native_gate_entrypoint.py -> experiments.native_gate_entrypoint -> engine.v2.ops.worker -> engine.v2.models -> engine.v2.models.inventory
+experiments/native_gate_entrypoint.py -> experiments.native_gate_entrypoint -> engine.v2.ops.worker -> engine.v2.models -> engine.v2.models.releases
+experiments/native_gate_entrypoint.py -> experiments.native_gate_entrypoint -> engine.v2.ops.worker -> engine.v2.ops.legacy_adapter -> engine.ledger
+experiments/native_gate_entrypoint.py -> experiments.native_gate_entrypoint -> engine.v2.ops.worker -> engine.v2.ops.native_score_batch -> engine.v2.scoring.gate_fold_selection -> engine.v2.models.serving_fold_loader
+experiments/native_gate_entrypoint.py -> experiments.native_gate_entrypoint -> engine.v2.ops.worker -> engine.v2.ops.retrain_check -> engine.v2.models.release_layout
+experiments/native_gate_entrypoint.py -> experiments.native_gate_entrypoint -> engine.v2.ops.worker -> engine.v2.ops.retrain_check -> engine.v2.models.release_objects
+experiments/native_gate_entrypoint.py -> experiments.native_gate_entrypoint -> engine.v2.ops.worker -> engine.v2.ops.state_stage -> tools.phase5_state_stage_job -> tools.phase5_prepare_release -> engine.v2.models.serving_fold_preflight
+experiments/native_gate_entrypoint.py -> experiments.native_gate_entrypoint -> engine.v2.ops.worker -> engine.v2.scoring.release_bindings
+experiments/native_gate_entrypoint.py -> experiments.native_gate_entrypoint -> experiments.native_gate_worker -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/native_gate_evaluation.py -> experiments.native_gate_evaluation -> engine.v2.ops.stages -> engine.v2.ops.calendar_moves_jobs -> engine.v2.ops.computed_moves_store -> engine.v2.ops.legacy_adapter -> engine.ledger
+experiments/native_gate_evaluation.py -> experiments.native_gate_evaluation -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models -> engine.v2.models.inventory
+experiments/native_gate_evaluation.py -> experiments.native_gate_evaluation -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models -> engine.v2.models.releases
+experiments/native_gate_evaluation.py -> experiments.native_gate_evaluation -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.deployment
+experiments/native_gate_evaluation.py -> experiments.native_gate_evaluation -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.release_layout
+experiments/native_gate_evaluation.py -> experiments.native_gate_evaluation -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.release_objects
+experiments/native_gate_evaluation.py -> experiments.native_gate_evaluation -> engine.v2.ops.stages -> engine.v2.ops.state_stage -> tools.phase5_state_stage_job -> tools.phase5_prepare_release -> engine.v2.models.serving_fold_preflight
+experiments/native_gate_evaluation.py -> experiments.native_gate_evaluation -> experiments.native_gate_worker -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/native_gate_worker.py -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.calendar_moves_jobs -> engine.v2.ops.computed_moves_store -> engine.v2.ops.legacy_adapter -> engine.ledger
+experiments/native_gate_worker.py -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models -> engine.v2.models.inventory
+experiments/native_gate_worker.py -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models -> engine.v2.models.releases
+experiments/native_gate_worker.py -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.deployment
+experiments/native_gate_worker.py -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.release_layout
+experiments/native_gate_worker.py -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.release_objects
+experiments/native_gate_worker.py -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.state_stage -> tools.phase5_state_stage_job -> tools.phase5_prepare_release -> engine.v2.models.serving_fold_preflight
+experiments/native_gate_worker.py -> experiments.native_gate_worker -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/native_outcomes.py -> experiments.native_outcomes -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/native_registration.py -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/native_sweep_collection.py -> experiments.native_sweep_collection -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/native_sweep_collection.py -> experiments.native_sweep_collection -> experiments.v2_gate_sweep -> engine.v2.ops.stages -> engine.v2.ops.calendar_moves_jobs -> engine.v2.ops.computed_moves_store -> engine.v2.ops.legacy_adapter -> engine.ledger
+experiments/native_sweep_collection.py -> experiments.native_sweep_collection -> experiments.v2_gate_sweep -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models -> engine.v2.models.inventory
+experiments/native_sweep_collection.py -> experiments.native_sweep_collection -> experiments.v2_gate_sweep -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models -> engine.v2.models.releases
+experiments/native_sweep_collection.py -> experiments.native_sweep_collection -> experiments.v2_gate_sweep -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.deployment
+experiments/native_sweep_collection.py -> experiments.native_sweep_collection -> experiments.v2_gate_sweep -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.release_layout
+experiments/native_sweep_collection.py -> experiments.native_sweep_collection -> experiments.v2_gate_sweep -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.release_objects
+experiments/native_sweep_collection.py -> experiments.native_sweep_collection -> experiments.v2_gate_sweep -> engine.v2.ops.stages -> engine.v2.ops.state_stage -> tools.phase5_state_stage_job -> tools.phase5_prepare_release -> engine.v2.models.serving_fold_preflight
+experiments/registered_runup.py -> experiments.registered_runup -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/v2_candidate_grid.py -> experiments.v2_candidate_grid -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/v2_gate.py -> experiments.v2_gate -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/v2_gate_collect.py -> experiments.v2_gate_collect -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.calendar_moves_jobs -> engine.v2.ops.computed_moves_store -> engine.v2.ops.legacy_adapter -> engine.ledger
+experiments/v2_gate_collect.py -> experiments.v2_gate_collect -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models -> engine.v2.models.inventory
+experiments/v2_gate_collect.py -> experiments.v2_gate_collect -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models -> engine.v2.models.releases
+experiments/v2_gate_collect.py -> experiments.v2_gate_collect -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.deployment
+experiments/v2_gate_collect.py -> experiments.v2_gate_collect -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.release_layout
+experiments/v2_gate_collect.py -> experiments.v2_gate_collect -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.release_objects
+experiments/v2_gate_collect.py -> experiments.v2_gate_collect -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.state_stage -> tools.phase5_state_stage_job -> tools.phase5_prepare_release -> engine.v2.models.serving_fold_preflight
+experiments/v2_gate_collect.py -> experiments.v2_gate_collect -> experiments.native_gate_worker -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/v2_gate_sweep.py -> experiments.v2_gate_sweep -> engine.v2.ops.stages -> engine.v2.ops.calendar_moves_jobs -> engine.v2.ops.computed_moves_store -> engine.v2.ops.legacy_adapter -> engine.ledger
+experiments/v2_gate_sweep.py -> experiments.v2_gate_sweep -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models -> engine.v2.models.inventory
+experiments/v2_gate_sweep.py -> experiments.v2_gate_sweep -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models -> engine.v2.models.releases
+experiments/v2_gate_sweep.py -> experiments.v2_gate_sweep -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.deployment
+experiments/v2_gate_sweep.py -> experiments.v2_gate_sweep -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.release_layout
+experiments/v2_gate_sweep.py -> experiments.v2_gate_sweep -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.release_objects
+experiments/v2_gate_sweep.py -> experiments.v2_gate_sweep -> engine.v2.ops.stages -> engine.v2.ops.state_stage -> tools.phase5_state_stage_job -> tools.phase5_prepare_release -> engine.v2.models.serving_fold_preflight
+experiments/v2_gate_sweep.py -> experiments.v2_gate_sweep -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/v2_magnitude_search.py -> experiments.v2_magnitude_search -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/v2_magnitude_search_run.py -> experiments.v2_magnitude_search_run -> experiments.magnitude_search_execution -> engine.v2.models -> engine.v2.models.deployment
+experiments/v2_magnitude_search_run.py -> experiments.v2_magnitude_search_run -> experiments.magnitude_search_execution -> engine.v2.models -> engine.v2.models.inventory
+experiments/v2_magnitude_search_run.py -> experiments.v2_magnitude_search_run -> experiments.magnitude_search_execution -> engine.v2.models -> engine.v2.models.releases
+experiments/v2_magnitude_search_run.py -> experiments.v2_magnitude_search_run -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.calendar_moves_jobs -> engine.v2.ops.computed_moves_store -> engine.v2.ops.legacy_adapter -> engine.ledger
+experiments/v2_magnitude_search_run.py -> experiments.v2_magnitude_search_run -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.release_layout
+experiments/v2_magnitude_search_run.py -> experiments.v2_magnitude_search_run -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.release_objects
+experiments/v2_magnitude_search_run.py -> experiments.v2_magnitude_search_run -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.state_stage -> tools.phase5_state_stage_job -> tools.phase5_prepare_release -> engine.v2.models.serving_fold_preflight
+experiments/v2_magnitude_search_run.py -> experiments.v2_magnitude_search_run -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/v2_prediction.py -> experiments.v2_prediction -> experiments.magnitude_history_report -> experiments.magnitude_fitted -> engine.v2.models -> engine.v2.models.deployment
+experiments/v2_prediction.py -> experiments.v2_prediction -> experiments.magnitude_history_report -> experiments.magnitude_fitted -> engine.v2.models -> engine.v2.models.inventory
+experiments/v2_prediction.py -> experiments.v2_prediction -> experiments.magnitude_history_report -> experiments.magnitude_fitted -> engine.v2.models -> engine.v2.models.releases
+experiments/v2_prediction.py -> experiments.v2_prediction -> experiments.magnitude_history_report -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
+experiments/v2_runup_study.py -> experiments.v2_runup_study -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.calendar_moves_jobs -> engine.v2.ops.computed_moves_store -> engine.v2.ops.legacy_adapter -> engine.ledger
+experiments/v2_runup_study.py -> experiments.v2_runup_study -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models -> engine.v2.models.inventory
+experiments/v2_runup_study.py -> experiments.v2_runup_study -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models -> engine.v2.models.releases
+experiments/v2_runup_study.py -> experiments.v2_runup_study -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.deployment
+experiments/v2_runup_study.py -> experiments.v2_runup_study -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.release_layout
+experiments/v2_runup_study.py -> experiments.v2_runup_study -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.retrain_check -> engine.v2.models.release_objects
+experiments/v2_runup_study.py -> experiments.v2_runup_study -> experiments.native_gate_worker -> engine.v2.ops.stages -> engine.v2.ops.state_stage -> tools.phase5_state_stage_job -> tools.phase5_prepare_release -> engine.v2.models.serving_fold_preflight
+experiments/v2_runup_study.py -> experiments.v2_runup_study -> experiments.native_registration -> experiments.magnitude_history_inputs -> experiments.magnitude_history_store -> engine.v2.ops.bootstrap -> engine.v2.ledger
