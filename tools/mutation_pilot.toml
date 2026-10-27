@@ -1188,9 +1188,9 @@ tests = [
     "tests/v2/ops/test_v2_ops_legacy_workflows.py",
     # tests/v2/ops/test_v2_ops_nightly_trigger.py (phase 6 slice 12): same untracked
     # file caveat as the mutate list above; listed literally since it moved.
-    "tests/test_v2_ops_nightly*.py",
     "tests/v2/ops/test_v2_ops_nightly_completion.py",
     "tests/v2/ops/test_v2_ops_nightly_decision_clock.py",
+    "tests/v2/ops/test_v2_ops_nightly_quote_rows.py",
     "tests/v2/ops/test_v2_ops_nightly_trigger.py",
     "tests/v2/ops/test_v2_ops_render_parity.py",
     "tests/v2/ops/test_state_stage.py",
