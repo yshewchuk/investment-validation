@@ -4,7 +4,8 @@ Turns one ``ScoringReleaseBinding`` (PR-1, ``engine/v2/scoring/
 release_bindings.py``) plus per-event staged inputs (PR-2, ``engine/v2/
 scoring/nightly_source_bundle.py``) into ``{BoardRequest: (ScoreRequest,
 NativeScoreInputs)}``, admitting only registered strategies (currently
-``STR-THRU``, ``STR-RUNUP`` and the gate-less entry-rule ``TWIN-P``/``TWIN-P5``):
+``STR-THRU``, ``STR-RUNUP`` and the gate-less entry-rule ``TWIN-P``,
+``TWIN-P5``, ``BFLY-P``, ``BFLY-P5``, ``CTR5`` and ``RAMP7``):
 batch-level malformed input raises, every per-row gap is a collected
 :class:`NativeScoreBatchRowRefusal`, and ``run_native_score_batch_worker``
 scores the assembled batch under ``no_fit_guard``. Production reaches this
@@ -127,13 +128,13 @@ _RUNUP_SPEC = _StrategySpec(
     gate_role="gate:STR-RUNUP", gate_policy_key="STR-RUNUP",
     bundle_strategy="STR-RUNUP", driver_name="im_t1")
 
-# Entry-rule TWIN strategies: gate-less, size then iv_crush drivers.
-_TWIN_SPECS = {
+# Entry-rule strategies: gate-less, size then iv_crush drivers.
+_ENTRY_RULE_SPECS = {
     name: _StrategySpec(
         drivers=(_DriverSpec("forecast_abs_move", "size:*"),
                  _DriverSpec("pred_iv_crush_30", "iv_crush:*")),
         bundle_strategy=name, entry_rule=True)
-    for name in ("TWIN-P", "TWIN-P5")
+    for name in ("TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7")
 }
 
 # Code-owned admission, not a runtime registration API or chooser contract.
@@ -143,7 +144,7 @@ _STRATEGY_REGISTRY: Mapping[str, _StrategySpec] = MappingProxyType({
         gate_role="gate:STR-THRU", gate_policy_key="STR-THRU",
         bundle_strategy="STR-THRU"),
     "STR-RUNUP": _RUNUP_SPEC,
-    **_TWIN_SPECS,
+    **_ENTRY_RULE_SPECS,
 })
 
 
