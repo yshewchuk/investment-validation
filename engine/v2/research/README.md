@@ -392,6 +392,8 @@ tickers need no sidecar; full canonical metadata still defines protected windows
 History selection uses each target ticker's own latest ceiling, retaining explicit
 targets. Receipt lookup compares identity in SQL and returns only a bounded native
 snapshot ID, never unused diagnostics; conflicting evidence is `IDENTITY_CONFLICT`.
+Before object publication, output also obeys the native reader's summed uncompressed
+Parquet row-group cap, alongside compressed-object/total caps; no peak-allocation guarantee.
 `experiments.magnitude_eligible_history.build/comparison_inputs` supplies SIZE's
 native folds and one shared clean-history input for challenger and comparator.
 SIZE admits only its frozen 30-day grouped policy on both build and read.
