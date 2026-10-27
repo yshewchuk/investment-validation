@@ -2,9 +2,9 @@
 
 ``scan_chain_slices`` replaces the per-event pair of exact ``(ticker, obs_date)``
 scans: one ``DataQuery`` with ``ticker in <tickers>`` and ``obs_date eq
-<decision session>`` over the union of the candidate and quote columns, grouped
-by ticker in primary-key order (so each group equals what the per-key scan
-returns). Failure semantics: a ticker with no rows maps to ``[]``; a missing
+<decision session>`` over the union of the candidate, quote and chain-spot
+columns, grouped by ticker in primary-key order (so each group equals what the
+per-key scan returns). Failure semantics: a ticker with no rows maps to ``[]``; a missing
 table is ``Repository.table_contract``'s own ``CONTRACT_MISMATCH``; every
 repository error (including ``RESULT_LIMIT_EXCEEDED``) propagates and never
 falls back to per-key scans. The rows-returned worker step and the near-cap
@@ -29,8 +29,11 @@ __all__ = ["CHAIN_COLUMNS", "CHAIN_TABLE", "require_chain_rows", "require_usable
            "scan_chain_slices"]
 
 CHAIN_TABLE = "option_chains"
-#: Union of the candidate-expiry columns and the quote-row columns.
-CHAIN_COLUMNS = ("ticker", "obs_date", "expiry", "strike", "right", "bid", "ask")
+#: Union of the candidate-expiry columns, the quote-row columns and the chain
+#: ``spot`` the quote staging carries through (never validated here: rows for
+#: other expiries or dates must not fail on it; only the surviving quote rows
+#: are checked, in ``nightly_quote_rows``).
+CHAIN_COLUMNS = ("ticker", "obs_date", "expiry", "strike", "right", "bid", "ask", "spot")
 RIGHTS = frozenset({"C", "P"})
 _BATCH_CAP = 50_000
 _RESULT_CAP = 2_000_000

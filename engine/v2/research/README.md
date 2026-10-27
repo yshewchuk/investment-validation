@@ -360,8 +360,9 @@ per horizon with `horizon_sessions`, `decision_date`, `source_session_ceiling`.
 Dates are canonical ISO calendar days. Producers must establish these bounds;
 missing bounds refuse. A caller's digest is not evidence of their truth.
 
-This is a metadata foundation only: no current runner uses it. Evaluation IDs
-are preserved, not authorized for reading. Existing v1 behavior is unchanged.
+The eligible-history builder below consumes this metadata policy. Evaluation IDs
+are preserved, not authorized for reading; annual development targets still need
+retained eligibility. Existing v1 behavior is unchanged.
 Integration sequencing belongs to the [stage-2 design](../../../experiments/SUPER_SIZE/STAGE2_DESIGN.md).
 
 ## Confirmed metadata index (synthetic only)
@@ -374,3 +375,48 @@ source membership, selected/confirmed counts and a canonical `index_id`.
 All 13 limits are mandatory; native failures remain intact and no partial proof
 escapes. No coverage/PIT/numerical admission follows from dataset membership.
 See [the frozen contract](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md).
+
+## Policy-qualified eligible history
+
+<!-- public-interface: eligible_history.admit_source, eligible_history_table.CONTRACT, eligible_history_table.FEATURES, eligible_history_table.admit_fields, eligible_history_table.recipe -->
+
+These are intentionally manual, research-only Python APIs, not production CLI,
+nightly or training entrypoints. A separately authorized research caller supplies
+the pinned source and explicit policy; this PR neither activates a data run nor
+wires production scoring. Synthetic tests are the only current invocations.
+The sole public build/read boundary is `experiments.eligible_history`; it rejects
+caller producer identities before source access and derives the installed identity.
+An immutable import-time source/environment baseline refuses later disk drift with
+`INPUT_CHANGED`; restart from a fixed code tree. This is not bytecode attestation.
+Its backend `_materialize`/`_read` helpers are trusted internal orchestration, not
+independent admitted APIs or a Python privacy/security boundary. The adapter consumes
+backend source admission and these helpers;
+`experiments.magnitude_eligible_history` consumes its qualified H11 field list.
+Use pure `experiments.eligible_history.validate_request` for closed request shape only (not data admission).
+Public malformed requests/SIZE artifact envelopes refuse `CONTRACT_MISMATCH` before
+fingerprints or source access; a valid non-30-day SIZE policy still refuses `HOLDOUT_ACCESS_DENIED`.
+Use `experiments.eligible_history.materialize/read` with explicit source snapshot,
+holdout month, grouped policy, target IDs, horizons `[1, 3, 5]`, history start and
+limits (`max_source_rows`, `max_fragments`, `max_object_bytes`, `max_total_bytes`,
+`max_output_rows`). The separate `research_eligible_history` table requires native
+`computed_move_bounds`; missing/stale bindings refuse before outcomes.
+Missing bounds for selected target/history tickers or events are `CONTRACT_MISMATCH`;
+wrong outcome-object bindings/isolation remain `HOLDOUT_ACCESS_DENIED`. Unrelated
+tickers need no sidecar; full canonical metadata still defines protected windows.
+History selection uses each target ticker's own latest ceiling, retaining explicit
+targets. Receipt lookup compares identity in SQL and returns only a bounded native
+snapshot ID, never unused diagnostics; conflicting evidence is `IDENTITY_CONFLICT`.
+Before object publication, output also obeys the native reader's summed uncompressed
+Parquet row-group cap, alongside compressed-object/total caps; no peak-allocation guarantee.
+`experiments.magnitude_eligible_history.build/comparison_inputs` supplies SIZE's
+native folds and one shared clean-history input for challenger and comparator.
+SIZE admits only its frozen 30-day grouped policy on both build and read.
+This is a causal research refit, not production-byte parity. Annual evaluation
+remains development and must pass embargo admission. No final-confirmation API.
+Installed code/environment, source, policy/month, cutoffs and contributors bind
+replay. Live-only aggregates, unknown fields and unapproved aliases/derivations
+are not accepted experiment sources; v1 readers and production tables stay unchanged.
+Each preparation revalidates clocks once per distinct date/session/horizon against
+its fixed calendar, sharing a local memo across targets/contributors, never across reads.
+The artifact contains native H11 means/EMAs only, not implied-quote history.
+Historical publication and schedule knowledge remain unverified reconstruction.
