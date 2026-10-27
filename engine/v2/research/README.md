@@ -363,3 +363,21 @@ missing bounds refuse. A caller's digest is not evidence of their truth.
 This is a metadata foundation only: no current runner uses it. Evaluation IDs
 are preserved, not authorized for reading. Existing v1 behavior is unchanged.
 Integration sequencing belongs to the [stage-2 design](../../../experiments/SUPER_SIZE/STAGE2_DESIGN.md).
+
+## Policy-qualified eligible history
+
+Use `experiments.eligible_history.materialize/read` with explicit source snapshot,
+holdout month, grouped policy, target IDs, horizons `[1, 3, 5]`, history start and
+limits (`max_source_rows`, `max_fragments`, `max_object_bytes`, `max_total_bytes`,
+`max_output_rows`). The separate `research_eligible_history` table requires native
+`computed_move_bounds`; missing/stale bindings refuse before outcomes.
+`experiments.magnitude_eligible_history.build/comparison_inputs` supplies SIZE's
+native folds and one shared clean-history input for challenger and comparator.
+SIZE admits only its frozen 30-day grouped policy on both build and read.
+This is a causal research refit, not production-byte parity. Annual evaluation
+remains development and must pass embargo admission. No final-confirmation API.
+Installed code/environment, source, policy/month, cutoffs and contributors bind
+replay. Live-only aggregates, unknown fields and unapproved aliases/derivations
+are not accepted experiment sources; v1 readers and production tables stay unchanged.
+The artifact contains native H11 means/EMAs only, not implied-quote history.
+Historical publication and schedule knowledge remain unverified reconstruction.

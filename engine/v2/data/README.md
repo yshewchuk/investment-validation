@@ -152,3 +152,9 @@ Private bounded-catalog prerequisites now include pure native identity reconstru
 from transferred metadata. The bounded factory exposes detached metadata and
 selected-table native scans. Synthetic lifetime tests poison later SQL; see the
 [component contract](ARCHITECTURE.md#bounded-catalog-prerequisites-internal-no-production-caller).
+
+## Source-date metadata for experiments
+
+`computed_move_bounds.CONTRACT` defines the optional metadata-only sibling of native
+computed moves. Actual pre/post source dates bind exact outcome objects; null means
+unavailable, not permission to guess dates. Existing outcome contracts are unchanged.

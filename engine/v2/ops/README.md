@@ -534,3 +534,10 @@ check is never green). The green-path command is:
 python3 checks/v2_coverage_ratchet.py --profile phase1 --measure --output /tmp/coverage.json
 python3 checks/rearchitecture_phase1_gate.py --coverage /tmp/coverage.json
 ```
+
+## Optional source-bound capture
+
+`run_computed_moves_refresh(..., include_source_bounds=True)` adds the native
+`computed_move_bounds` sibling table without changing live outcome bytes. Default is
+false; rewritten tickers invalidate stale sidecars. Old snapshots need an explicitly
+authorized regeneration to gain bounds. This option does not authorize a data run.

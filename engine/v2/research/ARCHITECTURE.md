@@ -754,17 +754,17 @@ It does not authenticate arbitrary rehashed calendars as builder-derived.
 | Invalid projection | Non-string selections, malformed selection containers, unknown event/feature or duplicate feature: `CONTRACT_MISMATCH` before any payload scan. |
 | Source/publication failures | Unknown source/feature snapshot ID: `SNAPSHOT_NOT_FOUND`; resolved source-pin mismatch during public build/read context derivation: `SNAPSHOT_UNRESOLVED`; direct `materialize` source/context mismatch: `IDENTITY_CONFLICT`. Non-native computed-moves contract: `CONTRACT_MISMATCH`; empty fold: `POPULATION_COLLAPSED`; invalid eligible label/features: `EXPERIMENT_VARIANT_FAILED`; competing head: `SNAPSHOT_CONFLICT`. Other native catalog/object/source-admission errors propagate. |
 
-`magnitude_history_inputs.admit_stored(repository, snapshot, context)` is the consumer-only
-metadata boundary used by `experiments/magnitude_history_inputs.py`: exact receipt/output,
-features-only contract and complete event isolation, without payload decoding or arithmetic.
-It delegates to the readers' shared `magnitude_history_store.preflight_stored`
-receipt/contract/isolation boundary and returns no feature values.
-Missing/changed receipt or pin refuses `IDENTITY_CONFLICT`; bad contract refuses
-`CONTRACT_MISMATCH`; unprovable isolation refuses `HOLDOUT_ACCESS_DENIED`.
-It does not derive or authenticate a context; the unlayered caller owns supported producer
-derivation and native registration. `experiments/magnitude_history_report.py` consumes
-the existing `read_stored` plus magnitude target preflight/load/qualification APIs.
-Neither consumer modifies the build closure, stored artifact identity or final-read authority.
+`magnitude_history_inputs.admit_stored` delegates to `magnitude_history_store.preflight_stored`: exact receipt/output, features-only contract and event isolation; no payloads or arithmetic.
+Missing/changed receipt/pin refuses `IDENTITY_CONFLICT`, bad contract `CONTRACT_MISMATCH`, unprovable isolation `HOLDOUT_ACCESS_DENIED`.
+Its unlayered caller owns context derivation/registration; `experiments/magnitude_history_report.py` uses stored reads and target qualification. Both v1 consumers remain unchanged.
+
+**Eligible history:** `experiments.eligible_history` fingerprints installed source closure/environment for `eligible_history.materialize/read`; `experiments.magnitude_eligible_history` is SIZE's shared challenger/comparator consumer.
+The separate `research_eligible_history.v1` table binds exact source/bounds, policy/month/membership versions, history start, fixed 1/3/5 clocks, contributors and producer identity. Exact receipts replay; live/v1 aggregates never substitute.
+Full canonical metadata establishes protected windows. Native source-bound objects qualify labels before grouped eligibility and singleton outcome preflight; null historical bounds are omissions, missing required evidence refuses.
+All selection targets, including annual evaluation, require retained eligibility; protected confirmation is not this API. Read only eligible prior outcomes available by each ceiling; preserve native means/EMA/nulls.
+`eligible_history_table.admit_fields` accepts only the exact research contract/recipe/policy and known H11 fields; live/unknown provenance and unsupported aliases/derivations refuse before feature reads. Implied history remains separate.
+Limits cap decoded source rows, fragments and physical source bytes after native catalog resolution; output byte caps apply after per-target serialization, not peak allocations. Progress is bounded; failures publish no receipt, unreferenced objects use normal cleanup.
+Publication/schedule-as-known remain unverified reconstruction. Outcome object checks hash full bytes; protected outcome objects stay unopened. No production mutation, provider, fitting, registration or final-read authority is granted.
 
 `magnitude_history_store.read_stored_for_events` is the projected search reader.
 Every call revalidates the complete receipt, isolation, metadata and feature content,
