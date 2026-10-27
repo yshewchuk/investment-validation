@@ -723,6 +723,21 @@ def test_a_corrupt_memo_reads_empty_and_the_run_proceeds(monkeypatch, tmp_path):
     assert out["calls"] == 1 and f.asked == [AS_OF], "the refresh proceeds"
 
 
+def test_a_deeply_nested_memo_reads_empty_without_raising(monkeypatch, tmp_path):
+    """'[' x 100000 blows the JSON parser's stack: RecursionError is neither
+    ValueError nor OSError, so the never-raises promise needs its own arm —
+    an over-nested file is just another invalid content, read as empty, and
+    the refresh proceeds."""
+    _wire(monkeypatch, set(), tmp_path)
+    nightly.CHAIN_RETRY_PATH.write_text("[" * 100000)
+
+    assert nightly._read_chain_retry() == {}, "the nested file reads as no debt"
+
+    f = _Fetcher()
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+    assert out["calls"] == 1, "the unreadable memo never blocks the refresh"
+
+
 def test_an_oversized_memo_is_ignored_with_one_stderr_line(monkeypatch, capsys, tmp_path):
     """A memo over CHAIN_RETRY_MAX_BYTES is announced once per read and never
     parsed — and the run proceeds as if there were no memo."""
@@ -1114,3 +1129,54 @@ def test_the_end_line_prints_when_a_base_exception_escapes(
     assert "exit=error" in end[0] and "requests=1" in end[0] and "calls=0" in end[0]
     kept = nightly._read_chain_retry()
     assert kept.get(AS_OF) == {"TKR00"}, "the unwind path files the debt before the line"
+
+
+def test_an_early_exit_logs_only_the_completed_chunks(monkeypatch, capsys, tmp_path):
+    """The finally reports the chunks that ACTUALLY completed, not
+    total_chunks: under a slow clock (fake monotonic jumping 61s per read, so
+    every progress call passes the cadence gate and prints) a BaseException
+    on the FIRST fetch of a two-chunk session must print chunks=0/2 and the
+    final progress line 0/2 — never an all-done N/N claiming a finished
+    interrupted session."""
+    names = ["TKR00", "TKR01"]
+    _wire(monkeypatch, set(), tmp_path)
+    clock = [0.0]
+
+    def fake_monotonic():
+        now = clock[0]
+        clock[0] += 61.0
+        return now
+
+    monkeypatch.setattr(nightly.time, "monotonic", fake_monotonic)
+    f = _Fetcher(fail=lambda p: KeyboardInterrupt())
+
+    with pytest.raises(KeyboardInterrupt):
+        nightly.refresh_forward_chains(names, AS_OF, fetcher=f, sessions=1,
+                                       batch=1)
+
+    err = capsys.readouterr().err
+    end = [ln for ln in err.splitlines() if " done in " in ln]
+    assert len(end) == 1 and "chunks=0/2" in end[0], \
+        f"the end line names the zero completed chunks: {end}"
+    progress = [ln for ln in err.splitlines() if " chunks, " in ln and " req/s" in ln]
+    assert progress and all(ln.split(" chunks")[0].endswith("0/2") for ln in progress), \
+        f"the final progress line is 0/2, not N/N: {progress}"
+    assert "2/2" not in err and "1/1" not in err, \
+        "no line claims an interrupted session finished its chunks"
+
+
+def test_a_normal_run_logs_every_chunk_done(monkeypatch, capsys, tmp_path):
+    """The other side of the same counter: a session that runs the loop to
+    completion prints chunks=3/3 on its end line — done equals total exactly
+    when every chunk was fully processed."""
+    names = ["TKR00", "TKR01", "TKR02"]
+    _wire(monkeypatch, set(), tmp_path)
+    f = _Fetcher()
+
+    out = nightly.refresh_forward_chains(names, AS_OF, fetcher=f, sessions=1,
+                                         batch=1)
+
+    assert out["calls"] == 3
+    end = [ln for ln in capsys.readouterr().err.splitlines() if " done in " in ln]
+    assert len(end) == 1 and "exit=ok" in end[0] and "chunks=3/3" in end[0], \
+        f"a finished session shows the full tally: {end}"

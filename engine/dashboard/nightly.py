@@ -314,7 +314,8 @@ def _read_chain_retry() -> dict[str, set[str]]:
     Never raises. The fd-based open (``O_NOFOLLOW`` | ``O_NONBLOCK``) plus
     fstat is race-free; a failed open, a non-regular file and an over-cap
     file are announced once on stderr and ignored, and every other invalid
-    content (junk JSON, wrong shapes, read errors) is ignored silently.
+    content (junk JSON, over-nested JSON, wrong shapes, read errors) is
+    ignored silently.
     A flat legacy file reads as the owed section.
     """
     try:
@@ -352,7 +353,10 @@ def _read_chain_retry() -> dict[str, set[str]]:
             return {}
         return {str(d): {str(t) for t in ts}
                 for d, ts in owed_raw.items() if isinstance(ts, list)}
-    except (OSError, ValueError, TypeError, AttributeError):
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+        # RecursionError: a deeply nested file ("[" x 100000) blows the JSON
+        # parser's stack inside json.loads; like any invalid content it is
+        # invalid, not exceptional — the never-raises promise covers it.
         return {}
     finally:
         os.close(fd)
@@ -736,11 +740,17 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
     # The loop cursor, pre-bound: an exit before the first chunk owes every
     # name, exactly as the up-front persist filed them.
     start = 0
+    # Chunks FULLY processed — failed/404 ones included, since the chunk was
+    # asked and answered for. An exit that escapes the loop mid-chunk must
+    # report this count, never total_chunks: an interrupted session that
+    # printed N/N would claim work it did not do.
+    done_chunks = 0
     exit_kind = "error"
     try:
         for done, start in enumerate(range(0, len(wanted), batch)):
             if done:
                 _log_chunk_progress(done)  # `done` chunks completed already
+            done_chunks = done  # chunks before this one; this one is in flight
             chunk = wanted[start : start + batch]
             # Only a memo-owed chunk gets the token; an all-first-fetch chunk
             # stays cache-first, and an old-signature fetcher sees no new kwarg.
@@ -817,6 +827,7 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
         # A fetched-OK or 404 name drops out of this session's entry by not being
         # re-added; only this run's transient failures and quota-cut remainder stay.
         _persist_chain_retry(stamp, retry, attempted)
+        done_chunks = total_chunks  # the loop ran every chunk to completion
         exit_kind = "ok"
     except BaseException as exc:
         # Any other exit unwinds the session: put the current chunk and every
@@ -833,9 +844,10 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
         # of the finally and mask the exit it is reporting.
         if wanted:
             try:
-                _log_chunk_progress(total_chunks)
+                _log_chunk_progress(done_chunks)
                 elapsed = time.monotonic() - t_start
-                print(f"[chains] {stamp}: done in {elapsed:.1f}s, exit={exit_kind}, "
+                print(f"[chains] {stamp}: done in {elapsed:.1f}s, "
+                      f"chunks={done_chunks}/{total_chunks}, exit={exit_kind}, "
                       f"requests={out['requests'] - requests_in}, "
                       f"calls={out['calls'] - calls_in}, "
                       f"cache_hits={out['cache_hits'] - cache_in}, "
