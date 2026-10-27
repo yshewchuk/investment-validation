@@ -291,6 +291,14 @@ B2, B3a and B3b may also share one identity/session/scanner review unit under
 the same separate category caps. Each acceptance boundary remains mandatory;
 this packaging-only consolidation changes no runtime, scientific semantics or
 execution authority and leaves B1b/P3a foundations and coverage design separate.
+M2/M3 may share one admission/index-composition PR under the same separate
+non-test-code/documentation caps. Exact native inventory and exhausted-scan
+acceptance remain distinct; the independently reviewed M1 reducer is unchanged.
+This is packaging only, not a coverage/scientific-policy amendment.
+Canonical partition syntax does not override native candidate completeness,
+object integrity or timestamp representability; a syntactically valid low year
+still refuses if native scanning cannot exhaust its membership. No empty proof
+may replace that refusal, and existing native partition semantics stay unchanged.
 
 | Sub-slice / dependency and acceptance | Added code / tests / docs |
 | --- | --- |
