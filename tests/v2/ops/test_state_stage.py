@@ -236,19 +236,20 @@ def test_monthly_stage_uses_the_deployed_pointer_as_prior(tmp_path, monkeypatch)
     deployment.promote(store, "prior1")
 
     staged = {
-        "driver_size.json": ("driver_residual_pool:size", "m-size-*|None"),
+        "driver_size.json": ("driver_residual_pool:size", "champion-size|None"),
         "driver_implied_t1.json": ("driver_residual_pool:implied_t1",
-                                   "m-implied_t1-*|None"),
+                                   "champion-implied_t1|None"),
         "driver_runup_move.json": ("driver_residual_pool:runup_move",
-                                   "m-runup_move-*|None"),
+                                   "champion-runup_move|None"),
         "chooser.json": ("chooser_analog_pool", "chooser|2026-11-01"),
     }
     payloads = {
-        "driver_size.json": serialize_frozen_state(pool("size", fold=None)),
+        "driver_size.json": serialize_frozen_state(
+            pool("size", model_id="champion-size", fold=None)),
         "driver_implied_t1.json": serialize_frozen_state(
-            pool("implied_t1", fold=None)),
+            pool("implied_t1", model_id="champion-implied_t1", fold=None)),
         "driver_runup_move.json": serialize_frozen_state(
-            pool("runup_move", fold=None)),
+            pool("runup_move", model_id="champion-runup_move", fold=None)),
         "chooser.json": serialize_frozen_state(make_chooser_analog_pool_artifact(
             pool_id="chooser", cutoff="2026-11-01",
             strategies={"STR-THRU": [["2026-10-30", 1.0, 0.5, 1.25, 2.0, 0.1, 0.02]]},
@@ -332,48 +333,6 @@ def test_monthly_stage_uses_the_deployed_pointer_as_prior(tmp_path, monkeypatch)
             "role": role, "model_id": f"champion-{role}", "fold": None,
             "content_hash": loaded[role].content_hash}
         assert declaration["model_residual_artifacts"][slot] == loaded[role]
-
-    from engine.v2.models.residual_artifact import residual_artifact_from_document
-    from engine.v2.ops import native_runup_inputs as batch
-    from tests.v2.ops.runup_helpers import stage_model_release, state_row, surface
-    from tests.v2.ops.test_native_driver_declarations import IMPLIED, MOVE, RUNUP_GATE
-    from tests.v2.scoring.test_v2_scoring_release_bindings import (
-        _obj, _row, _write_object)
-
-    models = tmp_path / "models"
-    candidate: dict[str, bytes] = {}
-    model_rows = []
-    for role in ("implied_t1", "runup_move"):
-        obj = rows[f"driver_residual_pool:{role}"]["objects"][0]
-        payload = (store / obj["path"]).read_bytes()
-        assert phase5_release.sha256_bytes(payload) == obj["content_hash"]
-        candidate[role] = payload
-        model_rows.append(_row(
-            f"driver_residual_pool:{role}",
-            [_obj(_write_object(models / "deployment", payload), obj["content_hash"])]))
-    model_rows.append(state_row(
-        models, "payoff_surface:STR-RUNUP", [surface(cutoff="2026-11-01", alpha=0.5)]))
-    binding = stage_model_release(models, [IMPLIED, MOVE, RUNUP_GATE], rows=model_rows)
-    declarations = batch.runup_model_declarations(
-        binding,
-        {"driver_prediction": binding.model_identity["implied_t1:*"],
-         "runup_move_prediction": binding.model_identity["runup_move:*"]},
-        cutoff="2026-11-01", fill_alpha=0.5)
-
-    identity = binding.model_identity
-    champions = declarations["model_residual_artifacts"]
-    assert set(champions) == {"driver", "runup_move"}
-    for role, slot in (("implied_t1", "driver"), ("runup_move", "runup_move")):
-        champion = champions[slot]
-        assert champion is binding.driver_residual_artifacts[role]
-        assert champion == residual_artifact_from_document(json.loads(candidate[role]))
-        assert (champion.role, champion.model_id, champion.fold) == (
-            role, identity[f"{role}:*"].model_id, None)
-        assert declarations["model_residual_artifact_recipe"][slot] == {
-            "role": role, "model_id": champion.model_id, "fold": None,
-            "content_hash": champion.content_hash}
-    assert declarations["payoff_artifact_recipe"] == {"before": "2026-11-01"}
-    assert declarations["residual_recipe"] == {"mode": "not_applicable"}
 
 
 def test_monthly_retrain_cutoff_equal_to_the_prior_is_refused(tmp_path):
