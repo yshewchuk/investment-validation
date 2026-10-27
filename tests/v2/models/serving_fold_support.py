@@ -6,7 +6,8 @@ import json
 import joblib
 
 from engine.v2.models import release_layout as layout
-from engine.v2.foundation import from_document
+from engine.v2.foundation import content_hash, from_document, to_document
+from engine.v2.models.serving_fold_preflight import describe_size_fold
 from engine.v2.models import (
     ArtifactInventoryMember,
     ArtifactMember,
@@ -34,6 +35,37 @@ def fold_bytes(cache, **dump_options):
 def fold_name(cache):
     month = cache["fold_start"].replace("-", "")[:6]
     return f"{cache['model_id']}_{month}_{cache['tier3_snapshot'][:12]}.joblib"
+
+
+def staged_fold_object(cache, manifest, dep_root):
+    """Write one synthetic size fold into ``dep_root`` and describe its object."""
+    raw = fold_bytes(cache)
+    policy = SizeFoldPolicy(
+        model_id=cache["model_id"], feature_order=tuple(cache["features"]),
+        panel_sha256=cache["tier3_snapshot"], interval_floor=0.0)
+    descriptor = describe_size_fold(raw, fold_name(cache), policy, manifest)
+    path = dep_root / descriptor.estimator.path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    return {
+        "path": descriptor.estimator.path,
+        "content_hash": descriptor.estimator.content_hash,
+        "name": fold_name(cache), "bytes": len(raw),
+        "serving_fold": to_document(descriptor),
+    }
+
+
+def write_catalog(root, release_id, fold_object=None):
+    """Write the required catalog, optionally with one synthetic size fold."""
+    members = ([] if fold_object is None else [{
+        "member_id": "tier4_folds:size", "status": "STAGED", "objects": [fold_object],
+    }])
+    body = {"schema_version": "phase5_staged_release.v1.0", "release_id": release_id,
+            "deployment_id": "d1", "members": members, "sources": {}}
+    body["manifest_hash"] = content_hash(
+        {k: v for k, v in body.items() if k != "manifest_hash"})
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "phase5_release.json").write_text(json.dumps(body, sort_keys=True))
 
 
 def chooser_policy(role, cache, *, floor=0.0):

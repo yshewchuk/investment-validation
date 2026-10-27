@@ -74,7 +74,8 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_e
         ref = from_document(ArtifactRef, evidence["native_registration"])
         if (ref.schema_ref not in ("native_experiment_registration.v1.0", "native_experiment_registration.v1.1",
                                   "native_experiment_registration.v1.2", "native_experiment_registration.v1.3",
-                                  "native_experiment_registration.v1.4", "native_experiment_registration.v1.5")
+                                  "native_experiment_registration.v1.4", "native_experiment_registration.v1.5",
+                                  "native_experiment_registration.v1.6")
                 or (expected_ref is not None and ref != expected_ref)):
             raise ValueError
         if max_evidence_bytes is not None and ref.byte_size > max_evidence_bytes:
@@ -118,6 +119,8 @@ def validate_magnitude_execution(document):
 
 def _magnitude_binding(document):
     """Check stored plan integrity and cross-links, never reconstruct or authorize."""
+    if document["schema_version"] == "native_experiment_registration.v1.6":
+        return _size_binding(document)
     if document["schema_version"] == "native_experiment_registration.v1.5":
         return _fitted_binding(document)
     if document["schema_version"] == "native_experiment_registration.v1.4":
@@ -142,6 +145,40 @@ def _magnitude_binding(document):
     return (_magnitude_metadata(plan) and _magnitude_sources(plan, document["snapshot"])
             and _magnitude_context(document, plan, request)
             and (not executable or _magnitude_execution(document, plan)))
+
+
+def _size_binding(document):
+    """Integrity-only additive panel envelope; research owns current source admission."""
+    additions = ("size_request", "size_panel_request", "size_panel", "size_comparison")
+    if not all(isinstance(document.get(key), dict) for key in additions):
+        return False
+    baseline = {key: value for key, value in document.items() if key not in additions}
+    baseline["schema_version"] = "native_experiment_registration.v1.3"
+    panel, request = document["size_panel"], document["size_request"]
+    context = panel["context"]
+    return (_size_panel_request(document) and document["size_comparison"]["schema_version"] == "size_causal_comparator.v1"
+        and _magnitude_binding(baseline)
+        and context["schema_version"] == "magnitude_panel_context.v3"
+        and context["context_id"] == content_hash({k: v for k, v in context.items() if k != "context_id"})
+        and context["source_snapshot"] == document["snapshot"]
+        and request["schema_version"] == "magnitude_search_request.v2"
+        and request["feature_snapshot_id"] == panel["feature_snapshot"]["snapshot_id"]
+        and request["history_snapshot_id"] == context["history_snapshot"]["snapshot_id"]
+        and {e["event_id"] for e in context["target_events"]} == set(document["event_ids"]))
+
+
+def _size_panel_request(document):
+    panel = document["size_panel"]
+    context = panel.get("context")
+    if set(panel) != {"context", "feature_snapshot"} or not isinstance(context, dict):
+        return False
+    request = context["request"]
+    return (isinstance(request, dict) and set(request) == {"as_of_month", "policy", "event_ids",
+        "horizons", "history_start", "limits", "source_start", "metadata_limits"}
+        and document["size_panel_request"] == {**request,
+            "feature_snapshot_id": panel["feature_snapshot"]["snapshot_id"],
+            "history_snapshot": context["history_snapshot"]["snapshot_id"],
+            "price_history_snapshot": context["price_history_snapshot"]["snapshot_id"]})
 
 
 def magnitude_execution_document(labels_before):

@@ -926,6 +926,7 @@ tests = [
 why = "Catalog-bound native registration verification and immutable user-only final-read spend: forged metadata or a duplicate act must never create authority."
 mutate = ["engine/v2/ops/native_registration.py", "engine/v2/ops/final_holdout.py"]
 tests = [
+    "tests/v2/research/test_size_search_integration.py",
     "tests/v2/research/test_magnitude_search_plan.py",
     "tests/v2/research/test_magnitude_search_trials.py",
     "tests/v2/research/test_magnitude_search_records.py",
@@ -1238,6 +1239,7 @@ mutate = [
     "engine/v2/research/*.py",
 ]
 tests = [
+    "tests/v2/research/test_size_*.py",
     "tests/v2/research/test_magnitude_confirmed_metadata.py",
     "tests/v2/research/test_confirmed_metadata_reducer.py",
     "tests/v2/research/test_magnitude_search_request.py",

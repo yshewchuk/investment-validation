@@ -234,12 +234,7 @@ inputs use native market/history features from the pinned snapshot (cutover
 gate's requested `pred_abs_move` family and `forecast_edge`. Both execute in
 the existing scoring stages, never in the raw-row producer. Gate-only forecasts
 must not create a top-level sizing forecast or change the selected structure.
-`native_score_batch` selects the exact causal size fold for STR-THRU and
-attaches it as `gate_forecast_source`; a missing exact fold or selected-fold
-verification/load failure is refused as a per-row `MODEL_NOT_READY` with no
-fallback. Malformed release catalogs or descriptors fail release resolution
-before row assembly, rather than becoming per-row fold refusals. RUNUP is
-unchanged.
+Outcomes are in the table below. RUNUP is unchanged.
 
 `SourceBundle.gate_forecast_source` (optional `GateForecastSource`) carries the
 selected fold's `binding_id` and verified estimator `artifact_hash`, its fold-view `ModelRelease`, the shared
@@ -257,12 +252,11 @@ ordinary bundle path remains valid when the source is absent.
 | Gate names no forecast column | Executor and pool are built but the stage never calls them; no flag |
 | Source absent, gate names a forecast column | Bundle builds; the stage flags `MISSING_GATE_INPUT:forecast` |
 | Thin pool | Bundle builds; the stage leaves the band columns unavailable |
+| Exact causal fold missing, or selected fold fails verification/load (`native_score_batch`) | Per-row `MODEL_NOT_READY`; no fallback |
+| Malformed release catalog or descriptor | Release resolution fails before row assembly; not a per-row fold refusal |
 
 Failure semantics: building the source members does no I/O, caching, retry or
-fallback; a refusal returns no bundle. The selection of the exact causal size
-fold for STR-THRU and its attachment as `gate_forecast_source` is
-`native_score_batch`'s responsibility; a missing or corrupt fold is refused as
-a per-row `MODEL_NOT_READY` with no fallback. RUNUP's behavior is unchanged.
+fallback; a refusal returns no bundle. RUNUP's behavior is unchanged.
 
 `resolve_release_binding` indexes the release's staged size folds (catalog
 member `tier4_folds:size`) into `ScoringReleaseBinding.size_folds`
@@ -573,7 +567,7 @@ rather than its own. `native_score_batch` goes through `score_one`, never
   | staged manifest's own hash disagrees (`_manifest_hash_matches`, checked before trusting `manifest.release`) | `ModelNotReady("model_release", "release_hash disagrees with manifest")` — accepts either hash version, since replay of an older-hashed release must keep resolving; `deployment.promote`/`rollback` enforce a stricter write-side rule this read path never applies |
   | `resolve_production_release_binding()` only: no/blank `MODEL_RELEASE_ROOT` | `ModelNotReady("release_root", "no production release root is configured")` |
   | once resolved, any member (model binding, payoff/recalibration/analog artifact) missing, wrong status, hash mismatch, or fails its typed load | `ModelNotReady(member_id, ...)`, naming the exact member (e.g. `"model:gate:STR-THRU"`) |
-  | Release-local `phase5_release.json`: unreadable, bad self-hash, wrong schema or release ID | `ModelNotReady("phase5_release.json", ...)` before any state-family row is read; a valid root copy never overrides this refusal |
+  | Release-local `phase5_release.json`: unreadable, bad self-hash, wrong schema or release ID, or noncanonical `sources.retrain_cutoff` later than `sources.pool_cutoff` | `ModelNotReady("phase5_release.json", ...)` before any state-family row is read; a valid root copy never overrides this refusal |
   | `tier4_folds:size` row malformed (more than one row, non-mapping objects, bad descriptor, name/bytes mismatch, duplicate `fold_start`) | `ModelNotReady("tier4_folds:size", ...)` at resolve; a non-list `members`, a non-mapping members row or a non-string `member_id` is `ModelNotReady("phase5_release.json", ...)`; an absent or non-`STAGED` row indexes empty (see "Forward forecast assembly") |
   | Release-local catalog absent | Read the legacy root catalog only if its schema, self-hash and release ID match; otherwise `ModelNotReady` |
 

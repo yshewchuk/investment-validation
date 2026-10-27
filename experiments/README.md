@@ -17,6 +17,14 @@ The owning modules expose these helpers to native experiment callers; no compati
 | --- | --- |
 | `size_panel.materialize(repository, source, **request)` | Explicit frozen-policy/history/source/price snapshot request and finite limits publish qualified H/HM/HMO rows and return context plus a feature SnapshotRef. Publishes through the native artifact/catalog path; exact replay reuses the admitted receipt. No fitting or production caller. |
 | `size_panel.read(repository, source, feature_snapshot, *, columns=None, **request)` | Same bound request re-admits the exact stored panel, returning serialized feature snapshot/context/rows with a closed projection. No rebuild or producer override; malformed shape/projection, changed source, incompatible artifact, protected access and exceeded limits retain typed data refusals. See the owning [architecture contract](ARCHITECTURE.md#qualified-size-panel-opt-in). |
+| `size_search_binding.validate_panel_request` / `prepare` / `prepare_plan` / `verify_installation` | SIZE CLI/planner admit closed requests, installed source/environment and stored panel/folds into v1.6 registration/v2 plans; admitted panel/metadata reads, no writes/fits. Invalid requests, drift and oversized bindings retain typed refusals. |
+| `size_search_binding.fold_inputs` / `execution_for_candidate` | Comparison/search evidence uses the former to require an exact reconstructed inner/normalized outer fold before re-admitting stored rows and qualified training targets; trials/outer use the latter to bind a candidate execution dict. No hidden materialization or fitting; admission failures propagate. |
+| `size_comparator.COLUMNS` / `native_recipe` / `recipe` / `fit_evidence` / `forecasts` | Binding/comparison/worker consume ordered input names, native/complete detached recipes and causal OLS+MLP forecasts from admitted arrays. Reads installed registry metadata, not market sources; fresh guarded fits or explicit abstention, unchanged raw predictions; invalid recipe/metadata raises `ValueError`, bounded registry refusal raises typed `OpsError`. `fit_evidence(inputs, fold, plan)` binds eligible ordered 14-column arrays, not estimator entry; the full admitted cohort remains in the input manifest. |
+| `size_comparison_run.execute` | Outer execution passes sealed plan/fold/limits; returns validated forecasts and persists create-only input/fit/terminal receipts. `replay_only=True` reads exact evidence or refuses, never fits/writes; identity/resource/native failures retain their policy. |
+| `size_fit_diagnostics.keys` / `evidence` | Trials/outer select versioned receipt keys and validate child diagnostics against execution recipe/horizons; pure set/dict results, no I/O; mismatches refuse `EXPERIMENT_IDENTITY_CONFLICT`. |
+| `size_job_budget.remaining` / `resolved_limits` | CLI/trials/outer/comparison supply an admitted plan; persist the first immutable deadline, then return seconds/clamped child limits. No reset/retry; mismatched evidence/limits or exhausted/backward time refuse. |
+| `size_paired_report.paired_report` | SIZE collector passes events, challenger/incumbent forecasts, targets and optional exclusions; returns matched metrics/coverage/bootstrap without I/O/fits. Structural/numeric errors propagate; missing incumbent inputs remain abstentions. |
+| `size_search_report.collect` / `resource_report` | SIZE CLI uses verified read-only driver/outer/comparator replay for paired reports; the pure latter reports schedule-dependent maximum counts and configured bounds, not measured feasibility. No missing-work fallback; admission/receipt failures propagate. |
 | `magnitude_candidate_recipe.candidate_recipe` | Exact family/parameter keys plus ordered columns and dictionary hash yield the existing closed family recipe; no training, source reads or admission proof. |
 | `magnitude_candidate_fit.fit_candidate` | Both no-fit guards precede inspection; exact schema/model dispatch delegates one horizon to the existing numeric fitter and preserves its complete result and native errors. No source qualification, selection, retry or I/O. |
 | `magnitude_report.magnitude_metrics` | Complete scored rows yield stable pooled RMSE, MAE and count; empty rows or nonfinite metrics refuse `EXPERIMENT_VARIANT_FAILED`. Fixed and history reporters, the search recorder and the outer evaluator (fold and aggregate metrics) share this scorer. |
@@ -71,15 +79,10 @@ Its CLI also consumes `native_registration.read_native_registration`/`valid_regi
 
 `magnitude_search_request.compile_request` returns source-free stage-2 request
 specifications and year/count previews for the full-HMO v1 dictionary.
-`magnitude_search_request_versions.compile_request` adds exact full-HMO v2 hash
-dispatch via public compiler validation and public panel recipes, preserving v1
-outputs/refusals and the closed H/HM/HMO 33-candidate grid. Only synthetic tests
-consume the adapter; no registration, executable recipe, input admission, source
-qualification or search activation is implied.
-
-`magnitude_candidate_recipe` and `magnitude_candidate_fit` compose the public
-model recipe/fitter APIs; their only callers are synthetic tests. They do not bind
-compiler candidate specifications or activate the existing search worker/recorder.
+`magnitude_search_request_versions.compile_request` dispatches versioned dictionaries via public validation/panel recipes; the qualified SIZE binding/CLI consume it while legacy previews retain their outputs/refusals.
+It preserves the closed H/HM/HMO 33-candidate grid; compilation alone grants no source or fit authority.
+`magnitude_candidate_recipe` and `magnitude_candidate_fit` are consumed by qualified plan construction and the bounded worker, as well as synthetic tests.
+They reuse public model recipe/fitter APIs; admitted stored inputs and the sealed execution route, not compiler specifications alone, authorize fitting.
 
 `v2_gate_sweep` uses registration preparation/lookup/reservation, the bounded reader and `gate_report.validate_gate_spec`.
 `native_sweep_collection` consumes `v2_gate_sweep.submit_sweep`, sealed registration, `native_outcomes`, `gate_report.render_gate_report`, ops transactions/bounded SQL-text helpers/registered artifacts/spec parsing/source closure/bounded native evidence readers and writers/job reads/`MAX_JOB_FAILURE_BYTES`/errors, contracts and foundation. `v2_gate_collect` consumes that collector, staged-input reading, ops catalog/job reads/errors, data `Repository`/errors and foundation artifacts.
@@ -291,3 +294,91 @@ all modes exclude ledger/outcome publication, final holdouts, releases and order
 Native inner recording normalizes each successful forecast submission once within
 the recording call, reusing that local value for its completion digest and publication.
 This adds no cross-call cache: fresh reads, validation order and receipt verification remain unchanged.
+
+## Qualified SIZE v2 development entrypoint
+
+The qualified-panel route is additive: old v1 search and source-free v1/v2
+previews are not silently upgraded. It requires an explicitly built v3 panel,
+its exact eligible-history artifact and a fresh native v1.6 experiment/arm.
+This is a causal research refit, not byte-identical production reproduction.
+Historical publication/event-schedule knowledge remains reconstructed/unverified.
+No command below authorizes real data access, providers, registration, execution,
+final holdouts, release or merging. The user separately authorizes local data runs.
+
+**Developer synthetic checks (no private datasets):**
+
+```sh
+python -m pytest tests/v2/research/test_size_comparator.py tests/v2/research/test_size_paired_report.py
+python -m pytest tests/v2/research/test_size_search_integration.py
+```
+
+The integration fixture creates synthetic native sources, materializes both
+qualified artifacts, executes 33 candidates on one inner fold (102 search fits
+including the outer refit), and checks deterministic no-refit replay. Its tiny
+cohort correctly makes the 500-row incumbent unavailable; separate synthetic
+500-row numerical tests establish native OLS+MLP parity, while report tests
+establish exact matched metrics and clustered bootstrap arithmetic.
+
+**User-local preparation:** inspect `SUPER_SIZE/request.v2.example.json` and
+`SUPER_SIZE/spec.v2.example.json`. These concrete syntax fixtures use synthetic
+identity tokens, not usable data references or recommended resource budgets.
+Replace every snapshot/plan token with exact locally admitted artifacts, choose
+an unused experiment/arm, and measure resource limits in a separately authorized
+pilot. Keep fixed H/HM/HMO grids, 1/3/5 clocks and 30-day policy. The three-outer,
+six-inner example requests 603 search fits, 9 comparator logical/18 component
+fits, at most 612 logical/621 component fits total; another schedule differs.
+
+Write `panel-request.json` with the exact original public `size_panel` request:
+`feature_snapshot_id`, `history_snapshot` and `price_history_snapshot` are native
+snapshot ID strings; retain `as_of_month`, `policy`, `event_ids`, `horizons`,
+`history_start`, `source_start`, `limits` and `metadata_limits` from materialization.
+Do not pass a producer ID. Both arms consume this same stored clean history.
+No builder runs from the search worker. Preserve actual label anchors and frozen
+membership; do not relabel annual evaluation as protected confirmation.
+
+```sh
+COMMON="--spec spec.json --request request.json --catalog /local/catalog.sqlite --store-root /local/store --no-ledger"
+PREP="--panel-request panel-request.json --scope frozen-development --training-start 2010-01-01 --labels-before 2025-01-01"
+python -m experiments.size_search preflight $COMMON $PREP > preflight.json
+# Only after separate local registration/execution authorization:
+python -m experiments.size_search register $COMMON $PREP > registered.json
+python -c 'import json; print(json.dumps(json.load(open("registered.json"))["plan_ref"]))' > plan-ref.json
+python -m experiments.size_search seal $COMMON --plan-ref plan-ref.json
+python -m experiments.size_search run $COMMON --plan-ref plan-ref.json > comparison.json
+python -m experiments.size_search report $COMMON --plan-ref plan-ref.json > verified-comparison.json
+```
+
+Preflight checks actual stored admission, schedule feasibility and label windows,
+not a memory/performance promise. CLI parent address space and parent/job wall
+ceilings are enforced; child CPU/address space/affinity/wall are contained by the
+existing worker. Child memory must not exceed parent memory. Library callers
+must provide parent containment themselves. Build limits are not consumed or
+measured here because artifacts must already exist. Reports state these limits.
+Progress/RSS goes to stderr; stdout is JSON. No `--ledger` mode exists.
+
+Every candidate attempt precedes selection; infrastructure failure blocks it.
+Completed runs replay exact evidence without refitting. An interrupted start
+without durable result is not retry permission: preserve the journal and diagnose
+it; never reset claims or raise caps automatically. Changed bindings require new
+artifacts/experiment identity. Comparator masks can cause explicit abstention;
+no history-mean substitution conceals an unavailable incumbent. Main pairing
+requires all three horizons; broad coverage, exclusions and history-mean metrics
+remain visible. Bootstrap intervals do not erase prior adaptive design reuse.
+
+The first execution stores one immutable job deadline in the existing journal.
+The legacy search CLI rejects qualified requests; use the SIZE entry point above.
+Registration and replay share the native 16 MiB evidence cap; reports require the exact driver seal.
+Resuming cannot reset it or enlarge child limits; completed read-only reports
+remain available after expiry. Inner ElasticNet convergence, coefficients and
+selected-column evidence are included in the report and retained in bounded
+journal receipts; `magnitude_search_records.read_record(conn, store, run_id, slot)`
+reads the reported execution slot with the existing 16 MiB record bound.
+
+Start a fresh process after code changes: installed source identity is captured
+at import and checked before preparation/replay, refusing subsequent tree drift.
+This assumes stable process startup, not proof of arbitrary stale prior imports.
+
+The panel-request wire envelope is closed and typed before source/catalog access.
+Source seals include the dynamic fit-worker entrypoint and its estimator imports.
+Child jobs count inner candidates + outer challengers + outer comparators:
+the 603-search-fit example has 204 children, even if every comparator abstains.

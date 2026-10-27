@@ -66,6 +66,7 @@ it; the result is wrapped with `engine.v2.models`'s
 `make_recalibration_map_artifact`. It checks both no-fit switches.
 
 P5-3 (current dataset/training recipes):
+`current_recipes(registry_path=None)` bounds installed or alternate registry JSON to 16 MiB before decode via `read_bounded_state`; oversized/nonregular files raise its `ValueError` subclass, with no cache, retry or writes.
 
 - `current_recipes()` — every current recipe as a `TrainingRecipe`, keyed by
   `RecipeKey(role, strategy, output)`: the P5-1 inventory's champion

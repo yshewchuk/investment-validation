@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -179,6 +180,19 @@ def _validate_catalog(body: Any, expected_id: str | None = None) -> dict:
     _catalog_path(Path(), body.get("release_id"))
     if expected_id is not None and body["release_id"] != expected_id:
         raise ReleaseLayoutError("phase5 release_id does not match selected release")
+    sources = body.get("sources")
+    if isinstance(sources, Mapping) and "retrain_cutoff" in sources:
+        try:
+            retrain_cutoff = sources["retrain_cutoff"]
+            pool_cutoff = sources["pool_cutoff"]
+            retrain_date = date.fromisoformat(retrain_cutoff)
+            pool_date = date.fromisoformat(pool_cutoff)
+        except (KeyError, TypeError, ValueError):
+            raise ReleaseLayoutError("invalid phase5 release sources cutoff") from None
+        if (retrain_date.isoformat() != retrain_cutoff
+                or pool_date.isoformat() != pool_cutoff
+                or retrain_date > pool_date):
+            raise ReleaseLayoutError("invalid phase5 release sources cutoff")
     claimed = body.get("manifest_hash")
     unhashed = {key: value for key, value in body.items() if key != "manifest_hash"}
     if claimed != content_hash(unhashed):

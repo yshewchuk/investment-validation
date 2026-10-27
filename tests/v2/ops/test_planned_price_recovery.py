@@ -414,6 +414,7 @@ def test_real_nightly_planner_pins_refreshed_capture_before_input_manifest(
     calls = install_fetcher(case.tmp)
     _write_gspc(case.tmp)  # the capture now requires REGIME_TICKER alongside SPY
     open_catalog = bootstrap.open_catalog
+    open_catalog(case.root / "catalog.sqlite", clock=case.clock).close()
     monkeypatch.setattr(bootstrap, "open_catalog", lambda path, **kwargs:
                         open_catalog(case.tmp / "catalog.sqlite", **kwargs))
     monkeypatch.setattr(nightly_trigger, "_ops_root", lambda root: case.root)
