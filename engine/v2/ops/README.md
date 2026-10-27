@@ -68,6 +68,7 @@ Stored history additionally exposes `native_registration.magnitude_history_reque
 `native_registration.magnitude_history_execution_document` and `native_registration.validate_magnitude_history_execution`
 seal/check v1.4. `native_registration.magnitude_fitted_execution_document` and `native_registration.validate_magnitude_fitted_execution`
 seal/check v1.5 recipes owned by registration, without importing training.
+`native_registration.verified_registration_bytes` also admits native v1.6 SIZE integrity envelopes for `experiments.size_search_binding`: request/context/snapshot cross-links only; existing byte caps/conflicts apply, with no read or fit authority.
 These constructors/validators do not grant read authority.
 They compose one resolved plan, source/environment binding and primary catalog
 reservation; the caller owns the transaction around the reservation helper.

@@ -11,7 +11,7 @@ The caller supplies the checkout root used for source fingerprinting.
 `read_native_registration` uses the ops bounded verifier with the existing native 16 MiB UTF-8 default evidence/object budget: one SQL snapshot caps evidence transfer
 (twice the budget for UTF-16, followed by UTF-8 admission), then validates the registration reference size before the verified object read. Missing registration remains R1;
 malformed/conflicting evidence and oversized catalog evidence remain R6. Raw storage exceptions propagate. This bounds transferred/serialized bytes, not
-SQLite internals or decoded-object overhead. It loads v1.0–v1.5 without rewriting saved bindings; current-source admission still requires a matching closure.
+SQLite internals or decoded-object overhead. It loads v1.0–v1.6 without rewriting saved bindings; current-source admission still requires a matching closure.
 Larger legitimate registrations can supply `max_evidence_bytes`, also exposed as `--max-registration-bytes` by the gate, prediction, search-plan and serial-search CLIs; magnitude
 history binds its temporal plan twice, so 16 MiB is not a universal population bound (nor a feature-matrix cap). The pure `valid_registration_read_budget` predicate admits only built-in integer
 budgets in `[1, 2**62 - 1]`, leaving SQLite headroom for UTF-16. The loader and all five CLI parsers (including RUNUP's evidence-budget flag) and `register_native` share it; None cannot disable either public boundary.
@@ -233,54 +233,57 @@ both flag states publish/verify the same plan and never write a ledger.
 | CLI typed refusal | Preserve the full `Problem` (including native spec conversion), return exit 2 and close an opened catalog connection. Filesystem/artifact unavailability, including an unopenable socket path, maps to `RESOURCE_UNAVAILABLE`; malformed or excessively nested JSON maps to `INVALID_EXPERIMENT_SPEC`. |
 | Unexpected builtin exception from catalog/registration/planning code | Propagate it after closing the catalog; do not misclassify it as malformed user JSON. |
 
-## Stage-2 request-only schedule preview
+## Stage-2 declarations and qualified execution
 
-`magnitude_search_request.compile_request(request)` consumes a plain-JSON
-`magnitude_search_request.v2` declaration and returns a detached
-`magnitude_search_schedule.v2` preview. Its callers are synthetic tests and the
-additive `magnitude_search_request_versions.compile_request(request)` adapter;
-there is no CLI or runtime activation. Standard JSON/product and foundation
-canonical hashing implement normalization/enumeration. The owning research
-panel `recipe` supplies ordered subset dictionaries; shared `eligibility_policy`
-fixes the declared 30-day policy. The existing public search child-limit validator
-supplies the child resource domain. No estimator or source reader is called.
-Direct `ops.errors.fail` supplies typed, nonretryable request refusals.
+`magnitude_search_request.compile_request` remains a source-free closed v2-request
+validator. `magnitude_search_request_versions` explicitly selects v1/v2/v3 dictionaries;
+legacy declaration outputs remain unchanged. JSON/product and canonical hashing
+provide normalization/enumeration; no extra schema library or scheduler is needed.
+H/HM/HMO cross fixed Ridge/ElasticNet/HGB grids: 33 candidates. The six-inner,
+three-outer example has 603 search fits plus 9 logical/18 component comparison fits.
+Counts cap attempts, not completed fits, input bytes, coverage or cost feasibility.
+Unknown shapes, columns, hashes, grids, policies or insufficient caps refuse before
+expansion. A preview grants no source, fit, selection or holdout authority.
 
-The closed request names pinned snapshot IDs, dictionary hash, an identity-only
-eligibility-plan reference, H/HM/HMO, fixed Ridge/ElasticNet/HGB grids, ordered
-outer/inner years, candidate/fit caps, named comparison and explicit child,
-parent/build/job limits. Identity references prove neither existence nor
-provenance. The [wire contract](https://github.com/yshewchuk/investment-validation/blob/4095cb7fc953811bbcbf2a61ff390251dae3bbce/experiments/SUPER_SIZE/STAGE2_DESIGN.md#6-stage-2-request-and-schedule-compiler-checkpoint)
-defines the closed nested fields. Scope is request compatibility, not native admission.
+`size_search_binding.prepare` explicitly creates native registration v1.6 from metadata temporal folds and installed `size_panel.read` admission. It binds the complete v3 context/snapshots, all-horizon 30-day eligibility, request, full causal
+comparator recipe (including registry-derived native recipe and sklearn defaults), source closure/environment and actual label anchors. Inner-year feasibility and
+label-end purging run before reservation. Native catalog reservation and search journal ownership stay unchanged; no new store, scheduler or ledger is introduced.
+`magnitude_search_plan` routes only a v1.6 anchor plus v2 request to executable v2 plans. Historical v1 execution semantics remain explicit, never a latest default.
 
-| Condition | Enforced outcome |
+`size_search` is the local no-ledger preflight/register/seal/run/report entrypoint.
+Parent/job wall and address-space limits are CLI-owned; child memory cannot exceed
+the inherited parent hard ceiling. Libraries require external parent containment.
+Build limits describe separately produced artifacts: execution never builds features.
+`SearchTrials`/outer reuse sharded inputs, the bounded fit-only worker and immutable
+zero-retry journal. Candidate IDs bind full numeric recipes, ordered dictionary,
+context and sources. ElasticNet convergence/coefficients/selected columns survive
+in verified receipts. Only inner scores select; outer outcomes cannot choose models.
+
+`size_comparison_run` admits the exact sealed plan/fold before a fresh comparator
+claim, checks both no-fit guards first, and freezes forecasts before outer labels.
+`size_comparator` uses fourteen causal inputs, complete-row/n_prior>=4 training,
+500-row minimum, fixed target/predictor masks and native OLS+MLP construction.
+Missing inputs (including source-zero quotes stored as null) abstain; no quote reconstruction. Raw negative blends stay negative. Its history
+mean reference uses the same admitted history, not live aggregates or new weights.
+Completed CLI replay verifies outer/comparison journals read-only without an execution deadline; interrupted claims
+cannot restart. Source, registry, policy, limits or context drift refuses.
+
+`size_search_report` verifies complete journals, then `size_paired_report` matches
+whole three-horizon events, retains all coverage/label exclusions and broad sanity
+metrics, and reports equal-event paired RMSE/MAE differences, bias, large-move
+underprediction and 2,000 seed-zero quarter-block/issuer bootstrap intervals.
+Results concern the frozen dataset's development population, not source-wide
+completeness, untouched confirmation, production reproduction or release authority.
+Publication/event-schedule knowledge remains reconstructed/unverified; known dates,
+actual label windows, holdout union and source ceilings are still mandatory.
+
+| Qualified SIZE condition | Outcome |
 | --- | --- |
-| Plain finite JSON, closed grids/dictionary/policy and sufficient explicit caps | Normalize numeric grid aliases, return deterministic request/spec IDs, 33 sorted candidate specifications and an ordered year-only schedule. |
-| Malformed/extra/missing nested fields, non-JSON values, invalid references/years or insufficient caps | Nonretryable `INVALID_EXPERIMENT_SPEC`; no partial preview or I/O. |
-| Search counts | Three horizons times (candidates times total inner folds plus outer folds); comparison adds three logical/six component fits per outer fold. Counts describe attempted-fit limits, not completed fits. |
-| Changed valid references, years, caps or limits | Changed request/spec identity; identical normalized declarations replay identically without input mutation. |
-| Candidate specification returned | Contains subset recipe metadata and only grid knobs, not an executable estimator recipe or complete source/fold seal. |
-| Snapshot/eligibility reference has valid syntax | No repository resolution, membership check, embargo enforcement, event coverage or qualified-label proof. |
-
-The preview does not select a winner, fit or preprocess, reserve/register/publish,
-write a ledger, enforce resource containment, or authorize execution/holdout reads.
-The additive version adapter has the same closed request and schedule schemas.
-Its shared validation/refusal boundary is the public v1 compiler; public v2 panel
-recipes and foundation hashing own the version-specific metadata and identities.
-
-| Adapter input | Outcome |
-| --- | --- |
-| Built-in dict with a built-in string equal to the full-HMO v2 dictionary hash | Shared validation completes before expansion; detached v2 recipes and actual declaration identities, with sorted specifications and no surrogate identity. |
-| Any other input, including v1/unsupported/subset hashes or nonplain shapes | Delegate unchanged to the public v1 compiler; identical valid outputs and complete refusal envelopes. |
-
-V2 dictionary widths are 11/28/42; model columns are 11/28/43, with
-`has_implied_quote` last only for HMO, outside the numeric dictionary.
-Both versions retain 33 candidates and schedule-specific counts (603 search,
-9 logical/18 component comparison fits for the three-outer/six-inner fixture).
-The adapter has synthetic callers only, no CLI/native caller or fitting path.
-Work/space scale with the declaration plus fixed metadata specifications; caps
-bound enumeration, not input bytes, memory or real-data resource feasibility.
-Existing compiler/panel definitions and v1 runtime source closures are unchanged.
+| Malformed closed panel request or mismatched request/anchor version | `INVALID_EXPERIMENT_SPEC` before reservation/execution. |
+| Changed binding/hash/environment, driver seal or replay receipt | `EXPERIMENT_IDENTITY_CONFLICT`; no replacement, new fit or replay write. Native admission failures retain their own codes. |
+| Prepared/stored registration over 16 MiB; new work beyond original deadline | `RESOURCE_LIMIT_EXCEEDED`; preserve existing evidence, no retry or automatic cap increase. |
+| Read-only collection: complete expired replay; missing terminal | Verified read-only report remains available; missing evidence refuses before work, never invokes a mutable fallback. |
+| CLI malformed reference/spec; raw storage failure; unexpected programming error | Typed `INVALID_EXPERIMENT_SPEC`; sanitized `RESOURCE_UNAVAILABLE`; unexpected errors propagate. |
 
 ## Source-free candidate recipe and single-horizon fit
 
@@ -311,11 +314,8 @@ this helper does not silently normalize it to Ridge/HGB's conversion policy.
 | Valid dispatch envelope with invalid policy/order/numeric inputs | Existing family refusal; no retry or partial result. |
 | Valid numeric call | Unmodified family result/schema/recipe ID; no new candidate seal or evidence of source qualification. |
 
-Only synthetic tests currently call these helpers. Columns/digests/arrays prove
-no dictionary membership, causal admission or permission to fit. No source reader,
-registration, artifact, journal, worker, resource containment, selection or CLI is
-added. Compiler specifications are not accepted as executable recipes; v1
-`SearchTrials` admission/selection and every existing execution closure stay intact.
+Qualified SIZE plan construction and its bounded worker now consume these helpers alongside synthetic tests; v1 execution remains explicit and unchanged.
+Columns/digests/arrays alone prove no source qualification or fit permission: the v1.6 binding, admitted stored inputs and v2 journal route supply those checks.
 
 ## Recorded magnitude-search selection
 

@@ -27,6 +27,7 @@ from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.migrations import require_current
+from engine.v2.research.progress import Progress, decision
 from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.magnitude_search_outer import collect_outer_results, execute_outer_fold
 from experiments.magnitude_search_plan import read_search_plan
@@ -102,6 +103,8 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search contains an unfinished or orphan outer claim")
         if read("outer-start:" + key) is not None:
             completed_outer.append(fold["outer"]["year"])
+    meter = Progress("search trials", len(claimed) + len(fresh))
+    decision("search trials", f"{len(claimed)} replay claims; {len(fresh)} fresh trials; zero retries")
     def complete(action, args, key):
         try:
             action(*args, limits=limits)
@@ -111,6 +114,7 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
                     or not isinstance(terminal, dict) or terminal.get("status") != "refused"):
                 raise
             trials.reconcile(*args, limits=limits)
+        meter.tick()
     for args, key in claimed:
         complete(trials.reconcile, args, key)
     for year in completed_outer:
@@ -189,6 +193,8 @@ def main(argv=None):
                 spec = experiment_spec_from_document(_read_document(args.spec))
                 request = _read_document(args.request)
                 reference = from_document(ArtifactRef, _read_document(args.plan_ref))
+                if request.get("schema_version") == "magnitude_search_request.v2":
+                    raise fail("INVALID_EXPERIMENT_SPEC", "qualified SIZE requires experiments.size_search CLI containment")
             except (DocumentError, TypeError):
                 raise fail("INVALID_EXPERIMENT_SPEC", "search metadata could not be admitted") from None
             if args.action == "collect":

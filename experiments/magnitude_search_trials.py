@@ -33,6 +33,10 @@ from experiments.magnitude_search_execution import (
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import read_search_plan
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
+from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
+from experiments.size_fit_diagnostics import keys as diagnostic_keys
+from experiments.size_job_budget import resolved_limits
+from experiments.size_search_binding import execution_for_candidate
 
 
 def _problem(problem):
@@ -163,6 +167,8 @@ class SearchTrials:
         """Run one bounded native inner trial once, or verify its completed replay."""
         plan = self._admit()
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
+        if plan.get("schema_version") == "magnitude_search_plan.v2" and limits != plan["request"]["limits"]["child"]:
+            raise fail("INVALID_EXPERIMENT_SPEC", "v2 trial limits differ from sealed request")
         validate_execution_limits(limits)
         attempt = {"limits": dict(limits), "candidate_id": candidate_id, "trial_id": key}
         completed = self._read("execution:" + key)
@@ -170,10 +176,10 @@ class SearchTrials:
             return self._executed(plan, outer_year, inner_year, candidate_id, attempt)
         forbid_fitting("SearchTrials.execute")
         forbid_legacy_fitting("SearchTrials.execute")
-        resolved = execution_limits(limits)
+        resolved = resolved_limits(self.conn, self.store, self.registration, plan, limits) if plan.get("schema_version") == "magnitude_search_plan.v2" else execution_limits(limits)
         started = self._start(outer_year, inner_year, candidate_id, attempt)
         inputs = started["inputs"]
-        execution = {**self.registration.document["magnitude_execution"], "fit_recipe": candidate["recipe"]}
+        execution = execution_for_candidate(self.registration.document, candidate)
         fits, pending = [], []
         expected = self._fit_evidence(inputs, inner, plan, execution)
 
@@ -192,10 +198,12 @@ class SearchTrials:
         admitted = self._read("inputs:" + key)
         source = {"manifest": self._read("cohort:" + admitted["cohort"]), "inputs_id": admitted["inputs_id"],
                   "store_root": str(self.store.root)}
+        if plan.get("schema_version") == "magnitude_search_plan.v2":
+            resolved = resolved_limits(self.conn, self.store, self.registration, plan, limits)
         result = run_fitted_trial(source, inner, plan, execution, resolved, progress)
         succeeded = isinstance(result, dict) and result.get("event") == "succeeded"
         if (not isinstance(result, dict) or result.get("event") not in ("succeeded", "failed")
-                or (succeeded and (pending or len(fits) != len(plan["horizons"]) or set(result) != {"event", "forecasts"}))
+                or (succeeded and (pending or len(fits) != len(plan["horizons"]) or set(result) != {"event", "forecasts"} | diagnostic_keys(self.registration.document)))
                 or (not succeeded and (len(pending) != 1 or set(result) != {"event"}))):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit completion differs from admitted attempts")
         # run_fitted_trial has returned only after checking exit and reaping the child.
@@ -204,7 +212,8 @@ class SearchTrials:
                      "inputs_id": self._read("inputs:" + key)["inputs_id"], "result": result}, replay=False)
         evidence = {"attempt": attempt, "fit_attempt_count": len(fits) + len(pending),
                     "completed_fit_count": len(fits), "fits": fits, "status": result["event"],
-                    "forecasts_id": content_hash(result["forecasts"]) if succeeded else None}
+                    "forecasts_id": content_hash(result["forecasts"]) if succeeded else None,
+                    **diagnostic_evidence(result, execution, plan["horizons"])}
         self._append("execution:" + key, evidence, replay=False)
         self._record(outer_year, inner_year, candidate_id, native=True, **({"forecasts": result["forecasts"]} if succeeded
             else {"failure": fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed").problem}))
@@ -255,7 +264,7 @@ class SearchTrials:
             if not isinstance(result, dict) or result.get("event") not in ("succeeded", "failed"):
                 raise ValueError
             succeeded = result["event"] == "succeeded"
-            if set(result) != ({"event", "forecasts"} if succeeded else {"event"}):
+            if set(result) != (({"event", "forecasts"} | diagnostic_keys(self.registration.document)) if succeeded else {"event"}):
                 raise ValueError
             forecasts = None
             if succeeded:
@@ -272,7 +281,7 @@ class SearchTrials:
                 validation = self._read("validation:" + cohort_key)
                 if validation is not None:
                     self._validation(inner, admitted, inputs, validation)
-            execution = {**self.registration.document["magnitude_execution"], "fit_recipe": candidate["recipe"]}
+            execution = execution_for_candidate(self.registration.document, candidate)
             expected = self._fit_evidence(inputs, inner, plan, execution)
             started_fits, completed_fits = [], []
             for fit in expected:
@@ -291,7 +300,8 @@ class SearchTrials:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search durable execution result differs") from None
         return result, {"attempt": attempt, "fit_attempt_count": count, "completed_fit_count": completed,
                         "fits": expected[:completed], "status": result["event"],
-                        "forecasts_id": content_hash(forecasts) if succeeded else None}
+                        "forecasts_id": content_hash(forecasts) if succeeded else None,
+                        **diagnostic_evidence(result, execution, plan["horizons"])}
 
     @staticmethod
     def _fit_evidence(inputs, inner, plan, execution):
