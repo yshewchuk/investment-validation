@@ -38,6 +38,7 @@ def _native() -> NativeScoreInputs:
         "exit_date": "2026-09-18",
         "expiry": "2026-09-18",
         "spot": 100.0,
+        "chain_spot": 125.0,
     }
     forecast = {
         "driver_name": "abs_move",
@@ -91,8 +92,12 @@ def test_fill_recomputes_owned_simulation_and_gate_outputs():
     worst = application.score_one(_request(0.0), inputs)
     best = application.score_one(_request(1.0), inputs)
 
-    assert worst.financial_diagnostics["entry_cost_pct"] == pytest.approx(6.0)
-    assert best.financial_diagnostics["entry_cost_pct"] == pytest.approx(2.0)
+    assert worst.financial_diagnostics["entry_cost_pct"] == pytest.approx(
+        6.0 / 125.0 * 100,
+    )
+    assert best.financial_diagnostics["entry_cost_pct"] == pytest.approx(
+        2.0 / 125.0 * 100,
+    )
     assert worst.forecasts["exp_pnl_sim"] == pytest.approx(-1.0 / 6.0)
     assert best.forecasts["exp_pnl_sim"] == pytest.approx(1.5)
     assert worst.gate_terms["gate_pass"] is False

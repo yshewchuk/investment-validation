@@ -16,6 +16,8 @@ gate stage in ``_append_late_stages`` had already run.
 import hashlib
 import json
 
+import pytest
+
 from engine.v2.models import FrozenInference, ModelBinding, ModelRelease
 from engine.v2.models.contracts import ArtifactMember
 from engine.v2.scoring.frozen_executor import FrozenStageExecutor
@@ -46,8 +48,7 @@ def _inputs(*, source_features=None, model_inputs=None, gate=None, chooser=None,
         "entry_date": "2026-09-16",
         "exit_date": "2026-09-18",
         "expiry": "2026-09-18",
-        "strike": 100.0,
-        "spot": 100.0,
+        "strike": 100.0, "spot": 100.0, "chain_spot": 125.0,
         "quotes": dict(_QUOTES),
     }
     context.update(context_overrides or {})
@@ -211,4 +212,4 @@ def test_entry_cost_pct_available_to_the_gate(tmp_path):
     values = assemble_native_values(_inputs(gate=gate))
     assert "MISSING_FEATURES" not in values["flags"]
     assert values.get("gate_score") is not None
-    assert values.get("entry_cost_pct") is not None
+    assert values.get("entry_cost_pct") == pytest.approx(4.0 / 125.0 * 100)

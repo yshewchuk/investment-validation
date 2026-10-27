@@ -214,3 +214,19 @@ def test_direct_native_inputs_refuse_invalid_chain_spot(spot):
 
     assert excinfo.value.code == "BAD_VALUE"
     assert excinfo.value.path == "$.context.chain_spot"
+
+
+@pytest.mark.parametrize("block_name", ["features", "diagnostics", "chooser"])
+def test_assembly_keeps_context_chain_spot_authoritative(block_name):
+    bundle = assemble_nightly_source_bundle(
+        **_kwargs(quote_rows=_rows(chain_spot=87.5)),
+    )
+    inputs = build_native_score_inputs(bundle)
+    block = dict(getattr(inputs, block_name))
+    block["chain_spot"] = 250.0
+    inputs = replace(inputs, **{block_name: block})
+
+    values = assemble_native_values(inputs, strategy="STR-THRU")
+
+    assert values["chain_spot"] == 87.5
+    assert values["entry_cost_pct"] == pytest.approx((1.1 + 1.2) / 87.5 * 100)

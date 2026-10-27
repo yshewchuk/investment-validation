@@ -715,6 +715,9 @@ def _simulation_acceptance_controls() -> dict[str, object]:
                 "event_date": "2026-09-17", "exit_date": exit_date,
                 "expiry": "2026-10-17", "pre_iv30": 40.0,
             }, source_ref)
+            base = replace(
+                base, context={**base.context, "chain_spot": 125.0},
+            )
             inputs = replace(
                 base, geometry=geometry, pricing=pricing,
                 forecast=forecast_recipe, simulation=simulation_recipe,

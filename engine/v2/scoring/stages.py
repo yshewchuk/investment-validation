@@ -186,7 +186,7 @@ _OWNED_OUTPUTS = (
 # days_to_print / dte_entry are scorer-computed (see _check_pricing_boundary and
 # _stage_days_to_print): a diagnostics block must never replace or install them.
 _DIAGNOSTIC_PROTECTED = (_OWNED_OUTPUTS | _FINANCIAL_OUTPUTS
-                         | frozenset({"days_to_print", "dte_entry"}))
+                         | frozenset({"days_to_print", "dte_entry", "chain_spot"}))
 _ROLE_OUTPUTS = {
     "driver": ("driver_prediction",),
     "size": ("forecast_abs_move",),
@@ -1271,6 +1271,9 @@ def _initial_values(
     executed: list[StageReceipt] = []
     prior: Any = {"source_ref": inputs.source_ref}
     for stage, block in (("resolve_context", inputs.context), ("features", inputs.features)):
+        if stage == "features" and "chain_spot" in block:
+            block = {key: value for key, value in block.items()
+                     if key != "chain_spot"}
         _merge_stage(values, block)
         output = {key: value for key, value in block.items()
                   if key not in _OWNED_OUTPUTS and key != "flags"}
@@ -1292,7 +1295,8 @@ def _initial_values(
     _stage_days_to_print(inputs, values)
     prior = {**prior, "values": dict(values)}  # the receipt records the days_to_print the forecast consumes
     if compatibility:
-        values.update(inputs.forecast)
+        values.update({key: value for key, value in inputs.forecast.items()
+                       if key != "chain_spot"})
         forecast_output = dict(inputs.forecast)
     else:
         forecast_output = _execute_forecast(
@@ -2851,7 +2855,8 @@ def _execute_chooser(inputs: NativeScoreInputs, name: str,
     executors = block.get("executors")
     if executors is None:
         output = {key: value for key, value in block.items()
-                  if key not in _OWNED_OUTPUTS and key != "flags"}
+                  if key not in _OWNED_OUTPUTS
+                  and key not in {"flags", "chain_spot"}}
         values.update(output)
         return output
     executor = executors.get("chooser_score") if isinstance(executors, Mapping) else None
@@ -2946,7 +2951,8 @@ def _append_late_stages(
             ("gate", inputs.gate), ("chooser", inputs.chooser),
             ("diagnostics", inputs.diagnostics),
         ):
-            values.update(block)
+            values.update({key: value for key, value in block.items()
+                           if key != "chain_spot"})
             _emit_stage(
                 executed, stage, {"prior": executed[-1].output_hash}, block,
                 observer,

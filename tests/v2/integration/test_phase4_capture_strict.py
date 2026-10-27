@@ -753,6 +753,24 @@ def _full_strict_candidate(*, fixture_id, ticker, driver_vector, gate_vector,
     }
 
 
+def test_captured_blocks_stage_chain_spot_from_quote_rows(tmp_path):
+    path, digest = _artifact(tmp_path)
+    candidate = _full_strict_candidate(
+        fixture_id="case-0", ticker="AAA", driver_vector={"x": 2.0},
+        gate_vector={"x": 9.0, "n_prior": 5.0}, path=path, digest=digest,
+    )
+    checkpoint = candidate["legacy_trace"]["checkpoints"]["source_inputs"]
+    source = checkpoint["value"]
+    for row in source["quote_domain"]:
+        row["chain_spot"] = 125.0
+    checkpoint["content_hash"] = content_hash(source)
+
+    blocks = _captured_blocks(candidate, _request())
+
+    assert blocks["context"]["spot"] == 100.0
+    assert blocks["context"]["chain_spot"] == 125.0
+
+
 def test_attach_strict_probe_traces_every_selected_candidate(tmp_path, monkeypatch):
     # attach_strict_probe resolves captured artifact paths beneath the data
     # root (engine.paths.ROOT); point it at this test's tmp_path instead of

@@ -119,7 +119,9 @@ from engine.v2.models import (  # noqa: E402
 )
 from engine.v2.models.contracts import ArtifactMember  # noqa: E402
 from engine.v2.scoring import application as v2_application  # noqa: E402
-from engine.v2.scoring.nightly_source_bundle import quote_domain_map  # noqa: E402
+from engine.v2.scoring.nightly_source_bundle import (  # noqa: E402
+    _staged_chain_spot, quote_domain_map,
+)
 from engine.v2.scoring.stages import (  # noqa: E402
     NativeScoreInputs,
     StageObservation,
@@ -1433,8 +1435,12 @@ def _captured_blocks(candidate: Mapping[str, Any],
             context[key] = source_features[key]
     context["strategy"] = request.strategy_version
     quote_status = source.get("quote_status")
+    quote_domain = source.get("quote_domain")
     try:
-        context["quotes"] = quote_domain_map(source.get("quote_domain"), quote_status)
+        context["quotes"] = quote_domain_map(quote_domain, quote_status)
+        chain_spot = _staged_chain_spot(quote_domain)
+        if chain_spot is not None:
+            context["chain_spot"] = chain_spot
     except ValueError as exc:
         # NightlySourceBundleRefusal's own str() carries a "CODE: " prefix
         # StrictTraceCaptureError never had; .detail is the original message

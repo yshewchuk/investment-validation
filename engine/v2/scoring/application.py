@@ -1140,7 +1140,7 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
         # non-acceptance unit tests of the compatibility path itself
         # (tests/v2/scoring/test_v2_scoring_application.py,
         # tests/v2/scoring/test_v2_scoring_application_track_b.py,
-        # tests/test_v2_scoring_stage_ownership.py,
+        # tests/v2/scoring/test_v2_scoring_stage_ownership.py,
         # tests/test_v2_scoring_no_score_status.py). checks/phase4_real.py no
         # longer calls it anywhere (its `_native()` helper was removed): every
         # Phase 4 side control now builds its inputs the same native way the
