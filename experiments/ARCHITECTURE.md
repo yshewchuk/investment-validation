@@ -283,7 +283,7 @@ actual label windows, holdout union and source ceilings are still mandatory.
 | Changed binding/hash/environment, driver seal or replay receipt | `EXPERIMENT_IDENTITY_CONFLICT`; no replacement, new fit or replay write. Native admission failures retain their own codes. |
 | Prepared/stored registration or installed registry over 16 MiB; new work beyond original deadline | `RESOURCE_LIMIT_EXCEEDED`; preserve existing evidence, no retry or automatic cap increase. |
 | Read-only collection: complete expired replay; missing terminal | Verified read-only report remains available; missing evidence refuses before work, never invokes a mutable fallback. |
-| CLI malformed reference/spec; raw storage failure; unexpected programming error | Typed `INVALID_EXPERIMENT_SPEC`; sanitized `RESOURCE_UNAVAILABLE`; unexpected errors propagate. |
+| CLI malformed reference/spec; raw storage failure; recoverable parent `MemoryError`; unexpected programming error | Typed `INVALID_EXPERIMENT_SPEC`; sanitized `RESOURCE_UNAVAILABLE`; static `RESOURCE_LIMIT_EXCEEDED` JSON and exit 2 if refusal output/cleanup can complete; unexpected errors propagate. Fatal OS/interpreter exhaustion cannot guarantee a response. |
 
 ## Source-free candidate recipe and single-horizon fit
 

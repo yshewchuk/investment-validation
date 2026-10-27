@@ -137,10 +137,9 @@ def test_native_data_error_uses_supported_code_property(monkeypatch, capsys):
 
 @pytest.mark.parametrize("headroom", [-1, 0, 1])
 def test_prepare_and_cli_memory_admission_have_identical_refusal(monkeypatch, headroom):
+    from engine.v2.research.magnitude_panel_qualified_table import recipe
     from tests.v2.research.test_magnitude_search_request import request as request_fixture
     from tests.v2.research.test_size_review_contract import panel_request
-
-    from engine.v2.research.magnitude_panel_qualified_table import recipe
 
     request = request_fixture()
     request["feature_dictionary_hash"] = recipe("HMO")["dictionary_hash"]
@@ -259,3 +258,51 @@ def test_fingerprint_programming_error_remains_visible(monkeypatch):
     monkeypatch.setattr(binding, "_source_files", lambda: (_ for _ in ()).throw(TypeError("bug")))
     with pytest.raises(TypeError, match="bug"):
         binding._sources()
+
+
+@pytest.mark.parametrize("stage", ["input", "catalog", "report", "serialization"])
+def test_parent_memory_error_has_static_refusal_and_closes_catalog(monkeypatch, capsys, stage):
+    setup_cli(monkeypatch)
+    closed = []
+    monkeypatch.setattr(cli, "connect", lambda *a, **k: SimpleNamespace(close=lambda: closed.append(True)))
+    monkeypatch.setattr(cli, "from_document", lambda *a: object())
+    monkeypatch.setattr(cli, "collect", lambda *a: {"complete": True})
+    def exhausted(*a, **k):
+        raise MemoryError("private allocation detail")
+    target = {"input": "_read_document", "catalog": "connect", "report": "collect"}.get(stage)
+    if target:
+        monkeypatch.setattr(cli, target, exhausted)
+    else:
+        monkeypatch.setattr(cli, "json", SimpleNamespace(dumps=exhausted))
+    assert cli.main(args()) == 2
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {"refused": "RESOURCE_LIMIT_EXCEEDED",
+        "message": "SIZE parent memory exhausted"}
+    assert closed == ([True] if stage in ("report", "serialization") else [])
+    assert "Traceback" not in output.err and "private allocation detail" not in output.out
+
+
+def test_recoverable_real_parent_address_space_failure_is_json_exit_two():
+    import subprocess
+    import sys
+    code = '''import resource
+from pathlib import Path
+from experiments import size_search as cli
+cli._read_document = lambda path: {}
+cli.experiment_spec_from_document = lambda doc: object()
+def contain(request):
+    current = int(Path('/proc/self/statm').read_text().split()[0]) * resource.getpagesize()
+    ceiling = current + (16 << 20)
+    resource.setrlimit(resource.RLIMIT_AS, (ceiling, ceiling))
+cli._contain = contain
+def allocate(*args, **kwargs):
+    return bytearray(64 << 20)
+cli.connect = allocate
+raise SystemExit(cli.main(['report','--spec','spec','--request','request','--plan-ref','ref',
+    '--catalog','catalog','--store-root','/tmp','--no-ledger']))
+'''
+    completed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 2, completed.stderr
+    assert json.loads(completed.stdout) == {"refused": "RESOURCE_LIMIT_EXCEEDED",
+        "message": "SIZE parent memory exhausted"}
+    assert "Traceback" not in completed.stderr

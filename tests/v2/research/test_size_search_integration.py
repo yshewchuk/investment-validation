@@ -20,6 +20,9 @@ from tests.v2.research.magnitude_trial_support import poison_outcomes, predictio
 from tests.v2.research.test_magnitude_panel_qualified import panel_data
 from tests.v2.research.test_magnitude_search_request import request as request_fixture
 
+# Share the bounded native journal fixture instead of rebuilding it on each xdist worker.
+pytestmark = pytest.mark.xdist_group("size_search_integration")
+
 
 @pytest.fixture(scope="module")
 def case(tmp_path_factory):
@@ -101,7 +104,7 @@ def test_no_fit_probe_does_not_claim_comparator(case):
     assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
 
 
-def test_complete_synthetic_serial_search_child_diagnostics_and_exact_retry(case, monkeypatch):
+def test_complete_synthetic_serial_search_child_diagnostics(case, monkeypatch):
     poison_outcomes(monkeypatch, case.repository, case.panel_source, ["2023-03-20", "2023-04-03", "2023-05-15"])
     for producer in (size_panel, eligible_history):
         monkeypatch.setattr(producer, "materialize", lambda *a, **k: pytest.fail("hidden feature rebuild"))
@@ -137,14 +140,25 @@ def test_complete_synthetic_serial_search_child_diagnostics_and_exact_retry(case
         if candidate["recipe"]["model"] == "elasticnet":
             diagnostics.extend(receipt["diagnostics"])
     assert len(diagnostics) == 54 and all(d["converged"] for d in diagnostics)
+
+
+def test_completed_search_exact_and_expired_replay(completed_case, monkeypatch):
+    case = completed_case
+    poison_outcomes(monkeypatch, case.repository, case.panel_source, ["2023-03-20", "2023-04-03", "2023-05-15"])
+    for producer in (size_panel, eligible_history):
+        monkeypatch.setattr(producer, "materialize", lambda *a, **k: pytest.fail("hidden feature rebuild"))
+    report = collect(*case.context)
+    first = report["search"]
     import experiments.magnitude_search_outer as outer
     import experiments.magnitude_search_trials as trials
     import experiments.size_comparison_run as comparison
+    from experiments.magnitude_search_records import read_record
     for module in (trials, outer, comparison):
         monkeypatch.setattr(module, "run_fitted_trial", lambda *a, **k: pytest.fail("retry fit"))
     assert run_search(*case.context, limits=case.request["limits"]["child"]) == first
     assert collect(*case.context) == report
     from datetime import timedelta
+
     from engine.v2.foundation import parse_timestamp
     from experiments import size_job_budget, size_search
     saved = read_record(case.conn, case.store, case.registration.run_id, "size-job-deadline")
@@ -197,6 +211,7 @@ def completed_case(case):
 def test_report_replays_comparator_evidence(completed_case, monkeypatch, slot, mutation):
     case = completed_case
     from datetime import timedelta
+
     from engine.v2.foundation import parse_timestamp
     from experiments import size_job_budget
     from experiments.magnitude_search_records import read_record
@@ -204,9 +219,9 @@ def test_report_replays_comparator_evidence(completed_case, monkeypatch, slot, m
     frozen = SimpleNamespace(now=lambda: parse_timestamp(saved["deadline"]) + timedelta(seconds=1))
     monkeypatch.setattr(size_job_budget, "SystemClock", lambda: frozen)
 
-    from experiments import size_comparison_run as comparison
     from experiments import magnitude_search_outer as outer
     from experiments import magnitude_search_trials as trials
+    from experiments import size_comparison_run as comparison
     key = content_hash([case.plan["plan_id"], "2024", "comparison"])
     target = "comparison-" + slot + ":" + key
     original = comparison.read_record

@@ -125,6 +125,9 @@ def main(argv=None):
     except (OpsError, DataError) as error:
         print(json.dumps({"refused": error.code, "message": str(error)}))
         return 2
+    except MemoryError:
+        print('{"refused": "RESOURCE_LIMIT_EXCEEDED", "message": "SIZE parent memory exhausted"}')
+        return 2
     except DocumentError:
         print(json.dumps({"refused": "INVALID_EXPERIMENT_SPEC", "message": "invalid SIZE metadata"}))
         return 2
