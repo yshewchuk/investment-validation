@@ -245,7 +245,7 @@ def _staged_chain_spot(quote_rows: Sequence[Mapping[str, Any]]) -> float | None:
         value = row["chain_spot"]
         try:
             spot = None if isinstance(value, bool) else float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             spot = None
         if spot is None or not math.isfinite(spot) or spot <= 0.0:
             raise NightlySourceBundleRefusal(

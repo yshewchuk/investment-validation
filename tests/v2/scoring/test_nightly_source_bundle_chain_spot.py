@@ -115,7 +115,7 @@ def test_rows_that_disagree_on_the_chain_spot_refuse_the_bundle():
 
 
 @pytest.mark.parametrize("spot", [None, float("nan"), float("inf"), 0.0, -87.5, True,
-                                  "not-a-spot"])
+                                  "not-a-spot", 10**400])
 def test_an_unusable_chain_spot_refuses_the_bundle(spot):
     with pytest.raises(NightlySourceBundleRefusal) as exc:
         assemble_nightly_source_bundle(**_kwargs(quote_rows=_rows(chain_spot=spot)))

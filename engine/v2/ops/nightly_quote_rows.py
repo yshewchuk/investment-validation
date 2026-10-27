@@ -94,7 +94,7 @@ def _chain_spot(value: Any) -> float:
         raise data_fail("CONTRACT_MISMATCH", "option chain row has an unusable spot")
     try:
         spot = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise data_fail("CONTRACT_MISMATCH", "option chain row has an unusable spot") from None
     if not math.isfinite(spot) or spot <= 0.0:
         raise data_fail("CONTRACT_MISMATCH", "option chain row has an unusable spot")

@@ -76,7 +76,7 @@ def test_an_integer_or_numeric_string_spot_stages_as_a_float():
 
 @pytest.mark.parametrize("spot", [
     None, float("nan"), float("inf"), -float("inf"), 0.0, -12.5, True, False,
-    "not-a-spot", [],
+    "not-a-spot", [], 10**400,
 ])
 def test_an_unusable_spot_on_a_surviving_row_is_contract_mismatch(spot):
     with pytest.raises(DataError) as exc:
