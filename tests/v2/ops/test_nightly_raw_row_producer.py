@@ -1240,3 +1240,56 @@ def test_only_disabled_keys_skip_option_chains_and_all_context_reads(
         ("AAA", "CND-P", _MIDNIGHT_WIRE, "BMO"),
     ]
     assert json.dumps(refusals_document)
+
+
+def test_unusable_chain_spot_refuses_that_key_in_place_while_another_builds(
+        tmp_path, monkeypatch):
+    """A null spot on a surviving expiry is a per-key CHAIN_SPOT_UNAVAILABLE
+    refusal document, not a build failure: the quote reader runs for real and
+    another ticker's key in the same build still composes its event."""
+    from engine.v2.ops.native_board_universe import BoardRequest
+
+    repository, snapshot = _snapshot(tmp_path, [
+        _event_row("AAA", _MIDNIGHT, "BMO", event_id="aaa-midnight"),
+        _event_row("BBB", _MIDNIGHT, "BMO", event_id="bbb-midnight"),
+    ])
+    real_scan_quote_rows = nrp.scan_quote_rows
+    rig = _ReaderRig(monkeypatch)
+    supported = rig.direct(repository, snapshot)
+    assert supported
+    strategy = next(key.strategy for key in supported if key.strategy != "DYN-SV")
+    bad_key = BoardRequest(ticker="AAA", strategy=strategy,
+                           event_date=_MIDNIGHT, session="BMO")
+    good_key = BoardRequest(ticker="BBB", strategy=strategy,
+                            event_date=_MIDNIGHT, session="BMO")
+
+    def two_key_enum(repo, snap, *, as_of, horizon_days, tickers=None):
+        return [bad_key, good_key]
+
+    def chain_slices(repo, snap, tickers, *, decision_session):
+        return {ticker: [{
+            "ticker": ticker, "obs_date": decision_session,
+            "expiry": _MIDNIGHT_WIRE, "strike": 100.0, "right": "C",
+            "bid": 1.0, "ask": 1.2,
+            "spot": None if ticker == "AAA" else 100.0,
+        }] for ticker in tickers}
+
+    _patch_reader(monkeypatch, nightly_raw_rows, "scan_forward_board_requests",
+                  two_key_enum)
+    monkeypatch.setattr(nrp, "scan_quote_rows", real_scan_quote_rows)
+    monkeypatch.setattr(nrp, "scan_chain_slices", chain_slices)
+
+    events_document, refusals_document = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=_AS_OF, horizon_days=_HORIZON_DAYS)
+
+    assert [document["key"] for document in events_document] == [_event_keylike(good_key)]
+    assert events_document[0]["quote_status"] == "recorded"
+    assert [row["chain_spot"] for row in events_document[0]["quote_rows"]] == [100.0]
+    refusals = refusals_document["refusals"]
+    assert [(_identity(item["key"]), item["code"]) for item in refusals] == [
+        (_identity(_event_keylike(bad_key)), "CHAIN_SPOT_UNAVAILABLE")]
+    assert refusals[0]["detail"] == (
+        "the option chain carries no usable spot for the board request")
+    assert refusals_document["schema_version"] == _REFUSAL_SCHEMA
+    assert json.dumps(events_document)
+    assert json.dumps(refusals_document)

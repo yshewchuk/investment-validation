@@ -995,7 +995,7 @@ def _spot_fixture_documents(close_raw):
                 "panel_anchor": "2024-01-05", "tier4_row": {}, "quote_status": "recorded",
                 "quote_rows": [
                     {"ticker": ticker, "right": right, "strike": 10.0, "expiry": "2024-02-16",
-                     "bid": 1.0, "ask": 1.2, "observed_at": "2024-01-05"}
+                     "bid": 1.0, "ask": 1.2, "chain_spot": 100.0, "observed_at": "2024-01-05"}
                     for right in ("C", "P")]})
     return events, {"schema_version": "native_score_batch_producer_refusals.v1.0",
                     "refusals": refusals}

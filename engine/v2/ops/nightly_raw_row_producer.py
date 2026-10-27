@@ -72,6 +72,7 @@ _ROW_REFUSAL_DETAILS = {
     "EVENT_NOT_FOUND": "no exact calendar event for the board request in the snapshot",
     "IDENTITY_CONFLICT": "multiple exact calendar events for the board request",
     "PRICE_HISTORY_NOT_AVAILABLE": _SPOT_HISTORY_DETAIL,
+    "CHAIN_SPOT_UNAVAILABLE": "the option chain carries no usable spot for the board request",
     "RUNUP_HORIZON_NOT_AVAILABLE": "the pinned calendar does not cover the RUNUP horizon",
     "INVALID_RUNUP_HORIZON": "RUNUP entry is after the pre-print close",
 }
@@ -257,7 +258,8 @@ def build_native_score_batch_events(
     ticker history or missing/unusable exact-session spot becomes a
     per-key ``PRICE_HISTORY_NOT_AVAILABLE`` refusal at its original position.
     ``NO_RESOLVABLE_EXPIRY``, ``EVENT_NOT_FOUND``, ``IDENTITY_CONFLICT``,
-    ``RUNUP_HORIZON_NOT_AVAILABLE`` and ``INVALID_RUNUP_HORIZON`` are likewise
+    ``CHAIN_SPOT_UNAVAILABLE``, ``RUNUP_HORIZON_NOT_AVAILABLE`` and
+    ``INVALID_RUNUP_HORIZON`` are likewise
     per-key refusals; other keys proceed. Malformed calendar/series data,
     missing source tables, repository failures, caller-input failures and other
     errors still fail the whole build. An absent ``option_chains`` table fails
