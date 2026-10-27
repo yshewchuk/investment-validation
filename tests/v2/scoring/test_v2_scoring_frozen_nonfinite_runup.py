@@ -27,7 +27,7 @@ from dataclasses import replace
 from checks import phase4_real
 from engine.v2.foundation import content_hash
 from engine.v2.scoring import application
-from tests.test_phase4_capture_strict import _artifact, _full_strict_candidate
+from tests.v2.integration.test_phase4_capture_strict import _artifact, _full_strict_candidate
 from tests.test_v2_scoring_runup_frozen import (
     _Frozen, _analog_block, _inference_requests, _inputs, _release, _request,
 )

@@ -1,7 +1,8 @@
+# packages: engine.v2.data, engine.v2.foundation, engine.v2.ops, engine.v2.diagnosis
 """tools/capture_attach_probe.py: replays attach_strict_probe/write against
 a CAPTURE_DUMP_SELECTED dump, standalone. Synthetic: builds one real
 strict-traceable STR-THRU candidate (the same fixture shape
-tests/test_phase4_capture_strict.py already uses for this), dumps it with
+tests/v2/integration/test_phase4_capture_strict.py already uses for this), dumps it with
 capture_tier0_corpus._dump_selected, and checks the probe reproduces the
 same corpus a direct `write(..., strict_trace=True)` call would."""
 from __future__ import annotations
@@ -16,7 +17,7 @@ import tools.capture_attach_probe as probe
 import tools.capture_tier0_corpus as capture
 
 from tests.test_capture_heartbeat import FakeClock
-from tests.test_phase4_capture_strict import _artifact, _full_strict_candidate
+from tests.v2.integration.test_phase4_capture_strict import _artifact, _full_strict_candidate
 
 
 def test_probe_loads_a_dump_and_reproduces_the_written_corpus(tmp_path, monkeypatch):

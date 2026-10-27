@@ -5,7 +5,7 @@ from engine.v2.scoring.financial import financial_diagnostics
 
 def test_runup_surface_produces_fair_premium_and_market_ratio():
     record = {
-        "spot": 100.0,
+        "spot": 100.0, "chain_spot": 100.0,
         "strike": 100.0,
         "entry_cost": 2.3,
         "driver_prediction": 6.0,
@@ -29,7 +29,7 @@ def test_runup_surface_produces_fair_premium_and_market_ratio():
 
 def test_complete_constant_runup_surface_returns_two_percent():
     record = {
-        "spot": 100.0,
+        "spot": 100.0, "chain_spot": 100.0,
         "strike": 100.0,
         "entry_cost": 1.0,
         "driver_prediction": 6.0,

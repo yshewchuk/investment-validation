@@ -78,7 +78,8 @@ def _request(alpha: float = 0.5, strategy: str = "STR-THRU") -> ScoreRequest:
 
 # ---------------------------------------------------------------------------
 # paired pool, direct native inputs (same fixture shape as
-# test_v2_scoring_stage_ownership.py's planned-exit parity test)
+# test_v2_scoring_stage_ownership.py's planned-exit parity test at
+# tests/v2/scoring/test_v2_scoring_stage_ownership.py)
 # ---------------------------------------------------------------------------
 
 

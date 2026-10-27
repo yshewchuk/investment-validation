@@ -7,12 +7,14 @@ from engine import pnl_sim
 from tests.planned_exit_support import legacy_expected_pnl
 from engine.v2.contracts import ScoreRequest
 from engine.v2.domain.generation import generate, price
+from engine.v2.foundation import to_document
 from engine.v2.scoring import application
 from engine.v2.scoring.native_analog import source_population_hash
 from engine.v2.scoring.stages import (
     NativeScoreInputs,
     STAGE_NAMES,
     StageReceipt,
+    assemble_native_values,
 )
 
 
@@ -38,6 +40,7 @@ def _native() -> NativeScoreInputs:
         "exit_date": "2026-09-18",
         "expiry": "2026-09-18",
         "spot": 100.0,
+        "chain_spot": 125.0,
     }
     forecast = {
         "driver_name": "abs_move",
@@ -91,8 +94,12 @@ def test_fill_recomputes_owned_simulation_and_gate_outputs():
     worst = application.score_one(_request(0.0), inputs)
     best = application.score_one(_request(1.0), inputs)
 
-    assert worst.financial_diagnostics["entry_cost_pct"] == pytest.approx(6.0)
-    assert best.financial_diagnostics["entry_cost_pct"] == pytest.approx(2.0)
+    assert worst.financial_diagnostics["entry_cost_pct"] == pytest.approx(
+        6.0 / 125.0 * 100,
+    )
+    assert best.financial_diagnostics["entry_cost_pct"] == pytest.approx(
+        2.0 / 125.0 * 100,
+    )
     assert worst.forecasts["exp_pnl_sim"] == pytest.approx(-1.0 / 6.0)
     assert best.forecasts["exp_pnl_sim"] == pytest.approx(1.5)
     assert worst.gate_terms["gate_pass"] is False
@@ -102,6 +109,42 @@ def test_fill_recomputes_owned_simulation_and_gate_outputs():
         item["output_hash"] != "declared-output"
         for item in worst.resolved_request["native_stage_receipts"]
     )
+
+
+def test_compatibility_receipts_exclude_filtered_chain_spot():
+    inputs = _native()
+    inputs = replace(
+        inputs,
+        source_ref="compatibility-input",
+        features={**inputs.features, "chain_spot": 99.0},
+        forecast={**inputs.forecast, "chain_spot": 99.0},
+        model={"chain_spot": 99.0},
+        analogs={"chain_spot": 99.0},
+        simulation={**inputs.simulation, "chain_spot": 99.0},
+        gate={**inputs.gate, "chain_spot": 99.0},
+        chooser={"chain_spot": 99.0},
+        diagnostics={**inputs.diagnostics, "chain_spot": 99.0},
+    )
+    seen = []
+
+    values = assemble_native_values(inputs, observer=seen.append)
+
+    assert values["chain_spot"] == 125.0
+    expected_by_stage = {
+        "features": inputs.features,
+        "forecast": inputs.forecast,
+        "model": inputs.model,
+        "analogs": inputs.analogs,
+        "simulation": inputs.simulation,
+        "gate": inputs.gate,
+        "chooser": inputs.chooser,
+        "diagnostics": inputs.diagnostics,
+    }
+    for stage, block in expected_by_stage.items():
+        observation = next(item for item in seen if item.receipt.stage == stage)
+        assert observation.output_document == to_document({
+            key: value for key, value in block.items() if key != "chain_spot"
+        })
 
 
 def test_empty_compatibility_input_refuses_missing_essentials():

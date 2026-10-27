@@ -213,6 +213,41 @@ def test_non_object_artifact_is_refused_without_echoing_the_value(tmp_path):
     assert "not-an-artifact-document" not in str(excinfo.value)
 
 
+@pytest.mark.parametrize("chain_spot", [
+    None, float("nan"), float("inf"), -float("inf"), 0.0, -10.0,
+    True, "not-a-spot", 10**400,
+])
+def test_invalid_decoded_chain_spot_is_refused(tmp_path, chain_spot):
+    doc = _serialized_native_doc(tmp_path, {})
+    doc["context"]["chain_spot"] = chain_spot
+
+    with pytest.raises(DocumentError) as excinfo:
+        _load_native_score_inputs(doc)
+
+    assert excinfo.value.code == "BAD_VALUE"
+    assert excinfo.value.path == "$.context.chain_spot"
+    assert "not-a-spot" not in str(excinfo.value)
+
+
+def test_decoded_input_without_chain_spot_keeps_field_absent(tmp_path):
+    doc = _serialized_native_doc(tmp_path, {})
+
+    loaded = _load_native_score_inputs(doc)
+
+    assert "chain_spot" not in loaded.context
+
+
+def test_decoded_numeric_chain_spot_is_normalized_without_mutating_document(tmp_path):
+    doc = _serialized_native_doc(tmp_path, {})
+    doc["context"]["chain_spot"] = "64.25"
+
+    loaded = _load_native_score_inputs(doc)
+
+    assert loaded.context["chain_spot"] == 64.25
+    assert type(loaded.context["chain_spot"]) is float
+    assert doc["context"]["chain_spot"] == "64.25"
+
+
 def test_artifact_free_model_blocks_still_load(tmp_path):
     _, inputs_path = _write_fixture(tmp_path)
     loaded = _load_native_score_inputs(json.loads(inputs_path.read_text()))

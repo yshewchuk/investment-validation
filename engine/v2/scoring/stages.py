@@ -21,7 +21,7 @@ from engine.v2.domain.generation import (
     price,
 )
 from engine.v2.domain.valuation import terminal_payoff
-from engine.v2.foundation import content_hash, to_document
+from engine.v2.foundation import DocumentError, content_hash, to_document
 from engine.v2.foundation.market_calendar import _rule_sessions
 from engine.v2.scoring import financial
 
@@ -186,7 +186,7 @@ _OWNED_OUTPUTS = (
 # days_to_print / dte_entry are scorer-computed (see _check_pricing_boundary and
 # _stage_days_to_print): a diagnostics block must never replace or install them.
 _DIAGNOSTIC_PROTECTED = (_OWNED_OUTPUTS | _FINANCIAL_OUTPUTS
-                         | frozenset({"days_to_print", "dte_entry"}))
+                         | frozenset({"days_to_print", "dte_entry", "chain_spot"}))
 _ROLE_OUTPUTS = {
     "driver": ("driver_prediction",),
     "size": ("forecast_abs_move",),
@@ -571,18 +571,23 @@ def _check_wide_market(pricing: Pricing, flags: list[str]) -> None:
             return
 
 
-def _check_bad_quote(pricing: Pricing, flags: list[str]) -> None:
+def _check_bad_quote(pricing: Pricing, flags: list[str],
+                     chain_spot: Any = None) -> None:
     """BAD_QUOTE -- engine/score.py ``_price_entry`` (EXP-117).
 
     Mirrors legacy exactly: once the structure priced, and only when the
     spot is nonzero and the cost exists, ``entry_cost / spot * 100 >
-    BAD_QUOTE_COST_PCT`` flags the row. Legacy then leaves before the model,
+    BAD_QUOTE_COST_PCT`` flags the row. Legacy's denominator is the priced
+    chain spot (``result.spot = float(priced.spot)``, engine/score.py:2440),
+    so the threshold is measured against the staged ``chain_spot``; only
+    with none staged does the priced leg's own (calendar-close geometry)
+    spot stand. Legacy then leaves before the model,
     analog, gate and chooser layers (``Scorer.score``'s BAD_QUOTE exit);
     :func:`_append_late_stages` withholds the same layers.
     """
     if pricing.refusal is not None:
         return
-    spot = _finite(pricing.spot)
+    spot = _finite(pricing.spot if chain_spot is None else chain_spot)
     cost = _finite(pricing.entry_cost)
     if not spot or cost is None:
         return
@@ -730,10 +735,13 @@ def _facts(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> dict[str, An
         facts["dte_entry"] = computed_dte
         facts["_native_stage_facts"]["dte_entry"] = computed_dte
     computed_cost_pct = financial.entry_cost_pct(
-        values.get("entry_cost"), values.get("spot"))
+        values.get("entry_cost"), values.get("chain_spot"))
     if computed_cost_pct is not None:
         facts["entry_cost_pct"] = computed_cost_pct
         facts["_native_stage_facts"]["entry_cost_pct"] = computed_cost_pct
+    elif values.get("chain_spot") is None:
+        facts["entry_cost_pct"] = None
+        facts["_native_stage_facts"]["entry_cost_pct"] = None
     return facts
 
 
@@ -810,6 +818,20 @@ def _is_planned(block: Mapping[str, Any]) -> bool:
         or block.get("residuals") is not None
         or PAIRED_ARTIFACT_FIELD in block
     )
+
+
+def _validate_chain_spot_context(context: Mapping[str, Any]) -> None:
+    if "chain_spot" not in context:
+        return
+    raw_spot = context["chain_spot"]
+    try:
+        chain_spot = None if isinstance(raw_spot, bool) else float(raw_spot)
+    except (TypeError, ValueError, OverflowError):
+        chain_spot = None
+    if chain_spot is None or not isfinite(chain_spot) or chain_spot <= 0.0:
+        raise DocumentError(
+            "BAD_VALUE", "$.context.chain_spot",
+            "expected a finite positive spot")
 
 
 def _validate_forecast_roles(inputs: NativeScoreInputs,
@@ -1257,6 +1279,9 @@ def _initial_values(
     executed: list[StageReceipt] = []
     prior: Any = {"source_ref": inputs.source_ref}
     for stage, block in (("resolve_context", inputs.context), ("features", inputs.features)):
+        if stage == "features" and "chain_spot" in block:
+            block = {key: value for key, value in block.items()
+                     if key != "chain_spot"}
         _merge_stage(values, block)
         output = {key: value for key, value in block.items()
                   if key not in _OWNED_OUTPUTS and key != "flags"}
@@ -1278,8 +1303,12 @@ def _initial_values(
     _stage_days_to_print(inputs, values)
     prior = {**prior, "values": dict(values)}  # the receipt records the days_to_print the forecast consumes
     if compatibility:
-        values.update(inputs.forecast)
-        forecast_output = dict(inputs.forecast)
+        values.update({key: value for key, value in inputs.forecast.items()
+                       if key != "chain_spot"})
+        forecast_output = {
+            key: value for key, value in inputs.forecast.items()
+            if key != "chain_spot"
+        }
     else:
         forecast_output = _execute_forecast(
             inputs, values, flags, strategy, deferred,
@@ -2837,7 +2866,8 @@ def _execute_chooser(inputs: NativeScoreInputs, name: str,
     executors = block.get("executors")
     if executors is None:
         output = {key: value for key, value in block.items()
-                  if key not in _OWNED_OUTPUTS and key != "flags"}
+                  if key not in _OWNED_OUTPUTS
+                  and key not in {"flags", "chain_spot"}}
         values.update(output)
         return output
     executor = executors.get("chooser_score") if isinstance(executors, Mapping) else None
@@ -2932,9 +2962,11 @@ def _append_late_stages(
             ("gate", inputs.gate), ("chooser", inputs.chooser),
             ("diagnostics", inputs.diagnostics),
         ):
-            values.update(block)
+            output = {key: value for key, value in block.items()
+                      if key != "chain_spot"}
+            values.update(output)
             _emit_stage(
-                executed, stage, {"prior": executed[-1].output_hash}, block,
+                executed, stage, {"prior": executed[-1].output_hash}, output,
                 observer,
             )
     elif "BAD_QUOTE" in flags:
@@ -3047,7 +3079,7 @@ def _check_pricing_boundary(
     stages stays a no-op on this path.
     """
     values["entry_cost_pct"] = financial.entry_cost_pct(
-        values.get("entry_cost"), values.get("spot"),
+        values.get("entry_cost"), values.get("chain_spot"),
     )
     # dte_entry is the SUCCESSFULLY PRICED first leg's days to expiry (legacy
     # engine/score.py:2451 `int(priced.legs[0].dte)`). On a pricing/geometry
@@ -3065,7 +3097,7 @@ def _check_pricing_boundary(
         if computed_dte is not None:
             values["dte_entry"] = computed_dte
     _check_wide_market(pricing, flags)
-    _check_bad_quote(pricing, flags)
+    _check_bad_quote(pricing, flags, values.get("chain_spot"))
     _check_extrapolated(geometry, pricing, flags)
     for refusal in (geometry.refusal, pricing.refusal):
         if refusal:
@@ -3119,6 +3151,7 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
     """Execute declared stages and return execution-owned values."""
     if not isinstance(inputs, NativeScoreInputs):
         raise TypeError("native stage assembly requires NativeScoreInputs")
+    _validate_chain_spot_context(inputs.context)
     is_compatibility = inputs.source_ref == "compatibility-input"
     flags: list[str] = []
     #: A champion driver/runup forecast refusal (see ``_execute_forecast_executor``)
