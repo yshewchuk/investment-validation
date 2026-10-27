@@ -247,7 +247,7 @@ def test_happy_path_assembles_score_request_and_native_inputs(tmp_path):
 def test_unsupported_strategy_refuses_without_sinking_batch(tmp_path):
     binding = _stage_release(tmp_path)
     good = _event_inputs()
-    bad = _event_inputs(strategy="CND-PS")
+    bad = _event_inputs(strategy="DYN-SV")
     assembled, refusals = _assemble(binding, [good, bad])
     assert list(assembled) == [good.key]
     assert len(refusals) == 1
@@ -546,7 +546,7 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     root = tmp_path / "staging"
     root.mkdir()
     (root / "events.json").write_text(json.dumps(
-        [_event_doc(), _event_doc(strategy="CND-PS", event_id="evt-2")]))
+        [_event_doc(), _event_doc(strategy="DYN-SV", event_id="evt-2")]))
     result = run_native_score_batch_worker(
         _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
     assert result["completed_ids"] == ["native_score_batch"]
@@ -570,7 +570,7 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     # CodeRabbit round 5 (PR #66): compare the refusal's fully serialized
     # canonical key against an independently-known expected identity, not
     # just its code.
-    _refusal_matches_key(refusals_document, "TEST|CND-PS|2026-01-15|am",
+    _refusal_matches_key(refusals_document, "TEST|DYN-SV|2026-01-15|am",
                          "UNSUPPORTED_STRATEGY")
 
 

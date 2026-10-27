@@ -28,7 +28,7 @@ def _twin_identities(size_clock="clock", crush_clock="clock"):
             "iv_crush:*": _identity("m-crush", crush_clock, "iv_crush:*")}
 
 
-@pytest.mark.parametrize("name", ["TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7"])
+@pytest.mark.parametrize("name", ["TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7", "CND-PS"])
 def test_registry_has_gateless_entry_rule_specs(name):
     spec = _STRATEGY_REGISTRY[name]
     assert (spec.gate_role, spec.gate_policy_key, spec.entry_rule) == (None, None, True)
@@ -123,7 +123,7 @@ def test_entry_rule_declarations_or_refusal(monkeypatch):
         "cutoff": "2026-01-09", "pre_iv30": 45.0}
 
 
-@pytest.mark.parametrize("name", ["TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7"])
+@pytest.mark.parametrize("name", ["TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7", "CND-PS"])
 def test_twin_row_assembly_declares_entry_rule_and_planned_exit(tmp_path, monkeypatch, name):
     binding = _stage(tmp_path, [SIZE, IV_CRUSH])
     event = _event_inputs(
@@ -167,7 +167,7 @@ def test_twin_row_assembly_declares_entry_rule_and_planned_exit(tmp_path, monkey
     assert recorded["strategy"] == name
 
 
-@pytest.mark.parametrize("name", ["TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7"])
+@pytest.mark.parametrize("name", ["TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7", "CND-PS"])
 def test_twin_row_without_iv_crush_role_is_refused_alone(tmp_path, name):
     binding = _stage(tmp_path, [SIZE])
     event = _event_inputs(strategy=name)
@@ -176,7 +176,7 @@ def test_twin_row_without_iv_crush_role_is_refused_alone(tmp_path, name):
     assert refusals[0].code == "RELEASE_MISSING_ROLE"
 
 
-@pytest.mark.parametrize("name", ["CND-PS", "DYN-SV"])
+@pytest.mark.parametrize("name", ["DYN-SV"])
 def test_unsupported_rows_are_refused(tmp_path, name):
     binding = _stage(tmp_path, [SIZE])
     event = _event_inputs(strategy=name)
