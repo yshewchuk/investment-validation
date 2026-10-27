@@ -6,10 +6,9 @@ Production training/retrain/release modules (``engine/v2/models``, top-level
 ``engine.v2.research``, ``engine.v2.foundation.experiment_holdouts`` or
 ``engine.v2.foundation.final_holdout``. Direct ``import``/``from import``
 statements only: no transitive graph walking, alias or binding resolution,
-re-exports, path-root rules or the opposite import direction. A regular run
-compares today's inventory against the committed baseline and fails on any
-difference; the baseline is shrink-only and ``--write-baseline`` is the only
-writer.
+re-exports, path-root rules or the opposite import direction. A regular run compares today's inventory with the committed empty baseline and
+fails on any difference. ``--write-baseline`` can write only an empty
+inventory; nonempty baseline data is refused.
 """
 import argparse
 import ast
@@ -109,8 +108,7 @@ def _print_category(name: str, items: list[dict]) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--write-baseline", action="store_true",
-                        help="regenerate the baseline from today's source "
-                             "(shrink-only when one already exists)")
+                        help="write today's empty inventory; refuses nonempty source or baseline data")
     args = parser.parse_args(argv)
     current = violations()
     if args.write_baseline:
