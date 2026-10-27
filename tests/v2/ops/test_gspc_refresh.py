@@ -339,6 +339,20 @@ def test_malformed_now_is_refused_before_fetching(tmp_path):
     assert not path.exists()
 
 
+@pytest.mark.parametrize("value", [pd.NaT, "NaT"])
+def test_nat_now_is_refused_before_fetching(tmp_path, value):
+    """``pd.NaT`` and ``"NaT"`` parse to NaT without raising: still ``invalid_now``."""
+    path = tmp_path / "gspc_daily.csv"
+    fetcher = StubFetcher(body=_body(DATES))
+
+    result = refresh_gspc_daily(fetcher, path, session="2026-08-27",
+                                refetch_token="run-1", now=value)
+
+    assert result == {"ok": False, "reason": "invalid_now"}
+    assert fetcher.calls == []
+    assert not path.exists()
+
+
 def test_identical_second_call_leaves_file_untouched(tmp_path):
     """Same bytes => no rewrite, so the panel's mtime-keyed cache stays warm."""
     path = tmp_path / "gspc_daily.csv"

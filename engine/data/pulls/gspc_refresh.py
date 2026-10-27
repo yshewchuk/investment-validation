@@ -265,6 +265,8 @@ def refresh_gspc_daily(fetcher, path, *, refetch_token: str | None = None,
                 stamp = pd.Timestamp(now)
             except (TypeError, ValueError):
                 return _finish({"ok": False, "reason": "invalid_now"}, started)
+            if pd.isna(stamp):
+                return _finish({"ok": False, "reason": "invalid_now"}, started)
         if stamp.tz is None:
             stamp = stamp.tz_localize("UTC")
         if stamp <= _regular_market_close(ceiling) + COVERAGE_CLOSE_BUFFER:
