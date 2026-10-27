@@ -131,16 +131,28 @@ def _request(repository, snapshot, policy, event_ids, horizons, limits):
         raise fail("RESULT_LIMIT_EXCEEDED", "history output exceeds explicit bounds")
 
 
+def _forecasts(event, horizons, calendar, clocks):
+    """Reuse identical validated clocks within one preparation's fixed calendar."""
+    forecasts = []
+    for horizon in horizons:
+        key = (event.event_date.date().isoformat(), event.session, horizon)
+        if key not in clocks:
+            clocks[key] = forecast_cutoff(event.event_date, event.session, horizon, calendar)
+        forecasts.append(dict(clocks[key]))
+    return forecasts
+
+
 def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits,
              producer):
     _request(repository, snapshot, policy, event_ids, horizons, limits)
     targets = load_population(repository, snapshot, as_of_month=as_of_month, event_ids=event_ids)
     population = load_population(repository, snapshot, as_of_month=as_of_month)
     calendar, calendar_source = calendar_input(repository, snapshot)
-    forecasts = {event.event_id: [forecast_cutoff(event.event_date, event.session, h, calendar)
-        for h in horizons] for event in targets.itertuples(index=False)}
+    clocks = {}
+    forecasts = {event.event_id: _forecasts(event, horizons, calendar, clocks)
+        for event in targets.itertuples(index=False)}
     start, _ = event_history._window(history_start,
-        min(c["source_session_ceiling"] for clocks in forecasts.values() for c in clocks))
+        min(c["source_session_ceiling"] for event_clocks in forecasts.values() for c in event_clocks))
     ceilings = {}
     for target in targets.itertuples(index=False):
         ceilings[target.ticker] = max(ceilings.get(target.ticker, ""),
@@ -150,7 +162,7 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
     selected = population[(population.ticker.isin(targets.ticker)) & (days >= start.isoformat())
         & ((days < ceiling) | population.event_id.isin(event_ids))]
     groups, unavailable, qualified = _groups(repository, snapshot, selected, forecasts,
-        event_ids, horizons, calendar, limits)
+        event_ids, horizons, calendar, clocks, limits)
     metadata = {"schema_version": "event_group_bounds.v1", "source_snapshot": to_document(snapshot),
         "holdout_as_of_month": as_of_month, "policy_id": policy["policy_id"], "horizons": horizons,
         "groups": groups}
@@ -185,7 +197,7 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
     return context, targets.set_index("event_id", drop=False), population, plans, reader
 
 
-def _groups(repository, snapshot, selected, forecasts, event_ids, horizons, calendar, limits):
+def _groups(repository, snapshot, selected, forecasts, event_ids, horizons, calendar, clocks, limits):
     """Source-derived label windows; missing evidence differs from null labels."""
     anchors = _anchors(repository, snapshot, limits, required_tickers=selected.ticker.unique())
     records = {}
@@ -203,13 +215,12 @@ def _groups(repository, snapshot, selected, forecasts, event_ids, horizons, cale
                 raise fail("CONTRACT_MISMATCH", "target label bounds are unavailable")
             continue
         qualified[event.event_id] = bound
-        clocks = forecasts.get(event.event_id) or [forecast_cutoff(event.event_date, event.session, h, calendar)
-            for h in horizons]
+        event_clocks = forecasts.get(event.event_id) or _forecasts(event, horizons, calendar, clocks)
         groups.append({"event_id": event.event_id, "ticker": event.ticker,
             "event_date": event.event_date.date().isoformat(), "label_start": bound["pre_close_date"],
             "label_end": bound["post_close_date"], "forecasts": [{"horizon_sessions": c["horizon_sessions"],
                 "decision_date": c["source_session_ceiling"], "source_session_ceiling": c["source_session_ceiling"]}
-                for c in clocks]})
+                for c in event_clocks]})
     return groups, unavailable, qualified
 
 

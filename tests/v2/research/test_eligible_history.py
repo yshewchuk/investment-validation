@@ -414,3 +414,58 @@ def test_size_frozen_policy_refuses_build_and_read_before_source_access(data, mo
             training_start="2023-01-01", history_start="2022-01-01", policy=policy, limits=LIMITS)
     with pytest.raises(DataError, match="frozen 30-day"):
         size.comparison_inputs(data.repository, data.snapshot, {**artifact, "request": request})
+
+
+def test_clock_memo_spans_target_and_contributor_loops_but_not_invocations(tmp_path, monkeypatch):
+    from collections import Counter
+    from engine.v2.research import eligible_history as backend
+    data = source(tmp_path, extra_ticker=True)
+    calls, original = Counter(), backend.forecast_cutoff
+    def counted(day, session, horizon, calendar):
+        calls[(day.date().isoformat(), session, horizon)] += 1
+        return original(day, session, horizon, calendar)
+    monkeypatch.setattr(backend, "forecast_cutoff", counted)
+    try:
+        request = {**data.request, "event_ids": [data.events[0]["event_id"], data.events[-1]["event_id"]]}
+        artifact = history.materialize(data.repository, data.snapshot, **request)
+        assert len(calls) == 15
+        assert set(calls.values()) == {1}
+        result = history.read(data.repository, data.snapshot, artifact["feature_snapshot"],
+            columns=list(FEATURES), **request)
+        assert len(result["rows"]) == 6
+        assert set(calls.values()) == {2}  # Read revalidates; no stale global/calendar cache.
+        synth = [r for r in result["rows"] if r["event_id"] == data.events[-1]["event_id"]]
+        assert len(synth) == 3
+        assert all((r["n_prior"], r["mean_prior_move"], r["mean_prior_abs_move"]) == (3, 0, 4) for r in synth)
+    finally:
+        data.conn.close()
+
+
+def test_clock_memo_scales_with_distinct_keys_and_returns_detached_values(monkeypatch):
+    from engine.v2.research import eligible_history as backend
+    calendar = calendar_sessions("2024-05-01", "2024-06-20")
+    original, calls = backend.forecast_cutoff, []
+    def counted(*args):
+        calls.append(args[:3])
+        return original(*args)
+    monkeypatch.setattr(backend, "forecast_cutoff", counted)
+    event = SimpleNamespace(event_date=pd.Timestamp("2024-06-17"), session="AMC")
+    memo = {}
+    expected = [original(event.event_date, event.session, h, calendar) for h in (1, 3, 5)]
+    for _ in range(1000):
+        result = backend._forecasts(event, [1, 3, 5], calendar, memo)
+        assert result == expected
+        result[0]["cutoff_id"] = "mutated caller result"
+    assert len(calls) == 3
+    for day, session in [("2024-06-17", "BMO"), ("2024-06-18", "AMC")]:
+        different = SimpleNamespace(event_date=pd.Timestamp(day), session=session)
+        assert backend._forecasts(different, [1, 3, 5], calendar, memo) == [
+            original(different.event_date, session, h, calendar) for h in (1, 3, 5)]
+    assert len(calls) == 9
+    invalid = SimpleNamespace(event_date=pd.Timestamp("2024-01-01"), session="AMC")
+    for _ in range(2):
+        with pytest.raises(DataError) as caught:
+            backend._forecasts(invalid, [1, 3, 5], calendar, memo)
+        assert caught.value.code == "CONTRACT_MISMATCH"
+    assert len(calls) == 11  # Failed validation is neither cached nor turned into a clock.
+    assert len(memo) == 9

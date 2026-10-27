@@ -395,5 +395,7 @@ remains development and must pass embargo admission. No final-confirmation API.
 Installed code/environment, source, policy/month, cutoffs and contributors bind
 replay. Live-only aggregates, unknown fields and unapproved aliases/derivations
 are not accepted experiment sources; v1 readers and production tables stay unchanged.
+Each preparation revalidates clocks once per distinct date/session/horizon against
+its fixed calendar, sharing a local memo across targets/contributors, never across reads.
 The artifact contains native H11 means/EMAs only, not implied-quote history.
 Historical publication and schedule knowledge remain unverified reconstruction.
