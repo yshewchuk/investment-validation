@@ -1185,7 +1185,7 @@ Per row (collected as a refusal, never sinks the batch):
 | `POST_AS_OF_ROW` | the row's panel anchor is dated after `as_of` |
 | re-wrapped | any other source-bundle refusal, or an input-assembly `ValueError` |
 
-Re-wrapped refusal details suppress arbitrary exception text. Four fixed labels distinguish missing exact-cutoff analog/payoff, duplicate exact-cutoff payoff, and driver-pool identity mismatch; other source-bundle refusals publish only their code. Ambiguous analog pools use separate fixed detail.
+Re-wrapped refusal details suppress arbitrary exception text. Fixed labels distinguish missing exact-cutoff analog/payoff, duplicate exact-cutoff payoff, driver-pool identity mismatch, the entry-rule paired pool and trailing cutoff (labels applying to every entry-rule strategy: TWIN-P, TWIN-P5, CND-PS, BFLY-P, BFLY-P5, RAMP7, CTR5), and the RUNUP champion pool, exact-key payoff surface and its numeric validity; duplicates of the paired pool, trailing cutoff or exact-key surface carry their own `duplicate` labels; other source-bundle refusals publish only their code. Ambiguous analog pools use separate fixed detail.
 `NATIVE_INPUT_BUILD_FAILED` adds the exception class and, for `AnswerFieldsInSource` (bundle or assembly; refuses only that row), answer-field names, never staged keys, values or messages (`refusals.json` is published).
 The release is resolved once per attempt and reused for every row. Apart from read-only causal fold selection/loading, assembly uses no clock or RNG; successful fold selections are cached only for that batch.
 A newly promoted release genuinely changing the output is by design.
