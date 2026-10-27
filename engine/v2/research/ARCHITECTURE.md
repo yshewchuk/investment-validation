@@ -1,23 +1,23 @@
 # `engine/v2/research` — architecture
 
-Layer 7.0 in both `checks/layer_map.py` and the root `/ARCHITECTURE.md` layer table.
-Native snapshot-reading counterparts to `tools/signal_screen.py`, `tools/fill_quality.py`, `engine/data/pulls/polygon_fills.py`'s read path,
-`engine/replay.py` (over a committed snapshot) and `engine/build_trades.py`'s v2 write path. The legacy modules themselves are untouched and keep
-publishing exactly as before; this package adds parallel `tools/v2_*` CLIs that read a pinned v2 snapshot instead.
+Layer 7.0 in both `checks/layer_map.py` and the root `/ARCHITECTURE.md` layer table. Native snapshot-reading counterparts to `tools/signal_screen.py`, `tools/fill_quality.py`, `engine/data/pulls/polygon_fills.py`'s read path, `engine/replay.py` (over a committed snapshot) and `engine/build_trades.py`'s v2 write path. The legacy modules themselves are untouched and keep publishing exactly as before; this package adds parallel `tools/v2_*` CLIs that read a pinned v2 snapshot instead.
 
-`tools/log_diagnostics.py` is deliberately **not** moved here: it reads only
-a local transactions-log CSV (plus an optional sibling `metrics_*.json`), never the Tier-2 store, so it needs no snapshot-pinned counterpart.
+`tools/log_diagnostics.py` is deliberately **not** moved here: it reads only a local transactions-log CSV (plus an optional sibling `metrics_*.json`), never the Tier-2 store, so it needs no snapshot-pinned counterpart.
 
 ## Purpose
 
-Offline research analysis CLIs — real-fill quality, a cross-sectional signal screen, the real-trade pull's universe plan,
-deterministic as-of replay, and the trade table that replay publishes — reading exactly one resolved, named snapshot per run
-instead of the legacy mutable Tier-2 store. It produces measured tables and reports for a person to read; it never decides a
-research conclusion, never fetches from a network provider, and never mutates the legacy trades ledger. `experiment_trades.load_trades`
-extends this same one-snapshot-per-read contract to the v2 experiment platform: read the committed `trades` version `tools/v2_build_trades.py`
-published, never the legacy mutable store. Completed experiments need not remain runnable; their historical wrappers are not a supported experiment execution boundary.
+Offline research analysis CLIs — real-fill quality, a cross-sectional signal screen, the real-trade pull's universe plan, deterministic as-of replay, and the trade table that replay publishes — reading exactly one resolved, named snapshot per run instead of the legacy mutable Tier-2 store. It produces measured tables and reports for a person to read; it never decides a research conclusion, never fetches from a network provider, and never mutates the legacy trades ledger. `experiment_trades.load_trades` extends this same one-snapshot-per-read contract to the v2 experiment platform: read the committed `trades` version `tools/v2_build_trades.py` published, never the legacy mutable store. Completed experiments need not remain runnable; their historical wrappers are not a supported experiment execution boundary.
 
 ## Stage-2 magnitude panel foundation
+
+`magnitude_confirmed_metadata.build_index(repository, snapshot, *, tickers, limits)` is synthetic-only complete pinned-view admission.
+It owns a data `bounded_snapshot` session, exact `snapshot_inputs` admission and the frozen earnings contract allowlist; native `query` plans exhaust every canonical-year partition before scans.
+All inventory row/object caps precede any object open; one native scan per partition projects seven metadata fields with mandatory object caps.
+Retained rows/canonical bytes are bounded before retention; every stream must exhaust before the unchanged `_confirmed_metadata` reducer and detached content-hashed proof return.
+All catalog/request/retention/proof limits are explicit, with no defaults, retries, cache, fallback SQL or durable writes. This is not an RSS guarantee.
+Native diagnostic envelopes propagate unchanged; malformed shapes/incomplete inventory refuse CONTRACT_MISMATCH, unknown contracts UNSUPPORTED_CONTRACT, caps RESULT_LIMIT_EXCEEDED and semantic conflicts IDENTITY_CONFLICT.
+Receipt references stay unopened. Complete pinned membership proves neither expected-population coverage, observed-PIT knowledge nor protected/numerical eligibility; no production caller exists.
+Work is bounded by admitted catalog/partition scans and retained-row reduction; progress emits aggregate stage/RSS/counts at bounded cadence without source diagnostics or secrets.
 
 `_confirmed_metadata.reduce_sequences` is internal/synthetic-only: a pure seven-column DataFrame reducer of a complete caller-supplied view, not evidence of completeness.
 Strict naive `datetime64[ns]` types precede public `confirmed_event_metadata.classify_metadata`; public `event_sequence(warmup=4)` counts all supplied confirmed rows from zero; no date cutoff applies.
@@ -661,7 +661,7 @@ This bounds retained unmatched rows, not total process RSS.
 ## Dependencies
 
 `engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `incremental_tables`,
-`catalog`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`, `confirmed_event_metadata`, `event_history`,
+`catalog`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`, `computed_move_bounds`, `confirmed_event_metadata`, `event_history`,
 `iv_crush_table`, `price_history_query`, `price_history_table`), `engine.v2.contracts` (`RevisionCandidate`, `CompletedCoverage`,
 `CoverageKey`, `CoverageOutcome`, `TimeInterval`), `engine.v2.contracts.data`
 (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`, `ObjectRef`,
@@ -754,17 +754,17 @@ It does not authenticate arbitrary rehashed calendars as builder-derived.
 | Invalid projection | Non-string selections, malformed selection containers, unknown event/feature or duplicate feature: `CONTRACT_MISMATCH` before any payload scan. |
 | Source/publication failures | Unknown source/feature snapshot ID: `SNAPSHOT_NOT_FOUND`; resolved source-pin mismatch during public build/read context derivation: `SNAPSHOT_UNRESOLVED`; direct `materialize` source/context mismatch: `IDENTITY_CONFLICT`. Non-native computed-moves contract: `CONTRACT_MISMATCH`; empty fold: `POPULATION_COLLAPSED`; invalid eligible label/features: `EXPERIMENT_VARIANT_FAILED`; competing head: `SNAPSHOT_CONFLICT`. Other native catalog/object/source-admission errors propagate. |
 
-`magnitude_history_inputs.admit_stored(repository, snapshot, context)` is the consumer-only
-metadata boundary used by `experiments/magnitude_history_inputs.py`: exact receipt/output,
-features-only contract and complete event isolation, without payload decoding or arithmetic.
-It delegates to the readers' shared `magnitude_history_store.preflight_stored`
-receipt/contract/isolation boundary and returns no feature values.
-Missing/changed receipt or pin refuses `IDENTITY_CONFLICT`; bad contract refuses
-`CONTRACT_MISMATCH`; unprovable isolation refuses `HOLDOUT_ACCESS_DENIED`.
-It does not derive or authenticate a context; the unlayered caller owns supported producer
-derivation and native registration. `experiments/magnitude_history_report.py` consumes
-the existing `read_stored` plus magnitude target preflight/load/qualification APIs.
-Neither consumer modifies the build closure, stored artifact identity or final-read authority.
+`magnitude_history_inputs.admit_stored` delegates to `magnitude_history_store.preflight_stored`: exact receipt/output, features-only contract and event isolation; no payloads or arithmetic.
+Missing/changed receipt/pin refuses `IDENTITY_CONFLICT`, bad contract `CONTRACT_MISMATCH`, unprovable isolation `HOLDOUT_ACCESS_DENIED`.
+Its unlayered caller owns context derivation/registration; `experiments/magnitude_history_report.py` uses stored reads and target qualification. Both v1 consumers remain unchanged.
+
+**Eligible history:** sole public build/read boundary `experiments.eligible_history` rejects producer overrides and fingerprints installed code/environment; backend `_materialize`/`_read` are trusted internal helpers, not admitted APIs or Python security. SIZE wraps this generic boundary; only tests invoke it today. Production wiring/data runs need separate authorization.
+The separate `research_eligible_history.v1` table binds exact source/bounds, policy/month/membership versions, history start, fixed 1/3/5 clocks, contributors and producer identity. Exact receipts replay; live/v1 aggregates never substitute.
+Full canonical metadata establishes protected windows. Once selected target/history population is known, missing required ticker/event bounds refuse `CONTRACT_MISMATCH` before outcomes; unrelated tickers need no bounds. Native bounds precede grouped eligibility/object preflight; null historical bounds are omissions, wrong object binding/isolation remains `HOLDOUT_ACCESS_DENIED`.
+All selection targets, including annual evaluation, require retained eligibility; protected confirmation is not this API. Read only eligible prior outcomes available by each ceiling; preserve native means/EMA/nulls.
+`eligible_history_table.admit_fields` accepts only the exact research contract/recipe/policy and known H11 fields; live/unknown provenance and unsupported aliases/derivations refuse before feature reads. Implied history remains separate.
+Limits cap decoded source rows, fragments and physical source bytes after native catalog resolution; output byte caps apply after per-target serialization, not peak allocations. Progress is bounded; failures publish no receipt, unreferenced objects use normal cleanup.
+Publication/schedule-as-known remain unverified reconstruction. Full admitted object bytes are hashed; protected outcomes stay unopened. Refusals: malformed dates `CONTRACT_MISMATCH`; fields/provenance/producer overrides, unisolated outcomes/excluded targets/wrong artifact `HOLDOUT_ACCESS_DENIED`; limits `RESULT_LIMIT_EXCEEDED`; changed receipt `IDENTITY_CONFLICT`. Native errors propagate; no production/provider/fit/final-read authority.
 
 `magnitude_history_store.read_stored_for_events` is the projected search reader.
 Every call revalidates the complete receipt, isolation, metadata and feature content,
