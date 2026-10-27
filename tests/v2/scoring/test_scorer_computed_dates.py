@@ -52,6 +52,7 @@ def _inputs(*, gate=None, quotes=None, quote_bid_ask=None,
                "quote_date": "2026-10-08" if quote_date is None else quote_date,
                "exit_date": "2026-10-27",
                "expiry": resolved_expiry, "strike": 100.0, "spot": 100.0,
+               "chain_spot": 100.0,
                "as_of": "2026-10-07",
                "quotes": quotes}
     if drop_decision:

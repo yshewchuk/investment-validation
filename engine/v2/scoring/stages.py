@@ -730,7 +730,7 @@ def _facts(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> dict[str, An
         facts["dte_entry"] = computed_dte
         facts["_native_stage_facts"]["dte_entry"] = computed_dte
     computed_cost_pct = financial.entry_cost_pct(
-        values.get("entry_cost"), values.get("spot"))
+        values.get("entry_cost"), values.get("chain_spot"))
     if computed_cost_pct is not None:
         facts["entry_cost_pct"] = computed_cost_pct
         facts["_native_stage_facts"]["entry_cost_pct"] = computed_cost_pct
@@ -3047,7 +3047,7 @@ def _check_pricing_boundary(
     stages stays a no-op on this path.
     """
     values["entry_cost_pct"] = financial.entry_cost_pct(
-        values.get("entry_cost"), values.get("spot"),
+        values.get("entry_cost"), values.get("chain_spot"),
     )
     # dte_entry is the SUCCESSFULLY PRICED first leg's days to expiry (legacy
     # engine/score.py:2451 `int(priced.legs[0].dte)`). On a pricing/geometry

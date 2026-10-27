@@ -64,15 +64,26 @@ def test_context_carries_the_staged_chain_spot():
     assert bundle.context["spot"] == _CALENDAR_CLOSE
 
 
-def test_the_chain_spot_reaches_native_inputs_without_entering_the_price():
+def test_chain_spot_drives_entry_cost_pct_while_calendar_spot_is_preserved():
     bundle = assemble_nightly_source_bundle(**_kwargs(quote_rows=_rows(chain_spot=87.5)))
 
     inputs = build_native_score_inputs(bundle)
     values = assemble_native_values(inputs, strategy="STR-THRU")
 
     assert inputs.context["chain_spot"] == 87.5
-    # entry_cost_pct still divides by the calendar close, never the chain spot.
-    assert values["entry_cost_pct"] == pytest.approx((1.1 + 1.2) / _CALENDAR_CLOSE * 100.0)
+    assert inputs.context["spot"] == _CALENDAR_CLOSE
+    # entry_cost_pct uses the staged chain spot while `spot` remains the calendar close.
+    assert values["entry_cost_pct"] == pytest.approx((1.1 + 1.2) / 87.5 * 100.0)
+
+
+def test_missing_chain_spot_leaves_entry_cost_pct_absent():
+    bundle = assemble_nightly_source_bundle(**_kwargs())
+
+    values = assemble_native_values(
+        build_native_score_inputs(bundle), strategy="STR-THRU")
+
+    assert "chain_spot" not in bundle.context
+    assert values.get("entry_cost_pct") is None
 
 
 def test_an_empty_slice_carries_no_chain_spot():

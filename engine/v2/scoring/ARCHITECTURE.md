@@ -782,6 +782,8 @@ returns no partial bundle. Other strategies retain their existing projection.
 | `feature_names` a bare `str`/`bytes`, not a `Sequence`, or containing a non-`str`, empty, or duplicate entry | `INVALID_FEATURE_NAMES` |
 | a quote row missing `right`/`strike`/`expiry`/`bid`/`ask`, an unrecognized `right`, non-finite/negative `bid`, a crossed `ask`, two rows disagreeing on the same contract key, or `quote_rows`/`quote_status` disagreeing on whether the domain is empty (`quote_domain_map`, the quote-map builder `tools/capture_tier0_corpus.py` shares; each quote also carries its row's `observed_date`) | `NightlySourceBundleRefusal` (that module's own call site wraps it back into its own exception type) |
 
+Pricing computes native `entry_cost_pct` as `entry_cost / chain_spot * 100`, using the ORATS option-chain spot staged on quote rows and carried in bundle `context`. Strike selection continues to use the calendar close in `context["spot"]`. If a caller supplies no `chain_spot`, the shared `financial.entry_cost_pct` helper returns `None`, so no percentage value is emitted; in the nightly producer path a surviving quote row with an unavailable or invalid chain spot is already refused as `CHAIN_SPOT_UNAVAILABLE`, and a partial or inconsistent staged value is refused by this bundle as `INVALID_QUOTE_DOMAIN`.
+
 - **Panel/Tier-4 values pass through unclassified.** A resolved feature value is
   projected into `feature_vector` exactly as staged (`None`, any NaN
   flavor, `+/-inf`, a non-numeric string — unconverted, unfiltered):
