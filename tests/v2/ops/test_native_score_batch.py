@@ -247,7 +247,7 @@ def test_happy_path_assembles_score_request_and_native_inputs(tmp_path):
 def test_unsupported_strategy_refuses_without_sinking_batch(tmp_path):
     binding = _stage_release(tmp_path)
     good = _event_inputs()
-    bad = _event_inputs(strategy="TWIN-P")
+    bad = _event_inputs(strategy="BFLY-P")
     assembled, refusals = _assemble(binding, [good, bad])
     assert list(assembled) == [good.key]
     assert len(refusals) == 1
@@ -515,13 +515,13 @@ def _refusal_matches_key(document, canonical_key, expected_code) -> None:
 def test_planted_refusal_key_corruption_is_caught():
     """Proves _refusal_matches_key is not a tautology: it must fail on a
     corrupted serialized refusal code."""
-    good = {"refusals": {"TEST|TWIN-P|2026-01-15|am": {
+    good = {"refusals": {"TEST|BFLY-P|2026-01-15|am": {
         "code": "UNSUPPORTED_STRATEGY", "detail": "only STR-THRU is supported"}}}
-    _refusal_matches_key(good, "TEST|TWIN-P|2026-01-15|am", "UNSUPPORTED_STRATEGY")
-    corrupted = {"refusals": {"TEST|TWIN-P|2026-01-15|am": {
+    _refusal_matches_key(good, "TEST|BFLY-P|2026-01-15|am", "UNSUPPORTED_STRATEGY")
+    corrupted = {"refusals": {"TEST|BFLY-P|2026-01-15|am": {
         "code": "WRONG_CODE", "detail": "only STR-THRU is supported"}}}
     with pytest.raises(AssertionError):
-        _refusal_matches_key(corrupted, "TEST|TWIN-P|2026-01-15|am",
+        _refusal_matches_key(corrupted, "TEST|BFLY-P|2026-01-15|am",
                              "UNSUPPORTED_STRATEGY")
 
 
@@ -531,13 +531,13 @@ def test_planted_refusal_timestamp_key_corruption_is_caught():
     under a distinct expected key, with the refusal code identical between
     stored and expected lookups -- independent of the code-corruption test
     above."""
-    refusals = {"refusals": {"TEST|TWIN-P|2026-01-15T09:00:01|am": {
+    refusals = {"refusals": {"TEST|BFLY-P|2026-01-15T09:00:01|am": {
         "code": "INTRADAY_EVENT_NOT_ADMITTED",
         "detail": "intraday event not admitted to the midnight batch"}}}
-    _refusal_matches_key(refusals, "TEST|TWIN-P|2026-01-15T09:00:01|am",
+    _refusal_matches_key(refusals, "TEST|BFLY-P|2026-01-15T09:00:01|am",
                          "INTRADAY_EVENT_NOT_ADMITTED")
     with pytest.raises(KeyError):
-        _refusal_matches_key(refusals, "TEST|TWIN-P|2026-01-15T09:00:00|am",
+        _refusal_matches_key(refusals, "TEST|BFLY-P|2026-01-15T09:00:00|am",
                              "INTRADAY_EVENT_NOT_ADMITTED")
 
 
@@ -546,7 +546,7 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     root = tmp_path / "staging"
     root.mkdir()
     (root / "events.json").write_text(json.dumps(
-        [_event_doc(), _event_doc(strategy="TWIN-P", event_id="evt-2")]))
+        [_event_doc(), _event_doc(strategy="BFLY-P", event_id="evt-2")]))
     result = run_native_score_batch_worker(
         _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
     assert result["completed_ids"] == ["native_score_batch"]
@@ -570,7 +570,7 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     # CodeRabbit round 5 (PR #66): compare the refusal's fully serialized
     # canonical key against an independently-known expected identity, not
     # just its code.
-    _refusal_matches_key(refusals_document, "TEST|TWIN-P|2026-01-15|am",
+    _refusal_matches_key(refusals_document, "TEST|BFLY-P|2026-01-15|am",
                          "UNSUPPORTED_STRATEGY")
 
 
