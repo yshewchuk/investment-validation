@@ -132,11 +132,11 @@ def _classify_prior(release_root, prior_id):
 
 
 def validate_retrain_base(release_root, prior_id):
-    """Refuse a damaged deployed base before its retrain cutoff affects planning."""
-    from tools.phase5_state_stage_job import PRIOR_NO_POOL_CATALOG, PRIOR_USABLE
+    """Require a usable deployed base before its retrain cutoff affects planning."""
+    from tools.phase5_state_stage_job import PRIOR_USABLE
 
     prior = _classify_prior(release_root, prior_id)
-    if prior.kind not in (PRIOR_NO_POOL_CATALOG, PRIOR_USABLE):
+    if prior.kind != PRIOR_USABLE:
         raise ValueError("base release catalog could not be read")
     return prior
 

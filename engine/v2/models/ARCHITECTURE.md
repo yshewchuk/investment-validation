@@ -336,6 +336,7 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
   re-supplied, is carried (`prior_carry_set`), so older causal keys stay selectable and
   driver pools and the chooser keep their hash until a retrain (the planned monthly refresh, §2.3, is not built) re-supplies them.
 - In `monthly` mode the worker reads the deployed pointer and catalog again at stage time, uses that release as the base, accepts exactly the three driver pools and chooser, and carries board, paired and trailing members. The requested `cutoff` is `retrain_cutoff`. This stage path is plumbing only and has no production submitter until the monthly chain wiring split is implemented.
+- Monthly planning requires a `USABLE` deployed base; a legacy `NO_POOL_CATALOG` base may bootstrap the nightly pool path (§2.2.2), but cannot be scheduled for monthly staging because it lacks the carried member set.
 - Output: a re-verified candidate release (never `DEPLOYED`) and `stage_result.json`. The
   inventory comes from the legacy champion registry under the new id; drift refuses before any write.
 - Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a

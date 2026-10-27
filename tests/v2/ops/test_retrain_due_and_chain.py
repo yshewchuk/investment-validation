@@ -176,6 +176,20 @@ def test_validate_retrain_base_refuses_damaged_classification(monkeypatch, tmp_p
         pool_refresh.validate_retrain_base(tmp_path, "pools-bad")
 
 
+def test_validate_retrain_base_refuses_legacy_no_pool_catalog(monkeypatch, tmp_path):
+    import types
+
+    import engine.v2.ops.pool_refresh as pool_refresh
+
+    monkeypatch.setattr(
+        pool_refresh, "_classify_prior",
+        lambda *args: types.SimpleNamespace(kind="NO_POOL_CATALOG"),
+    )
+
+    with pytest.raises(ValueError, match="base release catalog could not be read"):
+        pool_refresh.validate_retrain_base(tmp_path, "legacy-release")
+
+
 def test_validate_catalog_rejects_invalid_retrain_cutoffs():
     from engine.v2.models.release_layout import (
         ReleaseLayoutError,
