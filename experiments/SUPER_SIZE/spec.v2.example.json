@@ -1,0 +1,12 @@
+{
+  "experiment_id": "REPLACE-unique-development-experiment",
+  "hypothesis": "A fixed prior baseline provides a calibration reference.",
+  "primary_arm_id": "prior",
+  "arms": ["prior"],
+  "seed": 0,
+  "folds": ["2022", "2023", "2024"],
+  "economic_params": {},
+  "price_source": "computed_moves",
+  "input_files": [],
+  "runner": "experiments/size_search.py"
+}

@@ -981,3 +981,5 @@ flowchart LR
 
 `experiments/magnitude_search_outer.py` consumes the legacy/v2 no-fit guards
 before selected outer refit claims; completed evidence replay never fits.
+
+Training `current_recipes` reads installed or alternate registry JSON through `read_bounded_state` with a 16 MiB ceiling before decoding; valid recipe identities are unchanged. `BoundedStateReadError` remains a `ValueError`; the SIZE adapter translates only this read refusal to a resource error, without fitting or writes.

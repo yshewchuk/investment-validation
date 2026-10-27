@@ -42,16 +42,23 @@ def main():
             if sys.stdin.readline() != "continue\n":
                 raise OSError
 
+        if request["execution"].get("schema_version") == "size_comparison_execution.v1":
+            from experiments.size_comparator import forecasts
+            emit(forecasts(indexed, pd.DataFrame(inputs["training"]), request["inner"], request["plan"],
+                           request["execution"], progress=progress))
+            return
+        diagnostics = []
         try:
             predictions, _ = fitted_forecasts(indexed, pd.DataFrame(inputs["training"]),
-                request["inner"], request["plan"], request["execution"], progress=progress, strict_failures=True)
+                request["inner"], request["plan"], request["execution"], progress=progress, strict_failures=True, diagnostics=diagnostics)
         except OpsError as error:
             if error.code != "EXPERIMENT_VARIANT_FAILED":
                 raise
             emit({"event": "failed"})
             return
         emit({"event": "succeeded", "forecasts": [{"event_id": event, "horizon_sessions": horizon,
-            "predicted_absolute_move_pct": value} for (event, horizon), value in sorted(predictions.items())]})
+            "predicted_absolute_move_pct": value} for (event, horizon), value in sorted(predictions.items())],
+            **({"diagnostics": diagnostics} if request["execution"].get("schema_version") == "size_candidate_execution.v1" else {})})
     except MemoryError:
         emit({"event": "resource_limit"})
     except Exception:

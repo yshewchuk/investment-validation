@@ -129,6 +129,14 @@ def _implementation(binding):
 
 
 def _prepare(conn, store, registration, request):
+    request_version = request.get("schema_version") if isinstance(request, dict) else None
+    anchor_version = getattr(registration, "document", {}).get("schema_version")
+    qualified = anchor_version == "native_experiment_registration.v1.6"
+    if request_version != ("magnitude_search_request.v2" if qualified else "magnitude_search_request.v1"):
+        raise fail("INVALID_EXPERIMENT_SPEC", "search requires explicit valid axes, inner years and count caps")
+    if qualified:
+        from experiments.size_search_binding import prepare_plan
+        return prepare_plan(conn, store, registration, request)
     request, count = _request(request)
     verify_native_registration(conn, store, registration)
     binding = registration.document
@@ -157,7 +165,7 @@ def seal_search_plan(conn, store, registration, request):
     """Publish immutable planning bytes only; no catalog reservation, attempt or result."""
     plan = _prepare(conn, store, registration, request)
     try:
-        ref = store.publish_bytes(canonical_json(plan).encode(), schema_ref=SCHEMA)
+        ref = store.publish_bytes(canonical_json(plan).encode(), schema_ref=plan["schema_version"])
     except ArtifactError as error:
         raise _artifact_failure(error) from None
     return {"plan": plan, "plan_ref": to_document(ref)}
@@ -165,11 +173,12 @@ def seal_search_plan(conn, store, registration, request):
 
 def read_search_plan(conn, store, registration, request, ref):
     """Verify exact reconstruction from the original reservation, without input payloads."""
-    if not isinstance(ref, ArtifactRef) or ref.schema_ref != SCHEMA:
+    schema = "magnitude_search_plan.v2" if isinstance(request, dict) and request.get("schema_version") == "magnitude_search_request.v2" else SCHEMA
+    if not isinstance(ref, ArtifactRef) or ref.schema_ref != schema:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference has the wrong schema")
     expected = _prepare(conn, store, registration, request)
     payload = canonical_json(expected).encode()
-    if ref != artifact_reference(payload, SCHEMA):
+    if ref != artifact_reference(payload, schema):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
     try:
         store.read_verified(ref)

@@ -847,3 +847,27 @@ def test_job_summary_omits_threshold_for_non_threshold_recipes(key, tmp_path):
     recipe = RECIPES[key]
     summary = _summary(recipe, tmp_path, ())
     assert "threshold" not in summary and "threshold_n" not in summary
+
+
+@pytest.mark.parametrize("alternate", [False, True])
+@pytest.mark.parametrize("headroom", [-1, 0, 1])
+def test_recipe_registry_byte_boundary_before_decode(tmp_path, monkeypatch, alternate, headroom):
+    from engine.v2.models.frozen_state_io import BoundedStateReadError
+    from engine.v2.models.training import recipes
+
+    expected = recipes.current_recipes()
+    payload = recipes._REGISTRY_JSON.read_bytes()
+    path = tmp_path / "registry.json"
+    path.write_bytes(payload)
+    assert recipes._REGISTRY_MAX_BYTES == 16 * 1024 * 1024
+    monkeypatch.setattr(recipes, "_REGISTRY_MAX_BYTES", len(payload) + headroom)
+    if not alternate:
+        monkeypatch.setattr(recipes, "_REGISTRY_JSON", path)
+    args = (path,) if alternate else ()
+    if headroom < 0:
+        monkeypatch.setattr(recipes.json, "loads", lambda *a, **k: pytest.fail("oversized registry decoded"))
+        with pytest.raises(BoundedStateReadError) as caught:
+            recipes.current_recipes(*args)
+        assert caught.value.code == "SIZE_LIMIT"
+    else:
+        assert recipes.current_recipes(*args) == expected
