@@ -385,6 +385,25 @@ def _write_chain_retry(retry: dict[str, set[str]]) -> None:
         print(f"[chains] could not write {CHAIN_RETRY_PATH.name}: {exc}", file=sys.stderr)
 
 
+def _canonical_chain_day(key: str) -> pd.Timestamp | None:
+    """The day behind a canonical ``YYYY-MM-DD`` memo key, else None.
+
+    A key counts as canonical only when it is exactly the ISO date string of
+    the day it parses to, so a time part, a compact yyyymmdd, a bare non-date
+    or a non-string never becomes a tradeDate, a persist stamp or a prune
+    reference. Never raises. Shared by the prune in
+    :func:`_persist_chain_retry` and the older-memo re-ask in
+    :func:`refresh_forward_chains`, so the two agree on what a date key is.
+    """
+    try:
+        day = pd.Timestamp(key)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    if pd.isna(day) or key != str(day.date()):
+        return None
+    return day
+
+
 def _persist_chain_retry(stamp: str, retry: set[str]) -> None:
     """Replace one session's retry entry with the names this call owes it.
 
@@ -397,13 +416,16 @@ def _persist_chain_retry(stamp: str, retry: set[str]) -> None:
 
     Entries older than 14 days behind the reference are pruned — past that
     the session is far outside any heal window and the date is not coming
-    back. The reference is the NEWER of ``stamp`` and the newest date key
-    already on file, so a persist at an old stamp (an older-memo re-ask that
-    failed again) can neither keep stale entries alive nor re-persist its
-    own date past 14 days behind a fresher debt the file carries. Dates
-    inside that retention but outside the CHAIN_SESSIONS heal window are
-    re-asked from the memo before they age out (see
-    :func:`refresh_forward_chains`).
+    back — and non-canonical keys are dropped: a key the older-memo re-ask
+    would never use (:func:`refresh_forward_chains` skips exactly those, via
+    :func:`_canonical_chain_day`) is not debt worth carrying. The reference
+    is the max of ``stamp`` and the canonical keys on file, but NEVER later
+    than ``stamp`` itself: a future-dated key must not move the cutoff —
+    when it did, the first persist erased every in-retention debt behind it
+    before the older pass could re-ask any of them. The heal-session persists
+    and the older pass therefore cut at the same reference (the newest
+    session) minus 14 days, so nothing is pruned before the older pass could
+    re-ask it.
     """
     d = _read_chain_retry()
     if not retry and stamp not in d:
@@ -412,23 +434,12 @@ def _persist_chain_retry(stamp: str, retry: set[str]) -> None:
         d[stamp] = retry
     else:
         d.pop(stamp, None)
+    days = {k: day for k in d if (day := _canonical_chain_day(k)) is not None}
+    # max(stamp, the canonical keys on file) clamped at stamp — which the
+    # clamp always achieves, since stamp itself is in the running.
     ref = pd.Timestamp(stamp)
-    for k in d:
-        try:
-            kk = pd.Timestamp(k)
-        except ValueError:
-            continue
-        if kk > ref:
-            ref = kk  # NaT never compares greater; unparseables keep nothing
     cutoff = ref - pd.Timedelta(days=14)
-    kept: dict[str, set[str]] = {}
-    for k, v in d.items():
-        try:
-            old = pd.Timestamp(k)
-        except ValueError:
-            continue
-        if old >= cutoff:
-            kept[k] = v
+    kept = {k: v for k, v in d.items() if k in days and days[k] >= cutoff}
     _write_chain_retry(kept)
 
 
@@ -664,11 +675,16 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
         # The memo reaches past `sessions`: two nights of healing, fourteen
         # days of retention. Dates in that gap are not touched by the loop
         # above, so re-ask their owed unheld names once, from a single memo
-        # read, before the prune ages them out. Keys are canonicalised: a
-        # date is only re-asked when it is exactly its own "YYYY-MM-DD"
-        # string, so a hand-edited or corrupt key carrying a time part can
-        # never be passed through as a tradeDate or a persist stamp. They
-        # are ignored here and counted once on stderr.
+        # read, before the prune drops them and the pairs are lost for good.
+        # The reference and cutoff are the SAME as the prune's (see
+        # :func:`_persist_chain_retry`): stamps[0] — no key on file moves it
+        # — minus 14 days, so nothing is pruned before this pass could
+        # re-ask it. Keys go through :func:`_canonical_chain_day`, the same
+        # rule the prune applies: a date is only re-asked when it is exactly
+        # its own "YYYY-MM-DD" string, so a hand-edited or corrupt key
+        # carrying a time part can never be passed through as a tradeDate or
+        # a persist stamp. They are ignored here and counted once on stderr;
+        # the next persist drops them from the file.
         newest = pd.Timestamp(stamps[0])
         cutoff = newest - pd.Timedelta(days=14)  # the same cutoff as the prune
         memo = _read_chain_retry()
@@ -676,11 +692,8 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
         for d in sorted(memo):
             if d in stamps:
                 continue  # the heal loop above already handled this session
-            try:
-                day = pd.Timestamp(d)
-            except ValueError:
-                continue  # not a date string at all: leave it for the prune
-            if pd.isna(day) or d != str(day.date()):
+            day = _canonical_chain_day(d)
+            if day is None:
                 non_canonical += 1  # a time part, or not a date at all
                 continue
             if day < cutoff or day >= newest:
@@ -824,21 +837,26 @@ def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_h
                 retry.update(chunk)
                 continue
             rows = data
-            dict_rows = [r for r in rows if isinstance(r, dict)]
-            if len(dict_rows) != len(rows):
-                # Rows that are not objects (a bare string, a number, null)
-                # would crash `r.get` and take the whole session down: same
-                # class as a non-list "data" — a transient bad answer, not a
-                # verdict — owed the date, reported, and the session
-                # continues with the later batches. The chunk is retried as
-                # a unit: a partly-junk body says nothing about which names
-                # really have chains, so none of its rows are booked.
+            if any(not (isinstance(r, dict) and isinstance(r.get("ticker"), str))
+                   for r in rows):
+                # A usable row is an object whose "ticker" is a string. A
+                # non-object row would crash `r.get` and take the whole
+                # session down; a dict row with a missing or non-string
+                # ticker (a number, a null) would slip past the `got`
+                # intersection below and book its chunk's unreturned names as
+                # definitively no-chain — owed debt dropped on a malformed
+                # answer. Either is the same class as a non-list "data": a
+                # transient bad answer, not a verdict — owed the date,
+                # reported, and the session continues with the later batches.
+                # The chunk is retried as a unit: a partly-junk body says
+                # nothing about which names really have chains, so none of
+                # its rows are booked.
                 out["failed"].append(f"{chunk[0]}..: response 'data' rows are "
-                                     "not all objects")
+                                     "not all objects with a string 'ticker'")
                 retry.update(chunk)
                 continue
             out["rows"] += len(rows)
-            got = {r.get("ticker") for r in dict_rows}
+            got = {r["ticker"] for r in rows}
             out["returned"] += len(got & set(chunk))
             # A short response has TWO causes and they look identical: the
             # endpoint truncating (it caps at 10 and returns HTTP 200

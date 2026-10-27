@@ -463,33 +463,59 @@ def test_prune_keeps_exactly_14_days_and_drops_15(monkeypatch, tmp_path):
     assert kept[AS_OF] == set(TICKERS)
 
 
-def test_a_re_persisted_older_entry_cannot_outlive_the_newest_key(monkeypatch, tmp_path):
-    """The prune's reference is max(stamp, the newest key on file): an older
-    memo date re-asked by the older pass that fails again is re-persisted at
-    ITS OWN stamp, and pruning against that stamp alone kept it alive 14 days
-    behind a fresher debt the file carries. Here the newest key is 16 days
-    ahead of the failing re-ask: the stale entry drops out of its own
-    persist, while one exactly 14 days behind the newest key survives."""
-    older = str((pd.Timestamp("2026-09-10") - pd.Timedelta(days=16)).date())  # drops
-    keep = str((pd.Timestamp("2026-09-10") - pd.Timedelta(days=14)).date())  # stays
-    newest = "2026-09-10"  # newer than this run's session: asked never, prune ref
-    held = {(t, pd.Timestamp(AS_OF)) for t in TICKERS}
+def test_a_future_dated_key_does_not_move_the_prune_cutoff(monkeypatch, tmp_path):
+    """The prune's reference is max(stamp, the canonical keys on file) but
+    NEVER later than the persist's own stamp: a hand-edited key past this run
+    used to move the cutoff years forward and the FIRST persist (the
+    up-front owed list) erased every in-retention debt behind it before the
+    older pass even read the memo, so that debt was never re-asked. Here the
+    newest key is 8 days past the run; the entries 16 and 14 days behind it
+    are 8 and 6 behind the run — inside retention — so they survive every
+    persist and reach the older pass. The future key is kept but inert: it is
+    not a past session, so it is never fetched."""
+    older = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=8)).date())   # 2026-08-25
+    keep = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=6)).date())    # 2026-08-27
+    future = "2026-09-10"  # later than this run's newest session
+    held = {(t, pd.Timestamp(AS_OF)) for t in TICKERS[:5]}
     _wire(monkeypatch, held, tmp_path)
     nightly.CHAIN_RETRY_PATH.write_text(
-        json.dumps({older: ["TKR08"], keep: ["TKR09"], newest: ["TKR00"]}))
+        json.dumps({older: ["TKR08"], keep: ["TKR09"], future: ["TKR00"]}))
     f = _Fetcher(fail=lambda p: RuntimeError("HTTP 502"))
 
     out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
 
-    assert f.asked == [older, keep], "the future key is inside neither the " \
-        "heal window's older-pass bound nor the fetch: prune reference only"
-    assert out["failed"], "both re-asks failed transiently"
+    assert f.asked == [AS_OF, older, keep], \
+        "the up-front persist's prune kept the debts for the older pass; " \
+        "the future key is never fetched"
+    assert out["failed"], "every ask failed transiently"
     kept = nightly._read_chain_retry()
-    assert older not in kept, \
-        "re-persisted 16 days behind the newest key: the debt ages out here, " \
-        "not 14 days behind its own stale stamp"
-    assert kept[keep] == {"TKR09"}, "exactly 14 behind the newest key is kept"
-    assert kept[newest] == {"TKR00"}, "the newest key itself is never pruned"
+    assert kept[older] == {"TKR08"} and kept[keep] == {"TKR09"}, \
+        "16 and 14 days behind the future key, inside retention of the run"
+    assert kept[AS_OF] == {t for t in TICKERS if t >= "TKR05"}
+    assert kept[future] == {"TKR00"}, "kept but inert: never a prune reference"
+
+
+def test_exactly_14_days_behind_is_kept_by_the_prune_and_re_asked(
+        monkeypatch, tmp_path):
+    """The prune and the older pass cut at the SAME reference (stamps[0])
+    minus 14 days: an entry exactly on that boundary is dropped by neither
+    and is re-asked once more before it ages out. A persist cutting later
+    (as the future-key bug did) or a pass asking from earlier would silently
+    lose the pair either side of the boundary."""
+    edge = str((pd.Timestamp(AS_OF) - pd.Timedelta(days=14)).date())  # 2026-08-19
+    held = {(t, pd.Timestamp(AS_OF)) for t in TICKERS[:5]}
+    _wire(monkeypatch, held, tmp_path)
+    nightly.CHAIN_RETRY_PATH.write_text(json.dumps({edge: ["TKR08"]}))
+    f = _Fetcher(fail=lambda p: RuntimeError("HTTP 502"))
+
+    out = nightly.refresh_forward_chains(TICKERS, AS_OF, fetcher=f, sessions=1)
+
+    assert f.asked == [AS_OF, edge], "the heal persist's prune kept the " \
+        "boundary entry, and the older pass re-asks it under the same cutoff"
+    assert out["older_retried"] == [{"session": edge, "names": 1}]
+    kept = nightly._read_chain_retry()
+    assert kept[edge] == {"TKR08"}, "exactly 14 behind is inside both cutoffs"
+    assert kept[AS_OF] == {t for t in TICKERS if t >= "TKR05"}
 
 
 def test_a_corrupt_memo_reads_empty_and_the_run_proceeds(monkeypatch, tmp_path):
@@ -775,8 +801,7 @@ def test_non_canonical_memo_date_keys_are_ignored_with_one_stderr_line(
     assert "ignored 2 non-canonical" in err, "both keys named by count, not silently"
     kept = nightly._read_chain_retry()
     assert canon not in kept, "the successful canonical re-ask cleared its entry"
-    assert kept == {with_time: {"TKR09"}, compact: {"TKR00"}}, \
-        "the ignored keys survive untouched for the prune to age out"
+    assert kept == {}, "non-canonical keys are dropped by the persist that follows the pass"
 
 
 def test_skip_held_false_never_runs_the_older_pass(monkeypatch, tmp_path):
