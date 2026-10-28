@@ -35,8 +35,11 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   reading or replacing the stored file; a stale source leaves it untouched.
   With refresh disabled, both refresh and panel rebuild are skipped. The v2
   `price-refresh` stage omits the new optional cutoff and instead passes its
-  run session as a ceiling. The legacy nightly also passes that expected
-  (previous) session as the ceiling, so a bar dated after it is never stored.
+  run session as a ceiling. The legacy nightly keeps that expected (previous)
+  session as its freshness minimum and caps at the finality-resolved as-of
+  session. If the calendar universe is empty and that ceiling is not final,
+  the helper refuses before fetch and the caller falls back to the expected
+  previous session.
 
 - `nightly.py` — the orchestrator; run as the legacy nightly entrypoint
   (root doc §4). Public helpers for the Tier-4 gap repair:

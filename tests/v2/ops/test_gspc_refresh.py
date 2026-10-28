@@ -226,6 +226,23 @@ def test_legacy_as_of_session_keeps_final_close_and_drops_future_row(tmp_path):
     assert "2026-08-28" not in path.read_text()
 
 
+def test_legacy_as_of_session_refuses_missing_previous_cutoff(tmp_path):
+    """The as-of ceiling still requires the exact prior trading session."""
+    path = tmp_path / "gspc_daily.csv"
+    fetcher = StubFetcher(body=_body([
+        "2026-08-25", "2026-08-27", "2026-08-28",
+    ]))
+
+    result = refresh_gspc_daily(
+        fetcher, path, minimum_last_date="2026-08-26", session="2026-08-27",
+        refetch_token="legacy-run", now=CEILING_NOW,
+    )
+
+    assert result == {"ok": False, "reason": "stale_source"}
+    assert len(fetcher.calls) == 1
+    assert not path.exists()
+
+
 def test_session_ceiling_keeps_the_stored_history_prefix(tmp_path):
     """Stored rows D1,D2 come back out of the capped rewrite byte-for-byte."""
     path = tmp_path / "gspc_daily.csv"

@@ -1905,6 +1905,18 @@ def run_nightly(
                 fetcher, paths.GSPC_DAILY, refetch_token=refetch_token,
                 minimum_last_date=expected, session=as_of.strftime("%Y-%m-%d"),
             )
+            if (
+                not result.get("ok")
+                and result.get("reason") == "session_not_final"
+                and not calendar_tickers
+            ):
+                # session_not_final is returned before fetch, so this fallback makes only one GSPC
+                # fetch and uses the completed previous session when no ticker universe exists to
+                # resolve as_of.
+                result = refresh_gspc_daily(
+                    fetcher, paths.GSPC_DAILY, refetch_token=refetch_token,
+                    minimum_last_date=expected, session=expected,
+                )
             _log_rss("gspc refresh end")
             report.mark("gspc_refresh", started=started)
             report.steps["gspc_refresh"] = result
