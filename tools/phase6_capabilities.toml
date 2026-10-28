@@ -177,6 +177,18 @@ disposition = "native"
 owner = "P6-2"
 notes = "v2-only protection (system design §4.7); no legacy counterpart."
 
+[[row]]
+id = "nightly-preview-inputs"
+area = "nightly"
+capability = "Nightly preview-input and source-lineage documents: pin the plan snapshot and hash the score, projection, finality and model_evidence outputs"
+old = []
+new = ["nightly:v2 nightly_preview_inputs"]
+producer = "nightly_preview_inputs job kind (engine/v2/ops/nightly_preview_inputs.py::run) in the supervised shadow DAG, after its score, projection, finality and model_evidence parents"
+identity = "preview_input.json and source_provenance.json (nightly_preview_input.v1.0 / nightly_source_provenance.v1.0), bound to the plan's snapshot_id, each producer job id and SHA-256"
+tests = ["tests/v2/ops/test_nightly_preview_inputs.py"]
+disposition = "native"
+owner = "P6-2"
+
 # -------------------------------------------------------------- decisions
 
 [[row]]
