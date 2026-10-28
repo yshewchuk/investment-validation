@@ -139,6 +139,37 @@ def test_missing_chooser_state_becomes_typed_member_refusal():
     assert refusal.detail == "DYN-SV chooser analog pool missing or unusable"
 
 
+def test_missing_fold_provenance_refuses_member_row_with_fixed_cause(monkeypatch):
+    binding = _binding(SimpleNamespace(
+        cutoff="2026-10-27", pool_id="analog", content_hash="analog-hash"))
+    binding.chooser_admissible_artifacts = (SimpleNamespace(
+        key=(N_ADMISSIBLE_TABLE_ID, "v1"), table_id=N_ADMISSIBLE_TABLE_ID,
+        version="v1", content_hash="table-hash"),)
+    binding.chooser_fold_catalog_json = json.dumps({"members": [
+        {"member_id": "tier4_folds:implied_t1", "status": "STAGED",
+         "objects": [{"serving_fold": {
+             "policy": {"role": "implied_t1"},
+             "fold_start": "2026-09-01", "training_cutoff": None}}]},
+    ]})
+    binding.chooser_parent_manifest = object()
+    binding.frozen_inference = object()
+    monkeypatch.setattr(
+        release_bindings, "select_gate_forecast_source",
+        lambda *args: SimpleNamespace(
+            pool_pred=(1.0,), pool_res=(0.0,), interval_floor=0.1,
+            artifact_hash="size-hash"),
+    )
+
+    refusal = _chooser_bundle_or_refusal(
+        object(), SimpleNamespace(strategy="TWIN-P"), binding=binding,
+        event_date="2026-09-27", as_of="2026-10-27", fold_cache={})
+
+    assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert refusal.code == "MODEL_NOT_READY"
+    assert refusal.detail == (
+        "DYN-SV chooser fold training cutoff provenance missing or unusable")
+
+
 @pytest.mark.parametrize(
     ("member_id", "safe_label"),
     [
@@ -146,7 +177,7 @@ def test_missing_chooser_state_becomes_typed_member_refusal():
         ("admissible_table:dyn_sv", "chooser admissible table missing or unusable"),
         ("tier4_folds:size", "chooser size fold missing or unusable"),
         ("phase5_release.json", "chooser release catalog missing or unusable"),
-        ("chooser_training_cutoff", "chooser training cutoff missing or unusable"),
+        ("chooser_training_cutoff", "chooser fold training cutoff provenance missing or unusable"),
         ("chooser_champion", "chooser champion binding missing or unusable"),
         ("chooser_producer", "chooser producer binding missing or unusable"),
         ("chooser state", "chooser state missing or unusable"),
@@ -199,7 +230,9 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
     )
     monkeypatch.setattr(
         release_bindings, "content_hash",
-        lambda policy: f"policy:{policy.role}",
+        lambda policy: (
+            f"size-floor:{policy['interval_floor']}"
+            if isinstance(policy, dict) else f"policy:{policy.role}"),
     )
 
     def fake_from_document(cls, doc):
@@ -241,7 +274,7 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
     assert state.producer_bindings["pred_im_t1_d14"].binding_id == "fold:implied_t1"
     assert state.producer_bindings["pred_runup_abs_move_d14"].binding_id == "fold:runup_move"
     assert state.artifact_refs == (
-        "size-hash", "policy:implied_t1", "policy:runup_move")
+        "size-hash", "size-floor:0.1", "policy:implied_t1", "policy:runup_move")
     assert loader_calls == ["implied_t1", "runup_move"]
 
     release_bindings.select_chooser_state(

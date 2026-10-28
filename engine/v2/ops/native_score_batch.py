@@ -768,7 +768,7 @@ _CHOOSER_REFUSAL_CAUSE_LABELS: Mapping[str, str] = {
     "admissible_table:dyn_sv": "chooser admissible table missing or unusable",
     "tier4_folds:size": "chooser size fold missing or unusable",
     "phase5_release.json": "chooser release catalog missing or unusable",
-    "chooser_training_cutoff": "chooser training cutoff missing or unusable",
+    "chooser_training_cutoff": "chooser fold training cutoff provenance missing or unusable",
     "chooser_champion": "chooser champion binding missing or unusable",
     "chooser_producer": "chooser producer binding missing or unusable",
     "chooser state": "chooser state missing or unusable",

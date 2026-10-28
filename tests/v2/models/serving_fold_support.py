@@ -101,8 +101,14 @@ def release_inputs(role, cache, *, output=None, clock="entry-close", release_id=
     return ModelRelease(release_id=release_id, deployment_id="d1", bindings=(binding,)), inventory, {digest: raw}
 
 
-def fold_states(role, cache, *, explicit=True, data=None):
-    found = {f"tier4_folds:{role}": {fold_name(cache): fold_bytes(cache) if data is None else data}}
+def fold_states(role, cache, *, explicit=True, data=None, training_cutoff="2026-01-31"):
+    payload = data
+    if payload is None:
+        source = cache
+        if role != "size" and "training_cutoff" not in cache:
+            source = {**cache, "training_cutoff": training_cutoff}
+        payload = fold_bytes(source)
+    found = {f"tier4_folds:{role}": {fold_name(cache): payload}}
     if role == "size":
         policy = SizeFoldPolicy(model_id=cache["model_id"], feature_order=cache["features"],
                                 panel_sha256=cache["tier3_snapshot"], interval_floor=0.0)

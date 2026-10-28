@@ -53,7 +53,7 @@ class ValidatedChooserFold:
     pool_count: int
     policy: ChooserFoldPolicy
     release: ModelRelease
-    training_cutoff: str | None = None
+    training_cutoff: str
 
 
 def preflight_size_fold(data: bytes, name: str, policy: SizeFoldPolicy,
@@ -98,18 +98,17 @@ def _preflight_fold(data, name, policy, release, *, role, output, interval_polic
     extra = {}
     if result_type is ValidatedChooserFold:
         training_cutoff = stored.get("training_cutoff")
-        if training_cutoff is not None:
-            if isinstance(training_cutoff, str):
-                try:
-                    parsed_cutoff = date.fromisoformat(training_cutoff)
-                    valid_cutoff = (parsed_cutoff.isoformat() == training_cutoff
-                                    and parsed_cutoff < fold)
-                except (TypeError, ValueError):
-                    valid_cutoff = False
-            else:
+        if isinstance(training_cutoff, str):
+            try:
+                parsed_cutoff = date.fromisoformat(training_cutoff)
+                valid_cutoff = (parsed_cutoff.isoformat() == training_cutoff
+                                and parsed_cutoff < fold)
+            except (TypeError, ValueError):
                 valid_cutoff = False
-            if not valid_cutoff:
-                raise ValueError("invalid chooser training cutoff")
+        else:
+            valid_cutoff = False
+        if not valid_cutoff:
+            raise ValueError("invalid chooser training cutoff")
         extra["training_cutoff"] = training_cutoff
     return result_type(fold_start=fold.isoformat(),
                        decision_clock_id=binding.decision_clock_id,

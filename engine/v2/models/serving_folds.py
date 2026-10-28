@@ -102,8 +102,8 @@ def _is_canonical_date(value: object) -> bool:
     return parsed.isoformat() == value
 
 
-def _validate_optional_training_cutoff(value: object) -> None:
-    if value is not None and not _is_canonical_date(value):
+def _validate_training_cutoff(value: object) -> None:
+    if not _is_canonical_date(value):
         raise DocumentError("BAD_TRAINING_CUTOFF", "$.training_cutoff", "expected canonical ISO date")
 
 
@@ -111,16 +111,16 @@ def _validate_optional_training_cutoff(value: object) -> None:
 class ChooserServingFoldDescriptor:
     """Role-specific declaration; loaded only by the chooser artifact loader.
 
-    ``training_cutoff`` is the producer-declared upper training day. The runtime
-    consumer requires it to be canonical and strictly before the decision session.
-    The date alone does not prove source finality or training provenance.
+    ``training_cutoff`` is the required producer-declared upper training day. The
+    runtime consumer checks it against the decision and held-out boundaries. The
+    date alone does not prove source finality or training provenance.
     """
 
     parent_release_id: str
     parent_release_hash: str
     policy: ChooserFoldPolicy
     fold_start: str
-    training_cutoff: str | None = None
+    training_cutoff: str
     decision_clock_id: str
     estimator: ArtifactMember
     pool_count: int
@@ -144,7 +144,7 @@ class ChooserServingFoldDescriptor:
             valid_month = False
         if not valid_month:
             raise DocumentError("BAD_FOLD_MONTH", "$.fold_start", "expected canonical ISO month start")
-        _validate_optional_training_cutoff(self.training_cutoff)
+        _validate_training_cutoff(self.training_cutoff)
         if type(self.pool_count) is not int or self.pool_count < 0:
             raise DocumentError("BAD_POOL_COUNT", "$.pool_count", "expected a nonnegative integer")
         if (not isinstance(self.parent_release_hash, str)

@@ -201,15 +201,20 @@ Chooser producer folds require a canonical `training_cutoff` in both the
 descriptor and hash-verified estimator metadata, strictly before the decision
 session and strictly before the selected held-out fold start. Missing,
 malformed, mismatched, same-day or later cutoffs refuse the member row as
-`MODEL_NOT_READY`; the cache key includes the decision day and only entries
-produced by the validated fold loader are reusable. Request artifact refs also
+`MODEL_NOT_READY` with the fixed `chooser fold training cutoff provenance missing or unusable`
+cause; the cache key includes the decision day and only entries produced by
+the validated fold loader are reusable. Existing folds without this field are
+not consumed; member rows refuse until provenance-bearing folds are produced
+and released. No cutoff is inferred from fold dates or runtime time. Request artifact refs also
 bind the selected size estimator and each producer's full chooser policy,
 including its `interval_floor`, because both contribute to chooser inputs.
 Selector dates
 must be canonical ISO dates or timezone-naive datetimes; timezone-aware or
-noncanonical values refuse as `MODEL_NOT_READY`. Legacy artifacts without this field are not consumed. The
-hashes bind the declaration but do not prove source finality or training
-membership; producer provenance remains follow-up work.
+noncanonical values refuse as `MODEL_NOT_READY`. The required producer
+`training_cutoff` is part of the chooser fold contract. Descriptor and request
+hashes bind the declaration and selected size fold's effective `interval_floor`,
+but neither proves source finality or training membership; those claims remain
+a producer responsibility.
 
 `application.score_event` requires the complete ordered `DYNAMIC_MENU`, scores
 its members and resolves DYN-SV over finite simulation-bearing candidates:

@@ -56,7 +56,8 @@ def _rehash(catalog):
 
 
 def _store(tmp_path, cache, parent, role):
-    raw = _raw(cache)
+    training_cutoff = "2026-01-31"
+    raw = _raw({**cache, "training_cutoff": training_cutoff})
     digest = "sha256:" + hashlib.sha256(raw).hexdigest()
     member = ArtifactMember(name="estimator", path=f"objects/{digest[7:]}", content_hash=digest)
     path = tmp_path / member.path
@@ -74,6 +75,7 @@ def _store(tmp_path, cache, parent, role):
             interval_floor=0.0,
         ),
         fold_start="2026-02-01",
+        training_cutoff=training_cutoff,
         decision_clock_id="entry-close",
         estimator=member,
         pool_count=len(cache["pool_pred"]),

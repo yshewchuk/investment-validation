@@ -342,9 +342,8 @@ def _chooser_day(value: Any) -> str:
 
 
 def _require_causal_chooser_cutoff(
-    descriptor: ChooserServingFoldDescriptor, fold_start: str, decision_cutoff: str,
+    training_cutoff: Any, fold_start: str, decision_cutoff: str,
 ) -> None:
-    training_cutoff = getattr(descriptor, "training_cutoff", None)
     if not isinstance(training_cutoff, str):
         raise ModelNotReady("chooser_training_cutoff", "chooser state is missing or unusable") from None
     try:
@@ -385,8 +384,9 @@ def _chooser_fold_descriptor(
             matches.append(descriptor)
     if len(matches) != 1:
         raise ValueError("chooser fold for cutoff missing or ambiguous")
+    _require_causal_chooser_cutoff(
+        matches[0].get("training_cutoff"), fold_start, decision_cutoff)
     descriptor = from_document(ChooserServingFoldDescriptor, matches[0])
-    _require_causal_chooser_cutoff(descriptor, fold_start, decision_cutoff)
     return descriptor
 
 
@@ -398,7 +398,8 @@ def _load_chooser_fold_state(
     size_hash = getattr(size, "artifact_hash", None)
     if not isinstance(size_hash, str) or not size_hash:
         raise ValueError("size artifact hash missing")
-    refs: list[str] = [size_hash]
+    refs: list[str] = [
+        size_hash, content_hash({"interval_floor": size.interval_floor})]
     pools = {"pred_abs_move": {
         "predictions": size.pool_pred, "residuals": size.pool_res,
         "interval_floor": size.interval_floor,

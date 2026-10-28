@@ -567,13 +567,16 @@ pinned COPY verification and pinned-size byte mismatches use `panel_copy_refused
 | Cache | Authoring validates each supplied object anew; no process-global descriptor cache |
 
 **Chooser producer fold authoring.** `ChooserFoldPolicy` and `ChooserServingFoldDescriptor` declare `implied_t1`/`runup_move` under exact `tier4_folds:<role>` members. The descriptor binds the parent release, full panel hash, ordered features, clock, whole-cache estimator object (not the champion member), pool count and decile/floor policy. It records both the champion binding output and raw D14 chooser column; runup output is never day-scaled here. Standard release preparation obtains each present role's policy from its registered producer and validates the cache against that role's unique wildcard champion. Size descriptors keep their existing schema.
-The chooser descriptor also has an optional `training_cutoff` day. The scoring consumer requires it to be canonical, strictly before the decision session, and equal to the cutoff embedded in the hash-verified estimator metadata. It refuses missing or mismatched values before using fold state. Current authoring only carries the value when the producer artifact supplies it; legacy folds without it are not consumed. The catalog and object hashes bind the declaration but do not themselves prove source finality or training membership.
-The descriptor hash covers its canonical typed document, including parent, role and estimator identity.
+The chooser descriptor requires a canonical `training_cutoff` day as part of the fold contract. The scoring consumer requires it to be strictly before both the decision session and selected held-out fold start, and equal to the cutoff embedded in hash-verified estimator metadata. Missing, malformed, mismatched, same-day or later values refuse before fold state is used. The catalog and object hashes bind the declaration but do not themselves prove source finality or training membership.
+The descriptor hash covers its canonical typed document, including parent, role, estimator identity and required `training_cutoff`.
 Without pinned COPY, the panel digest is caller-asserted; preparation does not verify panel bytes.
+
+**Compatibility.** Existing chooser folds without this producer-declared cutoff are refused during release preparation or per-row selection as `MODEL_NOT_READY`; no cutoff is inferred from fold dates or runtime time. Menu-member rows remain unavailable until a provenance-bearing fold is produced and released.
 
 | Chooser fold authoring condition | Outcome |
 |---|---|
 | Explicit coherent role policy and bounded cache | Catalog-hashed descriptor; no fitting or prediction |
+| Missing or invalid `training_cutoff` provenance | Refuse preparation; no default or inferred cutoff |
 | Unsupported role/output, mismatched policy/header/binding, malformed pool or oversized cache | Refuse preparation; no substitution by size or another role |
 | Invalid chooser role/features/panel/interval policy/floor or descriptor month/count/parent hash/clock/output/object (constructor/semantic checks) | Typed `DocumentError`; decode preserves nested paths |
 | Unsupported policy-map role or wrong policy type | Fixed `PrepareRefused`; distinguish unsupported role, invalid type and role/member disagreement |
