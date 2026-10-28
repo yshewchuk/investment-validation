@@ -115,6 +115,34 @@ def test_verified_shard_cache_requires_full_binding(case):
         list(iter_section(case.store, section, changed, _position, verified_rows=old_cache))
 
 
+def test_v17_admission_checks_shard_boundaries_paths_and_map_rows(case):
+    from engine.v2.ops.native_registration import _size_artifact_verified
+    from experiments.magnitude_search_shards import write_section
+    from experiments.size_registration_artifacts import _position
+
+    compact = json.loads(case.registration.binding_json)
+    map_descriptor = next(descriptor for descriptor in compact["size_artifacts"].values()
+                          if descriptor["kind"] == "map")
+    assert _size_artifact_verified(case.store, map_descriptor)
+
+    bad_boundary = deepcopy(map_descriptor)
+    bad_boundary["entry"]["shards"][0]["first_key"] = [100]
+    assert not _size_artifact_verified(case.store, bad_boundary)
+
+    unsafe_path = deepcopy(map_descriptor)
+    unsafe_path["entry"]["shards"][0]["ref"]["storage_key"] = "../outside.json"
+    assert not _size_artifact_verified(case.store, unsafe_path)
+
+    section = "size_registration.v1.7:synthetic-malformed-map"
+    malformed_map = {
+        "kind": "map",
+        "section": section,
+        "entry": write_section(case.store, section,
+                                [{"position": 0, "row": ["missing-value"]}], _position),
+    }
+    assert not _size_artifact_verified(case.store, malformed_map)
+
+
 def test_preflight_missing_inner_year_refuses_before_reservation(case):
     changed = deepcopy(case.request)
     changed["inner_years"] = {"2024": ["2020"]}

@@ -10,6 +10,7 @@ from engine.v2.foundation import (
     canonical_json,
     content_hash,
     from_document,
+    safe_relative_path,
     to_document,
 )
 from engine.v2.ops.catalog import decode_bounded_text, sql_text_budget
@@ -143,31 +144,95 @@ def _size_artifacts_verified(store, document, verified_size_rows=None):
         return False
 
 
+def _size_artifact_descriptor_parts(descriptor):
+    if (not isinstance(descriptor, dict)
+            or set(descriptor) != {"kind", "section", "entry"}
+            or descriptor["kind"] not in ("list", "map", "object")
+            or not isinstance(descriptor["section"], str)):
+        return None
+    entry = descriptor["entry"]
+    if (not isinstance(entry, dict) or set(entry) != {"row_count", "shards"}
+            or type(entry["row_count"]) is not int or entry["row_count"] < 0
+            or not isinstance(entry["shards"], list)):
+        return None
+    return descriptor["kind"], descriptor["section"], entry
+
+
+def _size_artifact_boundaries_valid(shard, position):
+    first_key, last_key = shard["first_key"], shard["last_key"]
+    if (not isinstance(first_key, list) or len(first_key) != 1
+            or type(first_key[0]) is not int):
+        return False
+    if (not isinstance(last_key, list) or len(last_key) != 1
+            or type(last_key[0]) is not int):
+        return False
+    return first_key == [position] and last_key == [position + shard["rows"] - 1]
+
+
+def _size_artifact_shard_ref(shard, section, position):
+    if (not isinstance(shard, dict)
+            or set(shard) != {"ref", "rows", "first_key", "last_key"}
+            or type(shard["rows"]) is not int or shard["rows"] <= 0):
+        return None
+    ref = from_document(ArtifactRef, shard["ref"])
+    if (ref.schema_ref != "magnitude_search_shard.v1"
+            or type(ref.byte_size) is not int or not 0 < ref.byte_size <= 8 * 1024 * 1024):
+        return None
+    safe_relative_path(ref.storage_key)
+    if not _size_artifact_boundaries_valid(shard, position):
+        return None
+    return ref
+
+
+def _size_artifact_rows_valid(rows, position, kind, map_names):
+    for offset, row in enumerate(rows):
+        if (not isinstance(row, dict) or set(row) != {"position", "row"}
+                or type(row["position"]) is not int
+                or row["position"] != position + offset):
+            return False
+        if kind == "map":
+            value = row["row"]
+            if (not isinstance(value, list) or len(value) != 2
+                    or not isinstance(value[0], str) or value[0] in map_names):
+                return False
+            map_names.add(value[0])
+    return True
+
+
+def _size_artifact_total_valid(kind, entry, position):
+    if position != entry["row_count"]:
+        return False
+    return kind != "object" or position == 1
+
+
 def _size_artifact_verified(store, descriptor, verified_size_rows=None):
     """Verify one artifact descriptor's shards, row totals, and object cardinality."""
     try:
-        entry = descriptor["entry"]
-        section = descriptor["section"]
+        parts = _size_artifact_descriptor_parts(descriptor)
+        if parts is None:
+            return False
+        kind, section, entry = parts
         position = 0
+        map_names = set()
         for shard in entry["shards"]:
-            ref = from_document(ArtifactRef, shard["ref"])
-            payload = store.read_verified(ref)
-            stored = json.loads(payload)
-            rows = stored["rows"]
-            if (set(stored) != {"schema_version", "section", "rows"}
-                    or stored["schema_version"] != "magnitude_search_shard.v1"
-                    or stored["section"] != section or len(rows) != shard["rows"]):
+            ref = _size_artifact_shard_ref(shard, section, position)
+            if ref is None:
                 return False
-            if any(not isinstance(row, dict) or set(row) != {"position", "row"}
-                   or row["position"] != position + offset for offset, row in enumerate(rows)):
+            stored = json.loads(store.read_verified(ref))
+            if (not isinstance(stored, dict)
+                    or set(stored) != {"schema_version", "section", "rows"}
+                    or stored["schema_version"] != "magnitude_search_shard.v1"
+                    or stored["section"] != section):
+                return False
+            rows = stored["rows"]
+            if (not isinstance(rows, list) or len(rows) != shard["rows"]
+                    or not _size_artifact_rows_valid(rows, position, kind, map_names)):
                 return False
             if verified_size_rows is not None:
                 verified_size_rows[(section, ref.schema_ref, ref.storage_key, ref.content_hash,
                                     ref.byte_size)] = rows
-            position += len(rows)
-        if position != entry["row_count"]:
-            return False
-        if descriptor["kind"] == "object" and position != 1:
+            position += shard["rows"]
+        if not _size_artifact_total_valid(kind, entry, position):
             return False
         return True
     except (ArtifactError, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
