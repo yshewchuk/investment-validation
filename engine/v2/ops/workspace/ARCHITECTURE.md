@@ -34,6 +34,7 @@ Create order: validate roots, open production read-only, verify the closure, the
 | root equals, contains or lies under the production store or the catalog's directory; reopened catalog is the production file | `production_root` |
 | path crosses a symlink; parent missing; existing root not empty; production paths missing | `symlink_path`; `parent_missing`; `root_not_empty`; `production_missing` |
 | reopen: marker, `workspace.json`, catalog or a subdirectory missing, a symlink, or the catalog hard-linked | `layout_invalid` |
+| create: `root`, `snapshot_id` or `manifest_hash` of the wrong type | `argument_invalid` |
 | reopen: `workspace.json` unreadable or incomplete; `schema_version` differs; recorded production paths differ | `identity_unreadable`; `schema_mismatch`; `production_mismatch` |
 | execution root at or under a workspace | `execution_in_workspace` |
 

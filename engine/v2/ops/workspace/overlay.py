@@ -104,7 +104,7 @@ class SnapshotOnlyRepository(Repository):
 
     def _check_ref(self, snapshot_ref) -> None:
         """A ref must be the pinned snapshot exactly, not merely carry its id."""
-        self._check(snapshot_ref.snapshot_id)
+        self._check(getattr(snapshot_ref, "snapshot_id", None))
         if snapshot_ref != super().resolve(self._only):
             raise data_errors.fail("SNAPSHOT_NOT_FOUND", "reference is not the pinned snapshot",
                                    details={"snapshot_id": snapshot_ref.snapshot_id})
@@ -142,7 +142,7 @@ class SnapshotOnlyRepository(Repository):
         return super().get_close(ticker, date, observation_ceiling, snapshot_ref)
 
     def scan(self, query, *, table_name, max_object_bytes=None):
-        self._check(query.snapshot_id)
+        self._check(getattr(query, "snapshot_id", None))
         return super().scan(query, table_name=table_name, max_object_bytes=max_object_bytes)
 
     def explain_dependencies(self, query, *, table_name=None, snapshot_ref=None):
@@ -302,6 +302,9 @@ def _clear(root: Path, created: bool) -> None:
 def create_workspace(root, *, production_catalog, production_store, snapshot_id: str,
                      manifest_hash: str, clock, deep: bool = False) -> ResearchWorkspace:
     """Verify the pinned snapshot's closure, then lay out and open a new workspace."""
+    if (not isinstance(root, (str, os.PathLike)) or not isinstance(snapshot_id, str)
+            or not isinstance(manifest_hash, str)):
+        raise _refuse("argument_invalid")
     catalog, store_root = _production(production_catalog, production_store)
     base = _checked_root(root, catalog, store_root)
     if base.exists() and (not base.is_dir() or any(base.iterdir())):

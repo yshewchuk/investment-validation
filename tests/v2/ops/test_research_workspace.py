@@ -503,3 +503,16 @@ def test_single_value_over_the_sqlite_length_limit_refuses_with_the_byte_cap(pro
     monkeypatch.undo()
     with _create(prod, "smallvalue") as ws:  # default 64 MiB cap: normal reads still work
         assert ws.closure.object_count >= 1
+
+
+def test_malformed_public_arguments_refuse_with_typed_errors(prod):
+    with pytest.raises(OpsError) as caught:
+        _create(prod, "badid", snapshot_id=["not", "a", "string"])
+    assert caught.value.code == "WORKSPACE_REFUSED"
+    assert caught.value.problem.details.get("reason") == "argument_invalid"
+    with _create(prod) as ws:
+        for call in (lambda: ws.source.scan(None, table_name="securities"),
+                     lambda: ws.source.table_contract(None, "securities")):
+            with pytest.raises(DataError) as caught:
+                call()
+            assert caught.value.code == "SNAPSHOT_NOT_FOUND"
