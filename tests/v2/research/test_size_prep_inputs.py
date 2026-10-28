@@ -121,6 +121,7 @@ def test_generate_bounds_writes_only_the_write_root_and_labels_provenance(source
     assert _tree(source_root) == source_before
     assert record["label"] == "reconstructed"
     assert record["refresh_noop"] is False
+    assert record["entry_count"] == 1 and record["manifest_entry_count"] == 1
     assert record["session_ceiling"] == _AS_OF and record["latest_fetched_at"] == "2026-01-01T00:00:00+00:00"
     assert record["entries_fetched_after_ceiling"] == 1
     assert record["source_snapshot_id"] == parent and record["bounds_snapshot_id"] != parent
@@ -209,6 +210,7 @@ def test_rerun_after_commit_is_marked_noop_and_still_proves_bounds(source_root, 
     second = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF,
                                   production_roots=_PRODUCTION)
     assert second["refresh_noop"] is True
+    assert second["entry_count"] == 1 and second["manifest_entry_count"] == 1
     assert second["source_snapshot_id"] == second["bounds_snapshot_id"] == first["bounds_snapshot_id"]
 
 

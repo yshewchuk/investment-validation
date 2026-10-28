@@ -170,15 +170,16 @@ def pinned_history_fetcher(source_root, manifest, *, strict=False):
     return cache, fetch
 
 
-def _provenance(manifest, source_snapshot_id, bounds_snapshot_id, *, refresh_noop):
-    entries = manifest["entries"]
+def _provenance(manifest, served, source_snapshot_id, bounds_snapshot_id, *, refresh_noop):
+    """``served`` are the manifest entries the refresh actually fetched (none on a no-op)."""
     ceiling = date.fromisoformat(manifest["session_ceiling"])
-    by_time = sorted(entries, key=lambda e: _retrieved(e["fetched_at"]))
+    by_time = sorted(served, key=lambda e: _retrieved(e["fetched_at"]))
     record = {"schema_version": PROVENANCE_VERSION, "label": "reconstructed",
         "session_ceiling": manifest["session_ceiling"], "manifest_id": manifest["manifest_id"],
-        "entry_count": len(entries), "earliest_fetched_at": by_time[0]["fetched_at"],
-        "latest_fetched_at": by_time[-1]["fetched_at"],
-        "entries_fetched_after_ceiling": sum(_retrieved(e["fetched_at"]).date() > ceiling for e in entries),
+        "manifest_entry_count": len(manifest["entries"]), "entry_count": len(served),
+        "earliest_fetched_at": by_time[0]["fetched_at"] if by_time else None,
+        "latest_fetched_at": by_time[-1]["fetched_at"] if by_time else None,
+        "entries_fetched_after_ceiling": sum(_retrieved(e["fetched_at"]).date() > ceiling for e in served),
         "source_snapshot_id": source_snapshot_id, "bounds_snapshot_id": bounds_snapshot_id,
         "refresh_noop": refresh_noop}
     return {**record, "record_id": content_hash(record)}
@@ -236,7 +237,15 @@ def generate_bounds(write_root, *, source_root, manifest, scope, as_of, producti
         raise fail("INVALID_REQUEST", "catalog.sqlite must exist directly inside the write root")
     started = time.monotonic()
     print("[size-prep] bounds start entries=" + str(len(manifest["entries"])), file=sys.stderr)
-    history = pinned_history_fetcher(source_root, manifest, strict=True)
+    cache, fetch = pinned_history_fetcher(source_root, manifest, strict=True)
+    served = set()
+
+    def tracked(ticker):
+        result = fetch(ticker)
+        served.add(ticker)
+        return result
+
+    history = (cache, tracked)
     conn = open_catalog(catalog, clock=SystemClock())
     try:
         args = SimpleNamespace(source_root=Path(source_root), scope=scope, as_of=as_of, dry_run=False)
@@ -250,7 +259,8 @@ def generate_bounds(write_root, *, source_root, manifest, scope, as_of, producti
                 raise fail("PUBLICATION_REFUSED", "the refresh committed nothing and the head carries no source bounds")
     finally:
         conn.close()
-    record = _provenance(manifest, source, bounds, refresh_noop=candidate is None)
+    pinned = [e for e in manifest["entries"] if e["ticker"] in served]
+    record = _provenance(manifest, pinned, source, bounds, refresh_noop=candidate is None)
     _write_record(root, record)
     print("[size-prep] bounds end elapsed=" + format(time.monotonic() - started, ".1f") + "s", file=sys.stderr)
     return record
